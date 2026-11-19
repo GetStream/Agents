@@ -172,6 +172,20 @@ Import `stream_chat` with a prefix: it exports a `TokenProvider` of its own.
 
 Asking an incognito session for its channel throws a `StateError`, since it keeps none.
 
+Show an incognito session from its socket instead: `session.turnMessages` is the conversation
+in the channel's shape, one reply per question with its steps as attachment payloads, the whole
+of each round of thinking, and a call waiting in `approvals` asking on its step. Build it again
+whenever `conversation`, `approvals` or `connection` changes:
+
+```dart
+final session = await agents.agent('support').chat(const SessionOptions(incognito: true));
+
+for (final message in session.turnMessages) {
+  final parts = AIMessagePart.parseAll(message.steps); // stream_chat_flutter_ai
+  // For each part with a reasoning step, message.reasoning[part.id] is its whole thinking.
+}
+```
+
 The channel opens on the app's own client when it hands one over, connected as the same user:
 
 ```dart

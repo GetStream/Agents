@@ -219,8 +219,8 @@ final class ReasoningStep extends TurnStep {
   /// The thinking so far.
   final String text;
 
-  /// When the model began on it: when it was asked, or took the reply up again after writing,
-  /// as a kept reply's step is timed. Not when its first words arrived, which a model that
+  /// When the model began on it: when it was asked, or took the reply up again after writing or
+  /// after a tool's result, as a kept reply's step is timed. Not when its first words arrived, which a model that
   /// sends its thinking in one burst sends only at the end.
   @override
   final DateTime at;
@@ -389,7 +389,7 @@ final class Conversation {
   final Map<String, _PendingUI> _uiWritten;
 
   /// When the model last took each agent turn in flight up again, by turn id: when it was asked,
-  /// or went on after writing. A round of thinking is timed from it.
+  /// went on after writing, or had a tool's result. A round of thinking is timed from it.
   final Map<String, DateTime> _resumedAt;
 
   /// Whatever the caller typed, shown before the router has confirmed hearing it.
@@ -459,12 +459,13 @@ final class Conversation {
           state: ConversationState.responding,
           failure: null,
           uiWritten: _uiWritten.containsKey(event.turnId) ? _without(event.turnId) : null,
-          resumedAt: {..._resumedAt, event.turnId: now},
-        );
+        )._resumed(event.turnId, now);
 
       case AgentEventKind.responseDelta:
         // Writing ends the round of thinking under way, and the next one is timed from here.
-        final went = event.text.isEmpty ? this : _wentOn(event.turnId, now);
+        final went = event.text.isEmpty
+            ? this
+            : _amend(event.turnId, (turn) => turn._settled(now))._resumed(event.turnId, now);
         return went
             ._write(event.turnId, now, (text) => text + event.text, event.text)
             .withState(ConversationState.responding);
@@ -498,13 +499,18 @@ final class Conversation {
 
       case AgentEventKind.toolRan:
         final status = event.errorText.isEmpty ? ToolCallStatus.completed : ToolCallStatus.failed;
-        return _amend(
+        final ran = _amend(
           event.turnId,
           (turn) => turn._changedCall(
             _text(event['tool_call_id']),
             (call) => call._with(status: status, duration: now.difference(call.at)),
           ),
         );
+        // The model goes on from the call's result, so its next round of thinking in this turn
+        // is timed from here, not from when it was first asked.
+        return identical(ran, this) || !_resumedAt.containsKey(event.turnId)
+            ? ran
+            : ran._resumed(event.turnId, now);
 
       case AgentEventKind.uiDelta:
         final delta = _text(event['delta']);
@@ -519,10 +525,10 @@ final class Conversation {
           raw: '${_uiWritten[event.turnId]?.raw ?? ''}$delta',
         );
         // Writing UI ends the round of thinking under way, as writing text does.
-        final written = _wentOn(
+        final written = _amend(
           event.turnId,
-          now,
-        )._with(uiWritten: {..._uiWritten, event.turnId: pending});
+          (turn) => turn._settled(now),
+        )._resumed(event.turnId, now)._with(uiWritten: {..._uiWritten, event.turnId: pending});
         // Only the line still being written grew, so no statement finished: nothing shown changes.
         final updated = format == 'openui' && !delta.contains('\n')
             ? written
@@ -557,8 +563,13 @@ final class Conversation {
             ? settled
             : settled._write(event.turnId, now, (_) => event.text, event.text);
         // A reply whose tools or work are still to come is carried on by a turn of its own.
+        final done = event['pending_work'] != true;
         return written
-            ._ended(event.turnId, now, done: event['pending_work'] != true)
+            ._resumed(event.turnId, null)
+            ._amend(event.turnId, (turn) {
+              final settledTurn = turn._settled(now);
+              return done && !settledTurn.isDone ? settledTurn._copy(isDone: true) : settledTurn;
+            })
             .withState(ConversationState.idle);
 
       case AgentEventKind.delegated:
@@ -573,10 +584,7 @@ final class Conversation {
         return _with(state: left.isEmpty ? ConversationState.responding : Working(left));
 
       case AgentEventKind.interrupted:
-        return _settleUI(
-          event.turnId,
-          now,
-        )._ended(event.turnId, now, done: true).withState(ConversationState.idle);
+        return _ended(event.turnId, now).withState(ConversationState.idle);
 
       case AgentEventKind.error:
         final refused = event['code'] == 'prompt_injection' ? _refused() : this;
@@ -634,22 +642,23 @@ final class Conversation {
     return _with(turns: [...turns]..[index] = changed);
   }
 
-  /// The model went on with the agent turn [turnId] at [now], writing text or UI: its round of
-  /// thinking under way is complete, and the next one is timed from here.
-  Conversation _wentOn(String turnId, DateTime now) =>
-      _amend(turnId, (turn) => turn._settled(now))._with(resumedAt: {..._resumedAt, turnId: now});
-
-  /// Nothing more of the agent turn [turnId] comes at [now]: its round of thinking is complete,
-  /// and the turn is [done] unless a turn of its own carries the reply on.
-  Conversation _ended(String turnId, DateTime now, {required bool done}) {
-    final settled = _amend(turnId, (turn) {
-      final ended = turn._settled(now);
-      return done && !ended.isDone ? ended._copy(isDone: true) : ended;
-    });
-    return settled._resumedAt.containsKey(turnId)
-        ? settled._with(resumedAt: {...settled._resumedAt}..remove(turnId))
-        : settled;
+  /// This conversation with the agent turn [turnId] taken up again [at], or done with for null.
+  Conversation _resumed(String turnId, DateTime? at) {
+    if (at == null) {
+      return _resumedAt.containsKey(turnId)
+          ? _with(resumedAt: {..._resumedAt}..remove(turnId))
+          : this;
+    }
+    return _with(resumedAt: {..._resumedAt, turnId: at});
   }
+
+  /// The agent turn [turnId] with nothing more of it to come: its round of thinking and its UI
+  /// settled, and the turn done.
+  Conversation _ended(String turnId, DateTime now) =>
+      _settleUI(turnId, now)._resumed(turnId, null)._amend(turnId, (turn) {
+        final settledTurn = turn._settled(now);
+        return settledTurn.isDone ? settledTurn : settledTurn._copy(isDone: true);
+      });
 
   /// The prompt injection screen refused the reply being written. What it streamed before the
   /// verdict is not the answer, so its text and UI go, as they do from the kept conversation;

@@ -181,6 +181,17 @@ is kept working. What the router writes is what it renders:
   `AIMessage.reasoningText` reads it.
 - A tool that asks first is answered by an `AIToolApprover` whose `decide` calls
   `session.decide`; on a call, by an `AIToolApprovalCard` over `session.approvals`.
+- An incognito session has no channel, and `chat()` throws. `Conversation` folds the socket's
+  `reasoning_delta`, `tool_started`, `tool_updated` (not `verbatim`) and `tool_ran` into
+  `Turn.steps` and `Turn.isDone`, timing a round of thinking from when the turn was asked,
+  went on writing, or had a tool's result (a private `_resumedAt`, part of equality as
+  `_uiWritten` is). `session.turnMessages` (`TurnMessage`, in core) is the conversation in the
+  channel's shape: one reply per question across its tools' turns, each step the record
+  `AIMessagePart.parseAll` takes, rounds numbered across the reply, the whole thinking in
+  `reasoning`, and a call in `approvals` as `awaiting_approval` for the agents' own user
+  (`backend.userId`), never `Session.userId`, the agent's name on the call. `flutter_demo`'s
+  `AgentChat.unkept` follows it, rebuilding on `conversation`, `approvals` and `connection`,
+  and its app bar's lock starts an incognito chat.
 - `AIConversationView` lays the channel out in turns, `ChatComposer` asks and stops, and
   `AIVoiceGlowView` / `AIVoiceWaveView` show the agent on a call.
 

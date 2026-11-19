@@ -22,6 +22,16 @@
   while it runs, such as "Comparing 40 flights", otherwise its display title, such as "Checking
   the weather", falling back to the tool's name.
 - `session.toolCallsForTurn(turnId)` - the calls one agent turn made, to show under its message.
+- `session.turnMessages` and `TurnMessage` - an incognito session, which has no channel, in the
+  shape a kept one has in Stream Chat, for Stream's AI components.
+- `Turn.steps` (`ReasoningStep`, `ToolCallStep`) and `Turn.isDone` - each reply's rounds of
+  thinking and tool calls, folded from the socket's `reasoning_delta`, `tool_started`,
+  `tool_updated` and `tool_ran`. A reply the prompt injection screen refused loses its text and UI.
+
+🔄 Changed
+
+- `AgentEventKind` has `reasoningDelta` and `toolUpdated`: a `switch` over it with no default
+  needs the two cases.
 
 ## 0.7.0
 

@@ -465,12 +465,13 @@ void main() {
             at: ms(2000),
             duration: const Duration(milliseconds: 500),
           ),
+          // Timed from when the model had the weather's result, not from when it was asked.
           ReasoningStep(
             id: 'r2',
             isStreaming: false,
             text: 'Check the calendar too.',
-            at: ms(0),
-            duration: const Duration(milliseconds: 2700),
+            at: ms(2500),
+            duration: const Duration(milliseconds: 200),
           ),
           ToolCallStep(
             id: 'call_2',

@@ -12,7 +12,7 @@ import 'conversation.dart';
 /// it. A call waiting in the session's `approvals` asks its user on its step, as a kept reply's
 /// does.
 final class TurnMessage {
-  TurnMessage({
+  TurnMessage._({
     required this.id,
     required this.isAgentReply,
     required this.text,
@@ -90,7 +90,7 @@ final class TurnMessage {
   }) {
     final first = turns.first;
     if (!first.speaker.isAgent) {
-      return TurnMessage(id: first.id, isAgentReply: false, text: first.text, at: first.at);
+      return TurnMessage._(id: first.id, isAgentReply: false, text: first.text, at: first.at);
     }
     final steps = <({String type, Map<String, Object?> payload})>[];
     final reasoning = <String, String>{};
@@ -126,7 +126,7 @@ final class TurnMessage {
       }
     }
     final ui = turns.lastWhere((turn) => turn.ui != null, orElse: () => first).ui;
-    return TurnMessage(
+    return TurnMessage._(
       id: first.id,
       isAgentReply: true,
       text: turns.map((turn) => turn.text).where((text) => text.isNotEmpty).join('\n\n'),
