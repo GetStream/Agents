@@ -30,8 +30,7 @@
 
 🔄 Changed
 
-- `AgentEventKind` has `reasoningDelta` and `toolUpdated`: a `switch` over it with no default
-  needs the two cases.
+- `AgentEventKind` has `reasoningDelta`: a `switch` over it with no default needs the case.
 
 ## 0.7.0
 

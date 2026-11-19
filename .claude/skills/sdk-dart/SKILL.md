@@ -183,9 +183,13 @@ is kept working. What the router writes is what it renders:
   `session.decide`; on a call, by an `AIToolApprovalCard` over `session.approvals`.
 - An incognito session has no channel, and `chat()` throws. `Conversation` folds the socket's
   `reasoning_delta`, `tool_started`, `tool_updated` (not `verbatim`) and `tool_ran` into
-  `Turn.steps` and `Turn.isDone`, timing a round of thinking from when the turn was asked,
-  went on writing, or had a tool's result (a private `_resumedAt`, part of equality as
-  `_uiWritten` is). `session.turnMessages` (`TurnMessage`, in core) is the conversation in the
+  `Turn.steps` and `Turn.isDone`, timing a round of thinking from when the turn was asked or
+  went on writing (a private `_resumedAt`, part of equality as `_uiWritten` is). The router
+  answers a reply as waiting (`pending_work`) before its tools run, so their steps land on a
+  turn already answered, and their results carry it on in a turn of its own. The reducer keeps
+  Kotlin's shape (`_amend`, `_resumed`, `_ended`, `_refused`; `Turn._think`, `_settled`,
+  `_called`, `_changedCall`), with step types top level (`ReasoningStep`, `ToolCallStep`,
+  `ToolCallStepStatus`) for want of nested types. `session.turnMessages` (`TurnMessage`, in core) is the conversation in the
   channel's shape: one reply per question across its tools' turns, each step the record
   `AIMessagePart.parseAll` takes, rounds numbered across the reply, the whole thinking in
   `reasoning`, and a call in `approvals` as `awaiting_approval` for the agents' own user

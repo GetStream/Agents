@@ -406,13 +406,25 @@ void main() {
       }
 
       test('a written reply keeps its thinking and tool calls in the order they happened', () {
+        // The router's order: the reply is answered as waiting on its tools, which then run, and
+        // their results carry it on in a turn of its own.
         final conversation = play([
           (0, '{"type":"responding","turn_id":"t1"}'),
           (1000, '{"type":"reasoning_delta","turn_id":"t1","text":"They want "}'),
           (1100, '{"type":"reasoning_delta","turn_id":"t1","text":"Lisbon\'s weather."}'),
           (
             2000,
+            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"Let me look.",'
+                '"time_to_first_token_ms":90}',
+          ),
+          (
+            2000,
             '{"type":"tool_started","tool_call_id":"call_1","tool":"weather","turn_id":"t1",'
+                '"started_at":"2026-11-19T09:00:02Z"}',
+          ),
+          (
+            2000,
+            '{"type":"tool_started","tool_call_id":"call_2","tool":"calendar","turn_id":"t1",'
                 '"started_at":"2026-11-19T09:00:02Z"}',
           ),
           (
@@ -430,21 +442,10 @@ void main() {
             '{"type":"tool_ran","tool_call_id":"call_1","turn_id":"t1","tool":"weather",'
                 '"arguments":"{}","result":"sunny","files":[],"error":""}',
           ),
-          (2600, '{"type":"reasoning_delta","turn_id":"t1","text":"Check the calendar too."}'),
           (
-            2700,
-            '{"type":"tool_started","tool_call_id":"call_2","tool":"calendar","turn_id":"t1",'
-                '"started_at":"2026-11-19T09:00:02Z"}',
-          ),
-          (
-            3000,
+            2300,
             '{"type":"tool_ran","tool_call_id":"call_2","turn_id":"t1","tool":"calendar",'
                 '"arguments":"{}","result":"","files":[],"error":"calendar unreachable"}',
-          ),
-          (
-            3100,
-            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"Let me look.",'
-                '"time_to_first_token_ms":90}',
           ),
         ]);
 
@@ -460,24 +461,16 @@ void main() {
           ToolCallStep(
             id: 'call_1',
             name: 'weather',
-            status: ToolCallStatus.completed,
+            status: ToolCallStepStatus.completed,
             summary: 'Reading the forecast',
             at: ms(2000),
             duration: const Duration(milliseconds: 500),
           ),
-          // Timed from when the model had the weather's result, not from when it was asked.
-          ReasoningStep(
-            id: 'r2',
-            isStreaming: false,
-            text: 'Check the calendar too.',
-            at: ms(2500),
-            duration: const Duration(milliseconds: 200),
-          ),
           ToolCallStep(
             id: 'call_2',
             name: 'calendar',
-            status: ToolCallStatus.failed,
-            at: ms(2700),
+            status: ToolCallStepStatus.failed,
+            at: ms(2000),
             duration: const Duration(milliseconds: 300),
           ),
         ]);
@@ -545,7 +538,7 @@ void main() {
           (ReasoningStep, 'r1'),
           (ToolCallStep, 'r1'),
         ]);
-        expect((steps.last as ToolCallStep).status, ToolCallStatus.completed);
+        expect((steps.last as ToolCallStep).status, ToolCallStepStatus.completed);
         expect((steps.last as ToolCallStep).duration, const Duration(milliseconds: 8));
       });
 

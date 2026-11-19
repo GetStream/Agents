@@ -109,7 +109,7 @@ final class TurnMessage {
             },
           ));
         case ToolCallStep():
-          final waiting = step.status == ToolCallStatus.running
+          final waiting = step.status == ToolCallStepStatus.running
               ? approvals.where((request) => request.id == step.id).firstOrNull
               : null;
           steps.add((

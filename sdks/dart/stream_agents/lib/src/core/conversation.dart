@@ -162,7 +162,7 @@ final class Turn {
   /// This turn with its running call [id] changed as [change] says, or itself when it has none.
   Turn _changedCall(String id, ToolCallStep Function(ToolCallStep) change) {
     final index = steps.indexWhere(
-      (step) => step is ToolCallStep && step.id == id && step.status == ToolCallStatus.running,
+      (step) => step is ToolCallStep && step.id == id && step.status == ToolCallStepStatus.running,
     );
     if (index == -1) return this;
     final changed = [...steps];
@@ -219,8 +219,8 @@ final class ReasoningStep extends TurnStep {
   /// The thinking so far.
   final String text;
 
-  /// When the model began on it: when it was asked, or took the reply up again after writing or
-  /// after a tool's result, as a kept reply's step is timed. Not when its first words arrived, which a model that
+  /// When the model began on it: when it was asked, or took the reply up again after writing,
+  /// as a kept reply's step is timed. Not when its first words arrived, which a model that
   /// sends its thinking in one burst sends only at the end.
   @override
   final DateTime at;
@@ -267,7 +267,7 @@ final class ToolCallStep extends TurnStep {
 
   /// The tool.
   final String name;
-  final ToolCallStatus status;
+  final ToolCallStepStatus status;
 
   /// What whoever runs it last said about how it is going (`tool_updated`), or the empty string.
   final String summary;
@@ -278,14 +278,15 @@ final class ToolCallStep extends TurnStep {
   /// How long it ran, once it is no longer running.
   final Duration? duration;
 
-  ToolCallStep _with({ToolCallStatus? status, String? summary, Duration? duration}) => ToolCallStep(
-    id: id,
-    name: name,
-    status: status ?? this.status,
-    summary: summary ?? this.summary,
-    at: at,
-    duration: duration ?? this.duration,
-  );
+  ToolCallStep _with({ToolCallStepStatus? status, String? summary, Duration? duration}) =>
+      ToolCallStep(
+        id: id,
+        name: name,
+        status: status ?? this.status,
+        summary: summary ?? this.summary,
+        at: at,
+        duration: duration ?? this.duration,
+      );
 
   @override
   bool operator ==(Object other) =>
@@ -305,12 +306,12 @@ final class ToolCallStep extends TurnStep {
 }
 
 /// How a tool call went.
-enum ToolCallStatus {
+enum ToolCallStepStatus {
   running('running'),
   completed('completed'),
   failed('failed');
 
-  const ToolCallStatus(this.wire);
+  const ToolCallStepStatus(this.wire);
 
   /// Its name in a kept reply's `ai_tool_call` step.
   final String wire;
@@ -389,7 +390,7 @@ final class Conversation {
   final Map<String, _PendingUI> _uiWritten;
 
   /// When the model last took each agent turn in flight up again, by turn id: when it was asked,
-  /// went on after writing, or had a tool's result. A round of thinking is timed from it.
+  /// or went on after writing. A round of thinking is timed from it.
   final Map<String, DateTime> _resumedAt;
 
   /// Whatever the caller typed, shown before the router has confirmed hearing it.
@@ -481,7 +482,7 @@ final class Conversation {
         final call = ToolCallStep(
           id: _text(event['tool_call_id']),
           name: _text(event['tool']),
-          status: ToolCallStatus.running,
+          status: ToolCallStepStatus.running,
           at: now,
         );
         return _amend(event.turnId, (turn) => turn._settled(now)._called(call), startingAt: now);
@@ -498,19 +499,16 @@ final class Conversation {
         );
 
       case AgentEventKind.toolRan:
-        final status = event.errorText.isEmpty ? ToolCallStatus.completed : ToolCallStatus.failed;
-        final ran = _amend(
+        final status = event.errorText.isEmpty
+            ? ToolCallStepStatus.completed
+            : ToolCallStepStatus.failed;
+        return _amend(
           event.turnId,
           (turn) => turn._changedCall(
             _text(event['tool_call_id']),
             (call) => call._with(status: status, duration: now.difference(call.at)),
           ),
         );
-        // The model goes on from the call's result, so its next round of thinking in this turn
-        // is timed from here, not from when it was first asked.
-        return identical(ran, this) || !_resumedAt.containsKey(event.turnId)
-            ? ran
-            : ran._resumed(event.turnId, now);
 
       case AgentEventKind.uiDelta:
         final delta = _text(event['delta']);

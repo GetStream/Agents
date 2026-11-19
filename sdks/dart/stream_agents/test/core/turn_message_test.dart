@@ -22,6 +22,12 @@ void main() {
     final toolTurn = [
       (10, '{"type":"responding","turn_id":"t1"}'),
       (1000, '{"type":"reasoning_delta","turn_id":"t1","text":"They want Lisbon\'s weather."}'),
+      // As the router sends it: answered as waiting on its tool, which then runs.
+      (
+        1500,
+        '{"pending_work":true,"type":"responded","turn_id":"t1","text":"Let me look.",'
+            '"time_to_first_token_ms":90}',
+      ),
       (1500, '{"type":"tool_started","tool_call_id":"call_1","tool":"weather","turn_id":"t1"}'),
       (
         1600,
@@ -31,11 +37,6 @@ void main() {
       (
         2000,
         '{"type":"tool_ran","tool_call_id":"call_1","turn_id":"t1","tool":"weather","error":""}',
-      ),
-      (
-        2100,
-        '{"pending_work":true,"type":"responded","turn_id":"t1","text":"Let me look.",'
-            '"time_to_first_token_ms":90}',
       ),
     ];
     final answerTurn = [
