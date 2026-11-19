@@ -11,14 +11,23 @@ import 'package:stream_agents/stream_agents.dart';
 /// question in the channel and answers it there: the reply's text, and its steps (each round
 /// of reasoning and each tool call) as attachments. The session's socket is what runs this
 /// phone's tools and carries the person's answers to the ones that ask first.
+///
+/// An incognito session keeps no channel, so it is shown from its socket instead: the
+/// session's `turnMessages`, which are the conversation in the channel's shape.
 class AgentChat with AIConversationTransport<AgentMessage> {
-  AgentChat._(this.session, stream.Channel channel) : _channel = channel;
+  AgentChat._(this.session, stream.Channel? channel)
+    : _channel = channel,
+      _kept = channel != null;
 
-  /// Opens the session's channel and starts following it.
+  /// Opens the session's channel and starts following it, or follows the session's socket
+  /// alone when it keeps no channel, as an incognito one does.
   ///
   /// The session is closed if its channel cannot be opened, so it does not run on with
   /// nobody to show it.
   static Future<AgentChat> open(AgentSession session) async {
+    if (session.session.conversationId.isEmpty) {
+      return AgentChat.unkept(session);
+    }
     stream.Channel? channel;
     try {
       channel = await session.chat();
@@ -45,6 +54,10 @@ class AgentChat with AIConversationTransport<AgentMessage> {
     .._hasOlderMessages = hasOlderMessages
     .._follow(channel);
 
+  /// Follows [session], which keeps no channel, from its socket alone.
+  factory AgentChat.unkept(AgentSession session) =>
+      AgentChat._(session, null).._follow(null);
+
   static const _pageSize = 30;
 
   /// What a reply that failed says, in place of the provider's raw error.
@@ -52,6 +65,9 @@ class AgentChat with AIConversationTransport<AgentMessage> {
 
   final AgentSession session;
   stream.Channel? _channel;
+
+  /// Whether the conversation is kept in a channel, rather than shown from the socket alone.
+  final bool _kept;
 
   /// Why the session's socket stopped, or null: tools and approvals stop until a new
   /// conversation is opened.
@@ -70,9 +86,30 @@ class AgentChat with AIConversationTransport<AgentMessage> {
   var _unanswered = false;
   var _closed = false;
 
+  var _unkeptShown = const <AgentMessage>[];
+
   /// The messages as Stream's AI components show them.
-  List<AgentMessage> get listMessages =>
-      listed(_channel?.state?.messages ?? const [], reasoning, shown: _shown);
+  List<AgentMessage> get listMessages => _kept
+      ? listed(_channel?.state?.messages ?? const [], reasoning, shown: _shown)
+      : _unkeptShown = listedTurns(session.turnMessages, shown: _unkeptShown);
+
+  /// The [messages] of a session that keeps no channel as Stream's AI components show them,
+  /// without the replies that ended with nothing written, reusing those in [shown] that did
+  /// not change.
+  static List<AgentMessage> listedTurns(
+    List<TurnMessage> messages, {
+    List<AgentMessage> shown = const [],
+  }) {
+    final known = {for (final message in shown) message.id: message};
+    return [
+      for (final message in messages)
+        if (!message.isUnwrittenReply)
+          if (known[message.id] case final same? when same._turn == message)
+            same
+          else
+            AgentMessage.unkept(message),
+    ];
+  }
 
   /// The [messages] as Stream's AI components show them, oldest first, without those deleted
   /// and without the replies that ended with nothing written, reusing those in [shown].
@@ -96,21 +133,27 @@ class AgentChat with AIConversationTransport<AgentMessage> {
     _tell(_unanswered ? _failedActivity : activityOf(session.state));
   }
 
-  void _follow(stream.Channel channel) {
+  void _follow(stream.Channel? channel) {
+    if (channel != null) {
+      _subscriptions
+        ..add(channel.state!.messagesStream.listen((_) => _publish()))
+        // The client's events rather than the channel's list: the list can fold several live
+        // updates into one, and each update carries its own window of the reply's thinking.
+        ..add(
+          channel.client.on(stream.EventType.messageUpdated).listen((event) {
+            final message = event.message;
+            if (event.cid == channel.cid &&
+                message != null &&
+                _readReasoning(message)) {
+              _publish();
+            }
+          }),
+        );
+    } else {
+      // A call waiting for the person asks on its step of the reply.
+      _subscriptions.add(session.approvals.stream.listen((_) => _publish()));
+    }
     _subscriptions
-      ..add(channel.state!.messagesStream.listen((_) => _publish()))
-      // The client's events rather than the channel's list: the list can fold several live
-      // updates into one, and each update carries its own window of the reply's thinking.
-      ..add(
-        channel.client.on(stream.EventType.messageUpdated).listen((event) {
-          final message = event.message;
-          if (event.cid == channel.cid &&
-              message != null &&
-              _readReasoning(message)) {
-            _publish();
-          }
-        }),
-      )
       ..add(session.conversation.stream.listen((_) => _sessionChanged()))
       ..add(session.connection.stream.listen((_) => _sessionChanged()))
       // A reply that fails ends with nothing written in the channel: only the socket says so.
@@ -130,7 +173,7 @@ class AgentChat with AIConversationTransport<AgentMessage> {
 
   void _publish() {
     final feed = _feed;
-    if (feed == null || _channel == null) return;
+    if (feed == null || _closed) return;
     feed
       ..updateMessages(listMessages)
       ..updateHasOlderMessages(_hasOlderMessages);
@@ -139,6 +182,8 @@ class AgentChat with AIConversationTransport<AgentMessage> {
   void _sessionChanged() {
     _sessionFailure.value = session.failure?.toString();
     if (!_unanswered) _tell(activityOf(session.state));
+    // With no channel, the socket is where the conversation is.
+    if (!_kept) _publish();
   }
 
   void _report(AgentEvent event) {
@@ -261,32 +306,59 @@ extension AgentReply on stream.Message {
   ]);
 }
 
-/// A message of the conversation as Stream's AI components show it.
-class AgentMessage with AIMessage {
-  AgentMessage(this.message, this._reasoning) : parts = message.steps;
+/// Whether this is a reply the agent ended without writing anything: no text and no steps.
+extension UnwrittenTurnReply on TurnMessage {
+  bool get isUnwrittenReply =>
+      isAgentReply && !isGenerating && text.isEmpty && steps.isEmpty;
+}
 
-  final stream.Message message;
-  final LiveReasoning _reasoning;
+/// A message of the conversation as Stream's AI components show it: one of the channel's, or,
+/// for a session that keeps no channel, one built from its socket.
+class AgentMessage with AIMessage {
+  AgentMessage(stream.Message this.message, LiveReasoning this._reasoning)
+    : _turn = null,
+      id = message.id,
+      role = message.isAgentReply
+          ? AIMessageRole.assistant
+          : AIMessageRole.user,
+      text = message.text ?? '',
+      isGenerating = message.isGenerating,
+      parts = message.steps;
+
+  /// A message of a session that keeps no channel, an incognito one, from its socket.
+  AgentMessage.unkept(TurnMessage this._turn)
+    : message = null,
+      _reasoning = null,
+      id = _turn.id,
+      role = _turn.isAgentReply ? AIMessageRole.assistant : AIMessageRole.user,
+      text = _turn.text,
+      isGenerating = _turn.isGenerating,
+      parts = AIMessagePart.parseAll(_turn.steps);
+
+  /// The channel's message, or null for one built from the socket.
+  final stream.Message? message;
+  final TurnMessage? _turn;
+  final LiveReasoning? _reasoning;
+
+  @override
+  final String id;
+
+  @override
+  final AIMessageRole role;
+
+  @override
+  final String text;
+
+  @override
+  final bool isGenerating;
 
   @override
   final List<AIMessagePart> parts;
 
   @override
-  String get id => message.id;
-
-  @override
-  AIMessageRole get role =>
-      message.isAgentReply ? AIMessageRole.assistant : AIMessageRole.user;
-
-  @override
-  String get text => message.text ?? '';
-
-  @override
-  bool get isGenerating => message.isGenerating;
-
-  @override
   late final List<AIMessageAttachment> attachments = [
-    for (final attachment in message.attachments)
+    for (final attachment
+        in message?.attachments ?? const <stream.Attachment>[])
       if (attachment.type == 'image' && attachment.imageUrl != null)
         AIMessageAttachment.image(
           Uri.parse(attachment.imageUrl!),
@@ -302,8 +374,10 @@ class AgentMessage with AIMessage {
   ];
 
   /// A step keeps only the opening of its thinking; the whole of it came with the live
-  /// updates, while the reply was being written.
+  /// updates, while the reply was being written. One built from the socket holds all of it.
   @override
-  String? reasoningText(AIReasoningPart step) =>
-      _reasoning[(message: message.id, step: step.id)];
+  String? reasoningText(AIReasoningPart step) => switch (_turn) {
+    final turn? => turn.reasoning[step.id],
+    null => _reasoning?[(message: id, step: step.id)],
+  };
 }

@@ -749,6 +749,64 @@ void main() {
         await chat.close();
       });
 
+      test(
+        'waits on its step of the reply, for the agents\' user, in a conversation kept nowhere',
+        () async {
+          // The router's session keeps no conversation: sessionJson's conversation_id is empty.
+          final chat = await agents
+              .withUser('ada')
+              .chat(
+                SessionOptions(
+                  incognito: true,
+                  tools: [
+                    AgentTool(
+                      name: 'issue_refund',
+                      description: 'Refund an order.',
+                      approval: const ToolApproval(
+                        title: 'Refund order A-1042?',
+                        reasonArgument: 'reason',
+                        allowTitle: 'Refund',
+                      ),
+                      run: (arguments) async => 'Refunded',
+                    ),
+                  ],
+                ),
+              );
+          final socket = await router.socket();
+
+          socket
+            ..send('{"type":"responding","turn_id":"t1"}')
+            ..send(
+              '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund","turn_id":"t1",'
+              '"started_at":"2026-11-19T09:00:00Z"}',
+            )
+            ..send(refundCall);
+          await until(() => chat.approvals.value.isNotEmpty);
+
+          final step = chat.turnMessages.last.steps.single;
+          expect(step.type, 'ai_tool_call');
+          expect(step.payload, {
+            'id': 'c1',
+            'name': 'issue_refund',
+            'status': 'awaiting_approval',
+            // The person using the app, whom Stream's approver shows the card to: the session's own
+            // user_id is the name the agent joined the call as.
+            'target_user_id': 'ada',
+            'approval': {
+              'title': 'Refund order A-1042?',
+              'reason': 'it arrived unopened',
+              'allow_title': 'Refund',
+            },
+          });
+
+          chat.decide('c1', allowed: true);
+
+          expect(chat.turnMessages.last.steps.single.payload['status'], 'running');
+          await chat.close();
+          expect(chat.turnMessages.last.isGenerating, isFalse);
+        },
+      );
+
       test('declined, never runs, tells the model so, and a second answer does nothing', () async {
         final chat = await open();
         final socket = await router.socket();

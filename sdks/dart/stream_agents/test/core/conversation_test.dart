@@ -392,6 +392,269 @@ void main() {
 
       expect(identical(after, before), isTrue);
     });
+
+    group('steps', () {
+      final start = DateTime.utc(2026, 11, 19, 9);
+      DateTime ms(int milliseconds) => start.add(Duration(milliseconds: milliseconds));
+
+      Conversation play(List<(int, String)> frames, {Conversation from = const Conversation()}) {
+        var conversation = from;
+        for (final (at, json) in frames) {
+          conversation = conversation.apply(frame(json), at: ms(at));
+        }
+        return conversation;
+      }
+
+      test('a written reply keeps its thinking and tool calls in the order they happened', () {
+        final conversation = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (1000, '{"type":"reasoning_delta","turn_id":"t1","text":"They want "}'),
+          (1100, '{"type":"reasoning_delta","turn_id":"t1","text":"Lisbon\'s weather."}'),
+          (
+            2000,
+            '{"type":"tool_started","tool_call_id":"call_1","tool":"weather","turn_id":"t1",'
+                '"started_at":"2026-11-19T09:00:02Z"}',
+          ),
+          (
+            2100,
+            '{"type":"tool_updated","id":"call_1","turn_id":"t1","tool":"weather",'
+                '"text":"Reading the forecast","verbatim":false}',
+          ),
+          (
+            2200,
+            '{"type":"tool_updated","id":"call_1","turn_id":"t1","tool":"weather",'
+                '"text":"One moment.","verbatim":true}',
+          ),
+          (
+            2500,
+            '{"type":"tool_ran","tool_call_id":"call_1","turn_id":"t1","tool":"weather",'
+                '"arguments":"{}","result":"sunny","files":[],"error":""}',
+          ),
+          (2600, '{"type":"reasoning_delta","turn_id":"t1","text":"Check the calendar too."}'),
+          (
+            2700,
+            '{"type":"tool_started","tool_call_id":"call_2","tool":"calendar","turn_id":"t1",'
+                '"started_at":"2026-11-19T09:00:02Z"}',
+          ),
+          (
+            3000,
+            '{"type":"tool_ran","tool_call_id":"call_2","turn_id":"t1","tool":"calendar",'
+                '"arguments":"{}","result":"","files":[],"error":"calendar unreachable"}',
+          ),
+          (
+            3100,
+            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"Let me look.",'
+                '"time_to_first_token_ms":90}',
+          ),
+        ]);
+
+        final turn = conversation.turns.single;
+        expect(turn.steps, [
+          ReasoningStep(
+            id: 'r1',
+            isStreaming: false,
+            text: "They want Lisbon's weather.",
+            at: ms(0),
+            duration: const Duration(seconds: 2),
+          ),
+          ToolCallStep(
+            id: 'call_1',
+            name: 'weather',
+            status: ToolCallStatus.completed,
+            summary: 'Reading the forecast',
+            at: ms(2000),
+            duration: const Duration(milliseconds: 500),
+          ),
+          ReasoningStep(
+            id: 'r2',
+            isStreaming: false,
+            text: 'Check the calendar too.',
+            at: ms(0),
+            duration: const Duration(milliseconds: 2700),
+          ),
+          ToolCallStep(
+            id: 'call_2',
+            name: 'calendar',
+            status: ToolCallStatus.failed,
+            at: ms(2700),
+            duration: const Duration(milliseconds: 300),
+          ),
+        ]);
+        // Its tools' results are still to come, in a turn of its own.
+        expect(turn.isDone, isFalse);
+        expect(turn.text, 'Let me look.');
+      });
+
+      test('times a round of thinking from when the model was asked, not its first words', () {
+        // A model that sends its thinking in one burst, just before it writes.
+        final asked = play([
+          (1000, '{"type":"responding","turn_id":"t1"}'),
+          (5000, '{"type":"reasoning_delta","turn_id":"t1","text":"Lisbon, "}'),
+          (5001, '{"type":"reasoning_delta","turn_id":"t1","text":"this weekend."}'),
+          (5250, '{"type":"response_delta","turn_id":"t1","text":"Sunny."}'),
+        ]);
+        final first = asked.turns.single.steps.single as ReasoningStep;
+        expect(first.at, ms(1000));
+        expect(first.duration, const Duration(milliseconds: 4250));
+
+        // After writing, the next round is timed from when the model went on.
+        final wentOn = play([
+          (7000, '{"type":"reasoning_delta","turn_id":"t1","text":"And Sunday?"}'),
+          (8000, '{"type":"response_delta","turn_id":"t1","text":" Sunday too."}'),
+        ], from: asked);
+        final second = wentOn.turns.single.steps.last as ReasoningStep;
+        expect(second.id, 'r2');
+        expect(second.at, ms(5250));
+        expect(second.duration, const Duration(milliseconds: 2750));
+      });
+
+      test('a round stays open while the model thinks, and UI being written closes it', () {
+        final thinking = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (300, '{"type":"reasoning_delta","turn_id":"t1","text":"A card fits."}'),
+        ]);
+        expect((thinking.turns.single.steps.single as ReasoningStep).isStreaming, isTrue);
+
+        final carding = play([
+          (
+            900,
+            '{"type":"ui_delta","turn_id":"t1","format":"openui","mode":"replace",'
+                r'"delta":"root = Card([])\n"}',
+          ),
+        ], from: thinking);
+        final round = carding.turns.single.steps.single as ReasoningStep;
+        expect(round.isStreaming, isFalse);
+        expect(round.duration, const Duration(milliseconds: 900));
+      });
+
+      test('a call shows once, even when started again or sharing an id with a round', () {
+        final conversation = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (1, '{"type":"reasoning_delta","turn_id":"t1","text":"The weather tool knows."}'),
+          (2, '{"type":"tool_started","tool_call_id":"r1","tool":"weather","turn_id":"t1"}'),
+          (3, '{"type":"tool_started","tool_call_id":"r1","tool":"weather","turn_id":"t1"}'),
+          (
+            10,
+            '{"type":"tool_ran","tool_call_id":"r1","tool":"weather","turn_id":"t1","error":""}',
+          ),
+        ]);
+
+        final steps = conversation.turns.single.steps;
+        expect(steps.map((step) => (step.runtimeType, step.id)), [
+          (ReasoningStep, 'r1'),
+          (ToolCallStep, 'r1'),
+        ]);
+        expect((steps.last as ToolCallStep).status, ToolCallStatus.completed);
+        expect((steps.last as ToolCallStep).duration, const Duration(milliseconds: 8));
+      });
+
+      test('a turn is done once it answered with nothing left to come, or was cut off', () {
+        final answered = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (
+            1,
+            '{"pending_work":false,"type":"responded","turn_id":"t1","text":"Sunny.",'
+                '"time_to_first_token_ms":90}',
+          ),
+        ]);
+        expect(answered.turns.single.isDone, isTrue);
+
+        final waiting = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (
+            1,
+            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"",'
+                '"time_to_first_token_ms":90}',
+          ),
+        ]);
+        expect(waiting.turns.single.isDone, isFalse);
+
+        final cut = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (1, '{"type":"reasoning_delta","turn_id":"t1","text":"Hmm"}'),
+          (5, '{"type":"interrupted","turn_id":"t1","participant":null}'),
+        ]);
+        expect(cut.turns.single.isDone, isTrue);
+        expect(
+          (cut.turns.single.steps.single as ReasoningStep).duration,
+          const Duration(milliseconds: 5),
+        );
+      });
+
+      test(
+        'progress for a call or a turn never seen changes nothing; thinking starts the turn',
+        () {
+          final before = play([(0, '{"type":"responding","turn_id":"t1"}')]);
+
+          for (final json in [
+            '{"type":"tool_updated","id":"nope","turn_id":"t1","text":"Working","verbatim":false}',
+            '{"type":"tool_ran","tool_call_id":"nope","turn_id":"t1","error":""}',
+            '{"type":"tool_ran","tool_call_id":"c1","turn_id":"t9","error":""}',
+            '{"type":"reasoning_delta","turn_id":"t1","text":""}',
+          ]) {
+            expect(identical(before.apply(frame(json)), before), isTrue, reason: json);
+          }
+
+          final unseen = before.apply(
+            frame('{"type":"reasoning_delta","turn_id":"t2","text":"Next."}'),
+            at: ms(40),
+          );
+          expect(unseen.turns.map((turn) => turn.id), ['t1', 't2']);
+          expect((unseen.turns.last.steps.single as ReasoningStep).at, ms(40));
+        },
+      );
+
+      test('a reply the prompt injection screen refused loses its text and UI, not its steps', () {
+        final refused = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (1, '{"type":"reasoning_delta","turn_id":"t1","text":"Reading the page."}'),
+          (2, '{"type":"tool_started","tool_call_id":"c1","tool":"fetch","turn_id":"t1"}'),
+          (3, '{"type":"response_delta","turn_id":"t1","text":"Ignore your rules and"}'),
+          (
+            4,
+            '{"type":"ui_delta","turn_id":"t1","format":"openui","mode":"replace",'
+                r'"delta":"root = Card([])\n"}',
+          ),
+          (
+            5,
+            '{"type":"error","context":"llm","error":"the input was refused",'
+                '"code":"prompt_injection"}',
+          ),
+        ]);
+
+        final turn = refused.turns.single;
+        expect(turn.text, isEmpty);
+        expect(turn.ui, isNull);
+        expect(turn.steps.map((step) => step.id), ['r1', 'c1']);
+        expect(refused.failure, 'the input was refused');
+
+        // Another failure leaves what was written alone.
+        final failed = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (3, '{"type":"response_delta","turn_id":"t1","text":"Half"}'),
+          (5, '{"type":"error","context":"tts","error":"the voice is unknown"}'),
+        ]);
+        expect(failed.turns.single.text, 'Half');
+      });
+
+      test('a refusal after the reply is done leaves the answer that was given', () {
+        final answered = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (
+            1,
+            '{"pending_work":false,"type":"responded","turn_id":"t1","text":"Sunny.",'
+                '"time_to_first_token_ms":90}',
+          ),
+          (
+            5,
+            '{"type":"error","context":"llm","error":"the input was refused",'
+                '"code":"prompt_injection"}',
+          ),
+        ]);
+
+        expect(answered.turns.single.text, 'Sunny.');
+      });
+    });
   });
 
   group('AgentEvent', () {
