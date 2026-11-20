@@ -808,6 +808,11 @@ A call allowed from the conversation with its arguments ran at once, and ran aga
 - `console.log` and `JSON.stringify` of a `Client`, `Backend` or `Edge` no longer show the API secret, a token handed in, a token function's answer or a token minted from the secret.
 - `loadFolder` leaves hidden files and folders, `node_modules` and `__pycache__` out of knowledge, as it already did for skills, so `.github/` or a `.secrets.yaml` is no longer synced as something the agent can quote. A `node_modules` or hidden folder directly in `skills/` is left out rather than refused as a skill without a `SKILL.md`. A symbolic link that leads out of the agent directory is refused: a file in `skills/` or `knowledge/`, a skill's `SKILL.md`, or `skills/` or `knowledge/` itself. A link within the directory is read, and one to a directory is not followed (#2146).
 
+### Kotlin: a tool's failure and a printed credential keep internal details out
+
+- A tool's failure reaches the model as `StreamAgents.onToolError` says, `agents.onToolError = { call, error -> ... }`, for every session of that client, and as the error's message otherwise, cut to 1,024 characters with an ellipsis, as in JavaScript. The model may repeat it and the conversation keeps it, and an error from a library a tool calls can name an internal host, a table or a value from a record: a hook can pass on only the app's own errors and say something plain for the rest. A hook that throws tells the model only that the tool failed.
+- `StreamCredentials` and `Guest` no longer print their token in `toString()`; it shows as `[redacted]`. The generated `GuestUser` the SDK keeps a guest's store record in still prints its token and refresh secret: it is internal, never handed to the app or logged by the SDK, and the generator has no way to mask a field yet (AND-XXXX).
+
 ### The Go SDK's `Agent.Sync` works for an agent with skills
 
 `Agent.Sync` stored the agent's skills before its config, with no config to name, and the router answered "a skill belongs to an agent config, so one has to be named". It now stores the config first and its skills under the config's id, as the Python SDK does, so a second `Sync` still edits the config and each skill rather than adding copies. An agent read from a directory was not affected (#2074).

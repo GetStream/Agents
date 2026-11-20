@@ -356,3 +356,6 @@ has not started answering within `timeoutMs` (60 s); a non-envelope error body i
 `Backend` and `Edge` print no secret or token through `toJSON` or Node's inspect; folder sync
 leaves hidden entries and `node_modules` out of skills and knowledge and refuses a symlink out of
 the agent directory; and a tool's failure reaches the model through an `onError` hook on `Tools`.
+
+Kotlin has since caught up on two of them: a tool's failure goes through `StreamAgents.onToolError`
+and is cut to 1,024 characters, and `StreamCredentials` and `Guest` print no token.
