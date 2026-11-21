@@ -1777,7 +1777,7 @@ func (s *DataMoveSuite) seedScheduledTask(id, customerID, state string) {
 	}
 	s.Require().NoError(s.source.ScheduledTasks.Insert(s.ctx, task, 25))
 	_, err = s.source.GlobalDB().ExecContext(s.ctx,
-		"UPDATE scheduled_tasks SET claim_id = 'claim-1', lease_until = now() + interval '1 hour' WHERE id = ?", id)
+		"UPDATE scheduled_tasks SET leased_by = 'claim-1', lease_until = now() + interval '1 hour' WHERE id = ?", id)
 	s.Require().NoError(err)
 	_, err = s.source.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, state, finished_at)
@@ -1789,7 +1789,7 @@ VALUES (?, ?, ?, ?, 'delivered', now())`, id+"-run", id, customerID, next.Add(-d
 func (s *DataMoveSuite) scheduledTaskOn(store *Store, id string) (state, claim string, leased bool, next time.Time) {
 	var lease sql.NullTime
 	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT state, claim_id, lease_until, next_run_at FROM scheduled_tasks WHERE id = ?", id).
+		"SELECT state, leased_by, lease_until, next_run_at FROM scheduled_tasks WHERE id = ?", id).
 		Scan(&state, &claim, &lease, &next))
 	return state, claim, lease.Valid, next
 }

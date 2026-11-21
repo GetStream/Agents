@@ -178,7 +178,7 @@ func (s *StoreSuite) TestARenewalExtendsOnlyTheClaimItHolds() {
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
-	held, err := s.store.ScheduledTasks.Renew(s.ctx, "acme", "st-renew", claimed[0].ClaimID, time.Hour)
+	held, err := s.store.ScheduledTasks.Renew(s.ctx, "acme", "st-renew", claimed[0].LeasedBy, time.Hour)
 	s.Require().NoError(err)
 	s.True(held)
 	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "st-renew")
@@ -189,7 +189,7 @@ func (s *StoreSuite) TestARenewalExtendsOnlyTheClaimItHolds() {
 	// A pause clears the claim, so the worker that had it holds nothing.
 	task.State = ScheduledTaskPaused
 	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &task))
-	held, err = s.store.ScheduledTasks.Renew(s.ctx, "acme", "st-renew", claimed[0].ClaimID, time.Hour)
+	held, err = s.store.ScheduledTasks.Renew(s.ctx, "acme", "st-renew", claimed[0].LeasedBy, time.Hour)
 	s.Require().NoError(err)
 	s.False(held)
 }
@@ -211,7 +211,7 @@ func (s *StoreSuite) TestAFinishUnderAStolenClaimDoesNotAdvanceTheTask() {
 	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &stored))
 
 	next := s.base.Add(24 * time.Hour)
-	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].ClaimID, ScheduledTaskOutcome{
+	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].LeasedBy, ScheduledTaskOutcome{
 		RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 		NextRunAt: &next, State: ScheduledTaskActive,
 	})
@@ -239,7 +239,7 @@ func (s *StoreSuite) TestAFinishAdvancesTheTask() {
 	s.Require().Len(claimed, 1)
 
 	next := s.base.Add(24 * time.Hour)
-	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].ClaimID, ScheduledTaskOutcome{
+	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].LeasedBy, ScheduledTaskOutcome{
 		RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 		NextRunAt: &next, State: ScheduledTaskActive,
 	})
@@ -250,7 +250,7 @@ func (s *StoreSuite) TestAFinishAdvancesTheTask() {
 	s.Require().NoError(err)
 	s.Require().NotNil(after.NextRunAt)
 	s.Equal(next, *after.NextRunAt)
-	s.Empty(after.ClaimID)
+	s.Empty(after.LeasedBy)
 }
 
 func (s *StoreSuite) TestDeletingASessionDeletesItsTasks() {
@@ -299,7 +299,7 @@ func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	s.Require().Len(claimed, 1)
 
 	until := time.Now().Add(2 * time.Hour)
-	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].ClaimID, until)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].LeasedBy, until)
 	s.Require().NoError(err)
 	s.True(held)
 
@@ -307,7 +307,7 @@ func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	s.Require().NoError(err)
 	s.Require().NotNil(task.LeaseUntil)
 	s.True(task.LeaseUntil.After(time.Now().Add(time.Hour)), "the lease is the hold, not the claim's minute")
-	s.Equal(claimed[0].ClaimID, task.ClaimID, "the claim is kept, so no other worker takes the occurrence")
+	s.Equal(claimed[0].LeasedBy, task.LeasedBy, "the claim is kept, so no other worker takes the occurrence")
 
 	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "one", Limit: 25})
 	s.Require().NoError(err)
@@ -355,7 +355,7 @@ func (s *StoreSuite) TestAPostponeUnderAStolenClaimHoldsNothing() {
 	stored.Title = "Edited"
 	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &stored))
 
-	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].ClaimID, time.Now().Add(time.Hour))
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].LeasedBy, time.Now().Add(time.Hour))
 	s.Require().NoError(err)
 	s.False(held, "a fenced claim holds nothing: the edit decides what happens")
 }
@@ -385,7 +385,7 @@ func (s *StoreSuite) held(id string, until time.Time) ClaimedScheduledTask {
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().Equal(id, claimed[0].Task.ID)
-	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", id, claimed[0].Run.ID, claimed[0].ClaimID, until)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", id, claimed[0].Run.ID, claimed[0].LeasedBy, until)
 	s.Require().NoError(err)
 	s.Require().True(held)
 	return claimed[0]
@@ -535,14 +535,14 @@ func (s *StoreSuite) TestAnEditedOneShotBeingDeliveredKeepsItsClaimAndItsRun() {
 	stored, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
 	s.Require().NoError(err)
 	s.Equal("Remind Sam to drink water.", stored.Instructions)
-	s.Equal(claimed[0].ClaimID, stored.ClaimID, "the worker delivering it keeps its claim")
+	s.Equal(claimed[0].LeasedBy, stored.LeasedBy, "the worker delivering it keeps its claim")
 	s.True(stored.NextRunAt.Equal(due), "the one-shot is not brought forward to be delivered again")
 	s.Equal(ScheduledTaskRunRunning, s.run(claimed[0].Run.ID).State, "the delivery under way is not written missed")
 	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
 	s.Empty(again, "nothing starts a second delivery")
 
-	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].ClaimID, ScheduledTaskOutcome{
+	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].LeasedBy, ScheduledTaskOutcome{
 		RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 		State: ScheduledTaskCompleted,
 	})
@@ -576,7 +576,7 @@ func (s *StoreSuite) TestAnEditedOneShotTakenUpAgainAfterItsHoldKeepsItsClaim() 
 
 	stored, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
 	s.Require().NoError(err)
-	s.Equal(taken[0].ClaimID, stored.ClaimID, "a hold that has ended no longer holds the delivery")
+	s.Equal(taken[0].LeasedBy, stored.LeasedBy, "a hold that has ended no longer holds the delivery")
 	s.Equal(ScheduledTaskRunRunning, s.run(claim.Run.ID).State)
 }
 
@@ -677,7 +677,7 @@ func (s *StoreSuite) TestAOneShotMovedWhileBeingDeliveredLetsThatDeliveryGo() {
 
 	stored, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
 	s.Require().NoError(err)
-	s.Empty(stored.ClaimID, "the move decides what comes next, not the worker")
+	s.Empty(stored.LeasedBy, "the move decides what comes next, not the worker")
 	s.True(stored.NextRunAt.Equal(later))
 	s.Equal(ScheduledTaskRunMissed, s.run(claimed[0].Run.ID).State)
 }
@@ -727,7 +727,7 @@ func (s *StoreSuite) TestAnOccurrenceWhoseWorkersKeepDyingIsFailedAtTheAttemptCa
 	s.NotNil(stored.FinishedAt)
 	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
 	s.Require().NoError(err)
-	s.Equal(failed[0].ClaimID, task.ClaimID, "the settle runs under a claim of its own")
+	s.Equal(failed[0].LeasedBy, task.LeasedBy, "the settle runs under a claim of its own")
 }
 
 func (s *StoreSuite) TestTheAttemptCapRecordsWhatThePlacedCallLeft() {
@@ -1030,7 +1030,7 @@ func (s *StoreSuite) TestAClaimInFlightCannotResumeADeletedConfigsTask() {
 	s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
 
 	next := s.base.Add(24 * time.Hour)
-	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].ClaimID, ScheduledTaskOutcome{
+	applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claimed[0].Run.ID, claimed[0].LeasedBy, ScheduledTaskOutcome{
 		RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 		NextRunAt: &next, State: ScheduledTaskActive,
 	})
@@ -1062,7 +1062,7 @@ func (s *StoreSuite) TestAConfigDeleteWhileAWorkerFinishesTheRunStillPausesTheTa
 	finished := make(chan error, 1)
 	go func() {
 		next := s.base.Add(24 * time.Hour)
-		_, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claim.Run.ID, claim.ClaimID, ScheduledTaskOutcome{
+		_, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claim.Run.ID, claim.LeasedBy, ScheduledTaskOutcome{
 			RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 			NextRunAt: &next, State: ScheduledTaskActive,
 		})
@@ -1186,20 +1186,20 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	}), "Claim")
 	first, second := claimed[0], claimed[1]
 	s.Equal(1, s.countQueries(func() {
-		held, err := s.store.ScheduledTasks.Renew(s.ctx, "acme", first.Task.ID, first.ClaimID, time.Minute)
+		held, err := s.store.ScheduledTasks.Renew(s.ctx, "acme", first.Task.ID, first.LeasedBy, time.Minute)
 		s.Require().NoError(err)
 		s.True(held)
 	}), "Renew")
 	// The transaction, the task and its run.
 	s.Equal(4, s.countQueries(func() {
-		held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", second.Task.ID, second.Run.ID, second.ClaimID, time.Now().Add(time.Hour))
+		held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", second.Task.ID, second.Run.ID, second.LeasedBy, time.Now().Add(time.Hour))
 		s.Require().NoError(err)
 		s.True(held)
 	}), "Postpone")
 	next := time.Now().Add(24 * time.Hour)
 	// The transaction, the run read, its task locked, the run and the task written.
 	s.Equal(6, s.countQueries(func() {
-		applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", first.Run.ID, first.ClaimID, ScheduledTaskOutcome{
+		applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", first.Run.ID, first.LeasedBy, ScheduledTaskOutcome{
 			RunState: ScheduledTaskRunDelivered, DeliveredTo: "conversation", NextRunAt: &next, State: ScheduledTaskActive,
 		})
 		s.Require().NoError(err)

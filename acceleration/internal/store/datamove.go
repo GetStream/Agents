@@ -944,7 +944,7 @@ func pauseImported(row json.RawMessage, active []string, paused string, claimed 
 	}
 	fields["move_paused"] = json.RawMessage(strconv.FormatBool(moved))
 	if claimed {
-		fields["claim_id"] = json.RawMessage(`""`)
+		fields["leased_by"] = json.RawMessage(`""`)
 		fields["lease_until"] = json.RawMessage("null")
 	}
 	return json.Marshal(fields)

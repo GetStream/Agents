@@ -104,7 +104,7 @@ type ScheduledTask struct {
 	QuietHours *ScheduledTaskQuietHours `bun:"quiet_hours,type:jsonb"`
 	Custom     map[string]any           `bun:"custom,type:jsonb,nullzero"`
 	LeaseUntil *time.Time               `bun:"lease_until"`
-	ClaimID    string                   `bun:"claim_id,notnull"`
+	LeasedBy   string                   `bun:"leased_by,notnull"`
 	// ConsecutiveFailures is how many occurrences in a row failed to deliver.
 	ConsecutiveFailures int       `bun:"consecutive_failures,notnull"`
 	CreatedBy           string    `bun:"created_by,notnull"`
@@ -349,7 +349,7 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 		return stack.Wrap(err)
 	}
 	task.UpdatedAt = time.Now().UTC()
-	task.ClaimID = ""
+	task.LeasedBy = ""
 	task.LeaseUntil = nil
 	if len(task.Channels) == 0 {
 		task.Channels = []string{ScheduledTaskDeliveredConversation}
@@ -422,7 +422,7 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 		// Who scheduled the task is fixed when it is created.
 		save := tx.NewUpdate().Model(task).ExcludeColumn("customer_id", "created_at", "api_key", "usage_categories")
 		if len(delivering) > 0 {
-			save = save.ExcludeColumn("claim_id", "lease_until")
+			save = save.ExcludeColumn("leased_by", "lease_until")
 		}
 		result, err := save.
 			Where("customer_id = ?", task.CustomerID).
@@ -526,7 +526,7 @@ func activeScheduledTasks(ctx context.Context, db bun.IDB, customerID, userID, c
 type ClaimedScheduledTask struct {
 	Task           ScheduledTask
 	Run            ScheduledTaskRun
-	ClaimID        string
+	LeasedBy       string
 	AlreadySettled bool
 	WorkersLost    bool
 }
@@ -568,7 +568,7 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 				continue
 			}
 			scheduledFor := *task.NextRunAt
-			claimID := newID()
+			leasedBy := newID()
 
 			run, found := runs[occurrenceOf(task.CustomerID, task.ID, scheduledFor)]
 			if found {
@@ -622,9 +622,9 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 					// The worker settles the task from the run as it stands,
 					// without delivering.
 					task.LeaseUntil = &leaseUntil
-					task.ClaimID = claimID
+					task.LeasedBy = leasedBy
 					leased = append(leased, task)
-					claimed = append(claimed, ClaimedScheduledTask{Task: task, Run: run, ClaimID: claimID, AlreadySettled: true, WorkersLost: lost})
+					claimed = append(claimed, ClaimedScheduledTask{Task: task, Run: run, LeasedBy: leasedBy, AlreadySettled: true, WorkersLost: lost})
 					continue
 				}
 			} else {
@@ -643,9 +643,9 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 				inserted = append(inserted, run)
 			}
 			task.LeaseUntil = &leaseUntil
-			task.ClaimID = claimID
+			task.LeasedBy = leasedBy
 			leased = append(leased, task)
-			claimed = append(claimed, ClaimedScheduledTask{Task: task, Run: run, ClaimID: claimID})
+			claimed = append(claimed, ClaimedScheduledTask{Task: task, Run: run, LeasedBy: leasedBy})
 		}
 		if len(inserted) > 0 {
 			if _, err := tx.NewInsert().Model(&inserted).Exec(ctx); err != nil {
@@ -704,15 +704,15 @@ func leaseScheduledTasks(ctx context.Context, tx bun.Tx, tasks []ScheduledTask, 
 	if len(tasks) == 0 {
 		return nil
 	}
-	customers, ids, claimID := make([]string, len(tasks)), make([]string, len(tasks)), make([]string, len(tasks))
+	customers, ids, leasedBy := make([]string, len(tasks)), make([]string, len(tasks)), make([]string, len(tasks))
 	for i, task := range tasks {
-		customers[i], ids[i], claimID[i] = task.CustomerID, task.ID, task.ClaimID
+		customers[i], ids[i], leasedBy[i] = task.CustomerID, task.ID, task.LeasedBy
 	}
 	_, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
-		TableExpr("unnest(?::text[], ?::text[], ?::text[]) AS claim (customer_id, id, claim_id)",
-			pgdialect.Array(customers), pgdialect.Array(ids), pgdialect.Array(claimID)).
+		TableExpr("unnest(?::text[], ?::text[], ?::text[]) AS claim (customer_id, id, leased_by)",
+			pgdialect.Array(customers), pgdialect.Array(ids), pgdialect.Array(leasedBy)).
 		Set("lease_until = ?", until).
-		Set("claim_id = claim.claim_id").
+		Set("leased_by = claim.leased_by").
 		Set("updated_at = ?", now).
 		Where("st.customer_id = claim.customer_id").
 		Where("st.id = claim.id").
@@ -754,7 +754,7 @@ func heldRun(run ScheduledTaskRun, now time.Time) bool {
 // takes the occurrence meanwhile, and the run stays running with the hold
 // recorded on it. False is a claim an update or pause fenced meanwhile: the
 // change that fenced it decides what happens instead.
-func (r *ScheduledTasks) Postpone(ctx context.Context, customerID, taskID, runID, claimID string, until time.Time) (bool, error) {
+func (r *ScheduledTasks) Postpone(ctx context.Context, customerID, taskID, runID, leasedBy string, until time.Time) (bool, error) {
 	held := false
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		result, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
@@ -762,7 +762,7 @@ func (r *ScheduledTasks) Postpone(ctx context.Context, customerID, taskID, runID
 			Set("updated_at = now()").
 			Where("customer_id = ?", customerID).
 			Where("id = ?", taskID).
-			Where("claim_id = ?", claimID).
+			Where("leased_by = ?", leasedBy).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: postpone scheduled task: %w", err)
@@ -791,12 +791,12 @@ func (r *ScheduledTasks) Postpone(ctx context.Context, customerID, taskID, runID
 
 // Renew extends a claim the worker still holds. False is a
 // claim it no longer holds: an update, pause or delete took it.
-func (r *ScheduledTasks) Renew(ctx context.Context, customerID, taskID, claimID string, lease time.Duration) (bool, error) {
+func (r *ScheduledTasks) Renew(ctx context.Context, customerID, taskID, leasedBy string, lease time.Duration) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", taskID).
-		Where("claim_id = ?", claimID).
+		Where("leased_by = ?", leasedBy).
 		Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: renew scheduled task lease: %w", err))
@@ -825,7 +825,7 @@ type ScheduledTaskOutcome struct {
 // Finish records an occurrence's outcome and, under the
 // claim, advances the task. applied is false when the claim was fenced by an
 // update or pause: the run is still recorded, the schedule is left alone.
-func (r *ScheduledTasks) Finish(ctx context.Context, customerID, runID, claimID string, outcome ScheduledTaskOutcome) (bool, error) {
+func (r *ScheduledTasks) Finish(ctx context.Context, customerID, runID, leasedBy string, outcome ScheduledTaskOutcome) (bool, error) {
 	applied := false
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var run ScheduledTaskRun
@@ -860,11 +860,11 @@ func (r *ScheduledTasks) Finish(ctx context.Context, customerID, runID, claimID 
 			Set("state = ?", outcome.State).
 			Set("consecutive_failures = ?", outcome.ConsecutiveFailures).
 			Set("lease_until = NULL").
-			Set("claim_id = ''").
+			Set("leased_by = ''").
 			Set("updated_at = ?", now).
 			Where("customer_id = ?", customerID).
 			Where("id = ?", run.TaskID).
-			Where("claim_id = ?", claimID).
+			Where("leased_by = ?", leasedBy).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: finish scheduled task run: %w", err)
@@ -989,7 +989,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 		var paused []string
 		err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("state = ?", ScheduledTaskPaused).
-			Set("claim_id = ''").
+			Set("leased_by = ''").
 			Set("updated_at = now()").
 			Where("customer_id = ?", customerID).
 			Where("config_id = ?", configID).

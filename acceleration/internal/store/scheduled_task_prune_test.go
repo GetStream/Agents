@@ -210,7 +210,7 @@ func (s *StoreSuite) TestPruneRunsBesideFinishesWithoutDeadlock() {
 	errs := make(chan error, 2*live+8)
 	for _, c := range claimed {
 		wg.Go(func() {
-			applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", c.Run.ID, c.ClaimID, ScheduledTaskOutcome{
+			applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", c.Run.ID, c.LeasedBy, ScheduledTaskOutcome{
 				RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 				State: ScheduledTaskActive, NextRunAt: &due,
 			})

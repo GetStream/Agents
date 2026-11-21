@@ -446,7 +446,7 @@ func (s *SchedulerSuite) TestAOneShotWhoseCallMayHaveCarriedItOutIsCompletedNotF
 func (s *SchedulerSuite) settled(task store.ScheduledTask) []store.ScheduledTaskRun {
 	s.Require().Eventually(func() bool {
 		runs := s.runs(task)
-		return len(runs) == 1 && runs[0].State != store.ScheduledTaskRunRunning && s.read(task).ClaimID == ""
+		return len(runs) == 1 && runs[0].State != store.ScheduledTaskRunRunning && s.read(task).LeasedBy == ""
 	}, 10*time.Second, 10*time.Millisecond)
 	return s.runs(task)
 }
