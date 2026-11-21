@@ -139,7 +139,7 @@ func (s *ManageSuite) TestTheAuditKeepsAManagementChangeWithTheDecodedNameAndNoA
 		Changes: []store.AuditChange{{Field: "unit_price_micros", After: 1}},
 	}
 
-	s.Require().NoError(s.store.RecordAuditEntry(s.T().Context(), &entry))
+	s.Require().NoError(s.store.AuditEntries.Insert(s.T().Context(), &entry))
 
 	var kept store.AuditEntry
 	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&kept).Where("id = ?", entry.ID).Scan(s.T().Context()))

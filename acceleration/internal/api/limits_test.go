@@ -480,7 +480,7 @@ func (s *LimitsSuite) TestACustomerResetLetsItSpendAgain() {
 	s.Require().NotNil(daily.RoomMicros)
 	s.Equal(int64(1_000_000), *daily.RoomMicros, "the whole limit is back")
 	s.searchedUntil(s.serverClient, http.StatusOK)
-	entries, err := s.store.AuditEntries(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Contains(entries[0].ResourceID, "reset:")
 }
@@ -543,7 +543,7 @@ func (s *LimitsSuite) TestStaffEditACustomerLimitThroughManage() {
 	s.Require().NoError(json.Unmarshal(payload, &created))
 	s.Contains(created.UpdatedBy, "manage:")
 
-	entries, err := s.store.AuditEntries(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	s.Equal(store.AuditSourceManage, entries[0].Source)

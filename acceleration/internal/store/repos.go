@@ -6,10 +6,13 @@ type repos struct {
 	CustomModels                   *CustomModels
 	APIKeys                        *APIKeys
 	Activities                     *Activities
+	AgentLogs                      *AgentLogs
 	AppOrganizations               *AppOrganizations
 	Apps                           *Apps
+	AuditEntries                   *AuditEntries
 	BranchMessages                 *BranchMessages
 	BranchSwitches                 *BranchSwitches
+	Buckets                        *Buckets
 	BusinessProfiles               *BusinessProfiles
 	CallBridges                    *CallBridges
 	CallEvents                     *CallEvents
@@ -50,27 +53,35 @@ type repos struct {
 	LimitGrantUses                 *LimitGrantUses
 	LimitGrants                    *LimitGrants
 	Limits                         *Limits
+	MoveCursors                    *MoveCursors
 	Notices                        *Notices
 	OptOuts                        *OptOuts
 	OrganizationTiers              *OrganizationTiers
 	Organizations                  *Organizations
 	PhoneNumbers                   *PhoneNumbers
 	Policies                       *Policies
+	PriceChanges                   *PriceChanges
+	PriceEntries                   *PriceEntries
 	ProviderKeys                   *ProviderKeys
 	Recordings                     *Recordings
+	Requests                       *Requests
 	ResponseItems                  *ResponseItems
 	Responses                      *Responses
 	ReviewLogs                     *ReviewLogs
 	SIPTrunks                      *SIPTrunks
 	SandboxRecipients              *SandboxRecipients
 	Sandboxes                      *Sandboxes
+	ScheduledTaskRuns              *ScheduledTaskRuns
+	ScheduledTasks                 *ScheduledTasks
 	SessionTools                   *SessionTools
 	Sessions                       *Sessions
 	Spend                          *Spend
 	StreamAppTokens                *StreamAppTokens
 	StreamFallbackUses             *StreamFallbackUses
 	StreamTrunks                   *StreamTrunks
+	TagBuckets                     *TagBuckets
 	TelephonySuspensions           *TelephonySuspensions
+	TurnBuckets                    *TurnBuckets
 	Turns                          *Turns
 	UsageResets                    *UsageResets
 	UseCases                       *UseCases
@@ -84,10 +95,13 @@ func (s *Store) wire() {
 		CustomModels:                   &CustomModels{store: s},
 		APIKeys:                        &APIKeys{store: s},
 		Activities:                     &Activities{store: s},
+		AgentLogs:                      &AgentLogs{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},
 		Apps:                           &Apps{store: s},
+		AuditEntries:                   &AuditEntries{store: s},
 		BranchMessages:                 &BranchMessages{store: s},
 		BranchSwitches:                 &BranchSwitches{store: s},
+		Buckets:                        &Buckets{store: s},
 		BusinessProfiles:               &BusinessProfiles{store: s},
 		CallBridges:                    &CallBridges{store: s},
 		CallEvents:                     &CallEvents{store: s},
@@ -128,27 +142,35 @@ func (s *Store) wire() {
 		LimitGrantUses:                 &LimitGrantUses{store: s},
 		LimitGrants:                    &LimitGrants{store: s},
 		Limits:                         &Limits{store: s},
+		MoveCursors:                    &MoveCursors{store: s},
 		Notices:                        &Notices{store: s},
 		OptOuts:                        &OptOuts{store: s},
 		OrganizationTiers:              &OrganizationTiers{store: s},
 		Organizations:                  &Organizations{store: s},
 		PhoneNumbers:                   &PhoneNumbers{store: s},
 		Policies:                       &Policies{store: s},
+		PriceChanges:                   &PriceChanges{store: s},
+		PriceEntries:                   &PriceEntries{store: s},
 		ProviderKeys:                   &ProviderKeys{store: s},
 		Recordings:                     &Recordings{store: s},
+		Requests:                       &Requests{store: s},
 		ResponseItems:                  &ResponseItems{store: s},
 		Responses:                      &Responses{store: s},
 		ReviewLogs:                     &ReviewLogs{store: s},
 		SIPTrunks:                      &SIPTrunks{store: s},
 		SandboxRecipients:              &SandboxRecipients{store: s},
 		Sandboxes:                      &Sandboxes{store: s},
+		ScheduledTaskRuns:              &ScheduledTaskRuns{store: s},
+		ScheduledTasks:                 &ScheduledTasks{store: s},
 		SessionTools:                   &SessionTools{store: s},
 		Sessions:                       &Sessions{store: s},
 		Spend:                          &Spend{store: s},
 		StreamAppTokens:                &StreamAppTokens{store: s},
 		StreamFallbackUses:             &StreamFallbackUses{store: s},
 		StreamTrunks:                   &StreamTrunks{store: s},
+		TagBuckets:                     &TagBuckets{store: s},
 		TelephonySuspensions:           &TelephonySuspensions{store: s},
+		TurnBuckets:                    &TurnBuckets{store: s},
 		Turns:                          &Turns{store: s},
 		UsageResets:                    &UsageResets{store: s},
 		UseCases:                       &UseCases{store: s},

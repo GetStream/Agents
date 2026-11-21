@@ -54,13 +54,13 @@ func (s *ScheduledTasksSuite) forwardStoredTo(holding, to *httptest.Server, cred
 	if edit != nil {
 		edit(&task)
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 25))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
 	now := time.Now()
 	run := store.ScheduledTaskRun{
 		TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: now, Trigger: store.ScheduledTaskTriggerManual,
 		Prompt: "peer-delivery-" + s.utils.uuid(), State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &run))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
 
 	payload := map[string]any{
 		"customer_id": s.customerID(),
@@ -277,7 +277,7 @@ func (s *ScheduledTasksSuite) TestAPeerHandedAnEarlierRunsCommandFollowsUpUnderI
 		Trigger: store.ScheduledTaskTriggerManual, Prompt: "peer-delivery-" + s.utils.uuid(),
 		State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &next))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &next))
 	handed["run_id"] = next.ID
 
 	answer, err = s.handOff(other, s.suiteCredential(), handed)
@@ -294,7 +294,7 @@ func (s *ScheduledTasksSuite) TestAPeerNamingAFinishedRunOfTheTaskIsRefused() {
 			TaskID: payload["task_id"].(string), CustomerID: s.customerID(), ScheduledFor: time.Now(),
 			Trigger: store.ScheduledTaskTriggerManual, Prompt: "done", State: store.ScheduledTaskRunDelivered,
 		}
-		s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &finished))
+		s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &finished))
 		payload["run_id"] = finished.ID
 	}))
 }

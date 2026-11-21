@@ -52,7 +52,7 @@ func (s *StoreSuite) TestALimitsWritesAreAudited() {
 	_, err = s.store.Limits.Get(s.ctx, "org-1", limit.ID)
 	s.ErrorIs(err, ErrNoLimit)
 
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 3)
 	s.Equal([]string{AuditDeleted, AuditUpdated, AuditCreated}, []string{entries[0].Action, entries[1].Action, entries[2].Action})

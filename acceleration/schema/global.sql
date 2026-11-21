@@ -1184,7 +1184,6 @@ TABLE scheduled_tasks
     caller_kind text NOT NULL DEFAULT ''::text
     channel_thread text NOT NULL DEFAULT ''::text
     channels jsonb NOT NULL DEFAULT '["conversation"]'::jsonb
-    claim_id text NOT NULL DEFAULT ''::text
     config_id text NOT NULL DEFAULT ''::text
     consecutive_failures integer NOT NULL DEFAULT 0
     conversation_id text NOT NULL DEFAULT ''::text
@@ -1195,6 +1194,7 @@ TABLE scheduled_tasks
     id text NOT NULL
     instructions text NOT NULL
     lease_until timestamp with time zone
+    leased_by text NOT NULL DEFAULT ''::text
     move_paused boolean NOT NULL DEFAULT false
     next_run_at timestamp with time zone
     origin_session_id text NOT NULL DEFAULT ''::text

@@ -22,7 +22,7 @@ func (s *StoreSuite) grantRow(store *Store, grants []int64, cost int64, billable
 // writer does: RecordRequests counts them with one database, the writer's grant counter apart
 // with shards.
 func (s *StoreSuite) writeAsTheWriter(store *Store, rows ...Request) {
-	written, err := store.RecordRequests(s.ctx, rows)
+	written, err := store.Requests.InsertMany(s.ctx, rows)
 	s.Require().NoError(err)
 	if store.Sharded() {
 		_, err = store.LimitGrantUses.InsertMany(s.ctx, GrantUsesOf(rows, written))
@@ -55,7 +55,7 @@ func (s *StoreSuite) TestARowWrittenTwiceCountsOnceTowardItsGrant() {
 
 	again := row
 	again.ID = 0
-	written, err := s.store.RecordRequests(s.ctx, []Request{again, again})
+	written, err := s.store.Requests.InsertMany(s.ctx, []Request{again, again})
 	s.Require().NoError(err)
 	s.Empty(written, "the shard has it")
 	counted, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{{GrantID: grant.ID, UsageID: row.UsageID, Micros: 300}})

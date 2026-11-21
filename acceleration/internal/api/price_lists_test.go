@@ -951,7 +951,7 @@ func TestAnEmptyListIsNotReady(t *testing.T) {
 	fallback, err := prices.Embedded(nil, "test", nil)
 	require.NoError(t, err)
 	active := pricing.NewActive(running, pricing.ActiveOptions{
-		Source: pgStore.PriceSource(), Fallback: fallback, Interval: suitePriceReload, RequireEntries: true,
+		Source: pgStore.PriceEntries.Source(), Fallback: fallback, Interval: suitePriceReload, RequireEntries: true,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	server, err := NewServer(Options{
@@ -974,7 +974,7 @@ func TestAnEmptyListIsNotReady(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	require.Contains(t, body.Dependencies["prices"], "empty")
 
-	_, _, _, err = pgStore.SyncPrices(ctx, store.PriceLoad{Entries: prices.Vendor().Entries, Source: prices.VendorFile, Release: "test"})
+	_, _, _, err = pgStore.PriceChanges.Sync(ctx, store.PriceLoad{Entries: prices.Vendor().Entries, Source: prices.VendorFile, Release: "test"})
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {

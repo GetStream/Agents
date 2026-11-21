@@ -15,6 +15,66 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
+// TurnSample is what a finished turn adds to its hour's stats. The legs are pointers
+// because a pipeline need not have all of them, and a leg that never happened is left out
+// of the percentiles rather than counted as instant.
+type TurnSample struct {
+	CustomerID  string
+	AgentID     string
+	StartedAt   time.Time
+	Interrupted bool
+	AudioOutMs  float64
+	// STTLatencyMs is the provider's decode time for the transcript that settled the turn.
+	STTLatencyMs *float64
+	// LLMTTFTMs is the wait between asking the model and its first token.
+	LLMTTFTMs *float64
+	// TTSTTFBMs is the wait between sending the first sentence and the first audio.
+	TTSTTFBMs *float64
+	// RoundtripMs is the whole delay: settled transcript to first audio published.
+	RoundtripMs *float64
+}
+
+// Validate refuses a turn no agent's stats could hold: every turn is one customer's agent's.
+func (t *TurnSample) Validate() error {
+	return validate("turn").
+		required("customer_id", t.CustomerID).
+		required("agent_id", t.AgentID).
+		done()
+}
+
+// TurnBucket is one agent's turns in an hour or a day. The percentiles are read off a
+// histogram, so they are within 5% of the true ones.
+type TurnBucket struct {
+	CustomerID       string    `bun:"customer_id"`
+	AgentID          string    `bun:"agent_id"`
+	Bucket           time.Time `bun:"bucket"`
+	TurnCount        int64     `bun:"turn_count"`
+	InterruptedCount int64     `bun:"interrupted_count"`
+	AudioOutMsTotal  float64   `bun:"audio_out_ms_total"`
+	STTLatencyP50Ms  *float64  `bun:"-"`
+	STTLatencyP95Ms  *float64  `bun:"-"`
+	LLMTTFTP50Ms     *float64  `bun:"-"`
+	LLMTTFTP95Ms     *float64  `bun:"-"`
+	TTSTTFBP50Ms     *float64  `bun:"-"`
+	TTSTTFBP95Ms     *float64  `bun:"-"`
+	RoundtripP50Ms   *float64  `bun:"-"`
+	RoundtripP95Ms   *float64  `bun:"-"`
+	RoundtripP99Ms   *float64  `bun:"-"`
+}
+
+// TurnBucketFilter picks a customer's turn buckets in [From, To). An agent id narrows them to
+// one agent.
+type TurnBucketFilter struct {
+	AgentID     string
+	Granularity Granularity
+	From, To    time.Time
+}
+
+// TurnBuckets are each shard's hourly turn counts and latency histograms, per agent.
+type TurnBuckets struct {
+	store *Store
+}
+
 // latencyGrowth is how much wider each histogram bin is than the one before it, and so how
 // far a percentile read off the bins can be from the true one.
 const latencyGrowth = 1.05
@@ -27,12 +87,12 @@ const (
 	legRoundtrip  = "roundtrip"
 )
 
-// RecordTurnStats counts one finished turn into its hour, in one statement: the turn
-// itself, and each leg it had into that leg's histogram. A turn counted twice is counted
-// twice, so the caller writes each one once.
-func (s *Store) RecordTurnStats(ctx context.Context, turn TurnSample) error {
-	if turn.CustomerID == "" || turn.AgentID == "" {
-		return errors.New("store: a customer and an agent id are required")
+// Add counts one finished turn into its hour, in one statement: the turn itself, and each
+// leg it had into that leg's histogram. A turn counted twice is counted twice, so the caller
+// writes each one once.
+func (r *TurnBuckets) Add(ctx context.Context, turn TurnSample) error {
+	if err := turn.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
 	if turn.StartedAt.IsZero() {
 		turn.StartedAt = time.Now()
@@ -77,20 +137,16 @@ VALUES ` + strings.Join(rows, ", ") + `
 ON CONFLICT (customer_id, agent_id, bucket, leg, bin) DO UPDATE SET
     count = turn_latency_hourly.count + 1`
 	}
-	if _, err := s.shard.ExecContext(ctx, query, args...); err != nil {
-		return fmt.Errorf("store: record turn stats: %w", err)
+	if _, err := r.store.shard.ExecContext(ctx, query, args...); err != nil {
+		return stack.Wrap(fmt.Errorf("store: record turn stats: %w", err))
 	}
 	return nil
 }
 
-// CustomerTurnStats returns the conversational latency buckets for one customer, oldest
-// first. An agent id narrows it to one agent. A day is the hours in it from from to to.
-func (s *Store) CustomerTurnStats(
-	ctx context.Context,
-	customerID, agentID string,
-	granularity Granularity,
-	from, to time.Time,
-) ([]TurnBucket, error) {
+// Select returns the conversational latency buckets for one customer, oldest first. A day is
+// the hours in it from the filter's From to its To.
+func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucketFilter) ([]TurnBucket, error) {
+	granularity, agentID, from, to := f.Granularity, f.AgentID, f.From, f.To
 	if !granularity.Valid() {
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
@@ -110,7 +166,7 @@ func (s *Store) CustomerTurnStats(
 		buckets []TurnBucket
 		bins    []binRow
 	}
-	answers, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardRows, error) {
+	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (shardRows, error) {
 		counts := db.NewSelect().
 			Table("turn_stats_hourly").
 			ColumnExpr("customer_id, agent_id").
@@ -223,15 +279,15 @@ type LegLatency struct {
 	P99Ms *float64
 }
 
-// TurnLatency is how long the turns apps started from the hour of since on took, every agent
-// of theirs and every shard summed, one per leg in the order of turnLegs.
-func (s *Store) TurnLatency(ctx context.Context, apps []string, since time.Time) ([]LegLatency, error) {
+// Latency is how long the turns apps started from the hour of since on took, every agent of
+// theirs and every shard summed, one per leg in the order of turnLegs.
+func (r *TurnBuckets) Latency(ctx context.Context, apps []string, since time.Time) ([]LegLatency, error) {
 	type binRow struct {
 		Leg   string `bun:"leg"`
 		Bin   int    `bun:"bin"`
 		Count int64  `bun:"count"`
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]binRow, error) {
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]binRow, error) {
 		var bins []binRow
 		err := db.NewSelect().
 			Table("turn_latency_hourly").

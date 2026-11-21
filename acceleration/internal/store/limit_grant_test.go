@@ -72,7 +72,7 @@ func (s *StoreSuite) TestRevokingTwiceIsANoOp() {
 
 	s.Equal(first.RevokedAt, second.RevokedAt)
 	s.Equal("someone", second.RevokedBy)
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Len(entries, 1, "the second records nothing")
 	_, err = s.store.LimitGrants.Revoke(s.ctx, "org-2", grant.ID, "x", "x", audit)
@@ -109,7 +109,7 @@ func (s *StoreSuite) TestAnUnrevokedGrantIsLiveAgainAndAudited() {
 	live, err := s.store.LimitGrants.SelectLive(s.ctx, []string{"org-1"}, time.Now())
 	s.Require().NoError(err)
 	s.Equal([]int64{grant.ID}, idsOf(live))
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	s.Equal(AuditUpdated, entries[0].Action)
@@ -128,7 +128,7 @@ func (s *StoreSuite) TestUnrevokingAGrantNotRevokedIsANoOp() {
 
 	s.Require().NoError(err)
 	s.Nil(unrevoked.RevokedAt)
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Empty(entries, "it records nothing")
 	_, err = s.store.LimitGrants.Unrevoke(s.ctx, "org-2", s.revoked("org-1").ID, "x", audit)
@@ -142,7 +142,7 @@ func (s *StoreSuite) TestAnyOrganizationsGrantIsUnrevokedWithNoOrganization() {
 
 	s.Require().NoError(err)
 	s.Nil(unrevoked.RevokedAt)
-	entries, err := s.store.AuditEntries(s.ctx, "org-1", AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, "org-1", AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1, "audited under the grant's organization")
 }

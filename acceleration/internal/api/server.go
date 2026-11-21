@@ -1790,8 +1790,8 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerStats(
-		ctx, string(request.Modality), customerID, granularity, request.From, request.To, tags)
+	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
 	}
@@ -1833,8 +1833,8 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTagStats(ctx, string(request.Modality), customerID,
-		request.Key, granularity, request.From, request.To)
+	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
@@ -1881,8 +1881,8 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTurnStats(
-		ctx, customerID, agentID, granularity, request.From, request.To)
+	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
 	}
@@ -1952,7 +1952,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		limit = *request.Limit.ptr()
 	}
 
-	buckets, err := s.store.CustomerSpend(ctx, customerID, groupBy,
+	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
@@ -2013,7 +2013,7 @@ func (s *Server) getTagKeys(ctx context.Context, request *getTagKeysRequest) (*g
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
-	found, err := s.store.CustomerTagKeys(ctx, customerID, request.From, request.To, tags)
+	found, err := s.store.Requests.TagKeys(ctx, customerID, request.From, request.To, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -2162,7 +2162,7 @@ func (s *Server) runRollup(ctx context.Context, request *runRollupRequest) (*run
 	}
 
 	granularity := granularityOf(request.Body.Granularity)
-	written, err := s.store.Rollup(ctx, granularity, request.Body.From, request.Body.To)
+	written, err := s.store.Buckets.Rollup(ctx, granularity, request.Body.From, request.Body.To)
 	if err != nil {
 		return nil, err
 	}

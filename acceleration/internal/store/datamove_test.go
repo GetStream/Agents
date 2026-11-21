@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -192,8 +193,30 @@ func (s *DataMoveSuite) TestExportLeavesCredentialsBehind() {
 	connections := s.export("acme").of("agent_plugin_connections")
 
 	s.Require().Len(connections, 1)
-	for _, column := range secretColumns {
+	for _, column := range []string{"access_token", "refresh_token"} {
 		s.NotContains(connections[0], column, "a credential is not part of a customer's data")
+	}
+}
+
+// A column named like a credential in a table an export carries is left out (isSecret), or is
+// vouched for here as no credential. A new one fails until somebody decides which it is.
+func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
+	looksSecret := regexp.MustCompile(`seal|secret|token|password`)
+	notSecret := map[string]string{
+		"token_endpoint":              "the OAuth server's URL",
+		"credentials_kek_version":     "which key sealed the credentials",
+		"password_kek_version":        "which key sealed the password",
+		"bridge_password_kek_version": "which key sealed the password",
+	}
+	for _, table := range DataTables() {
+		shape, err := s.source.shapeOf(s.ctx, table)
+		s.Require().NoError(err)
+		for _, column := range shape.columns {
+			counted := strings.HasSuffix(column, "_tokens") || strings.HasSuffix(column, "_tokens_total")
+			if looksSecret.MatchString(column) && !isSecret(column) && notSecret[column] == "" && !counted {
+				s.Failf("a column that looks secret is exported", "%s.%s", table, column)
+			}
+		}
 	}
 }
 
@@ -209,7 +232,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 }
 
 func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
-	// The change feed strips columns in its own trigger, apart from secretColumns.
+	// The change feed strips the columns isSecret names in its trigger, passed to it when attached.
 	s.capture("acme")
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
@@ -1753,9 +1776,9 @@ func (s *DataMoveSuite) seedScheduledTask(id, customerID, state string) {
 		Title: "Stretch", Instructions: "Remind Sam to stretch.", StartLocal: next, Timezone: "UTC",
 		State: state, NextRunAt: &next, CreatedBy: "api",
 	}
-	s.Require().NoError(s.source.CreateScheduledTask(s.ctx, task, 25))
+	s.Require().NoError(s.source.ScheduledTasks.Insert(s.ctx, task, 25))
 	_, err = s.source.GlobalDB().ExecContext(s.ctx,
-		"UPDATE scheduled_tasks SET claim_id = 'claim-1', lease_until = now() + interval '1 hour' WHERE id = ?", id)
+		"UPDATE scheduled_tasks SET leased_by = 'claim-1', lease_until = now() + interval '1 hour' WHERE id = ?", id)
 	s.Require().NoError(err)
 	_, err = s.source.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, state, finished_at)
@@ -1767,7 +1790,7 @@ VALUES (?, ?, ?, ?, 'delivered', now())`, id+"-run", id, customerID, next.Add(-d
 func (s *DataMoveSuite) scheduledTaskOn(store *Store, id string) (state, claim string, leased bool, next time.Time) {
 	var lease sql.NullTime
 	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT state, claim_id, lease_until, next_run_at FROM scheduled_tasks WHERE id = ?", id).
+		"SELECT state, leased_by, lease_until, next_run_at FROM scheduled_tasks WHERE id = ?", id).
 		Scan(&state, &claim, &lease, &next))
 	return state, claim, lease.Valid, next
 }
@@ -1864,10 +1887,10 @@ func (s *DataMoveSuite) TestTheCutOverResumesOnlyTheTasksTheMovePaused() {
 	s.Equal(ScheduledTaskCompleted, state)
 
 	// The user pauses it here once it is theirs; a second cut-over leaves it to them.
-	task, err := s.destination.ScheduledTask(s.ctx, "moved", "st-active")
+	task, err := s.destination.ScheduledTasks.Get(s.ctx, "moved", "st-active")
 	s.Require().NoError(err)
 	task.State = ScheduledTaskPaused
-	s.Require().NoError(s.destination.SaveScheduledTask(s.ctx, &task))
+	s.Require().NoError(s.destination.ScheduledTasks.Update(s.ctx, &task))
 	again, _ := s.resume("moved")
 	s.Zero(again)
 	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-active")
@@ -1935,7 +1958,7 @@ func (s *DataMoveSuite) limitHere(limit int) {
 // madeHere is an active task a user made on the destination before the cut-over.
 func (s *DataMoveSuite) madeHere(id, user, config string) {
 	next := time.Date(2026, 12, 2, 9, 0, 0, 0, time.UTC)
-	s.Require().NoError(s.destination.CreateScheduledTask(s.ctx, &ScheduledTask{
+	s.Require().NoError(s.destination.ScheduledTasks.Insert(s.ctx, &ScheduledTask{
 		ID: id, CustomerID: "moved", ConfigID: config, UserID: user, CallerKind: "authenticated",
 		Title: "Hydrate", Instructions: "Remind them to drink.", StartLocal: next, Timezone: "UTC",
 		State: ScheduledTaskActive, NextRunAt: &next, CreatedBy: "api",
@@ -1964,7 +1987,7 @@ func (s *DataMoveSuite) TestTheCutOverResumesAUserOnlyUpToTheRoomTheirLimitLeave
 		s.Equal(ScheduledTaskPaused, state, id)
 		s.True(s.movePausedOn(id), "%s is still owed its resume", id)
 	}
-	held, err := s.destination.ActiveScheduledTaskCount(s.ctx, "moved", "sam", "config-1")
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
 	s.Require().NoError(err)
 	s.Equal(2, held)
 }
@@ -2197,7 +2220,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHerePaused
 	s.move("acme", "moved")
 	// What deleting the config over the API does here.
 	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
-	s.Require().NoError(s.destination.PauseScheduledTasksForConfig(s.ctx, "moved", "config-1"))
+	s.Require().NoError(s.destination.ScheduledTasks.PauseForConfig(s.ctx, "moved", "config-1"))
 
 	resumed, skipped, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
 
@@ -2216,7 +2239,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHereBefore
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	cursor := s.move("acme", "moved")
 	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
-	s.Require().NoError(s.destination.PauseScheduledTasksForConfig(s.ctx, "moved", "config-1"))
+	s.Require().NoError(s.destination.ScheduledTasks.PauseForConfig(s.ctx, "moved", "config-1"))
 	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET next_run_at = next_run_at + interval '1 day', updated_at = now() WHERE id = 'st-active'")
 	s.Require().NoError(err)
@@ -3083,21 +3106,21 @@ func (s *DataMoveSuite) TestScheduledTasksMoveWithTheirRuns() {
 		Title: "Stretch", Instructions: "Remind Sam to stretch.", StartLocal: next, Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, State: ScheduledTaskActive, CreatedBy: "api",
 	}
-	s.Require().NoError(s.source.CreateScheduledTask(s.ctx, task, 25))
-	s.Require().NoError(s.source.InsertScheduledTaskRun(s.ctx, &ScheduledTaskRun{
+	s.Require().NoError(s.source.ScheduledTasks.Insert(s.ctx, task, 25))
+	s.Require().NoError(s.source.ScheduledTaskRuns.Insert(s.ctx, &ScheduledTaskRun{
 		TaskID: "stretch", CustomerID: "acme", ScheduledFor: next.Add(-24 * time.Hour),
 		State: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 	}))
 
 	s.move("acme", "moved")
 
-	moved, err := s.destination.ScheduledTask(s.ctx, "moved", "stretch")
+	moved, err := s.destination.ScheduledTasks.Get(s.ctx, "moved", "stretch")
 	s.Require().NoError(err)
 	s.Equal("Remind Sam to stretch.", moved.Instructions)
 	s.Equal("config-1", moved.ConfigID)
 	s.Require().NotNil(moved.NextRunAt)
 	s.Equal(next, moved.NextRunAt.UTC())
-	runs, err := s.destination.ScheduledTaskRuns(s.ctx, "moved", "stretch", 25, nil)
+	runs, err := s.destination.ScheduledTaskRuns.Select(s.ctx, "moved", ScheduledTaskRunFilter{TaskID: "stretch", Limit: 25})
 	s.Require().NoError(err)
 	s.Require().Len(runs, 1, "the task's history moves with it")
 	s.Equal(ScheduledTaskRunDelivered, runs[0].State)
@@ -3120,7 +3143,7 @@ func (s *DataMoveSuite) movedRequest(old bool) map[string]any {
 }
 
 func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEveryTime() {
-	s.Require().NoError(s.source.RecordRequest(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
 	first := s.movedRequest(true)
@@ -3133,7 +3156,7 @@ func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEve
 func (s *DataMoveSuite) TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped() {
 	usageID := uuid.Must(uuid.NewV7())
 	shippedAt := time.Now().UTC().Add(-time.Minute)
-	s.Require().NoError(s.source.RecordRequest(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true, ToShip: true,
 		ShippedAt: &shippedAt, ShipError: "missing_api_key"}))
 
@@ -3203,7 +3226,7 @@ func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
 }
 
 func (s *DataMoveSuite) TestADeletedRequestFromBeforeUsageIDsIsReplayedToo() {
-	s.Require().NoError(s.source.RecordRequest(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 	moved := s.movedRequest(true)
 	sourceID := int64(s.export("acme").of("requests")[0]["id"].(float64))
@@ -3255,7 +3278,7 @@ func (s *DataMoveSuite) TestAMovedRequestLeavesTheSequenceOfItsIDAlone() {
 
 	s.move("acme", "acme")
 	usageID := uuid.Must(uuid.NewV7())
-	s.Require().NoError(s.destination.RecordRequest(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(s.destination.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
 	own := s.requestsByUsage()[usageID.String()]
@@ -3266,7 +3289,7 @@ func (s *DataMoveSuite) TestAMovedRequestLeavesTheSequenceOfItsIDAlone() {
 // seedLog writes a log of the customer's on the source, the way the router does, and answers its id.
 func (s *DataMoveSuite) seedLog(customerID, message string) int64 {
 	entry := &AgentLog{CustomerID: customerID, Source: "agent", Severity: "info", EventType: "turn", Message: message}
-	s.Require().NoError(s.source.RecordAgentLog(s.ctx, entry))
+	s.Require().NoError(s.source.AgentLogs.Insert(s.ctx, entry))
 	return entry.ID
 }
 
@@ -3423,7 +3446,7 @@ func (s *DataMoveSuite) TestACopiedLogIsNumberedUnderTheLockItsAppsLogsAreNumber
 	s.seedLog("acme", "copied")
 	encoded, err := json.Marshal(s.exportedLog())
 	s.Require().NoError(err)
-	// A log of acme's being written here, holding the lock RecordAgentLog takes.
+	// A log of acme's being written here, holding the lock AgentLogs.Insert takes.
 	writing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = writing.Rollback() }()
@@ -3477,7 +3500,7 @@ func (s *DataMoveSuite) TestMigrateBuildsTheIndexCopiedLogsAreKnownByAgain() {
 
 func (s *DataMoveSuite) TestACopiedRequestOfAnAgentIsLoggedHereOnlyByItsCopiedLog() {
 	// With one database, the trigger on requests logs a request of an agent where it is written.
-	s.Require().NoError(s.source.RecordRequest(s.ctx, &Request{Modality: "stt", CustomerID: "acme", AgentID: "agent",
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme", AgentID: "agent",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 	logged := s.export("acme").of("agent_logs")
 	s.Require().Len(logged, 1, "the source logged the request")
@@ -3539,4 +3562,16 @@ func (s *DataMoveSuite) TestALogCopiedBackWhereItCameFromIsNotCopiedAgain() {
 	var logs []int64
 	s.Require().NoError(s.source.GlobalDB().NewSelect().Table("agent_logs").Column("id").Where("customer_id = 'acme'").Scan(s.ctx, &logs))
 	s.Equal([]int64{id}, logs, "the log that went away and came back is the one log it was")
+}
+
+// The trigger on a shard's tables takes the capture starts' lock on a repeatable read write, as
+// the shared database's do, so the shard keeps the table too.
+func (s *ShardedStoreSuite) TestARepeatableReadWriteToAShardTableIsNotRefused() {
+	tx, err := s.store.shard.BeginTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(s.ctx, "INSERT INTO calls (id, customer_id, call_id, agent_id) VALUES ('c', 'acme', 'c', 'agent')")
+	s.Require().NoError(err)
+	s.NoError(tx.Commit())
 }

@@ -129,7 +129,7 @@ func jobRecorder(ctx context.Context, settings config.Config, pgStore *store.Sto
 	}
 	reading, stopReading := context.WithCancel(ctx)
 	active := pricing.NewActive(reading, pricing.ActiveOptions{
-		Source: pgStore.PriceSource(), Fallback: fallback, Interval: time.Hour, Logger: logger,
+		Source: pgStore.PriceEntries.Source(), Fallback: fallback, Interval: time.Hour, Logger: logger,
 	})
 	host, _ := os.Hostname()
 	shard := cmp.Or(settings.Shard, routing.Unsharded)

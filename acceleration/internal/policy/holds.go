@@ -915,7 +915,7 @@ func (m *money) shipped(ctx context.Context) {
 			ids[i] = each.id
 		}
 		call, cancel := context.WithTimeout(ctx, readTimeout)
-		found, err := db.Shipped(call, ids)
+		found, err := db.Requests.Shipped(call, ids)
 		cancel()
 		if err != nil {
 			m.failedRead("could not ask the shard which held rows it has shipped, so their timers start again", err, "rows", len(asked))

@@ -1441,7 +1441,7 @@ func (s *RouterSuite) serverPricer(logger *slog.Logger) pricing.Pricer {
 func (s *RouterSuite) databasePrices(logger *slog.Logger) *pricing.Active {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.T().Cleanup(cancel)
-	_, _, _, err := s.store.SyncPrices(ctx, store.PriceLoad{Entries: pricingtest.Entries(s.T()),
+	_, _, _, err := s.store.PriceChanges.Sync(ctx, store.PriceLoad{Entries: pricingtest.Entries(s.T()),
 		Source: pricingtest.FileName + ", " + prices.VendorFile, Release: "suite"})
 	s.Require().NoError(err)
 	reasoned := reasoningConfig()
@@ -1450,7 +1450,7 @@ func (s *RouterSuite) databasePrices(logger *slog.Logger) *pricing.Active {
 	fallback, err := prices.Embedded(local, "suite", logger)
 	s.Require().NoError(err)
 	return pricing.NewActive(ctx, pricing.ActiveOptions{
-		Source: s.store.PriceSource(), Fallback: fallback, Local: local, Interval: suitePriceReload, RequireEntries: true, Logger: logger,
+		Source: s.store.PriceEntries.Source(), Fallback: fallback, Local: local, Interval: suitePriceReload, RequireEntries: true, Logger: logger,
 	})
 }
 

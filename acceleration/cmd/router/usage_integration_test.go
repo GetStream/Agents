@@ -162,7 +162,7 @@ func (s *UsageCommandsSuite) recorded(ago time.Duration, change func(*store.Requ
 		StartedAt: time.Now().UTC().Add(-ago), Success: true,
 	}
 	change(&request)
-	_, err := s.store.RecordRequests(s.ctx, []store.Request{request})
+	_, err := s.store.Requests.InsertMany(s.ctx, []store.Request{request})
 	s.Require().NoError(err)
 	return request.UsageID
 }

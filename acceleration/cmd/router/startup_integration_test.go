@@ -84,9 +84,9 @@ func (s *RouterStartSuite) TestAStartingRouterPrunesAndRedactsWhatIsPastItsReten
 		CallerKind: store.UserKindAuthenticated, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "UTC", NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "agent",
 	}
-	s.Require().NoError(s.db.CreateScheduledTask(s.ctx, &task, 25))
+	s.Require().NoError(s.db.ScheduledTasks.Insert(s.ctx, &task, 25))
 	s.T().Cleanup(func() {
-		s.NoError(s.db.DeleteScheduledTask(context.Background(), customer, task.ID))
+		s.NoError(s.db.ScheduledTasks.Delete(context.Background(), customer, task.ID))
 	})
 	_, err := s.db.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, finished_at)

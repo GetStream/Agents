@@ -23,7 +23,7 @@ func (s *StoreSuite) TestResetsAreReadFromTheWindowsAsked() {
 	s.Require().NoError(err)
 	s.Require().Len(resets, 1)
 	s.True(resets[0].WindowStart.Equal(today))
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Len(entries, 2)
 	s.Contains(entries[0].ResourceID, "reset:")

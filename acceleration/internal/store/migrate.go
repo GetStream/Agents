@@ -318,7 +318,7 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 }
 
 // changeLogTables are kept by both sets: a row's change is recorded in the database it is
-// written to.
+// written to, under the capture starts' lock.
 var changeLogTables = []string{"data_change_capture", "data_change_starts", "data_changes"}
 
 // tableChange is a statement of a migration's Up that creates, drops or renames tables.

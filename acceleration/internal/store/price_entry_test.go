@@ -12,7 +12,7 @@ import (
 
 // seeded loads a first price list, as a router's first start does.
 func (s *StoreSuite) seeded(entries ...pricing.Entry) PriceChange {
-	change, _, _, err := s.store.SyncPrices(s.ctx, load(entries...))
+	change, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(entries...))
 	s.Require().NoError(err)
 	return change
 }
@@ -47,10 +47,10 @@ func (s *StoreSuite) auditOf(name string) []AuditEntry {
 }
 
 func (s *StoreSuite) TestAPriceChangeIsRefusedBeforeTheSeed() {
-	_, _, _, err := s.store.CreatePriceChange(s.ctx, apiChange("early", "key-early", priced("a", 1)), accept)
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("early", "key-early", priced("a", 1)), accept)
 
 	s.ErrorIs(err, ErrPriceListNotSeeded)
-	changes, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{})
+	changes, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{})
 	s.Require().NoError(err)
 	s.Empty(changes)
 }
@@ -58,7 +58,7 @@ func (s *StoreSuite) TestAPriceChangeIsRefusedBeforeTheSeed() {
 func (s *StoreSuite) TestAPriceChangeWritesItsEntriesAndOneAuditRow() {
 	s.seeded(priced("a", 1))
 
-	change, rows, replayed, err := s.store.CreatePriceChange(s.ctx, apiChange("halve_a", "key-halve", priced("a", 0.5)), accept)
+	change, rows, replayed, err := s.store.PriceChanges.Insert(s.ctx, apiChange("halve_a", "key-halve", priced("a", 0.5)), accept)
 
 	s.Require().NoError(err)
 	s.False(replayed)
@@ -82,10 +82,10 @@ func (s *StoreSuite) TestAPriceChangeWritesItsEntriesAndOneAuditRow() {
 func (s *StoreSuite) TestAPriceChangeResubmittedUnderItsKeyIsWrittenOnce() {
 	s.seeded(priced("a", 1))
 	write := apiChange("resubmitted", "key-once", priced("a", 0.5))
-	first, _, _, err := s.store.CreatePriceChange(s.ctx, write, accept)
+	first, _, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
 	s.Require().NoError(err)
 
-	again, rows, replayed, err := s.store.CreatePriceChange(s.ctx, write, func(PriceListAt, []PriceEntryWrite) error {
+	again, rows, replayed, err := s.store.PriceChanges.Insert(s.ctx, write, func(PriceListAt, []PriceEntryWrite) error {
 		return errors.New("a resubmit is not checked again")
 	})
 
@@ -108,27 +108,27 @@ func (s *StoreSuite) TestAnExpandedPriceChangeResubmittedIsWrittenOnce() {
 		}
 		return append(writes, PriceEntryWrite{Entry: pricing.AtCost(priced("b", 1))})
 	}
-	first, rows, _, err := s.store.CreatePriceChange(s.ctx, write, accept)
+	first, rows, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
 	s.Require().NoError(err)
 	s.Require().Len(rows, 2, "a and the entry written beside it")
 
-	again, rows, replayed, err := s.store.CreatePriceChange(s.ctx, write, accept)
+	again, rows, replayed, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
 
 	s.Require().NoError(err)
 	s.True(replayed)
 	s.Equal(first.Name, again.Name)
 	s.Len(rows, 2)
 	write.Entries = apiChange("expanded", "key-expanded", priced("a", 0.4)).Entries
-	_, _, _, err = s.store.CreatePriceChange(s.ctx, write, accept)
+	_, _, _, err = s.store.PriceChanges.Insert(s.ctx, write, accept)
 	s.ErrorIs(err, ErrPriceChangeKeyReused, "an entry asked for is still compared")
 }
 
 func (s *StoreSuite) TestAPriceChangeKeyHeldByAnotherBodyIsRefused() {
 	s.seeded(priced("a", 1))
-	_, _, _, err := s.store.CreatePriceChange(s.ctx, apiChange("reused", "key-reused", priced("a", 0.5)), accept)
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("reused", "key-reused", priced("a", 0.5)), accept)
 	s.Require().NoError(err)
 
-	_, _, _, err = s.store.CreatePriceChange(s.ctx, apiChange("reused", "key-reused", priced("a", 0.4)), accept)
+	_, _, _, err = s.store.PriceChanges.Insert(s.ctx, apiChange("reused", "key-reused", priced("a", 0.4)), accept)
 
 	s.ErrorIs(err, ErrPriceChangeKeyReused)
 }
@@ -137,14 +137,14 @@ func (s *StoreSuite) TestAPriceChangeTheCheckRefusesWritesNothing() {
 	s.seeded(priced("a", 1))
 	refused := errors.New("refused")
 
-	_, _, _, err := s.store.CreatePriceChange(s.ctx, apiChange("checked", "key-check", priced("a", 0.5)), func(before PriceListAt, writes []PriceEntryWrite) error {
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("checked", "key-check", priced("a", 0.5)), func(before PriceListAt, writes []PriceEntryWrite) error {
 		s.Len(before.Entries, 1, "the check is handed the list the change lands on")
 		s.Equal("llm-openai-a-us", writes[0].SKU, "and the entries with their SKUs")
 		return refused
 	})
 
 	s.ErrorIs(err, refused)
-	changes, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{})
+	changes, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{})
 	s.Require().NoError(err)
 	s.Len(changes, 1, "only the seed")
 }
@@ -157,13 +157,13 @@ func (s *StoreSuite) TestAPriceChangeTakesEffectNoEarlierThanNow() {
 	recent := apiChange("recent", "key-recent", priced("a", 0.5))
 	recent.EffectiveAt = &twoMinutesAgo
 
-	_, _, _, err := s.store.CreatePriceChange(s.ctx, past, accept)
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, past, accept)
 	s.ErrorIs(err, ErrPriceChangeInPast)
-	change, _, _, err := s.store.CreatePriceChange(s.ctx, recent, accept)
+	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, recent, accept)
 	s.Require().NoError(err)
 
 	s.Equal(change.CreatedAt, change.EffectiveAt, "two minutes ago is taken as now")
-	_, _, replayed, err := s.store.CreatePriceChange(s.ctx, recent, accept)
+	_, _, replayed, err := s.store.PriceChanges.Insert(s.ctx, recent, accept)
 	s.Require().NoError(err)
 	s.True(replayed, "the time it asked for still matches the change it took")
 }
@@ -173,17 +173,17 @@ func (s *StoreSuite) TestAScheduledPriceChangeIsCancelledOnce() {
 	tomorrow := time.Now().Add(24 * time.Hour)
 	write := apiChange("tomorrow", "key-tomorrow", priced("a", 0.5))
 	write.EffectiveAt = &tomorrow
-	change, _, _, err := s.store.CreatePriceChange(s.ctx, write, accept)
+	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
 	s.Require().NoError(err)
 
-	cancelled, rows, done, err := s.store.CancelPriceChange(s.ctx, change.Name, "The vendor withdrew it.", "staff:grace", "Grace")
+	cancelled, rows, done, err := s.store.PriceChanges.Cancel(s.ctx, change.Name, "The vendor withdrew it.", "staff:grace", "Grace")
 	s.Require().NoError(err)
 	s.True(done)
 	s.Require().NotNil(cancelled.CancelledAt)
 	s.Equal("staff:grace", cancelled.CancelledBy)
 	s.Len(rows, 1)
 
-	again, _, done, err := s.store.CancelPriceChange(s.ctx, change.Name, "Again.", "staff:alan", "Alan")
+	again, _, done, err := s.store.PriceChanges.Cancel(s.ctx, change.Name, "Again.", "staff:alan", "Alan")
 	s.Require().NoError(err)
 	s.False(done, "a cancel sent again writes nothing")
 	s.Equal("staff:grace", again.CancelledBy)
@@ -191,21 +191,21 @@ func (s *StoreSuite) TestAScheduledPriceChangeIsCancelledOnce() {
 	audit := s.auditOf(change.Name)
 	s.Require().Len(audit, 2)
 	s.Equal(AuditCancelled, audit[1].Action)
-	upcoming, err := s.store.UpcomingPriceEntries(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming)
 }
 
 func (s *StoreSuite) TestAPriceChangeInForceCannotBeCancelled() {
 	seed := s.seeded(priced("a", 1))
-	change, _, _, err := s.store.CreatePriceChange(s.ctx, apiChange("now", "key-now", priced("a", 0.5)), accept)
+	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("now", "key-now", priced("a", 0.5)), accept)
 	s.Require().NoError(err)
 
 	for _, name := range []string{seed.Name, change.Name} {
-		_, _, _, err := s.store.CancelPriceChange(s.ctx, name, "Too late.", "staff:ada", "Ada")
+		_, _, _, err := s.store.PriceChanges.Cancel(s.ctx, name, "Too late.", "staff:ada", "Ada")
 		s.ErrorIs(err, ErrPriceChangeInForce, name)
 	}
-	_, _, _, err = s.store.CancelPriceChange(s.ctx, "20261023000000_nobody", "No such change.", "staff:ada", "Ada")
+	_, _, _, err = s.store.PriceChanges.Cancel(s.ctx, "20261023000000_nobody", "No such change.", "staff:ada", "Ada")
 	s.ErrorIs(err, ErrNoPriceChange)
 }
 
@@ -214,7 +214,7 @@ func (s *StoreSuite) TestAWriteThatWaitsOutThePriceListsLockIsBusy() {
 	tomorrow := time.Now().Add(24 * time.Hour)
 	scheduled := apiChange("busy_cancel", "key-busy-cancel", priced("a", 0.5))
 	scheduled.EffectiveAt = &tomorrow
-	change, _, _, err := s.store.CreatePriceChange(s.ctx, scheduled, accept)
+	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, scheduled, accept)
 	s.Require().NoError(err)
 	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
@@ -222,9 +222,9 @@ func (s *StoreSuite) TestAWriteThatWaitsOutThePriceListsLockIsBusy() {
 	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
 	s.Require().NoError(err)
 
-	_, _, _, err = s.store.CreatePriceChange(s.ctx, apiChange("busy", "key-busy", priced("a", 0.5)), accept)
+	_, _, _, err = s.store.PriceChanges.Insert(s.ctx, apiChange("busy", "key-busy", priced("a", 0.5)), accept)
 	s.ErrorIs(err, ErrPriceListBusy)
-	_, _, _, err = s.store.CancelPriceChange(s.ctx, change.Name, "Busy.", "staff:ada", "Ada")
+	_, _, _, err = s.store.PriceChanges.Cancel(s.ctx, change.Name, "Busy.", "staff:ada", "Ada")
 	s.ErrorIs(err, ErrPriceListBusy)
 }
 
@@ -233,9 +233,9 @@ func (s *StoreSuite) TestThePriceSourceAnswersTheListInForceAndTheNextChange() {
 	tomorrow := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Microsecond)
 	write := apiChange("tomorrow", "key-source", priced("a", 0.5))
 	write.EffectiveAt = &tomorrow
-	change, _, _, err := s.store.CreatePriceChange(s.ctx, write, accept)
+	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
 	s.Require().NoError(err)
-	source := s.store.PriceSource()
+	source := s.store.PriceEntries.Source()
 
 	entries, next, err := source.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
@@ -264,9 +264,9 @@ func (s *StoreSuite) TestAnItemKeepsItsSKUAcrossItsPriceChanges() {
 	later := apiChange("later", "key-later", priced("a", 0.4))
 	later.EffectiveAt = &tomorrow
 
-	_, now, _, err := s.store.CreatePriceChange(s.ctx, apiChange("now", "key-sku-now", priced("a", 0.5)), accept)
+	_, now, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("now", "key-sku-now", priced("a", 0.5)), accept)
 	s.Require().NoError(err)
-	_, scheduled, _, err := s.store.CreatePriceChange(s.ctx, later, accept)
+	_, scheduled, _, err := s.store.PriceChanges.Insert(s.ctx, later, accept)
 	s.Require().NoError(err)
 
 	s.Equal("llm-openai-a-us", now[0].SKU)
@@ -284,7 +284,7 @@ func (s *StoreSuite) TestARenamedModelKeepsItsSKU() {
 	write := apiChange("rename_a", "key-rename", renamed)
 	write.Entries = append(write.Entries, withdrawal("a"))
 
-	_, rows, _, err := s.store.CreatePriceChange(s.ctx, write, accept)
+	_, rows, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
 
 	s.Require().NoError(err)
 	s.Require().Len(rows, 2)
@@ -297,7 +297,7 @@ func (s *StoreSuite) TestARenamedModelKeepsItsSKU() {
 	s.Equal("llm-openai-a-us", list.Quote(llmItem("a-2026", nil), pricing.Quantities{pricing.InputTokens: 1}).SKU)
 
 	again := priced("a", 1)
-	_, back, _, err := s.store.CreatePriceChange(s.ctx, apiChange("a_again", "key-again", again), accept)
+	_, back, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("a_again", "key-again", again), accept)
 	s.Require().NoError(err)
 	s.Equal("llm-openai-a-us-2", back[0].SKU, "the old name, priced again, cannot take the SKU its successor has")
 }
@@ -309,7 +309,7 @@ func (s *StoreSuite) TestASKUAnotherItemHasInForceIsRefused() {
 	taken := priced("c", 1)
 	taken.SKU = "llm-openai-a-us"
 
-	_, _, _, err := s.store.CreatePriceChange(s.ctx, apiChange("take_a", "key-take", taken), accept)
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("take_a", "key-take", taken), accept)
 	s.ErrorIs(err, ErrSKUInUse)
 	s.ErrorContains(err, "llm-openai-a-us is the SKU of llm/openai/a (us)")
 
@@ -318,14 +318,14 @@ func (s *StoreSuite) TestASKUAnotherItemHasInForceIsRefused() {
 		Region: pricing.RegionUS, SKU: "llm-openai-b-us", Rates: priced("b", 1).Rates})
 	scheduled.Entries = append(scheduled.Entries, withdrawal("b"))
 	scheduled.EffectiveAt = &tomorrow
-	_, _, _, err = s.store.CreatePriceChange(s.ctx, scheduled, accept)
+	_, _, _, err = s.store.PriceChanges.Insert(s.ctx, scheduled, accept)
 	s.Require().NoError(err)
 	early := priced("d", 1)
 	early.SKU = "llm-openai-b-us"
 	early.Prices = early.Rates
 	write := apiChange("early_b", "key-early-b", early)
 	write.Entries = append(write.Entries, withdrawal("b"))
-	_, _, _, err = s.store.CreatePriceChange(s.ctx, write, accept)
+	_, _, _, err = s.store.PriceChanges.Insert(s.ctx, write, accept)
 	s.ErrorIs(err, ErrSKUInUse, "a change scheduled later gives llm-openai-b-us to b-2026")
 	s.ErrorContains(err, "a change scheduled later gives llm-openai-b-us to llm/openai/b-2026 (us)")
 }
@@ -335,7 +335,7 @@ func (s *StoreSuite) TestAnItemInForceKeepsItsSKU() {
 	renamed := priced("a", 0.5)
 	renamed.SKU = "another"
 
-	_, _, _, err := s.store.CreatePriceChange(s.ctx, apiChange("resku", "key-resku", renamed), accept)
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("resku", "key-resku", renamed), accept)
 
 	s.ErrorIs(err, ErrSKUChanged)
 	s.ErrorContains(err, "llm/openai/a (us) has the SKU llm-openai-a-us, not another")
@@ -346,7 +346,7 @@ func (s *StoreSuite) TestAnItemInForceKeepsItsSKU() {
 func (s *StoreSuite) TestTwoItemsOfOneBaseSKUAreNumbered() {
 	s.seeded(priced("gpt-4.1", 1))
 
-	_, rows, _, err := s.store.CreatePriceChange(s.ctx, apiChange("dashed", "key-dashed", priced("gpt-4-1", 1)), accept)
+	_, rows, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("dashed", "key-dashed", priced("gpt-4-1", 1)), accept)
 
 	s.Require().NoError(err)
 	s.Equal("llm-openai-gpt-4-1-us-2", rows[0].SKU)
@@ -361,7 +361,7 @@ func (s *StoreSuite) TestAChangeOfTheUSPriceLeavesTheEUAndBYOKEntriesAsTheyWere(
 	byok.BYOK = true
 	s.seeded(priced("a", 1), eu, byok)
 
-	_, rows, _, err := s.store.CreatePriceChange(s.ctx, apiChange("halve_a", "key-halve-us", priced("a", 0.5)), accept)
+	_, rows, _, err := s.store.PriceChanges.Insert(s.ctx, apiChange("halve_a", "key-halve-us", priced("a", 0.5)), accept)
 
 	s.Require().NoError(err)
 	s.Equal("llm-openai-a-us", rows[0].SKU)
@@ -371,4 +371,34 @@ func (s *StoreSuite) TestAChangeOfTheUSPriceLeavesTheEUAndBYOKEntriesAsTheyWere(
 	s.EqualValues(1_188_000, list.Quote(pricing.Item{Modality: "llm", Provider: "openai", Model: "a", Region: pricing.RegionEU}, used).CostMicros)
 	s.EqualValues(200_000, list.Quote(pricing.Item{Modality: "llm", Provider: "openai", Model: "a", Region: pricing.RegionUS, BYOK: true},
 		used).CostMicros)
+}
+
+func (s *StoreSuite) TestPriceEntryQueryBudgets() {
+	s.seeded(priced("a", 1), priced("b", 2), priced("c", 3))
+	later := time.Now().Add(time.Hour)
+	scheduled := apiChange("halve_a", "key-halve", priced("a", 0.5))
+	scheduled.EffectiveAt = &later
+	_, _, _, err := s.store.PriceChanges.Insert(s.ctx, scheduled, accept)
+	s.Require().NoError(err)
+
+	s.Equal(1, s.countQueries(func() {
+		active, err := s.store.PriceEntries.Active(s.ctx, time.Now())
+		s.Require().NoError(err)
+		s.Len(active, 3)
+	}), "Active")
+	s.Equal(2, s.countQueries(func() {
+		upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+		s.Require().NoError(err)
+		s.Len(upcoming, 1)
+	}), "Upcoming")
+	// One read-only snapshot: the entries in force and the upcoming ones.
+	s.Equal(5, s.countQueries(func() {
+		_, err := s.store.PriceEntries.At(s.ctx, time.Now())
+		s.Require().NoError(err)
+	}), "At")
+	s.Equal(5, s.countQueries(func() {
+		_, err := s.store.PriceEntries.Before(s.ctx, nil)
+		s.Require().NoError(err)
+	}), "Before")
+	s.Equal(0, s.countQueries(func() { s.NotNil(s.store.PriceEntries.Source()) }), "Source")
 }

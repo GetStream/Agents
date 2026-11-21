@@ -143,7 +143,7 @@ func (s *PolicySuite) spend(appID string, costMicros int64) {
 func (s *PolicySuite) spendAs(request store.Request) {
 	request.Modality, request.Provider, request.Model = "llm", "openai", "gpt-5.6-luna"
 	request.StartedAt, request.Success, request.Billable = time.Now().UTC(), true, true
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &request))
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
 }
 
 func (s *PolicySuite) save(scope store.PolicyScope, id string, document store.PolicyDocument) {
@@ -376,7 +376,7 @@ func (s *PolicySuite) TestWithShardsTheReconcileRunsAsTheLoopsStart() {
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
 	s.Require().NoError(db.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	// The shard has a row naming the grant and nothing counted it: its count was dropped.
-	_, err := db.RecordRequests(s.ctx, []store.Request{s.shardRow(500_000, []int64{grant.ID})})
+	_, err := db.Requests.InsertMany(s.ctx, []store.Request{s.shardRow(500_000, []int64{grant.ID})})
 	s.Require().NoError(err)
 
 	s.newEnforcer(configs, nil)
@@ -391,7 +391,7 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	enforcer := s.newEnforcer(configs, nil)
 	audit := store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}
 	row := s.shardRow
-	_, err := db.RecordRequests(s.ctx, []store.Request{row(1, nil)})
+	_, err := db.Requests.InsertMany(s.ctx, []store.Request{row(1, nil)})
 	s.Require().NoError(err)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
 	s.Require().NoError(db.LimitGrants.Insert(s.ctx, &grant, audit))
@@ -405,7 +405,7 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	used.LimitGrants = enforcer.Settle(owner, used.UsageID, used.CostMicros)
 	s.Equal([]int64{grant.ID}, used.LimitGrants)
 	// The shard has the row and nothing counted it: its count was dropped.
-	_, err = db.RecordRequests(s.ctx, []store.Request{used})
+	_, err = db.Requests.InsertMany(s.ctx, []store.Request{used})
 	s.Require().NoError(err)
 	usageID := used.UsageID
 	enforcer.Written([]routing.Acked{{UsageID: usageID, OrganizationID: s.org, CostMicros: 2_000_000}})

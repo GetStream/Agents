@@ -936,9 +936,7 @@ func (s *CallHooksSuite) callSitesRow() *store.AgentLog {
 	ctx := context.Background()
 	var id int64
 	s.Require().Eventually(func() bool {
-		rows, err := s.store.AgentLogs(ctx, store.LogFilter{
-			CustomerID: s.customerID(), SessionID: s.callID, Limit: 250,
-		})
+		rows, err := s.store.AgentLogs.Select(ctx, s.customerID(), store.AgentLogFilter{SessionID: s.callID, Limit: 250})
 		s.Require().NoError(err)
 		for _, row := range rows {
 			if row.EventType == "call_sites" {
@@ -948,9 +946,9 @@ func (s *CallHooksSuite) callSitesRow() *store.AgentLog {
 		}
 		return false
 	}, settleFor, 50*time.Millisecond, "the ended call got no call_sites row")
-	row, err := s.store.AgentLog(ctx, s.customerID(), id)
+	row, err := s.store.AgentLogs.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
-	return row
+	return &row
 }
 
 // hold records the number for the suite's app and attaches it to a call.

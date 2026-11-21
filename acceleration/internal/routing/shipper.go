@@ -115,7 +115,7 @@ func (s *shipping) send(ctx context.Context, rows []store.Request) error {
 
 	marking, cancel := context.WithTimeout(ctx, shipTimeout)
 	defer cancel()
-	if err := s.store.RecordShipment(marking, shipped, refused); err != nil {
+	if err := s.store.Requests.Ship(marking, shipped, refused); err != nil {
 		s.failed(ctx, "could not mark usage rows shipped, the sweeper sends them again", len(rows), err)
 		return err
 	}

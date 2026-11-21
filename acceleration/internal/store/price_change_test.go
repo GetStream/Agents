@@ -59,7 +59,7 @@ func entryRow(entry pricing.Entry) PriceEntry {
 
 // activeList is the price list in force now, built as a router would build it.
 func (s *StoreSuite) activeList() (*pricing.List, []PriceEntry) {
-	active, err := s.store.ActivePriceEntries(s.ctx, time.Now())
+	active, err := s.store.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	entries := make([]pricing.Entry, 0, len(active))
 	for _, row := range active {
@@ -95,7 +95,7 @@ func (s *StoreSuite) TestTheFirstSyncSeedsEverything() {
 	free := pricing.Entry{Modality: "phone", Provider: "telnyx", Model: "call", Region: pricing.RegionUS, Free: true}
 	files := load(priced("a", 1), priced("b", 2), free)
 
-	change, added, wrote, err := s.store.SyncPrices(s.ctx, files)
+	change, added, wrote, err := s.store.PriceChanges.Sync(s.ctx, files)
 
 	s.Require().NoError(err)
 	s.True(wrote)
@@ -127,7 +127,7 @@ func (s *StoreSuite) TestARegionAndBYOKEntryOfOneModelAreItemsOfTheirOwn() {
 	byok := priced("a", 1)
 	byok.BYOK = true
 
-	_, added, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1), eu, byok))
+	_, added, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1), eu, byok))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"llm/openai/a (us) llm-openai-a-us", "llm/openai/a (eu) llm-openai-a-eu", "llm/openai/a (us, byok) llm-openai-a-us-byok"},
@@ -148,12 +148,12 @@ func (s *StoreSuite) TestARegionAndBYOKEntryOfOneModelAreItemsOfTheirOwn() {
 // TestALaterSyncAddsARegionTheDatabaseLacks: an eu entry is an item of its own, so a release
 // whose files have one adds it beside the us entry, which keeps its price.
 func (s *StoreSuite) TestALaterSyncAddsARegionTheDatabaseLacks() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 	eu := priced("a", 1.1)
 	eu.Region = pricing.RegionEU
 
-	change, added, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 9), eu))
+	change, added, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 9), eu))
 
 	s.Require().NoError(err)
 	s.Equal(PriceChangeRelease, change.Kind)
@@ -181,7 +181,7 @@ func (s *StoreSuite) TestASeedKeepsAFilesOwnPriceAndSKU() {
 	own.SKU = "house-a"
 	own.Prices = map[pricing.Meter]pricing.Rate{pricing.InputTokens: perMillionTokens(1.1)}
 
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(own))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(own))
 	s.Require().NoError(err)
 
 	list, active := s.activeList()
@@ -191,12 +191,12 @@ func (s *StoreSuite) TestASeedKeepsAFilesOwnPriceAndSKU() {
 }
 
 func (s *StoreSuite) TestALaterSyncOnlyAddsNewItems() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 
 	next := load(priced("a", 9), priced("b", 2))
 	next.Release = "v2"
-	change, added, wrote, err := s.store.SyncPrices(s.ctx, next)
+	change, added, wrote, err := s.store.PriceChanges.Sync(s.ctx, next)
 
 	s.Require().NoError(err)
 	s.True(wrote)
@@ -212,26 +212,26 @@ func (s *StoreSuite) TestALaterSyncOnlyAddsNewItems() {
 }
 
 func (s *StoreSuite) TestASyncWithNothingNewWritesNothing() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 
-	_, added, wrote, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, added, wrote, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 
 	s.Require().NoError(err)
 	s.False(wrote)
 	s.Empty(added)
-	changes, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{})
+	changes, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{})
 	s.Require().NoError(err)
 	s.Len(changes, 1)
 }
 
 func (s *StoreSuite) TestAServiceTierNewInAReleaseIsAddedBesideTheDefault() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 	flex := priced("a", 0.5)
 	flex.When = map[string]string{"service_tier": "flex"}
 
-	_, added, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1), flex))
+	_, added, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1), flex))
 
 	s.Require().NoError(err)
 	s.Require().Len(added, 1)
@@ -240,12 +240,12 @@ func (s *StoreSuite) TestAServiceTierNewInAReleaseIsAddedBesideTheDefault() {
 }
 
 func (s *StoreSuite) TestASyncNeverTouchesAWithdrawnItem() {
-	seed, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	seed, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 	withdrawn := PriceEntry{Modality: "llm", Provider: "openai", Model: "a", Region: pricing.RegionUS, SKU: "llm-openai-a-us", Withdrawn: true}
 	s.write("20990101000000_withdraw_a", seed.EffectiveAt, withdrawn)
 
-	_, added, wrote, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, added, wrote, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 
 	s.Require().NoError(err)
 	s.False(wrote)
@@ -255,13 +255,13 @@ func (s *StoreSuite) TestASyncNeverTouchesAWithdrawnItem() {
 }
 
 func (s *StoreSuite) TestAnItemOnlyACancelledChangePricedIsAddedAgain() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 	s.write("20990101000000_add_b", time.Now().Add(time.Hour), entryRow(priced("b", 5)))
 	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_add_b'")
 	s.Require().NoError(err)
 
-	_, added, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1), priced("b", 2)))
+	_, added, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1), priced("b", 2)))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"llm/openai/b (us) llm-openai-b-us"}, names(added), "a cancelled change's SKU holds nothing")
@@ -281,7 +281,7 @@ func (s *StoreSuite) TestTwoSyncsAtOnceWriteOnce() {
 		if i%2 == 1 {
 			router = other
 		}
-		wg.Go(func() { _, _, wrote[i], failed[i] = router.SyncPrices(s.ctx, files) })
+		wg.Go(func() { _, _, wrote[i], failed[i] = router.PriceChanges.Sync(s.ctx, files) })
 	}
 	wg.Wait()
 
@@ -293,7 +293,7 @@ func (s *StoreSuite) TestTwoSyncsAtOnceWriteOnce() {
 		}
 	}
 	s.Equal(1, written)
-	changes, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{})
+	changes, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{})
 	s.Require().NoError(err)
 	s.Len(changes, 1)
 	_, active := s.activeList()
@@ -303,7 +303,7 @@ func (s *StoreSuite) TestTwoSyncsAtOnceWriteOnce() {
 func (s *StoreSuite) TestASyncIsAudited() {
 	files := load(priced("a", 1))
 
-	change, _, _, err := s.store.SyncPrices(s.ctx, files)
+	change, _, _, err := s.store.PriceChanges.Sync(s.ctx, files)
 	s.Require().NoError(err)
 
 	// audit_log outlives a test, and a change made in the same second by another test has
@@ -320,12 +320,12 @@ func (s *StoreSuite) TestASyncIsAudited() {
 }
 
 func (s *StoreSuite) TestAReleaseNameIsSanitized() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 	next := load(priced("b", 1))
 	next.Release = "v1.4.0-RC/2"
 
-	change, _, _, err := s.store.SyncPrices(s.ctx, next)
+	change, _, _, err := s.store.PriceChanges.Sync(s.ctx, next)
 
 	s.Require().NoError(err)
 	s.Regexp(`^\d{14}_release_v1_4_0_rc_2$`, change.Name)
@@ -333,18 +333,18 @@ func (s *StoreSuite) TestAReleaseNameIsSanitized() {
 }
 
 func (s *StoreSuite) TestPricesToLoadWritesNothing() {
-	seed, added, err := s.store.PricesToLoad(s.ctx, []pricing.Entry{priced("a", 1)})
+	seed, added, err := s.store.PriceChanges.ToLoad(s.ctx, []pricing.Entry{priced("a", 1)})
 
 	s.Require().NoError(err)
 	s.True(seed)
 	s.Len(added, 1)
-	changes, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{})
+	changes, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{})
 	s.Require().NoError(err)
 	s.Empty(changes)
 }
 
 func (s *StoreSuite) TestAPriceEntryCannotBeChanged() {
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 
 	for _, update := range []string{"UPDATE price_list_entries SET free = true",
@@ -462,7 +462,7 @@ func (s *StoreSuite) TestAChangeForTomorrowIsNotInForceToday() {
 	s.write("20990101000000_tomorrow", time.Now().Add(24*time.Hour), entryRow(priced("a", 2)))
 
 	list, _ := s.activeList()
-	later, err := s.store.ActivePriceEntries(s.ctx, time.Now().Add(25*time.Hour))
+	later, err := s.store.PriceEntries.Active(s.ctx, time.Now().Add(25*time.Hour))
 	s.Require().NoError(err)
 
 	s.InDelta(1.0, s.inputRate(list, "a", nil), 1e-12)
@@ -476,9 +476,9 @@ func (s *StoreSuite) TestACancelledChangeIsNeverInForce() {
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_later'")
 	s.Require().NoError(err)
 
-	entries, err := s.store.ActivePriceEntries(s.ctx, time.Now().Add(2*time.Hour))
+	entries, err := s.store.PriceEntries.Active(s.ctx, time.Now().Add(2*time.Hour))
 	s.Require().NoError(err)
-	upcoming, err := s.store.UpcomingPriceEntries(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 
 	s.Require().Len(entries, 1)
@@ -529,7 +529,7 @@ func (s *StoreSuite) TestTiersRoundTrip() {
 			pricing.CallSeconds: {USD: 0.007, Per: 60, Increment: 60, Minimum: 60},
 		}}},
 	}
-	_, _, _, err := s.store.SyncPrices(s.ctx, load(entry))
+	_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(entry))
 	s.Require().NoError(err)
 
 	list, active := s.activeList()
@@ -553,9 +553,9 @@ func (s *StoreSuite) TestTheNextChangeIsKnown() {
 	s.write("20990101000000_soon", soon)
 	s.write("20990101000001_later", soon.Add(time.Hour))
 
-	next, ok, err := s.store.NextPriceChangeAt(s.ctx, time.Now())
+	next, ok, err := s.store.PriceChanges.NextAt(s.ctx, time.Now())
 	s.Require().NoError(err)
-	_, none, err := s.store.NextPriceChangeAt(s.ctx, soon.Add(2*time.Hour))
+	_, none, err := s.store.PriceChanges.NextAt(s.ctx, soon.Add(2*time.Hour))
 	s.Require().NoError(err)
 
 	s.True(ok)
@@ -567,7 +567,7 @@ func (s *StoreSuite) TestUpcomingEntriesCarryTheirChangesReason() {
 	s.write("20260101000000_past", time.Now().Add(-time.Hour), entryRow(priced("a", 1)))
 	s.write("20990101000000_soon", time.Now().Add(time.Hour), entryRow(priced("a", 2)))
 
-	upcoming, err := s.store.UpcomingPriceEntries(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
 
 	s.Require().NoError(err)
 	s.Require().Len(upcoming, 1)
@@ -576,11 +576,11 @@ func (s *StoreSuite) TestUpcomingEntriesCarryTheirChangesReason() {
 }
 
 func (s *StoreSuite) TestAPriceChangeCanBeReadBack() {
-	change, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1), priced("b", 2)))
+	change, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1), priced("b", 2)))
 	s.Require().NoError(err)
 
-	read, entries, err := s.store.PriceChange(s.ctx, change.Name)
-	_, _, missing := s.store.PriceChange(s.ctx, "20990101000000_nobody")
+	read, entries, err := s.store.PriceChanges.Get(s.ctx, change.Name)
+	_, _, missing := s.store.PriceChanges.Get(s.ctx, "20990101000000_nobody")
 
 	s.Require().NoError(err)
 	s.Equal(change.Name, read.Name)
@@ -593,17 +593,66 @@ func (s *StoreSuite) TestPriceChangesPageNewestFirst() {
 	s.write("20260101000001_b", time.Now().Add(-time.Hour))
 	s.write("20260101000002_c", time.Now().Add(-time.Hour))
 
-	first, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{Limit: 2})
+	first, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{Limit: 2})
 	s.Require().NoError(err)
 	s.Require().Len(first, 3, "one more than the limit says there is another page")
 	last := first[1]
-	second, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{Limit: 2, After: &PriceChangePosition{CreatedAt: last.CreatedAt, Name: last.Name}})
+	second, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{Limit: 2, After: &PriceChangePosition{CreatedAt: last.CreatedAt, Name: last.Name}})
 	s.Require().NoError(err)
-	seeds, err := s.store.PriceChanges(s.ctx, PriceChangeFilter{Kind: PriceChangeSeed})
+	seeds, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{Kind: PriceChangeSeed})
 	s.Require().NoError(err)
 
 	s.Equal([]string{"20260101000002_c", "20260101000001_b"}, []string{first[0].Name, first[1].Name})
 	s.Require().Len(second, 1)
 	s.Equal("20260101000000_a", second[0].Name)
 	s.Empty(seeds)
+}
+
+// Each is a transaction under the price list's lock, writing its audit row; none grows with the
+// number of entries.
+func (s *StoreSuite) TestPriceChangeQueryBudgets() {
+	entries := []pricing.Entry{priced("a", 1), priced("b", 2), priced("c", 3)}
+
+	s.Equal(10, s.countQueries(func() {
+		_, _, _, err := s.store.PriceChanges.Sync(s.ctx, load(entries...))
+		s.Require().NoError(err)
+	}), "Sync")
+	s.Equal(2, s.countQueries(func() {
+		_, _, err := s.store.PriceChanges.ToLoad(s.ctx, entries)
+		s.Require().NoError(err)
+	}), "ToLoad")
+	s.Equal(8, s.countQueries(func() {
+		_, err := s.store.PriceChanges.Reload(s.ctx, load(entries...), true)
+		s.Require().NoError(err)
+	}), "Reload")
+	later := time.Now().Add(time.Hour)
+	scheduled := apiChange("halve_a", "key-halve", priced("a", 0.5))
+	scheduled.EffectiveAt = &later
+	var change PriceChange
+	s.Equal(13, s.countQueries(func() {
+		var err error
+		change, _, _, err = s.store.PriceChanges.Insert(s.ctx, scheduled, accept)
+		s.Require().NoError(err)
+	}), "Insert")
+	s.Equal(1, s.countQueries(func() {
+		next, found, err := s.store.PriceChanges.NextAt(s.ctx, time.Now())
+		s.Require().NoError(err)
+		s.True(found)
+		s.WithinDuration(later, next, time.Second)
+	}), "NextAt")
+	s.Equal(2, s.countQueries(func() {
+		_, rows, err := s.store.PriceChanges.Get(s.ctx, change.Name)
+		s.Require().NoError(err)
+		s.Len(rows, 1)
+	}), "Get")
+	s.Equal(1, s.countQueries(func() {
+		changes, err := s.store.PriceChanges.Select(s.ctx, PriceChangeFilter{Limit: 1})
+		s.Require().NoError(err)
+		s.Len(changes, 2)
+	}), "Select")
+	s.Equal(9, s.countQueries(func() {
+		_, _, cancelled, err := s.store.PriceChanges.Cancel(s.ctx, change.Name, "too early", "staff:ada", "Ada")
+		s.Require().NoError(err)
+		s.True(cancelled)
+	}), "Cancel")
 }
