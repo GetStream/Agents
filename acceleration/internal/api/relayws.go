@@ -99,15 +99,19 @@ func (s *Server) newRelayed(ctx context.Context, bus *relay.Bus) (*relayed, erro
 		sockets: map[string]*remoteSocket{},
 		proxies: map[string]*proxyWatcher{},
 	}
-	if err := bus.Subscribe(ctx, bus.Events(), state.deliver); err != nil {
+	events, err := bus.Subscribe(ctx, bus.Events(), state.deliver)
+	if err != nil {
 		return nil, err
 	}
-	if err := bus.Subscribe(ctx, bus.Commands(), func(payload []byte) {
+	commands, err := bus.Subscribe(ctx, bus.Commands(), func(payload []byte) {
 		s.serveRelayRequest(ctx, state, payload)
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	go s.expireProxies(ctx, state)
+	s.background.Go(func() { <-events })
+	s.background.Go(func() { <-commands })
+	s.background.Go(func() { s.expireProxies(ctx, state) })
 	return state, nil
 }
 

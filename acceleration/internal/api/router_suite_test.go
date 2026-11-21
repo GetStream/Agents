@@ -1938,9 +1938,9 @@ func (s *RouterSuite) nodeDirectory(listener *httptest.Server, shard string, log
 // The node subscribes to its relay as it is made, each subscription on a Redis connection of
 // its own that rueidis gives 5 s to open, which a loaded machine can overrun. The node is then
 // made again until redisready's minute is up, each attempt with a Redis client of its own for
-// the relay, closed when the attempt fails: NewServer holds the subscriptions against the
-// process and goes on trying a failed one, so only closing the client ends what a node nobody
-// holds left subscribed, which would otherwise answer the relay beside the node that came up.
+// the relay, closed when the attempt fails. The node is closed when the test that made it ends,
+// as cmd/router closes it, which ends its subscriptions: they would otherwise hold the node,
+// and everything it was made with, to the end of the package.
 func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options) *Server {
 	server, err := redisready.Retry(s.shardRedisAddr, func() (*Server, error) {
 		redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.shardRedisAddr}, DisableCache: true})
@@ -1960,6 +1960,12 @@ func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options
 		return server, nil
 	})
 	s.Require().NoError(err)
+	// After redis.Close's cleanup, so it runs first: the subscriptions end on the cancel.
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.NoError(server.Close(ctx), "the node's background work did not end")
+	})
 	return server
 }
 
