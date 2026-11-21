@@ -1722,6 +1722,46 @@ func (s *TakeoverSuite) TestClaimingLapsedCallsTakesOneRoundTripHoweverManyThere
 	}
 }
 
+func (s *TakeoverSuite) TestRenewingTakesOneRoundTripHoweverManyCallsTheNodeHolds() {
+	counted := &roundTrips{}
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: rueidishook.WithHook(s.redis, counted), Node: "a",
+		holdFor: time.Minute, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+	hold := func(n int) []string {
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = uuid.NewString()
+			call := newFakeCall()
+			call.state = callState("a")
+			held := &heldCall{call: call, ref: ref(), movable: true}
+			claimed, err := p.claim(ids[i], held)
+			s.Require().NoError(err)
+			s.Require().True(claimed)
+			p.calls[ids[i]] = held
+		}
+		return ids
+	}
+	// Loads the script, which a first run sends Redis once more.
+	hold(1)
+	p.renew(context.Background())
+
+	ids := hold(24)
+	for _, id := range ids {
+		s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zadd().Key(s.prefix+":calls").ScoreMember().ScoreMember(1, id).Build()).Error())
+	}
+	before := counted.sent.Load()
+	p.renew(context.Background())
+
+	s.Equal(int64(1), counted.sent.Load()-before, "renewing 25 calls")
+	for _, id := range ids {
+		lapse, inSet := s.lapse(id)
+		s.Require().True(inSet)
+		s.True(lapse.After(time.Now()), "a renewed claim pushes its lapse out")
+		s.Equal("a", s.get("owner:"+id))
+	}
+}
+
 func (s *TakeoverSuite) TestClaimingLapsedCallsSkipsHeldOnesAndForgetsOnesWithNoRecord() {
 	p := newProvider(Options{
 		Logger: slog.New(slog.DiscardHandler), Redis: s.redis, Node: "b",

@@ -12,6 +12,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/sipbridge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/redisscript"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -122,7 +123,7 @@ return 1
 // go would hang up a call no node could take over without its record. Past the lease another
 // node may have taken the call and ended it, so it says 0.
 // KEYS: record, owner, calls. ARGV: node, record, recordFor ms, holdFor ms, lapse ms, id, leased.
-var renewScript = rueidis.NewLuaScript(`
+var renewScript = redisscript.New(`
 local owner = redis.call('GET', KEYS[2])
 if owner == ARGV[1] then
   redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
@@ -161,7 +162,7 @@ return 1
 // giveBackScript lets go of ARGV[1]'s claim on a call it could not take over, and marks the
 // call lapsing at ARGV[2].
 // KEYS: owner, calls. ARGV: node, lapse ms, id.
-var giveBackScript = rueidis.NewLuaScript(`
+var giveBackScript = redisscript.New(`
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
   return 0
 end
@@ -308,17 +309,50 @@ func (p *Provider) renew(ctx context.Context) {
 	}
 	p.mu.Unlock()
 
+	// The calls whose writing lock is free are renewed in one round trip. One that is taken is
+	// being rewritten or ended, and is renewed on its own after, so hold never waits on another
+	// call's write to delete its keys.
+	var renewals []renewal
+	var busy []string
 	for id, h := range held {
-		p.renewOne(ctx, id, h)
+		if !h.writing.TryLock() {
+			busy = append(busy, id)
+			continue
+		}
+		if r, ok := p.prepareRenewal(id, h); ok {
+			renewals = append(renewals, r)
+		} else {
+			h.writing.Unlock()
+		}
+	}
+	p.renewLocked(ctx, renewals)
+	for _, id := range busy {
+		p.renewOne(ctx, id, held[id])
 	}
 }
 
-// renewOne holds the call's writing lock across the script, so a call that ends meanwhile is not
-// written back after hold deleted its keys, and its mu only around reading and applying, so the
-// BYE at stop never waits on Redis.
+// renewOne renews one call, waiting for its writing lock.
 func (p *Provider) renewOne(ctx context.Context, id string, h *heldCall) {
 	h.writing.Lock()
-	defer h.writing.Unlock()
+	r, ok := p.prepareRenewal(id, h)
+	if !ok {
+		h.writing.Unlock()
+		return
+	}
+	p.renewLocked(ctx, []renewal{r})
+}
+
+// renewal is one call's renewal, read under its writing lock.
+type renewal struct {
+	id     string
+	held   *heldCall
+	leased bool
+	record string
+}
+
+// prepareRenewal reads what renewing a call whose writing lock is held writes, and says false
+// when the call is not to be renewed.
+func (p *Provider) prepareRenewal(id string, h *heldCall) (renewal, bool) {
 	h.mu.Lock()
 	// A call being handed over may look lost once a failed take moved its score off the given-up
 	// 0, and claiming it back would undo the offer.
@@ -326,44 +360,68 @@ func (p *Provider) renewOne(ctx context.Context, id string, h *heldCall) {
 	lapse := h.lapse
 	h.mu.Unlock()
 	if skip {
-		return
+		return renewal{}, false
 	}
 	record, err := json.Marshal(callRecord{ID: id, Ref: *h.ref, State: h.call.State(), PostDialDelay: h.postDialDelay})
 	if err != nil {
 		p.logger.Warn("could not record a call through a customer's sip trunk to renew its claim",
 			"vendor_call_id", id, "error", err)
+		return renewal{}, false
+	}
+	return renewal{id: id, held: h, leased: time.Now().Before(lapse), record: string(record)}, true
+}
+
+// renewLocked runs the renewals in one round trip and releases their writing locks. Each lock
+// is held across the script, so a call that ends meanwhile is not written back after hold
+// deleted its keys, and each call's mu only around applying, so the BYE at stop never waits on
+// Redis.
+func (p *Provider) renewLocked(ctx context.Context, renewals []renewal) {
+	if len(renewals) == 0 {
 		return
+	}
+	defer func() {
+		for _, r := range renewals {
+			r.held.writing.Unlock()
+		}
+	}()
+	lapse := time.Now().Add(p.holdFor)
+	execs := make([]rueidis.LuaExec, len(renewals))
+	for i, r := range renewals {
+		leased := "0"
+		if r.leased {
+			leased = "1"
+		}
+		execs[i] = rueidis.LuaExec{
+			Keys: []string{p.keys.record(r.id), p.keys.owner(r.id), p.keys.calls()},
+			Args: []string{p.node, r.record, ms(recordFor), ms(p.holdFor), strconv.FormatInt(lapse.UnixMilli(), 10), r.id, leased},
+		}
 	}
 	// Bounded: hold waits on the writing lock to delete the call's keys.
 	scriptCtx, cancel := context.WithTimeout(ctx, lockedRedisTimeout)
 	defer cancel()
-	now := time.Now()
-	leased := "0"
-	if now.Before(lapse) {
-		leased = "1"
-	}
-	lapse = now.Add(p.holdFor)
-	kept, err := renewScript.Exec(scriptCtx, p.redis, []string{p.keys.record(id), p.keys.owner(id), p.keys.calls()},
-		[]string{p.node, string(record), ms(recordFor), ms(p.holdFor), strconv.FormatInt(lapse.UnixMilli(), 10), id, leased}).AsInt64()
-	if err != nil {
-		if ctx.Err() == nil {
-			p.logger.Warn("could not renew the claim on a call through a customer's sip trunk",
-				"vendor_call_id", id, "error", err)
+	for i, resp := range renewScript.ExecMulti(scriptCtx, p.redis, execs...) {
+		r := renewals[i]
+		kept, err := resp.AsInt64()
+		if err != nil {
+			if ctx.Err() == nil {
+				p.logger.Warn("could not renew the claim on a call through a customer's sip trunk",
+					"vendor_call_id", r.id, "error", err)
+			}
+			continue
 		}
-		return
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	switch kept {
-	case 0:
-		// Another node took it, or will: two nodes relaying one call would answer each
-		// other's re-INVITEs out of order.
-		h.call.Release()
-	case 1:
-		h.lapse = lapse
-	case 3:
-		h.lapse = lapse
-		p.logger.Warn("claimed a call again after its claim went missing", "vendor_call_id", id)
+		r.held.mu.Lock()
+		switch kept {
+		case 0:
+			// Another node took it, or will: two nodes relaying one call would answer each
+			// other's re-INVITEs out of order.
+			r.held.call.Release()
+		case 1:
+			r.held.lapse = lapse
+		case 3:
+			r.held.lapse = lapse
+			p.logger.Warn("claimed a call again after its claim went missing", "vendor_call_id", r.id)
+		}
+		r.held.mu.Unlock()
 	}
 }
 
