@@ -18,3 +18,16 @@ func (s *StoreSuite) TestSavingABusinessProfileAgainKeepsItsBrand() {
 	s.Equal("brand-1", held.VendorBrandID)
 	s.Equal("brand-1", profile.VendorBrandID, "the saved row is handed back")
 }
+
+func (s *StoreSuite) TestBusinessProfileQueryBudgets() {
+	customerID := newID()
+	profile := BusinessProfile{CustomerID: customerID, LegalBusinessName: "Acme Inc"}
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.BusinessProfiles.Upsert(s.ctx, &profile)) }), "Upsert")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.BusinessProfiles.SetBrand(s.ctx, customerID, "brand-1", "VERIFIED"))
+	}), "SetBrand")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.BusinessProfiles.Get(s.ctx, customerID)
+		s.Require().NoError(err)
+	}), "Get")
+}

@@ -2,6 +2,8 @@
 
 package store
 
+import "time"
+
 func (s *StoreSuite) TestReleasingACallReturnsItsResourceAndIsIdempotent() {
 	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "trunk-1", RouteID: "route-1",
@@ -80,4 +82,43 @@ func (s *StoreSuite) TestReadingACallsResourcesDeletesNothing() {
 	released, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "read-call")
 	s.Require().NoError(err)
 	s.Len(released, 2, "reading left both rows for the release")
+}
+
+func (s *StoreSuite) TestCallResourceQueryBudgets() {
+	shards := len(s.store.shards())
+	var first *CallResource
+	for i := range 3 {
+		resource := &CallResource{TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: "call-1", CustomerID: "acme", Shared: true}
+		s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CallResources.Insert(s.ctx, resource)) }), "Insert")
+		if i == 0 {
+			first = resource
+		}
+	}
+	s.Equal(shards, s.countQueries(func() {
+		resources, err := s.store.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+		s.Require().NoError(err)
+		s.Len(resources, 3)
+	}), "Select")
+	s.Equal(shards, s.countQueries(func() {
+		_, found, err := s.store.CallResources.Pin(s.ctx, "acme", "default", "call-1")
+		s.Require().NoError(err)
+		s.True(found)
+	}), "Pin finds the call's lines on the shards")
+	s.Equal(shards+1, s.countQueries(func() {
+		_, found, err := s.store.CallResources.Pin(s.ctx, "acme", "default", "no-lines")
+		s.Require().NoError(err)
+		s.False(found)
+	}), "Pin then looks for a number attached to the call")
+	s.Equal(shards, s.countQueries(func() {
+		stale, err := s.store.CallResources.SelectStale(s.ctx, time.Now().Add(time.Minute))
+		s.Require().NoError(err)
+		s.Len(stale, 3)
+	}), "SelectStale")
+	s.Equal(shards, s.countQueries(func() { s.Require().NoError(s.store.CallResources.Forget(s.ctx, *first)) }), "Forget")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CallResources.Delete(s.ctx, first.ID+1)) }), "Delete")
+	s.Equal(shards, s.countQueries(func() {
+		released, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+		s.Require().NoError(err)
+		s.Len(released, 1)
+	}), "Release")
 }

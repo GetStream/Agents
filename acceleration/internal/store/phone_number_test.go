@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -192,4 +193,60 @@ func (s *StoreSuite) TestTheSameNumberCanBeBoughtAgainAfterBeingReleased() {
 	}
 
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, again))
+}
+
+func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
+	config := newID()
+	_, err := s.store.global.ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, 'acme', 'answers', 'be brief')", config)
+	s.Require().NoError(err)
+	for i := range 5 {
+		e164 := fmt.Sprintf("+1512555010%d", i)
+		s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+			E164: e164, Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
+		}))
+		s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", e164, NumberAttachment{TrunkID: "trunk-1", CallType: "default"}))
+		s.Require().NoError(s.store.PhoneNumbers.SetAgent(s.ctx, "acme", e164, config))
+	}
+	trunk := s.trunk("acme")
+
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+			E164: "+15125550199", Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
+		}))
+	}), "Insert")
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15125550198"))
+	}), "InsertOnSIPTrunk reads the trunk and the number before it inserts")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125550199", NumberAttachment{TrunkID: "trunk-1", CallType: "default"}))
+	}), "Attach")
+	s.Equal(1, s.countQueries(func() {
+		numbers, err := s.store.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{})
+		s.Require().NoError(err)
+		s.Len(numbers, 7)
+	}), "Select")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125550100")
+		s.Require().NoError(err)
+	}), "GetByE164")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.PhoneNumbers.SetAgent(s.ctx, "acme", "+15125550199", config))
+	}), "SetAgent")
+	s.Equal(1, s.countQueries(func() {
+		numbers, err := s.store.PhoneNumbers.AnsweredBy(s.ctx, "acme", config)
+		s.Require().NoError(err)
+		s.Len(numbers, 6)
+	}), "AnsweredBy")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.PhoneNumbers.ClearAgent(s.ctx, "acme", "+15125550199"))
+	}), "ClearAgent")
+	s.Equal(1, s.countQueries(func() {
+		held, err := s.store.PhoneNumbers.HeldSince(s.ctx, s.base)
+		s.Require().NoError(err)
+		s.Len(held, 7)
+	}), "HeldSince")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125550199", s.base.Add(time.Hour)))
+	}), "Release")
 }

@@ -162,3 +162,23 @@ func (s *StoreSuite) TestABoughtNumberIsStillHeldByOneCustomerPerVendor() {
 	})
 	s.True(isViolation(err, uniqueViolation), "the rewritten index still stops a vendor's number being recorded twice: %v", err)
 }
+
+func (s *StoreSuite) TestSIPTrunkQueryBudgets() {
+	for range 3 {
+		s.trunk("acme")
+	}
+	var trunk *SIPTrunk
+	s.Equal(1, s.countQueries(func() { trunk = s.trunk("acme") }), "Insert")
+	s.Equal(1, s.countQueries(func() {
+		trunks, err := s.store.SIPTrunks.Select(s.ctx, "acme")
+		s.Require().NoError(err)
+		s.Len(trunks, 4)
+	}), "Select")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
+		s.Require().NoError(err)
+	}), "Get")
+	trunk.Name = "renamed"
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, trunk)) }), "Update")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID)) }), "Delete")
+}

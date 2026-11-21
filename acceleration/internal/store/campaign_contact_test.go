@@ -641,3 +641,62 @@ func (s *StoreSuite) TestASilentCallSettlesAsUnanswered() {
 	s.Equal("done", latest.ClassifyState)
 	s.Equal(Enrolled, s.contactByNumber(campaign, "+15550001").Stage)
 }
+
+func (s *StoreSuite) TestCampaignContactQueryBudgets() {
+	draft := s.draftCampaign(newID())
+	contacts := make([]Contact, 2*insertChunk+1)
+	for i := range contacts {
+		contacts[i] = Contact{ToNumber: fmt.Sprintf("+1555%07d", i)}
+	}
+	s.Equal(5+2, s.countQueries(func() {
+		_, _, err := s.store.CampaignContacts.InsertMany(s.ctx, draft.ID, contacts)
+		s.Require().NoError(err)
+	}), "InsertMany locks the draft, inserts a chunk at a time and counts")
+	s.Equal(2+2, s.countQueries(func() { s.Require().NoError(s.store.CampaignContacts.DeleteAll(s.ctx, draft.ID)) }),
+		"DeleteAll locks the draft and deletes")
+
+	running := make([]Campaign, 3)
+	for i := range running {
+		running[i] = s.runningCampaign(2, "+15550001", "+15550002", "+15550003")
+	}
+	var claimed []Claimed
+	s.Equal(2+1+len(running), s.countQueries(func() { claimed = s.claimDue("a", s.base, 10) }),
+		"Claim locks the due campaigns, then claims each one's share in one statement")
+	s.Len(claimed, 6, "two of each campaign's three, its concurrency")
+	s.Equal(2, s.countQueries(func() {
+		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", s.base.Add(time.Hour), time.Minute, 10)
+		s.Require().NoError(err)
+		s.Len(taken, 6)
+	}), "TakeOverExpired takes every lapsed contact, then reads their campaigns, in one query each")
+
+	contact := claimed[0].Contact
+	s.Equal(1, s.countQueries(func() {
+		listed, err := s.store.CampaignContacts.Select(s.ctx, running[0].ID, ContactFilter{Limit: 10})
+		s.Require().NoError(err)
+		s.Len(listed, 3)
+	}), "Select")
+	s.Equal(2, s.countQueries(func() {
+		_, _, err := s.store.CampaignContacts.Get(s.ctx, contact.CampaignID, contact.ID)
+		s.Require().NoError(err)
+	}), "Get reads the contact, then its attempts")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CampaignContacts.Stop(s.ctx, contact.CampaignID, contact.ID)) }), "Stop")
+	next := s.base.Add(time.Hour)
+	s.Equal(2+2, s.countQueries(func() {
+		s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "b", contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &next}))
+	}), "Settle settles the contact and abandons its pending classifications")
+	other := claimed[1].Contact
+	attempt := s.answered("b", running[0], other, s.base, s.base.Add(time.Minute))
+	s.Equal(3+2, s.countQueries(func() {
+		s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "b",
+			Classification{AttemptID: attempt.ID, Outcome: "callback"}, other.ID, Settle{Stage: Completed, Attempt: 1}))
+	}), "ClassifyAndSettle classifies the dial, then settles as Settle does")
+	ids := make([]string, len(running))
+	for i, campaign := range running {
+		ids[i] = campaign.ID
+	}
+	s.Equal(1, s.countQueries(func() {
+		stages, err := s.store.CampaignContacts.Stages(s.ctx, ids)
+		s.Require().NoError(err)
+		s.Len(stages, 3)
+	}), "Stages")
+}

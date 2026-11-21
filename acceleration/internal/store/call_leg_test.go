@@ -3,6 +3,7 @@
 package store
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -408,4 +409,87 @@ INSERT INTO phone_calls (token, customer_id, call_type, call_id, vendor, vendor_
 	s.Require().NoError(err)
 	s.False(refused.Connected())
 	s.NotNil(refused.EndedAt, "a call with no leg is no leg still ringing")
+}
+
+func (s *StoreSuite) TestCallLegQueryBudgets() {
+	shards := len(s.store.shards())
+	scope := AppScope{App: 7}
+	open := func(callID, remote string, direction string) CallLeg {
+		leg := CallLeg{CustomerID: "acme", OrganizationID: "org", StreamAppPK: 7, CallType: "default", CallID: callID,
+			Vendor: "telnyx", Direction: direction, LocalNumber: "+15125550100", RemoteNumber: remote, DialedAt: s.base}
+		opened, err := s.store.CallLegs.Open(s.ctx, &leg)
+		s.Require().NoError(err)
+		s.Require().True(opened)
+		return leg
+	}
+	// Opening looks for the phone's join kept before it, by its remote number, then, outbound,
+	// by the number it was placed from: one statement for each, in each shard, each its own transaction.
+	s.Equal(1+2*shards*3, s.countQueries(func() { open("call-1", "+15125550101", Outbound) }), "Open of an outbound leg")
+	s.Equal(1+shards*3, s.countQueries(func() { open("call-1", "+15125550102", Inbound) }), "Open of an inbound leg")
+	open("call-1", "+15125550103", Outbound)
+
+	s.Equal(shards, s.countQueries(func() {
+		ringing, err := s.store.CallLegs.Ringing(s.ctx, scope, "default", "call-1")
+		s.Require().NoError(err)
+		s.True(ringing)
+	}), "Ringing")
+	s.Equal(shards+1, s.countQueries(func() {
+		_, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "default", "call-1", "session", "phone-1", "+15125550101", s.base, nil)
+		s.Require().NoError(err)
+		s.Equal(LegConnected, connection)
+	}), "Connect asks every shard whether the phone has a leg, then gives it the leg of its number")
+	s.Equal(shards, s.countQueries(func() {
+		known, err := s.store.CallLegs.HasParticipant(s.ctx, scope, "default", "call-1", "phone-1")
+		s.Require().NoError(err)
+		s.True(known)
+	}), "HasParticipant")
+	s.Equal(shards, s.countQueries(func() {
+		total, inCall, err := s.store.CallLegs.CountOpen(s.ctx, "org", s.base.Add(-time.Minute), "default", "call-1")
+		s.Require().NoError(err)
+		s.Equal(3, total)
+		s.Equal(3, inCall)
+	}), "CountOpen")
+	s.Equal(shards, s.countQueries(func() {
+		ended, err := s.store.CallLegs.EndParticipant(s.ctx, scope, "default", "call-1", "phone-1", s.base.Add(time.Minute))
+		s.Require().NoError(err)
+		s.Len(ended, 1)
+	}), "EndParticipant")
+	s.Equal(shards, s.countQueries(func() {
+		ended, err := s.store.CallLegs.EndCall(s.ctx, scope, "default", "call-1", s.base.Add(time.Minute))
+		s.Require().NoError(err)
+		s.Len(ended, 2)
+	}), "EndCall ends every open leg of the call in one statement a shard")
+	s.Equal(1, s.countQueries(func() {
+		ended, err := s.store.CallLegs.SelectEnded(s.ctx, s.base, s.base.Add(time.Hour), 10)
+		s.Require().NoError(err)
+		s.Len(ended, 1, "the inbound leg never started")
+	}), "SelectEnded")
+
+	for i := range 3 {
+		answered := open(fmt.Sprintf("long-%d", i), "+15125550104", Inbound)
+		_, _, err := s.store.CallLegs.Connect(s.ctx, scope, "default", answered.CallID, "session", "phone", "+15125550104", s.base, nil)
+		s.Require().NoError(err)
+		open(fmt.Sprintf("rang-%d", i), "+15125550105", Outbound)
+	}
+	s.Equal(2, s.countQueries(func() {
+		swept, err := s.store.CallLegs.Sweep(s.ctx, s.base.Add(time.Hour), 30*time.Minute, 10)
+		s.Require().NoError(err)
+		s.Len(swept, 6)
+	}), "Sweep ends the long calls, then the ones that rang out")
+
+	leg := s.placedLeg("token", func(leg *CallLeg) { leg.VendorCallID = "v-1" })
+	s.Equal(1, s.countQueries(func() { s.placedLeg("other", nil) }), "Place")
+	s.Equal(1, s.countQueries(func() {
+		placed, err := s.store.CallLegs.Placed(s.ctx, leg.CustomerID, leg.Vendor, "v-1")
+		s.Require().NoError(err)
+		s.True(placed)
+	}), "Placed finds a leg of this shard there")
+	s.Equal(2+2, s.countQueries(func() {
+		_, err := s.store.CallLegs.ChangeOutcome(s.ctx, PlacedWhere{Token: "token"}, func(leg *CallLeg) bool {
+			leg.Outcome = "completed"
+			return true
+		})
+		s.Require().NoError(err)
+	}), "ChangeOutcome locks the leg in its shard, then writes it")
+	s.Equal(shards, s.countQueries(func() { s.Require().NoError(s.store.CallLegs.Unplace(s.ctx, "other")) }), "Unplace")
 }

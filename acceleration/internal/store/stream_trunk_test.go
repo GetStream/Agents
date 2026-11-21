@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -451,4 +452,53 @@ func (s *StoreSuite) TestAnOwnTrunkMadeWithoutAKeyIsSavedWithNoPassword() {
 	s.Require().NoError(err)
 	s.True(trunk.Own)
 	s.Empty(trunk.BridgePasswordSealed)
+}
+
+func (s *StoreSuite) TestStreamTrunkQueryBudgets() {
+	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
+	for i := range 3 {
+		s.savedTrunk(group, fmt.Sprintf("trunk-%d", i))
+		for j := range 3 {
+			s.lined(group, fmt.Sprintf("+151255501%d%d", i, j), fmt.Sprintf("trunk-%d", i))
+		}
+	}
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125550199", Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
+	}))
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-0")
+		s.Require().NoError(err)
+	}), "Get")
+	// InGroup is a transaction, BEGIN to COMMIT, that takes the group's lock first.
+	in := func(name string, budget int, fn func(tx *TrunkGroupTx) error) {
+		s.Equal(3+budget, s.countQueries(func() {
+			s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+				return fn(tx)
+			}))
+		}), name)
+	}
+	in("InGroup", 0, func(*TrunkGroupTx) error { return nil })
+	in("Trunks", 1, func(tx *TrunkGroupTx) error {
+		trunks, err := tx.Trunks()
+		s.Len(trunks, 3)
+		for _, trunk := range trunks {
+			s.Len(trunk.Numbers, 3, "each trunk's numbers come with it")
+		}
+		return err
+	})
+	in("SaveTrunk", 1, func(tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-3", BridgeURI: "sip:trunk-3@sip.example.test"})
+	})
+	in("Number", 1, func(tx *TrunkGroupTx) error {
+		_, err := tx.Number("+15125550199")
+		return err
+	})
+	in("SetLine", 1, func(tx *TrunkGroupTx) error { return tx.SetLine("+15125550199", "trunk-3", "route-3") })
+	in("Attach", 1, func(tx *TrunkGroupTx) error {
+		return tx.Attach("+15125550199", NumberAttachment{TrunkID: "trunk-3", StreamAppPK: 7, CallType: "default"})
+	})
+	in("Detach", 1, func(tx *TrunkGroupTx) error { return tx.Detach("+15125550199") })
+	in("ClearLine", 1, func(tx *TrunkGroupTx) error { return tx.ClearLine("+15125550199") })
+	in("DeleteTrunk", 1, func(tx *TrunkGroupTx) error { return tx.DeleteTrunk("trunk-3") })
+	in("ReleaseNumber", 1, func(tx *TrunkGroupTx) error { return tx.ReleaseNumber("+15125550199", s.base) })
 }

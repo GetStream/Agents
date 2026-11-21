@@ -730,3 +730,57 @@ func (s *StoreSuite) TestCallsAreCountedByHowThePhoneSaysTheyEnded() {
 
 	s.Equal(map[string]int{"busy": 2, "no_answer": 1, "completed": 1}, got.CallOutcomes, "a call still happening and a dial that placed none are left out")
 }
+
+func (s *StoreSuite) TestCampaignQueryBudgets() {
+	customerID := newID()
+	for range 3 {
+		s.draftCampaign(customerID, "+15550001", "+15550002")
+	}
+	var campaign Campaign
+	s.Equal(1, s.countQueries(func() {
+		campaign = Campaign{CustomerID: customerID, Name: "Renewals", ConfigID: "config-1", FromNumber: "+15550100",
+			Sequence: json.RawMessage(`{"steps":[]}`), CallingHours: json.RawMessage(`{"windows":{}}`)}
+		s.Require().NoError(s.store.Campaigns.Insert(s.ctx, &campaign))
+	}), "Insert")
+	_, _, err := s.store.CampaignContacts.InsertMany(s.ctx, campaign.ID, []Contact{{ToNumber: "+15550001"}, {ToNumber: "+15550002"}, {ToNumber: "+15550003"}})
+	s.Require().NoError(err)
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.Campaigns.Get(s.ctx, customerID, campaign.ID)
+		s.Require().NoError(err)
+	}), "Get")
+	s.Equal(1, s.countQueries(func() {
+		campaigns, err := s.store.Campaigns.Select(s.ctx, customerID, CampaignFilter{Limit: 10})
+		s.Require().NoError(err)
+		s.Len(campaigns, 4)
+	}), "Select")
+	name := "Renamed"
+	s.Equal(2, s.countQueries(func() {
+		_, err := s.store.Campaigns.Update(s.ctx, customerID, campaign.ID, CampaignChanges{Name: &name})
+		s.Require().NoError(err)
+	}), "Update writes, then reads the campaign back")
+	var copied Campaign
+	s.Equal(3+2, s.countQueries(func() {
+		copied, err = s.store.Campaigns.Duplicate(s.ctx, customerID, campaign.ID, DuplicateAll)
+		s.Require().NoError(err)
+	}), "Duplicate reads, inserts the campaign, then copies every contact in one statement")
+	s.Len(s.contactsOf(copied), 3)
+	s.Equal(4+2, s.countQueries(func() { campaign = s.launch(campaign, s.base.Add(time.Hour)) }),
+		"Launch moves the campaign, rejects the opted out, enrolls the rest and reads it back")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Campaigns.StartDue(s.ctx, s.base.Add(2*time.Hour))) }), "StartDue")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Campaigns.Pause(s.ctx, customerID, campaign.ID, "")) }), "Pause")
+	s.Equal(2, s.countQueries(func() { s.Require().NoError(s.store.Campaigns.Resume(s.ctx, customerID, campaign.ID)) }),
+		"Resume reads the campaign to know where it resumes to")
+	s.Equal(1, s.countQueries(func() {
+		totals, err := s.store.Campaigns.Totals(s.ctx, []string{campaign.ID})
+		s.Require().NoError(err)
+		s.Contains(totals, campaign.ID)
+	}), "Totals")
+	s.Equal(5, s.countQueries(func() {
+		_, err := s.store.Campaigns.Analytics(s.ctx, campaign.ID)
+		s.Require().NoError(err)
+	}), "Analytics")
+	s.Equal(2+2, s.countQueries(func() { s.Require().NoError(s.store.Campaigns.Stop(s.ctx, customerID, campaign.ID, s.base)) }),
+		"Stop moves the campaign and its waiting contacts")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Campaigns.Complete(s.ctx, s.base.Add(3*time.Hour))) }), "Complete")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Campaigns.Delete(s.ctx, customerID, campaign.ID)) }), "Delete")
+}
