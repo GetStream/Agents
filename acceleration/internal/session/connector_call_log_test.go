@@ -523,7 +523,7 @@ func (s *CallLogSuite) row(connection string) store.ConnectorInvocation {
 	var rows []store.ConnectorInvocation
 	s.Require().Eventually(func() bool {
 		var err error
-		rows, err = s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		rows, err = s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	return rows[0]
@@ -565,7 +565,7 @@ sources:
     endpoint: mcp
 `, s.connectorID, s.provider.URL)))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }

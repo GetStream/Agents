@@ -32,14 +32,14 @@ var (
 // connection that was removed (store.ErrNoConnectorConnection), and free text past the
 // provider's window (ErrOutsideWindow, pastWindow).
 func (b *Bridge) Reachable(ctx context.Context, thread store.ChannelThread) error {
-	connection, err := b.store.ConnectorConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	connection, err := b.store.ConnectorConnections.Get(ctx, thread.CustomerID, thread.ConnectionID)
 	if err != nil {
 		return err
 	}
 	if err := b.refusesReply(ctx, thread); err != nil {
 		return err
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return err
 	}

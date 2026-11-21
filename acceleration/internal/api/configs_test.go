@@ -33,7 +33,7 @@ func TestConfigsSuite(t *testing.T) {
 func (s *ConfigsSuite) SetupSuite() {
 	s.connectors = core.Registry{Schemes: map[string]core.Scheme{"oauth2_code": namedScheme("oauth2_code")}}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, because a config's name has to be free and
@@ -1221,7 +1221,7 @@ func (s *ConfigsSuite) TestAFixedBindingToAnotherAppsConnectionIsRefused() {
 
 func (s *ConfigsSuite) TestAFixedBindingToADeletedConnectionIsRefused() {
 	connection := s.connection("")
-	s.Require().NoError(s.store.DeleteConnectorConnection(context.Background(), s.customerID(), connection))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(context.Background(), s.customerID(), connection))
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
 		map[string]any{"name": "support", "connectors": []map[string]any{fixedSlack("crm", connection)}})
@@ -1748,7 +1748,7 @@ func (s *ConfigsSuite) connection(owner string) string {
 // connectionTo is connection to another built-in connector.
 func (s *ConfigsSuite) connectionTo(connectorID, owner string) string {
 	ctx := context.Background()
-	definition, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), connectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), connectorID)
 	s.Require().NoError(err)
 	connection := &store.ConnectorConnection{
 		CustomerID: s.customerID(), ConnectorID: definition.ID, DefinitionRevision: definition.Revision,
@@ -1757,7 +1757,7 @@ func (s *ConfigsSuite) connectionTo(connectorID, owner string) string {
 	if owner != "" {
 		connection.OwnerType, connection.OwnerID = store.OwnerUser, owner
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(ctx, s.connectors, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, s.connectors, connection))
 	return connection.ID
 }
 
@@ -1935,7 +1935,7 @@ func (s *ConfigsSuite) TestTwoSandboxBindingsToDifferentConnectorsGivingOneEnvVa
 	manifest, err := core.ParseManifest(source)
 	s.Require().NoError(err)
 	manifest.ID = "custom_" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	custom := sessionGitHub("docs", true)
 	custom["connector_id"] = manifest.ID
@@ -2098,7 +2098,7 @@ func (s *ConfigsSuite) TestNessyBesideAConnectorWithOneOutboundSourceAmongSevera
 	readOnly := manifest.Sources[0]
 	readOnly.Outbound = new(false)
 	manifest.Sources = []core.SourceRule{readOnly, manifest.Sources[0]}
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	custom := sessionGitHubGranting("code", "create_issue")
 	custom["connector_id"] = manifest.ID
@@ -2305,19 +2305,19 @@ func (s *ConfigsSuite) TestABindingBesideNessyMayGrantExactlyTheToolsFlaggedRead
 func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveChecks() {
 	s.useInternalApp()
 	ctx := context.Background()
-	linear, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), "linear")
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
 	s.Require().NoError(err)
 	manifest := linear.Manifest
 	manifest.ID = "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest.Sources = []core.SourceRule{{Kind: "mcp", Endpoint: "mcp", ReadOnlyTools: []string{"list_issues"}}}
-	_, err = s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
 	id := s.connectionTo(manifest.ID, "")
 	manifest.Sources = []core.SourceRule{{Kind: "mcp", Endpoint: "mcp",
 		ReadOnlyTools: []string{"list_issues", "search_documentation"}}}
-	revised, err := s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	revised, err := s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
-	connection, err := s.store.ConnectorConnection(ctx, s.customerID(), id)
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
 	s.Require().Equal([]int{1, 2}, []int{connection.DefinitionRevision, revised.Revision})
 	s.listTools(id, "list_issues", "search_documentation", "save_issue")
@@ -2338,7 +2338,7 @@ func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveCh
 func (s *ConfigsSuite) TestReadOnlyOfAConnectorWithSeveralSourcesNeedsEverySourceToSayIt() {
 	s.useInternalApp()
 	ctx := context.Background()
-	linear, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), "linear")
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
 	s.Require().NoError(err)
 	manifest := linear.Manifest
 	manifest.ID = "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
@@ -2346,7 +2346,7 @@ func (s *ConfigsSuite) TestReadOnlyOfAConnectorWithSeveralSourcesNeedsEverySourc
 		{Kind: "mcp", Endpoint: "mcp", ReadOnlyTools: []string{"list_issues", "get_issue", "search_documentation"}},
 		{Kind: "mcp", Endpoint: "mcp", ReadOnlyTools: []string{"list_issues", "get_issue"}},
 		{Kind: "mcp", Endpoint: "mcp", Outbound: new(false)}}
-	_, err = s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
 	id := s.connectionTo(manifest.ID, "")
 	s.listTools(id, "list_issues", "get_issue", "search_documentation", "save_issue")
@@ -2389,7 +2389,7 @@ func (s *ConfigsSuite) listTools(id string, names ...string) {
 	for _, name := range names {
 		tools = append(tools, store.ConnectorTool{Name: name, InputSchema: map[string]any{"type": "object"}})
 	}
-	s.Require().NoError(s.store.SetConnectorConnectionTools(context.Background(), s.customerID(), id, tools,
+	s.Require().NoError(s.store.ConnectorConnections.SetTools(context.Background(), s.customerID(), id, tools,
 		"digest", time.Now()))
 }
 
@@ -2673,7 +2673,7 @@ func (s *ConfigsSuite) TestAnUpdateKeepingABindingToAForceDeletedConnectorIsAcce
 	manifest, err := core.ParseManifest(source)
 	s.Require().NoError(err)
 	manifest.ID = "custom_" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	custom := sessionGitHubGranting("code", "create_issue")
 	custom["connector_id"] = manifest.ID

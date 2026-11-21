@@ -84,7 +84,7 @@ func (s *WhatsAppChannelSuite) SetupSuite() {
 	// The model's fetch of a photo reads it where the test's Stream Chat says it stored it.
 	s.imageHTTP = &http.Client{Transport: roundTripper(s.cdn)}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *WhatsAppChannelSuite) SetupTest() {
@@ -376,7 +376,7 @@ func (s *WhatsAppChannelSuite) TestAPhotoThatCannotBeDownloadedIsAnsweredByItsCa
 			s.Equal("Is this tooth chipped?", said.Content)
 			s.Empty(imagesIn(said))
 			s.Empty(s.chat.Uploads()[uploaded:])
-			connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), s.connection.ID)
+			connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), s.connection.ID)
 			s.Require().NoError(err)
 			s.Equal(store.ConnectionConnected, string(connection.Status), "the connection is left as it was")
 			gets := s.meta.got()[got:]
@@ -768,7 +768,7 @@ func (s *WhatsAppChannelSuite) TestAConnectionStillOnRevision1AnswersTextAlone()
 func (s *WhatsAppChannelSuite) TestAConnectionPinnedToARevisionWithNoChannelBlockAnswers500AndLinksNothing() {
 	ctx := context.Background()
 	s.pinToRevision1()
-	stored, err := s.store.ConnectorDefinition(ctx, s.customerID(), "whatsapp", 1)
+	stored, err := s.store.ConnectorDefinitions.Get(ctx, s.customerID(), "whatsapp", 1)
 	s.Require().NoError(err)
 	s.Require().NotNil(stored.Manifest.Channel)
 	restored := stored
@@ -826,8 +826,8 @@ func (s *WhatsAppChannelSuite) pinTo(revision int) {
 		older = strings.NewReplacer("\nrevision: 2\n", "\nrevision: 1\n", also, "").Replace(older)
 		s.Require().NotContains(older, "also:")
 	}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(ctx, fstest.MapFS{"whatsapp.yaml": {Data: []byte(older)}}))
-	s.Require().NoError(s.store.WithLockedConnectorConnection(ctx, s.customerID(), s.connection.ID,
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(ctx, fstest.MapFS{"whatsapp.yaml": {Data: []byte(older)}}))
+	s.Require().NoError(s.store.ConnectorConnections.WithLocked(ctx, s.customerID(), s.connection.ID,
 		func(connection *store.ConnectorConnection, _ func() error) (bool, error) {
 			connection.DefinitionRevision = revision
 			return true, nil

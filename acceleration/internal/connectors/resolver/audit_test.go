@@ -16,7 +16,7 @@ import (
 // which a second row would have been written too.
 func (s *ResolverSuite) audited(ref core.ConnectionRef, count int) []store.ConnectorAuditEvent {
 	read := func() []store.ConnectorAuditEvent {
-		rows, err := s.db.ConnectorAuditEvents(s.f.ctx, ref.CustomerID, store.AuditFilter{ConnectionID: ref.ConnectionID})
+		rows, err := s.db.ConnectorAuditEvents.Select(s.f.ctx, ref.CustomerID, store.AuditFilter{ConnectionID: ref.ConnectionID})
 		s.Require().NoError(err)
 		return rows
 	}

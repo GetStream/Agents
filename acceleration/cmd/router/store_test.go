@@ -66,7 +66,7 @@ func (s *OpenStoreSuite) TestARouterStartingOnAnEmptyDatabaseHasTheBuiltInsAtThe
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { opened.Close() })
 
-		definitions, err := opened.ListConnectorDefinitions(s.ctx, "acme", store.ConnectorDefinitionFilter{})
+		definitions, err := opened.ConnectorDefinitions.Select(s.ctx, "acme", store.ConnectorDefinitionFilter{})
 		s.Require().NoError(err)
 		s.Require().Len(definitions, 23, "a restart adds no revision")
 		for i, id := range []string{"bigquery", "calcom", "calendly", "github", "gmail", "gong", "google_calendar", "google_docs", "google_drive", "hubspot", "instacart", "linear", "linear_app", "linq", "metabase", "notion", "salesforce", "sentry", "shopify", "slack", "slack_bot", "telnyx", "whatsapp"} {

@@ -100,11 +100,11 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	definition, err := db.CreateConnectorDefinition(s.ctx, customer, manifest)
+	definition, err := db.ConnectorDefinitions.Revise(s.ctx, customer, manifest)
 	s.Require().NoError(err)
 	connection := &store.ConnectorConnection{CustomerID: customer, ConnectorID: definition.ID, DefinitionRevision: definition.Revision,
 		OwnerType: store.OwnerApp, AuthScheme: bearer.Name}
-	s.Require().NoError(db.CreateConnectorConnection(s.ctx, core.Registry{Schemes: schemes}, connection))
+	s.Require().NoError(db.ConnectorConnections.Insert(s.ctx, core.Registry{Schemes: schemes}, connection))
 	ref := core.ConnectionRef{CustomerID: customer, ConnectionID: connection.ID}
 	stored, _, err := bearer.New().Complete(s.ctx, core.CompleteInput{Supplied: map[string]string{bearer.SuppliedToken: "gho_canary"}})
 	s.Require().NoError(err)

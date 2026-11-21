@@ -374,7 +374,7 @@ func (s *AttachConnectorsSuite) TestAGrantedToolTheConnectorLeavesOutSaysSo() {
 		"scopes:\n  list: [read]\nsources:", 1) + "    tools:\n      - name: whoami\n        needs_scopes: [write]\n"
 	manifest, err := core.ParseManifest([]byte(scoped))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 	app := s.connection("", "primary")

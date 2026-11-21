@@ -7,10 +7,13 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
 	"github.com/uptrace/bun"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 )
 
 func (s *ShardedStoreSuite) TestTheSchemaFilesAreCurrent() {
@@ -87,17 +90,12 @@ func (s *ShardedStoreSuite) TestARepeatableReadWriteOnANewDatabaseIsRecorded() {
 }
 
 // legacy turns the suite's database back into one that ran the single history up to version:
-// the schema at the baseline, which that history left.
+// the baseline's schema, recorded in the single history's table.
 func (s *StoreSuite) legacy(dsn string, version int64) *Store {
 	legacy, err := Open(dsn)
 	s.Require().NoError(err)
-	s.Require().NoError(legacy.Migrate(s.ctx))
-	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", legacy.global.DB, globalSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-	_, err = provider.DownTo(s.ctx, baseline)
-	s.Require().NoError(err)
+	s.upTo(legacy, globalSet, baseline)
+	s.upTo(legacy, shardSet, baseline)
 	_, err = legacy.global.ExecContext(s.ctx, `DROP TABLE goose_global_version, goose_shard_version;
 		CREATE TABLE goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp DEFAULT now());
 		INSERT INTO goose_db_version (version_id, is_applied) VALUES (0, true), (?, true)`, version)
@@ -124,4 +122,80 @@ func (s *StoreSuite) TestADatabaseShortOfTheSingleHistorysLastMigrationIsRefused
 	defer legacy.Close()
 
 	s.ErrorContains(legacy.Migrate(s.ctx), "has not applied migration 20270103090000")
+}
+
+// migratedTo opens an empty database of the suite's own with the shared set applied up to
+// version, so a test can write the rows a later migration rewrites.
+func (s *StoreSuite) migratedTo(name string, version int64) *Store {
+	opened, err := Open(s.emptyDatabase(name))
+	s.Require().NoError(err)
+	s.upTo(opened, globalSet, version)
+	return opened
+}
+
+// upTo applies set's migrations to the store's one database up to version.
+func (s *StoreSuite) upTo(opened *Store, set migrationSet, version int64) {
+	versions, err := database.NewStore(database.DialectPostgres, set.table)
+	s.Require().NoError(err)
+	provider, err := goose.NewProvider("", opened.global.DB, set.files, goose.WithStore(versions))
+	s.Require().NoError(err)
+	_, err = provider.UpTo(s.ctx, version)
+	s.Require().NoError(err)
+}
+
+func (s *StoreSuite) TestFoldingTheConnectorSideTablesKeepsTheirRows() {
+	folded := s.migratedTo("folded", 20270113000000-1)
+	defer folded.Close()
+	checked := time.Date(2026, 3, 1, 10, 0, 0, 123456000, time.UTC)
+	expires := checked.Add(time.Hour)
+	_, err := folded.global.ExecContext(s.ctx, `
+INSERT INTO connector_connections (id, customer_id, connector_id, definition_revision, owner_type, auth_scheme, status)
+VALUES ('with', 'app', 'acme', 1, 'app', 'test_key', 'connected'), ('without', 'app', 'acme', 1, 'app', 'test_key', 'pending');
+INSERT INTO connector_connection_clients (connection_id, registration, client_id, updated_at) VALUES ('with', 'dcr', 'issued', ?);
+INSERT INTO connector_connection_validations (connection_id, revision, status, code, error, checked_at)
+VALUES ('with', 3, 'failed', '503', 'Service Unavailable', ?);
+INSERT INTO connector_audit (id, customer_id, connection_id, connector_id, owner_type, action, created_at)
+VALUES ('granted', 'app', 'with', 'acme', 'app', 'grant_created', ?), ('called', 'app', 'with', 'acme', 'app', 'proxy_call', ?);
+INSERT INTO connector_audit_credentials (audit_id, access_fingerprint, refresh_fingerprint, previous_refresh_fingerprint, rotated, access_expires_at)
+VALUES ('granted', 'a1', 'r2', 'r1', true, ?);
+INSERT INTO connector_invocations (id, customer_id, connection_id, connector_id, config_id, binding, tool, started_at, latency_ms)
+VALUES ('shaped', 'app', 'with', 'acme', 'config', 'acme', 'search', ?, 5), ('unshaped', 'app', 'with', 'acme', 'config', 'acme', 'search', ?, 5);
+INSERT INTO connector_invocation_arguments (invocation_id, shape) VALUES ('shaped', '[{"name": "q", "type": "string", "length": 4}]');
+`, checked, checked, checked, checked.Add(-time.Second), expires, checked, checked.Add(-time.Second))
+	s.Require().NoError(err)
+
+	s.Require().NoError(folded.Migrate(s.ctx))
+
+	with, err := folded.ConnectorConnections.Get(s.ctx, "app", "with")
+	s.Require().NoError(err)
+	s.Equal(ConnectorConnectionClient{Registration: core.ClientDCR, ClientID: "issued", UpdatedAt: checked}, with.Client)
+	s.Equal(ConnectorConnectionValidation{Revision: 3, Status: "failed", Code: "503", Error: "Service Unavailable", CheckedAt: checked}, with.Validation)
+	without, err := folded.ConnectorConnections.Get(s.ctx, "app", "without")
+	s.Require().NoError(err)
+	s.Zero(without.Client)
+	s.Zero(without.Validation)
+
+	events, err := folded.ConnectorAuditEvents.Select(s.ctx, "app", AuditFilter{ConnectionID: "with"})
+	s.Require().NoError(err)
+	s.Require().Len(events, 2)
+	s.Equal(&ConnectorAuditCredential{AccessFingerprint: "a1", RefreshFingerprint: "r2", PreviousRefreshFingerprint: "r1",
+		Rotated: true, AccessExpiresAt: expires}, normalized(events[0].Credential))
+	s.Nil(events[1].Credential, "a row without a credential has none")
+
+	invocations, err := folded.ConnectorInvocations.Select(s.ctx, "app", InvocationFilter{ConnectionID: "with"})
+	s.Require().NoError(err)
+	s.Require().Len(invocations, 2)
+	length := 4
+	s.Equal([]ArgumentShape{{Name: "q", Type: "string", Length: &length}}, invocations[0].Arguments)
+	s.Nil(invocations[1].Arguments, "a call whose arguments were not an object has no shape")
+}
+
+// normalized is credential with its times in UTC, as they were written.
+func normalized(credential *ConnectorAuditCredential) *ConnectorAuditCredential {
+	if credential == nil {
+		return nil
+	}
+	out := *credential
+	out.AccessExpiresAt, out.RefreshExpiresAt = out.AccessExpiresAt.UTC(), out.RefreshExpiresAt.UTC()
+	return &out
 }

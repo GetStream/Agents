@@ -31,7 +31,7 @@ func (s *StoreSuite) TestAConfigsBindingsAreReadBackAsTheyWereStored() {
 
 func (s *StoreSuite) TestAConfigCannotBindAConnectionThatIsNotLive() {
 	deleted := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", deleted.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", deleted.ID))
 	others := s.connection("other-app", nil)
 
 	for _, id := range []string{deleted.ID, others.ID, newID()} {
@@ -46,7 +46,7 @@ func (s *StoreSuite) TestAConfigCannotBindAConnectionThatIsNotLive() {
 
 func (s *StoreSuite) TestAnUpdateCannotNewlyBindADeletedConnection() {
 	deleted := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", deleted.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", deleted.ID))
 	config := s.boundConfig("acme-app")
 
 	config.Connectors = []ConnectorBinding{fixed(deleted.ID)}
@@ -62,7 +62,7 @@ func (s *StoreSuite) TestAnUpdateCannotNewlyBindADeletedConnection() {
 func (s *StoreSuite) TestAnUpdateKeepsABindingAForcedDeleteLeftBehind() {
 	connection := s.connection("acme-app", nil)
 	config := s.boundConfig("acme-app", fixed(connection.ID))
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
 	config.Instructions = "be brief"
 	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &config))
@@ -102,7 +102,7 @@ func (s *StoreSuite) TestAFixedBindingAConfigStoresReferencesItsConnection() {
 	connection := s.connection("acme-app", nil)
 	s.boundConfig("acme-app", fixed(connection.ID))
 
-	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.True(referenced)
 }

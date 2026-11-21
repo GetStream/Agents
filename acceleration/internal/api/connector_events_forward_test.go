@@ -62,7 +62,7 @@ func (s *EventForwardingSuite) SetupSuite() {
 	s.channelProvider = func() string { return strings.TrimPrefix(s.slack.URL, "https://") }
 	s.forwardHTTP = destinationClient()
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *EventForwardingSuite) SetupTest() {
@@ -760,7 +760,7 @@ func (s *EventForwardingSuite) providerApp(signingSecret string) store.Connector
 	record.SigningSecretSealed, err = s.sealer.SealWithAAD(signingSecret, providerAppAAD(record.CustomerID, "slack_bot", record.ProviderAppID))
 	s.Require().NoError(err)
 	record.SigningKEKVersion = s.sealer.CurrentVersion()
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	return *record
 }

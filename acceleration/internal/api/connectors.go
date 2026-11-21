@@ -293,11 +293,12 @@ func (s *Server) listConnectors(ctx context.Context, request *listConnectorsRequ
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.ListConnectorDefinitions(ctx, customerID, store.ConnectorDefinitionFilter{
+	found, err := s.store.ConnectorDefinitions.Select(ctx, customerID, store.ConnectorDefinitionFilter{
 		Text:   strings.TrimSpace(request.Q),
 		Cursor: cursor,
 		Limit:  request.Limit,
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +327,7 @@ func (s *Server) getConnector(ctx context.Context, request *getConnectorRequest)
 	if s.store == nil {
 		return nil, errNoConnectors
 	}
-	definition, err := s.store.LatestConnectorDefinition(ctx, customerID, request.ID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, request.ID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, notFound("no such connector")
 	}
@@ -353,7 +354,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 		return nil, invalidRequest(store.StreamSource + " is the source of the router's own events, which no connector may be named")
 	}
 	// Every refusal a caller can cause is above, so what the store refuses here is a bug.
-	definition, err := s.store.CreateConnectorDefinition(ctx, customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(ctx, customerID, manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +371,7 @@ func (s *Server) deleteConnector(ctx context.Context, request *deleteConnectorRe
 	if s.store == nil {
 		return nil, errNoConnectors
 	}
-	deleted, err := s.store.DeleteConnectorDefinition(ctx, customerID, request.ID, request.Force)
+	deleted, err := s.store.ConnectorDefinitions.Delete(ctx, customerID, request.ID, request.Force)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, errNoCustomConnector
 	}

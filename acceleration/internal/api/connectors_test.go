@@ -38,7 +38,7 @@ func (s *ConnectorsSuite) SetupSuite() {
 		"api_key":                   namedScheme("api_key"),
 	}}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, so a list holds the built-ins and only what

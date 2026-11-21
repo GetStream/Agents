@@ -178,7 +178,7 @@ func (s *StoreSuite) deliveryKey() string {
 // The message webhook recorded the message first: it answers it, and the delivery queues nothing.
 func (s *StoreSuite) TestAChatInboundIsNotQueuedUnderAKeyRecordedBefore() {
 	key := s.deliveryKey()
-	first, err := s.store.FirstDelivery(s.ctx, key)
+	first, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, key)
 	s.Require().NoError(err)
 	s.Require().True(first)
 
@@ -198,7 +198,7 @@ func (s *StoreSuite) TestAChatInboundQueuedFirstRecordsItsKey() {
 	s.Require().NoError(err)
 	s.Require().True(queued)
 
-	first, err := s.store.FirstDelivery(s.ctx, key)
+	first, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, key)
 	s.Require().NoError(err)
 	s.False(first)
 	again, err := s.store.ChatInbounds.QueueFirst(s.ctx, key, s.chatInbound("msg-one"))
@@ -223,15 +223,15 @@ func (s *StoreSuite) TestAChatInboundThatCouldNotBeQueuedRecordsNoKey() {
 // Once the message webhook is off, the endpoint is what forgets the keys older than a day.
 func (s *StoreSuite) TestQueueingAChatInboundForgetsTheKeysOfADayAgo() {
 	old := s.deliveryKey()
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "INSERT INTO hook_deliveries (key, seen_at) VALUES (?, ?)", old, time.Now().Add(-deliveryKeptFor-time.Hour))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "INSERT INTO deliveries_seen (scope, key, seen_at) VALUES (?, ?, ?)", DeliveryScopeHook, old, time.Now().Add(-deliveryKeptFor-time.Hour))
 	s.Require().NoError(err)
 	// As a store that has forgotten none yet.
-	s.store.deliveriesPruned.Store(0)
+	s.store.DeliveriesSeen.pruned.Store(0)
 
 	_, err = s.store.ChatInbounds.QueueFirst(s.ctx, s.deliveryKey(), s.chatInbound("msg-one"))
 	s.Require().NoError(err)
 
-	kept, err := s.store.GlobalDB().NewSelect().Table("hook_deliveries").Where("key = ?", old).Count(s.ctx)
+	kept, err := s.store.GlobalDB().NewSelect().Table("deliveries_seen").Where("scope = ? AND key = ?", DeliveryScopeHook, old).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(kept, "a key of a day ago is still recorded")
 }

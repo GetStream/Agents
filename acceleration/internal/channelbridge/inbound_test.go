@@ -1240,7 +1240,7 @@ func (s *InboundSuite) destination(forwarder *eventforward.Forwarder) string {
 	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	return destination.ID
 }
 

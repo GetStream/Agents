@@ -216,10 +216,11 @@ func (m *Manager) impliedSelection(ctx context.Context, spec Spec, binding store
 		return "", nil
 	}
 	// Limit 1 lists at most two, enough to tell one from more than one.
-	connected, err := m.options.Store.ConnectorConnectionsByOwner(ctx, spec.CustomerID, store.ConnectionFilter{
+	connected, err := m.options.Store.ConnectorConnections.Select(ctx, spec.CustomerID, store.ConnectionFilter{
 		OwnerType: store.OwnerUser, OwnerID: spec.Caller.UserID, ConnectorID: binding.ConnectorID,
 		Status: store.ConnectionConnected, Limit: 1,
 	})
+
 	if err != nil || len(connected) != 1 {
 		return "", err
 	}
@@ -282,7 +283,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		m.logger.Warn("a connector binding cannot be opened: connectors are off on this deployment", "connector", binding.Name)
 		return unavailableOpenFailed, nil
 	}
-	connection, err := m.options.Store.ConnectorConnection(ctx, spec.CustomerID, id)
+	connection, err := m.options.Store.ConnectorConnections.Get(ctx, spec.CustomerID, id)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return unavailableConnection, nil
 	}
@@ -310,7 +311,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		m.logger.Warn("a connector binding cannot be opened: no such scheme", "connector", binding.Name, "scheme", connection.AuthScheme)
 		return unavailableOpenFailed, nil
 	}
-	definition, err := m.options.Store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := m.options.Store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return unavailableConnection, nil
 	}
@@ -321,7 +322,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 	// one that needs a reconnect: a binding of the caller's own waits for their login, whose
 	// consent runs on the latest revision. A token or key has no consent: saving it again
 	// moves it (AI-1002), so it is left out as a rejected one is.
-	_, broken, err := m.options.Store.BrokenConnectorRevision(ctx, connection.ConnectorID, connection.DefinitionRevision)
+	_, broken, err := m.options.Store.ConnectorBrokenRevisions.Get(ctx, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return "", err
 	}
@@ -552,7 +553,7 @@ func (m *Manager) patternGrants(ctx context.Context, binding store.ConnectorBind
 			"connector", binding.Name, "connection", connection.ID, "matched", len(matched))
 		matched = matched[:patternToolCap]
 	}
-	pins, err := m.options.Store.ConnectorToolPins(ctx, connection.ID, connection.ConnectedAt)
+	pins, err := m.options.Store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -563,7 +564,7 @@ func (m *Manager) patternGrants(ctx context.Context, binding store.ConnectorBind
 		}
 	}
 	if len(first) > 0 {
-		pins, err = m.options.Store.PinConnectorTools(ctx, connection.ID, connection.ConnectedAt, first)
+		pins, err = m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt, first)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -607,7 +608,7 @@ func (m *Manager) pinGrants(ctx context.Context, alias string, connection store.
 	if len(named) == 0 {
 		return "", nil
 	}
-	pins, err := m.options.Store.ConnectorToolPins(ctx, connection.ID, connection.ConnectedAt)
+	pins, err := m.options.Store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
 	if err != nil {
 		return "", err
 	}
@@ -638,7 +639,7 @@ func (m *Manager) pinGrants(ctx context.Context, alias string, connection store.
 				first[name] = digest
 			}
 		}
-		pins, err = m.options.Store.PinConnectorTools(ctx, connection.ID, connection.ConnectedAt, first)
+		pins, err = m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt, first)
 		if err != nil {
 			return "", err
 		}

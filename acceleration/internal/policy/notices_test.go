@@ -23,7 +23,7 @@ func (s *PolicySuite) streamDestination(appID string) string {
 		ID: uuid.NewString(), CustomerID: appID, ConnectorID: store.StreamSource, URL: "https://example.com/" + appID,
 		Forward: store.ForwardAll, SecretSealed: []byte("sealed"), KEKVersion: 1,
 	}
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	return destination.ID
 }
 

@@ -120,7 +120,7 @@ func (s *PGSealedSuite) SetupSuite() {
 	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
-	s.Require().NoError(db.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(manifest)}}))
+	s.Require().NoError(db.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(manifest)}}))
 
 	s.v1, err = auth.NewSealerWithKeyring(1, map[int]string{1: "test key one"})
 	s.Require().NoError(err)
@@ -161,7 +161,7 @@ func (s *PGSealedSuite) connected(customerID string, held tokens, expires time.T
 		CustomerID: customerID, ConnectorID: "acme", DefinitionRevision: 1,
 		OwnerType: store.OwnerApp, AuthScheme: "test_rotating",
 	}
-	s.Require().NoError(s.db.CreateConnectorConnection(s.ctx, schemes, connection))
+	s.Require().NoError(s.db.ConnectorConnections.Insert(s.ctx, schemes, connection))
 	ref := core.ConnectionRef{CustomerID: customerID, ConnectionID: connection.ID}
 	s.Require().NoError(s.credentialStore(s.v1).Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Credentials = credentials(held)
@@ -173,7 +173,7 @@ func (s *PGSealedSuite) connected(customerID string, held tokens, expires time.T
 }
 
 func (s *PGSealedSuite) stored(ref core.ConnectionRef) store.ConnectorConnection {
-	connection, err := s.db.ConnectorConnection(s.ctx, ref.CustomerID, ref.ConnectionID)
+	connection, err := s.db.ConnectorConnections.Get(s.ctx, ref.CustomerID, ref.ConnectionID)
 	s.Require().NoError(err)
 	return connection
 }

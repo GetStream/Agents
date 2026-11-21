@@ -596,7 +596,7 @@ func (d *dispatcher) recheck(ctx context.Context, r route) (store.ConnectorBindi
 	case !slices.Contains(current.Tools, store.ToolGrant{Name: r.tool, SchemaDigest: r.digest}):
 		return refuse("the tool is no longer granted")
 	}
-	connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, r.connection.ID)
+	connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, r.connection.ID)
 	switch {
 	case errors.Is(err, store.ErrNoConnectorConnection):
 		return refuse("the connection is gone")

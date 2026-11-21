@@ -883,7 +883,7 @@ func (s *Server) unboundConnectors(ctx context.Context, customerID string, bindi
 		return "", true, nil
 	}
 	for _, binding := range *bindings {
-		definition, err := s.store.LatestConnectorDefinition(ctx, customerID, binding.ConnectorId)
+		definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, binding.ConnectorId)
 		if errors.Is(err, store.ErrNoConnectorDefinition) {
 			return fmt.Sprintf("connector binding %q names connector %q, and there is no such connector",
 				binding.Name, binding.ConnectorId), false, nil
@@ -898,7 +898,7 @@ func (s *Server) unboundConnectors(ctx context.Context, customerID string, bindi
 			continue
 		}
 		id := value(binding.Connection.ConnectionId)
-		connection, err := s.store.ConnectorConnection(ctx, customerID, id)
+		connection, err := s.store.ConnectorConnections.Get(ctx, customerID, id)
 		if errors.Is(err, store.ErrNoConnectorConnection) {
 			return fmt.Sprintf("connector binding %q names connection %q, and the app has no such connection",
 				binding.Name, id), false, nil
@@ -953,7 +953,7 @@ func (s *Server) sandboxBindingsComplaint(ctx context.Context, customerID string
 			return fmt.Sprintf("connector binding %q sets sandbox, and the config has no sandbox for code to "+
 				"run in: set sandbox, such as %s", binding.Name, Daytona), false, nil
 		}
-		definition, err := s.store.LatestConnectorDefinition(ctx, customerID, binding.ConnectorID)
+		definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, binding.ConnectorID)
 		if err != nil {
 			return "", false, err
 		}
@@ -1029,7 +1029,7 @@ func SensitiveBindingsComplaint(ctx context.Context, definitions store.Definitio
 	var sensitive *store.ConnectorBinding
 	var outbound, unheld []string
 	for i, binding := range config.Connectors {
-		definition, err := definitions.LatestConnectorDefinition(ctx, customerID, binding.ConnectorID)
+		definition, err := definitions.Latest(ctx, customerID, binding.ConnectorID)
 		// A forced connector delete leaves its bindings behind (store.refuseUndefined), and
 		// a binding to a connector with no definition opens nothing.
 		if errors.Is(err, store.ErrNoConnectorDefinition) {
@@ -1069,7 +1069,7 @@ func SensitiveBindingsComplaint(ctx context.Context, definitions store.Definitio
 
 // sensitiveBindingsComplaint is SensitiveBindingsComplaint over the server's store.
 func (s *Server) sensitiveBindingsComplaint(ctx context.Context, customerID string, config store.AgentConfig) (string, bool, error) {
-	return SensitiveBindingsComplaint(ctx, s.store, customerID, config)
+	return SensitiveBindingsComplaint(ctx, s.store.ConnectorDefinitions, customerID, config)
 }
 
 // bindingSendsOut reports whether a binding offers a tool that may send data out with nobody

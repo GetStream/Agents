@@ -20,6 +20,15 @@ func TestEveryTableBelongsToOneSet(t *testing.T) {
 	}
 }
 
+// A table a later migration drops is not one the set leaves, so nothing describes or moves it.
+func TestADroppedTableIsNotInItsSet(t *testing.T) {
+	global, err := setTables(globalSet)
+	require.NoError(t, err)
+
+	require.Contains(t, global, "connector_connections")
+	require.NotContains(t, global, "connector_connection_clients")
+}
+
 // An export reads and writes each table in the database it lives in.
 func TestEveryExportedTableIsOnTheSideItsSetSays(t *testing.T) {
 	shard, err := setTables(shardSet)
