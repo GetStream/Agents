@@ -480,6 +480,7 @@ TABLE chat_inbound
 
 TABLE connection_event_subscriptions
     arguments jsonb NOT NULL DEFAULT '{}'::jsonb
+    attempts integer NOT NULL DEFAULT 0
     binding text NOT NULL
     config_id text NOT NULL
     connection_id text NOT NULL
@@ -498,6 +499,7 @@ TABLE connection_event_subscriptions
     status text NOT NULL
     token text NOT NULL
     updated_at timestamp with time zone NOT NULL
+    CONSTRAINT connection_event_subscriptions_attempts_check CHECK ((attempts >= 0))
     CONSTRAINT connection_event_subscriptions_kek_version_check CHECK ((kek_version >= 1))
     CONSTRAINT connection_event_subscriptions_pkey PRIMARY KEY (id)
     CONSTRAINT connection_event_subscriptions_secret_sealed_check CHECK ((secret_sealed <> '\x'::bytea))

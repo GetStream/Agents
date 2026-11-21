@@ -15,6 +15,10 @@ import (
 // ErrNoConnectionEventSubscription is a token or an id no subscription has.
 var ErrNoConnectionEventSubscription = errors.New("store: no such connection event subscription")
 
+// ErrConnectionEventSubscriptionTaken is an Update of a subscription another claim took after
+// the lease it was claimed under ran out, or one since deleted.
+var ErrConnectionEventSubscriptionTaken = errors.New("store: connection event subscription is no longer held")
+
 // How far a connection event subscription has got.
 const (
 	// ConnectionEventPending is a subscription the server has not accepted yet.
@@ -54,6 +58,8 @@ type ConnectionEventSubscription struct {
 	Error         string     `bun:"error,notnull"`
 	// NextAttemptAt is when a worker next asks the server for it. Nil is never.
 	NextAttemptAt *time.Time `bun:"next_attempt_at"`
+	// Attempts is how many times a worker claimed it.
+	Attempts int `bun:"attempts,notnull"`
 	// Failures is how many times in a row the server refused it.
 	Failures  int       `bun:"failures,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
@@ -74,6 +80,7 @@ func (sub *ConnectionEventSubscription) Validate() error {
 		check(sub.KEKVersion >= 1, "kek_version", "is below 1").
 		oneOf("status", sub.Status, ConnectionEventPending, ConnectionEventActive, ConnectionEventFailed).
 		check(sub.Failures >= 0, "failures", "is negative").
+		check(sub.Attempts >= 0, "attempts", "is negative").
 		done()
 }
 
@@ -184,43 +191,13 @@ func (r *ConnectionEventSubscriptions) DueConnection(ctx context.Context, custom
 	return nil
 }
 
-// claimConnectionEventSubscriptionsQuery takes at most limit due rows and pushes each one's
-// next_attempt_at to the lease's end, so no other router takes it until the lease runs out.
-// due checks next_attempt_at again on the row it locks, as claimEventDeliveriesQuery does: a
-// row another router leased after the statement started is skipped.
-const claimConnectionEventSubscriptionsQuery = `
-WITH due AS (
-    SELECT id FROM connection_event_subscriptions
-    WHERE next_attempt_at <= ?
-    ORDER BY next_attempt_at
-    LIMIT ?
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE connection_event_subscriptions AS ces
-SET next_attempt_at = ?
-FROM due
-WHERE ces.id = due.id AND ces.next_attempt_at <= ?
-RETURNING ces.*`
-
 // Claim takes at most limit subscriptions due at now, each leased
 // until leaseUntil.
 func (r *ConnectionEventSubscriptions) Claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ConnectionEventSubscription, error) {
-	return r.claim(ctx, claimConnectionEventSubscriptionsQuery, now, limit, leaseUntil)
+	return claim[ConnectionEventSubscription](ctx, r.store.global, connectionEventSubscriptions, now, leaseUntil, limit, nil, "ces.*")
 }
 
-// claim runs query, ClaimConnectionEventSubscriptions' statement or
-// a test's variant of it with a pause in it.
-func (r *ConnectionEventSubscriptions) claim(ctx context.Context, query string, now time.Time, limit int, leaseUntil time.Time) ([]ConnectionEventSubscription, error) {
-	claimed := []ConnectionEventSubscription{}
-	if limit < 1 {
-		return claimed, nil
-	}
-	err := r.store.global.NewRaw(query, now.UTC(), limit, leaseUntil.UTC(), now.UTC()).Scan(ctx, &claimed)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: claim connection event subscriptions: %w", err))
-	}
-	return claimed, nil
-}
+var connectionEventSubscriptions = queue{name: "connection event subscriptions", alias: "ces", key: "id"}
 
 // NextDue is when the subscription due first is due, any router's.
 // found is false when none is ever due: there are no subscriptions, or none expires.
@@ -232,18 +209,25 @@ func (r *ConnectionEventSubscriptions) NextDue(ctx context.Context) (next time.T
 	return at.Time, at.Valid, nil
 }
 
-// Update writes what asking the server for a subscription came to.
+// Update writes what asking the server for a subscription came to, while the claim sub came
+// from still holds it.
 func (r *ConnectionEventSubscriptions) Update(ctx context.Context, sub *ConnectionEventSubscription) error {
 	if err := sub.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 	sub.UpdatedAt = time.Now().UTC()
-	_, err := r.store.global.NewUpdate().Model(sub).
-		Column("remote_id", "refresh_before", "status", "error", "next_attempt_at", "failures", "updated_at").
-		Where("id = ?", sub.ID).
-		Exec(ctx)
+	update := r.store.global.NewUpdate().Model(sub).
+		Column("remote_id", "refresh_before", "status", "error", "next_attempt_at", "failures", "updated_at")
+	result, err := connectionEventSubscriptions.heldBy(update, sub.ID, sub.Attempts).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save connection event subscription: %w", err))
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save connection event subscription: %w", err))
+	}
+	if updated != 1 {
+		return stack.Wrap(ErrConnectionEventSubscriptionTaken)
 	}
 	return nil
 }

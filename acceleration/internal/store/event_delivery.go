@@ -119,6 +119,11 @@ func (r *EventDeliveries) Claim(ctx context.Context, now time.Time, limit, perDe
 // second updater ... re-evaluates its WHERE condition»: Read Committed Isolation Level,
 // https://www.postgresql.org/docs/16/transaction-iso.html, opened October 7, 2026). Without
 // the check in due, a row another router just leased is leased again (AI-924 review of #778).
+//
+// It is not queue.go's claim: a delivery is known by two columns, the cap needs ranked's
+// window, and the destination's secrets come back in the same statement through a join the
+// claim's UPDATE has no place for. A claim does not count attempts either: Retry writes the
+// count the forwarder makes.
 const claimEventDeliveriesQuery = `
 WITH sending AS (
     SELECT * FROM unnest(?::text[], ?::int[]) AS s (destination_id, count)

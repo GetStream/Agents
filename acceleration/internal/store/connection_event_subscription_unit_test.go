@@ -31,6 +31,7 @@ func TestConnectionEventSubscriptionValidate(t *testing.T) {
 		"kek_version":   func(s *ConnectionEventSubscription) { s.KEKVersion = 0 },
 		"status":        func(s *ConnectionEventSubscription) { s.Status = "accepted" },
 		"failures":      func(s *ConnectionEventSubscription) { s.Failures = -1 },
+		"attempts":      func(s *ConnectionEventSubscription) { s.Attempts = -1 },
 	} {
 		sub := valid()
 		broken(&sub)

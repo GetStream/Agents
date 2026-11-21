@@ -4,8 +4,9 @@ package store
 
 import (
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // eventSubscription stores a subscription of customer's connection, due at s.base, for config
@@ -79,6 +80,28 @@ func (s *StoreSuite) TestAClaimLeasesWhatIsDueAndNotWhatIsNot() {
 	s.Empty(again, "a leased one is not taken again before its lease ends")
 }
 
+func (s *StoreSuite) TestAClaimWhoseLeaseRanOutCannotOverwriteTheClaimAfterIt() {
+	s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
+	slow, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	s.Require().NoError(err)
+	s.Require().Len(slow, 1)
+	taken, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base.Add(2*time.Minute), 10, s.base.Add(3*time.Minute))
+	s.Require().NoError(err)
+	s.Require().Len(taken, 1)
+
+	slow[0].Status, slow[0].Error = ConnectionEventFailed, "too late"
+	err = s.store.ConnectionEventSubscriptions.Update(s.ctx, &slow[0])
+	taken[0].Status = ConnectionEventActive
+	s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &taken[0]))
+
+	s.ErrorIs(err, ErrConnectionEventSubscriptionTaken)
+	s.Equal([]int{1, 2}, []int{slow[0].Attempts, taken[0].Attempts}, "each claim counts its attempt")
+	stored, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, taken[0].Token)
+	s.Require().NoError(err)
+	s.Equal(ConnectionEventActive, stored.Status)
+	s.Empty(stored.Error)
+}
+
 // TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce: router A's claim pauses after it read
 // the due rows; router B claims them meanwhile. A then takes none of them, so the server is
 // never asked for one subscription by two routers at once.
@@ -89,19 +112,18 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
-	read := "    WHERE next_attempt_at <= ?\n"
-	s.Require().Contains(claimConnectionEventSubscriptionsQuery, read)
-	paused := strings.Replace(claimConnectionEventSubscriptionsQuery, read,
-		"    WHERE next_attempt_at <= ? AND (SELECT 1 FROM pg_sleep(0.5)) = 1\n", 1)
-	type claim struct {
+	paused := func(due *bun.SelectQuery) *bun.SelectQuery {
+		return due.Where("(SELECT 1 FROM pg_sleep(0.5)) = 1")
+	}
+	type claimed struct {
 		claimed []ConnectionEventSubscription
 		err     error
 	}
-	byA := make(chan claim, 1)
+	byA := make(chan claimed, 1)
 
 	go func() {
-		claimed, err := routerA.ConnectionEventSubscriptions.claim(s.ctx, paused, s.base, 10, s.base.Add(time.Minute))
-		byA <- claim{claimed, err}
+		subs, err := claim[ConnectionEventSubscription](s.ctx, routerA.global, connectionEventSubscriptions, s.base, s.base.Add(time.Minute), 10, paused, "ces.*")
+		byA <- claimed{subs, err}
 	}()
 	s.Require().Eventually(func() bool {
 		var sleeping int
@@ -176,8 +198,10 @@ func (s *StoreSuite) TestConnectionEventSubscriptionQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectionEventSubscriptions.DueConnection(s.ctx, "acme-app", "conn-1", s.base))
 	}), "DueConnection")
+	var claimed []ConnectionEventSubscription
 	s.Equal(1, s.countQueries(func() {
-		claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base.Add(time.Second), 20, s.base.Add(time.Minute))
+		var err error
+		claimed, err = s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base.Add(time.Second), 20, s.base.Add(time.Minute))
 		s.Require().NoError(err)
 		s.Len(claimed, 20)
 	}), "Claim")
@@ -185,8 +209,8 @@ func (s *StoreSuite) TestConnectionEventSubscriptionQueryBudgets() {
 		_, _, err := s.store.ConnectionEventSubscriptions.NextDue(s.ctx)
 		s.Require().NoError(err)
 	}), "NextDue")
-	sub.Status = ConnectionEventActive
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &sub)) }), "Update")
+	claimed[0].Status = ConnectionEventActive
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &claimed[0])) }), "Update")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Delete(s.ctx, sub.ID)) }), "Delete")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectionEventSubscriptions.DeleteConnection(s.ctx, "acme-app", "conn-1"))
