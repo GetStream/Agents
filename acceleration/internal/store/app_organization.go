@@ -50,7 +50,7 @@ func (r *AppOrganizations) Upsert(ctx context.Context, membership *AppOrganizati
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: join organization: %w", err))
 	}
-	r.store.forget(ctx, appOrganizationKey(membership.AppID))
+	r.store.forget(ctx, appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID))
 	return nil
 }
 

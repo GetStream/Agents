@@ -199,6 +199,76 @@ func (s *StoreSuite) TestAPolicySavedOnAReplicaIsWhatThatReplicaReadsNext() {
 	s.Zero(stale.Load(), "reads that failed or answered with the policy from before the save")
 }
 
+func (s *StoreSuite) TestAnAppsPoliciesAreItsOwnAndThoseOfTheOrganizationItWasLastSeenUnder() {
+	yes, no := true, false
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeApp, ScopeID: "app-1", Document: PolicyDocument{PromptInjection: &yes}}))
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeOrganization, ScopeID: "org-1", Document: PolicyDocument{PromptInjection: &no}}))
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeOrganization, ScopeID: "org-2", Document: PolicyDocument{Tags: map[string]string{"org": "2"}}}))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "app-1", OrganizationID: "org-2"}))
+
+	read, err := s.store.Policies.OfApp(s.ctx, "app-1")
+
+	s.Require().NoError(err)
+	s.Equal(AppPolicies{
+		App:            PolicyDocument{PromptInjection: &yes},
+		OrganizationID: "org-2",
+		Organization:   PolicyDocument{Tags: map[string]string{"org": "2"}},
+	}, read)
+	alone, err := s.store.Policies.OfApp(s.ctx, "app-2")
+	s.Require().NoError(err)
+	s.Equal(AppPolicies{}, alone, "an app in no organization with no policy of its own")
+}
+
+// appPoliciesOn is what replica reads of the app's policies once its read is what want says.
+func (s *StoreSuite) appPoliciesOn(replica *Store, app string, want func(AppPolicies) bool, msg string) {
+	s.Eventually(func() bool {
+		read, err := replica.Policies.OfApp(s.ctx, app)
+		return err == nil && want(read)
+	}, 2*time.Second, 10*time.Millisecond, msg)
+}
+
+func (s *StoreSuite) TestAnOrganizationsPolicySavedOnOneReplicaIsReadForEachOfItsAppsOnTheOther() {
+	replica := s.replica()
+	org := "org-" + uuid.NewString()
+	apps := []string{"app-" + uuid.NewString(), "app-" + uuid.NewString(), "app-" + uuid.NewString()}
+	for _, app := range apps {
+		s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: org}))
+		read, err := replica.Policies.OfApp(s.ctx, app)
+		s.Require().NoError(err)
+		s.Nil(read.Organization.Tags)
+	}
+
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeOrganization, ScopeID: org, Document: PolicyDocument{Tags: map[string]string{"team": "a"}}}))
+
+	for _, app := range apps {
+		s.appPoliciesOn(replica, app, func(read AppPolicies) bool { return read.Organization.Tags["team"] == "a" },
+			"the other replica still decides the app on its organization's old policy")
+	}
+	s.Require().NoError(s.store.Policies.Delete(s.ctx, ScopeOrganization, org))
+	s.appPoliciesOn(replica, apps[0], func(read AppPolicies) bool { return read.Organization.Tags == nil },
+		"the other replica still decides the app on its organization's deleted policy")
+}
+
+func (s *StoreSuite) TestAnAppsPoliciesFollowItsOwnPolicyAndItsMoveToAnotherOrganizationOnEveryReplica() {
+	replica := s.replica()
+	app := "app-" + uuid.NewString()
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeOrganization, ScopeID: app + "-second", Document: PolicyDocument{Tags: map[string]string{"org": "second"}}}))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: app + "-first"}))
+	read, err := replica.Policies.OfApp(s.ctx, app)
+	s.Require().NoError(err)
+	s.Equal(app+"-first", read.OrganizationID)
+
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: app + "-second"}))
+	s.appPoliciesOn(replica, app, func(read AppPolicies) bool {
+		return read.OrganizationID == app+"-second" && read.Organization.Tags["org"] == "second"
+	}, "the other replica still decides the app under its old organization")
+
+	yes := true
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeApp, ScopeID: app, Document: PolicyDocument{PromptInjection: &yes}}))
+	s.appPoliciesOn(replica, app, func(read AppPolicies) bool { return read.App.PromptInjection != nil },
+		"the other replica still decides the app on its old policy")
+}
+
 func (s *StoreSuite) TestPolicyQueryBudgets() {
 	app := "app-" + uuid.NewString()
 	limit := int64(3)
@@ -231,4 +301,33 @@ func (s *StoreSuite) TestPolicyQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Delete(s.ctx, ScopeUser, user.ScopeID)) }))
 	}))
+}
+
+func (s *StoreSuite) TestAppPoliciesQueryBudgets() {
+	org := "org-" + uuid.NewString()
+	apps := []string{"app-" + uuid.NewString(), "app-" + uuid.NewString(), "app-" + uuid.NewString()}
+	yes := true
+	for _, app := range apps {
+		s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: org}))
+		s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeApp, ScopeID: app, Document: PolicyDocument{PromptInjection: &yes}}))
+	}
+	organization := Policy{Scope: ScopeOrganization, ScopeID: org, Document: PolicyDocument{Tags: map[string]string{"team": "a"}}}
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &organization))
+
+	read := func() {
+		read, err := s.store.Policies.OfApp(s.ctx, apps[0])
+		s.Require().NoError(err)
+		s.Equal("a", read.Organization.Tags["team"])
+		s.NotNil(read.App.PromptInjection)
+	}
+	// The app's document, its organization and the organization's document.
+	s.Equal(1, s.countQueries(read), "a cold read")
+	if s.store.cache != nil {
+		read()
+		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), "then answered locally")
+	}
+	// The write, then the apps whose cached policies it changed, all forgotten in one round trip.
+	s.Equal(s.redisTrips(1)+1, s.countQueries(func() {
+		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Upsert(s.ctx, &organization)) }))
+	}), "an organization's save, however many apps it has")
 }

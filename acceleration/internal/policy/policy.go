@@ -715,23 +715,20 @@ func (e *Enforcer) refresh(customerID string) {
 
 // policies reads the app's policy, the organization it is in and the organization's policy.
 func (e *Enforcer) policies(ctx context.Context, appID string) (app, organization store.PolicyDocument, organizationID string, err error) {
-	if app, err = e.config.Policies.Get(ctx, store.ScopeApp, appID); err != nil {
-		return app, organization, "", err
-	}
-	membership, err := e.config.AppOrganizations.Get(ctx, appID)
+	read, err := e.config.Policies.OfApp(ctx, appID)
 	if err != nil {
 		return app, organization, "", err
 	}
-	organizationID = membership.OrganizationID
+	app, organization, organizationID = read.App, read.Organization, read.OrganizationID
 	// An app seen for the first time is recorded under its organization in the background.
 	// Until that lands, the organization it came in under is the one whose floor applies:
 	// an app's first requests are not the ones to escape it.
 	if pending, ok := e.members.Load(appID); ok && organizationID == "" {
 		organizationID, _ = pending.(string)
-	}
-	if organizationID != "" {
-		if organization, err = e.config.Policies.Get(ctx, store.ScopeOrganization, organizationID); err != nil {
-			return app, organization, "", err
+		if organizationID != "" {
+			if organization, err = e.config.Policies.Get(ctx, store.ScopeOrganization, organizationID); err != nil {
+				return app, organization, "", err
+			}
 		}
 	}
 	return app, organization, organizationID, nil

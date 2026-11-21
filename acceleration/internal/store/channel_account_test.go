@@ -2,6 +2,8 @@
 
 package store
 
+import "sync"
+
 // line connects a WhatsApp line for a customer, with sealed credentials standing in for the
 // real ones.
 func (s *StoreSuite) line(customerID, e164 string) ChannelAccount {
@@ -45,6 +47,32 @@ func (s *StoreSuite) TestReconnectingALineKeepsItsTokenAndReplacesItsCredentials
 	s.Equal(first.ID, held.ID)
 	s.Equal("another-phone-number-id", held.AccountID)
 	s.Equal([]byte("sealed again"), held.SecretsSealed)
+	s.Equal(first.Token, again.Token, "the caller is told the token the provider was given")
+	s.Equal(first.ID, again.ID)
+}
+
+func (s *StoreSuite) TestALineConnectedTwiceAtOnceIsOneLine() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	const connects = 8
+	accounts := make([]ChannelAccount, connects)
+	errs := make([]error, connects)
+	var wg sync.WaitGroup
+	for i := range connects {
+		wg.Go(func() {
+			accounts[i] = ChannelAccount{CustomerID: customerID, Kind: "whatsapp", E164: e164,
+				AccountID: "phone-number-id", Token: newID(), SecretsSealed: []byte("sealed"), SecretsKEKVersion: 1}
+			errs[i] = s.store.ChannelAccounts.Upsert(s.ctx, &accounts[i])
+		})
+	}
+	wg.Wait()
+
+	held, err := s.store.ChannelAccounts.GetByNumber(s.ctx, customerID, "whatsapp", e164)
+	s.Require().NoError(err)
+	for i := range connects {
+		s.Require().NoError(errs[i])
+		s.Equal(held.ID, accounts[i].ID)
+		s.Equal(held.Token, accounts[i].Token)
+	}
 }
 
 // A line nobody answers on has no use for the credentials.
@@ -87,9 +115,9 @@ func (s *StoreSuite) TestTheSameNumberOnAnotherChannelIsAnotherLine() {
 func (s *StoreSuite) TestChannelAccountQueryBudgets() {
 	customerID, e164 := newID(), "+1555"+newID()[:7]
 	var account ChannelAccount
-	s.Equal(2, s.countQueries(func() { account = s.line(customerID, e164) }), "Upsert of a new line: look, insert")
-	s.Equal(2, s.countQueries(func() { s.Require().NoError(s.store.ChannelAccounts.Upsert(s.ctx, &account)) }),
-		"Upsert of a connected line: look, update")
+	s.Equal(1, s.countQueries(func() { account = s.line(customerID, e164) }), "Upsert of a new line")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ChannelAccounts.Upsert(s.ctx, &account)) }),
+		"Upsert of a connected line")
 	s.Equal(1, s.countQueries(func() {
 		lines, err := s.store.ChannelAccounts.Select(s.ctx, customerID)
 		s.Require().NoError(err)

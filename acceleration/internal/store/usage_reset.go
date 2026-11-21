@@ -68,7 +68,7 @@ func (r *UsageResets) Select(ctx context.Context, organizationIDs []string, sinc
 	return resets, nil
 }
 
-// InsertMany writes resets in one statement, and each one's audit row, in one transaction.
+// InsertMany writes resets in one statement, and their audit rows in another, in one transaction.
 func (r *UsageResets) InsertMany(ctx context.Context, resets []UsageReset, audit LimitAudit) error {
 	for i := range resets {
 		if err := resets[i].Validate(); err != nil {
@@ -85,6 +85,7 @@ func (r *UsageResets) InsertMany(ctx context.Context, resets []UsageReset, audit
 		if _, err := tx.NewInsert().Model(&resets).Returning("*").Exec(ctx); err != nil {
 			return err
 		}
+		entries := make([]AuditEntry, len(resets))
 		for i := range resets {
 			reset := &resets[i]
 			after := map[string]any{
@@ -96,12 +97,9 @@ func (r *UsageResets) InsertMany(ctx context.Context, resets []UsageReset, audit
 					after[name] = value
 				}
 			}
-			if err := recordAuditEntry(ctx, tx, audit.entry("reset:"+strconv.FormatInt(reset.ID, 10), string(reset.Subject),
-				AuditCreated, fieldChanges(nil, after))); err != nil {
-				return err
-			}
+			entries[i] = *audit.entry("reset:"+strconv.FormatInt(reset.ID, 10), string(reset.Subject), AuditCreated, fieldChanges(nil, after))
 		}
-		return nil
+		return recordAuditEntries(ctx, tx, entries)
 	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: add resets: %w", err))

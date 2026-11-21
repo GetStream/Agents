@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -152,6 +153,38 @@ func (r *Policies) Get(ctx context.Context, scope PolicyScope, id string) (Polic
 	})
 }
 
+// AppPolicies is what decides an app's requests: its own document, the organization it was
+// last seen under (AppOrganizations), empty for none, and that organization's document.
+type AppPolicies struct {
+	App            PolicyDocument `bun:"app" json:"app"`
+	OrganizationID string         `bun:"organization_id" json:"organization_id"`
+	Organization   PolicyDocument `bun:"organization" json:"organization"`
+}
+
+// OfApp returns an app's AppPolicies, through the cache, read in one statement. A write of the
+// app's document, of its organization's or of which organization it is in drops it.
+func (r *Policies) OfApp(ctx context.Context, appID string) (AppPolicies, error) {
+	if appID == "" {
+		return AppPolicies{}, stack.Wrap(errors.New("store: a policy needs a scope id"))
+	}
+	return cached(ctx, r.store, appPoliciesKey(appID), func(ctx context.Context) (AppPolicies, error) {
+		var read AppPolicies
+		err := r.store.global.NewSelect().
+			TableExpr("(SELECT ?::text AS app_id) AS a", appID).
+			Join("LEFT JOIN policies AS app ON app.scope = ? AND app.scope_id = a.app_id", ScopeApp).
+			Join("LEFT JOIN app_organizations AS ao ON ao.app_id = a.app_id").
+			Join("LEFT JOIN policies AS org ON org.scope = ? AND org.scope_id = ao.organization_id", ScopeOrganization).
+			ColumnExpr("COALESCE(app.document, '{}') AS app").
+			ColumnExpr("COALESCE(ao.organization_id, '') AS organization_id").
+			ColumnExpr("COALESCE(org.document, '{}') AS organization").
+			Scan(ctx, &read)
+		if err != nil {
+			return AppPolicies{}, stack.Wrap(fmt.Errorf("store: app policies: %w", err))
+		}
+		return read, nil
+	})
+}
+
 // Upsert replaces a scope's document and drops what every replica had cached of it. An
 // organization's document that leaves RequireOwnStreamApp out keeps the one stored.
 func (r *Policies) Upsert(ctx context.Context, policy *Policy) error {
@@ -175,7 +208,7 @@ func (r *Policies) Upsert(ctx context.Context, policy *Policy) error {
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save policy: %w", err))
 	}
-	r.store.forget(ctx, policyKeys(policy.Scope, policy.ScopeID)...)
+	r.forget(ctx, policy.Scope, policy.ScopeID)
 	return nil
 }
 
@@ -196,7 +229,7 @@ func (r *Policies) Delete(ctx context.Context, scope PolicyScope, id string) err
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete policy: %w", err))
 	}
-	r.store.forget(ctx, policyKeys(scope, id)...)
+	r.forget(ctx, scope, id)
 	if deleted == 0 {
 		return stack.Wrap(ErrNoPolicy)
 	}
@@ -243,9 +276,33 @@ func (r *Policies) HasUsers(ctx context.Context, appID string) (bool, error) {
 	})
 }
 
-// policyKeys are the cached values a write of one scope's document changes.
+// forget drops what every replica had cached of a scope's document once it was written. An
+// organization's is in the AppPolicies of every app seen under it, listed after the write
+// committed: an app seen under it since drops its own (AppOrganizations.Upsert). A listing that
+// fails is logged, as a deletion that fails is (Store.forget), and the TTL covers it.
+func (r *Policies) forget(ctx context.Context, scope PolicyScope, id string) {
+	keys := policyKeys(scope, id)
+	if scope == ScopeOrganization && r.store.cache != nil {
+		var apps []string
+		err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
+			Where("organization_id = ?", id).Scan(context.WithoutCancel(ctx), &apps)
+		if err != nil {
+			slog.Default().Error("could not list the apps whose cached policies an organization's changed", "organization", id, "error", err)
+		}
+		for _, app := range apps {
+			keys = append(keys, appPoliciesKey(app))
+		}
+	}
+	r.store.forget(ctx, keys...)
+}
+
+// policyKeys are the cached values a write of one scope's document changes, but for the
+// AppPolicies of an organization's apps (forget).
 func policyKeys(scope PolicyScope, id string) []string {
 	keys := []string{cacheKey("policy", string(scope), id)}
+	if scope == ScopeApp {
+		keys = append(keys, appPoliciesKey(id))
+	}
 	if scope == ScopeUser {
 		if appID, _, ok := SplitUserScopeID(id); ok {
 			keys = append(keys, cacheKey("user-policies", appID))
@@ -253,6 +310,8 @@ func policyKeys(scope PolicyScope, id string) []string {
 	}
 	return keys
 }
+
+func appPoliciesKey(appID string) string { return cacheKey("app-policies", appID) }
 
 // likePrefix is a LIKE pattern matching what starts with prefix, its own % and _ taken as
 // themselves.
