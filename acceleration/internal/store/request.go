@@ -311,20 +311,15 @@ func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.U
 	if len(requests) == 0 {
 		return nil, nil
 	}
-	// The agent log trigger takes a lock per customer for each row it logs, so two routers
-	// writing batches that name the same customers in another order would deadlock. Written in
-	// customer order, every batch takes them in one order.
+	// The log rows take a lock per customer, so two routers writing batches that name the same
+	// customers in another order would deadlock. Written in customer order, every batch takes
+	// them in one order.
 	sorted := slices.Clone(requests)
 	slices.SortStableFunc(sorted, func(a, b Request) int { return strings.Compare(a.CustomerID, b.CustomerID) })
 
 	sharded := r.store.Sharded()
 	var written []writtenRequest
 	err := r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if sharded {
-			if _, err := tx.ExecContext(ctx, "SELECT set_config('router.request_logged', 'on', true)"); err != nil {
-				return err
-			}
-		}
 		// Scanned apart from the models: a row skipped by the conflict returns nothing, so the
 		// rows that come back do not line up with the ones sent.
 		_, err := tx.NewInsert().Model(&sorted).
@@ -334,10 +329,12 @@ func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.U
 		if err != nil || sharded {
 			return err
 		}
-		// One database: the rows count toward their grants in the transaction that writes them, and
-		// the agent_request_log trigger logs them.
-		_, err = addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written)))
-		return err
+		// One database: the rows count toward their grants, and are logged, in the transaction
+		// that writes them.
+		if _, err := addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written))); err != nil {
+			return err
+		}
+		return r.store.AgentLogs.logRequests(ctx, tx, tx, toLog(sorted, written))
 	})
 	if err != nil {
 		if IDTaken(err) {

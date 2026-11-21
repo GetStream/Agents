@@ -117,6 +117,7 @@ func (r *AgentLogs) Insert(ctx context.Context, entry *AgentLog) error {
 // logRequests writes the provider_request log row of each written request, in calls' order:
 // the call each happened in read from calls in one query, and the rows written to logs in one
 // statement under every customer's lock, taken in customer order as every batch takes them.
+// With one database both are the transaction that wrote the requests.
 func (r *AgentLogs) logRequests(ctx context.Context, calls, logs bun.IDB, requests []Request) error {
 	if len(requests) == 0 {
 		return nil

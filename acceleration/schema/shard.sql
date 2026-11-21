@@ -389,7 +389,6 @@ TABLE requests
     CREATE INDEX requests_to_ship_idx ON public.requests USING btree (started_at) WHERE to_ship
     CREATE UNIQUE INDEX requests_usage_id_idx ON public.requests USING btree (usage_id)
     CREATE INDEX requests_user_spend_idx ON public.requests USING btree (customer_id, user_id, started_at) INCLUDE (cost_micros) WHERE (billable AND (user_id <> ''::text))
-    CREATE TRIGGER agent_request_log AFTER INSERT ON public.requests FOR EACH ROW EXECUTE FUNCTION log_agent_request()
 
 TABLE stats_daily
     audio_ms_total bigint NOT NULL

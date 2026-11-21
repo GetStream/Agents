@@ -164,7 +164,8 @@ func (s *StoreSuite) TestARowPostgresRefusesIsUnwritable() {
 	s.True(Unwritable(err), "an id too big for its index is refused however often it is sent: %v", err)
 }
 
-func (s *StoreSuite) TestAShardedBatchWritesOneLogRowPerNewRow() {
+// With one database or many, the router writes the log row: a second writer would make it two.
+func (s *StoreSuite) TestABatchWritesOneLogRowPerNewRow() {
 	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "call", CustomerID: "batch-log", AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
 	batch := []Request{
 		s.usageRow("batch-log", func(request *Request) { request.AgentID = "agent" }),
@@ -616,15 +617,10 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		s.usageRow("globex", func(request *Request) { request.AgentID = "agent" }),
 	}
 
-	// One database: the transaction and the rows, logged by the trigger. Shards: the transaction, the
-	// trigger told the router logs them, the rows, their calls read and the log rows written under the
-	// customers' lock in a transaction of their own. The same for one row as for a batch.
-	budget := 3
-	if s.store.Sharded() {
-		budget = 9
-	}
-	s.Equal(budget, s.countQueries(func() { s.Require().NoError(s.store.Requests.Insert(s.ctx, &single)) }), "Insert")
-	s.Equal(budget, s.countQueries(func() {
+	// The rows, the grants they used, their calls read, the log rows under the customers' lock, and
+	// the transactions around them: the same for one row as for a batch.
+	s.Equal(8, s.countQueries(func() { s.Require().NoError(s.store.Requests.Insert(s.ctx, &single)) }), "Insert")
+	s.Equal(8, s.countQueries(func() {
 		_, err := s.store.Requests.InsertMany(s.ctx, batch)
 		s.Require().NoError(err)
 	}), "InsertMany")
