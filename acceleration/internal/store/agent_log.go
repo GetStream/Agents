@@ -90,6 +90,15 @@ type AgentLogs struct {
 	store *Store
 }
 
+// insertAgentLog writes one log row under its customer's lock in one statement. The row is read
+// through the lock, so it is taken before the id is drawn and held until the statement's own
+// transaction commits, as importRow takes it.
+const insertAgentLog = `WITH locked AS (SELECT pg_advisory_xact_lock(hashtextextended(?, ?)))
+INSERT INTO agent_logs (customer_id, config_id, agent_id, session_id, user_id, source, severity, event_type, message,
+    occurred_at, ingested_at, details)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?::jsonb FROM locked
+RETURNING id`
+
 // Insert stores one log row, redacted, under its customer's lock.
 func (r *AgentLogs) Insert(ctx context.Context, entry *AgentLog) error {
 	entry.Message = SafeLogText(entry.Message)
@@ -101,13 +110,9 @@ func (r *AgentLogs) Insert(ctx context.Context, entry *AgentLog) error {
 		entry.OccurredAt = time.Now().UTC()
 	}
 	entry.IngestedAt = time.Now().UTC()
-	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := lockUntilCommit(ctx, tx, entry.CustomerID, agentLogLockSeed); err != nil {
-			return err
-		}
-		_, err := tx.NewInsert().Model(entry).Exec(ctx)
-		return err
-	})
+	err := r.store.global.NewRaw(insertAgentLog, entry.CustomerID, agentLogLockSeed,
+		entry.CustomerID, entry.ConfigID, entry.AgentID, entry.SessionID, entry.UserID, entry.Source, entry.Severity,
+		entry.EventType, entry.Message, entry.OccurredAt, entry.IngestedAt, entry.Details).Scan(ctx, &entry.ID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record agent log: %w", err))
 	}
