@@ -145,7 +145,7 @@ func (s *ConcurrencySuite) TestATurnDeadlineEndingTheWaitIsNotSent() {
 	primary := s.connection("", "primary")
 	d := s.attachAll(s.fixed("crm", primary, "whoami"))
 	r := d.routes["crm__whoami"]
-	held, err := d.slots.take(s.ctx, r.connection.ID, r.maxInFlight)
+	held, _, err := d.slots.take(s.ctx, r.connection.ID, r.maxInFlight)
 	s.Require().NoError(err)
 	defer held()
 	turn, stop := context.WithTimeout(s.ctx, 100*time.Millisecond)

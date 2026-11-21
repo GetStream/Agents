@@ -3,13 +3,16 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -231,6 +234,64 @@ func (s *RateLimitSuite) TestACallWaitingForASlotIsHeldByThe429OfTheCallItWaited
 	s.Equal(1, s.provider.calls("primary"), "the waiting call reached a provider that had just answered 429")
 	s.Zero(d.slots.users(primary), "the held call gave its slot back")
 	s.ElementsMatch([]string{store.InvocationExternalServer, store.InvocationDenied}, s.logged(primary, 2))
+}
+
+// TestACallWithAFreeSlotReadsTheHoldOnce: with a cap and a slot free, the call is admitted on
+// one round trip to Redis; only a call that waited for its slot reads the hold again.
+func (s *RateLimitSuite) TestACallWithAFreeSlotReadsTheHoldOnce() {
+	s.limitAndCapPer(core.RateLimitPerApp, 2)
+	primary := s.connection("", "primary")
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	counted := &roundTrips{}
+	manager := s.managerWith(fixtureRequestTimeout)
+	manager.options.Connectors.Limiter = core.NewLimiter(rueidishook.WithHook(client, counted), nil)
+	d := s.attachWith(manager, s.fixed("crm", primary, "whoami"))
+
+	said, err := s.call(d, "crm__whoami", "{}")
+
+	s.Require().NoError(err)
+	s.Equal("primary", said)
+	s.Equal(int64(1), counted.sent.Load())
+}
+
+// roundTrips counts what a client sends Redis: a command, or a pipeline of them, is one.
+type roundTrips struct{ sent atomic.Int64 }
+
+func (r *roundTrips) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.Do(ctx, cmd)
+}
+
+func (r *roundTrips) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (r *roundTrips) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (r *roundTrips) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (r *roundTrips) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	r.sent.Add(1)
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	r.sent.Add(1)
+	return client.DoStream(ctx, cmd)
+}
+
+func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
 }
 
 // TestAConnectorThatNamesNoRateLimitBehavesAsWithoutALimiter: the control. A manifest with
