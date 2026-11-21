@@ -2830,7 +2830,7 @@ Postgres and Redis for local runs:
 
 ```bash
 docker run -d --name va-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=model_router \
-  -p 55432:5432 postgres:16-alpine
+  -p 55432:5432 postgres:19-alpine
 docker run -d --name va-redis -p 56379:6379 redis:7-alpine
 ```
 

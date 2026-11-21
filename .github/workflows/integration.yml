@@ -89,13 +89,13 @@ jobs:
     # and on disk each TRUNCATE waits on fsync.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:19-alpine
         env:
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432
         options: >-
-          --tmpfs /var/lib/postgresql/data
+          --tmpfs /var/lib/postgresql
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 3s

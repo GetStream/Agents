@@ -36,7 +36,7 @@ a mistake that actually happened.
   agent's `testing.yaml` copy:
   ```bash
   docker run -d --name va-test-pg --restart unless-stopped -p 127.0.0.1:55433:5432 \
-    -e POSTGRES_PASSWORD=postgres -v va-test-pgdata:/var/lib/postgresql/data postgres:16-alpine \
+    -e POSTGRES_PASSWORD=postgres -v va-test-pg19data:/var/lib/postgresql postgres:19-alpine \
     -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=1000
   ```
   - Keep its data on disk, not on tmpfs. One server held 765 MB over 59 test databases.
