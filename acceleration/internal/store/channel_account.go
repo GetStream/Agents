@@ -128,29 +128,15 @@ func (r *ChannelAccounts) Upsert(ctx context.Context, account *ChannelAccount) e
 		return stack.Wrap(err)
 	}
 	now := time.Now().UTC()
-	account.UpdatedAt = now
-
-	existing, err := r.GetByNumber(ctx, account.CustomerID, account.Kind, account.E164)
-	switch {
-	case errors.Is(err, ErrUnknownChannelAccount):
-		account.ID = newID()
-		account.CreatedAt = now
-		if _, err := r.store.global.NewInsert().Model(account).Exec(ctx); err != nil {
-			return stack.Wrap(fmt.Errorf("store: connect channel account: %w", err))
-		}
-		return nil
-	case err != nil:
-		return err
-	}
-
-	account.ID = existing.ID
-	account.Token = existing.Token
-	account.CreatedAt = existing.CreatedAt
-	_, err = r.store.global.NewUpdate().Model(account).
-		Column("account_id", "secrets_sealed", "kek_version", "updated_at").
-		Where("id = ?", account.ID).
-		Where("deleted_at IS NULL").
-		Exec(ctx)
+	account.ID, account.CreatedAt, account.UpdatedAt = newID(), now, now
+	err := r.store.global.NewInsert().Model(account).
+		On("CONFLICT (customer_id, kind, e164) WHERE deleted_at IS NULL DO UPDATE").
+		Set("account_id = EXCLUDED.account_id").
+		Set("secrets_sealed = EXCLUDED.secrets_sealed").
+		Set("kek_version = EXCLUDED.kek_version").
+		Set("updated_at = EXCLUDED.updated_at").
+		Returning("id, token, created_at").
+		Scan(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save channel account: %w", err))
 	}
