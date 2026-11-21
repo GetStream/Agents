@@ -3,8 +3,12 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+
+	"github.com/uptrace/bun"
 )
 
 func (s *ShardedStoreSuite) TestTheSchemaFilesAreCurrent() {
@@ -57,6 +61,27 @@ func (s *ShardedStoreSuite) TestAShardDropsTheEmptyTablesOfTheSharedSet() {
 	s.False(configs, "an empty table of the shared set is dropped")
 	s.True(skills, "a table of the shared set holding rows is kept")
 	s.True(requests, "the shard's own tables stay")
+}
+
+// record_data_change locks the one data_change_starts row on a repeatable read write, on either
+// set, so a new database of each starts with it.
+func (s *ShardedStoreSuite) TestARepeatableReadWriteOnANewDatabaseIsRecorded() {
+	split, err := OpenShards(Options{DSN: s.emptyDatabase("fresh_global"), ShardDSN: s.emptyDatabase("fresh_shard")})
+	s.Require().NoError(err)
+	defer split.Close()
+	s.Require().NoError(split.Migrate(s.ctx))
+
+	for name, db := range map[string]*bun.DB{"shared": split.global, "shard": split.shard} {
+		var starts int
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT count(*) FROM data_change_starts").Scan(&starts))
+		s.Equal(1, starts, "the %s database starts with its data_change_starts row", name)
+	}
+	err = split.shard.RunInTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead}, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO call_bridges (token, customer_id, call_id, vendor, trunk_uri, expires_at)
+			VALUES ('t', 'app', 'call', 'telnyx', 'sip:x', now() + interval '1 minute')`)
+		return err
+	})
+	s.NoError(err, "a repeatable read write on a new shard")
 }
 
 // legacy turns the suite's database back into one that ran the single history up to version.

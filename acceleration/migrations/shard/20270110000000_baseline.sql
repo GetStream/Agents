@@ -115,6 +115,14 @@ CREATE INDEX IF NOT EXISTS data_changes_at_idx ON data_changes USING btree (at);
 
 CREATE INDEX IF NOT EXISTS data_changes_customer_idx ON data_changes USING btree (customer_id, seq);
 
+CREATE TABLE IF NOT EXISTS data_change_starts (
+    one boolean DEFAULT true NOT NULL PRIMARY KEY,
+    started bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT data_change_starts_one_check CHECK (one)
+);
+
+INSERT INTO data_change_starts DEFAULT VALUES ON CONFLICT DO NOTHING;
+
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION log_agent_request() RETURNS trigger
     LANGUAGE plpgsql

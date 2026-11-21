@@ -1771,6 +1771,8 @@ ALTER TABLE ONLY customer_activity
 ALTER TABLE ONLY data_change_starts
     ADD CONSTRAINT data_change_starts_pkey PRIMARY KEY (one);
 
+INSERT INTO data_change_starts DEFAULT VALUES;
+
 ALTER TABLE ONLY data_move_cursors
     ADD CONSTRAINT data_move_cursors_pkey PRIMARY KEY (customer_id, source);
 

@@ -267,6 +267,12 @@ TABLE data_change_capture
     started_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT data_change_capture_pkey PRIMARY KEY (customer_id)
 
+TABLE data_change_starts
+    one boolean NOT NULL DEFAULT true
+    started bigint NOT NULL DEFAULT 0
+    CONSTRAINT data_change_starts_one_check CHECK (one)
+    CONSTRAINT data_change_starts_pkey PRIMARY KEY (one)
+
 TABLE data_changes
     at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
