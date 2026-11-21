@@ -136,24 +136,6 @@ func (s *StoreSuite) TestTheNextSubscriptionDueIsTheFirstAndNoneWhenNoneIsEverDu
 	s.True(next.Equal(s.base))
 }
 
-func (s *StoreSuite) TestAnEventIsClaimedOnceAndGoesWithItsSubscription() {
-	sub := s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
-
-	first, err := s.store.ConnectionEventSubscriptions.FirstEvent(s.ctx, sub.ID, "evt-1")
-	s.Require().NoError(err)
-	again, err := s.store.ConnectionEventSubscriptions.FirstEvent(s.ctx, sub.ID, "evt-1")
-	s.Require().NoError(err)
-	s.Require().NoError(s.store.ConnectionEventSubscriptions.Delete(s.ctx, sub.ID))
-
-	s.True(first)
-	s.False(again)
-	var left int
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connection_event_deliveries").Scan(&left))
-	s.Zero(left)
-	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
-	s.ErrorIs(err, ErrNoConnectionEventSubscription)
-}
-
 func (s *StoreSuite) TestMakingAConnectionDueMakesEveryOneOfItsSubscriptionsDue() {
 	sub := s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
 	other := s.eventSubscription("acme-app", "conn-2", "config-1", "key-1")
@@ -205,11 +187,6 @@ func (s *StoreSuite) TestConnectionEventSubscriptionQueryBudgets() {
 	}), "NextDue")
 	sub.Status = ConnectionEventActive
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &sub)) }), "Update")
-	s.Equal(1, s.countQueries(func() {
-		first, err := s.store.ConnectionEventSubscriptions.FirstEvent(s.ctx, sub.ID, "event-1")
-		s.Require().NoError(err)
-		s.True(first)
-	}), "FirstEvent")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Delete(s.ctx, sub.ID)) }), "Delete")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectionEventSubscriptions.DeleteConnection(s.ctx, "acme-app", "conn-1"))

@@ -662,7 +662,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	}
 	// Claimed as the owner's subscription, so the same event delivered again to the owner's,
 	// once it is active, opens no second conversation.
-	fresh, err := s.store.ConnectionEventSubscriptions.FirstEvent(ctx, held.ID, delivered.EventID)
+	fresh, err := s.store.DeliveriesSeen.First(ctx, store.DeliveryScopeConnectionEvent, store.ConnectionEventKey(held.ID, delivered.EventID))
 	if err != nil {
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}

@@ -478,13 +478,6 @@ TABLE chat_inbound
     CREATE INDEX chat_inbound_finished ON public.chat_inbound USING btree (finished_at) WHERE (state <> 'queued'::text)
     CREATE INDEX chat_inbound_queued ON public.chat_inbound USING btree (next_attempt_at, seq) WHERE (state = 'queued'::text)
 
-TABLE connection_event_deliveries
-    event_id text NOT NULL
-    received_at timestamp with time zone NOT NULL
-    subscription_id text NOT NULL
-    CONSTRAINT connection_event_deliveries_pkey PRIMARY KEY (subscription_id, event_id)
-    CONSTRAINT connection_event_deliveries_subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES connection_event_subscriptions(id) ON DELETE CASCADE
-
 TABLE connection_event_subscriptions
     arguments jsonb NOT NULL DEFAULT '{}'::jsonb
     binding text NOT NULL
@@ -814,6 +807,14 @@ TABLE data_move_cursors
     source text NOT NULL
     CONSTRAINT data_move_cursors_pkey PRIMARY KEY (customer_id, source)
 
+TABLE deliveries_seen
+    key text NOT NULL
+    scope text NOT NULL
+    seen_at timestamp with time zone NOT NULL DEFAULT now()
+    CONSTRAINT deliveries_seen_key_check CHECK ((key <> ''::text))
+    CONSTRAINT deliveries_seen_pkey PRIMARY KEY (scope, key)
+    CREATE INDEX deliveries_seen_seen_at ON public.deliveries_seen USING btree (seen_at)
+
 TABLE dlc_review_logs
     actor text NOT NULL
     actor_name text NOT NULL DEFAULT ''::text
@@ -893,12 +894,6 @@ TABLE episodes
     CREATE INDEX episodes_open_call ON public.episodes USING btree (call_id) WHERE ((status = 'in_progress'::text) AND (session_id IS NOT NULL))
     CREATE UNIQUE INDEX episodes_open_thread ON public.episodes USING btree (customer_id, thread_channel) WHERE ((status = 'in_progress'::text) AND (session_id IS NULL))
     CREATE INDEX episodes_thread ON public.episodes USING btree (customer_id, thread_channel, started_at)
-
-TABLE hook_deliveries
-    key text NOT NULL
-    seen_at timestamp with time zone NOT NULL DEFAULT now()
-    CONSTRAINT hook_deliveries_pkey PRIMARY KEY (key)
-    CREATE INDEX hook_deliveries_seen_at ON public.hook_deliveries USING btree (seen_at)
 
 TABLE image_jobs
     agent_id text NOT NULL DEFAULT ''::text

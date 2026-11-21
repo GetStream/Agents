@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/uptrace/bun"
 )
@@ -138,54 +137,4 @@ func customers[T any](rows []T, of func(T) string) int {
 		seen[of(row)] = true
 	}
 	return len(seen)
-}
-
-// deliveryKeptFor is how long a delivery is remembered, which is longer than Stream retries.
-const deliveryKeptFor = 24 * time.Hour
-
-// deliveriesPrunedEvery is how often deliveries older than a day are forgotten, which is
-// rarely enough that a busy hook does not pay for it on every delivery.
-const deliveriesPrunedEvery = time.Minute
-
-// FirstDelivery records a hook delivery and reports whether it is the first with that key.
-func (s *Store) FirstDelivery(ctx context.Context, key string) (bool, error) {
-	if err := s.forgetDeliveries(ctx); err != nil {
-		return false, err
-	}
-	return recordDelivery(ctx, s.global, key)
-}
-
-// hookDelivery is one hook delivery's key, as FirstDelivery records it.
-type hookDelivery struct {
-	bun.BaseModel `bun:"table:hook_deliveries,alias:hd"`
-
-	Key    string    `bun:"key,pk"`
-	SeenAt time.Time `bun:"seen_at,notnull"`
-}
-
-// forgetDeliveries deletes the deliveries older than a day, at most once every
-// deliveriesPrunedEvery.
-func (s *Store) forgetDeliveries(ctx context.Context) error {
-	now := time.Now().UTC()
-	if last := s.deliveriesPruned.Load(); now.UnixNano()-last >= int64(deliveriesPrunedEvery) &&
-		s.deliveriesPruned.CompareAndSwap(last, now.UnixNano()) {
-		_, err := s.global.NewDelete().Model((*hookDelivery)(nil)).Where("seen_at < ?", now.Add(-deliveryKeptFor)).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("store: forget hook deliveries: %w", err)
-		}
-	}
-	return nil
-}
-
-// recordDelivery is FirstDelivery's record on db, the store's or a transaction's.
-func recordDelivery(ctx context.Context, db bun.IDB, key string) (bool, error) {
-	result, err := db.NewInsert().Model(&hookDelivery{Key: key}).
-		Column("key").
-		On("CONFLICT (key) DO NOTHING").
-		Exec(ctx)
-	if err != nil {
-		return false, fmt.Errorf("store: record hook delivery: %w", err)
-	}
-	inserted, _ := result.RowsAffected()
-	return inserted == 1, nil
 }

@@ -269,27 +269,3 @@ func (r *ConnectionEventSubscriptions) DeleteConnection(ctx context.Context, cus
 	}
 	return nil
 }
-
-// connectionEventDelivery is one event a subscription got (ClaimConnectionEvent).
-type connectionEventDelivery struct {
-	bun.BaseModel `bun:"table:connection_event_deliveries,alias:cevd"`
-
-	SubscriptionID string    `bun:"subscription_id,pk"`
-	EventID        string    `bun:"event_id,pk"`
-	ReceivedAt     time.Time `bun:"received_at,notnull"`
-}
-
-// FirstEvent records that a subscription's event arrived, and reports whether this
-// is the first time: a retried delivery of the same event id is not.
-func (r *ConnectionEventSubscriptions) FirstEvent(ctx context.Context, subscriptionID, eventID string) (bool, error) {
-	delivery := connectionEventDelivery{SubscriptionID: subscriptionID, EventID: eventID, ReceivedAt: time.Now().UTC()}
-	result, err := r.store.global.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: claim connection event: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: claim connection event: %w", err))
-	}
-	return affected == 1, nil
-}

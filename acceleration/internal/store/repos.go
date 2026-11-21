@@ -17,6 +17,7 @@ type repos struct {
 	ConnectorAuditEvents           *ConnectorAuditEvents
 	ConnectorInvocations           *ConnectorInvocations
 	ConnectorToolPins              *ConnectorToolPins
+	DeliveriesSeen                 *DeliveriesSeen
 }
 
 // wire gives every repository the store it reads and writes through.
@@ -36,5 +37,6 @@ func (s *Store) wire() {
 		ConnectorAuditEvents:           &ConnectorAuditEvents{store: s},
 		ConnectorInvocations:           &ConnectorInvocations{store: s},
 		ConnectorToolPins:              &ConnectorToolPins{store: s},
+		DeliveriesSeen:                 &DeliveriesSeen{store: s},
 	}
 }

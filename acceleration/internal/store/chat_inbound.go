@@ -97,16 +97,16 @@ func queueChatInbound(ctx context.Context, db bun.IDB, delivery ChatInbound) (bo
 	return affected == 1, nil
 }
 
-// QueueFirstChatInbound records a delivery under key, as FirstDelivery does, and queues it, in
+// QueueFirstChatInbound records a delivery under key, as DeliveriesSeen.First does, and queues it, in
 // one transaction: the delivery is queued exactly when it is the first under key. queued is
 // false when key was recorded before, by the message webhook or an earlier delivery of the same
 // message: that one answers it. An error records nothing, so a delivery made again is queued.
 func (s *Store) QueueFirstChatInbound(ctx context.Context, key string, delivery ChatInbound) (queued bool, err error) {
-	if err := s.forgetDeliveries(ctx); err != nil {
+	if err := s.DeliveriesSeen.prune(ctx); err != nil {
 		return false, stack.Wrap(err)
 	}
 	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		first, err := recordDelivery(ctx, tx, key)
+		first, err := firstSeen(ctx, tx, DeliveryScopeHook, key)
 		if err != nil || !first {
 			return err
 		}

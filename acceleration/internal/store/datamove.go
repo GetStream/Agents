@@ -81,8 +81,9 @@ func (t dataTable) rollup() bool {
 // connector_config_tokens, sealed under this deployment's key for the provider app whose
 // events URL is this deployment's. And connector_event_destinations, whose signing secrets are
 // sealed under this deployment's key, with connector_event_deliveries, forwards in flight. And
-// connection_event_subscriptions with connection_event_deliveries: their secrets are sealed
-// under this deployment's key and their callbacks are this deployment's URL. And
+// connection_event_subscriptions: their secrets are sealed under this deployment's key and
+// their callbacks are this deployment's URL. And deliveries_seen, the deliveries this
+// deployment acted on in the last day, which is where their retries arrive. And
 // channel_threads, contact_map, episodes and episode_activity: the thread channels,
 // omni-channels and cards they point at live in the Stream app, which a move does not carry
 // either; and user_phones, whose links join only those contact_map rows; and
