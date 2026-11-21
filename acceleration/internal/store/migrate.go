@@ -165,7 +165,7 @@ func (s *Store) DropStrays(ctx context.Context) (dropped, left []string, err err
 // person. A stray another stray points at is dropped on a later pass, once the one pointing
 // is gone.
 func dropStrays(ctx context.Context, db *bun.DB, other migrationSet) (dropped, left []string, err error) {
-	tables, err := setTables(other)
+	tables, err := createdTables(other)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -320,11 +320,37 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 // written to.
 var changeLogTables = []string{"data_change_capture", "data_changes"}
 
-var createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
+var (
+	createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
+	dropTable   = regexp.MustCompile(`(?i)DROP TABLE (?:IF EXISTS )?([a-z_0-9]+)`)
+)
 
-// setTables are the tables the set's migrations create, read from their SQL. A table is
-// created by one set alone, except the change log both keep.
+// setTables are the tables the set's migrations create and leave, read from their SQL. A
+// table is created by one set alone, except the change log both keep.
 func setTables(set migrationSet) ([]string, error) {
+	created, err := createdTables(set)
+	if err != nil {
+		return nil, err
+	}
+	files, err := fs.Glob(set.files, "*.sql")
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range files {
+		raw, err := fs.ReadFile(set.files, name)
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range dropTable.FindAllStringSubmatch(string(raw), -1) {
+			created = slices.DeleteFunc(created, func(table string) bool { return table == match[1] })
+		}
+	}
+	return created, nil
+}
+
+// createdTables are the tables the set's migrations ever create, a later one dropping them
+// included, which a database of the other set may still hold from before the split.
+func createdTables(set migrationSet) ([]string, error) {
 	files, err := fs.Glob(set.files, "*.sql")
 	if err != nil {
 		return nil, err

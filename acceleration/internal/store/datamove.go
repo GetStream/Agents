@@ -97,8 +97,6 @@ func (t dataTable) rollup() bool {
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
-	{name: "agent_plugin_connections", customer: "customer_id"},
-	{name: "agent_plugin_clients", customer: "customer_id"},
 	// Only the customer's own definitions: the built-ins are under no customer, and every
 	// deployment seeds its own. They come before the connections that pin them.
 	{name: "connector_definitions", customer: "customer_id"},
@@ -166,7 +164,11 @@ var dataTables = []dataTable{
 // authorized again rather than arriving broken.
 // A guest's refresh secret hash is the same kind of thing: a moved guest is handed a new
 // one by its own token or by the app's backend, or comes back as a new guest.
-var secretColumns = []string{"secret_sealed", "access_token", "refresh_token", "oauth_state", "code_verifier", "credentials_sealed", "password_sealed", "bridge_password_sealed", "refresh_secret_hash"}
+var secretColumns = []string{"secret_sealed", "credentials_sealed", "password_sealed", "bridge_password_sealed", "refresh_secret_hash"}
+
+// retiredTables are tables an export from an older release may carry that this schema dropped
+// (20270112000100_drop_plugin_tables.sql). An import skips their rows, inserts and deletes alike.
+var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -655,6 +657,9 @@ var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk"
 	"bridge_uri", "bridge_username", "bridge_password_kek_version", "attached_at", "config_id"}
 
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage) error {
+	if slices.Contains(retiredTables, table) {
+		return nil
+	}
 	spec, found := dataTableByName(table)
 	if !found {
 		return fmt.Errorf("store: %q is not a table an export carries", table)
@@ -1549,6 +1554,9 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
 // change carrying somebody else's key cannot reach their row.
 func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange) error {
+	if slices.Contains(retiredTables, change.Table) {
+		return nil
+	}
 	spec, found := dataTableByName(change.Table)
 	if !found {
 		return fmt.Errorf("store: %q is not a table an export carries", change.Table)

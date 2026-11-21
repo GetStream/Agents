@@ -186,17 +186,6 @@ func (s *DataMoveSuite) TestExportCarriesOnlyTheCallersRows() {
 	s.Equal("acme-agent", configs[0]["name"])
 }
 
-func (s *DataMoveSuite) TestExportLeavesCredentialsBehind() {
-	s.seedPluginConnection(s.source, "acme", "xoxb-a-real-token")
-
-	connections := s.export("acme").of("agent_plugin_connections")
-
-	s.Require().Len(connections, 1)
-	for _, column := range secretColumns {
-		s.NotContains(connections[0], column, "a credential is not part of a customer's data")
-	}
-}
-
 func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 	// It is what lets a guest come back as themselves; a moved guest is handed a new one.
 	_, hash, err := NewGuestSecret()
@@ -243,17 +232,6 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT refresh_secret_hash FROM users WHERE customer_id = 'moved' AND id = 'guest-1'").Scan(&held))
 	s.Empty(held)
-}
-
-func (s *DataMoveSuite) TestAnImportedConnectionHasToBeAuthorizedAgain() {
-	s.seedPluginConnection(s.source, "acme", "xoxb-a-real-token")
-
-	s.move("acme", "acme")
-
-	var token string
-	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT access_token FROM agent_plugin_connections").Scan(&token))
-	s.Empty(token)
 }
 
 func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
@@ -1441,16 +1419,6 @@ func (s *DataMoveSuite) seedVoice(store *Store, customerID, name string) string 
 	id := newID()
 	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO voices (id, customer_id, name) VALUES (?, ?, ?)", id, customerID, name)
-	s.Require().NoError(err)
-	return id
-}
-
-func (s *DataMoveSuite) seedPluginConnection(store *Store, customerID, token string) string {
-	id := newID()
-	_, err := store.GlobalDB().ExecContext(s.ctx,
-		"INSERT INTO agent_plugin_connections (id, customer_id, config_id, plugin_id, access_token)"+
-			" VALUES (?, ?, ?, ?, ?)",
-		id, customerID, newID(), "slack", token)
 	s.Require().NoError(err)
 	return id
 }
@@ -3536,4 +3504,24 @@ func (s *DataMoveSuite) TestALogCopiedBackWhereItCameFromIsNotCopiedAgain() {
 	var logs []int64
 	s.Require().NoError(s.source.GlobalDB().NewSelect().Table("agent_logs").Column("id").Where("customer_id = 'acme'").Scan(s.ctx, &logs))
 	s.Equal([]int64{id}, logs, "the log that went away and came back is the one log it was")
+}
+
+// An export from a release before the plugin tables were dropped still carries their rows, and
+// changes to them; an import skips them rather than failing the whole move.
+func (s *DataMoveSuite) TestAnImportSkipsTheRowsOfARetiredTable() {
+	connection := json.RawMessage(`{"id": "c1", "customer_id": "acme", "config_id": "x", "plugin_id": "slack", "access_token": "xoxb"}`)
+	for _, table := range retiredTables {
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", table, connection), table)
+	}
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{
+		{Table: "agent_plugin_connections", Op: ChangeInsert, Key: json.RawMessage(`{"id": "c1"}`), Payload: connection},
+		{Table: "agent_plugin_connections", Op: ChangeDelete, Key: json.RawMessage(`{"id": "c1"}`)},
+	}))
+
+	var present bool
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT to_regclass('agent_plugin_connections') IS NOT NULL").Scan(&present))
+	s.False(present)
+	s.ErrorContains(s.destination.ImportRow(s.ctx, "moved", "no_such_table", connection), "is not a table an export carries",
+		"only the retired tables are skipped")
 }
