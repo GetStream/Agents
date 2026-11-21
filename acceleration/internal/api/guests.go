@@ -69,11 +69,11 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 	// does not admit guests is one the next request rejects, which reads as a broken
 	// deployment rather than as a setting somebody chose.
 	if s.store != nil {
-		settings, err := s.store.AppSettingsFor(ctx, customerID)
-		if err != nil {
+		app, err := s.store.Apps.Get(ctx, customerID)
+		if err != nil && !errors.Is(err, store.ErrNoApp) {
 			return nil, err
 		}
-		if !settings.GuestAllowed() {
+		if !app.Settings.GuestAllowed() {
 			return nil, forbidden("this app does not admit guests")
 		}
 	}
@@ -176,7 +176,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		if err := s.updateGuestProfile(ctx, bound, requested, name, custom); err != nil {
 			return nil, err
 		}
-		if err := s.store.SetGuestProfile(ctx, customerID, requested, name, custom); err != nil {
+		if err := s.store.Guests.SetProfile(ctx, customerID, requested, name, custom); err != nil {
 			return nil, err
 		}
 	}
@@ -195,9 +195,9 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	// holding none, such as one minted before secrets existed; one holding a secret keeps it.
 	issued := true
 	if server {
-		err = s.store.SetGuestSecret(ctx, customerID, requested, hash)
+		err = s.store.Guests.SetSecret(ctx, customerID, requested, hash)
 	} else {
-		issued, err = s.store.GiveGuestASecret(ctx, customerID, requested, hash)
+		issued, err = s.store.Guests.GiveSecret(ctx, customerID, requested, hash)
 	}
 	if err != nil {
 		return nil, err
@@ -229,7 +229,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	held, err := s.store.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err := s.store.Guests.RotateSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
 	if errors.Is(err, store.ErrGuestSecretRefused) {
 		return nil, nil
 	}

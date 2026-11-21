@@ -240,7 +240,7 @@ func (r *Recorder) write() bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	if err := r.db.RecordActivity(ctx, deltas); err != nil {
+	if err := r.db.Activities.Add(ctx, deltas); err != nil {
 		r.logger.Error("could not write the activity record", "rows", len(deltas), "error", err)
 		r.mu.Lock()
 		defer r.mu.Unlock()

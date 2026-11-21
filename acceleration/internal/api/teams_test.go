@@ -57,11 +57,11 @@ func (s *AgentTeamsSuite) useTeamsApp(settings store.AppSettings) {
 func (s *AgentTeamsSuite) useDeploymentApp(settings store.AppSettings) {
 	id := streamAppID()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(context.Background(), &organization))
+	s.Require().NoError(s.store.Organizations.Insert(context.Background(), &organization))
 	app := store.App{
 		ID: streamapp.CustomerOf(id), OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings,
 	}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
 	s.useApp(s.data.keyed(organization, app))
 	s.teamsChat = chattest.NewServer(s.T())
 	s.setApps(s.customerID(), func(apps *suiteApps) {
@@ -280,9 +280,9 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerWithNoPinReadsItsUsers
 		s.useApp(s.data.keyed(store.Organization{ID: app.OrganizationID}, app))
 	} else {
 		organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-		s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+		s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 		app = store.App{ID: id, OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings}
-		s.Require().NoError(s.store.CreateApp(ctx, &app))
+		s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 		s.useApp(s.data.keyed(organization, app))
 	}
 	s.teamsChat = s.chat

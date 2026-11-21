@@ -37,7 +37,7 @@ func (s *UsageIdentitySuite) SetupTest() {
 }
 
 func (s *UsageIdentitySuite) TestARequestRecordsAllSixFields() {
-	s.Require().NoError(s.store.SetOrganizationTier(context.Background(), s.app.organization.ID, "tier-a", time.Now()))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(context.Background(), &store.OrganizationTier{OrganizationID: s.app.organization.ID, Tier: "tier-a", SeenAt: time.Now()}))
 	asking := s.userWith([]string{"project:onboarding"}, "finance")
 
 	row := s.searched(asking)

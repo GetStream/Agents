@@ -57,11 +57,11 @@ func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.Ca
 	if owner.OrganizationID == "" {
 		// Known when the row is written, but the concurrent calls of an organization are counted
 		// from its open legs.
-		organization, err := s.store.OrganizationOf(ctx, owner.CustomerID)
+		membership, err := s.store.AppOrganizations.Get(ctx, owner.CustomerID)
 		if err != nil {
 			s.logger.Warn("could not tell whose organization a call leg is", "customer", owner.CustomerID, "error", err)
 		}
-		owner.OrganizationID = organization
+		owner.OrganizationID = membership.OrganizationID
 	}
 	if leg.Direction == store.Outbound {
 		s.gate.Dialed(ctx, owner.CustomerID, owner.OrganizationID, leg.RemoteNumber)

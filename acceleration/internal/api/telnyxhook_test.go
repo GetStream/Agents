@@ -248,12 +248,12 @@ func (s *TelnyxHookSuite) TestASignedCallCarryingCredentialsRecordsNoUserAndJoin
 	s.Zero(recorded)
 
 	s.Never(func() bool {
-		under, err := s.store.OrganizationOf(ctx, s.customerID())
-		return err == nil && under != ""
+		under, err := s.store.AppOrganizations.Get(ctx, s.customerID())
+		return err == nil && under.OrganizationID != ""
 	}, time.Second, 20*time.Millisecond)
-	under, err := s.store.OrganizationOf(ctx, claimed)
+	under, err := s.store.AppOrganizations.Get(ctx, claimed)
 	s.Require().NoError(err)
-	s.Empty(under)
+	s.Empty(under.OrganizationID)
 }
 
 func (s *TelnyxHookSuite) call(to string) url.Values {

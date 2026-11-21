@@ -456,8 +456,8 @@ draining:
 func (s *SlackChannelSuite) TestAHookStartedReplyIsMarkedHookChat() {
 	// No key opened the thread channel's session: the message hook did, for its sender.
 	organization := s.RouterSuite.app.organization.ID
-	s.Require().NoError(s.store.JoinOrganization(context.Background(), s.customerID(), organization))
-	s.Require().NoError(s.store.SetOrganizationTier(context.Background(), organization, "tier-a", time.Now()))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: s.customerID(), OrganizationID: organization}))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(context.Background(), &store.OrganizationTier{OrganizationID: organization, Tier: "tier-a", SeenAt: time.Now()}))
 	s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	data, foundChannel := s.chat.Channel(channel)

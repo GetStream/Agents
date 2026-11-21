@@ -658,7 +658,7 @@ func (s *RunnerSuite) TestACampaignWhoseSessionCouldNotOpenPausesBeforeRinging()
 
 func (s *RunnerSuite) TestASpeechToSpeechConfigIsOnlyRefusedAVoicemailMessage() {
 	// Telephony is suspended, so a call that reaches the phone service fails before any vendor.
-	s.Require().NoError(s.store.SuspendTelephony(s.ctx, &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(s.ctx, &store.TelephonySuspension{
 		CustomerID: s.customerID, Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	config, err := phone.DefaultConfig()

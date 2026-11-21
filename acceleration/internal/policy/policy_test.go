@@ -107,7 +107,7 @@ func (s *PolicySuite) limit(limit store.Limit) store.Limit {
 		limit.Interval = usage.Daily
 	}
 	limit.UpdatedBy = "test"
-	s.Require().NoError(s.store.CreateLimit(s.ctx, &limit, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.ctx, &limit, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	return limit
 }
 
@@ -131,7 +131,7 @@ func (s *PolicySuite) SetupTest() {
 	stamp := time.Now().UnixNano()
 	s.app = fmt.Sprintf("app-%d", stamp)
 	s.org = fmt.Sprintf("org-%d", stamp)
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, s.app, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))
 }
 
 // spend records a billable request the app made just now.
@@ -245,7 +245,7 @@ func (s *PolicySuite) TestAnAppThatSpentItsLimitIsRefused() {
 
 func (s *PolicySuite) TestAnOrganizationLimitIsSpentByAllOfItsApps() {
 	sibling := s.app + "-sibling"
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, sibling, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: sibling, OrganizationID: s.org}))
 	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: s.org,
 		Interval: usage.Weekly, LimitMicros: 1_000_000})
 	s.spend(sibling, 1_000_000)
@@ -314,7 +314,7 @@ func (s *PolicySuite) TestAGrantAdmitsPastASpentLimitUntilItIsUsed() {
 	s.spend(s.app, 1_000_000)
 	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 
 	var admitted routing.Admission
 	s.eventually(func() bool {
@@ -357,10 +357,10 @@ func (s *PolicySuite) sharded() (*store.Store, *appconfig.Store) {
 	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: map[string]string{"here": shard}})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
-	s.Require().NoError(db.JoinOrganization(s.ctx, s.app, s.org))
+	s.Require().NoError(db.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))
 	configs, err := appconfig.New(appconfig.Options{Store: db})
 	s.Require().NoError(err)
-	s.Require().NoError(db.CreateLimit(s.ctx, &store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app,
+	s.Require().NoError(db.Limits.Insert(s.ctx, &store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app,
 		Interval: usage.Daily, LimitMicros: 1, UpdatedBy: "test"}, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	return db, configs
 }
@@ -374,14 +374,14 @@ func (s *PolicySuite) shardRow(cost int64, grants []int64) store.Request {
 func (s *PolicySuite) TestWithShardsTheReconcileRunsAsTheLoopsStart() {
 	db, configs := s.sharded()
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(db.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(db.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	// The shard has a row naming the grant and nothing counted it: its count was dropped.
 	_, err := db.RecordRequests(s.ctx, []store.Request{s.shardRow(500_000, []int64{grant.ID})})
 	s.Require().NoError(err)
 
 	s.newEnforcer(configs, nil)
 	s.eventually(func() bool {
-		read, err := db.Grant(s.ctx, "", grant.ID)
+		read, err := db.LimitGrants.Get(s.ctx, "", grant.ID)
 		return err == nil && read.UsedMicros == 500_000
 	}, 5*time.Second, 20*time.Millisecond, "counted by the reconcile the loops start with, not one reconcileEvery on")
 }
@@ -394,7 +394,7 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	_, err := db.RecordRequests(s.ctx, []store.Request{row(1, nil)})
 	s.Require().NoError(err)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(db.AddGrant(s.ctx, &grant, audit))
+	s.Require().NoError(db.LimitGrants.Insert(s.ctx, &grant, audit))
 	s.eventually(func() bool {
 		admitted, err := enforcer.Admit(s.ctx, ownerOf(s.app))
 		return err == nil && admitted.Spend == nil && len(admitted.Grants) == 1
@@ -420,10 +420,10 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	s.Require().NoError(err)
 	s.ErrorIs(admitted.Spend, ErrBudgetSpent, "the grant is not drawn twice meanwhile")
 
-	_, err = db.ReconcileGrantUses(s.ctx)
+	_, err = db.LimitGrantUses.Reconcile(s.ctx)
 	s.Require().NoError(err)
 	s.eventually(func() bool { return !held() }, 5*time.Second, 10*time.Millisecond, "let go once the reconcile counted it")
-	read, err := db.Grant(s.ctx, "", grant.ID)
+	read, err := db.LimitGrants.Get(s.ctx, "", grant.ID)
 	s.Require().NoError(err)
 	s.EqualValues(2_000_000, read.UsedMicros)
 	admitted, err = enforcer.Admit(s.ctx, ownerOf(s.app))
@@ -466,7 +466,7 @@ func (s *PolicySuite) TestAGrantUntilMidnightIsExpiredAfterIt() {
 	s.eventually(func() bool { return errors.Is(admit().Spend, ErrUserLimit) }, 5*time.Second, 10*time.Millisecond, "u1 is spent")
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectUser, AppID: s.app, UserID: "u1",
 		AmountMicros: 1_000_000, ExpiresAt: &midnight, Reason: "a support case", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	s.eventually(func() bool { return len(admit().Grants) > 0 }, 5*time.Second, 10*time.Millisecond, "admitted on the grant today")
 
 	after := midnight.Add(time.Second)
@@ -496,7 +496,7 @@ func (s *PolicySuite) TestALockedGrantsTableKeepsTheLastGrantsAndTheLimitsRead()
 	s.spend(s.app, 1_000_000)
 	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	s.eventually(func() bool { return len(s.admitted().Grants) > 0 }, 5*time.Second, 10*time.Millisecond, "admitted on the grant")
 
 	s.lockGrants()
@@ -504,7 +504,7 @@ func (s *PolicySuite) TestALockedGrantsTableKeepsTheLastGrantsAndTheLimitsRead()
 	s.never(func() bool { admitted := s.admitted(); return admitted.Spend != nil || len(admitted.Grants) == 0 },
 		2*grantsTimeout, 20*time.Millisecond, "the last grants read keeps answering while the next cannot land")
 	start, _ := usage.Window(usage.Daily, time.Now())
-	s.Require().NoError(s.store.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(s.store.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.org, Subject: limit.Subject, AppID: s.app, Interval: usage.Daily, WindowStart: start,
 		BaselineMicros: 1_000_000, Reason: "test", Actor: "test",
 	}}, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
@@ -516,7 +516,7 @@ func (s *PolicySuite) TestAGrantNeverReadIsNeverDrawnAndTheLimitStillRefuses() {
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_000_000)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	configs, err := appconfig.New(appconfig.Options{Store: s.store})
 	s.Require().NoError(err)
 	enforcer := s.newEnforcer(configs, nil)
@@ -542,7 +542,7 @@ func (s *PolicySuite) TestAResetCountsFromItsBaseline() {
 	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 
 	start, _ := usage.Window(usage.Daily, time.Now())
-	s.Require().NoError(s.store.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(s.store.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.org, Subject: limit.Subject, AppID: s.app, Interval: usage.Daily, WindowStart: start,
 		BaselineMicros: 1_000_000, Reason: "test", Actor: "test",
 	}}, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
@@ -867,7 +867,7 @@ func (s *PolicySuite) TestAUsersOwnQuotaWinsOverTheirAppsAndOrganizations() {
 
 func (s *PolicySuite) TestTheSameUserIDInTwoAppsIsTwoUsers() {
 	sibling := fmt.Sprintf("app-sibling-%d", time.Now().UnixNano())
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, sibling, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: sibling, OrganizationID: s.org}))
 	s.save(store.ScopeUser, store.UserScopeID(s.app, "same"), store.PolicyDocument{Quota: quotaOf(new(int64(1)), nil)})
 
 	s.EqualValues(1, s.limits("same").MessagesPerDay)
@@ -974,11 +974,11 @@ func (s *PolicySuite) TestADailyLimitHoldsWhenOnlyTheSpendCannotBeRead() {
 	if address == "" {
 		s.T().Skip("ROUTER_REDIS_ADDR is not set")
 	}
-	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
-	s.Require().NoError(err)
-	configs, err := redisready.Retry(address, func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: db, Address: address, Logger: slog.New(slog.DiscardHandler)})
+	db, err := redisready.Retry(address, func() (*store.Store, error) {
+		return store.OpenShards(store.Options{DSN: os.Getenv("ROUTER_POSTGRES_DSN"), Redis: store.Redis{Address: address}})
 	})
+	s.Require().NoError(err)
+	configs, err := appconfig.New(appconfig.Options{Store: db, Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
 	s.T().Cleanup(configs.Close)
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
@@ -987,7 +987,8 @@ func (s *PolicySuite) TestADailyLimitHoldsWhenOnlyTheSpendCannotBeRead() {
 	}))
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.Require().EqualValues(20_000, enforcer.Quota(s.ctx, s.app, "someone", deployment).Messages.PerDay)
-	s.Require().NoError(db.Close())
+	s.T().Cleanup(func() { _ = db.Close() })
+	s.Require().NoError(db.GlobalDB().Close())
 	enforcer.forget(s.app)
 
 	limits := limitsOf(enforcer.Quota(s.ctx, s.app, "someone", deployment))

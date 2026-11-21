@@ -302,7 +302,7 @@ func (s *Server) createGrant(ctx context.Context, organization string, sent Limi
 		return nil, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidExpiry,
 			Message: "expires_at is in the future and at most 366 days away"}
 	}
-	limits, err := s.store.LimitsFor(ctx, []string{organization})
+	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +318,7 @@ func (s *Server) createGrant(ctx context.Context, organization string, sent Limi
 		Category: ref.Category, AmountMicros: sent.AmountMicros, ExpiresAt: sent.ExpiresAt, Reason: sent.Reason,
 		Actor: actorName(audit),
 	}
-	err = s.store.AddGrant(ctx, &grant, audit)
+	err = s.store.LimitGrants.Insert(ctx, &grant, audit)
 	if errors.Is(err, store.ErrTooManyGrants) {
 		return nil, APIError{Type: ErrorTypeConflict, Code: codeTooManyGrants, Message: fmt.Sprintf(
 			"the organization has %d live grants, as many as it may: revoke one, or wait for one to end", store.MaxLiveGrants)}
@@ -366,11 +366,11 @@ func (s *Server) listGrants(ctx context.Context, organization string, request *L
 	case GrantLive:
 		filter.Revoked, filter.Expired, filter.Used = &no, &no, &no
 	}
-	var position int64
 	if before != nil {
-		position = before.ID
+		filter.Before = before.ID
 	}
-	rows, err := s.store.ListGrants(ctx, filter, position, request.Limit)
+	filter.Limit = request.Limit
+	rows, err := s.store.LimitGrants.Select(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +386,7 @@ func (s *Server) listGrants(ctx context.Context, organization string, request *L
 }
 
 func (s *Server) revokeGrant(ctx context.Context, organization string, request *grantIDRequest, audit store.LimitAudit) (*grantResponse, error) {
-	revoked, err := s.store.RevokeGrant(ctx, organization, request.GrantId, actorName(audit), request.Body.Reason, audit)
+	revoked, err := s.store.LimitGrants.Revoke(ctx, organization, request.GrantId, actorName(audit), request.Body.Reason, audit)
 	if errors.Is(err, store.ErrNoGrant) {
 		return nil, errNoSuchGrant
 	}
@@ -398,7 +398,7 @@ func (s *Server) revokeGrant(ctx context.Context, organization string, request *
 }
 
 func (s *Server) unrevokeGrant(ctx context.Context, organization string, request *grantUnrevokeRequest, audit store.LimitAudit) (*grantResponse, error) {
-	unrevoked, err := s.store.UnrevokeGrant(ctx, organization, request.GrantId, request.Body.Reason, audit)
+	unrevoked, err := s.store.LimitGrants.Unrevoke(ctx, organization, request.GrantId, request.Body.Reason, audit)
 	switch {
 	case errors.Is(err, store.ErrNoGrant):
 		return nil, errNoSuchGrant

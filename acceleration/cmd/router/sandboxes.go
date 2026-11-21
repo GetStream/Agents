@@ -104,7 +104,7 @@ func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(contex
 		return nil
 	}
 	return func(ctx context.Context) ([]string, error) {
-		rows, err := pgStore.ProviderKeysOf(ctx, providerkeys.Daytona)
+		rows, err := pgStore.ProviderKeys.SelectByProvider(ctx, providerkeys.Daytona)
 		if err != nil {
 			return nil, err
 		}

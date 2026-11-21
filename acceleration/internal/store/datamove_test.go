@@ -216,7 +216,7 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.SetGuestSecret(s.ctx, "acme", "guest-1", next))
+	s.Require().NoError(s.source.Guests.SetSecret(s.ctx, "acme", "guest-1", next))
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
@@ -329,7 +329,7 @@ func (s *DataMoveSuite) TestImportWritesTheRowsUnderTheImportingCustomer() {
 func (s *DataMoveSuite) TestAMoveCarriesTheAppsActivityUnderTheImportingApp() {
 	from, to := uuid.NewString(), uuid.NewString()
 	at := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
-	s.Require().NoError(s.source.RecordActivity(s.ctx, []ActivityDelta{{
+	s.Require().NoError(s.source.Activities.Add(s.ctx, []ActivityDelta{{
 		OrganizationID: "org", AppID: from, Area: "agent_setup", Client: AuditSourceCLI,
 		Day: at, Requests: 3, FirstAt: at, LastAt: at,
 	}}))

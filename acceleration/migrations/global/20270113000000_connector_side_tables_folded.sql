@@ -52,3 +52,70 @@ DROP TABLE connector_connection_clients;
 DROP TABLE connector_connection_validations;
 DROP TABLE connector_audit_credentials;
 DROP TABLE connector_invocation_arguments;
+
+-- +goose Down
+
+CREATE TABLE connector_connection_clients (
+    connection_id text PRIMARY KEY REFERENCES connector_connections(id) ON DELETE CASCADE,
+    registration text NOT NULL,
+    client_id text NOT NULL,
+    updated_at timestamp with time zone NOT NULL
+);
+
+CREATE TABLE connector_connection_validations (
+    connection_id text PRIMARY KEY REFERENCES connector_connections(id) ON DELETE CASCADE,
+    revision integer NOT NULL,
+    status text NOT NULL,
+    code text NOT NULL DEFAULT '',
+    error text NOT NULL DEFAULT '',
+    checked_at timestamp with time zone NOT NULL
+);
+
+CREATE TABLE connector_audit_credentials (
+    audit_id text PRIMARY KEY REFERENCES connector_audit(id) ON DELETE CASCADE,
+    access_fingerprint text NOT NULL DEFAULT '',
+    previous_access_fingerprint text NOT NULL DEFAULT '',
+    refresh_fingerprint text NOT NULL DEFAULT '',
+    previous_refresh_fingerprint text NOT NULL DEFAULT '',
+    rotated boolean NOT NULL DEFAULT false,
+    access_expires_at timestamp with time zone,
+    refresh_expires_at timestamp with time zone
+);
+
+CREATE TABLE connector_invocation_arguments (
+    invocation_id text PRIMARY KEY REFERENCES connector_invocations(id) ON DELETE CASCADE,
+    shape jsonb NOT NULL
+);
+
+INSERT INTO connector_connection_clients (connection_id, registration, client_id, updated_at)
+SELECT id, client_registration, client_id, client_updated_at FROM connector_connections
+WHERE client_updated_at IS NOT NULL;
+
+INSERT INTO connector_connection_validations (connection_id, revision, status, code, error, checked_at)
+SELECT id, validation_revision, validation_status, validation_code, validation_error, validation_checked_at
+FROM connector_connections WHERE validation_checked_at IS NOT NULL;
+
+INSERT INTO connector_audit_credentials (audit_id, access_fingerprint, previous_access_fingerprint,
+    refresh_fingerprint, previous_refresh_fingerprint, rotated, access_expires_at, refresh_expires_at)
+SELECT id, coalesce(credential ->> 'access_fingerprint', ''), coalesce(credential ->> 'previous_access_fingerprint', ''),
+    coalesce(credential ->> 'refresh_fingerprint', ''), coalesce(credential ->> 'previous_refresh_fingerprint', ''),
+    coalesce((credential ->> 'rotated')::boolean, false), (credential ->> 'access_expires_at')::timestamptz,
+    (credential ->> 'refresh_expires_at')::timestamptz
+FROM connector_audit WHERE credential IS NOT NULL;
+
+INSERT INTO connector_invocation_arguments (invocation_id, shape)
+SELECT id, arguments FROM connector_invocations WHERE arguments IS NOT NULL;
+
+ALTER TABLE connector_connections
+    DROP COLUMN client_registration,
+    DROP COLUMN client_id,
+    DROP COLUMN client_updated_at,
+    DROP COLUMN validation_revision,
+    DROP COLUMN validation_status,
+    DROP COLUMN validation_code,
+    DROP COLUMN validation_error,
+    DROP COLUMN validation_checked_at;
+
+ALTER TABLE connector_audit DROP COLUMN credential;
+
+ALTER TABLE connector_invocations DROP COLUMN arguments;

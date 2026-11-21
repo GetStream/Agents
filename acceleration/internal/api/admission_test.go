@@ -255,7 +255,7 @@ func (s *AdmissionSuite) TestAUsersSpentLimitIsTooManyRequestsWithRetryAfter() {
 		Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.organization(), AppID: s.customerID(),
 		Interval: usage.Daily, LimitMicros: 1, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	spender := s.utils.uuid()
 	s.usage.Spend(s.T(), s.organization(), 1_000, func(event *usage.Event) { event.AppID, event.UserID = s.customerID(), spender })
 	asUser := s.signedIn(jwt.MapClaims{"user_id": spender}, auth.AuthTypeJWT, user, spender)
@@ -293,7 +293,7 @@ func (s *AdmissionSuite) TestAUserSpentForTheDayAndTheMonthRetriesAfterTheMonth(
 			Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.organization(), AppID: s.customerID(),
 			Interval: interval, LimitMicros: 1, UpdatedBy: "test",
 		}
-		s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+		s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	}
 	spender := s.utils.uuid()
 	s.usage.Spend(s.T(), s.organization(), 1_000, func(event *usage.Event) { event.AppID, event.UserID = s.customerID(), spender })
@@ -634,7 +634,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 		s.usage.Credit(s.T(), s.organization(), -10_000_000)
 		s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
 	default:
-		s.Require().NoError(s.store.SuspendTelephony(ctx, &store.TelephonySuspension{
+		s.Require().NoError(s.store.TelephonySuspensions.Upsert(ctx, &store.TelephonySuspension{
 			CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 		}))
 	}
@@ -662,7 +662,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	case codeInsufficientCredits:
 		s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	default:
-		s.Require().NoError(s.store.LiftTelephonySuspension(ctx, s.customerID()))
+		s.Require().NoError(s.store.TelephonySuspensions.Delete(ctx, s.customerID()))
 	}
 	s.Require().Eventually(func() bool {
 		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK

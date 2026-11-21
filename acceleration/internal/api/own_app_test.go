@@ -34,9 +34,9 @@ func streamAppID() int64 { return 1_000_000_000 + rand.Int64N(8_000_000_000) }
 func (s *RouterSuite) numberedApp(id int64) testApp {
 	ctx := context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{ID: strconv.FormatInt(id, 10), OrganizationID: organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return s.data.keyed(organization, app)
 }
 

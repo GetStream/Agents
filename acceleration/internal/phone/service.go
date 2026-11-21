@@ -193,7 +193,7 @@ func (s *Service) Suspended(ctx context.Context, customerID string) error {
 	if s.store == nil {
 		return nil
 	}
-	_, err := s.store.TelephonySuspension(ctx, customerID)
+	_, err := s.store.TelephonySuspensions.Get(ctx, customerID)
 	if errors.Is(err, store.ErrNotSuspended) {
 		return nil
 	}

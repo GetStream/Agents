@@ -1305,9 +1305,9 @@ sources:
 // its connectors are read under.
 func (s *StoreSuite) appWith(settings AppSettings) string {
 	org := Organization{Name: "acme"}
-	s.Require().NoError(s.store.CreateOrganization(s.ctx, &org))
+	s.Require().NoError(s.store.Organizations.Insert(s.ctx, &org))
 	app := App{OrganizationID: org.ID, Name: "production", Settings: settings}
-	s.Require().NoError(s.store.CreateApp(s.ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(s.ctx, &app))
 	return app.ID
 }
 

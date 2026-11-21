@@ -101,7 +101,7 @@ func (s *StoredSuite) TestAnUnregisteredAppFallsBackOnlyWhenAllowed() {
 	s.Require().NoError(err)
 	s.Equal("deploy-key", identity.APIKey)
 	s.Equal(int64(1), identity.StreamApp)
-	uses, err := s.store.StreamFallbackUses(s.ctx, s.clock.Now().Add(-time.Minute))
+	uses, err := s.store.StreamFallbackUses.Select(s.ctx, s.clock.Now().Add(-time.Minute))
 	s.Require().NoError(err)
 	s.Contains(customersOf(uses), s.customer)
 }
@@ -200,7 +200,7 @@ func (s *StoredSuite) TestForwardedTokensAreNotKeptWithoutAKeyring() {
 }
 
 func (s *StoredSuite) usesOf(customer string) int64 {
-	uses, err := s.store.StreamFallbackUses(s.ctx, time.Unix(0, 0))
+	uses, err := s.store.StreamFallbackUses.Select(s.ctx, time.Unix(0, 0))
 	s.Require().NoError(err)
 	for _, use := range uses {
 		if use.CustomerID == customer {

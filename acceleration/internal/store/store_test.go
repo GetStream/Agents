@@ -126,6 +126,19 @@ func (s *StoreSuite) openRouter() (*Store, error) {
 	return OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
 }
 
+// replica opens another router on the suite's databases and its Redis, which is what a second
+// replica of the router is. A test of what one replica's write does to the other's cache is
+// skipped when the suite has no Redis.
+func (s *StoreSuite) replica() *Store {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	replica, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(replica.Close()) })
+	return replica
+}
+
 func (s *StoreSuite) TearDownSuite() {
 	if s.store != nil {
 		s.Require().NoError(s.store.Close())

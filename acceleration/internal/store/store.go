@@ -724,57 +724,6 @@ func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) 
 	return "", "", false
 }
 
-// OrganizationApps is every app of an organization: those requests last named it for, those
-// registered under it that no request named another for, and the app whose id is the
-// organization's, for an app that is its own.
-func (s *Store) OrganizationApps(ctx context.Context, organizationID string) ([]string, error) {
-	// One statement, so an app a request records under the organization meanwhile is in one
-	// half or the other.
-	namedOther := s.global.NewSelect().Model((*AppOrganization)(nil)).
-		ColumnExpr("1").
-		Where("ao.app_id = ap.id AND ao.organization_id <> ?", organizationID)
-	named := s.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("organization_id = ?", organizationID).
-		Union(s.global.NewSelect().Model((*App)(nil)).
-			Column("id").
-			Where("ap.organization_id = ?", organizationID).
-			Where("NOT EXISTS (?)", namedOther))
-	var members []string
-	err := s.global.NewSelect().TableExpr("(?) AS member", named).Column("member.app_id").OrderExpr("1").Scan(ctx, &members)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: organization apps: %w", err))
-	}
-	apps := []string{organizationID}
-	for _, app := range members {
-		if app != organizationID {
-			apps = append(apps, app)
-		}
-	}
-	return apps, nil
-}
-
-// OrganizationActivityApps is OrganizationApps for a read of what an organization did: the
-// app whose id is the organization's counts only when the organization is the one the latest
-// request named it for, or, when none did, the one it is registered under, so an app of
-// another organization with that id is not told as this one's.
-func (s *Store) OrganizationActivityApps(ctx context.Context, organizationID string) ([]string, error) {
-	apps, err := s.OrganizationApps(ctx, organizationID)
-	if err != nil {
-		return nil, err
-	}
-	var own bool
-	err = s.global.NewRaw(`SELECT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0 AND organization_id = ?0)
-  OR (NOT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0)
-      AND NOT EXISTS (SELECT 1 FROM apps WHERE id = ?0 AND organization_id <> ?0))`, organizationID).Scan(ctx, &own)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: organization activity apps: %w", err))
-	}
-	if !own {
-		// OrganizationApps puts the organization's own id first.
-		return apps[1:], nil
-	}
-	return apps, nil
-}
-
 // spendOther is the value every group outside the biggest few is summed into.
 const spendOther = "other"
 

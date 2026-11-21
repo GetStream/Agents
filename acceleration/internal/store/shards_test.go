@@ -26,7 +26,7 @@ func (s *ShardedStoreSuite) TestSpendIsCountedInEveryShard() {
 	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 300}))
 	s.Require().NoError(s.other.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 200}))
 
-	spent, err := s.store.SpendSince(s.ctx, "app", s.base.Add(-time.Hour))
+	spent, err := s.store.Spend.Since(s.ctx, "app", s.base.Add(-time.Hour))
 	s.Require().NoError(err)
 	s.EqualValues(500, spent)
 }

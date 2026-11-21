@@ -59,7 +59,7 @@ func (s *OrganizationActivitySuite) spent(appID, organizationID string, micros i
 // appOf is a second app of the suite's organization.
 func (s *OrganizationActivitySuite) appOf() string {
 	app := store.App{OrganizationID: s.app.organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
 	return app.ID
 }
 
@@ -121,7 +121,7 @@ func (s *OrganizationActivitySuite) TestEveryAppOfTheOrganizationIsReadAndNoOthe
 	s.spent(second, s.app.organization.ID, 2)
 	s.spent(stranger.app.ID, stranger.organization.ID, 100)
 	now := time.Now().UTC()
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		{OrganizationID: s.app.organization.ID, AppID: second, Area: activity.AreaWorkers, Client: store.AuditSourceSDK,
 			Day: now, Requests: 3, FirstAt: now, LastAt: now},
 		{OrganizationID: stranger.organization.ID, AppID: stranger.app.ID, Area: activity.AreaEvals,
@@ -206,7 +206,7 @@ func (s *OrganizationActivitySuite) counted(area string, first, last time.Time) 
 // name, rather than the earliest and latest of every area.
 func (s *OrganizationActivitySuite) TestFirstAndLastSeenAreTheEarliestAndLatestOfAnyArea() {
 	day := time.Now().UTC().Truncate(24 * time.Hour)
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		s.counted(activity.AreaAgentSetup, day.Add(2*time.Hour), day.Add(9*time.Hour)),
 		s.counted(activity.AreaConversations, day.Add(time.Hour), day.Add(3*time.Hour)),
 		s.counted(activity.AreaWorkers, day.Add(4*time.Hour), day.Add(5*time.Hour)),
@@ -229,7 +229,7 @@ func (s *OrganizationActivitySuite) TestModelCallsOnThreeDaysAreSteadyUse() {
 		at := day.Add(-time.Duration(n) * 24 * time.Hour)
 		deltas = append(deltas, s.counted(activity.AreaModelAPI, at, at))
 	}
-	s.Require().NoError(s.store.RecordActivity(context.Background(), deltas))
+	s.Require().NoError(s.store.Activities.Add(context.Background(), deltas))
 
 	s.Equal(activityStepSteadyUse, s.read(s.app.organization.ID, time.Time{}).FurthestStep)
 }
@@ -239,7 +239,7 @@ func (s *OrganizationActivitySuite) TestModelCallsOnThreeDaysAreSteadyUse() {
 func (s *OrganizationActivitySuite) TestAnAppOfAnotherOrganizationWithThisOrganizationsIdIsNotRead() {
 	stranger := s.data.createApp()
 	app := store.App{ID: s.app.organization.ID, OrganizationID: stranger.organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
 	s.spent(app.ID, stranger.organization.ID, 100)
 
 	s.Empty(s.read(s.app.organization.ID, time.Time{}).Meters)
@@ -251,8 +251,8 @@ func (s *OrganizationActivitySuite) TestAnAppOfAnotherOrganizationWithThisOrgani
 func (s *OrganizationActivitySuite) TestAnAppLastSeenUnderThisOrganizationIsReadWhateverItsRegistrationSays() {
 	stranger := s.data.createApp()
 	app := store.App{ID: s.app.organization.ID, OrganizationID: stranger.organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
-	s.Require().NoError(s.store.JoinOrganization(context.Background(), app.ID, s.app.organization.ID))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app.ID, OrganizationID: s.app.organization.ID}))
 	s.spent(app.ID, s.app.organization.ID, 100)
 
 	s.Require().Len(s.read(s.app.organization.ID, time.Time{}).Meters, 1)
@@ -264,8 +264,8 @@ func (s *OrganizationActivitySuite) TestAnAppLastSeenUnderThisOrganizationIsRead
 func (s *OrganizationActivitySuite) TestAnAppRegisteredHereAndLastSeenElsewhereIsNotRead() {
 	stranger := s.data.createApp()
 	app := store.App{ID: s.app.organization.ID, OrganizationID: s.app.organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
-	s.Require().NoError(s.store.JoinOrganization(context.Background(), app.ID, stranger.organization.ID))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app.ID, OrganizationID: stranger.organization.ID}))
 	s.spent(app.ID, stranger.organization.ID, 100)
 
 	s.Empty(s.read(s.app.organization.ID, time.Time{}).Meters)
@@ -276,7 +276,7 @@ func (s *OrganizationActivitySuite) TestAnAppRegisteredHereAndLastSeenElsewhereI
 // another organization, is summed into this one, because no registration contradicts it.
 func (s *OrganizationActivitySuite) TestAnUnregisteredAppLastSeenElsewhereIsNotRead() {
 	stranger := s.data.createApp()
-	s.Require().NoError(s.store.JoinOrganization(context.Background(), s.app.organization.ID, stranger.organization.ID))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: s.app.organization.ID, OrganizationID: stranger.organization.ID}))
 	s.spent(s.app.organization.ID, stranger.organization.ID, 100)
 
 	s.Empty(s.read(s.app.organization.ID, time.Time{}).Meters)
@@ -298,7 +298,7 @@ func (s *OrganizationActivitySuite) readAt(since time.Time) OrganizationActivity
 // Defect: a named since ignored when areas are read, so an area before it is still told.
 func (s *OrganizationActivitySuite) TestANamedSinceLeavesOutAreasBeforeIt() {
 	old := time.Now().UTC().Add(-10 * 24 * time.Hour)
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		s.counted(activity.AreaAgentSetup, old, old),
 	}))
 	s.Equal(activityStepAgentSetup, s.readAt(time.Time{}).FurthestStep)
@@ -317,7 +317,7 @@ func (s *OrganizationActivitySuite) TestANamedSinceLeavesOutDaysBeforeIt() {
 		at := day.Add(-time.Duration(n+5) * 24 * time.Hour)
 		deltas = append(deltas, s.counted(activity.AreaModelAPI, at, at))
 	}
-	s.Require().NoError(s.store.RecordActivity(context.Background(), deltas))
+	s.Require().NoError(s.store.Activities.Add(context.Background(), deltas))
 	s.Equal(activityStepSteadyUse, s.readAt(time.Time{}).FurthestStep)
 
 	s.Equal(activityStepNone, s.readAt(time.Now().Add(-2*24*time.Hour)).FurthestStep)
@@ -328,7 +328,7 @@ func (s *OrganizationActivitySuite) TestANamedSinceLeavesOutDaysBeforeIt() {
 func (s *OrganizationActivitySuite) TestASinceInAnotherOffsetReadsFromItsUTCDay() {
 	day := time.Now().UTC().Truncate(24 * time.Hour).Add(-3 * 24 * time.Hour)
 	before := day.Add(-2 * time.Hour)
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		s.counted(activity.AreaAgentSetup, before, before),
 	}))
 	// 01:00 UTC on day, which at -05:00 is still the evening of the day before.
@@ -344,7 +344,7 @@ func (s *OrganizationActivitySuite) TestASinceInAnotherOffsetCountsDaysFromItsUT
 		at := day.Add(time.Duration(n)*24*time.Hour + 2*time.Hour)
 		deltas = append(deltas, s.counted(activity.AreaModelAPI, at, at))
 	}
-	s.Require().NoError(s.store.RecordActivity(context.Background(), deltas))
+	s.Require().NoError(s.store.Activities.Add(context.Background(), deltas))
 	since := day.Add(time.Hour).In(time.FixedZone("west", -5*3600))
 	s.Equal(activityStepNone, s.readAt(since).FurthestStep)
 }
@@ -364,7 +364,7 @@ func (s *OrganizationActivitySuite) TestTheAnswerNamesTheShardsItsMetersWereRead
 func (s *OrganizationActivitySuite) TestTheFieldsTheAnswerHadBeforeSessionsAndLatencyAreUnchanged() {
 	day := time.Now().UTC().Truncate(24 * time.Hour)
 	first, last, refused := day.Add(time.Hour), day.Add(3*time.Hour), day.Add(2*time.Hour)
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{{
 		OrganizationID: s.app.organization.ID, AppID: s.customerID(), Area: activity.AreaConversations,
 		Client: store.AuditSourceSDK, Day: first, Requests: 4, Refused: 1, LastRefusalCode: "no_credit",
 		LastRefusalAt: refused, FirstAt: first, LastAt: last,

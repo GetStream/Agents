@@ -4,6 +4,10 @@ package store
 // s.store.CustomModels.Get(ctx, customerID, id).
 type repos struct {
 	CustomModels                   *CustomModels
+	APIKeys                        *APIKeys
+	Activities                     *Activities
+	AppOrganizations               *AppOrganizations
+	Apps                           *Apps
 	ChannelAccounts                *ChannelAccounts
 	ChannelDeliveries              *ChannelDeliveries
 	ChannelInbounds                *ChannelInbounds
@@ -28,7 +32,21 @@ type repos struct {
 	Episodes                       *Episodes
 	EventDeliveries                *EventDeliveries
 	EventDestinations              *EventDestinations
+	Guests                         *Guests
 	ImageJobs                      *ImageJobs
+	LimitGrantUses                 *LimitGrantUses
+	LimitGrants                    *LimitGrants
+	Limits                         *Limits
+	Notices                        *Notices
+	OrganizationTiers              *OrganizationTiers
+	Organizations                  *Organizations
+	Policies                       *Policies
+	ProviderKeys                   *ProviderKeys
+	Spend                          *Spend
+	StreamAppTokens                *StreamAppTokens
+	StreamFallbackUses             *StreamFallbackUses
+	TelephonySuspensions           *TelephonySuspensions
+	UsageResets                    *UsageResets
 	UserPhones                     *UserPhones
 	WaitingMessages                *WaitingMessages
 }
@@ -37,6 +55,10 @@ type repos struct {
 func (s *Store) wire() {
 	s.repos = repos{
 		CustomModels:                   &CustomModels{store: s},
+		APIKeys:                        &APIKeys{store: s},
+		Activities:                     &Activities{store: s},
+		AppOrganizations:               &AppOrganizations{store: s},
+		Apps:                           &Apps{store: s},
 		ChannelAccounts:                &ChannelAccounts{store: s},
 		ChannelDeliveries:              &ChannelDeliveries{store: s},
 		ChannelInbounds:                &ChannelInbounds{store: s},
@@ -61,7 +83,21 @@ func (s *Store) wire() {
 		Episodes:                       &Episodes{store: s},
 		EventDeliveries:                &EventDeliveries{store: s},
 		EventDestinations:              &EventDestinations{store: s},
+		Guests:                         &Guests{store: s},
 		ImageJobs:                      &ImageJobs{store: s},
+		LimitGrantUses:                 &LimitGrantUses{store: s},
+		LimitGrants:                    &LimitGrants{store: s},
+		Limits:                         &Limits{store: s},
+		Notices:                        &Notices{store: s},
+		OrganizationTiers:              &OrganizationTiers{store: s},
+		Organizations:                  &Organizations{store: s},
+		Policies:                       &Policies{store: s},
+		ProviderKeys:                   &ProviderKeys{store: s},
+		Spend:                          &Spend{store: s},
+		StreamAppTokens:                &StreamAppTokens{store: s},
+		StreamFallbackUses:             &StreamFallbackUses{store: s},
+		TelephonySuspensions:           &TelephonySuspensions{store: s},
+		UsageResets:                    &UsageResets{store: s},
 		UserPhones:                     &UserPhones{store: s},
 		WaitingMessages:                &WaitingMessages{store: s},
 	}

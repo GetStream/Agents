@@ -65,7 +65,7 @@ func (s *ProviderKeysSuite) TestAKeyIsKeptSealedAndNeverReturnedOnlyItsLastFourC
 	s.Require().Equal(http.StatusOK, status)
 	s.NotContains(string(listing), turbopufferKey)
 	s.Contains(string(listing), `"key_hint":"cdef"`)
-	stored, err := s.store.ProviderKeys(context.Background(), s.customerID())
+	stored, err := s.store.ProviderKeys.SelectAll(context.Background(), s.customerID())
 	s.Require().NoError(err)
 	s.Require().Len(stored, 1)
 	s.NotContains(string(stored[0].APIKeySealed), turbopufferKey, "the key is sealed at rest")

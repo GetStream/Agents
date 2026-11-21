@@ -199,7 +199,7 @@ func (s *Server) keyedIn(ctx context.Context, customerID, region string) (map[st
 	if s.configs == nil || customerID == "" {
 		return keyed, nil
 	}
-	keys, err := s.configs.ProviderKeys(ctx, customerID)
+	keys, err := s.configs.DB().ProviderKeys.SelectAll(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}

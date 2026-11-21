@@ -980,7 +980,7 @@ func (m *money) countedByReconcile(ctx context.Context, db *store.Store) {
 		for i, each := range part {
 			ids[i] = each.id
 		}
-		found, err := db.GrantUsesCounted(call, ids)
+		found, err := db.LimitGrantUses.Count(call, ids)
 		if err != nil {
 			m.failedRead("could not ask which rows held against their grants count toward them, so they are kept", err, "rows", len(asked))
 			return

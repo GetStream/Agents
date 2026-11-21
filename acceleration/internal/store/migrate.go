@@ -321,8 +321,8 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 // written to.
 var changeLogTables = []string{"data_change_capture", "data_change_starts", "data_changes"}
 
-// tableChange is a statement of a migration's Up that creates, drops or renames a table.
-var tableChange = regexp.MustCompile(`(?i)(CREATE TABLE (?:IF NOT EXISTS )?|DROP TABLE (?:IF EXISTS )?|ALTER TABLE (?:IF EXISTS )?)([a-z_0-9]+)(?: RENAME TO ([a-z_0-9]+))?`)
+// tableChange is a statement of a migration's Up that creates, drops or renames tables.
+var tableChange = regexp.MustCompile(`(?i)(CREATE TABLE (?:IF NOT EXISTS )?|DROP TABLE (?:IF EXISTS )?|ALTER TABLE (?:IF EXISTS )?)([a-z_0-9]+(?:\s*,\s*[a-z_0-9]+)*)(?: RENAME TO ([a-z_0-9]+))?`)
 
 // setTables are the tables the set's migrations leave, read from their Up SQL in order. A
 // table is created by one set alone, except the change log both keep.
@@ -339,17 +339,20 @@ func setTables(set migrationSet) ([]string, error) {
 		}
 		up, _, _ := strings.Cut(string(raw), "-- +goose Down")
 		for _, match := range tableChange.FindAllStringSubmatch(up, -1) {
-			verb, table, renamed := strings.ToUpper(match[1]), match[2], match[3]
-			switch {
-			case strings.HasPrefix(verb, "CREATE"):
-				if !slices.Contains(tables, table) && !slices.Contains(changeLogTables, table) {
-					tables = append(tables, table)
-				}
-			case strings.HasPrefix(verb, "DROP"):
-				tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
-			case renamed != "":
-				if i := slices.Index(tables, table); i >= 0 {
-					tables[i] = renamed
+			verb, renamed := strings.ToUpper(match[1]), match[3]
+			for _, table := range strings.Split(match[2], ",") {
+				table = strings.TrimSpace(table)
+				switch {
+				case strings.HasPrefix(verb, "CREATE"):
+					if !slices.Contains(tables, table) && !slices.Contains(changeLogTables, table) {
+						tables = append(tables, table)
+					}
+				case strings.HasPrefix(verb, "DROP"):
+					tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
+				case renamed != "":
+					if i := slices.Index(tables, table); i >= 0 {
+						tables[i] = renamed
+					}
 				}
 			}
 		}

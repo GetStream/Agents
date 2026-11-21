@@ -82,7 +82,7 @@ func (m *Money) Owner(t testing.TB, credit int64) routing.Owner {
 	t.Helper()
 	stamp := time.Now().UnixNano()
 	app, organization := fmt.Sprintf("app-%d", stamp), fmt.Sprintf("org-%d", stamp)
-	require.NoError(t, m.Store.JoinOrganization(context.Background(), app, organization))
+	require.NoError(t, m.Store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
 	if credit > 0 {
 		m.Usage.Credit(t, organization, credit)
 	}

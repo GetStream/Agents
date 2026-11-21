@@ -471,7 +471,7 @@ func (s *DeploymentNamedCallSuite) TestAnotherCustomerStillJoinsItsSessionsOwnCa
 // asTheDeploymentsCustomer makes the suite's clients the customer whose app the deployment's
 // is, which an earlier run may have made already.
 func (s *DeploymentNamedCallSuite) asTheDeploymentsCustomer() {
-	app, err := s.store.AppByID(context.Background(), strconv.Itoa(suiteStreamApp))
+	app, err := s.store.Apps.Get(context.Background(), strconv.Itoa(suiteStreamApp))
 	if errors.Is(err, store.ErrNoApp) {
 		s.useApp(s.numberedApp(suiteStreamApp))
 		return

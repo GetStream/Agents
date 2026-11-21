@@ -572,7 +572,7 @@ func (s *RouterSuite) SetupSuite() {
 
 	// A shard database and Redis run the suite as a hosted shard runs: the shared rows in one
 	// place and the calls, sessions and requests in another.
-	options := store.Options{DSN: testDatabase(s.T(), dsn)}
+	options := store.Options{DSN: testDatabase(s.T(), dsn), Redis: store.Redis{Address: redisAddr}}
 	if s.channelProvider != nil && s.database == "" {
 		s.T().Fatal("a suite with the real channel bridge needs a database of its own: its inbound worker takes every queued message there")
 	}
@@ -1589,7 +1589,7 @@ func (s *RouterSuite) authenticator() auth.Authenticator {
 	if s.byCustomer {
 		return auth.NewProxy(auth.ProxyOptions{})
 	}
-	authenticator, err := auth.New(auth.APIKey, s.configs.Lookup(s.sealer))
+	authenticator, err := auth.New(auth.APIKey, s.configs.DB().APIKeys.Lookup(s.sealer))
 	s.Require().NoError(err)
 	return authenticator
 }
@@ -1962,7 +1962,7 @@ func (s *RouterSuite) limitApp(interval usage.Interval, micros int64) store.Limi
 		Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.app.organization.ID, AppID: s.customerID(),
 		Interval: interval, LimitMicros: micros, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	return limit
 }
 
@@ -2367,9 +2367,9 @@ type testData struct {
 func (d testData) createApp() testApp {
 	s, ctx := d.suite, context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{OrganizationID: organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return d.keyed(organization, app)
 }
 
@@ -2378,9 +2378,9 @@ func (d testData) createApp() testApp {
 func (d testData) createAppAdmitting(settings store.AppSettings) testApp {
 	s, ctx := d.suite, context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return d.keyed(organization, app)
 }
 
@@ -2393,7 +2393,7 @@ func (d testData) keyed(organization store.Organization, app store.App) testApp 
 	s.Require().NoError(err)
 	sealed, err := s.sealer.Seal(secret)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.CreateAPIKey(ctx, &store.APIKey{
+	s.Require().NoError(s.store.APIKeys.Insert(ctx, &store.APIKey{
 		ID: key, AppID: app.ID, Name: "router suite", Env: string(auth.Test),
 		Sealed: sealed, KEKVersion: auth.KEKVersion, Last4: auth.Last4(secret), CreatedBy: "router suite",
 	}))

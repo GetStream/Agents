@@ -22,3 +22,30 @@ SELECT 'connection_event', subscription_id || '/' || event_id, received_at FROM 
 
 DROP TABLE hook_deliveries;
 DROP TABLE connection_event_deliveries;
+
+-- +goose Down
+
+CREATE TABLE hook_deliveries (
+    key text PRIMARY KEY,
+    seen_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+CREATE INDEX hook_deliveries_seen_at ON hook_deliveries (seen_at);
+
+CREATE TABLE connection_event_deliveries (
+    subscription_id text NOT NULL REFERENCES connection_event_subscriptions(id) ON DELETE CASCADE,
+    event_id text NOT NULL,
+    received_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (subscription_id, event_id)
+);
+
+INSERT INTO hook_deliveries (key, seen_at)
+SELECT key, seen_at FROM deliveries_seen WHERE scope = 'hook';
+
+INSERT INTO connection_event_deliveries (subscription_id, event_id, received_at)
+SELECT split_part(seen.key, '/', 1), substr(seen.key, strpos(seen.key, '/') + 1), seen.seen_at
+FROM deliveries_seen AS seen
+JOIN connection_event_subscriptions AS subscription ON subscription.id = split_part(seen.key, '/', 1)
+WHERE seen.scope = 'connection_event';
+
+DROP TABLE deliveries_seen;

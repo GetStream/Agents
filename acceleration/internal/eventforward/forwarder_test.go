@@ -283,7 +283,7 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	})
 	forwarder := s.forwarder(target.Client())
 	organization, app := "organization-"+uuid.NewString(), "customer-"+uuid.NewString()
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, app, organization))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: app, OrganizationID: organization}))
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: app, ConnectorID: store.StreamSource, URL: target.URL, Forward: store.ForwardAll,
 	}
@@ -291,12 +291,13 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
 	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
-	notice := store.BalanceNotice{OrganizationID: organization, Kind: store.NoticeBalanceLow, GrantedMicros: 10, BalanceMicros: 4, ThresholdMicros: 5}
+	notice, err := store.BalanceNotice{OrganizationID: organization, Kind: store.NoticeBalanceLow, GrantedMicros: 10, BalanceMicros: 4, ThresholdMicros: 5}.Notice()
+	s.Require().NoError(err)
 	delivery := store.EventDelivery{
 		ID: "balance:" + organization + ":balance_low:10", Headers: map[string]string{"Content-Type": "application/json"}, NextAttemptAt: time.Now(),
 	}
 
-	sent, queued, err := s.store.NoteBalance(s.ctx, notice, delivery, func(appID string) ([]byte, error) {
+	sent, queued, err := s.store.Notices.InsertQueued(s.ctx, &notice, delivery, func(appID string) ([]byte, error) {
 		return []byte(`{"type":"account.balance_low","data":{"app_id":"` + appID + `"}}`), nil
 	})
 	s.Require().NoError(err)
@@ -319,7 +320,7 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	s.Require().NoError(err)
 	s.Equal(signed, arrived.header.Get(headerSignature), "signed with the destination's own secret")
 
-	again, queued, err := s.store.NoteBalance(s.ctx, notice, delivery, func(string) ([]byte, error) { return []byte(`{}`), nil })
+	again, queued, err := s.store.Notices.InsertQueued(s.ctx, &notice, delivery, func(string) ([]byte, error) { return []byte(`{}`), nil })
 	s.Require().NoError(err)
 	s.False(again, "the same warning is written once")
 	s.Zero(queued)

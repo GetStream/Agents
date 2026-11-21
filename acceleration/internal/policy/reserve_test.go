@@ -496,7 +496,7 @@ func (s *PolicySuite) TestAGrantsRemainingNeverRisesPastTheTruthAcrossItsCount()
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_000_000)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 1_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	for _, enforcer := range []*Enforcer{a, b} {
 		s.eventually(func() bool {
 			admitted := s.admit(enforcer, s.app)
@@ -538,7 +538,7 @@ func (s *PolicySuite) TestAGrantsRemainingNeverRisesPastTheTruthAcrossItsCount()
 	truth.Store(1_000_000 - cost)
 
 	s.spendAs(store.Request{UsageID: id, CustomerID: s.app, CostMicros: cost, LimitGrants: []int64{grant.ID}})
-	_, err := s.store.AddGrantUses(s.ctx, []store.GrantUse{{GrantID: grant.ID, UsageID: id, Micros: cost}})
+	_, err := s.store.LimitGrantUses.InsertMany(s.ctx, []store.GrantUse{{GrantID: grant.ID, UsageID: id, Micros: cost}})
 	s.Require().NoError(err)
 	a.Written([]routing.Acked{{UsageID: id, OrganizationID: s.org, CostMicros: cost}})
 	a.Counted([]routing.Acked{{UsageID: id, OrganizationID: s.org, CostMicros: cost}})
@@ -700,7 +700,7 @@ func (s *PolicySuite) TestAGrantHeldOnOneRouterIsHeldOnEvery() {
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_000_000)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 1_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	for _, enforcer := range []*Enforcer{a, b} {
 		s.eventually(func() bool { return s.admit(enforcer, s.app).Spend == nil }, 5*time.Second, 10*time.Millisecond,
 			"admitted on the grant once it is read")

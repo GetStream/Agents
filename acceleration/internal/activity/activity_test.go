@@ -209,7 +209,7 @@ func (s *ActivitySuite) TestARecorderAtCapacityWritesAtOnce() {
 func (s *ActivitySuite) TestAFailedWriteIsWrittenByTheNextOne() {
 	stuck, other := s.app(), s.app()
 	// One more request than a BIGINT holds is refused by Postgres, and the whole write with it.
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{{
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
 		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
 		Day: day, Requests: math.MaxInt64, FirstAt: day, LastAt: day,
 	}}))
@@ -260,7 +260,7 @@ func (h errorCounter) WithGroup(string) slog.Handler      { return h }
 // tick: every request is then a failed statement and an error log while the database is down.
 func (s *ActivitySuite) TestAFailedWriteOfAFullRecordIsNotRetriedBeforeTheNextTick() {
 	stuck, other := s.app(), s.app()
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{{
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
 		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
 		Day: day, Requests: math.MaxInt64, FirstAt: day, LastAt: day,
 	}}))
