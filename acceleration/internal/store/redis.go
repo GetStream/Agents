@@ -76,7 +76,7 @@ func (s *Store) closeRedis() {
 }
 
 // redisFamilies are the prefixes of every key the store keeps in Redis.
-var redisFamilies = []string{"appcfg:"}
+var redisFamilies = []string{"appcfg:", refusedPrefix}
 
 // cacheKey names one cached row. Every key is prefixed, so what the store cached can be told
 // from what the rest of the router keeps.

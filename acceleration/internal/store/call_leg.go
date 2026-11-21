@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -551,3 +552,44 @@ func (r *CallLegs) Placed(ctx context.Context, customerID, vendor, vendorCallID 
 	}
 	return true, nil
 }
+
+// MarkRefused marks the Stream session session of the customer's arriving call in app as one
+// the router refused, for ttl, so its leg is counted failed when it ends, on whichever node ends
+// it. The mark is in the shared Redis because that node may be another shard's. A store with
+// no Redis marks nothing.
+func (r *CallLegs) MarkRefused(ctx context.Context, customer string, app int64, callType, callID, session string, ttl time.Duration) error {
+	if r.store.cache == nil {
+		return nil
+	}
+	client := r.store.cache.Client()
+	command := client.B().Set().Key(refusedKey(customer, app, callType, callID, session)).Value("1").Ex(ttl).Build()
+	if err := client.Do(ctx, command).Error(); err != nil {
+		return stack.Wrap(fmt.Errorf("store: mark a refused call: %w", err))
+	}
+	return nil
+}
+
+// Refused reports whether the call of an inbound leg was marked MarkRefused. A store with no
+// Redis has marked none.
+func (r *CallLegs) Refused(ctx context.Context, leg CallLeg) (bool, error) {
+	if r.store.cache == nil {
+		return false, nil
+	}
+	client := r.store.cache.Client()
+	command := client.B().Exists().Key(refusedKey(leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID, leg.StreamSessionID)).Build()
+	found, err := client.Do(ctx, command).AsInt64()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: read a refused call: %w", err))
+	}
+	return found > 0, nil
+}
+
+// refusedKey names the mark of a refused call. A call's id is unique only within its app, and
+// a number attached before per-caller calls puts every caller in the number's own call, each
+// caller a Stream session of it with a leg of its own: only the refused caller's leg is marked.
+func refusedKey(customer string, app int64, callType, callID, session string) string {
+	return refusedPrefix + customer + ":" + strconv.FormatInt(app, 10) + ":" + callType + ":" + callID + ":" + session
+}
+
+// refusedPrefix starts every refused call's mark.
+const refusedPrefix = "phone:refused:"

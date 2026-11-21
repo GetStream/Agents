@@ -572,7 +572,7 @@ func (s *RouterSuite) SetupSuite() {
 
 	// A shard database and Redis run the suite as a hosted shard runs: the shared rows in one
 	// place and the calls, sessions and requests in another.
-	options := store.Options{DSN: testDatabase(s.T(), dsn)}
+	options := store.Options{DSN: testDatabase(s.T(), dsn), Redis: store.Redis{Address: redisAddr}}
 	if s.channelProvider != nil && s.database == "" {
 		s.T().Fatal("a suite with the real channel bridge needs a database of its own: its inbound worker takes every queued message there")
 	}
@@ -1642,7 +1642,6 @@ func (s *RouterSuite) telephonySealedBy(sealer *auth.Sealer, apps phone.Apps, lo
 		Sealer:    sealer,
 		SIPTrunks: siptrunk.New(siptrunk.Options{Logger: logger}),
 		Apps:      apps,
-		Redis:     s.live.Redis(),
 		Logger:    logger,
 	})
 	s.Require().NoError(err)

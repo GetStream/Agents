@@ -373,13 +373,12 @@ const refusedFor = MaxCallLength + LegSweepEvery
 // it ends, on whichever node ends it (tell). A mark that cannot be kept is logged, and the call
 // is counted completed.
 func (s *Service) Refused(ctx context.Context, customer string, app int64, callType, callID, session string) {
-	if s.redis == nil {
+	if s.store == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeTimeout)
 	defer cancel()
-	command := s.redis.B().Set().Key(refusedKey(customer, app, callType, callID, session)).Value("1").Ex(refusedFor).Build()
-	if err := s.redis.Do(ctx, command).Error(); err != nil {
+	if err := s.store.CallLegs.MarkRefused(ctx, customer, app, callType, callID, session, refusedFor); err != nil {
 		s.logger.Warn("could not mark a refused arriving call; it is counted completed",
 			"customer", customer, "call", callType+":"+callID, "error", err)
 	}
@@ -393,26 +392,18 @@ const refusedReadTimeout = time.Second
 // refused reports whether the call of an inbound leg was marked Refused. One that cannot be
 // read in refusedReadTimeout is logged, and taken as not refused.
 func (s *Service) refused(ctx context.Context, leg store.CallLeg) bool {
-	if s.redis == nil {
+	if s.store == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, refusedReadTimeout)
 	defer cancel()
-	command := s.redis.B().Exists().Key(refusedKey(leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID, leg.StreamSessionID)).Build()
-	found, err := s.redis.Do(ctx, command).AsInt64()
+	found, err := s.store.CallLegs.Refused(ctx, leg)
 	if err != nil {
 		s.logger.Warn("could not tell whether the router refused an arriving call; it is counted completed",
 			"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "error", err)
 		return false
 	}
-	return found > 0
-}
-
-// refusedKey names the mark of a refused call. A call's id is unique only within its app, and
-// a number attached before per-caller calls puts every caller in the number's own call, each
-// caller a Stream session of it with a leg of its own: only the refused caller's leg is marked.
-func refusedKey(customer string, app int64, callType, callID, session string) string {
-	return "phone:refused:" + customer + ":" + strconv.FormatInt(app, 10) + ":" + callType + ":" + callID + ":" + session
+	return found
 }
 
 // SweepLegs ends the legs of this shard open longer than MaxCallLength, and checks the legs
