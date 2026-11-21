@@ -527,7 +527,7 @@ type DeletedConnector struct {
 // Delete removes every revision of one of the customer's own definitions.
 // Unforced, a live connection made from it or a live agent config binding it refuses the
 // delete with ErrConnectorDefinitionInUse, and nothing changes. Forced, its live connections
-// are deleted as a forced connection delete deletes one (softDeleteConnection: credentials and
+// are deleted as a forced connection delete deletes one (softDeleteConnections: credentials and
 // tool pins dropped), and the bindings are left in place, naming a connector that no longer
 // exists, as a forced connection delete leaves its bindings. Either way the rows that hold the
 // customer's sealed secrets for the connector go in the same transaction: its OAuth client and
@@ -602,10 +602,12 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 		if !force && (len(deleted.Uses.Connections) > 0 || len(deleted.Uses.Bindings) > 0) {
 			return fmt.Errorf("%w: %s", ErrConnectorDefinitionInUse, id)
 		}
-		for _, connection := range connections {
-			if _, err := softDeleteConnection(ctx, tx, customerID, connection.ID, false); err != nil {
+		if len(connections) > 0 {
+			if _, err := softDeleteConnections(ctx, tx, customerID, false, deleted.Uses.Connections...); err != nil {
 				return err
 			}
+		}
+		for _, connection := range connections {
 			deleted.Connections = append(deleted.Connections, DeletedConnection{
 				ID: connection.ID, ConnectorID: id, OwnerType: connection.OwnerType, HadGrant: connection.HadGrant,
 			})

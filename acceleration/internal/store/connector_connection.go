@@ -459,7 +459,7 @@ func (r *ConnectorConnections) Select(ctx context.Context, customerID string, fi
 // so nothing can use it from here on, whether or not a config still binds it. It is the
 // forced delete; DeleteUnboundConnectorConnection is the one that refuses a bound connection.
 func (r *ConnectorConnections) Delete(ctx context.Context, customerID, id string) error {
-	affected, err := softDeleteConnection(ctx, r.store.global, customerID, id, false)
+	affected, err := softDeleteConnections(ctx, r.store.global, customerID, false, id)
 	if err != nil {
 		return err
 	}
@@ -498,7 +498,7 @@ func (r *ConnectorConnections) DeleteUnbound(ctx context.Context, customerID, id
 		if err != nil {
 			return fmt.Errorf("store: lock connector connection: %w", err)
 		}
-		affected, err := softDeleteConnection(ctx, tx, customerID, id, true)
+		affected, err := softDeleteConnections(ctx, tx, customerID, true, id)
 		if err != nil {
 			return err
 		}
@@ -526,11 +526,11 @@ const boundByConfig = `EXISTS (
       AND ac.connectors @> jsonb_build_array(jsonb_build_object(
           'connection', jsonb_build_object('type', 'fixed', 'connection_id', cc.id))))`
 
-// softDeleteConnection marks a live connection deleted and drops its credentials and its tool
-// pins in one statement, and when unbound is set only if no config binds it. It returns the
-// rows it changed: one, or none.
-func softDeleteConnection(ctx context.Context, db bun.IDB, customerID, id string, unbound bool) (int64, error) {
-	if customerID == "" || id == "" {
+// softDeleteConnections marks live connections deleted and drops their credentials and their
+// tool pins in one statement, and when unbound is set only those no config binds. It returns
+// the rows it changed.
+func softDeleteConnections(ctx context.Context, db bun.IDB, customerID string, unbound bool, ids ...string) (int64, error) {
+	if customerID == "" || len(ids) == 0 || slices.Contains(ids, "") {
 		return 0, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	now := time.Now().UTC()
@@ -542,7 +542,7 @@ func softDeleteConnection(ctx context.Context, db bun.IDB, customerID, id string
 		Set("deleted_at = ?", now).
 		Set("updated_at = ?", now).
 		Where("cc.customer_id = ?", customerID).
-		Where("cc.id = ?", id).
+		Where("cc.id IN (?)", bun.In(ids)).
 		Where("cc.deleted_at IS NULL")
 	if unbound {
 		query = query.Where("NOT " + boundByConfig)

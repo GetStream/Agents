@@ -1571,6 +1571,14 @@ func (s *StoreSuite) TestConnectorDefinitionQueryBudgets() {
 		_, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm0", false)
 		s.Require().NoError(err)
 	}), "Delete")
+	s.crmConnection("acme-app")
+	s.crmConnection("acme-app")
+	// Delete's, and every connection of the three in one statement.
+	s.Equal(11, s.countQueries(func() {
+		deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm", true)
+		s.Require().NoError(err)
+		s.Len(deleted.Connections, 3)
+	}), "Delete, forced")
 	s.Equal(1, s.countQueries(func() {
 		_, _, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "slack", 1)
 		s.Require().NoError(err)
