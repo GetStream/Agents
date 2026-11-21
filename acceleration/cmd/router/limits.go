@@ -8,7 +8,6 @@ import (
 
 	"github.com/redis/rueidis"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/limitnotice"
@@ -54,7 +53,7 @@ func limitsNeedSomewhereToRead(settings config.Config, pgStore *store.Store) err
 // warning that an organization's credit is running out was queued for its destinations, and
 // sender, when set, posts the first time each organization reaches a money limit. The
 // returned func closes the counters' connection.
-func newPolicies(settings config.Config, configs *appconfig.Store, usageClient *usageservice.Client, holds rueidis.Client, notified func(), sender *limitnotice.Sender, logger *slog.Logger) (*policy.Enforcer, func(), error) {
+func newPolicies(settings config.Config, configs *store.Store, usageClient *usageservice.Client, holds rueidis.Client, notified func(), sender *limitnotice.Sender, logger *slog.Logger) (*policy.Enforcer, func(), error) {
 	if configs == nil {
 		return nil, func() {}, nil
 	}

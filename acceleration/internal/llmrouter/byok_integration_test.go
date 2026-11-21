@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/anthropic"
@@ -30,7 +29,7 @@ type BYOKSuite struct {
 	ctx        context.Context
 	store      *store.Store
 	live       *live.Client
-	configs    *appconfig.Store
+	configs    *store.Store
 	sealer     *auth.Sealer
 	customerID string
 }
@@ -55,11 +54,7 @@ func (s *BYOKSuite) SetupSuite() {
 	s.live, err = redisready.Retry(address, func() (*live.Client, error) { return live.New(live.Options{Address: address}) })
 	s.Require().NoError(err)
 	s.T().Cleanup(s.live.Close)
-	s.configs, err = redisready.Retry(address, func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: opened, Address: address})
-	})
-	s.Require().NoError(err)
-	s.T().Cleanup(s.configs.Close)
+	s.configs = opened
 	s.sealer, err = auth.NewSealer("byok suite")
 	s.Require().NoError(err)
 }
@@ -72,7 +67,7 @@ func (s *BYOKSuite) SetupTest() {
 func (s *BYOKSuite) put(customerID, provider, region, key string) {
 	sealed, err := providerkeys.Seal(s.sealer, customerID, provider, region, key)
 	s.Require().NoError(err)
-	_, _, err = s.configs.DB().ProviderKeys.Upsert(s.ctx, &sealed)
+	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &sealed)
 	s.Require().NoError(err)
 }
 
@@ -81,7 +76,7 @@ func (s *BYOKSuite) put(customerID, provider, region, key string) {
 func (s *BYOKSuite) router(config routing.ModalityConfig, prices pricing.Pricer) *Router {
 	router, err := New(Options{
 		Registry: DefaultRegistry(), Config: config, Store: s.store, Live: s.live, Pricer: prices,
-		Keys: providerkeys.NewKeyring(s.configs.DB().ProviderKeys, s.sealer),
+		Keys: providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
@@ -147,7 +142,7 @@ func (s *BYOKSuite) TestADeletedKeyIsNoLongerRoutedOn() {
 	router := s.router(keyedConfig(s.T(), at), nil)
 	answeredFor(s.ctx, s.T(), router, s.customerID)
 
-	_, err := s.configs.DB().ProviderKeys.Delete(s.ctx, s.customerID, anthropic.ProviderName, pricing.RegionUS)
+	_, err := s.configs.ProviderKeys.Delete(s.ctx, s.customerID, anthropic.ProviderName, pricing.RegionUS)
 	s.Require().NoError(err)
 	answeredFor(s.ctx, s.T(), router, s.customerID)
 
@@ -159,16 +154,16 @@ func (s *BYOKSuite) TestASealedKeyCopiedToAnotherRowDoesNotOpen() {
 	kept, err := s.store.ProviderKeys.SelectAll(s.ctx, s.customerID)
 	s.Require().NoError(err)
 	s.Require().Len(kept, 1)
-	keyring := providerkeys.NewKeyring(s.configs.DB().ProviderKeys, s.sealer)
+	keyring := providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer)
 
 	toAnotherCustomer := kept[0]
 	toAnotherCustomer.CustomerID = "byok-" + uuid.NewString()
-	_, _, err = s.configs.DB().ProviderKeys.Upsert(s.ctx, &toAnotherCustomer)
+	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &toAnotherCustomer)
 	s.Require().NoError(err)
 	_, _, otherCustomer := keyring.CustomerKey(s.ctx, toAnotherCustomer.CustomerID, anthropic.ProviderName, pricing.RegionUS)
 	toAnotherRegion := kept[0]
 	toAnotherRegion.Region = pricing.RegionEU
-	_, _, err = s.configs.DB().ProviderKeys.Upsert(s.ctx, &toAnotherRegion)
+	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &toAnotherRegion)
 	s.Require().NoError(err)
 	_, _, otherRegion := keyring.CustomerKey(s.ctx, s.customerID, anthropic.ProviderName, pricing.RegionEU)
 

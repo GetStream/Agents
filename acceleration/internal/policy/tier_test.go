@@ -12,7 +12,6 @@ import (
 
 	"github.com/uptrace/bun"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -40,8 +39,7 @@ func (s *PolicySuite) tiered() *tiered {
 	s.Require().NoError(err)
 	reads := &tierReads{}
 	db.GlobalDB().AddQueryHook(reads)
-	configs, err := appconfig.New(appconfig.Options{Store: db})
-	s.Require().NoError(err)
+	configs := db
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 	t := &tiered{enforcer: enforcer, store: db, reads: reads, clock: time.Now()}
 	enforcer.now = func() time.Time { return t.clock }

@@ -299,7 +299,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 		}
 	}
 	// Read before the write, so the entry can say what the setting was.
-	before, err := s.configs.DB().Policies.Get(ctx, scope, id)
+	before, err := s.configs.Policies.Get(ctx, scope, id)
 	if err != nil {
 		return Policy{}, err
 	}
@@ -315,7 +315,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 
 // policyOf reads a scope's policy.
 func (s *Server) policyOf(ctx context.Context, scope store.PolicyScope, id string) (Policy, error) {
-	document, err := s.configs.DB().Policies.Get(ctx, scope, id)
+	document, err := s.configs.Policies.Get(ctx, scope, id)
 	if err != nil {
 		return Policy{}, err
 	}

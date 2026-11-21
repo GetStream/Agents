@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
@@ -480,11 +479,7 @@ func grantRemaining(enforcer *Enforcer, organization string, id int64) (int64, b
 func (s *PolicySuite) TestAGrantsRemainingNeverRisesPastTheTruthAcrossItsCount() {
 	_, redisA := s.redis()
 	_, redisB := s.redis()
-	configs := func() *appconfig.Store {
-		c, err := appconfig.New(appconfig.Options{Store: s.store})
-		s.Require().NoError(err)
-		return c
-	}
+	configs := func() *store.Store { return s.store }
 	// Both routers read the grants once a second, so the other reads a count up to a second
 	// after this one has let its hold go.
 	slow := func(settings *Settings) { settings.Fresh, settings.MaxStale = time.Second, time.Minute }
@@ -689,11 +684,7 @@ func (s *PolicySuite) TestAPassOfManyChunksGivesUpByItsDeadlineWhenRedisHangs() 
 func (s *PolicySuite) TestAGrantHeldOnOneRouterIsHeldOnEvery() {
 	_, redisA := s.redis()
 	_, redisB := s.redis()
-	configs := func() *appconfig.Store {
-		c, err := appconfig.New(appconfig.Options{Store: s.store})
-		s.Require().NoError(err)
-		return c
-	}
+	configs := func() *store.Store { return s.store }
 	a := s.newEnforcer(configs(), nil, sharing(redisA))
 	b := s.newEnforcer(configs(), nil, sharing(redisB))
 	s.T().Cleanup(func() { s.dropHolds(s.direct(), s.org) })

@@ -886,7 +886,7 @@ func (m *money) shipped(ctx context.Context) {
 	if m.settings.Usage == nil {
 		return
 	}
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil {
 		return
 	}

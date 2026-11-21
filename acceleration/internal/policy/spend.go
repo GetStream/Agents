@@ -72,7 +72,7 @@ func (m *money) limitsPass(ctx context.Context) {
 	if len(keys) == 0 {
 		return
 	}
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil {
 		return
 	}
@@ -149,7 +149,7 @@ func (m *money) land(reads map[string]*spendRead) map[string]bool {
 // admission gave up on it, the next ones do not wait for it, and after one that did not land the
 // next is asked only Fresh later, so an outage costs an admission at most one wait.
 func (m *money) firstRead(ctx context.Context, key string, owner routing.Owner) {
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil || m.ctx == nil {
 		return
 	}
@@ -339,7 +339,7 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 // own: a slow or failed read of them never delays or skips the limits and resets, which their
 // loop reads apart. With shards it first finds which held rows the reconcile counted.
 func (m *money) grantsPass(ctx context.Context) {
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil {
 		return
 	}

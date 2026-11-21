@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -136,11 +135,7 @@ type ManagerOptions struct {
 	// organization's, which its agent config can shorten and not lengthen. Nil holds it to
 	// the agent config alone.
 	Policies *policy.Enforcer
-	// Configs reads the app settings a session is opened with through
-	// whatever cache is in front of Postgres. Built over Store when it is not given, in
-	// which case every read is a query, which is what a deployment without Redis does.
-	Configs *appconfig.Store
-	Live    *live.Client
+	Live     *live.Client
 	// Pricer and Writer are the process's price list and usage writer, for what a session
 	// records of its own rather than through a router or internal/metered, such as the time
 	// it runs; memory and knowledge record through the recorders they are built with. Nothing
@@ -291,13 +286,6 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	// written is the recorder behind records, which titles are written through too.
 	var written *sessionRecorder
 	if options.Store != nil {
-		if options.Configs == nil {
-			configs, err := appconfig.New(appconfig.Options{Store: options.Store, Logger: options.Logger})
-			if err != nil {
-				return nil, err
-			}
-			manager.options.Configs = configs
-		}
 		manager.logs = newLogRecorder(options.Store, options.Logger)
 		// Read only: the phone service's keeper is what counts calls, so this one names no vendors.
 		manager.outcomes = outcome.NewKeeper(options.Store, time.Now, nil, options.Logger)
@@ -400,10 +388,10 @@ func (m *Manager) newSession(spec Spec, conv *persistent.Conversation, skills ha
 // team's agent configs to its own users keeps their channels in the config's team too, so
 // that Chat shows them to that team's users alone. A config of no team asks nothing.
 func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
-	if spec.ConfigTeam == "" || m.options.Configs == nil {
+	if spec.ConfigTeam == "" || m.options.Store == nil {
 		return "", nil
 	}
-	settings, err := m.options.Configs.DB().Apps.GetSettings(ctx, spec.CustomerID)
+	settings, err := m.options.Store.Apps.GetSettings(ctx, spec.CustomerID)
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrAppSettingsUnreadable, err))
 	}

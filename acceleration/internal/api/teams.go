@@ -33,7 +33,7 @@ func (s *Server) teamsGateFor(ctx context.Context, customerID string) (teamsGate
 	if ServerSideFrom(ctx) {
 		return teamsGate{}, nil
 	}
-	settings, err := s.configs.DB().Apps.GetSettings(ctx, customerID)
+	settings, err := s.configs.Apps.GetSettings(ctx, customerID)
 	if err != nil {
 		return teamsGate{}, err
 	}

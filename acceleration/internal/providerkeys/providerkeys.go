@@ -106,7 +106,7 @@ type Source interface {
 // Keyring opens the keys customers keep, for the work routed on them. It is a
 // routing.CustomerKeys.
 //
-// It holds no opened key. Each is read through its source, which for an *appconfig.Store is the
+// It holds no opened key. Each is read through its source, which for an *store.Store is the
 // copy rueidis keeps in this process, dropped on every replica when a key is put or deleted,
 // and opened when work is routed on it: a cached read and one AES-GCM open per vendor and region
 // a request could go to.

@@ -93,7 +93,7 @@ func (s *Server) putProviderKey(ctx context.Context, request *putProviderKeyRequ
 	if err != nil {
 		return nil, err
 	}
-	was, replaced, err := s.configs.DB().ProviderKeys.Upsert(ctx, &sealed)
+	was, replaced, err := s.configs.ProviderKeys.Upsert(ctx, &sealed)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func (s *Server) deleteProviderKey(ctx context.Context, request *deleteProviderK
 	if !pricing.ValidRegion(region) {
 		return nil, invalidRequest("region is a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu")
 	}
-	deleted, err := s.configs.DB().ProviderKeys.Delete(ctx, customerID, request.Provider, region)
+	deleted, err := s.configs.ProviderKeys.Delete(ctx, customerID, request.Provider, region)
 	if errors.Is(err, store.ErrNoProviderKey) {
 		return nil, errUnknownProviderKey
 	}

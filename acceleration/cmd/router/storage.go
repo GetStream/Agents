@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
@@ -108,23 +107,15 @@ func jobRecorder(ctx context.Context, settings config.Config, pgStore *store.Sto
 	if err != nil {
 		return nil, nil, err
 	}
-	configs, err := appconfig.New(appconfig.Options{
-		Store: pgStore, Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password, Logger: logger,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
 	// The job admits nothing, so it reads no money and holds none: its policies only attribute
 	// each row.
-	policies, err := policy.New(configs, policy.Settings{Mode: config.LimitsOff}, logger)
+	policies, err := policy.New(pgStore, policy.Settings{Mode: config.LimitsOff}, logger)
 	if err != nil {
-		configs.Close()
 		return nil, nil, err
 	}
 	fallback, err := prices.Embedded(nil, release, logger)
 	if err != nil {
 		policies.Close()
-		configs.Close()
 		return nil, nil, err
 	}
 	reading, stopReading := context.WithCancel(ctx)
@@ -147,7 +138,6 @@ func jobRecorder(ctx context.Context, settings config.Config, pgStore *store.Sto
 		stopAlerts()
 		stopReading()
 		policies.Close()
-		configs.Close()
 	}, nil
 }
 

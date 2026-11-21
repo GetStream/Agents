@@ -192,14 +192,14 @@ func vendorWorkIn(setting string, modality routing.Modality, vendor, region stri
 	return billed
 }
 
-// keyedIn is the vendors the customer keeps a key for in region, read through appconfig. A key
+// keyedIn is the vendors the customer keeps a key for in region, read through the store's cache. A key
 // is not opened: that one is kept is what bills its work under the BYOK twin.
 func (s *Server) keyedIn(ctx context.Context, customerID, region string) (map[string]bool, error) {
 	keyed := map[string]bool{}
 	if s.configs == nil || customerID == "" {
 		return keyed, nil
 	}
-	keys, err := s.configs.DB().ProviderKeys.SelectAll(ctx, customerID)
+	keys, err := s.configs.ProviderKeys.SelectAll(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}

@@ -21,7 +21,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/campaign"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
@@ -390,8 +389,7 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,
 // as another replica of the deployment.
 func (s *AdmissionSuite) otherRouter() *policy.Enforcer {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: s.usage.URL, Token: s.usage.Token})
 	s.Require().NoError(err)
 	_, holds := newRedisProxy(s.T())

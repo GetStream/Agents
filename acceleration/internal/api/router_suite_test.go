@@ -44,7 +44,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -208,7 +207,7 @@ type RouterSuite struct {
 	suite.Suite
 
 	store   *store.Store
-	configs *appconfig.Store
+	configs *store.Store
 	live    *live.Client
 	sealer  *auth.Sealer
 	// activity is the activity record every node of the suite counts in.
@@ -636,11 +635,7 @@ func (s *RouterSuite) SetupSuite() {
 		s.stream = streamapp.NewClients(stored, streamapp.ClientsOptions{})
 	}
 	s.store.SetStreamPins(store.StreamPins{Deployment: s.apps.deployment.App, For: s.stream.Pin, Knowable: s.stream.DeploymentAppKnowable})
-	s.configs, err = redisready.Retry(redisAddr, func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: pgStore, Address: redisAddr, Logger: logger})
-	})
-	s.Require().NoError(err)
-	s.T().Cleanup(s.configs.Close)
+	s.configs = pgStore
 	s.relayPrefix = uuid.NewString()
 
 	if s.pricedFromDatabase {
@@ -750,7 +745,6 @@ func (s *RouterSuite) SetupSuite() {
 		Directory: directory,
 		Sessions:  sessions,
 		Store:     pgStore,
-		Configs:   s.configs,
 		Activity:  s.activity,
 		Live:      liveClient,
 		Auth:      s.authenticator(),
@@ -1508,7 +1502,6 @@ func (s *RouterSuite) sessionManager(
 		Store:         s.store,
 		Policies:      policies,
 		Live:          s.live,
-		Configs:       s.configs,
 		Directory:     directory,
 		Connectors:    connectors,
 		Logger:        logger,
@@ -1590,7 +1583,7 @@ func (s *RouterSuite) authenticator() auth.Authenticator {
 	if s.byCustomer {
 		return auth.NewProxy(auth.ProxyOptions{})
 	}
-	authenticator, err := auth.New(auth.APIKey, s.configs.DB().APIKeys.Lookup(s.sealer))
+	authenticator, err := auth.New(auth.APIKey, s.configs.APIKeys.Lookup(s.sealer))
 	s.Require().NoError(err)
 	return authenticator
 }
@@ -1808,7 +1801,6 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Stream:        s.stream,
 		Store:         s.store,
 		Live:          s.live,
-		Configs:       s.configs,
 		Directory:     directory,
 		Logger:        logger,
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
@@ -1830,7 +1822,6 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Dispatch:          workers,
 		Workers:           everyWorker,
 		Store:             s.store,
-		Configs:           s.configs,
 		Activity:          s.activity,
 		Live:              s.live,
 		Auth:              s.authenticator(),

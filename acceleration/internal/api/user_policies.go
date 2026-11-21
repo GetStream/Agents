@@ -317,7 +317,7 @@ func (s *Server) deleteUserPolicy(ctx context.Context, request *userIDRequest) (
 // audits the change under auditedAs.
 func (s *Server) saveUserPolicy(ctx context.Context, appID, userID string, sent *Quota, auditedAs string) error {
 	id := store.UserScopeID(appID, userID)
-	before, err := s.configs.DB().Policies.Get(ctx, store.ScopeUser, id)
+	before, err := s.configs.Policies.Get(ctx, store.ScopeUser, id)
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func (s *Server) saveUserPolicy(ctx context.Context, appID, userID string, sent 
 
 // userPolicyOf is a user's own quota, what they are held to and what they spent today.
 func (s *Server) userPolicyOf(ctx context.Context, appID, userID string) (UserPolicy, error) {
-	own, err := s.configs.DB().Policies.Get(ctx, store.ScopeUser, store.UserScopeID(appID, userID))
+	own, err := s.configs.Policies.Get(ctx, store.ScopeUser, store.UserScopeID(appID, userID))
 	if err != nil {
 		return UserPolicy{}, err
 	}

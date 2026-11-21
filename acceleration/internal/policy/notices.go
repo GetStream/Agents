@@ -94,7 +94,7 @@ func (m *money) noticesPass(ctx context.Context) {
 // sends it; the others find it written and send nothing. One that could not be written is due
 // again after the next pass.
 func (m *money) notify(ctx context.Context, due []notice) {
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if len(due) == 0 || db == nil {
 		return
 	}

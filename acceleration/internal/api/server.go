@@ -38,7 +38,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -133,10 +132,6 @@ type Options struct {
 	// providers alone.
 	Billable []pricing.Item
 	Store    *store.Store
-	// Configs reads and writes the tenant's configuration -- keys, policies, agent and
-	// router configs, voices -- through whatever cache is in front of Postgres. Built
-	// over Store when it is not given, in which case every read is a query.
-	Configs *appconfig.Store
 	// Activity counts every request an app makes, by area and client. A deployment without
 	// one keeps no activity record.
 	Activity *activity.Recorder
@@ -352,7 +347,7 @@ type Server struct {
 	prices             *pricing.Active
 	billable           []pricing.Item
 	store              *store.Store
-	configs            *appconfig.Store
+	configs            *store.Store
 	activity           *activity.Recorder
 	live               *live.Client
 	phone              *phone.Service
@@ -533,13 +528,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	configs := options.Configs
-	if configs == nil && options.Store != nil {
-		var err error
-		if configs, err = appconfig.New(appconfig.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
+	configs := options.Store
 	pricer := options.Pricer
 	if pricer == nil && options.Prices != nil {
 		pricer = options.Prices

@@ -135,7 +135,7 @@ func (s *AgentTeamsSuite) makeSettingsUnreadable() {
 	defer client.Close()
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
-		_, err := s.configs.DB().Apps.GetSettings(s.T().Context(), s.customerID())
+		_, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
 		return err != nil
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -172,7 +172,7 @@ func (s *AgentTeamsSuite) turnTeamsOff() {
 	defer client.Close()
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
-		settings, err := s.configs.DB().Apps.GetSettings(s.T().Context(), s.customerID())
+		settings, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
 		return err == nil && !settings.AgentTeamsChecked()
 	}, 10*time.Second, 20*time.Millisecond)
 }

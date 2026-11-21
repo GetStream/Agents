@@ -52,7 +52,7 @@ func (e *Enforcer) SubjectsSpend(ctx context.Context, refs []usage.SubjectRef, b
 		}
 		return spent, nil
 	}
-	db := e.config.DB()
+	db := e.config
 	if db == nil {
 		return nil, errors.New("policy: no database to sum spend from")
 	}
@@ -168,7 +168,7 @@ func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
 	if e == nil || e.money.off() {
 		return
 	}
-	db := e.config.DB()
+	db := e.config
 	if db == nil {
 		return
 	}

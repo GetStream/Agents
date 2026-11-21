@@ -277,7 +277,7 @@ func (s *Server) getAccount(ctx context.Context, _ *struct{}) (*accountResponse,
 		source = warningFromTier
 	}
 	if s.configs != nil {
-		own, err := s.configs.DB().Policies.Get(ctx, store.ScopeOrganization, organization)
+		own, err := s.configs.Policies.Get(ctx, store.ScopeOrganization, organization)
 		if err != nil {
 			return nil, err
 		}

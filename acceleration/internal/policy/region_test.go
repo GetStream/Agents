@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionmodel"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -65,8 +64,7 @@ func (s *PolicySuite) TestAPolicyReadThatFailsChangesNothingAboutWhereWorkIsDone
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	built := &builtIn{}
 	router := s.regionalRouter(s.newEnforcer(configs, slog.New(slog.DiscardHandler)), built)
 

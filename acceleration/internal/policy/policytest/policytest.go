@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -52,8 +51,7 @@ func Start(t testing.TB, name string, change ...func(*policy.Settings)) *Money {
 	service := usagetest.Start(t, usagetest.Options{
 		DSN: usagetest.Database(t, "usage_"+name), ManageKey: "manage-" + uuid.NewString(), Logger: discard,
 	})
-	configs, err := appconfig.New(appconfig.Options{Store: opened})
-	require.NoError(t, err)
+	configs := opened
 	client, err := usage.NewClient(usage.ClientOptions{URL: service.URL, Token: service.Token})
 	require.NoError(t, err)
 	settings := policy.Settings{

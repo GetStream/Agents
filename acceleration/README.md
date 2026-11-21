@@ -1127,7 +1127,7 @@ no keys.
   walk and the LLM fallback move on to the deployment's instance of the model as to any next
   candidate. A key is looked up for the work's region alone: a key for `eu` is used only for `eu`
   work, and a key for `us` only for `us` work. A model the deployment holds no key
-  for is still served on the customer's. Keys are read through the appconfig cache (Redis, and the
+  for is still served on the customer's. Keys are read through the store's cache (Redis, and the
   copy rueidis keeps in each process, dropped on every replica when a key is put or deleted) and
   opened, one AES-GCM open, when work is routed.
 - **Health.** Work on a customer's key is counted for the customer and kept out of the vendor and

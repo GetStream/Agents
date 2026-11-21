@@ -31,7 +31,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/billable"
@@ -582,7 +581,7 @@ var errAPIKeyNeedsKeyring = errors.New("auth.mode=" + string(auth.APIKey) + " ne
 //
 // secrets is the keyring newSecretSealer built, so a start unwraps its keys once; nil
 // refuses api_key, and the keyring is never read again here.
-func newAuthenticator(ctx context.Context, settings config.Config, configs *appconfig.Store, secrets *auth.Sealer, logger *slog.Logger) (auth.Authenticator, error) {
+func newAuthenticator(ctx context.Context, settings config.Config, configs *store.Store, secrets *auth.Sealer, logger *slog.Logger) (auth.Authenticator, error) {
 	mode, err := auth.ParseMode(settings.Auth.Mode)
 	if err != nil {
 		return nil, err
@@ -615,7 +614,7 @@ func newAuthenticator(ctx context.Context, settings config.Config, configs *appc
 		return nil, errAPIKeyNeedsKeyring
 	}
 
-	return auth.New(mode, configs.DB().APIKeys.Lookup(secrets))
+	return auth.New(mode, configs.APIKeys.Lookup(secrets))
 }
 
 func run(settings config.Config, logger *slog.Logger) error {
@@ -757,30 +756,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		return err
 	}
 
-	// What every request is measured against -- the key it presented, the app behind it,
-	// their policies and what they have configured -- read through Redis and the cache
-	// rueidis keeps beside it. Without Redis it is Postgres on every read, which is what
-	// this deployment did before the cache existed.
-	var configs *appconfig.Store
-	if pgStore != nil {
-		configs, err = appconfig.New(appconfig.Options{
-			Store:    pgStore,
-			Address:  settings.Redis.Addr,
-			Username: settings.Redis.Username,
-			Password: settings.Redis.Password,
-			Logger:   logger,
-		})
-		if err != nil {
-			return err
-		}
-		defer configs.Close()
-	}
+	configs := pgStore
 	// The keys customers keep for their own accounts at the vendors, read through the same cache
 	// and opened with the keyring they were sealed under. Without either, work is routed on the
 	// deployment's own keys alone.
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
-		customerKeys = providerkeys.NewKeyring(configs.DB().ProviderKeys, secrets)
+		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
 	}
 
 	// The activity record counts every request an app makes, by area and client, and writes
@@ -892,7 +874,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	library := buildLibrary(logger)
 	var resolver routing.VoiceResolver
 	if configs != nil {
-		resolver = voices.NewResolver(configs.DB(), library)
+		resolver = voices.NewResolver(configs, library)
 	}
 
 	bucket, err := blob.Open(ctx, settings.VoicesBucketURL)
@@ -1477,7 +1459,6 @@ func run(settings config.Config, logger *slog.Logger) error {
 		KnowledgeURLs:         pages,
 		KnowledgeFiles:        uploads,
 		Store:                 pgStore,
-		Configs:               configs,
 		Activity:              activityRecord,
 		Live:                  liveClient,
 		Phone:                 telephony,
@@ -2133,7 +2114,7 @@ func buildSessions(
 	settings config.Config,
 	streams *api.Streams,
 	pgStore *store.Store,
-	configs *appconfig.Store,
+	configs *store.Store,
 	liveClient *live.Client,
 	usageWriter *routing.Writer,
 	directory *node.Directory,
@@ -2193,7 +2174,6 @@ func buildSessions(
 		Logger:             logger,
 		Edge:               edgeFor(stream),
 		Transcript:         transcriptFor(settings.Agent.ChatTimings),
-		Configs:            configs,
 		Directory:          directory,
 		// The session's dispatcher shares the validate endpoint's transports, so each
 		// connection has one outbound client in the router.
@@ -2454,7 +2434,7 @@ func buildLibrary(logger *slog.Logger) *voices.Catalogue {
 // teach them to. The voice paths report the absence rather than failing halfway through an
 // upload.
 func buildVoices(
-	configs *appconfig.Store,
+	configs *store.Store,
 	bucket *blob.Bucket,
 	recorder *routing.Recorder,
 	logger *slog.Logger,
@@ -2480,7 +2460,7 @@ func buildVoices(
 	}
 
 	return voices.NewService(voices.Options{
-		Store:    configs.DB(),
+		Store:    configs,
 		Bucket:   bucket,
 		Cloners:  cloners,
 		Recorder: recorder,
