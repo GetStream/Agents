@@ -35,6 +35,8 @@ type StoreSuite struct {
 	// and countRedis.
 	queries    queryCount
 	roundTrips roundTrips
+	// seededDSN is the database the EXPLAIN checks read, seeded on the suite's first use.
+	seededDSN string
 }
 
 func TestStoreSuite(t *testing.T) {

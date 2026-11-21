@@ -269,6 +269,9 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The leg digits are pressed on.
 	{"shard", "call_legs_vendor_call_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_vendor_call_idx ON call_legs (vendor_call_id) " +
 		"WHERE vendor_call_id IS NOT NULL"},
+	// The legs a join delivered after its call ended revives.
+	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
+		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},
 	// A response's alternatives, the responses sharing its parent.
 	{"shard", "agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
 }

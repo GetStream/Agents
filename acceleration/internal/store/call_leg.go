@@ -235,8 +235,10 @@ func (r *CallLegs) takeFrom(ctx context.Context, db bun.IDB, leg *CallLeg, match
 		kept := match(from.NewSelect().Model((*CallParticipant)(nil)).Column("cp.id").
 			Where("cp.call_type = ?", leg.CallType).Where("cp.call_id = ?", leg.CallID).
 			Where("cp.joined_at IS NOT NULL").Where("cp.participant_session <> ''").
+			// Said again of l, which call_legs_participant_idx is built on: the planner does not
+			// carry it over from cp, and without it reads every leg.
 			Where("NOT EXISTS (SELECT 1 FROM call_legs AS l WHERE l.call_type = cp.call_type AND l.call_id = cp.call_id " +
-				"AND l.participant_session = cp.participant_session)"))
+				"AND l.participant_session = cp.participant_session AND l.participant_session <> '')"))
 		if leg.StreamAppPK != 0 {
 			kept = kept.Where("cp.stream_app_pk = ?", leg.StreamAppPK)
 		} else {

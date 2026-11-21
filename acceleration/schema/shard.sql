@@ -190,6 +190,7 @@ TABLE call_legs
     CREATE INDEX call_legs_placed_call_idx ON public.call_legs USING btree (customer_id, call_id, id DESC) WHERE (placed_at IS NOT NULL)
     CREATE INDEX call_legs_ringing_idx ON public.call_legs USING btree (dialed_at) WHERE ((ended_at IS NULL) AND (started_at IS NULL))
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
+    CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 
 TABLE call_participants
