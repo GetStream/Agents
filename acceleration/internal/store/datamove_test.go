@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -192,8 +193,30 @@ func (s *DataMoveSuite) TestExportLeavesCredentialsBehind() {
 	connections := s.export("acme").of("agent_plugin_connections")
 
 	s.Require().Len(connections, 1)
-	for _, column := range secretColumns {
+	for _, column := range []string{"access_token", "refresh_token"} {
 		s.NotContains(connections[0], column, "a credential is not part of a customer's data")
+	}
+}
+
+// A column named like a credential in a table an export carries is left out (isSecret), or is
+// vouched for here as no credential. A new one fails until somebody decides which it is.
+func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
+	looksSecret := regexp.MustCompile(`seal|secret|token|password`)
+	notSecret := map[string]string{
+		"token_endpoint":              "the OAuth server's URL",
+		"credentials_kek_version":     "which key sealed the credentials",
+		"password_kek_version":        "which key sealed the password",
+		"bridge_password_kek_version": "which key sealed the password",
+	}
+	for _, table := range DataTables() {
+		shape, err := s.source.shapeOf(s.ctx, table)
+		s.Require().NoError(err)
+		for _, column := range shape.columns {
+			counted := strings.HasSuffix(column, "_tokens") || strings.HasSuffix(column, "_tokens_total")
+			if looksSecret.MatchString(column) && !isSecret(column) && notSecret[column] == "" && !counted {
+				s.Failf("a column that looks secret is exported", "%s.%s", table, column)
+			}
+		}
 	}
 }
 
@@ -209,7 +232,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 }
 
 func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
-	// The change feed strips columns in its own trigger, apart from secretColumns.
+	// The change feed strips the columns isSecret names in its trigger, passed to it when attached.
 	s.capture("acme")
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)

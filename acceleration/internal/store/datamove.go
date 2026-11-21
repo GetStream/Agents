@@ -93,7 +93,9 @@ func (t dataTable) rollup() bool {
 // its tools again on first use. And connector_connection_clients: the next consent of the
 // connection where it moved to records its client again. And connector_connection_validations:
 // the next validate where it moved to records its result again. And chat_inbound, Stream
-// Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes.
+// Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes. And
+// call_bridges, an answer parked for seconds at this deployment's URL: its key is the token
+// that authenticates the fetch, and it holds the trunk's password in the clear.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -123,7 +125,6 @@ var dataTables = []dataTable{
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
 	{name: "calls", customer: "customer_id", shard: true},
-	{name: "call_bridges", customer: "customer_id", shard: true},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
@@ -156,7 +157,7 @@ var dataTables = []dataTable{
 	{name: "policies", customer: "scope_id", filter: "scope = 'app'"},
 }
 
-// secretColumns never leave the deployment that holds them.
+// A secret column never leaves the deployment that holds it.
 //
 // A sealed key secret is worth nothing anywhere else, since the key that unseals it is
 // this deployment's. An OAuth token is worse than worthless: it belongs to whoever
@@ -166,7 +167,16 @@ var dataTables = []dataTable{
 // authorized again rather than arriving broken.
 // A guest's refresh secret hash is the same kind of thing: a moved guest is handed a new
 // one by its own token or by the app's backend, or comes back as a new guest.
-var secretColumns = []string{"secret_sealed", "access_token", "refresh_token", "oauth_state", "code_verifier", "credentials_sealed", "password_sealed", "bridge_password_sealed", "refresh_secret_hash"}
+//
+// isSecret is the one list: the export, the import and the record_data_change trigger
+// (watchDataChanges) all read it.
+func isSecret(column string) bool {
+	return strings.HasSuffix(column, "_sealed") || strings.HasSuffix(column, "_secret_hash") ||
+		slices.Contains(oauthSecrets, column)
+}
+
+// oauthSecrets are an OAuth grant's tokens and the state of one under way.
+var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -193,6 +203,17 @@ type shape struct {
 	keys    []string
 	// sequences are the sequences behind the columns whose default draws from one, by column.
 	sequences map[string]string
+}
+
+// secrets are the table's columns that never leave the deployment (isSecret).
+func (s shape) secrets() []string {
+	var secrets []string
+	for _, column := range s.columns {
+		if isSecret(column) {
+			secrets = append(secrets, column)
+		}
+	}
+	return secrets
 }
 
 // tableShapes caches those, since they only change when a migration does.
@@ -578,7 +599,11 @@ func recordedSince(ctx context.Context, tx bun.Tx, customerID string) (since, pr
 }
 
 func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, customerID string, write func(string, json.RawMessage) error) error {
-	query, args := table.selectRows(customerID)
+	shape, err := s.shapeOf(ctx, table.name)
+	if err != nil {
+		return err
+	}
+	query, args := table.selectRows(customerID, shape.secrets())
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("store: export %s: %w", table.name, err)
@@ -605,10 +630,10 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 
 // selectRows reads one table's rows for one customer, without the columns that never
 // leave.
-func (t dataTable) selectRows(customerID string) (string, []any) {
+func (t dataTable) selectRows(customerID string, secrets []string) (string, []any) {
 	var subject strings.Builder
 	subject.WriteString("to_jsonb(t)")
-	for _, column := range secretColumns {
+	for _, column := range secrets {
 		subject.WriteString(" - '" + column + "'")
 	}
 
@@ -650,7 +675,7 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 
 // lineColumns are what attaching a number, or giving it a line, writes on its row (AttachNumber,
 // TrunkGroupTx.SetLine): where its calls go and which agent answers them. The sealed bridge
-// password is one too, and an import never writes it (secretColumns).
+// password is one too, and an import never writes it (isSecret).
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
 	"bridge_uri", "bridge_username", "bridge_password_kek_version", "attached_at", "config_id"}
 
@@ -1657,6 +1682,7 @@ func (s *Store) watchDataChanges(ctx context.Context, db *bun.DB) error {
 		if table.parent != "" {
 			arguments = []string{"'parent'", "'" + table.parentColumn + "'", "'" + table.parent + "'"}
 		}
+		arguments = append(arguments, "'{"+strings.Join(shape.secrets(), ",")+"}'")
 		for _, key := range table.captured(shape) {
 			arguments = append(arguments, "'"+key+"'")
 		}
@@ -1736,7 +1762,7 @@ ORDER BY a.attnum`, table, table)
 func (s shape) insertable(table dataTable) []string {
 	columns := make([]string, 0, len(s.columns))
 	for _, column := range s.columns {
-		if !slices.Contains(secretColumns, column) && !slices.Contains(table.vouched, column) {
+		if !isSecret(column) && !slices.Contains(table.vouched, column) {
 			columns = append(columns, column)
 		}
 	}
