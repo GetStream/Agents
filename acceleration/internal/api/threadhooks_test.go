@@ -28,10 +28,7 @@ func (s *SlackChannelSuite) TestAMessageTheThreadsSessionRefusesLetsGoOfTheTurnA
 	s.Require().Eventually(func() bool {
 		return strings.Contains(s.logged.String(), "could not answer a message in a channel the Router answers in")
 	}, settleFor, 10*time.Millisecond, "the turn kept trying a follow-up its session refuses")
-	s.Require().Eventually(func() bool {
-		thread, err := s.store.ChannelThread(context.Background(), channel)
-		return err == nil && thread.TurnHolder == ""
-	}, settleFor, 10*time.Millisecond, "the thread's turn is let go of once the message is given up")
+	s.threadTurnIsFree(channel)
 	s.Empty(s.slack.Posts(), "nothing was answered")
 
 	// A scheduled task's follow-up gives such a refusal up as fast (followUpWithin).
@@ -65,8 +62,11 @@ func (s *SlackChannelSuite) TestAMessageWhileTheThreadsSessionRepliesIsAnsweredA
 
 	handOver()
 	s.Require().Eventually(func() bool {
-		thread, err := s.store.ChannelThread(context.Background(), channel)
-		return err == nil && thread.TurnHolder != ""
+		taken, err := s.takeThreadTurn(channel, "the-test")
+		if taken {
+			s.releaseThreadTurn(channel, "the-test")
+		}
+		return err == nil && !taken
 	}, settleFor, 10*time.Millisecond, "the turn handed over never took the thread's turn")
 	// Some polls of the turn's follow-up land on the reply still running.
 	s.Never(func() bool { return len(s.holding.replies()) != asked+1 }, 5*threadTurnPoll, threadTurnPoll/5,

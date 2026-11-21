@@ -83,7 +83,7 @@ func (t dataTable) rollup() bool {
 // sealed under this deployment's key, with connector_event_deliveries, forwards in flight. And
 // connection_event_subscriptions with connection_event_deliveries: their secrets are sealed
 // under this deployment's key and their callbacks are this deployment's URL. And
-// channel_threads, contact_map, episodes and episode_activity: the thread channels,
+// channel_threads, channel_turns, contact_map and episodes: the thread channels,
 // omni-channels and cards they point at live in the Stream app, which a move does not carry
 // either; and user_phones, whose links join only those contact_map rows; and
 // channel_thread_waiting and channel_thread_inbound, messages in flight for minutes. And

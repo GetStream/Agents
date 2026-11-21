@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,7 +29,7 @@ func (s *StoreSuite) episodeOf(contactID, threadChannel string) *Episode {
 // mapped is a contact map row of the acme-app customer, for an episode to name.
 func (s *StoreSuite) mapped(address string) string {
 	entry := contact(address, "agent:omni-"+address)
-	_, err := s.store.MapContact(s.ctx, entry)
+	_, err := s.store.ContactMapEntries.Map(s.ctx, entry)
 	s.Require().NoError(err)
 	return entry.ID
 }
@@ -36,7 +37,7 @@ func (s *StoreSuite) mapped(address string) string {
 func (s *StoreSuite) TestTheFirstMessageOfAThreadOpensAnEpisodeInProgress() {
 	episode := s.episodeOf(s.mapped("+15550100"), "agent:thread-one")
 
-	opened, err := s.store.OpenEpisode(s.ctx, episode)
+	opened, err := s.store.Episodes.Open(s.ctx, episode)
 
 	s.Require().NoError(err)
 	s.True(opened)
@@ -51,7 +52,7 @@ func (s *StoreSuite) TestTheFirstMessageOfAThreadOpensAnEpisodeInProgress() {
 func (s *StoreSuite) TestAThreadEpisodeStartsAtTheTimeItIsGiven() {
 	episode := s.episodeOf(s.mapped("+15550100"), "agent:thread-one")
 
-	_, err := s.store.OpenEpisode(s.ctx, episode)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
 
 	s.Require().NoError(err)
 	var started time.Time
@@ -63,12 +64,12 @@ func (s *StoreSuite) TestAThreadEpisodeStartsAtTheTimeItIsGiven() {
 func (s *StoreSuite) TestTheNextMessagesOfAThreadFindItsOpenEpisode() {
 	person := s.mapped("+15550100")
 	first := s.episodeOf(person, "agent:thread-one")
-	_, err := s.store.OpenEpisode(s.ctx, first)
+	_, err := s.store.Episodes.Open(s.ctx, first)
 	s.Require().NoError(err)
 
 	for range 2 {
 		next := s.episodeOf(person, "agent:thread-one")
-		opened, err := s.store.OpenEpisode(s.ctx, next)
+		opened, err := s.store.Episodes.Open(s.ctx, next)
 		s.Require().NoError(err)
 		s.False(opened)
 		s.Equal(first.ID, next.ID)
@@ -91,7 +92,7 @@ func (s *StoreSuite) TestTwoFirstMessagesOfOneThreadAtOnceOpenOneEpisode() {
 			defer wg.Done()
 			episode := s.episodeOf(person, "agent:thread-one")
 			var err error
-			opened[i], err = pool.OpenEpisode(s.ctx, episode)
+			opened[i], err = pool.Episodes.Open(s.ctx, episode)
 			s.NoError(err)
 			ids[i] = episode.ID
 		}()
@@ -111,10 +112,10 @@ func (s *StoreSuite) TestTwoFirstMessagesOfOneThreadAtOnceOpenOneEpisode() {
 
 func (s *StoreSuite) TestAnotherThreadIsAnotherEpisode() {
 	person := s.mapped("+15550100")
-	_, err := s.store.OpenEpisode(s.ctx, s.episodeOf(person, "agent:thread-one"))
+	_, err := s.store.Episodes.Open(s.ctx, s.episodeOf(person, "agent:thread-one"))
 	s.Require().NoError(err)
 
-	opened, err := s.store.OpenEpisode(s.ctx, s.episodeOf(person, "agent:thread-two"))
+	opened, err := s.store.Episodes.Open(s.ctx, s.episodeOf(person, "agent:thread-two"))
 
 	s.Require().NoError(err)
 	s.True(opened)
@@ -128,13 +129,13 @@ func (s *StoreSuite) TestEachCallSessionIsAnEpisodeOfItsOwnOnOneCallChannel() {
 		episode.Source, episode.CallID, episode.SessionID = EpisodeCall, "phone-15550199", session
 		return episode
 	}
-	_, err := s.store.OpenEpisode(s.ctx, call("session-one"))
+	_, err := s.store.Episodes.Open(s.ctx, call("session-one"))
 	s.Require().NoError(err)
 
-	opened, err := s.store.OpenEpisode(s.ctx, call("session-two"))
+	opened, err := s.store.Episodes.Open(s.ctx, call("session-two"))
 	s.Require().NoError(err)
 	s.True(opened)
-	again, err := s.store.OpenEpisode(s.ctx, call("session-two"))
+	again, err := s.store.Episodes.Open(s.ctx, call("session-two"))
 	s.Require().NoError(err)
 	s.False(again, "a session's call is one episode")
 	s.Equal(2, s.episodeRows())
@@ -144,13 +145,13 @@ func (s *StoreSuite) TestEachCallSessionIsAnEpisodeOfItsOwnOnOneCallChannel() {
 func (s *StoreSuite) TestAThreadWhoseEpisodeEndedOpensANewOne() {
 	person := s.mapped("+15550100")
 	first := s.episodeOf(person, "agent:thread-one")
-	_, err := s.store.OpenEpisode(s.ctx, first)
+	_, err := s.store.Episodes.Open(s.ctx, first)
 	s.Require().NoError(err)
 	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = now() WHERE id = ?", first.ID)
 	s.Require().NoError(err)
 
 	next := s.episodeOf(person, "agent:thread-one")
-	opened, err := s.store.OpenEpisode(s.ctx, next)
+	opened, err := s.store.Episodes.Open(s.ctx, next)
 
 	s.Require().NoError(err)
 	s.True(opened)
@@ -161,20 +162,20 @@ func (s *StoreSuite) TestOnlyACallEpisodeNamesASession() {
 	person := s.mapped("+15550100")
 	thread := s.episodeOf(person, "agent:thread-one")
 	thread.SessionID = "session-one"
-	_, err := s.store.OpenEpisode(s.ctx, thread)
-	s.ErrorContains(err, "only a call episode, names its session")
+	_, err := s.store.Episodes.Open(s.ctx, thread)
+	s.ErrorContains(err, "session_id is named by a call episode, and only by one")
 
 	call := s.episodeOf(person, "agent:call-one")
 	call.Source = EpisodeCall
-	_, err = s.store.OpenEpisode(s.ctx, call)
-	s.ErrorContains(err, "only a call episode, names its session")
+	_, err = s.store.Episodes.Open(s.ctx, call)
+	s.ErrorContains(err, "session_id is named by a call episode, and only by one")
 }
 
 // threadAt is a thread episode of person in thread, opened at at.
 func (s *StoreSuite) threadAt(person, thread string, at time.Time) *Episode {
 	episode := s.episodeOf(person, thread)
 	episode.StartedAt = at
-	_, err := s.store.OpenEpisode(s.ctx, episode)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
 	s.Require().NoError(err)
 	return episode
 }
@@ -182,7 +183,7 @@ func (s *StoreSuite) threadAt(person, thread string, at time.Time) *Episode {
 // closeIdle closes the thread episodes with no message for an hour before now, leased for
 // five minutes.
 func (s *StoreSuite) closeIdle(store *Store, now time.Time) []ClosedEpisode {
-	closed, err := store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute))
+	closed, err := store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
 	s.Require().NoError(err)
 	return closed
 }
@@ -206,10 +207,11 @@ func (s *StoreSuite) TestAThreadQuietForTheIdlePeriodIsClosedAndLeasedToItsClose
 	s.Equal(EpisodeEnded, closed[0].Status)
 	s.Require().NotNil(closed[0].EndedAt)
 	s.True(now.Equal(*closed[0].EndedAt))
-	s.Require().NotNil(closed[0].SummaryLeaseUntil)
-	s.True(now.Add(5 * time.Minute).Equal(*closed[0].SummaryLeaseUntil))
+	s.Require().NotNil(closed[0].LeaseUntil)
+	s.True(now.Add(5 * time.Minute).Equal(*closed[0].LeaseUntil))
+	s.Equal("router-a", closed[0].LeasedBy, "the router that closed it")
 	s.Equal("agent:omni-+15550100", closed[0].ConversationID, "the omni-channel the card is in")
-	s.Equal("agent-one", closed[0].AgentConfigID, "the config whose LLM writes the summary")
+	s.Equal("agent-one", closed[0].ConfigID, "the config whose LLM writes the summary")
 	s.Equal(EpisodeEnded, s.episodeStatus(episode.ID))
 }
 
@@ -229,7 +231,7 @@ func (s *StoreSuite) TestAThreadWithAMessageInTheIdlePeriodStaysOpen() {
 func (s *StoreSuite) TestACallIsNeverClosedAsIdle() {
 	call := s.episodeOf(s.mapped("+15550100"), "agent:call-one")
 	call.Source, call.CallID, call.SessionID = EpisodeCall, "call-one", "session-one"
-	_, err := s.store.OpenEpisode(s.ctx, call)
+	_, err := s.store.Episodes.Open(s.ctx, call)
 	s.Require().NoError(err)
 
 	closed := s.closeIdle(s.store, s.base.Add(48*time.Hour))
@@ -254,7 +256,7 @@ func (s *StoreSuite) TestTwoSweepersAtOnceCloseEachIdleEpisodeOnce() {
 		go func() {
 			defer wg.Done()
 			var err error
-			closed[i], err = pool.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute))
+			closed[i], err = pool.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
 			s.NoError(err)
 		}()
 	}
@@ -284,7 +286,7 @@ func (s *StoreSuite) TestAnEpisodeAnotherRouterIsClosingIsLeftToIt() {
 	swept := make(chan []ClosedEpisode, 1)
 	go func() {
 		now := s.base.Add(time.Hour)
-		closed, err := s.store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute))
+		closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
 		s.NoError(err)
 		swept <- closed
 	}()
@@ -308,22 +310,22 @@ func (s *StoreSuite) TestACallsEpisodesEndWithItInItsOwnAppOnly() {
 	call := func(callID, session string) *Episode {
 		episode := s.episodeOf(person, "agent:"+callID)
 		episode.Source, episode.CallID, episode.SessionID = EpisodeCall, callID, session
-		_, err := s.store.OpenEpisode(s.ctx, episode)
+		_, err := s.store.Episodes.Open(s.ctx, episode)
 		s.Require().NoError(err)
 		return episode
 	}
 	first, second, other := call("call-one", "session-one"), call("call-one", "session-two"), call("call-two", "session-three")
 	now := s.base.Add(10 * time.Minute)
 
-	elsewhere, err := s.store.EndCallEpisodes(s.ctx, AppScope{App: 7}, "call-one", now, now.Add(5*time.Minute))
+	elsewhere, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 7}, "call-one", now, now.Add(5*time.Minute), "router-a")
 	s.Require().NoError(err)
 	s.Empty(elsewhere, "another app's call of the same id")
-	ended, err := s.store.EndCallEpisodes(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute))
+	ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute), "router-a")
 	s.Require().NoError(err)
 
 	s.ElementsMatch([]string{first.ID, second.ID}, []string{ended[0].ID, ended[1].ID})
 	s.Equal(episodeInProgress, s.episodeStatus(other.ID))
-	again, err := s.store.EndCallEpisodes(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute))
+	again, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute), "router-a")
 	s.Require().NoError(err)
 	s.Empty(again, "an event delivered twice ends each episode once")
 }
@@ -335,18 +337,19 @@ func (s *StoreSuite) TestAnEpisodeWhoseSummaryLeaseRanOutIsTakenAgainOnce() {
 	closedAt := s.base.Add(time.Hour)
 	s.closeIdle(s.store, closedAt)
 
-	early, err := s.store.ClaimEpisodeSummaries(s.ctx, closedAt.Add(4*time.Minute), 10, closedAt.Add(time.Hour))
+	early, err := s.store.Episodes.ClaimSummaries(s.ctx, closedAt.Add(4*time.Minute), 10, closedAt.Add(time.Hour), "router-a")
 	s.Require().NoError(err)
 	s.Empty(early, "its closer still holds it")
 	late := closedAt.Add(6 * time.Minute)
-	taken, err := s.store.ClaimEpisodeSummaries(s.ctx, late, 10, late.Add(5*time.Minute))
+	taken, err := s.store.Episodes.ClaimSummaries(s.ctx, late, 10, late.Add(5*time.Minute), "router-b")
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	s.Equal(episode.ID, taken[0].ID)
 	s.Equal("agent:omni-+15550100", taken[0].ConversationID)
-	s.Require().NotNil(taken[0].SummaryLeaseUntil)
-	s.True(late.Add(5*time.Minute).Equal(*taken[0].SummaryLeaseUntil), "the lease it was taken under")
-	again, err := s.store.ClaimEpisodeSummaries(s.ctx, late, 10, late.Add(5*time.Minute))
+	s.Require().NotNil(taken[0].LeaseUntil)
+	s.True(late.Add(5*time.Minute).Equal(*taken[0].LeaseUntil), "the lease it was taken under")
+	s.Equal("router-b", taken[0].LeasedBy, "the router that took it over")
+	again, err := s.store.Episodes.ClaimSummaries(s.ctx, late, 10, late.Add(5*time.Minute), "router-a")
 	s.Require().NoError(err)
 	s.Empty(again, "the new lease holds it")
 }
@@ -355,10 +358,10 @@ func (s *StoreSuite) TestAFinishedSummaryIsNeverTakenAgain() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
 	s.closeIdle(s.store, s.base.Add(time.Hour))
 
-	s.Require().NoError(s.store.FinishEpisodeSummary(s.ctx, "acme-app", episode.ID, EpisodeSummarized))
+	s.Require().NoError(s.store.Episodes.FinishSummary(s.ctx, "acme-app", episode.ID, EpisodeSummarized))
 
 	s.Equal(EpisodeSummarized, s.episodeStatus(episode.ID))
-	taken, err := s.store.ClaimEpisodeSummaries(s.ctx, s.base.Add(48*time.Hour), 10, s.base.Add(49*time.Hour))
+	taken, err := s.store.Episodes.ClaimSummaries(s.ctx, s.base.Add(48*time.Hour), 10, s.base.Add(49*time.Hour), "router-a")
 	s.Require().NoError(err)
 	s.Empty(taken)
 }
@@ -367,14 +370,14 @@ func (s *StoreSuite) TestAFinishedSummaryIsNeverTakenAgain() {
 func (s *StoreSuite) TestASummaryFinishesOnlyAnEndedEpisode() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
 
-	s.Require().NoError(s.store.FinishEpisodeSummary(s.ctx, "acme-app", episode.ID, EpisodeSummaryFailed))
+	s.Require().NoError(s.store.Episodes.FinishSummary(s.ctx, "acme-app", episode.ID, EpisodeSummaryFailed))
 
 	s.Equal(episodeInProgress, s.episodeStatus(episode.ID))
 }
 
 // anyToSweep is AnyEpisodeToSweep's answer.
 func (s *StoreSuite) anyToSweep() bool {
-	due, err := s.store.AnyEpisodeToSweep(s.ctx)
+	due, err := s.store.Episodes.AnyToSweep(s.ctx)
 	s.Require().NoError(err)
 	return due
 }
@@ -430,7 +433,7 @@ func (s *StoreSuite) TestAThreadEpisodeLeftInProgressAfterTheCardsTurnedOffIsToS
 	s.True(s.anyToSweep())
 
 	s.Require().Len(s.closeIdle(s.store, s.base.Add(2*time.Hour)), 1)
-	s.Require().NoError(s.store.FinishEpisodeSummary(s.ctx, "acme-app", episode.ID, EpisodeSummarized))
+	s.Require().NoError(s.store.Episodes.FinishSummary(s.ctx, "acme-app", episode.ID, EpisodeSummarized))
 	s.False(s.anyToSweep(), "a summarized episode is nothing to sweep")
 }
 
@@ -438,7 +441,7 @@ func (s *StoreSuite) TestAThreadEpisodeLeftInProgressAfterTheCardsTurnedOffIsToS
 func (s *StoreSuite) TestACallEpisodeInProgressIsNothingToSweep() {
 	call := s.episodeOf(s.mapped("+15550100"), "agent:call-one")
 	call.Source, call.CallID, call.SessionID = EpisodeCall, "call-one", "session-one"
-	_, err := s.store.OpenEpisode(s.ctx, call)
+	_, err := s.store.Episodes.Open(s.ctx, call)
 	s.Require().NoError(err)
 
 	s.False(s.anyToSweep())
@@ -450,13 +453,13 @@ func (s *StoreSuite) TestACallEpisodeInProgressIsNothingToSweep() {
 func (s *StoreSuite) TestAnEndedEpisodeWithItsSummaryLeaseHeldIsToSweep() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
 	now := s.base.Add(2 * time.Hour)
-	closed, err := s.store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 50, time.Now().Add(5*time.Minute))
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, time.Now().Add(5*time.Minute), "router-a")
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
 
 	s.True(s.anyToSweep(), "a lease still running is to sweep once it runs out")
 
-	s.Require().NoError(s.store.FinishEpisodeSummary(s.ctx, "acme-app", episode.ID, EpisodeSummaryFailed))
+	s.Require().NoError(s.store.Episodes.FinishSummary(s.ctx, "acme-app", episode.ID, EpisodeSummaryFailed))
 	s.False(s.anyToSweep(), "a failed summary drops its lease, and the episode is nothing to sweep")
 }
 
@@ -485,13 +488,13 @@ func (s *StoreSuite) TestAnEpisodeAMessageIsTouchingIsNotClosed() {
 	defer func() { _ = touching.Rollback() }()
 	now := s.base.Add(2 * time.Hour)
 	var touched Episode
-	s.Require().NoError(touching.NewRaw(touchThreadEpisodeQuery, "acme-app", "agent:thread-one", now).Scan(s.ctx, &touched))
+	s.Require().NoError(touching.NewRaw(touchThreadEpisodeQuery, now, "acme-app", "agent:thread-one").Scan(s.ctx, &touched))
 	s.Require().Equal(episode.ID, touched.ID, "the message found the episode open")
 	// A sweep that waited for the episode would wait until the message commits.
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
 
-	closed, err := s.store.CloseIdleEpisodes(ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute))
+	closed, err := s.store.Episodes.CloseIdle(ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
 
 	s.Require().NoError(err, "the sweep waited for the message")
 	s.Empty(closed, "the sweep closed an episode a message was touching")
@@ -501,29 +504,42 @@ func (s *StoreSuite) TestAnEpisodeAMessageIsTouchingIsNotClosed() {
 }
 
 // A message can commit after a sweep read the episode as idle and before it locked it: the
-// close reads the last message again once it holds the row, and leaves the episode open.
+// sweep reads the last message again once it holds the row, and leaves the episode open.
 func (s *StoreSuite) TestAMessageThatLandsAsASweepLocksTheEpisodeKeepsItOpen() {
 	person := s.mapped("+15550100")
 	episode := s.threadAt(person, "agent:thread-one", s.base)
 	s.threadAt(person, "agent:thread-one", s.base.Add(time.Minute))
 	now := s.base.Add(2 * time.Hour)
-	sweeping, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
-	s.Require().NoError(err)
-	defer func() { _ = sweeping.Rollback() }()
-	var due []string
-	s.Require().NoError(sweeping.NewRaw(idleEpisodesQuery, now.Add(-time.Hour), 50).Scan(s.ctx, &due))
-	s.Require().Equal([]string{episode.ID}, due, "the sweep holds the episode as idle")
-	// The message's touch, committed: it found the row before the sweep locked it.
-	_, err = s.store.GlobalDB().ExecContext(s.ctx,
-		"UPDATE episode_activity SET last_message_at = ? WHERE episode_id = ?", now, episode.ID)
+	order := "ORDER BY ep.started_at"
+	s.Require().Contains(idleEpisodesQuery, order)
+	// A pause once the sweep's statement read the rows as they were, before it locks them.
+	paused := strings.Replace(idleEpisodesQuery, order, "AND (SELECT 1 FROM pg_sleep(0.5)) = 1\n"+order, 1)
+	type sweep struct {
+		due []string
+		err error
+	}
+	swept := make(chan sweep, 1)
+	go func() {
+		var due []string
+		err := s.store.GlobalDB().NewRaw(paused, now.Add(-time.Hour), 50).Scan(s.ctx, &due)
+		swept <- sweep{due, err}
+	}()
+	s.Require().Eventually(func() bool {
+		var sleeping int
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
+		return sleeping == 1
+	}, 5*time.Second, 10*time.Millisecond, "the sweep is in its pause")
+	// The message's touch, committed while the sweep holds the episode as idle.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
+		"UPDATE episodes SET last_message_at = ? WHERE id = ?", now, episode.ID)
 	s.Require().NoError(err)
 
-	var closed []ClosedEpisode
-	err = sweeping.NewRaw(closeIdleEpisodesQuery, now, bun.In(due), now.Add(-time.Hour), now.Add(5*time.Minute)).Scan(s.ctx, &closed)
+	got := <-swept
 
-	s.Require().NoError(err)
-	s.Empty(closed, "the sweep closed an episode with a message in the idle period")
-	s.Require().NoError(sweeping.Commit())
+	s.Require().NoError(got.err)
+	s.Empty(got.due, "the sweep took an episode with a message in the idle period")
+	s.Empty(s.closeIdle(s.store, now), "the message keeps the episode open")
 	s.Equal(episodeInProgress, s.episodeStatus(episode.ID))
 }
 
@@ -536,7 +552,7 @@ func (s *StoreSuite) TestAnEpisodeThatAlreadyEndedIsNotClosedAgain() {
 	s.Require().Len(s.closeIdle(s.store, now), 1)
 
 	var closed []ClosedEpisode
-	err := s.store.GlobalDB().NewRaw(closeIdleEpisodesQuery, now.Add(time.Minute), bun.In([]string{episode.ID}), now.Add(-time.Hour), now.Add(10*time.Minute)).Scan(s.ctx, &closed)
+	err := s.store.GlobalDB().NewRaw(closeIdleEpisodesQuery, now.Add(time.Minute), now.Add(10*time.Minute), "router-a", bun.In([]string{episode.ID}), now.Add(-time.Hour)).Scan(s.ctx, &closed)
 
 	s.Require().NoError(err)
 	s.Empty(closed, "an ended episode was closed again")
@@ -551,7 +567,7 @@ func (s *StoreSuite) TestASweepsBatchHoldsOnlyIdleEpisodes() {
 	idle := s.threadAt(person, "agent:thread-idle", s.base.Add(time.Minute))
 	now := s.base.Add(2 * time.Hour)
 
-	closed, err := s.store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 1, now.Add(5*time.Minute))
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 1, now.Add(5*time.Minute), "router-a")
 
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
@@ -568,83 +584,17 @@ func (s *StoreSuite) TestALeaseAnotherRouterIsTakingIsLeftToIt() {
 	taking, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = taking.Rollback() }()
-	_, err = taking.ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = ? WHERE episode_id = ?", late.Add(5*time.Minute), episode.ID)
+	_, err = taking.ExecContext(s.ctx, "UPDATE episodes SET lease_until = ? WHERE id = ?", late.Add(5*time.Minute), episode.ID)
 	s.Require().NoError(err)
 
 	// A claim that waited for the lease would wait until the other router commits.
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
 
-	taken, err := s.store.ClaimEpisodeSummaries(ctx, late, 10, late.Add(5*time.Minute))
+	taken, err := s.store.Episodes.ClaimSummaries(ctx, late, 10, late.Add(5*time.Minute), "router-a")
 
 	s.Require().NoError(err, "the claim waited for the other router")
 	s.Empty(taken)
-}
-
-// previousEpisode is store.Episode as the release before episode_activity has it
-// (accelerate-v0.6.23, internal/store/episodes.go), which reads the cards with ep.*.
-type previousEpisode struct {
-	bun.BaseModel `bun:"table:episodes,alias:ep"`
-
-	ID            string     `bun:"id,pk"`
-	CustomerID    string     `bun:"customer_id,notnull"`
-	ContactID     string     `bun:"contact_id,notnull"`
-	Source        string     `bun:"source,notnull"`
-	ThreadChannel string     `bun:"thread_channel,notnull"`
-	CallID        string     `bun:"call_id,nullzero"`
-	SessionID     string     `bun:"session_id,nullzero"`
-	CardMessageID string     `bun:"card_message_id,notnull"`
-	Status        string     `bun:"status,notnull"`
-	StartedAt     time.Time  `bun:"started_at,notnull"`
-	EndedAt       *time.Time `bun:"ended_at"`
-	StreamAppPK   int64      `bun:"stream_app_pk,nullzero"`
-	CreatedAt     time.Time  `bun:"created_at,notnull,default:current_timestamp"`
-}
-
-// previousCard is store.EpisodeCard as that release has it.
-type previousCard struct {
-	previousEpisode `bun:",extend"`
-	Until           *time.Time `bun:"until,scanonly"`
-	ContactKind     string     `bun:"contact_kind,scanonly"`
-	ContactAddress  string     `bun:"contact_address,scanonly"`
-}
-
-// A router of the previous release still serving once this one migrated, in a rollout or a
-// rollback, reads the cards as it did: closing an episode adds no column to episodes, which
-// that release's ep.* would refuse.
-func (s *StoreSuite) TestThePreviousReleaseStillReadsTheCards() {
-	if s.store.Sharded() {
-		s.T().Skip("that release joined the sessions in the shared database, which a new sharded deployment does not hold")
-	}
-	person := s.mapped("+15550100")
-	s.threadAt(person, "agent:thread-one", s.base)
-	s.threadAt(person, "agent:thread-one", s.base.Add(time.Minute))
-	s.closeIdle(s.store, s.base.Add(2*time.Hour))
-	s.threadAt(person, "agent:thread-two", s.base.Add(3*time.Hour))
-	s.threadAt(person, "agent:thread-two", s.base.Add(3*time.Hour+time.Minute))
-
-	// accelerate-v0.6.23's store.EpisodeCards, word for word.
-	var cards []previousCard
-	err := s.store.global.NewSelect().Model(&cards).
-		ColumnExpr("ep.*").
-		ColumnExpr("cm.kind AS contact_kind, cm.address AS contact_address").
-		ColumnExpr(`LEAST(ep.ended_at, asn.closed_at, (SELECT min(nx.started_at) FROM episodes AS nx
-			WHERE nx.customer_id = ep.customer_id AND nx.thread_channel = ep.thread_channel
-			AND nx.started_at > ep.started_at)) AS until`).
-		Join("JOIN contact_map AS cm ON cm.id = ep.contact_id").
-		Join("LEFT JOIN agent_sessions AS asn ON asn.id = ep.session_id AND asn.customer_id = ep.customer_id").
-		Where("ep.customer_id = ?", "acme-app").
-		Where("cm.customer_id = ?", "acme-app").
-		Where("cm.agent_config_id = ?", "agent-one").
-		Where("cm.conversation_id = ?", "agent:omni-+15550100").
-		Where("ep.thread_channel <> ?", "").
-		Where("ep.session_id IS DISTINCT FROM ?", "").
-		OrderExpr("ep.started_at DESC").
-		Limit(10).
-		Scan(s.ctx)
-
-	s.Require().NoError(err)
-	s.Len(cards, 2)
 }
 
 // The call hook ends a call's episodes for every call that ends in the app, video calls
@@ -655,17 +605,16 @@ func (s *StoreSuite) TestACallsEpisodesAreFoundByTheirCall() {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
-		return tx.NewRaw("EXPLAIN "+endCallEpisodesQuery, s.base, "call-one", AppScope{App: 4242}.clause(), s.base).Scan(ctx, &plan)
+		return tx.NewRaw("EXPLAIN "+endCallEpisodesQuery, s.base, s.base, "router-a", "call-one", AppScope{App: 4242}.clause()).Scan(ctx, &plan)
 	})
 
 	s.Require().NoError(err)
 	s.Contains(strings.Join(plan, "\n"), "episodes_open_call")
 }
 
-// The sweep runs every minute, and episode_activity keeps a row for every thread episode
-// there was, so the sweep reads only the open episodes' rows, each by its key, rather than
-// joining the whole table.
-func (s *StoreSuite) TestASweepReadsTheLastMessageOfEachOpenEpisodeByItsKey() {
+// The sweep runs every minute, and episodes keeps a row for every thread episode there was,
+// so the sweep reads only the open thread episodes, by their index, rather than the whole table.
+func (s *StoreSuite) TestASweepReadsOnlyTheOpenThreadEpisodes() {
 	var plan []string
 	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
@@ -676,8 +625,7 @@ func (s *StoreSuite) TestASweepReadsTheLastMessageOfEachOpenEpisodeByItsKey() {
 
 	s.Require().NoError(err)
 	read := strings.Join(plan, "\n")
-	s.NotContains(read, "Join")
-	s.Contains(read, "episode_activity_pkey")
+	s.Contains(read, "episodes_open_thread")
 }
 
 // episodeRows is how many episodes there are.
@@ -685,4 +633,204 @@ func (s *StoreSuite) episodeRows() int {
 	var count int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes").Scan(&count))
 	return count
+}
+
+// episodeIn opens an episode of a contact in a thread channel, started minutes after the
+// suite's base time.
+func (s *StoreSuite) episodeIn(contactID, threadChannel string, minutes int) *Episode {
+	episode := s.episodeOf(contactID, threadChannel)
+	episode.StartedAt = s.base.Add(time.Duration(minutes) * time.Minute)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
+	s.Require().NoError(err)
+	return episode
+}
+
+// called opens the episode of a call session, as the session manager does.
+func (s *StoreSuite) called(contactID, callChannel, sessionID string, minutes int) *Episode {
+	episode := s.episodeOf(contactID, callChannel)
+	episode.Source, episode.SessionID, episode.CallID = EpisodeCall, sessionID, "call-"+sessionID
+	episode.StartedAt = s.base.Add(time.Duration(minutes) * time.Minute)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
+	s.Require().NoError(err)
+	return episode
+}
+
+// mappedAs is a contact row for address, in an omni-channel of the test's choosing, of a
+// customer and an agent of the test's choosing.
+func (s *StoreSuite) mappedAs(customerID, agentConfigID, kind, address, omni string) string {
+	entry := contact(address, omni)
+	entry.CustomerID, entry.ConfigID, entry.Kind = customerID, agentConfigID, kind
+	_, err := s.store.ContactMapEntries.Map(s.ctx, entry)
+	s.Require().NoError(err)
+	return entry.ID
+}
+
+// cardsOf reads the cards of the acme-app agent's omni-channel.
+func (s *StoreSuite) cardsOf(omni string, query CardsQuery) []EpisodeCard {
+	query.CustomerID, query.AgentConfigID, query.ConversationID = "acme-app", "agent-one", omni
+	if query.Limit == 0 {
+		query.Limit = 10
+	}
+	cards, err := s.store.Episodes.Cards(s.ctx, query)
+	s.Require().NoError(err)
+	return cards
+}
+
+func ids(cards []EpisodeCard) []string {
+	var out []string
+	for _, card := range cards {
+		out = append(out, card.ID)
+	}
+	return out
+}
+
+// A person's cards are theirs alone: another person of the same agent, the same omni-channel
+// id under another customer, and the same one under another agent of the customer are none
+// of theirs.
+func (s *StoreSuite) TestAPersonsCardsAreOnlyTheirOwnNewestFirst() {
+	ann := s.mapped("+15550100")
+	first := s.episodeIn(ann, "agent:thread-one", 0)
+	second := s.episodeIn(ann, "agent:thread-two", 10)
+	s.episodeIn(s.mapped("+15550199"), "agent:thread-bob", 20)
+	stranger := s.episodeOf(s.mappedAs("globex", "agent-one", ContactPhone, "+15550100", "agent:omni-+15550100"), "agent:thread-globex")
+	stranger.CustomerID = "globex"
+	_, err := s.store.Episodes.Open(s.ctx, stranger)
+	s.Require().NoError(err)
+	s.episodeIn(s.mappedAs("acme-app", "agent-two", ContactPhone, "+15550100", "agent:omni-+15550100"), "agent:thread-other-agent", 40)
+
+	cards := s.cardsOf("agent:omni-+15550100", CardsQuery{})
+
+	s.Equal([]string{second.ID, first.ID}, ids(cards))
+}
+
+// Account linking points a Slack row at a phone row's omni-channel; both rows are then the
+// one person, and their cards are read together.
+func (s *StoreSuite) TestEveryRowPointingAtTheOmniChannelIsThePerson() {
+	phone := s.mapped("+15550100")
+	slack := s.mappedAs("acme-app", "agent-one", ContactSlack, "T1:U1", "agent:omni-+15550100")
+	sms := s.episodeIn(phone, "agent:thread-sms", 0)
+	thread := s.episodeIn(slack, "agent:thread-slack", 10)
+
+	cards := s.cardsOf("agent:omni-+15550100", CardsQuery{})
+	s.Equal([]string{thread.ID, sms.ID}, ids(cards))
+	s.Equal([2]string{ContactSlack, "T1:U1"}, [2]string{cards[0].ContactKind, cards[0].ContactAddress}, "each card says whose row it is")
+	s.Equal([2]string{ContactPhone, "+15550100"}, [2]string{cards[1].ContactKind, cards[1].ContactAddress})
+	s.Equal("agent-one", cards[0].ConfigID, "the agent config an app chat's channel is checked against")
+}
+
+// A session reads its own thread word for word, and its own call is going on, so neither is
+// a card.
+func (s *StoreSuite) TestTheSessionsOwnThreadAndCallAreLeftOut() {
+	ann := s.mapped("+15550100")
+	sms := s.episodeIn(ann, "agent:thread-sms", 0)
+	slack := s.episodeIn(ann, "agent:thread-slack", 10)
+	call := s.called(ann, "agent:phone-1", "session-now", 20)
+
+	s.Equal([]string{call.ID, sms.ID}, ids(s.cardsOf("agent:omni-+15550100", CardsQuery{ExceptThread: "agent:thread-slack"})))
+	s.Equal([]string{slack.ID, sms.ID}, ids(s.cardsOf("agent:omni-+15550100", CardsQuery{ExceptSession: "session-now"})))
+}
+
+func (s *StoreSuite) TestNoMoreCardsThanTheLimitAreRead() {
+	ann := s.mapped("+15550100")
+	var newest []string
+	for minutes := range 7 {
+		newest = append([]string{s.episodeIn(ann, "agent:thread-"+string(rune('a'+minutes)), minutes).ID}, newest...)
+	}
+
+	s.Equal(newest[:5], ids(s.cardsOf("agent:omni-+15550100", CardsQuery{Limit: 5})))
+}
+
+// A call channel can hold several callers' calls, so a call's lines end where the next
+// episode in the channel starts, when its session closed, or when it ended, whichever is
+// first.
+func (s *StoreSuite) TestACardsLinesEndAtTheFirstThingThatEndsIt() {
+	ann, bob := s.mapped("+15550100"), s.mapped("+15550199")
+	open := s.called(ann, "agent:phone-1", "session-ann", 0)
+	s.called(bob, "agent:phone-1", "session-bob", 30)
+	closed := s.called(ann, "agent:phone-2", "session-closed", 40)
+	s.Require().NoError(s.store.SaveSession(s.ctx, &AgentSession{ID: "session-closed", CustomerID: "acme-app", CallID: "call-session-closed"}))
+	s.Require().NoError(s.store.CloseSession(s.ctx, "session-closed", s.base.Add(45*time.Minute), ""))
+	ended := s.episodeIn(ann, "agent:thread-ended", 50)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = ? WHERE id = ?", s.base.Add(55*time.Minute), ended.ID)
+	s.Require().NoError(err)
+	going := s.episodeIn(ann, "agent:thread-going", 60)
+
+	until := map[string]*time.Time{}
+	for _, card := range s.cardsOf("agent:omni-+15550100", CardsQuery{}) {
+		until[card.ID] = card.Until
+	}
+
+	at := func(minutes int) *time.Time {
+		t := s.base.Add(time.Duration(minutes) * time.Minute)
+		return &t
+	}
+	s.Require().Len(until, 4)
+	s.Equal(at(30).UTC(), until[open.ID].UTC(), "Bob's call in the same channel")
+	s.Equal(at(45).UTC(), until[closed.ID].UTC(), "the session closed")
+	s.Equal(at(55).UTC(), until[ended.ID].UTC(), "the episode ended")
+	s.Nil(until[going.ID], "nothing ends it yet")
+}
+
+// The person of a thread is the one its episode is with, for the customer and agent asked
+// about only.
+func (s *StoreSuite) TestAThreadsPersonIsTheOneItsEpisodeIsWith() {
+	ann := s.mapped("+15550100")
+	s.episodeIn(ann, "agent:thread-sms", 0)
+
+	found, err := s.store.ContactMapEntries.GetByThread(s.ctx, "acme-app", "agent-one", "agent:thread-sms")
+	s.Require().NoError(err)
+	s.Equal(ann, found.ID)
+
+	for _, asked := range [][2]string{{"globex", "agent-one"}, {"acme-app", "agent-two"}} {
+		_, err = s.store.ContactMapEntries.GetByThread(s.ctx, asked[0], asked[1], "agent:thread-sms")
+		s.True(errors.Is(err, ErrNoContact), asked)
+	}
+	_, err = s.store.ContactMapEntries.GetByThread(s.ctx, "acme-app", "agent-one", "agent:thread-nobody")
+	s.True(errors.Is(err, ErrNoContact))
+}
+
+// Reading a person's cards writes nothing: an address the contact map does not hold is none,
+// and stays none.
+func (s *StoreSuite) TestLookingUpAContactMakesNone() {
+	_, err := s.store.ContactMapEntries.GetByAddress(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
+
+	s.True(errors.Is(err, ErrNoContact))
+	s.Zero(s.contactRows())
+
+	id := s.mapped("+15550100")
+	found, err := s.store.ContactMapEntries.GetByAddress(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
+	s.Require().NoError(err)
+	s.Equal(id, found.ID)
+}
+
+func (s *StoreSuite) TestEpisodeQueryBudgets() {
+	person := s.mapped("+15550100")
+	var thread *Episode
+	s.Equal(1, s.countQueries(func() { thread = s.threadAt(person, "agent:thread-one", s.base) }), "Open of a new thread episode")
+	s.Equal(2, s.countQueries(func() { s.threadAt(person, "agent:thread-one", s.base.Add(time.Minute)) }),
+		"Open of a thread's next message: the insert finds it open, the touch")
+	call := s.episodeOf(person, "agent:call-one")
+	call.Source, call.CallID, call.SessionID = EpisodeCall, "call-one", "session-one"
+	_, err := s.store.Episodes.Open(s.ctx, call)
+	s.Require().NoError(err)
+	s.Equal(1, s.countQueries(func() { s.True(s.anyToSweep()) }), "AnyToSweep")
+	now := s.base.Add(2 * time.Hour)
+	s.Equal(4, s.countQueries(func() { s.Len(s.closeIdle(s.store, now), 1) }), "CloseIdle: begin, lock the idle, close them, commit")
+	s.Equal(1, s.countQueries(func() {
+		ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute), "router-a")
+		s.Require().NoError(err)
+		s.Len(ended, 1)
+	}), "EndCall")
+	s.Equal(1, s.countQueries(func() {
+		taken, err := s.store.Episodes.ClaimSummaries(s.ctx, now.Add(time.Hour), 10, now.Add(2*time.Hour), "router-b")
+		s.Require().NoError(err)
+		s.Len(taken, 2)
+	}), "ClaimSummaries")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.Episodes.FinishSummary(s.ctx, "acme-app", thread.ID, EpisodeSummarized))
+	}), "FinishSummary")
+	s.Equal(1, s.countQueries(func() {
+		cards := s.cardsOf("agent:omni-+15550100", CardsQuery{ExceptSession: "session-one"})
+		s.Len(cards, 1)
+	}), "Cards with no call, whose session is read in the shards")
 }

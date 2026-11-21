@@ -363,7 +363,7 @@ func (s *SlackChannelSuite) unreadableLink(channel string) {
 	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE channel_threads SET thread_parts = '{"ts": 1}'::jsonb WHERE channel_id = ?`, channel)
 	s.Require().NoError(err)
-	_, err = s.store.ChannelThread(context.Background(), channel)
+	_, err = s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().Error(err)
 	s.Require().NotErrorIs(err, store.ErrNoChannelThread)
 }
@@ -417,7 +417,7 @@ func (s *SlackChannelSuite) TestAThreadTheMessageHookOpensIsSharedAndOffersNoCal
 	data, foundChannel := s.chat.Channel(channel)
 	s.Require().True(foundChannel)
 	custom, _ := data["custom"].(map[string]any)
-	thread, err := s.store.ChannelThread(context.Background(), channel)
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().NoError(err)
 
 	// The same event the message hook hands answerThread, which calls threadSession.
@@ -463,7 +463,7 @@ func (s *SlackChannelSuite) TestAHookStartedReplyIsMarkedHookChat() {
 	data, foundChannel := s.chat.Channel(channel)
 	s.Require().True(foundChannel)
 	custom, _ := data["custom"].(map[string]any)
-	thread, err := s.store.ChannelThread(context.Background(), channel)
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().NoError(err)
 	event := messageEvent{ChannelType: chatlog.ChannelType, ChannelID: channel, ChannelCustom: custom}
 	event.Message.Text = "is the build green?"

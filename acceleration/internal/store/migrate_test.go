@@ -5,6 +5,9 @@ package store
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/database"
 )
 
 func (s *ShardedStoreSuite) TestTheSchemaFilesAreCurrent() {
@@ -59,11 +62,18 @@ func (s *ShardedStoreSuite) TestAShardDropsTheEmptyTablesOfTheSharedSet() {
 	s.True(requests, "the shard's own tables stay")
 }
 
-// legacy turns the suite's database back into one that ran the single history up to version.
+// legacy turns the suite's database back into one that ran the single history up to version:
+// the schema at the baseline, which that history left.
 func (s *StoreSuite) legacy(dsn string, version int64) *Store {
 	legacy, err := Open(dsn)
 	s.Require().NoError(err)
 	s.Require().NoError(legacy.Migrate(s.ctx))
+	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
+	s.Require().NoError(err)
+	provider, err := goose.NewProvider("", legacy.global.DB, globalSet.files, goose.WithStore(versions))
+	s.Require().NoError(err)
+	_, err = provider.DownTo(s.ctx, baseline)
+	s.Require().NoError(err)
 	_, err = legacy.global.ExecContext(s.ctx, `DROP TABLE goose_global_version, goose_shard_version;
 		CREATE TABLE goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp DEFAULT now());
 		INSERT INTO goose_db_version (version_id, is_applied) VALUES (0, true), (?, true)`, version)

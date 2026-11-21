@@ -576,9 +576,9 @@ func (s *UserPhonesSuite) idle() {
 func (s *UserPhonesSuite) chatReads(user string) []string {
 	person, err := omnichannel.StreamUser(s.hookApp(), user)
 	s.Require().NoError(err)
-	contact, err := s.store.Contact(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
+	contact, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
 	s.Require().NoError(err)
-	cards, err := s.store.EpisodeCards(context.Background(), store.CardsQuery{
+	cards, err := s.store.Episodes.Cards(context.Background(), store.CardsQuery{
 		CustomerID: s.customerID(), AgentConfigID: s.config.ID, ConversationID: contact.ConversationID, Limit: 100,
 	})
 	s.Require().NoError(err)
@@ -655,7 +655,7 @@ func (s *UserPhonesSuite) chatOmniChannel() string {
 func (s *UserPhonesSuite) chatOmniChannelOf(user string) string {
 	person, err := omnichannel.StreamUser(s.hookApp(), user)
 	s.Require().NoError(err)
-	contact, err := s.store.Contact(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
+	contact, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
 	s.Require().NoError(err)
 	return strings.TrimPrefix(contact.ConversationID, "agent:")
 }

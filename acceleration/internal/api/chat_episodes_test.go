@@ -257,7 +257,7 @@ func (s *ChatEpisodesSuite) TestAQueuedMessageTriedAgainOpensNoSecondEpisode() {
 	var seq int64
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT seq FROM chat_inbound WHERE position(? in body) > 0", []byte(s.channelID)).Scan(&seq))
-	row, err := s.store.ChatInboundBySeq(context.Background(), seq)
+	row, err := s.store.ChatInbounds.Get(context.Background(), seq)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.router.AnswerChatInbound(context.Background(), row))
@@ -668,9 +668,7 @@ func (s *ChatEpisodesSuite) TestAnIdleChatEpisodeIsSummarizedFromTheMessageThatO
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx, "SELECT started_at FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&started))
 	s.True(started.Equal(created.Truncate(time.Microsecond)), "the episode starts at %s, not when its message was made (%s)", started, created)
 	// Idle for two hours by its last message, past the closer's hour.
-	_, err = s.store.GlobalDB().ExecContext(ctx, `INSERT INTO episode_activity (episode_id, last_message_at)
-SELECT id, now() - interval '2 hours' FROM episodes WHERE customer_id = ?
-ON CONFLICT (episode_id) DO UPDATE SET last_message_at = excluded.last_message_at`, s.customerID())
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET last_message_at = now() - interval '2 hours' WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.episodes.Sweep(ctx))
@@ -1061,8 +1059,7 @@ func (s *ChatEpisodesSuite) cardWrites(omni string) int {
 // it has had none since.
 func (s *ChatEpisodesSuite) lastMessage() time.Time {
 	var at time.Time
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), `SELECT COALESCE(act.last_message_at, ep.started_at)
-FROM episodes AS ep LEFT JOIN episode_activity AS act ON act.episode_id = ep.id WHERE ep.customer_id = ?`, s.customerID()).Scan(&at))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), "SELECT COALESCE(last_message_at, started_at) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&at))
 	return at
 }
 

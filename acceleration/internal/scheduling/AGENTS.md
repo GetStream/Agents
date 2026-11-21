@@ -41,7 +41,7 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
         deliverOnThread (a task made in an SMS, WhatsApp or 1:1 iMessage thread; deliver_to is not read):
           channel_threads row, the task's customer's and user's   else thread_gone
           channelbridge.Bridge.Reachable: connection, opt-out, sandbox gate, WhatsApp 24 h
-          lease the thread's turn (store.TakeChannelThreadTurn)
+          lease the thread's turn (store.ChannelTurns.Take)
           the session on the thread channel, else one opened as answerThread opens it
           Session.FollowUp("st_<run id>" or "_r1"), wait for the reply   -> Bridge.Reply texts it
           delivered_to sms (telnyx) | whatsapp
@@ -206,8 +206,8 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   (`channelbridge.authorUserID`: per customer, line and person), `caller_kind` `server`, and
   `channel_thread` its thread channel. A Linq (iMessage) chat is offered them while its
   latest message says `data.chat.is_group` `false`; its person is that message's sender
-  (`channel_thread_people`), and a group chat, a chat whose message does not say and a
-  thread linked before the table are offered none. A Slack thread is shared and is offered none.
+  (`channel_threads.chat_person`), and a group chat, a chat whose message does not say and a
+  thread linked before the column are offered none. A Slack thread is shared and is offered none.
   `TestTelnyxChannelSuite/TestAPersonTextingTheLineSchedulesATaskThatKeepsTheirThread`,
   `TestTelnyxChannelSuite/TestTwoPeopleOnOneLineNeverReachEachOthersTasks`,
   `TestTelnyxChannelSuite/TestTheSamePersonOnAnotherCustomersLineReachesNoneOfTheTasks`,

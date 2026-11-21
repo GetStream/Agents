@@ -546,7 +546,7 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 		return withPhotoNote(event.Message.Text, event.photos(), unheardRecording, unheardRecordingWithMore)
 	}
 	if origin.queuedMessage != "" {
-		if err := s.store.KeepChatInboundHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
+		if err := s.store.ChatInbounds.KeepHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
 			s.logger.Warn("could not keep what the voice recording of a queued chat inbound message said",
 				"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
 		}

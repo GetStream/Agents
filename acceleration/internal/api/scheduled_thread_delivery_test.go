@@ -290,8 +290,7 @@ func (s *TelnyxChannelSuite) TestATaskWhoseReplyIsOnlyAFileTextsTheFile() {
 func (s *TelnyxChannelSuite) TestATaskWaitsForTheThreadsTurnAndLetsGoOfIt() {
 	task, channel := s.scheduledInThread("+13125550001")
 	sent := len(s.telnyx().sent())
-	ctx := context.Background()
-	taken, err := s.store.TakeChannelThreadTurn(ctx, channel, "another-router", time.Now().Add(time.Minute))
+	taken, err := s.takeThreadTurn(channel, "another-router")
 	s.Require().NoError(err)
 	s.Require().True(taken)
 	run := s.manualRun(task)
@@ -302,7 +301,7 @@ func (s *TelnyxChannelSuite) TestATaskWaitsForTheThreadsTurnAndLetsGoOfIt() {
 	}()
 
 	s.Never(func() bool { return s.scheduledTurns() > 0 }, dropped, 20*time.Millisecond, "the task ran in another router's turn")
-	s.Require().NoError(s.store.ReleaseChannelThreadTurn(ctx, channel, "another-router"))
+	s.releaseThreadTurn(channel, "another-router")
 
 	select {
 	case err := <-done:
@@ -311,7 +310,7 @@ func (s *TelnyxChannelSuite) TestATaskWaitsForTheThreadsTurnAndLetsGoOfIt() {
 		s.FailNow("the task was not delivered once the turn was free")
 	}
 	s.took(sent + 1)
-	taken, err = s.store.TakeChannelThreadTurn(ctx, channel, "the-next-router", time.Now().Add(time.Minute))
+	taken, err = s.takeThreadTurn(channel, "the-next-router")
 	s.Require().NoError(err)
 	s.True(taken, "the delivery let go of the thread's turn")
 }

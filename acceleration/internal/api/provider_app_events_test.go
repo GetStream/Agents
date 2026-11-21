@@ -254,7 +254,7 @@ func (s *SlackChannelSuite) omniChannel(user string) string {
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
 		return s.store.GlobalDB().QueryRowContext(context.Background(),
-			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'slack' AND address = ?",
+			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = 'slack' AND address = ?",
 			s.customerID(), s.config.ID, s.workspace+":"+user).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", user)
 	return strings.TrimPrefix(cid, "agent:")
@@ -644,7 +644,7 @@ func (s *SlackChannelSuite) TestAMentionDeliveredTwiceWritesEachReplyThatWaitedO
 	s.Require().Equal(1, s.waiting())
 	mention := s.message("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	channel := s.linkedAsAFailedDeliveryLeftIt("C0000CHAN:1759740000.000100")
-	fresh, err := s.store.ClaimChannelThreadMessage(context.Background(), channel, store.ClaimInbound, "1759740000.000100")
+	fresh, err := s.store.ChannelThreadMessages.Claim(context.Background(), channel, store.ClaimInbound, "1759740000.000100")
 	s.Require().NoError(err)
 	s.Require().True(fresh, "the failed delivery had claimed the mention too")
 
@@ -894,7 +894,7 @@ func (s *SlackChannelSuite) TestAReplyThatWaitedAndIsDeliveredAgainIsWrittenOnce
 func (s *SlackChannelSuite) TestAThreadAnotherRouterIsAnsweringWaitsForItsTurn() {
 	handOver := s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
-	taken, err := s.store.TakeChannelThreadTurn(context.Background(), channel, "another-router", time.Now().Add(time.Minute))
+	taken, err := s.takeThreadTurn(channel, "another-router")
 	s.Require().NoError(err)
 	s.Require().True(taken)
 
@@ -902,7 +902,7 @@ func (s *SlackChannelSuite) TestAThreadAnotherRouterIsAnsweringWaitsForItsTurn()
 
 	s.Never(func() bool { return len(s.slack.Posts()) > 0 }, 500*time.Millisecond, 20*time.Millisecond,
 		"two routers never answer one thread at once")
-	s.Require().NoError(s.store.ReleaseChannelThreadTurn(context.Background(), channel, "another-router"))
+	s.releaseThreadTurn(channel, "another-router")
 	s.posted(1)
 }
 
@@ -970,7 +970,7 @@ func (s *SlackChannelSuite) linkedAsAFailedDeliveryLeftIt(key string) string {
 		ConnectionID: s.bot.ConnectionID, ThreadParts: map[string]string{"channel": channel, "thread_ts": ts},
 		StreamAppPK: s.app.StreamAppPK,
 	}
-	created, err := s.store.LinkChannelThread(context.Background(), &thread)
+	created, err := s.store.ChannelThreads.Link(context.Background(), &thread)
 	s.Require().NoError(err)
 	s.Require().True(created)
 	return thread.ChannelID

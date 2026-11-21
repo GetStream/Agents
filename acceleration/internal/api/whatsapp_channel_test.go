@@ -995,7 +995,7 @@ func (s *WhatsAppChannelSuite) omniChannel(number string) string {
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
 		return s.store.GlobalDB().QueryRowContext(context.Background(),
-			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'phone' AND address = ?",
+			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = 'phone' AND address = ?",
 			s.customerID(), s.config.ID, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
 	return strings.TrimPrefix(cid, "agent:")

@@ -237,19 +237,18 @@ func (s *RouterStartSuite) TestAStartingRouterClosesAnIdleEpisode() {
 	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, carded))
 	s.T().Cleanup(func() { s.NoError(s.db.DeleteAgentConfig(context.Background(), customer, carded.ID)) })
 	contact := store.ContactMapEntry{
-		CustomerID: customer, AgentConfigID: carded.ID, Kind: store.ContactSlack,
+		CustomerID: customer, ConfigID: carded.ID, Kind: store.ContactSlack,
 		Address: "T1:U1", ConversationID: "agent:omni-" + uuid.NewString(),
 	}
-	_, err := s.db.MapContact(s.ctx, &contact)
+	_, err := s.db.ContactMapEntries.Map(s.ctx, &contact)
 	s.Require().NoError(err)
 	episode := store.Episode{
 		CustomerID: customer, ContactID: contact.ID, Source: store.EpisodeSlack, ThreadChannel: "agent:thread-" + uuid.NewString(),
 		// Past episodes.idle_after, an hour by default (config.Defaults).
 		StartedAt: time.Now().Add(-2 * time.Hour),
 	}
-	_, err = s.db.OpenEpisode(s.ctx, &episode)
+	_, err = s.db.Episodes.Open(s.ctx, &episode)
 	s.Require().NoError(err)
-	// The episode's episode_activity row goes with it (ON DELETE CASCADE).
 	s.T().Cleanup(func() {
 		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM episodes WHERE id = ?", episode.ID)
 		s.NoError(err)

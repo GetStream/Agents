@@ -401,7 +401,7 @@ func (s *EpisodeCardsSuite) omniChannel(number string) string {
 	var cid string
 	s.Require().Eventually(func() bool {
 		return s.store.GlobalDB().QueryRowContext(context.Background(),
-			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = ? AND address = ?",
+			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = ? AND address = ?",
 			s.customerID(), s.config.Id, store.ContactPhone, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
 	return strings.TrimPrefix(cid, "agent:")
@@ -418,6 +418,6 @@ func (s *EpisodeCardsSuite) cards(omni string, count int) []map[string]any {
 func (s *EpisodeCardsSuite) contacts() int {
 	var count int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
-		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND agent_config_id = ?", s.customerID(), s.config.Id).Scan(&count))
+		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND config_id = ?", s.customerID(), s.config.Id).Scan(&count))
 	return count
 }

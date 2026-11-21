@@ -164,14 +164,14 @@ func (s *Server) answerChatChannel(ctx context.Context, origin hookOrigin, event
 
 // answerChatChannelTurn is answerChatChannel off the request. One turn of a channel at a time
 // across every router, as a thread channel's: the turn's lease is a row in Postgres
-// (store.TakeChatChannelTurn), and a message that arrives while another router answers waits
+// (store.ChannelTurns.Take), and a message that arrives while another router answers waits
 // for it, so the session opened for it reads that router's reply from the channel.
 func (s *Server) answerChatChannelTurn(origin hookOrigin, config store.AgentConfig, cid string, event messageEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
 	defer cancel()
 	holder := uuid.NewString()
 	if err := takeTurn(ctx, func(ctx context.Context, until time.Time) (bool, error) {
-		return s.store.TakeChatChannelTurn(ctx, origin.app, cid, holder, until)
+		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, LeaseUntil: until})
 	}); err != nil {
 		s.logger.Error("a message in a channel the Router answers in waited too long for the channel's turn", "channel", cid, "error", err)
 		return
@@ -180,7 +180,7 @@ func (s *Server) answerChatChannelTurn(origin hookOrigin, config store.AgentConf
 	defer func() {
 		releasing, done := context.WithTimeout(context.WithoutCancel(ctx), threadTurnPoll*20)
 		defer done()
-		if err := s.store.ReleaseChatChannelTurn(releasing, origin.app, cid, holder); err != nil {
+		if err := s.store.ChannelTurns.Release(releasing, origin.app, cid, holder); err != nil {
 			s.logger.Error("could not let go of a channel's turn; it runs out instead", "channel", cid, "error", err)
 		}
 	}()

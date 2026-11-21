@@ -59,13 +59,13 @@ func (s *EpisodeReadingSuite) TestACallThatBeganBeforeItsNumbersLinkIsLeftOutWit
 	number, user := "+15550100191", "anya-"+uuid.NewString()
 	ahead := time.Now().Add(time.Hour)
 	began := time.Now().Add(-time.Minute)
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID,
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: s.customerID,
 		StreamAppPK: suiteDeploymentApp, UserID: user, Phone: number}))
 	before := s.cardOfCall(number, ahead, began)
 	after := s.cardOfCall(number, ahead, time.Now())
 
 	_, omni := s.callEpisode(before)
-	cards, err := s.store.EpisodeCards(s.ctx, store.CardsQuery{CustomerID: s.customerID, AgentConfigID: s.configID,
+	cards, err := s.store.Episodes.Cards(s.ctx, store.CardsQuery{CustomerID: s.customerID, AgentConfigID: s.configID,
 		ConversationID: omni, Limit: 10})
 	s.Require().NoError(err)
 	var read []string

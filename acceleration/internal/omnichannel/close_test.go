@@ -76,7 +76,7 @@ func (s *CloserSuite) SetupTest() {
 	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
 	s.Require().NoError(err)
-	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET lease_until = NULL")
 	s.Require().NoError(err)
 	s.chat = chattest.NewServer(s.T())
 	s.apps = streamapp.NewClients(streamapp.NewDeployment(streamapp.DeploymentOptions{
@@ -320,7 +320,7 @@ func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked(
 	s.Require().NoError(err)
 	s.Require().NoError(s.cards.Write(s.ctx, chatting))
 	number := "+15550100"
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID, UserID: user, Phone: number}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: s.customerID, UserID: user, Phone: number}))
 	person, err := Phone(number)
 	s.Require().NoError(err)
 	started := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
@@ -345,7 +345,7 @@ func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked(
 		Message: getstream.MessageRequest{Text: &text, UserID: &author},
 	})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.UnlinkUserPhone(s.ctx, s.customerID, 0, user))
+	s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, s.customerID, 0, user))
 
 	s.Require().NoError(s.closer.Sweep(s.ctx))
 
@@ -474,7 +474,7 @@ func (s *CloserSuite) TestTwoRoutersSweepingAtOnceSummarizeEachEpisodeOnce() {
 func (s *CloserSuite) TestAnEpisodeAStoppedRouterLeftEndedIsSummarizedByTheNextSweep() {
 	opened, _ := s.idleThread("where is my order 12?")
 	now := time.Now()
-	_, err := s.store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 50, now.Add(-time.Second))
+	_, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(-time.Second), "closer")
 	s.Require().NoError(err)
 	s.Equal(store.EpisodeEnded, s.status(opened))
 

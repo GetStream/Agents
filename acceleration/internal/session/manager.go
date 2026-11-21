@@ -466,7 +466,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// A session's channel is named after it, and a thread channel's id is taken by the
 		// external thread it holds. Compared case-folded, as threadConversation does.
 		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			_, err := m.options.Store.ChannelThread(ctx, folded)
+			_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
 			if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
 				return nil, stack.Wrap(err)
 			}
