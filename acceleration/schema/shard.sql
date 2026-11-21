@@ -221,6 +221,7 @@ TABLE call_resources
     trunk_id text NOT NULL
     CONSTRAINT call_resources_pkey PRIMARY KEY (id)
     CREATE INDEX call_resources_call_idx ON public.call_resources USING btree (call_type, call_id)
+    CREATE INDEX call_resources_created_idx ON public.call_resources USING btree (created_at)
 
 TABLE calls
     agent_id text NOT NULL

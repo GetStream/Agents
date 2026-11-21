@@ -886,6 +886,7 @@ TABLE dlc_use_cases
     CREATE INDEX dlc_use_cases_customer_idx ON public.dlc_use_cases USING btree (customer_id, created_at DESC, id DESC)
     CREATE UNIQUE INDEX dlc_use_cases_default_idx ON public.dlc_use_cases USING btree (customer_id) WHERE is_default
     CREATE INDEX dlc_use_cases_status_idx ON public.dlc_use_cases USING btree (status, updated_at, id)
+    CREATE INDEX dlc_use_cases_vendor_campaign_idx ON public.dlc_use_cases USING btree (vendor, vendor_campaign_id) WHERE (vendor_campaign_id <> ''::text)
 
 TABLE episode_activity
     episode_id text NOT NULL
