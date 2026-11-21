@@ -75,7 +75,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 )
 
 // tracer records the spans this package opens around work a route pattern does not say.
@@ -138,9 +137,6 @@ type Options struct {
 	// router configs, voices -- through whatever cache is in front of Postgres. Built
 	// over Store when it is not given, in which case every read is a query.
 	Configs *appconfig.Store
-	// Users writes down the end users each app is seen acting for. Built over Store when
-	// it is not given, in which case it caches in this process alone.
-	Users *users.Recorder
 	// Activity counts every request an app makes, by area and client. A deployment without
 	// one keeps no activity record.
 	Activity *activity.Recorder
@@ -357,7 +353,6 @@ type Server struct {
 	billable           []pricing.Item
 	store              *store.Store
 	configs            *appconfig.Store
-	users              *users.Recorder
 	activity           *activity.Recorder
 	live               *live.Client
 	phone              *phone.Service
@@ -545,13 +540,6 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 			return nil, err
 		}
 	}
-	recorder := options.Users
-	if recorder == nil && options.Store != nil {
-		var err error
-		if recorder, err = users.New(users.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
 	pricer := options.Pricer
 	if pricer == nil && options.Prices != nil {
 		pricer = options.Prices
@@ -574,7 +562,6 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		billable:           options.Billable,
 		store:              options.Store,
 		configs:            configs,
-		users:              recorder,
 		activity:           options.Activity,
 		live:               options.Live,
 		phone:              options.Phone,
@@ -1414,7 +1401,7 @@ func (s *Server) vouchedKey(r *http.Request, principal auth.Principal) string {
 // caller asked for, and refusing the request they did ask for because of it would be the
 // wrong trade.
 func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
-	if s.users == nil || principal.UserID == "" {
+	if s.store == nil || principal.UserID == "" {
 		return
 	}
 	var err error
@@ -1422,11 +1409,11 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	case auth.KindAnonymous:
 		return
 	case auth.KindAuthenticated:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
 	case auth.KindGuest:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
 	default:
-		err = s.users.Named(ctx, principal.AppID, principal.UserID)
+		err = s.store.Users.Named(ctx, principal.AppID, principal.UserID)
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
@@ -1436,14 +1423,14 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 
 // recordEmail keeps the address a backend said its user signs in with (auth.EmailHeader),
 // which a consent for a connector whose manifest sets owner_email is checked against. Only a
-// server-side caller has one (auth.Principal.Email), and users.Recorder.Email does nothing
+// server-side caller has one (auth.Principal.Email), and store.Users.Email does nothing
 // without one or without a user, nor for the address it last wrote. A failure is logged, as
 // recordUser's is: the consent it would have served then finds no address and is refused.
 func (s *Server) recordEmail(ctx context.Context, principal auth.Principal) {
-	if s.users == nil {
+	if s.store == nil {
 		return
 	}
-	if err := s.users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
+	if err := s.store.Users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
 		s.logger.Error("could not record an end user's email", "customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }

@@ -1,4 +1,4 @@
-package users
+package store
 
 import (
 	"strconv"
@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// SeenSuite covers the in-memory tier on its own, where what it holds and what it drops
-// can be counted.
+// SeenSuite covers the in-memory tier of Users on its own, where what it holds and what it
+// drops can be counted.
 type SeenSuite struct {
 	suite.Suite
 }
@@ -163,7 +163,7 @@ func (s *SeenSuite) TestClearingDropsEveryApp() {
 
 func (s *SeenSuite) TestACacheGivenNoCapacityHoldsTenThousand() {
 	cache := newSeen(0)
-	s.fill(cache, "app", DefaultCapacity+100)
+	s.fill(cache, "app", seenCapacity+100)
 
-	s.Equal(DefaultCapacity, cache.Len())
+	s.Equal(seenCapacity, cache.Len())
 }

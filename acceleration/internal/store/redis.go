@@ -49,7 +49,17 @@ func (s *Store) openRedis(options Options) error {
 		}
 		return rueidishook.WithHook(client, options.redisHook), nil
 	}
-	cache, err := rueidisaside.NewClient(rueidisaside.ClientOption{ClientOption: options.Redis.option(), ClientBuilder: build})
+	// The shared client tracks the keys it reads for rueidisaside and for Users, whose LRU
+	// hears from Redis which users went stale.
+	shared := func(option rueidis.ClientOption) (rueidis.Client, error) {
+		aside := option.OnInvalidations
+		option.OnInvalidations = func(messages []rueidis.RedisMessage) {
+			aside(messages)
+			s.Users.invalidate(messages)
+		}
+		return build(option)
+	}
+	cache, err := rueidisaside.NewClient(rueidisaside.ClientOption{ClientOption: options.Redis.option(), ClientBuilder: shared})
 	if err != nil {
 		return fmt.Errorf("store: connect to redis: %w", err)
 	}
@@ -84,7 +94,7 @@ func (s *Store) sharedRedis() rueidis.Client {
 }
 
 // redisFamilies are the prefixes of every key the store keeps in Redis.
-var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix}
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
 
 // cacheKey names one cached row. Every key is prefixed, so what the store cached can be told
 // from what the rest of the router keeps.

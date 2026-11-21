@@ -68,10 +68,11 @@ func OpenShards(options Options) (*Store, error) {
 			s.shardNames = append(s.shardNames, name)
 		}
 	}
+	// Wired first: the shared Redis client tells Users of stale keys as soon as it connects.
+	s.wire()
 	if err := s.openRedis(options); err != nil {
 		return nil, errors.Join(err, s.Close())
 	}
-	s.wire()
 	return s, nil
 }
 

@@ -103,7 +103,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
 )
 
@@ -782,24 +781,6 @@ func run(settings config.Config, logger *slog.Logger) error {
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
 		customerKeys = providerkeys.NewKeyring(configs.DB().ProviderKeys, secrets)
-	}
-
-	// Who each app is acting for, written down once per user rather than once per
-	// request: an LRU of the last few thousand this process saw, a key the replicas share
-	// in Redis, and the row underneath.
-	var endUsers *users.Recorder
-	if pgStore != nil {
-		endUsers, err = users.New(users.Options{
-			Store:    pgStore,
-			Address:  settings.Redis.Addr,
-			Username: settings.Redis.Username,
-			Password: settings.Redis.Password,
-			Logger:   logger,
-		})
-		if err != nil {
-			return err
-		}
-		defer endUsers.Close()
 	}
 
 	// The activity record counts every request an app makes, by area and client, and writes
@@ -1497,7 +1478,6 @@ func run(settings config.Config, logger *slog.Logger) error {
 		KnowledgeFiles:        uploads,
 		Store:                 pgStore,
 		Configs:               configs,
-		Users:                 endUsers,
 		Activity:              activityRecord,
 		Live:                  liveClient,
 		Phone:                 telephony,

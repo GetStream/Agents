@@ -318,9 +318,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	// The guest's row has changed under every replica holding it, so the caches are told.
 	// The account they turned out to be is not recorded here: the next request they make
 	// carries their own token, and that is what says which kind of user they are.
-	if s.users != nil {
-		s.users.Forget(ctx, customerID, guestID)
-	}
+	s.store.Users.Forget(ctx, customerID, guestID)
 
 	// The channels come after the rows, and a failure here is logged rather than returned.
 	// The conversations have already moved, which is the part that matters; a membership that

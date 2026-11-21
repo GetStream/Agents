@@ -75,6 +75,7 @@ type repos struct {
 	UsageResets                    *UsageResets
 	UseCases                       *UseCases
 	UserPhones                     *UserPhones
+	Users                          *Users
 	WaitingMessages                *WaitingMessages
 }
 
@@ -153,6 +154,7 @@ func (s *Store) wire() {
 		UsageResets:                    &UsageResets{store: s},
 		UseCases:                       &UseCases{store: s},
 		UserPhones:                     &UserPhones{store: s},
+		Users:                          newUsers(s),
 		WaitingMessages:                &WaitingMessages{store: s},
 	}
 }
