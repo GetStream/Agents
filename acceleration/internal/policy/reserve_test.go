@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -651,6 +652,72 @@ func (s *PolicySuite) TestAFlushOfMoreKeysThanAChunkLandsWhole() {
 		}
 	}
 	s.Equal(users, took, "and each of its users' keys took it")
+}
+
+func (s *PolicySuite) TestAFlushOfOneChunkIsOneRoundTrip() {
+	_, redis := s.redis()
+	counted := &roundTrips{}
+	s.usage().Credit(s.T(), s.org, 100_000_000)
+	enforcer := s.sharer(rueidishook.WithHook(redis, counted), func(settings *Settings) {
+		settings.FlushEvery, settings.HoldRefresh = time.Hour, time.Hour
+	})
+	reserve := func(users int) {
+		for range users {
+			owner := s.owner()
+			owner.UserID = "user-" + uuid.NewString()
+			s.Require().NoError(enforcer.Reserve(owner, newID(), 1_000, time.Minute))
+		}
+	}
+	// Loads the script, which Redis may not have yet.
+	reserve(1)
+	enforcer.money.flushPass(s.ctx)
+
+	reserve(20)
+	before := counted.sent.Load()
+	enforcer.money.flushPass(s.ctx)
+
+	s.Equal(int64(1), counted.sent.Load()-before, "a pass of fewer keys than a chunk")
+	enforcer.money.mu.Lock()
+	defer enforcer.money.mu.Unlock()
+	s.Empty(enforcer.money.dirty, "and every hold is written")
+}
+
+// roundTrips counts what a client sends Redis: a command, or a pipeline of them, is one.
+type roundTrips struct{ sent atomic.Int64 }
+
+func (r *roundTrips) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.Do(ctx, cmd)
+}
+
+func (r *roundTrips) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (r *roundTrips) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (r *roundTrips) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (r *roundTrips) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	r.sent.Add(1)
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	r.sent.Add(1)
+	return client.DoStream(ctx, cmd)
+}
+
+func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
 }
 
 func (s *PolicySuite) TestAPassOfManyChunksGivesUpByItsDeadlineWhenRedisHangs() {
