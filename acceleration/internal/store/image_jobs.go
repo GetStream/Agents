@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,28 +117,18 @@ ij.message, ij.failed, ij.outcome, ij.created_at, ij.finished_at`
 // post; otherwise the ones still to be drawn. A job whose earlier claim's lease ran out, such as
 // one a router stopped in the middle of, is due again, as claimChatInboundQuery's rows are.
 func (s *Store) ClaimImageJobs(ctx context.Context, now time.Time, limit int, leaseUntil time.Time, decided bool) ([]ImageJob, error) {
-	var claimed []ImageJob
-	if limit < 1 {
-		return claimed, nil
+	return claim[ImageJob](ctx, s.global, imageJobs, now, leaseUntil, limit, queuedImageJobs(decided), imageJobClaimed)
+}
+
+// imageJobs is the queue of pictures to draw and post.
+var imageJobs = queue{name: "image jobs", alias: "ij", key: "id"}
+
+// queuedImageJobs narrows to the queued jobs of a kind: decided, with the message that posts
+// them, or still to be drawn.
+func queuedImageJobs(decided bool) func(*bun.SelectQuery) *bun.SelectQuery {
+	return func(query *bun.SelectQuery) *bun.SelectQuery {
+		return query.Where("ij.state = ?", ImageJobQueued).Where("(ij.message <> '') = ?", decided)
 	}
-	due := s.global.NewSelect().Model((*ImageJob)(nil)).
-		Column("ij.id").
-		Where("ij.state = 'queued' AND ij.next_attempt_at <= ?", now.UTC()).
-		Where("(ij.message <> '') = ?", decided).
-		Order("ij.next_attempt_at", "ij.id").
-		Limit(limit).
-		For("UPDATE OF ij SKIP LOCKED")
-	err := s.global.NewUpdate().With("due", due).Model((*ImageJob)(nil)).
-		TableExpr("due").
-		Set("next_attempt_at = ?", leaseUntil.UTC()).
-		Set("attempts = ij.attempts + 1").
-		Where("ij.id = due.id").
-		Returning(imageJobClaimed).
-		Scan(ctx, &claimed)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: claim image jobs: %w", err))
-	}
-	return claimed, nil
 }
 
 // ImageJobDrawn is the picture the job keeps as drawn, nil when it keeps none.
@@ -155,17 +144,7 @@ func (s *Store) ImageJobDrawn(ctx context.Context, id string) ([]byte, error) {
 // NextImageJobAt is when the next queued job of a kind is due, decided or still to be drawn as
 // ClaimImageJobs takes them, and false when none is queued.
 func (s *Store) NextImageJobAt(ctx context.Context, decided bool) (time.Time, bool, error) {
-	var next time.Time
-	err := s.global.NewSelect().Model((*ImageJob)(nil)).ColumnExpr("next_attempt_at").
-		Where("state = ?", ImageJobQueued).Where("(message <> '') = ?", decided).
-		OrderExpr("next_attempt_at").Limit(1).Scan(ctx, &next)
-	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: next image job: %w", err))
-	}
-	return next, true, nil
+	return nextDue[ImageJob](ctx, s.global, imageJobs, queuedImageJobs(decided))
 }
 
 // StartImageJobDraw counts a draw the claim is about to start, before it starts: a router that
@@ -236,8 +215,8 @@ func (s *Store) FinishImageJob(ctx context.Context, job ImageJob, state, outcome
 // slow claim and the one that took the job after its lease ran out never both write it.
 func (s *Store) updateImageJob(ctx context.Context, job ImageJob, doing string,
 	set func(*bun.UpdateQuery) *bun.UpdateQuery) (bool, error) {
-	result, err := set(s.global.NewUpdate().Model((*ImageJob)(nil))).
-		Where("id = ?", job.ID).Where("state = ?", ImageJobQueued).Where("attempts = ?", job.Attempts).
+	result, err := imageJobs.heldBy(set(s.global.NewUpdate().Model((*ImageJob)(nil))), job.ID, job.Attempts).
+		Where("state = ?", ImageJobQueued).
 		Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: %s: %w", doing, err))

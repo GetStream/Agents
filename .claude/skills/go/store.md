@@ -85,6 +85,11 @@ A state change that is more than a column write gets a domain verb on the same r
 - Opening the database with `bun.WithDiscardUnknownColumns()` means a release that does not
   know a new column still reads the row. So add a column to the table that owns it, nullable
   or with a default; do not create a 1:1 side table to dodge a rollback.
+- A table of work routers claim (inbound messages, deliveries, jobs) is a `queue`
+  (`queue.go`): `claim` leases due rows with `FOR UPDATE SKIP LOCKED` in one query,
+  `nextDue` says when to look again, and every write after the claim goes through `heldBy`,
+  so a claim whose lease ran out cannot overwrite the next one. `image_jobs.go` is the
+  example. Do not write the claim by hand.
 
 ## Naming
 
