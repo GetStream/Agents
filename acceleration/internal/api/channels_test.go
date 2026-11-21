@@ -94,7 +94,7 @@ func (s *ChannelsSuite) TestTheCredentialsAreSealedInTheDatabase() {
 	number := s.number()
 	s.connect(number)
 
-	stored, err := s.store.ChannelAccount(context.Background(), s.customerID(), "whatsapp", number)
+	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
 	s.Require().NoError(err)
 	s.NotContains(string(stored.SecretsSealed), "meta-token")
 	s.Positive(stored.SecretsKEKVersion)
@@ -270,7 +270,7 @@ func (s *ChannelsSuite) TestTheConversationIsKeptForTheNumberThatWrote() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "what is open?"))
 	s.Require().NotEmpty(s.answer(writer))
 
-	held, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal("phone:+"+writer, held.UserID)
 	s.NotEmpty(held.ConversationID, "the next message carries this one on")
@@ -284,13 +284,13 @@ func (s *ChannelsSuite) TestASecondMessageCarriesOnTheSameConversation() {
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "what is open?"))
 	s.Require().NotEmpty(s.answer(writer))
-	first, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	first, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "and now?"))
 	s.Eventually(func() bool { return len(s.meta.to(writer)) == 2 }, settleFor, 50*time.Millisecond)
 
-	second, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	second, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal(first.ConversationID, second.ConversationID)
 }
@@ -403,7 +403,7 @@ func (s *ChannelsSuite) TestTheNumberThatTextsACodeBecomesThatEndUser() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), minted.Code))
 	s.Require().NotEmpty(s.answer(writer))
 
-	held, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal(owner, held.UserID)
 }
@@ -424,8 +424,8 @@ func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, other, "msg-"+s.utils.uuid(), minted.Code))
 
 	s.Contains(s.answer(other), "code")
-	_, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+other)
-	s.ErrorIs(err, store.ErrUnknownChannelIdentity)
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+other)
+	s.ErrorIs(err, store.ErrNoContact)
 }
 
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {

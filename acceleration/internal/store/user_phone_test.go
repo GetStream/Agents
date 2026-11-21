@@ -25,7 +25,7 @@ func streamUserOf(app int64, userID, conversationID string) *ContactMapEntry {
 
 // link links a user of the acme-app customer's app 4242 to a number.
 func (s *StoreSuite) link(userID, phone string) error {
-	return s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: userID, Phone: phone})
+	return s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: userID, Phone: phone})
 }
 
 // agentConfigs makes the acme-app customer's agent configs the tests' rows name: a link joins
@@ -40,7 +40,7 @@ func (s *StoreSuite) agentConfigs() {
 // chatEpisode opens a chat episode on a Stream user's row, the history its omni-channel holds.
 func (s *StoreSuite) chatEpisode(row *ContactMapEntry) string {
 	episode := &Episode{CustomerID: row.CustomerID, ContactID: row.ID, Source: EpisodeChat, ThreadChannel: "agent:chat-" + newID()}
-	_, err := s.store.OpenEpisode(s.ctx, episode)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
 	s.Require().NoError(err)
 	return episode.ID
 }
@@ -50,21 +50,21 @@ func (s *StoreSuite) chatEpisode(row *ContactMapEntry) string {
 func (s *StoreSuite) smsEpisode(row *ContactMapEntry) string {
 	episode := &Episode{CustomerID: row.CustomerID, ContactID: row.ID, Source: EpisodeSMS, ThreadChannel: "agent:sms-" + newID(),
 		StartedAt: time.Now().Add(-time.Hour)}
-	_, err := s.store.OpenEpisode(s.ctx, episode)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
 	s.Require().NoError(err)
 	return episode.ID
 }
 
 // made makes a contact row and returns it as the store holds it.
 func (s *StoreSuite) made(entry *ContactMapEntry) *ContactMapEntry {
-	_, err := s.store.MapContact(s.ctx, entry)
+	_, err := s.store.ContactMapEntries.Map(s.ctx, entry)
 	s.Require().NoError(err)
 	return entry
 }
 
 // omniOf is the omni-channel a row points at now.
 func (s *StoreSuite) omniOf(entry *ContactMapEntry) string {
-	found, err := s.store.Contact(s.ctx, entry.CustomerID, entry.AgentConfigID, entry.Kind, entry.Address)
+	found, err := s.store.ContactMapEntries.GetByAddress(s.ctx, entry.CustomerID, entry.ConfigID, entry.Kind, entry.Address)
 	s.Require().NoError(err)
 	return found.ConversationID
 }
@@ -76,10 +76,10 @@ func (s *StoreSuite) TestALinkPointsTheUsersAndTheNumbersRowsAtTheOlderOmniChann
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 	chatTwo := streamUser("anya", "agent:omni-chat-two")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.made(chatTwo)
 	smsTwo := contact("+15550100", "agent:omni-sms-two")
-	smsTwo.AgentConfigID = "agent-two"
+	smsTwo.ConfigID = "agent-two"
 	s.made(smsTwo)
 	s.Require().Equal("agent:omni-chat", s.omniOf(chat), "no link, no join")
 
@@ -112,13 +112,13 @@ func (s *StoreSuite) TestALinkSetsAsideTheNumbersRowsThatHoldEpisodes() {
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
 	carls := s.smsEpisode(sms)
 	other := contact("+15550100", "agent:omni-sms-7")
-	other.AgentConfigID, other.StreamAppPK = "agent-two", 7
+	other.ConfigID, other.StreamAppPK = "agent-two", 7
 	s.smsEpisode(s.made(other))
 	quiet := contact("+15550100", "agent:omni-quiet")
-	quiet.AgentConfigID = "agent-three"
+	quiet.ConfigID = "agent-three"
 	s.made(quiet)
 	off := contact("+15550100", "agent:omni-off")
-	off.AgentConfigID = "agent-four"
+	off.ConfigID = "agent-four"
 	s.smsEpisode(s.made(off))
 	another := s.made(contact("+15550199", "agent:omni-another"))
 	s.smsEpisode(another)
@@ -126,7 +126,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheNumbersRowsThatHoldEpisodes() {
 	s.Require().NoError(s.link("anya", "+15550100"))
 
 	s.Equal([]string{anyas}, ids(s.cardsOf(s.omniOf(chat), CardsQuery{})), "anya reads none of the number's earlier SMS")
-	_, err = s.store.Contact(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
+	_, err = s.store.ContactMapEntries.GetByAddress(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
 	s.ErrorIs(err, ErrNoContact, "the number has no row until it is seen again")
 	var aside ContactMapEntry
 	s.Require().NoError(s.store.global.NewSelect().Model(&aside).Where("id = ?", sms.ID).Scan(s.ctx))
@@ -178,32 +178,32 @@ func (s *StoreSuite) TestASetAsideRowIsStillReachedAtItsNumber() {
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
 	thread := &Episode{CustomerID: "acme-app", ContactID: sms.ID, Source: EpisodeSMS, ThreadChannel: "agent:thread-" + newID(),
 		StartedAt: time.Now().Add(-2 * time.Hour)}
-	_, err = s.store.OpenEpisode(s.ctx, thread)
+	_, err = s.store.Episodes.Open(s.ctx, thread)
 	s.Require().NoError(err)
 	callID := newID()
 	call := &Episode{CustomerID: "acme-app", ContactID: sms.ID, Source: EpisodeCall, ThreadChannel: "agent:" + callID,
 		CallID: callID, SessionID: newID(), StartedAt: time.Now().Add(-time.Hour)}
-	_, err = s.store.OpenEpisode(s.ctx, call)
+	_, err = s.store.Episodes.Open(s.ctx, call)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.link("anya", "+15550100"))
 
-	_, err = s.store.Contact(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
+	_, err = s.store.ContactMapEntries.GetByAddress(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
 	s.Require().ErrorIs(err, ErrNoContact, "the row was set aside")
-	found, err := s.store.ThreadContact(s.ctx, "acme-app", "agent-one", thread.ThreadChannel)
+	found, err := s.store.ContactMapEntries.GetByThread(s.ctx, "acme-app", "agent-one", thread.ThreadChannel)
 	s.Require().NoError(err)
 	s.Equal(sms.ID, found.ID)
 	s.Equal("+15550100", found.Address, "a reply on the thread reaches the number")
 	s.Empty(s.cardsOf("agent:omni-sms", CardsQuery{}), "both started before the link")
 	now := time.Now()
-	ended, err := s.store.EndCallEpisodes(s.ctx, AppScope{Unpinned: true}, callID, now, now.Add(-time.Minute))
+	ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{Unpinned: true}, callID, now, now.Add(-time.Minute), "router-a")
 	s.Require().NoError(err)
 	s.Require().Len(ended, 1)
 	s.Equal("+15550100", ended[0].ContactAddress, "the call's caller")
-	idle, err := s.store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 1000, now.Add(-time.Minute))
+	idle, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 1000, now.Add(-time.Minute), "router-a")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{thread.ID: "+15550100"}, s.addressesOf(idle, thread.ID))
-	claimed, err := s.store.ClaimEpisodeSummaries(s.ctx, now, 1000, now.Add(time.Hour))
+	claimed, err := s.store.Episodes.ClaimSummaries(s.ctx, now, 1000, now.Add(time.Hour), "router-a")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{thread.ID: "+15550100", call.ID: "+15550100"}, s.addressesOf(claimed, thread.ID, call.ID))
 }
@@ -227,7 +227,7 @@ func (s *StoreSuite) TestARowMadeAfterTheLinkTakesItsPartnersOmniChannel() {
 	s.made(streamUser("anya", "agent:omni-chat"))
 	sms := contact("+15550100", "agent:omni-sms")
 
-	created, err := s.store.MapContact(s.ctx, sms)
+	created, err := s.store.ContactMapEntries.Map(s.ctx, sms)
 
 	s.Require().NoError(err)
 	s.True(created, "the row is new, whatever omni-channel it was given")
@@ -235,15 +235,15 @@ func (s *StoreSuite) TestARowMadeAfterTheLinkTakesItsPartnersOmniChannel() {
 	s.Equal("agent:omni-chat", s.omniOf(sms))
 
 	smsTwo := contact("+15550100", "agent:omni-sms-two")
-	smsTwo.AgentConfigID = "agent-two"
+	smsTwo.ConfigID = "agent-two"
 	s.made(smsTwo)
 	chatTwo := streamUser("anya", "agent:omni-chat-two")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.made(chatTwo)
 	s.Equal("agent:omni-sms-two", chatTwo.ConversationID)
 
 	alone := contact("+15550100", "agent:omni-alone")
-	alone.AgentConfigID = "agent-three"
+	alone.ConfigID = "agent-three"
 	s.Equal("agent:omni-alone", s.made(alone).ConversationID)
 }
 
@@ -260,35 +260,35 @@ func (s *StoreSuite) TestTheDeploymentsOwnAppIsOneAppWhateverItsPin() {
 	sms.StreamAppPK = 0
 	s.made(sms)
 
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "anya", Phone: "+15550100"}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "anya", Phone: "+15550100"}))
 
 	s.Equal("agent:omni-chat", s.omniOf(sms))
-	found, err := s.store.Contact(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
+	found, err := s.store.ContactMapEntries.GetByAddress(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
 	s.Require().NoError(err)
 	s.Equal(int64(4242), found.StreamAppPK, "the pin of the omni-channel it points at")
 	s.Equal("agent:omni-chat", s.omniOf(chat))
 	smsTwo := contact("+15550100", "agent:omni-sms-two")
-	smsTwo.AgentConfigID, smsTwo.StreamAppPK = "agent-two", 0
+	smsTwo.ConfigID, smsTwo.StreamAppPK = "agent-two", 0
 	s.made(smsTwo)
 	chatTwo := streamUser("anya", "agent:omni-chat-two")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.Equal("agent:omni-sms-two", s.made(chatTwo).ConversationID, "a row made later, pinned to the app's id")
 	chatThree := streamUser("anya", "agent:omni-chat-three")
-	chatThree.AgentConfigID = "agent-three"
+	chatThree.ConfigID = "agent-three"
 	s.made(chatThree)
 	pinned := contact("+15550100", "agent:omni-sms-three")
-	pinned.AgentConfigID = "agent-three"
+	pinned.ConfigID = "agent-three"
 	s.Equal("agent:omni-chat-three", s.made(pinned).ConversationID,
 		"a number's row made later, pinned to the app's id as a join leaves it")
 
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: "bob", Phone: "+15550199"}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: "bob", Phone: "+15550199"}))
 
-	s.ErrorIs(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "carol", Phone: "+15550199"}), ErrPhoneTaken,
+	s.ErrorIs(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "carol", Phone: "+15550199"}), ErrPhoneTaken,
 		"a link made with the app's id is the link of 0")
-	s.Require().NoError(s.store.UnlinkUserPhone(s.ctx, "acme-app", 0, "bob"))
+	s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, "acme-app", 0, "bob"))
 	s.Equal(1, s.rows("SELECT count(*) FROM user_phones"), "anya's link alone")
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "bob", Phone: "+15550199"}))
-	s.Require().NoError(s.store.UnlinkUserPhone(s.ctx, "acme-app", 4242, "bob"))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "bob", Phone: "+15550199"}))
+	s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, "acme-app", 4242, "bob"))
 	s.Equal(1, s.rows("SELECT count(*) FROM user_phones"), "a link made with 0 is unlinked with the app's id")
 }
 
@@ -303,18 +303,18 @@ func (s *StoreSuite) TestTheSameUserIdInAnotherAppIsAnotherPerson() {
 
 	s.Equal("agent:omni-chat", s.omniOf(other))
 	smsTwo := contact("+15550100", "agent:omni-sms-two")
-	smsTwo.AgentConfigID = "agent-two"
+	smsTwo.ConfigID = "agent-two"
 	s.made(smsTwo)
 	later := streamUserOf(7, "anya", "agent:omni-chat-two")
-	later.AgentConfigID = "agent-two"
+	later.ConfigID = "agent-two"
 	s.Equal("agent:omni-chat-two", s.made(later).ConversationID, "a row made later in app 7")
 	// App 7 sorts before 4242, as the links' primary key does.
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "anya", Phone: "+15550177"}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "anya", Phone: "+15550177"}))
 	smsThree := contact("+15550100", "agent:omni-sms-three")
-	smsThree.AgentConfigID = "agent-three"
+	smsThree.ConfigID = "agent-three"
 	s.made(smsThree)
 	chatThree := streamUser("anya", "agent:omni-chat-three")
-	chatThree.AgentConfigID = "agent-three"
+	chatThree.ConfigID = "agent-three"
 	s.Equal("agent:omni-sms-three", s.made(chatThree).ConversationID, "anya of app 4242 is found by app 4242's link")
 }
 
@@ -332,18 +332,18 @@ func (s *StoreSuite) TestANumbersRowInAnotherAppIsNotJoined() {
 	s.Equal("agent:omni-sms", s.omniOf(sms))
 	s.Equal("agent:omni-chat", s.omniOf(chat))
 	later := contact("+15550100", "agent:omni-later")
-	later.AgentConfigID, later.StreamAppPK = "agent-two", 7
+	later.ConfigID, later.StreamAppPK = "agent-two", 7
 	chatTwo := streamUser("anya", "agent:omni-chat-two-4242")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.made(chatTwo)
 	s.Equal("agent:omni-later", s.made(later).ConversationID, "a number's row made later in app 7")
 	// App 7 sorts before 4242, as the links' index does.
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "bob", Phone: "+15550100"}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "bob", Phone: "+15550100"}))
 	chatThree := streamUser("anya", "agent:omni-chat-three")
-	chatThree.AgentConfigID = "agent-three"
+	chatThree.ConfigID = "agent-three"
 	s.made(chatThree)
 	smsThree := contact("+15550100", "agent:omni-sms-three")
-	smsThree.AgentConfigID = "agent-three"
+	smsThree.ConfigID = "agent-three"
 	s.Equal("agent:omni-chat-three", s.made(smsThree).ConversationID, "app 4242's link, not app 7's")
 }
 
@@ -354,7 +354,7 @@ func (s *StoreSuite) TestANumberIsOneUserOfAnApp() {
 	s.Require().NoError(s.link("anya", "+15550100"))
 
 	s.ErrorIs(s.link("bob", "+15550100"), ErrPhoneTaken)
-	s.NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "bob", Phone: "+15550100"}))
+	s.NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "bob", Phone: "+15550100"}))
 	s.NoError(s.link("anya", "+15550100"), "the same link again")
 	s.Equal(2, s.rows("SELECT count(*) FROM user_phones"))
 }
@@ -367,16 +367,16 @@ func (s *StoreSuite) TestAnotherCustomersLinkJoinsNothingOfThisCustomer() {
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 
 	// able-app sorts before acme-app, as the links' primary key does.
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "able-app", StreamAppPK: 4242, UserID: "anya", Phone: "+15550100"}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "able-app", StreamAppPK: 4242, UserID: "anya", Phone: "+15550100"}))
 
 	s.Equal("agent:omni-sms", s.omniOf(sms))
 	s.Equal("agent:omni-chat", s.omniOf(chat))
 	s.Require().NoError(s.link("anya", "+15550100"))
 	smsTwo := contact("+15550100", "agent:omni-sms-two")
-	smsTwo.AgentConfigID = "agent-two"
+	smsTwo.ConfigID = "agent-two"
 	s.made(smsTwo)
 	chatTwo := streamUser("anya", "agent:omni-chat-two")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.Equal("agent:omni-sms-two", s.made(chatTwo).ConversationID, "acme's own link, not able's")
 }
 
@@ -393,9 +393,9 @@ func (s *StoreSuite) TestAnUnlinkTakesTheNumberOffTheUsersOmniChannel() {
 	s.Require().Equal("agent:omni-sms", s.omniOf(anya))
 	s.Require().Equal([]string{anyas}, ids(s.cardsOf(s.omniOf(sms), CardsQuery{})), "joined, the number reads anya's card")
 	s.Require().NoError(s.link("carol", "+15550199"))
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "anya", Phone: "+15550100"}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "anya", Phone: "+15550100"}))
 
-	s.Require().NoError(s.store.UnlinkUserPhone(s.ctx, "acme-app", 4242, "anya"))
+	s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, "acme-app", 4242, "anya"))
 
 	s.Equal("agent:omni-sms", s.omniOf(anya), "anya keeps her omni-channel")
 	s.Equal([]string{anyas}, ids(s.cardsOf(s.omniOf(anya), CardsQuery{})))
@@ -403,10 +403,10 @@ func (s *StoreSuite) TestAnUnlinkTakesTheNumberOffTheUsersOmniChannel() {
 	s.Regexp(`^agent:omni-[0-9a-f-]{36}$`, s.omniOf(sms), "an omni-channel id, as omnichannel.Open makes one")
 	s.Empty(ids(s.cardsOf(s.omniOf(sms), CardsQuery{})), "the number reads none of anya's cards")
 	chatTwo := streamUser("anya", "agent:omni-chat-two")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.made(chatTwo)
 	later := contact("+15550100", "agent:omni-later")
-	later.AgentConfigID = "agent-two"
+	later.ConfigID = "agent-two"
 	s.Equal("agent:omni-later", s.made(later).ConversationID, "no link, no join")
 	s.Equal(1, s.rows("SELECT count(*) FROM user_phones WHERE user_id = 'carol'"), "another user's link")
 	s.Equal(1, s.rows("SELECT count(*) FROM user_phones WHERE stream_app_pk = 7"), "the user's link in another app")
@@ -426,15 +426,15 @@ func (s *StoreSuite) TestAnotherCustomersUnlinkKeepsThisCustomersLink() {
 	s.made(streamUser("anya", "agent:omni-chat"))
 	s.Require().NoError(s.link("anya", "+15550100"))
 
-	s.Require().NoError(s.store.UnlinkUserPhone(s.ctx, "able-app", 4242, "anya"))
+	s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, "able-app", 4242, "anya"))
 
 	s.Equal(1, s.rows("SELECT count(*) FROM user_phones WHERE customer_id = 'acme-app'"))
 	s.Equal("agent:omni-sms", s.omniOf(sms))
 	chatTwo := streamUser("anya", "agent:omni-chat-two")
-	chatTwo.AgentConfigID = "agent-two"
+	chatTwo.ConfigID = "agent-two"
 	s.made(chatTwo)
 	smsTwo := contact("+15550100", "agent:omni-sms-two")
-	smsTwo.AgentConfigID = "agent-two"
+	smsTwo.ConfigID = "agent-two"
 	s.Equal("agent:omni-chat-two", s.made(smsTwo).ConversationID, "the link still joins")
 }
 
@@ -481,7 +481,7 @@ func (s *StoreSuite) TestTwoLinksOfOneUserAtOnceLeaveOnlyTheStoredNumberJoined()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				s.NoError(pools[j].LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: user, Phone: phone}))
+				s.NoError(pools[j].UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: user, Phone: phone}))
 			}()
 		}
 		wg.Wait()
@@ -512,11 +512,11 @@ func (s *StoreSuite) TestALinkAndAFirstSightingAtOnceEndOnOneOmniChannel() {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			s.NoError(pools[0].LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: user, Phone: phone}))
+			s.NoError(pools[0].UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: user, Phone: phone}))
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := pools[1].MapContact(s.ctx, chat)
+			_, err := pools[1].ContactMapEntries.Map(s.ctx, chat)
 			s.NoError(err)
 		}()
 		wg.Wait()
@@ -544,11 +544,11 @@ func (s *StoreSuite) TestALinkAndTheNumbersNextSightingAtOnceJoinNoneOfItsHistor
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			s.NoError(pools[0].LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: user, Phone: phone}))
+			s.NoError(pools[0].UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: user, Phone: phone}))
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := pools[1].MapContact(s.ctx, next)
+			_, err := pools[1].ContactMapEntries.Map(s.ctx, next)
 			s.NoError(err)
 		}()
 		wg.Wait()
@@ -573,7 +573,7 @@ var linkedAt = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 // smsAt opens an SMS episode on a number's row that started at the time given.
 func (s *StoreSuite) smsAt(row *ContactMapEntry, at time.Time) string {
 	episode := &Episode{CustomerID: row.CustomerID, ContactID: row.ID, Source: EpisodeSMS, ThreadChannel: "agent:sms-" + newID(), StartedAt: at}
-	_, err := s.store.OpenEpisode(s.ctx, episode)
+	_, err := s.store.Episodes.Open(s.ctx, episode)
 	s.Require().NoError(err)
 	return episode.ID
 }
@@ -581,7 +581,7 @@ func (s *StoreSuite) smsAt(row *ContactMapEntry, at time.Time) string {
 // linkDated links a user to a number as LinkUserPhone does, dated at linkedAt: the link's time its
 // history row was written for too, and its boundary when the link is bounded at its own time.
 func (s *StoreSuite) linkDated(link *UserPhone) {
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, link))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, link))
 	_, err := s.store.global.ExecContext(s.ctx, `UPDATE user_phone_history AS h
 SET since = CASE WHEN h.since = up.updated_at THEN ?0 ELSE h.since END, linked_at = ?0 FROM user_phones AS up
 WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND up.user_id = h.user_id
@@ -595,7 +595,7 @@ WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND 
 // readFor are the episodes a session of a row's person reads: those of its omni-channel, under
 // its agent config.
 func (s *StoreSuite) readFor(row *ContactMapEntry) []string {
-	cards, err := s.store.EpisodeCards(s.ctx, CardsQuery{CustomerID: row.CustomerID, AgentConfigID: row.AgentConfigID,
+	cards, err := s.store.Episodes.Cards(s.ctx, CardsQuery{CustomerID: row.CustomerID, AgentConfigID: row.ConfigID,
 		ConversationID: s.omniOf(row), Limit: 100})
 	s.Require().NoError(err)
 	return ids(cards)
@@ -614,7 +614,7 @@ func (s *StoreSuite) TestCardsLeaveOutWhatALinkedNumberSaidBeforeTheLink() {
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
 	s.smsAt(sms, linkedAt.Add(-time.Hour))
 	unpinned := contact("+15550100", "agent:omni-unpinned")
-	unpinned.AgentConfigID, unpinned.StreamAppPK = "agent-two", 0
+	unpinned.ConfigID, unpinned.StreamAppPK = "agent-two", 0
 	s.made(unpinned)
 	s.smsAt(unpinned, linkedAt.Add(-time.Minute))
 
@@ -665,4 +665,26 @@ func (s *StoreSuite) TestTheSameNumberAgainKeepsTheTimeOfTheLink() {
 	s.Equal(linkedAt, linked(), "the same number again")
 	s.Require().NoError(s.link("anya", "+15550199"))
 	s.True(linked().After(linkedAt), "a new number")
+}
+
+func (s *StoreSuite) TestUserPhoneQueryBudgets() {
+	s.agentConfigs()
+	s.made(streamUser("anya", "agent:omni-anya"))
+	s.made(contact("+15550100", "agent:omni-number"))
+
+	s.Equal(11, s.countQueries(func() { s.Require().NoError(s.link("anya", "+15550100")) }),
+		"Link: begin, lock, read the old number, link, keep the history, set the number's past aside, commit; "+
+			"then begin, lock, join, commit")
+	s.Equal(1, s.countQueries(func() {
+		phone, _, linked, err := s.store.UserPhones.Linked(s.ctx, "acme-app", 4242, "anya")
+		s.Require().NoError(err)
+		s.True(linked)
+		s.Equal("+15550100", phone)
+	}), "Linked")
+	s.Equal(1, s.countQueries(func() {
+		_, _, err := s.store.UserPhones.ThreadHistorySince(s.ctx, "acme-app", "agent:thread-one")
+		s.Require().NoError(err)
+	}), "ThreadHistorySince")
+	s.Equal(5, s.countQueries(func() { s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, "acme-app", 4242, "anya")) }),
+		"Unlink: begin, lock, delete, detach the number, commit")
 }

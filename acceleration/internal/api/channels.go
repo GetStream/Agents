@@ -83,7 +83,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	}
 	account.SecretsSealed = sealed
 	account.SecretsKEKVersion = s.secrets.CurrentVersion()
-	if err := s.store.SaveChannelAccount(ctx, &account); err != nil {
+	if err := s.store.ChannelAccounts.Upsert(ctx, &account); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 
@@ -187,7 +187,7 @@ func (s *Server) listChannelAccounts(ctx context.Context, _ *struct{}) (*listCha
 		return nil, errNoConfigs
 	}
 
-	found, err := s.store.ChannelAccounts(ctx, customerID)
+	found, err := s.store.ChannelAccounts.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +208,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 		return nil, errNoConfigs
 	}
 
-	found, err := s.store.ChannelAccounts(ctx, customerID)
+	found, err := s.store.ChannelAccounts.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +216,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 		if account.ID != request.Id {
 			continue
 		}
-		if err := s.store.DeleteChannelAccount(ctx, customerID, account.Kind, account.E164); err != nil {
+		if err := s.store.ChannelAccounts.Delete(ctx, customerID, account.Kind, account.E164); err != nil {
 			return nil, errUnknownAccount
 		}
 		return nil, nil
@@ -335,7 +335,7 @@ func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig)
 		if !ok {
 			continue
 		}
-		if _, err := s.store.ChannelAccount(ctx, config.CustomerID, string(kind), number); errors.Is(err, store.ErrUnknownChannelAccount) {
+		if _, err := s.store.ChannelAccounts.GetByNumber(ctx, config.CustomerID, string(kind), number); errors.Is(err, store.ErrUnknownChannelAccount) {
 			unconnected = append(unconnected, "channels."+string(kind)+": this app has not connected "+number+
 				": connect it with POST /v1/agents/channels")
 		} else if err != nil {

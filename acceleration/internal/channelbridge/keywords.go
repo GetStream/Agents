@@ -145,7 +145,7 @@ func (b *Bridge) keyword(ctx context.Context, thread store.ChannelThread, queued
 	if source.answered != nil && source.answered(message.Raw) {
 		return true, nil
 	}
-	marked, err := b.store.MarkChannelInboundKeywordAnswered(ctx, queued)
+	marked, err := b.store.ChannelInbounds.MarkKeywordAnswered(ctx, queued)
 	if err != nil {
 		return false, err
 	}

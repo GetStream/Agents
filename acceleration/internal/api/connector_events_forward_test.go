@@ -182,9 +182,9 @@ func (s *EventForwardingSuite) TestAReplyThatWaitedAndIsNotWrittenDoesNotForward
 		ConnectionID: bot, ThreadParts: map[string]string{"channel": "C0000CHAN", "thread_ts": "1759740000.000100"},
 		StreamAppPK: s.app.StreamAppPK,
 	}
-	_, err := s.store.LinkChannelThread(context.Background(), &thread)
+	_, err := s.store.ChannelThreads.Link(context.Background(), &thread)
 	s.Require().NoError(err)
-	_, err = s.store.ClaimChannelThreadMessage(context.Background(), thread.ChannelID, store.ClaimInbound, "1759740000.000100")
+	_, err = s.store.ChannelThreadMessages.Claim(context.Background(), thread.ChannelID, store.ClaimInbound, "1759740000.000100")
 	s.Require().NoError(err)
 	// Stream refuses every write of the customer's, as in the test above.
 	s.setApps(s.customerID(), func(apps *suiteApps) { apps.readOnly[s.customerID()] = true })

@@ -108,7 +108,7 @@ func (s *WorkerSuite) TestADeliveryThatFailedOnceIsAnsweredOnTheNextTry() {
 	})
 
 	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(1, s.row(queued).Attempts)
+	s.Equal(2, s.row(queued).Attempts)
 	s.Equal(2, answers.of(queued))
 }
 
@@ -195,8 +195,8 @@ func (s *WorkerSuite) TestRunningCountsTheAnswersInFlight() {
 	s.Require().Eventually(func() bool { return worker.Running() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
-// An answer Close cut short is no attempt: the row waits for its lease to run out, and a
-// router answers it then.
+// An answer Close cut short is not retried early: the claim counted its attempt, the row waits
+// for its lease to run out, and a router answers it then.
 func (s *WorkerSuite) TestAnAnswerCloseCutShortIsLeftForItsLease() {
 	started := make(chan struct{}, 1)
 	queued := s.queue()
@@ -211,7 +211,7 @@ func (s *WorkerSuite) TestAnAnswerCloseCutShortIsLeftForItsLease() {
 
 	row := s.row(queued)
 	s.Equal(store.ChatInboundQueued, row.State)
-	s.Zero(row.Attempts)
+	s.Equal(1, row.Attempts)
 	s.True(row.NextAttemptAt.After(time.Now().Add(Lease-time.Minute)), "the lease was let go of: %s", row.NextAttemptAt)
 }
 
@@ -383,8 +383,8 @@ func (s *WorkerSuite) TestTheWorkerDeletesRowsPastTheirKeepOnceAnHour() {
 // queue queues a delivery due now and returns its message id.
 func (s *WorkerSuite) queue() string {
 	id := "message-" + uuid.NewString()
-	queued, err := s.store.QueueChatInbound(s.ctx, store.ChatInbound{
-		StreamApp: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
+	queued, err := s.store.ChatInbounds.Queue(s.ctx, store.ChatInbound{
+		StreamAppPK: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)

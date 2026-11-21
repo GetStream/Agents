@@ -37,6 +37,22 @@ type UserPhone struct {
 	History *PhoneHistory `bun:"-"`
 }
 
+// Validate refuses a link of no user or no number.
+func (p *UserPhone) Validate() error {
+	return validate("user phone").
+		required("customer_id", p.CustomerID).
+		required("user_id", p.UserID).
+		required("phone", p.Phone).
+		phoneNumber("phone", p.Phone).
+		done()
+}
+
+// UserPhones are the links between a customer's Stream users and phone numbers, in the shared
+// database.
+type UserPhones struct {
+	store *Store
+}
+
 // PhoneHistory is how much of a linked number's past its user reads: everything it ever said
 // (All), or what it said from Since on. Neither is from the link request on.
 type PhoneHistory struct {
@@ -65,23 +81,23 @@ const setAsideRead = `SELECT cm.* FROM (
 	SELECT up.* FROM contact_map AS me JOIN user_phones AS up ON up.customer_id = me.customer_id
 		AND up.user_id = substr(me.address, strpos(me.address, ':') + 1)
 		AND (me.address = up.stream_app_pk || ':' || up.user_id OR up.stream_app_pk = 0 AND me.address = ?3 || ':' || up.user_id)
-	WHERE me.customer_id = ?0 AND me.agent_config_id = ?1 AND me.conversation_id = ?2 AND me.kind = ?4
+	WHERE me.customer_id = ?0 AND me.config_id = ?1 AND me.conversation_id = ?2 AND me.kind = ?4
 	UNION
 	SELECT up.* FROM contact_map AS me JOIN user_phones AS up ON up.customer_id = me.customer_id
 		AND up.phone = me.address AND up.stream_app_pk = COALESCE(NULLIF(me.stream_app_pk, ?3), 0)
-	WHERE me.customer_id = ?0 AND me.agent_config_id = ?1 AND me.conversation_id = ?2 AND me.kind = ?5
+	WHERE me.customer_id = ?0 AND me.config_id = ?1 AND me.conversation_id = ?2 AND me.kind = ?5
 ) AS up ` + historyJoin + `
 JOIN contact_map AS cm ON cm.customer_id = up.customer_id AND cm.address LIKE '` + retiredPrefix + `%'
 	AND ` + reachedAt + ` = up.phone
 WHERE COALESCE(` + historyBoundary + ` < up.updated_at, true)
-	AND cm.agent_config_id = ?1 AND cm.kind = ?5 AND COALESCE(NULLIF(cm.stream_app_pk, ?3), 0) = up.stream_app_pk`
+	AND cm.config_id = ?1 AND cm.kind = ?5 AND COALESCE(NULLIF(cm.stream_app_pk, ?3), 0) = up.stream_app_pk`
 
 // userLinkLockSeed is the second argument to hashtextextended for the lock a user's link is
 // changed and joined under (lockLink), as definitionLockSeed is a revision's. 2701 is this
 // lock's issue, AI-2701; the value only has to differ from the other seeds (731, 833).
 const userLinkLockSeed = 2701
 
-// LinkUserPhone links a user to a number, in place of any number the user had, and points the
+// Link links a user to a number, in place of any number the user had, and points the
 // user's and the number's contact map rows of each agent at one omni-channel (joinLinked). The
 // number the user had before keeps none of the user's history: its rows that share the user's
 // omni-channel get one of their own (detachLinked). The new number brings none of its own: its
@@ -89,12 +105,12 @@ const userLinkLockSeed = 2701
 // after the link, unless the link's History gives the user more of it (writeHistory, EpisodeCards).
 // A number another user of the app holds is ErrPhoneTaken. Linking a pair again with no History
 // changes nothing.
-func (s *Store) LinkUserPhone(ctx context.Context, link *UserPhone) error {
-	if link.CustomerID == "" || link.UserID == "" || link.Phone == "" {
-		return stack.Wrap(errors.New("store: a customer, a user and a number are required"))
+func (r *UserPhones) Link(ctx context.Context, link *UserPhone) error {
+	if err := link.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
-	link.StreamAppPK = s.linkApp(link.StreamAppPK)
-	err := s.lockLink(ctx, *link, func(ctx context.Context, tx bun.Tx) error {
+	link.StreamAppPK = r.linkApp(link.StreamAppPK)
+	err := r.lockLink(ctx, *link, func(ctx context.Context, tx bun.Tx) error {
 		var had []string
 		if err := tx.NewSelect().Model((*UserPhone)(nil)).Column("phone").
 			Where("customer_id = ?", link.CustomerID).Where("stream_app_pk = ?", link.StreamAppPK).
@@ -125,21 +141,21 @@ func (s *Store) LinkUserPhone(ctx context.Context, link *UserPhone) error {
 		if same {
 			return nil
 		}
-		if err := s.retireHistory(ctx, tx, *link); err != nil {
+		if err := r.retireHistory(ctx, tx, *link); err != nil {
 			return err
 		}
 		if len(had) == 0 {
 			return nil
 		}
-		return s.detachLinked(ctx, tx, *link, had[0])
+		return r.detachLinked(ctx, tx, *link, had[0])
 	})
 	if err != nil {
 		return err
 	}
 	// After the link is committed, not in its transaction: a contact row MapContact makes at the
 	// same time either is committed before this reads it, or reads the link itself once it is
-	// made (MapContact), so no row is left out of the pair.
-	return s.joinLinked(ctx, *link)
+	// made (ContactMapEntries.Map), so no row is left out of the pair.
+	return r.joinLinked(ctx, *link)
 }
 
 // writeHistory stores the boundary a link request gives the number's past: none for All, Since,
@@ -171,18 +187,18 @@ ON CONFLICT (customer_id, stream_app_pk, user_id) DO UPDATE SET linked_at = EXCL
 	return nil
 }
 
-// LinkedPhone is a user's link as stored: the number, and from when on its past is the user's,
+// Linked is a user's link as stored: the number, and from when on its past is the user's,
 // nil for all of it. A user with no link has none.
-func (s *Store) LinkedPhone(ctx context.Context, customerID string, app int64, userID string) (string, *time.Time, bool, error) {
+func (r *UserPhones) Linked(ctx context.Context, customerID string, app int64, userID string) (string, *time.Time, bool, error) {
 	var rows []struct {
 		Phone string     `bun:"phone"`
 		Since *time.Time `bun:"since"`
 	}
-	err := s.global.NewSelect().Model((*UserPhone)(nil)).
+	err := r.store.global.NewSelect().Model((*UserPhone)(nil)).
 		Column("up.phone").
 		ColumnExpr(historyBoundary+" AS since").
 		Join(historyJoin).
-		Where("up.customer_id = ? AND up.stream_app_pk = ? AND up.user_id = ?", customerID, s.linkApp(app), userID).
+		Where("up.customer_id = ? AND up.stream_app_pk = ? AND up.user_id = ?", customerID, r.linkApp(app), userID).
 		Scan(ctx, &rows)
 	if err != nil {
 		return "", nil, false, stack.Wrap(fmt.Errorf("store: linked phone: %w", err))
@@ -197,17 +213,17 @@ func (s *Store) LinkedPhone(ctx context.Context, customerID string, app int64, u
 // session: the boundary of the link of a number an episode of the thread is with, the newest
 // first. ok is false when every message is: no such episode, no such link, or a link that gives
 // the user all of the number's past. A row a link set aside is read as its number (reachedAt).
-func (s *Store) ThreadHistorySince(ctx context.Context, customerID, threadChannel string) (time.Time, bool, error) {
+func (r *UserPhones) ThreadHistorySince(ctx context.Context, customerID, threadChannel string) (time.Time, bool, error) {
 	var since []struct {
 		At *time.Time `bun:"since"`
 	}
-	err := s.global.NewRaw(`SELECT `+historyBoundary+` AS since FROM episodes AS ep
+	err := r.store.global.NewRaw(`SELECT `+historyBoundary+` AS since FROM episodes AS ep
 JOIN contact_map AS cm ON cm.id = ep.contact_id
 JOIN user_phones AS up ON up.customer_id = cm.customer_id AND up.phone = `+reachedAt+`
 	AND up.stream_app_pk = COALESCE(NULLIF(cm.stream_app_pk, ?), 0)
 `+historyJoin+`
 WHERE ep.customer_id = ? AND ep.thread_channel = ? AND ep.session_id IS NULL AND cm.customer_id = ? AND cm.kind = ?
-ORDER BY ep.started_at DESC LIMIT 1`, s.streamPins().deployment(), customerID, threadChannel, customerID, ContactPhone).Scan(ctx, &since)
+ORDER BY ep.started_at DESC LIMIT 1`, r.store.streamPins().deployment(), customerID, threadChannel, customerID, ContactPhone).Scan(ctx, &since)
 	if err != nil {
 		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: thread history since: %w", err))
 	}
@@ -217,12 +233,12 @@ ORDER BY ep.started_at DESC LIMIT 1`, s.streamPins().deployment(), customerID, t
 	return *since[0].At, true, nil
 }
 
-// UnlinkUserPhone removes the user's link to a number, if any. The number keeps none of the
+// Unlink removes the user's link to a number, if any. The number keeps none of the
 // user's history: its rows that share the user's omni-channel get one of their own
 // (detachLinked), so whoever has the number next reads none of the user's cards.
-func (s *Store) UnlinkUserPhone(ctx context.Context, customerID string, app int64, userID string) error {
-	link := UserPhone{CustomerID: customerID, StreamAppPK: s.linkApp(app), UserID: userID}
-	return s.lockLink(ctx, link, func(ctx context.Context, tx bun.Tx) error {
+func (r *UserPhones) Unlink(ctx context.Context, customerID string, app int64, userID string) error {
+	link := UserPhone{CustomerID: customerID, StreamAppPK: r.linkApp(app), UserID: userID}
+	return r.lockLink(ctx, link, func(ctx context.Context, tx bun.Tx) error {
 		var had []string
 		_, err := tx.NewDelete().Model((*UserPhone)(nil)).
 			Where("customer_id = ?", link.CustomerID).Where("stream_app_pk = ?", link.StreamAppPK).Where("user_id = ?", link.UserID).
@@ -234,15 +250,15 @@ func (s *Store) UnlinkUserPhone(ctx context.Context, customerID string, app int6
 		if len(had) == 0 {
 			return nil
 		}
-		return s.detachLinked(ctx, tx, link, had[0])
+		return r.detachLinked(ctx, tx, link, had[0])
 	})
 }
 
 // lockLink runs fn in a transaction that holds the lock of one user's link, so the changes
 // and joins of one link take turns: two PUTs at once for one user, or a PUT and a first
 // sighting, each find the link the one before left (joinLinked reads it under the lock).
-func (s *Store) lockLink(ctx context.Context, link UserPhone, fn func(context.Context, bun.Tx) error) error {
-	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+func (r *UserPhones) lockLink(ctx context.Context, link UserPhone, fn func(context.Context, bun.Tx) error) error {
+	return r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		key := link.CustomerID + "/" + strconv.FormatInt(link.StreamAppPK, 10) + "/" + link.UserID
 		if err := lockUntilCommit(ctx, tx, key, userLinkLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock user phone: %w", err))
@@ -254,17 +270,17 @@ func (s *Store) lockLink(ctx context.Context, link UserPhone, fn func(context.Co
 // linkOf is the link a contact map address is one half of: a Stream user's in the app its
 // address names, a number's in the app the row is pinned to. A row of another kind, or with no
 // link, has none.
-func (s *Store) linkOf(ctx context.Context, entry *ContactMapEntry) (UserPhone, bool, error) {
-	query := s.global.NewSelect().Model((*UserPhone)(nil)).Where("customer_id = ?", entry.CustomerID)
+func (r *UserPhones) linkOf(ctx context.Context, entry *ContactMapEntry) (UserPhone, bool, error) {
+	query := r.store.global.NewSelect().Model((*UserPhone)(nil)).Where("customer_id = ?", entry.CustomerID)
 	switch entry.Kind {
 	case ContactStreamUser:
 		app, userID, ok := splitStreamUserAddress(entry.Address)
 		if !ok {
 			return UserPhone{}, false, nil
 		}
-		query = query.Where("user_id = ?", userID).Where("stream_app_pk = ?", s.linkApp(app))
+		query = query.Where("user_id = ?", userID).Where("stream_app_pk = ?", r.linkApp(app))
 	case ContactPhone:
-		query = query.Where("phone = ?", entry.Address).Where("stream_app_pk = ?", s.linkApp(entry.StreamAppPK))
+		query = query.Where("phone = ?", entry.Address).Where("stream_app_pk = ?", r.linkApp(entry.StreamAppPK))
 	default:
 		return UserPhone{}, false, nil
 	}
@@ -299,8 +315,8 @@ func splitStreamUserAddress(address string) (int64, string, bool) {
 // may hold as NULL, as 0 or as the deployment app's id. The message hook pins a chat row from
 // the deployment's own app to its id (streamapp.Verifier), while a request acting in it is
 // pinned 0 (streamapp.Identity), so both name one app here.
-func (s *Store) linkApp(pin int64) int64 {
-	if deployment := s.streamPins().deployment(); deployment != 0 && pin == deployment {
+func (r *UserPhones) linkApp(pin int64) int64 {
+	if deployment := r.store.streamPins().deployment(); deployment != 0 && pin == deployment {
 		return 0
 	}
 	return pin
@@ -309,9 +325,9 @@ func (s *Store) linkApp(pin int64) int64 {
 // streamUserAddresses are the addresses a link's Stream user has in the contact map: in the
 // deployment's own app, as 0 and as the app's id, which the message hook names it by once it is
 // known (linkApp).
-func (s *Store) streamUserAddresses(link UserPhone) []string {
+func (r *UserPhones) streamUserAddresses(link UserPhone) []string {
 	addresses := []string{StreamUserAddress(link.StreamAppPK, link.UserID)}
-	if deployment := s.streamPins().deployment(); link.StreamAppPK == 0 && deployment != 0 {
+	if deployment := r.store.streamPins().deployment(); link.StreamAppPK == 0 && deployment != 0 {
 		addresses = append(addresses, StreamUserAddress(deployment, link.UserID))
 	}
 	return addresses
@@ -329,33 +345,33 @@ func (s *Store) streamUserAddresses(link UserPhone) []string {
 // reads the pair's rows, not every row of the customer: 0.6 ms against 52 ms with one OR'd
 // pair over the customer's range, at 300k rows of one customer among 900k (EXPLAIN ANALYZE,
 // AI-2701 review).
-func (s *Store) joinLinked(ctx context.Context, link UserPhone) error {
-	deployment := s.streamPins().deployment()
-	return s.lockLink(ctx, link, func(ctx context.Context, tx bun.Tx) error {
+func (r *UserPhones) joinLinked(ctx context.Context, link UserPhone) error {
+	deployment := r.store.streamPins().deployment()
+	return r.lockLink(ctx, link, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewRaw(`WITH link AS (
 	SELECT up.phone FROM user_phones AS up WHERE up.customer_id = ?0 AND up.stream_app_pk = ?5 AND up.user_id = ?7
 ), configs AS (
-	SELECT ac.id AS agent_config_id FROM agent_configs AS ac WHERE ac.customer_id = ?0
+	SELECT ac.id AS config_id FROM agent_configs AS ac WHERE ac.customer_id = ?0
 ), pair AS (
-	SELECT cm.id, cm.agent_config_id, cm.conversation_id, cm.stream_app_pk FROM configs JOIN contact_map AS cm USING (agent_config_id)
+	SELECT cm.id, cm.config_id, cm.conversation_id, cm.stream_app_pk FROM configs JOIN contact_map AS cm USING (config_id)
 	WHERE cm.customer_id = ?0 AND cm.kind = ?1 AND cm.address IN (?2) AND COALESCE(NULLIF(cm.stream_app_pk, ?4), 0) = ?5
 	UNION ALL
-	SELECT cm.id, cm.agent_config_id, cm.conversation_id, cm.stream_app_pk FROM configs JOIN contact_map AS cm USING (agent_config_id)
+	SELECT cm.id, cm.config_id, cm.conversation_id, cm.stream_app_pk FROM configs JOIN contact_map AS cm USING (config_id)
 	WHERE cm.customer_id = ?0 AND cm.kind = ?3 AND cm.address = (SELECT phone FROM link) AND COALESCE(NULLIF(cm.stream_app_pk, ?4), 0) = ?5
 ), born AS (
-	SELECT o.agent_config_id, o.conversation_id, min(o.created_at) AS at FROM contact_map AS o
-	WHERE o.customer_id = ?0 AND (o.agent_config_id, o.conversation_id) IN (SELECT agent_config_id, conversation_id FROM pair)
-	GROUP BY o.agent_config_id, o.conversation_id
+	SELECT o.config_id, o.conversation_id, min(o.created_at) AS at FROM contact_map AS o
+	WHERE o.customer_id = ?0 AND (o.config_id, o.conversation_id) IN (SELECT config_id, conversation_id FROM pair)
+	GROUP BY o.config_id, o.conversation_id
 ), oldest AS (
-	SELECT DISTINCT ON (pair.agent_config_id) pair.agent_config_id, pair.conversation_id, pair.stream_app_pk
-	FROM pair JOIN born USING (agent_config_id, conversation_id)
-	ORDER BY pair.agent_config_id, born.at, pair.conversation_id
+	SELECT DISTINCT ON (pair.config_id) pair.config_id, pair.conversation_id, pair.stream_app_pk
+	FROM pair JOIN born USING (config_id, conversation_id)
+	ORDER BY pair.config_id, born.at, pair.conversation_id
 )
 UPDATE contact_map AS cm
 SET conversation_id = oldest.conversation_id, stream_app_pk = oldest.stream_app_pk, updated_at = ?6
-FROM pair JOIN oldest USING (agent_config_id)
+FROM pair JOIN oldest USING (config_id)
 WHERE cm.id = pair.id AND cm.conversation_id <> oldest.conversation_id`,
-			link.CustomerID, ContactStreamUser, bun.In(s.streamUserAddresses(link)), ContactPhone,
+			link.CustomerID, ContactStreamUser, bun.In(r.streamUserAddresses(link)), ContactPhone,
 			deployment, link.StreamAppPK, time.Now().UTC(), link.UserID).
 			Exec(ctx)
 		if err != nil {
@@ -371,17 +387,17 @@ WHERE cm.id = pair.id AND cm.conversation_id <> oldest.conversation_id`,
 // so the number keeps its own cards, read by their message id where they were written
 // (omnichannel.summaryOf); the user keeps theirs. The id is omnichannel.Open's form,
 // agent:omni-<uuid>. In tx, under the link's lock.
-func (s *Store) detachLinked(ctx context.Context, tx bun.Tx, link UserPhone, phone string) error {
+func (r *UserPhones) detachLinked(ctx context.Context, tx bun.Tx, link UserPhone, phone string) error {
 	_, err := tx.NewRaw(`UPDATE contact_map AS cm
 SET conversation_id = 'agent:omni-' || gen_random_uuid(), updated_at = ?6
 FROM contact_map AS su
-WHERE su.customer_id = ?0 AND su.agent_config_id IN (SELECT ac.id FROM agent_configs AS ac WHERE ac.customer_id = ?0)
+WHERE su.customer_id = ?0 AND su.config_id IN (SELECT ac.id FROM agent_configs AS ac WHERE ac.customer_id = ?0)
 	AND su.kind = ?1 AND su.address IN (?2)
-	AND cm.customer_id = ?0 AND cm.agent_config_id = su.agent_config_id AND cm.kind = ?3 AND cm.address = ?4
+	AND cm.customer_id = ?0 AND cm.config_id = su.config_id AND cm.kind = ?3 AND cm.address = ?4
 	AND COALESCE(NULLIF(cm.stream_app_pk, ?5), 0) = ?7
 	AND cm.conversation_id = su.conversation_id`,
-		link.CustomerID, ContactStreamUser, bun.In(s.streamUserAddresses(link)), ContactPhone, phone,
-		s.streamPins().deployment(), time.Now().UTC(), link.StreamAppPK).
+		link.CustomerID, ContactStreamUser, bun.In(r.streamUserAddresses(link)), ContactPhone, phone,
+		r.store.streamPins().deployment(), time.Now().UTC(), link.StreamAppPK).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: detach unlinked contacts: %w", err))
@@ -414,7 +430,7 @@ const reachedAt = `regexp_replace(cm.address, '^` + retiredPrefix + `[^:]*:', ''
 // as they were, and EpisodeCards' link filter keeps their episodes from the user. Record
 // counts as on: it writes the same episodes, which a session reads once the config turns on.
 // In tx, under the link's lock.
-func (s *Store) retireHistory(ctx context.Context, tx bun.Tx, link UserPhone) error {
+func (r *UserPhones) retireHistory(ctx context.Context, tx bun.Tx, link UserPhone) error {
 	writesCards := tx.NewSelect().Model((*AgentConfig)(nil)).
 		Column("ac.id").
 		Where("ac.customer_id = ?", link.CustomerID).
@@ -424,9 +440,9 @@ func (s *Store) retireHistory(ctx context.Context, tx bun.Tx, link UserPhone) er
 		Set("address = ? || cm.id || ':' || cm.address", retiredPrefix).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("cm.customer_id = ?", link.CustomerID).
-		Where("cm.agent_config_id IN (?)", writesCards).
+		Where("cm.config_id IN (?)", writesCards).
 		Where("cm.kind = ? AND cm.address = ?", ContactPhone, link.Phone).
-		Where("COALESCE(NULLIF(cm.stream_app_pk, ?), 0) = ?", s.streamPins().deployment(), link.StreamAppPK).
+		Where("COALESCE(NULLIF(cm.stream_app_pk, ?), 0) = ?", r.store.streamPins().deployment(), link.StreamAppPK).
 		Where("EXISTS (?)", withEpisode).
 		Exec(ctx)
 	if err != nil {

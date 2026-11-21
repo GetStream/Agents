@@ -256,7 +256,7 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	s.Equal(s.appID(), pin, "the episode is pinned to the provider app's app")
 	var cid string
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx,
-		"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'slack' AND address = ?",
+		"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = 'slack' AND address = ?",
 		s.customerID(), config.ID, workspace+":U0000ALICE").Scan(&cid))
 	omni := strings.TrimPrefix(cid, "agent:")
 	s.Require().Eventually(func() bool { return len(s.chat.Stored(omni)) == 1 }, settleFor, 10*time.Millisecond)
@@ -266,7 +266,7 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	// other suites' episodes are newer than an hour and stay.
 	_, err := s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET started_at = now() - interval '2 hours' WHERE id = ?", episode)
 	s.Require().NoError(err)
-	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episode_activity SET last_message_at = now() - interval '2 hours' WHERE episode_id = ?", episode)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET last_message_at = now() - interval '2 hours' WHERE id = ?", episode)
 	s.Require().NoError(err)
 	_, err = s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended') AND started_at < now() - interval '1 hour' AND id <> ?", episode)

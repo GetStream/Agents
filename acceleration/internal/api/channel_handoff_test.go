@@ -100,7 +100,7 @@ func (s *SlackChannelSuite) TestAMessageWrittenBeforeItsTurnWasClaimedIsAnswered
 func (s *SlackChannelSuite) TestAMessageWhoseTurnWasClaimedBeforeIsNotAnsweredAgain() {
 	handOver := s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
-	fresh, err := s.store.ClaimChannelThreadMessage(context.Background(), channel, store.ClaimTurn, s.bridged(channel)[0]["id"].(string))
+	fresh, err := s.store.ChannelThreadMessages.Claim(context.Background(), channel, store.ClaimTurn, s.bridged(channel)[0]["id"].(string))
 	s.Require().NoError(err)
 	s.Require().True(fresh)
 
@@ -152,7 +152,7 @@ func (s *SlackChannelSuite) TestATestEndsOnlyOnceTheReplyItsTurnStillWritesHasLe
 func (s *SlackChannelSuite) TestARouterWithNoSessionsHandsTheAgentNothing() {
 	s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
-	thread, err := s.store.ChannelThread(context.Background(), channel)
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().NoError(err)
 	written := channelbridge.Written{ID: s.bridged(channel)[0]["id"].(string), Text: "is the build green?", Author: "U0000ALICE"}
 

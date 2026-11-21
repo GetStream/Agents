@@ -794,7 +794,7 @@ func (s *ScheduledTasksSuite) placingCalls() {
 
 // numberRungFor is the number the task's user is rung on.
 func (s *ScheduledTasksSuite) numberRungFor(task store.ScheduledTask) string {
-	identity, err := s.store.ChannelIdentityByUser(context.Background(), task.CustomerID, task.ConfigID, "sms", task.UserID)
+	identity, err := s.store.ContactMapEntries.GetByUser(context.Background(), task.CustomerID, task.ConfigID, "sms", task.UserID)
 	s.Require().NoError(err)
 	return identity.Address
 }

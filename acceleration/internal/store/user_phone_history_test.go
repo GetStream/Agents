@@ -21,13 +21,13 @@ func (s *StoreSuite) historyStory() (chat *ContactMapEntry, own, sunday, monday 
 
 // linkWith links anya to the number as a request with history does.
 func (s *StoreSuite) linkWith(phone string, history *PhoneHistory) {
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: "anya",
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: "anya",
 		Phone: phone, History: history}))
 }
 
 // boundary is anya's link's boundary as stored, nil for all of the number's past.
 func (s *StoreSuite) boundary() *time.Time {
-	_, since, linked, err := s.store.LinkedPhone(s.ctx, "acme-app", 4242, "anya")
+	_, since, linked, err := s.store.UserPhones.Linked(s.ctx, "acme-app", 4242, "anya")
 	s.Require().NoError(err)
 	s.Require().True(linked)
 	return since
@@ -40,7 +40,7 @@ func (s *StoreSuite) TestALinkWithAllOfTheHistoryReadsWhatTheNumberSaidBeforeIt(
 
 	s.linkWith("+15550100", &PhoneHistory{All: true})
 
-	cards, err := s.store.EpisodeCards(s.ctx, CardsQuery{CustomerID: "acme-app", AgentConfigID: "agent-one",
+	cards, err := s.store.Episodes.Cards(s.ctx, CardsQuery{CustomerID: "acme-app", AgentConfigID: "agent-one",
 		ConversationID: s.omniOf(chat), Limit: 10})
 	s.Require().NoError(err)
 	s.ElementsMatch([]string{own, sunday, monday}, ids(cards))
@@ -133,7 +133,7 @@ func (s *StoreSuite) TestASetAsideRowOfAnotherAppIsNotRead() {
 	seven := contact("+15550100", "agent:omni-sms-7")
 	seven.StreamAppPK = 7
 	s.smsAt(s.made(seven), linkedAt.Add(-36*time.Hour))
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "carl", Phone: "+15550100",
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", StreamAppPK: 7, UserID: "carl", Phone: "+15550100",
 		History: &PhoneHistory{All: true}}))
 	s.Require().Equal(1, s.rows("SELECT count(*) FROM contact_map WHERE address LIKE 'retired:%' AND stream_app_pk = 7"), "app 7's row is set aside")
 	monday := s.smsAt(s.made(contact("+15550100", "agent:omni-sms")), linkedAt.Add(-12*time.Hour))
@@ -162,7 +162,7 @@ func (s *StoreSuite) TestALinkWithAllOfTheHistoryInTheDeploymentsOwnApp() {
 	s.T().Cleanup(func() { s.store.SetStreamPins(StreamPins{}) })
 	chat, own, sunday, monday := s.historyStory()
 
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "anya", Phone: "+15550100",
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &UserPhone{CustomerID: "acme-app", UserID: "anya", Phone: "+15550100",
 		History: &PhoneHistory{All: true}}))
 
 	s.ElementsMatch([]string{own, sunday, monday}, s.readFor(chat))
@@ -209,29 +209,30 @@ func (s *StoreSuite) TestAThreadOfALinkThePreviousReleaseMadeAgainIsCutAtItsTime
 	s.Require().NoError(err)
 	thread := "messaging:thread-" + newID()
 	row := s.made(contact("+15550100", "agent:omni-"+newID()))
-	_, err = s.store.OpenEpisode(s.ctx, &Episode{CustomerID: "acme-app", ContactID: row.ID, Source: EpisodeSMS,
+	_, err = s.store.Episodes.Open(s.ctx, &Episode{CustomerID: "acme-app", ContactID: row.ID, Source: EpisodeSMS,
 		ThreadChannel: thread, StartedAt: linkedAt.Add(-time.Hour)})
 	s.Require().NoError(err)
 	s.linkDated(&UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: "anya", Phone: "+15550100"})
 	s.linkWith("+15550100", &PhoneHistory{All: true})
-	_, cut, err := s.store.ThreadHistorySince(s.ctx, "acme-app", thread)
+	_, cut, err := s.store.UserPhones.ThreadHistorySince(s.ctx, "acme-app", thread)
 	s.Require().NoError(err)
 	s.Require().False(cut, "all of it")
 
 	s.previousRelink("+15550199")
 	s.previousRelink("+15550100")
 
-	_, cut, err = s.store.ThreadHistorySince(s.ctx, "acme-app", thread)
+	_, cut, err = s.store.UserPhones.ThreadHistorySince(s.ctx, "acme-app", thread)
 	s.Require().NoError(err)
 	s.True(cut, "cut at the link the previous release made again")
 }
 
 // previousCards is the previous release's EpisodeCards (ba2c5e912 episodes.go:384-412) for anya's
 // agent: the rows at the omni-channel, less what a linked number said before its link's time.
+// Its agent_config_id is config_id since 20270115000100_contact_map_channel_identities.sql.
 func (s *StoreSuite) previousCards(omni string) []string {
 	var found []string
 	s.Require().NoError(s.store.global.NewRaw(`SELECT ep.id FROM episodes AS ep JOIN contact_map AS cm ON cm.id = ep.contact_id
-WHERE ep.customer_id = 'acme-app' AND cm.customer_id = 'acme-app' AND cm.agent_config_id = 'agent-one' AND cm.conversation_id = ?
+WHERE ep.customer_id = 'acme-app' AND cm.customer_id = 'acme-app' AND cm.config_id = 'agent-one' AND cm.conversation_id = ?
 	AND NOT EXISTS (SELECT 1 FROM user_phones AS up WHERE up.customer_id = cm.customer_id
 		AND up.stream_app_pk = COALESCE(NULLIF(cm.stream_app_pk, ?), 0) AND up.phone = cm.address
 		AND ep.started_at < up.updated_at)
@@ -241,7 +242,7 @@ ORDER BY ep.started_at DESC`, omni, s.store.streamPins().deployment()).Scan(s.ct
 
 // previousUnlink is the previous release's UnlinkUserPhone of anya (ba2c5e912 user_phones.go:101
 // and its detachLinked, :252): the link deleted, and only the rows at the number detached from
-// her omni-channel.
+// her omni-channel. Its agent_config_id is config_id, as in previousCards.
 func (s *StoreSuite) previousUnlink(phone string) {
 	_, err := s.store.global.ExecContext(s.ctx, "DELETE FROM user_phones WHERE customer_id = 'acme-app' AND stream_app_pk = 4242 AND user_id = 'anya'")
 	s.Require().NoError(err)
@@ -249,7 +250,7 @@ func (s *StoreSuite) previousUnlink(phone string) {
 SET conversation_id = 'agent:omni-' || gen_random_uuid(), updated_at = now()
 FROM contact_map AS su
 WHERE su.customer_id = 'acme-app' AND su.kind = ? AND su.address IN (?)
-	AND cm.customer_id = 'acme-app' AND cm.agent_config_id = su.agent_config_id AND cm.kind = ? AND cm.address = ?
+	AND cm.customer_id = 'acme-app' AND cm.config_id = su.config_id AND cm.kind = ? AND cm.address = ?
 	AND cm.conversation_id = su.conversation_id`, ContactStreamUser, StreamUserAddress(4242, "anya"), ContactPhone, phone)
 	s.Require().NoError(err)
 }
@@ -275,11 +276,11 @@ func (s *StoreSuite) TestAThreadsHistoryIsCutAtItsNumbersLink() {
 		row := s.made(contact(number, "agent:omni-"+newID()))
 		episode := &Episode{CustomerID: "acme-app", ContactID: row.ID, Source: EpisodeSMS, ThreadChannel: thread,
 			StartedAt: linkedAt.Add(-time.Hour)}
-		_, err := s.store.OpenEpisode(s.ctx, episode)
+		_, err := s.store.Episodes.Open(s.ctx, episode)
 		s.Require().NoError(err)
 	}
 	since := func() (time.Time, bool) {
-		at, ok, err := s.store.ThreadHistorySince(s.ctx, "acme-app", thread)
+		at, ok, err := s.store.UserPhones.ThreadHistorySince(s.ctx, "acme-app", thread)
 		s.Require().NoError(err)
 		return at.UTC(), ok
 	}

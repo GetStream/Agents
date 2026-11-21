@@ -145,7 +145,7 @@ func (s *TelephonyBillingSuite) spendLimitReached() []byte {
 
 // deliveries is how many messages a line claimed.
 func (s *TelephonyBillingSuite) deliveries(line string) int {
-	account, err := s.store.ChannelAccount(context.Background(), s.customerID(), "sms", line)
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
 	var count int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
@@ -540,7 +540,7 @@ func (s *telephonyBilling) smsLine() string {
 	}))
 	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "telnyx-key", Signing: s.public})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SaveChannelAccount(ctx, &store.ChannelAccount{
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(ctx, &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "sms", E164: number, Token: "line-" + s.utils.uuid(),
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
@@ -568,7 +568,7 @@ func (s *telephonyBilling) textIn(line, from, id, text string) int {
 
 // telnyxIn delivers body to a line as Telnyx signs it at at.
 func (s *telephonyBilling) telnyxIn(line string, body []byte, at time.Time) int {
-	account, err := s.store.ChannelAccount(context.Background(), s.customerID(), "sms", line)
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
 	seconds := strconv.FormatInt(at.Unix(), 10)
 	header := http.Header{}

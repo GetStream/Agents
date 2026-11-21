@@ -105,8 +105,8 @@ func (s *DrainSuite) TestTheDrainWaitsForAScheduledDeliveryInFlight() {
 
 func (s *DrainSuite) TestTheDrainWaitsForAChatAnswerInFlight() {
 	id := "message-" + uuid.NewString()
-	queued, err := s.db.QueueChatInbound(s.ctx, store.ChatInbound{
-		StreamApp: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
+	queued, err := s.db.ChatInbounds.Queue(s.ctx, store.ChatInbound{
+		StreamAppPK: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)
@@ -166,8 +166,8 @@ func (s *DrainSuite) TestARouterDrainingAnInboundWriteTakesNoMoreMessages() {
 	s.queueInbound(writing, time.Now())
 	s.queueInbound(later, due)
 	message := "message-" + uuid.NewString()
-	queued, err := s.db.QueueChatInbound(s.ctx, store.ChatInbound{
-		StreamApp: 1, MessageID: message, Deployment: true, Body: []byte(`{}`), NextAttemptAt: due,
+	queued, err := s.db.ChatInbounds.Queue(s.ctx, store.ChatInbound{
+		StreamAppPK: 1, MessageID: message, Deployment: true, Body: []byte(`{}`), NextAttemptAt: due,
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)
@@ -493,7 +493,7 @@ func (s *DrainSuite) thread(customer string) store.ChannelThread {
 		ChannelID: conversation.ThreadChannelPrefix + uuid.NewString(), CustomerID: customer, ConnectorID: "fake_line",
 		ProviderUnitID: "T0000TEAM", ThreadKey: uuid.NewString(), ConnectionID: "connection-1",
 	}
-	_, err := s.db.LinkChannelThread(s.ctx, &thread)
+	_, err := s.db.ChannelThreads.Link(s.ctx, &thread)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
 		_, err := s.db.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Exec(context.Background())
@@ -504,7 +504,7 @@ func (s *DrainSuite) thread(customer string) store.ChannelThread {
 
 // queueInbound queues a message in thread, due at due.
 func (s *DrainSuite) queueInbound(thread store.ChannelThread, due time.Time) {
-	queued, err := s.db.AcceptChannelInbound(s.ctx, store.ChannelInbound{
+	queued, err := s.db.ChannelInbounds.Accept(s.ctx, store.ChannelInbound{
 		ChannelID: thread.ChannelID, ProviderMessageID: "m-1", CustomerID: thread.CustomerID,
 		ConnectorID: thread.ConnectorID, ProviderUnitID: thread.ProviderUnitID, ThreadKey: thread.ThreadKey,
 		ConfigID: "config-1", ConfigName: "Support", AuthorID: "U0000ALICE", Text: "hello",

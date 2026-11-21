@@ -150,7 +150,7 @@ func (s *EpisodeReadingSuite) linkAt(user, number string, seconds int) {
 // linkWith is linkAt with what the link request says of the number's past: the link's time its
 // history row was written for is dated with it, and so is a boundary at the link's own time.
 func (s *EpisodeReadingSuite) linkWith(user, number string, seconds int, history *store.PhoneHistory) {
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID,
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: s.customerID,
 		StreamAppPK: suiteDeploymentApp, UserID: user, Phone: number, History: history}))
 	at := s.now.Add(time.Duration(seconds) * time.Second)
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, `UPDATE user_phone_history AS h

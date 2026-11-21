@@ -67,7 +67,7 @@ func (s *EpisodeSweeperSuite) SetupTest() {
 	_, err = s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
 	s.Require().NoError(err)
-	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET lease_until = NULL")
 	s.Require().NoError(err)
 	s.settings.Connectors.Enabled = false
 
@@ -96,16 +96,16 @@ func (s *EpisodeSweeperSuite) SetupTest() {
 // hour, under the agent config configID of the customer customer.
 func (s *EpisodeSweeperSuite) idleEpisode(customer, configID string) {
 	contact := store.ContactMapEntry{
-		CustomerID: customer, AgentConfigID: configID, Kind: store.ContactSlack,
+		CustomerID: customer, ConfigID: configID, Kind: store.ContactSlack,
 		Address: "T1:U1", ConversationID: "agent:omni-" + uuid.NewString(),
 	}
-	_, err := s.store.MapContact(s.ctx, &contact)
+	_, err := s.store.ContactMapEntries.Map(s.ctx, &contact)
 	s.Require().NoError(err)
 	episode := store.Episode{
 		CustomerID: customer, ContactID: contact.ID, Source: store.EpisodeSlack,
 		ThreadChannel: "agent:thread-" + uuid.NewString(), StartedAt: time.Now().Add(-2 * time.Hour),
 	}
-	_, err = s.store.OpenEpisode(s.ctx, &episode)
+	_, err = s.store.Episodes.Open(s.ctx, &episode)
 	s.Require().NoError(err)
 	s.episode = episode.ID
 }
@@ -165,7 +165,7 @@ func (s *EpisodeSweeperSuite) TestAnEndedEpisodeWhoseSummaryLeaseRanOutHasItsSum
 	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, plain))
 	s.idleEpisode(customer, plain.ID)
 	closedAt := time.Now()
-	closed, err := s.store.CloseIdleEpisodes(s.ctx, closedAt.Add(-time.Hour), closedAt, 10, closedAt.Add(-time.Second))
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, closedAt.Add(-time.Hour), closedAt, 10, closedAt.Add(-time.Second), "closer")
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
 

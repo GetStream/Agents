@@ -1133,8 +1133,8 @@ func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, call
 // text this agent from. A number they only use on WhatsApp is not rung: a
 // person who chose to write there agreed to no call.
 func (s *Server) callableNumber(ctx context.Context, delivery scheduledDelivery) (string, error) {
-	identity, err := s.store.ChannelIdentityByUser(ctx, delivery.CustomerID, delivery.ConfigID, "sms", delivery.UserID)
-	if errors.Is(err, store.ErrUnknownChannelIdentity) {
+	identity, err := s.store.ContactMapEntries.GetByUser(ctx, delivery.CustomerID, delivery.ConfigID, "sms", delivery.UserID)
+	if errors.Is(err, store.ErrNoContact) {
 		return "", undelivered(scheduling.ReasonNoNumber, errors.New("the user has no number to call: they have never texted this agent"))
 	}
 	if err != nil {

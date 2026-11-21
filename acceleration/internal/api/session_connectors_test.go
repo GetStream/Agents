@@ -724,7 +724,7 @@ func (s *SessionConnectorsSuite) TestAThreadChannelsHeldCallAsksNobody() {
 // two people of the thread writing in it.
 func (s *SessionConnectorsSuite) threadChannel(channel, connector, connection, config string) {
 	ctx := context.Background()
-	_, err := s.store.LinkChannelThread(ctx, &store.ChannelThread{ChannelID: channel, CustomerID: s.customerID(),
+	_, err := s.store.ChannelThreads.Link(ctx, &store.ChannelThread{ChannelID: channel, CustomerID: s.customerID(),
 		ConnectorID: connector, ProviderUnitID: "T0000TEAM", ThreadKey: s.utils.uuid(), ConnectionID: connection})
 	s.Require().NoError(err)
 	alice, bob := "slack-U0000ALICE", "slack-U0000BOB"

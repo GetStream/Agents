@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -261,7 +262,7 @@ var usageIndexes = []struct{ set, name, create string }{
 	{"global", "agent_logs_source_idx", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS agent_logs_source_idx ON agent_logs (customer_id, source_id) " +
 		"WHERE source_id IS NOT NULL"},
 	// What a link's join finds one omni-channel's rows of an agent by.
-	{"global", "contact_map_conversation", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_conversation ON contact_map (customer_id, agent_config_id, conversation_id)"},
+	{"global", "contact_map_conversation", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_conversation ON contact_map (customer_id, config_id, conversation_id)"},
 	// The rows a link set aside, by their number.
 	{"global", "contact_map_retired", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_retired ON contact_map " +
 		"(customer_id, (regexp_replace(address, '^retired:[^:]*:', ''))) WHERE address LIKE 'retired:%'"},
@@ -320,10 +321,11 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 // written to.
 var changeLogTables = []string{"data_change_capture", "data_change_starts", "data_changes"}
 
-var createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
+// tableChange is a statement of a migration's Up that creates, drops or renames a table.
+var tableChange = regexp.MustCompile(`(?i)(CREATE TABLE (?:IF NOT EXISTS )?|DROP TABLE (?:IF EXISTS )?|ALTER TABLE (?:IF EXISTS )?)([a-z_0-9]+)(?: RENAME TO ([a-z_0-9]+))?`)
 
-// setTables are the tables the set's migrations create, read from their SQL. A table is
-// created by one set alone, except the change log both keep.
+// setTables are the tables the set's migrations leave, read from their Up SQL in order. A
+// table is created by one set alone, except the change log both keep.
 func setTables(set migrationSet) ([]string, error) {
 	files, err := fs.Glob(set.files, "*.sql")
 	if err != nil {
@@ -335,9 +337,20 @@ func setTables(set migrationSet) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, match := range createTable.FindAllStringSubmatch(string(raw), -1) {
-			if !slices.Contains(tables, match[1]) && !slices.Contains(changeLogTables, match[1]) {
-				tables = append(tables, match[1])
+		up, _, _ := strings.Cut(string(raw), "-- +goose Down")
+		for _, match := range tableChange.FindAllStringSubmatch(up, -1) {
+			verb, table, renamed := strings.ToUpper(match[1]), match[2], match[3]
+			switch {
+			case strings.HasPrefix(verb, "CREATE"):
+				if !slices.Contains(tables, table) && !slices.Contains(changeLogTables, table) {
+					tables = append(tables, table)
+				}
+			case strings.HasPrefix(verb, "DROP"):
+				tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
+			case renamed != "":
+				if i := slices.Index(tables, table); i >= 0 {
+					tables[i] = renamed
+				}
 			}
 		}
 	}

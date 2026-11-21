@@ -962,40 +962,6 @@ type Skill struct {
 	DeletedAt  *time.Time `bun:"deleted_at"`
 }
 
-// ChannelIdentity is who a number is to one agent, and where its conversation is kept.
-type ChannelIdentity struct {
-	bun.BaseModel `bun:"table:channel_identities,alias:ci"`
-
-	ID         string `bun:"id,pk"`
-	CustomerID string `bun:"customer_id,notnull"`
-	ConfigID   string `bun:"config_id,notnull"`
-	Kind       string `bun:"kind,notnull"`
-	// Address is the number that writes, in E.164, or a chat handle where there is no number.
-	Address string `bun:"address,notnull"`
-	// Thread is where a message is sent to reach this person again: the chat, for
-	// iMessage, whose replies go to a conversation rather than to a person. Empty
-	// where a reply goes to the address itself, as on WhatsApp and SMS.
-	Thread string `bun:"thread,notnull"`
-	UserID string `bun:"user_id,notnull"`
-	// ConversationID carries on what was said last time. Empty until the first turn settles.
-	ConversationID string    `bun:"conversation_id,notnull"`
-	CreatedAt      time.Time `bun:"created_at,notnull"`
-	UpdatedAt      time.Time `bun:"updated_at,notnull"`
-}
-
-// ChannelLink is a code that ties the number texting it to an end user.
-type ChannelLink struct {
-	bun.BaseModel `bun:"table:channel_links,alias:cl"`
-
-	Code       string     `bun:"code,pk"`
-	CustomerID string     `bun:"customer_id,notnull"`
-	ConfigID   string     `bun:"config_id,notnull"`
-	UserID     string     `bun:"user_id,notnull"`
-	CreatedAt  time.Time  `bun:"created_at,notnull"`
-	ExpiresAt  time.Time  `bun:"expires_at,notnull"`
-	UsedAt     *time.Time `bun:"used_at"`
-}
-
 // How a sender on a channel becomes an end user.
 const (
 	// ChannelIdentityPhone makes the sender an end user of their own, phone:+1555..., so
@@ -1129,33 +1095,6 @@ func (c AgentChannels) Lines() map[string]string {
 type ChannelLine struct {
 	// Number is the line, which has to be one the app connected.
 	Number string `json:"number"`
-}
-
-// ChannelAccount is one app's line on a channel: the number people write to and the
-// credentials of the provider carrying it.
-//
-// It belongs to the app rather than to an agent, the way a removed plugin login did: the number is
-// connected once and any number of configs name it.
-type ChannelAccount struct {
-	bun.BaseModel `bun:"table:channel_accounts,alias:ca"`
-
-	ID         string `bun:"id,pk"`
-	CustomerID string `bun:"customer_id,notnull"`
-	// Kind is the channel it carries: whatsapp, sms or imessage.
-	Kind string `bun:"kind,notnull"`
-	E164 string `bun:"e164,notnull"`
-	// AccountID is the provider's own id for the line, such as WhatsApp's phone number id.
-	AccountID string `bun:"account_id,notnull"`
-	// Token is the webhook's path segment, which is what tells the provider delivering to
-	// it apart from anybody who guessed the route.
-	Token string `bun:"token,notnull"`
-	// SecretsSealed is the provider's credentials as JSON, sealed under SecretsKEKVersion
-	// with the customer and the account's id as additional data.
-	SecretsSealed     []byte     `bun:"secrets_sealed"`
-	SecretsKEKVersion int        `bun:"kek_version,notnull"`
-	CreatedAt         time.Time  `bun:"created_at,notnull"`
-	UpdatedAt         time.Time  `bun:"updated_at,notnull"`
-	DeletedAt         *time.Time `bun:"deleted_at"`
 }
 
 // Where a knowledge url has got to.

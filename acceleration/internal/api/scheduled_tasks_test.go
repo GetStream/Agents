@@ -3186,13 +3186,13 @@ func (s *ScheduledTasksSuite) agentOnWhatsApp(number string) string {
 // WhatsApp from address, just now, so WhatsApp's window stands open.
 func (s *ScheduledTasksSuite) seedWriter(user *testClient, configID, number, address string) {
 	ctx := context.Background()
-	s.Require().NoError(s.store.SaveChannelIdentity(ctx, &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(ctx, &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: configID, Kind: "whatsapp",
 		Address: address, UserID: user.userID,
 	}))
-	account, err := s.store.ChannelAccount(ctx, s.customerID(), "whatsapp", number)
+	account, err := s.store.ChannelAccounts.GetByNumber(ctx, s.customerID(), "whatsapp", number)
 	s.Require().NoError(err)
-	fresh, err := s.store.ClaimChannelMessage(ctx, account.ID, "wamid."+s.utils.uuid(), address)
+	fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, "wamid."+s.utils.uuid(), address)
 	s.Require().NoError(err)
 	s.Require().True(fresh)
 }
@@ -3238,7 +3238,7 @@ func (s *RouterSuite) seedSMSLine(number string) {
 		Token: "telnyx-key", Signing: "a-public-key",
 	})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SaveChannelAccount(ctx, &store.ChannelAccount{
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(ctx, &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "sms", E164: number,
 		Token: "line-" + s.utils.uuid(), SecretsSealed: sealed,
 		SecretsKEKVersion: s.sealer.CurrentVersion(),
@@ -3257,7 +3257,7 @@ func (s *ScheduledTasksSuite) smsTask(writer string, change func(*AgentConfigReq
 		}
 	})
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: "sms",
 		Address: writer, UserID: user.userID,
 	}))
@@ -3367,7 +3367,7 @@ func (s *ScheduledTasksSuite) TestAWhatsAppTaskOutsideItsWindowLandsInTheConvers
 	config := s.agentOnWhatsApp(number)
 	user := s.data.createUser()
 	// The identity is there, but the person never wrote: no window.
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: "whatsapp",
 		Address: writer, UserID: user.userID,
 	}))
@@ -3473,7 +3473,7 @@ func (s *ScheduledTasksSuite) TestATaskForAnAgentWithoutANumberHasNoLineToRingFr
 	s.retryAtOnce()
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: "sms", Address: s.writerNumber(), UserID: user.userID,
 	}))
 	opened := s.openScheduling(user, config, nil)
@@ -3574,7 +3574,7 @@ func (s *ScheduledTasksSuite) TestAFailureOnEveryChannelIsListedUnderTheFirstCha
 	user := s.data.createUser()
 	// The person never wrote, so WhatsApp is out of its window; nor did they
 	// text, so the call has no number to ring.
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: "whatsapp", Address: writer, UserID: user.userID,
 	}))
 	opened := s.openScheduling(user, config, nil)
@@ -3615,7 +3615,7 @@ func (s *ScheduledTasksSuite) TestATaskOutsideWhatsAppsWindowRunsNoTurnForIt() {
 	config := s.agentOnWhatsApp(number)
 	user := s.data.createUser()
 	// The identity is there, but the person never wrote: no window.
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: "whatsapp",
 		Address: writer, UserID: user.userID,
 	}))
@@ -3665,7 +3665,7 @@ func (s *ScheduledTasksSuite) TestAReplyOneTextChannelCouldNotSendIsTextedOnTheN
 	})
 	user := s.data.createUser()
 	s.seedWriter(user, config, whatsAppLine, onWhatsApp)
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: "sms",
 		Address: bySMS, UserID: user.userID,
 	}))

@@ -28,7 +28,7 @@ func (m *Manager) restoring(ctx context.Context, spec Spec) (context.Context, er
 	var since time.Time
 	if spec.Thread && m.options.Store != nil {
 		var err error
-		if since, _, err = m.options.Store.ThreadHistorySince(ctx, spec.CustomerID, spec.ConversationID); err != nil {
+		if since, _, err = m.options.Store.UserPhones.ThreadHistorySince(ctx, spec.CustomerID, spec.ConversationID); err != nil {
 			return nil, err
 		}
 	}

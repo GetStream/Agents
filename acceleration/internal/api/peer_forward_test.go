@@ -188,7 +188,7 @@ func (s *ScheduledTasksSuite) textedTask(writer string) func(*store.ScheduledTas
 		config := s.agentWithScheduling(func(r *AgentConfigRequest) {
 			r.Channels = &AgentChannels{Sms: &ChannelLineRequest{Number: number}}
 		})
-		s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+		s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 			CustomerID: s.customerID(), ConfigID: config, Kind: "sms", Address: writer, UserID: task.UserID,
 		}))
 		task.ConfigID = config

@@ -326,8 +326,8 @@ func (s *EpisodeReadingSuite) phone(number string) omnichannel.Person {
 
 // link points a Slack user at a phone's omni-channel, as account linking will.
 func (s *EpisodeReadingSuite) link(slack omnichannel.Person, phone omnichannel.Opened) {
-	_, err := s.store.MapContact(s.ctx, &store.ContactMapEntry{
-		CustomerID: s.customerID, AgentConfigID: s.configID, Kind: slack.Kind, Address: slack.Address,
+	_, err := s.store.ContactMapEntries.Map(s.ctx, &store.ContactMapEntry{
+		CustomerID: s.customerID, ConfigID: s.configID, Kind: slack.Kind, Address: slack.Address,
 		ConversationID: phone.Contact.ConversationID,
 	})
 	s.Require().NoError(err)
@@ -649,7 +649,7 @@ func (s *EpisodeReadingSuite) contactRows(number string) func() int {
 	return func() int {
 		var count int
 		err := db.GlobalDB().QueryRowContext(context.Background(),
-			"SELECT count(*) FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND address = ?",
+			"SELECT count(*) FROM contact_map WHERE customer_id = ? AND config_id = ? AND address = ?",
 			customer, config, number).Scan(&count)
 		if err != nil {
 			return 1

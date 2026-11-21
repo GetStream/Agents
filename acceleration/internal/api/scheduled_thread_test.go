@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -139,12 +140,28 @@ func (s *telnyxLine) smsTurn(person, text string) string {
 // closes it, and only then releases. A probe that takes the turn and gives it back is the wait.
 // The lease (threadTurnLease) outlasts settleFor, so it running out cannot end the wait.
 func (s *RouterSuite) threadTurnIsFree(channel string) {
-	ctx := context.Background()
 	s.Require().Eventually(func() bool {
-		taken, err := s.store.TakeChannelThreadTurn(ctx, channel, "the-test", time.Now().Add(time.Minute))
+		taken, err := s.takeThreadTurn(channel, "the-test")
 		return err == nil && taken
 	}, settleFor, 10*time.Millisecond, "the turn that answered the message in %s was never let go of", channel)
-	s.Require().NoError(s.store.ReleaseChannelThreadTurn(ctx, channel, "the-test"))
+	s.releaseThreadTurn(channel, "the-test")
+}
+
+// takeThreadTurn leases the turn of the thread channel channel to holder for a minute.
+func (s *RouterSuite) takeThreadTurn(channel, holder string) (bool, error) {
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
+	if err != nil {
+		return false, err
+	}
+	return s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: thread.StreamAppPK,
+		CID: chatlog.ChannelType + ":" + channel, LeasedBy: holder, LeaseUntil: time.Now().Add(time.Minute)})
+}
+
+// releaseThreadTurn lets go of the turn holder leased in the thread channel channel.
+func (s *RouterSuite) releaseThreadTurn(channel, holder string) {
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ChannelTurns.Release(context.Background(), thread.StreamAppPK, chatlog.ChannelType+":"+channel, holder))
 }
 
 // hasThread is whether the test's customer has a thread channel for person yet.
@@ -411,8 +428,7 @@ func (s *LinqChannelSuite) hasChat(chat string) bool {
 func (s *LinqChannelSuite) chatPerson(chat string) string {
 	var person sql.NullString
 	err := s.store.GlobalDB().QueryRowContext(context.Background(),
-		"SELECT p.chat_person FROM channel_threads t LEFT JOIN channel_thread_people p ON p.channel_id = t.channel_id"+
-			" WHERE t.customer_id = ? AND t.connector_id = 'linq' AND t.thread_key = ?",
+		"SELECT chat_person FROM channel_threads WHERE customer_id = ? AND connector_id = 'linq' AND thread_key = ?",
 		s.customerID(), chat).Scan(&person)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ""
@@ -540,19 +556,19 @@ func (s *SlackChannelSuite) TestASlackThreadIsNotOfferedTheTools() {
 
 // A store that cannot record the chat's person fails the worker's attempt, not the delivery, and
 // the next attempt records the person and writes the message, once. The write is made to fail by
-// renaming the table away until the first attempt failed: the suite's database is its own
+// a check no person passes until the first attempt failed: the suite's database is its own
 // (SetupSuite), so no other suite sees it, and a defer puts it back.
 func (s *LinqChannelSuite) TestAChatPersonTheStoreCannotWriteIsWrittenOnTheNextAttempt() {
 	ctx := context.Background()
 	chat, person := s.utils.uuid(), "+13125550001"
 	body := s.chatSays(s.received(chat, s.line, person, "hello"), false)
-	_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_people RENAME TO channel_thread_people_off")
+	_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_threads ADD CONSTRAINT chat_person_off CHECK (chat_person = '') NOT VALID")
 	s.Require().NoError(err)
 	restored := false
 	restore := func() {
 		if !restored {
 			restored = true
-			_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_people_off RENAME TO channel_thread_people")
+			_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_threads DROP CONSTRAINT chat_person_off")
 			s.Require().NoError(err)
 		}
 	}

@@ -145,7 +145,7 @@ func (b *Bridge) silenced(ctx context.Context, thread store.ChannelThread) (bool
 	if !source.chats || source.optOuts == "" {
 		return false, nil
 	}
-	return b.store.ChannelThreadMemberOptedOut(ctx, thread.CustomerID, thread.ChannelID, source.optOuts)
+	return b.store.ChannelThreadMembers.OptedOut(ctx, thread.CustomerID, thread.ChannelID, source.optOuts)
 }
 
 // replyTo is the person a thread's replies reach, as its opt-outs and the gate name them. On
@@ -167,9 +167,9 @@ func (b *Bridge) replyTo(ctx context.Context, thread store.ChannelThread) (strin
 	if err != nil || len(configs) == 0 {
 		return "", err
 	}
-	contact, err := b.store.ThreadContact(ctx, thread.CustomerID, configs[0].ID, chatlog.ChannelType+":"+thread.ChannelID)
+	contact, err := b.store.ContactMapEntries.GetByThread(ctx, thread.CustomerID, configs[0].ID, chatlog.ChannelType+":"+thread.ChannelID)
 	if errors.Is(err, store.ErrNoContact) {
-		return b.store.ChannelThreadStarter(ctx, thread.ChannelID)
+		return b.store.ChannelThreads.Starter(ctx, thread.ChannelID)
 	}
 	if err != nil {
 		return "", err

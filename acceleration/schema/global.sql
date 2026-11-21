@@ -343,20 +343,6 @@ TABLE channel_deliveries
     CONSTRAINT channel_deliveries_pkey PRIMARY KEY (account_id, message_id)
     CREATE INDEX channel_deliveries_from_idx ON public.channel_deliveries USING btree (account_id, from_address, received_at DESC)
 
-TABLE channel_identities
-    address text NOT NULL
-    config_id text NOT NULL
-    conversation_id text NOT NULL DEFAULT ''::text
-    created_at timestamp with time zone NOT NULL
-    customer_id text NOT NULL
-    id text NOT NULL
-    kind text NOT NULL
-    thread text NOT NULL DEFAULT ''::text
-    updated_at timestamp with time zone NOT NULL
-    user_id text NOT NULL
-    CONSTRAINT channel_identities_pkey PRIMARY KEY (id)
-    CREATE UNIQUE INDEX channel_identities_address_idx ON public.channel_identities USING btree (customer_id, config_id, kind, address)
-
 TABLE channel_links
     code text NOT NULL
     config_id text NOT NULL
@@ -410,18 +396,6 @@ TABLE channel_thread_messages
     CONSTRAINT channel_thread_messages_kind_check CHECK ((kind = ANY (ARRAY['inbound'::text, 'turn'::text, 'reply'::text])))
     CONSTRAINT channel_thread_messages_pkey PRIMARY KEY (channel_id, kind, message_id)
 
-TABLE channel_thread_people
-    channel_id text NOT NULL
-    chat_person text NOT NULL
-    CONSTRAINT channel_thread_people_channel_id_fkey FOREIGN KEY (channel_id) REFERENCES channel_threads(channel_id) ON DELETE CASCADE
-    CONSTRAINT channel_thread_people_pkey PRIMARY KEY (channel_id)
-
-TABLE channel_thread_starters
-    channel_id text NOT NULL
-    starter text NOT NULL
-    CONSTRAINT channel_thread_starters_channel_id_fkey FOREIGN KEY (channel_id) REFERENCES channel_threads(channel_id) ON DELETE CASCADE
-    CONSTRAINT channel_thread_starters_pkey PRIMARY KEY (channel_id)
-
 TABLE channel_thread_waiting
     author_id text NOT NULL
     connector_id text NOT NULL
@@ -437,26 +411,26 @@ TABLE channel_thread_waiting
 
 TABLE channel_threads
     channel_id text NOT NULL
+    chat_person text NOT NULL DEFAULT ''::text
     connection_id text NOT NULL
     connector_id text NOT NULL
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
     last_inbound_at timestamp with time zone NOT NULL
     provider_unit_id text NOT NULL
+    starter text NOT NULL DEFAULT ''::text
     stream_app_pk bigint
     thread_key text NOT NULL
     thread_parts jsonb NOT NULL DEFAULT '{}'::jsonb
-    turn_holder text
-    turn_until timestamp with time zone
     CONSTRAINT channel_threads_pkey PRIMARY KEY (channel_id)
     CREATE UNIQUE INDEX channel_threads_thread ON public.channel_threads USING btree (customer_id, connector_id, provider_unit_id, thread_key)
 
-TABLE chat_channel_turns
+TABLE channel_turns
     cid text NOT NULL
+    lease_until timestamp with time zone NOT NULL
+    leased_by text NOT NULL
     stream_app_pk bigint NOT NULL
-    turn_holder text NOT NULL
-    turn_until timestamp with time zone NOT NULL
-    CONSTRAINT chat_channel_turns_pkey PRIMARY KEY (stream_app_pk, cid)
+    CONSTRAINT channel_turns_pkey PRIMARY KEY (stream_app_pk, cid)
 
 TABLE chat_inbound
     api_key text NOT NULL DEFAULT ''::text
@@ -471,10 +445,10 @@ TABLE chat_inbound
     received_at timestamp with time zone NOT NULL DEFAULT now()
     seq bigint NOT NULL
     state text NOT NULL DEFAULT 'queued'::text
-    stream_app bigint NOT NULL
+    stream_app_pk bigint NOT NULL
     CONSTRAINT chat_inbound_pkey PRIMARY KEY (seq)
     CONSTRAINT chat_inbound_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'done'::text, 'failed'::text])))
-    CONSTRAINT chat_inbound_stream_app_message_id_key UNIQUE (stream_app, message_id)
+    CONSTRAINT chat_inbound_stream_app_pk_message_id_key UNIQUE (stream_app_pk, message_id)
     CREATE INDEX chat_inbound_finished ON public.chat_inbound USING btree (finished_at) WHERE (state <> 'queued'::text)
     CREATE INDEX chat_inbound_queued ON public.chat_inbound USING btree (next_attempt_at, seq) WHERE (state = 'queued'::text)
 
@@ -744,20 +718,21 @@ TABLE connector_tool_pins
 
 TABLE contact_map
     address text NOT NULL
-    agent_config_id text NOT NULL
+    config_id text NOT NULL
     conversation_id text NOT NULL
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
     id text NOT NULL
     kind text NOT NULL
     stream_app_pk bigint
+    thread text NOT NULL DEFAULT ''::text
     updated_at timestamp with time zone NOT NULL
     user_id text
     CONSTRAINT contact_map_address_check CHECK ((address <> ''::text))
-    CONSTRAINT contact_map_kind_check CHECK ((kind = ANY (ARRAY['phone'::text, 'slack'::text, 'stream_user'::text]))) NOT VALID
+    CONSTRAINT contact_map_kind_check CHECK ((kind = ANY (ARRAY['phone'::text, 'slack'::text, 'stream_user'::text, 'whatsapp'::text, 'sms'::text, 'imessage'::text]))) NOT VALID
     CONSTRAINT contact_map_pkey PRIMARY KEY (id)
-    CREATE UNIQUE INDEX contact_map_address ON public.contact_map USING btree (customer_id, agent_config_id, kind, address)
-    CREATE INDEX contact_map_conversation ON public.contact_map USING btree (customer_id, agent_config_id, conversation_id)
+    CREATE UNIQUE INDEX contact_map_address ON public.contact_map USING btree (customer_id, config_id, kind, address)
+    CREATE INDEX contact_map_conversation ON public.contact_map USING btree (customer_id, config_id, conversation_id)
     CREATE INDEX contact_map_retired ON public.contact_map USING btree (customer_id, regexp_replace(address, '^retired:[^:]*:'::text, ''::text)) WHERE (address ~~ 'retired:%'::text)
 
 TABLE cost_anomaly_notices
@@ -887,14 +862,6 @@ TABLE dlc_use_cases
     CREATE UNIQUE INDEX dlc_use_cases_default_idx ON public.dlc_use_cases USING btree (customer_id) WHERE is_default
     CREATE INDEX dlc_use_cases_status_idx ON public.dlc_use_cases USING btree (status, updated_at, id)
 
-TABLE episode_activity
-    episode_id text NOT NULL
-    last_message_at timestamp with time zone
-    summary_lease_until timestamp with time zone
-    CONSTRAINT episode_activity_episode_id_fkey FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
-    CONSTRAINT episode_activity_pkey PRIMARY KEY (episode_id)
-    CREATE INDEX episode_activity_summary_lease ON public.episode_activity USING btree (summary_lease_until) WHERE (summary_lease_until IS NOT NULL)
-
 TABLE episodes
     call_id text
     card_message_id text NOT NULL
@@ -903,6 +870,9 @@ TABLE episodes
     customer_id text NOT NULL
     ended_at timestamp with time zone
     id text NOT NULL
+    last_message_at timestamp with time zone
+    lease_until timestamp with time zone
+    leased_by text
     session_id text
     source text NOT NULL
     started_at timestamp with time zone NOT NULL
@@ -916,6 +886,7 @@ TABLE episodes
     CONSTRAINT episodes_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'ended'::text, 'summarized'::text, 'summary_failed'::text])))
     CREATE UNIQUE INDEX episodes_call_session ON public.episodes USING btree (session_id)
     CREATE INDEX episodes_contact ON public.episodes USING btree (contact_id, started_at DESC)
+    CREATE INDEX episodes_lease ON public.episodes USING btree (lease_until) WHERE (lease_until IS NOT NULL)
     CREATE INDEX episodes_open_call ON public.episodes USING btree (call_id) WHERE ((status = 'in_progress'::text) AND (session_id IS NOT NULL))
     CREATE UNIQUE INDEX episodes_open_thread ON public.episodes USING btree (customer_id, thread_channel) WHERE ((status = 'in_progress'::text) AND (session_id IS NULL))
     CREATE INDEX episodes_thread ON public.episodes USING btree (customer_id, thread_channel, started_at)
@@ -953,7 +924,7 @@ TABLE image_jobs
     request_key text NOT NULL
     session_id text NOT NULL
     state text NOT NULL DEFAULT 'queued'::text
-    stream_app bigint NOT NULL DEFAULT 0
+    stream_app_pk bigint NOT NULL DEFAULT 0
     tags jsonb
     target text NOT NULL
     tool_call_id text NOT NULL

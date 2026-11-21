@@ -186,7 +186,7 @@ func (s *TelnyxUnpaidSuite) spentAfterOpening() (*testClient, Session) {
 	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
 	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
@@ -237,7 +237,7 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTu
 	s.config.LLM = "holding/holding-model"
 	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
@@ -586,7 +586,7 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChann
 	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
 	s.teamed()
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
