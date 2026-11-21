@@ -95,6 +95,7 @@ type repos struct {
 	UsageResets                    *UsageResets
 	UseCases                       *UseCases
 	UserPhones                     *UserPhones
+	Users                          *Users
 	VoiceBindings                  *VoiceBindings
 	VoiceSamples                   *VoiceSamples
 	Voices                         *Voices
@@ -196,6 +197,7 @@ func (s *Store) wire() {
 		UsageResets:                    &UsageResets{store: s},
 		UseCases:                       &UseCases{store: s},
 		UserPhones:                     &UserPhones{store: s},
+		Users:                          newUsers(s),
 		VoiceBindings:                  &VoiceBindings{store: s},
 		VoiceSamples:                   &VoiceSamples{store: s},
 		Voices:                         &Voices{store: s},

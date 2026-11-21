@@ -58,7 +58,7 @@ jobs:
           - group: store
             packages: >-
               ./internal/store ./internal/concurrency ./internal/connectors/core ./internal/usage
-              ./internal/live ./internal/users ./internal/streamapp
+              ./internal/live ./internal/streamapp
           # AI-2003, and claiming a guest does not move its memories yet. Both levels of a
           # skip are alternations, so it also names pairs that do not exist.
           - group: api
