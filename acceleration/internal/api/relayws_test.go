@@ -249,7 +249,9 @@ func (s *RelayedSessionSuite) TestClosingANodeEndsItsRelaySubscriptionsAndItsWat
 		// A shard of its own, so no other node's watcher is answered by this one.
 		node = s.newNode(s.utils.uuid(), slog.Default(), Options{Routers: s.modalities, Logger: slog.Default()})
 	})
-	s.Require().GreaterOrEqual(s.relayGoroutines(label), 3, "the node runs no subscription or watcher expiry")
+	// Two subscriptions and the watcher expiry, once their goroutines have started.
+	s.Require().Eventually(func() bool { return s.relayGoroutines(label) >= 3 }, 5*time.Second, 10*time.Millisecond,
+		"the node runs no subscription or watcher expiry")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
