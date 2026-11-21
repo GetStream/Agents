@@ -331,24 +331,13 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 			// passes to the next.
 			left := len(campaigns) - index
 			share := (remaining + left - 1) / left
-			inProgress, err := tx.NewSelect().Model((*Contact)(nil)).
-				Where("campaign_id = ?", campaign.ID).
-				Where("stage = ?", InProgress).
-				Count(ctx)
-			if err != nil {
-				return fmt.Errorf("store: count calls in progress: %w", err)
-			}
-			free := min(campaign.Concurrency-inProgress, share)
-			if free <= 0 {
-				continue
-			}
 
 			var contacts []Contact
-			err = tx.NewRaw(`WITH due AS (
+			err := tx.NewRaw(`WITH due AS (
 	SELECT id FROM campaign_contacts
 	WHERE campaign_id = ? AND stage = ? AND next_attempt_at <= ?
 	ORDER BY next_attempt_at, seq
-	LIMIT ?
+	LIMIT GREATEST(LEAST(?::int, ?::int - (SELECT count(*) FROM campaign_contacts WHERE campaign_id = ? AND stage = ?)), 0)
 	FOR UPDATE SKIP LOCKED
 ), claimed AS (
 	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, lease_until = ?
@@ -356,7 +345,8 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 	RETURNING cc.*
 )
 SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
-				campaign.ID, Enrolled, now, free, InProgress, owner, now.Add(lease)).Scan(ctx, &contacts)
+				campaign.ID, Enrolled, now, share, campaign.Concurrency, campaign.ID, InProgress,
+				InProgress, owner, now.Add(lease)).Scan(ctx, &contacts)
 			if err != nil {
 				return fmt.Errorf("store: claim due contacts: %w", err)
 			}
