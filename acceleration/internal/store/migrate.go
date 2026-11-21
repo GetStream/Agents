@@ -272,6 +272,14 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The legs a join delivered after its call ended revives.
 	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
 		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},
+	// The queued image jobs of each kind, in the order a claim takes them.
+	{"global", "image_jobs_undecided", "CREATE INDEX CONCURRENTLY IF NOT EXISTS image_jobs_undecided ON image_jobs (next_attempt_at, id) " +
+		"WHERE state = 'queued' AND message = ''"},
+	{"global", "image_jobs_decided", "CREATE INDEX CONCURRENTLY IF NOT EXISTS image_jobs_decided ON image_jobs (next_attempt_at, id) " +
+		"WHERE state = 'queued' AND message <> ''"},
+	// A session's calls, which deleting the session sets free.
+	{"shard", "calls_session_started_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_session_started_idx ON calls (session_id, started_at DESC) " +
+		"WHERE session_id IS NOT NULL"},
 	// A response's alternatives, the responses sharing its parent.
 	{"shard", "agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
 }

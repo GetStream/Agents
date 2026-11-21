@@ -25,10 +25,10 @@ import (
 const seedRows = 100_000
 
 // hotTables are the tables that grow with traffic, which no statement may read in full.
-var hotTables = regexp.MustCompile(`\b(requests|agent_sessions|calls|call_legs|agent_logs)\b`)
+var hotTables = regexp.MustCompile(`\b(requests|agent_sessions|calls|call_legs|agent_logs|image_jobs)\b`)
 
 // seqScans finds a sequential scan of one of hotTables in a plan.
-var seqScans = regexp.MustCompile(`Seq Scan on (requests|agent_sessions|calls|call_legs|agent_logs)\b`)
+var seqScans = regexp.MustCompile(`Seq Scan on (requests|agent_sessions|calls|call_legs|agent_logs|image_jobs)\b`)
 
 // seededDatabase fills a database of its own with seedRows of each hot table, once per run of the
 // suite: the suite's databases are emptied before every test, and seeding them for each would
@@ -55,7 +55,7 @@ func (s *StoreSuite) seededDatabase() string {
 		// Statistics read off every row rather than a sample, so the planner breaks a tie
 		// between two indexes the same way every run.
 		_, err := tx.ExecContext(ctx, "SET LOCAL default_statistics_target = 1000; "+
-			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs")
+			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs, image_jobs")
 		return err
 	}))
 	s.seededDSN = dsn
@@ -121,6 +121,14 @@ var seedStatements = []string{
 		'user-' || (n % 20000), (ARRAY['system', 'agent', 'tool'])[n % 3 + 1],
 		(ARRAY['info', 'info', 'info', 'warn', 'error'])[n % 5 + 1], 'provider_request', 'request ' || n, at, at,
 		CASE WHEN n % 50 = 0 THEN n END
+	FROM generate_series(1, ?1) AS n, LATERAL (SELECT ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
+
+	`INSERT INTO image_jobs (id, customer_id, cid, agent_user, session_id, tool_call_id, request_key, target,
+		attribution, prompt, state, message, created_at, next_attempt_at, finished_at)
+	SELECT 'seeded-image-' || n, 'customer-' || (n % 200), 'messaging:channel-' || (n % 50000), 'agent-' || (n % 2000),
+		'seeded-session-' || n, 'tool-call-' || n, 'request-' || n, 'model-' || (n % 5), '{}', 'draw ' || n,
+		CASE WHEN n % 100 = 0 THEN 'queued' WHEN n % 50 = 0 THEN 'failed' ELSE 'done' END,
+		CASE WHEN n % 200 = 0 THEN 'drawn' ELSE '' END, at, at, CASE WHEN n % 100 <> 0 THEN at + interval '1 minute' END
 	FROM generate_series(1, ?1) AS n, LATERAL (SELECT ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
 }
 
@@ -192,6 +200,9 @@ type explainedRead struct {
 	name, index string
 	// sharded runs it on a store with a shard of its own, for what only such a store reads.
 	sharded bool
+	// inOrder says the index hands the rows over in the order asked for, with no sort: a queue
+	// claim that sorts reads every due row, and every dead one, to take its first few.
+	inOrder bool
 	run     func(ctx context.Context, store *Store) error
 }
 
@@ -310,11 +321,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Calls.Get(ctx, "customer-7", "seeded-call-7")
 			return err
 		}},
-		{name: "Calls.Latest", index: "calls_session_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Calls.Latest", index: "calls_session_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Calls.Latest(ctx, "customer-7", []string{"seeded-session-7", "seeded-session-207"})
 			return err
 		}},
-		{name: "Calls.LastVoiced", index: "calls_session_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Calls.LastVoiced", index: "calls_session_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Calls.LastVoiced(ctx, "customer-7", "seeded-session-7")
 			return err
 		}},
@@ -326,7 +337,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Calls.Select(ctx, "customer-7", CallFilter{Running: true, MaxReviewScore: 3})
 			return err
 		}},
-		{name: "Calls.Select by session", index: "calls_session_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Calls.Select by session", index: "calls_session_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Calls.Select(ctx, "customer-7", CallFilter{SessionID: "seeded-session-7"})
 			return err
 		}},
@@ -479,6 +490,23 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		}},
 		{name: "Sessions.Delete", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Delete(ctx, "customer-199", "seeded-session-99999")
+		}},
+		// What calls_session_id_fkey runs on the calls of a session deleted, which no hook sees.
+		{name: "Sessions.Delete frees its calls", index: "calls_session_started_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.shard.NewRaw("UPDATE calls SET session_id = NULL WHERE session_id = ?", "seeded-session-99998").Exec(ctx)
+			return err
+		}},
+		{name: "ImageJobs.Claim", index: "image_jobs_undecided", inOrder: true, run: func(ctx context.Context, store *Store) error {
+			_, err := store.ImageJobs.Claim(ctx, s.base, 10, s.base, false)
+			return err
+		}},
+		{name: "ImageJobs.Claim decided", index: "image_jobs_decided", inOrder: true, run: func(ctx context.Context, store *Store) error {
+			_, err := store.ImageJobs.Claim(ctx, s.base, 10, s.base, true)
+			return err
+		}},
+		{name: "ImageJobs.NextDue", index: "image_jobs_undecided", run: func(ctx context.Context, store *Store) error {
+			_, _, err := store.ImageJobs.NextDue(ctx, false)
+			return err
 		}},
 		{name: "Sessions.Select", index: "agent_sessions_last_message_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{})
@@ -701,7 +729,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			if read.sharded {
 				explain = s.explainedSharded
 			}
-			s.usesIndex(explain(func(store *Store) { s.Require().NoError(read.run(s.ctx, store)) }), read.index)
+			plans := explain(func(store *Store) { s.Require().NoError(read.run(s.ctx, store)) })
+			s.usesIndex(plans, read.index)
+			if read.inOrder {
+				s.NotContains(strings.Join(plans, "\n"), "Sort", plans)
+			}
 		})
 	}
 }

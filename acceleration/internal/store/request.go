@@ -1056,8 +1056,8 @@ WHERE vendor > 0`
 
 // VendorCostGaps reads, over every shard, the rows since a time whose vendor reported what it
 // charged, per model, with up to widest of the rows whose gap is widest. Each shard is read
-// once, in a read-only transaction that gives up after timeout: no index leads with
-// started_at, so the read scans, and a large shard must not hold a connection for long.
+// once, in a read-only transaction that gives up after timeout: the read takes every row
+// since then off requests_started_idx, and a large shard must not hold a connection for long.
 func (r *Requests) VendorCostGaps(ctx context.Context, since time.Time, widest int, timeout time.Duration) ([]VendorCostModel, error) {
 	shards, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]VendorCostModel, error) {
 		return vendorCostGaps(ctx, db, since, widest, timeout)

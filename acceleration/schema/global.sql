@@ -816,7 +816,8 @@ TABLE image_jobs
     CONSTRAINT image_jobs_pkey PRIMARY KEY (id)
     CONSTRAINT image_jobs_request_key_key UNIQUE (request_key)
     CONSTRAINT image_jobs_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'done'::text, 'failed'::text])))
-    CREATE INDEX image_jobs_due ON public.image_jobs USING btree (next_attempt_at) WHERE (state = 'queued'::text)
+    CREATE INDEX image_jobs_decided ON public.image_jobs USING btree (next_attempt_at, id) WHERE ((state = 'queued'::text) AND (message <> ''::text))
+    CREATE INDEX image_jobs_undecided ON public.image_jobs USING btree (next_attempt_at, id) WHERE ((state = 'queued'::text) AND (message = ''::text))
 
 TABLE knowledge_documents
     bytes bigint NOT NULL DEFAULT 0
