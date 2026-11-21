@@ -754,10 +754,11 @@ func (s *StoreSuite) TestCampaignQueryBudgets() {
 		s.Len(campaigns, 4)
 	}), "Select")
 	name := "Renamed"
-	s.Equal(2, s.countQueries(func() {
-		_, err := s.store.Campaigns.Update(s.ctx, customerID, campaign.ID, CampaignChanges{Name: &name})
+	s.Equal(1, s.countQueries(func() {
+		updated, err := s.store.Campaigns.Update(s.ctx, customerID, campaign.ID, CampaignChanges{Name: &name})
 		s.Require().NoError(err)
-	}), "Update writes, then reads the campaign back")
+		s.Equal(name, updated.Name)
+	}), "Update writes and returns the campaign in one statement")
 	var copied Campaign
 	s.Equal(3+2, s.countQueries(func() {
 		copied, err = s.store.Campaigns.Duplicate(s.ctx, customerID, campaign.ID, DuplicateAll)

@@ -263,16 +263,14 @@ func (r *Campaigns) Update(ctx context.Context, customerID, id string, changes C
 		query = query.Where("(state = ? OR ("+strings.Join(same, " AND ")+"))", append([]any{Draft}, sameArgs...)...)
 	}
 
-	result, err := query.Exec(ctx)
-	if err != nil {
+	var updated []Campaign
+	if err := query.Returning("*").Scan(ctx, &updated); err != nil {
 		return Campaign{}, stack.Wrap(fmt.Errorf("store: update campaign: %w", err))
 	}
-	if affected, err := result.RowsAffected(); err != nil {
-		return Campaign{}, stack.Wrap(fmt.Errorf("store: update campaign: %w", err))
-	} else if affected == 0 {
+	if len(updated) == 0 {
 		return Campaign{}, r.whyNotChanged(ctx, r.store.global, customerID, id)
 	}
-	return r.Get(ctx, customerID, id)
+	return updated[0], nil
 }
 
 // whyNotChanged names why a guarded write touched no row: there is no such campaign, or its
