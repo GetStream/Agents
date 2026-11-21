@@ -49,11 +49,11 @@ type Contact struct {
 	// Attempt is how many attempts of the current step have been used.
 	Attempt       int        `bun:"attempt,notnull"`
 	NextAttemptAt *time.Time `bun:"next_attempt_at"`
-	// LeasedBy and LeasedUntil say which runner holds the contact while it is rung.
-	LeasedBy    string     `bun:"leased_by,notnull"`
-	LeasedUntil *time.Time `bun:"leased_until"`
-	Outcome     string     `bun:"outcome,notnull"`
-	Converted   bool       `bun:"converted,notnull"`
+	// LeasedBy and LeaseUntil say which runner holds the contact while it is rung.
+	LeasedBy   string     `bun:"leased_by,notnull"`
+	LeaseUntil *time.Time `bun:"lease_until"`
+	Outcome    string     `bun:"outcome,notnull"`
+	Converted  bool       `bun:"converted,notnull"`
 	// CallID is the calls row of the last dial.
 	CallID       string    `bun:"call_id,nullzero"`
 	VendorCallID string    `bun:"vendor_call_id,nullzero"`
@@ -351,7 +351,7 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 	LIMIT ?
 	FOR UPDATE SKIP LOCKED
 ), claimed AS (
-	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, leased_until = ?
+	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, lease_until = ?
 	FROM due WHERE cc.id = due.id
 	RETURNING cc.*
 )
@@ -386,16 +386,16 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, no
 
 	expired := r.store.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.id").
-		Where("cc.stage = ? AND cc.leased_until < ?", InProgress, now).
+		Where("cc.stage = ? AND cc.lease_until < ?", InProgress, now).
 		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)").
-		Order("cc.leased_until").
+		Order("cc.lease_until").
 		Limit(limit).
 		For("UPDATE SKIP LOCKED")
 	var contacts []Contact
 	err := r.store.global.NewUpdate().With("expired", expired).Model((*Contact)(nil)).
 		TableExpr("expired").
 		Set("leased_by = ?", owner).
-		Set("leased_until = ?", now.Add(lease)).
+		Set("lease_until = ?", now.Add(lease)).
 		Where("cc.id = expired.id").
 		Returning("cc.*").
 		Scan(ctx, &contacts)
@@ -481,7 +481,7 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("call_id = COALESCE(?, cc.call_id)", nullable(settle.CallID)).
 			Set("vendor_call_id = COALESCE(?, cc.vendor_call_id)", nullable(settle.VendorCallID)).
 			Set("leased_by = ''").
-			Set("leased_until = NULL").
+			Set("lease_until = NULL").
 			Where("cp.id = cc.campaign_id").
 			Where("cc.id = ? AND cc.leased_by = ?", contactID, owner).
 			Where("cc.stage IN (?, ?)", InProgress, AwaitingOutcome).

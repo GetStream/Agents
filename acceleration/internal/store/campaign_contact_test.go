@@ -105,7 +105,7 @@ func (s *StoreSuite) TestAClaimTakesTheEarliestDueFirstAndStopsAtMax() {
 	numbers := []string{claimed[0].Contact.ToNumber, claimed[1].Contact.ToNumber}
 	s.ElementsMatch([]string{"+15550002", "+15550001"}, numbers)
 	s.Equal(campaign.ID, claimed[0].Campaign.ID)
-	s.Equal(s.base.Add(time.Minute), claimed[0].Contact.LeasedUntil.UTC())
+	s.Equal(s.base.Add(time.Minute), claimed[0].Contact.LeaseUntil.UTC())
 }
 
 func (s *StoreSuite) TestAContactNotYetDueIsNotClaimed() {
@@ -162,7 +162,7 @@ func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverAndALiveOneIsNot() {
 	s.Require().Len(taken, 1)
 	s.Equal("+15550002", taken[0].Contact.ToNumber)
 	s.Equal("b", taken[0].Contact.LeasedBy)
-	s.Equal(s.base.Add(8*time.Minute), taken[0].Contact.LeasedUntil.UTC())
+	s.Equal(s.base.Add(8*time.Minute), taken[0].Contact.LeaseUntil.UTC())
 	s.Equal(campaign.ID, taken[0].Campaign.ID)
 	s.Equal("a", s.contactByNumber(campaign, "+15550001").LeasedBy, "a live lease stays")
 	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", s.base.Add(7*time.Minute), time.Minute, 10)
@@ -186,7 +186,7 @@ func (s *StoreSuite) TestOnlyTheLeaseHolderCanSettle() {
 	s.Equal(next, settled.NextAttemptAt.UTC())
 	s.Equal("call-1", settled.CallID)
 	s.Empty(settled.LeasedBy)
-	s.Nil(settled.LeasedUntil)
+	s.Nil(settled.LeaseUntil)
 
 	err = s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: ContactCompleted})
 	s.ErrorIs(err, ErrNotLeaseHolder, "a released lease settles nothing")

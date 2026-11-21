@@ -2441,7 +2441,7 @@ func (s *DataMoveSuite) midCall() string {
 	s.setState(s.source, "acme", campaign, Running)
 	_, err = s.source.GlobalDB().ExecContext(s.ctx, `UPDATE campaign_contacts SET
 		stage = CASE to_number WHEN '+15550000001' THEN 'in_progress' WHEN '+15550000002' THEN 'awaiting_outcome' ELSE 'completed' END,
-		attempt = 1, leased_by = 'router-a', leased_until = now() + interval '1 hour', next_attempt_at = now() + interval '2 days'
+		attempt = 1, leased_by = 'router-a', lease_until = now() + interval '1 hour', next_attempt_at = now() + interval '2 days'
 		WHERE campaign_id = ?`, campaign)
 	s.Require().NoError(err)
 	_, err = s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaign_attempts

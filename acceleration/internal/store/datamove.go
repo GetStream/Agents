@@ -954,7 +954,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 		return row, nil
 	}
 	fields["leased_by"] = json.RawMessage(`""`)
-	fields["leased_until"] = until
+	fields["lease_until"] = until
 	return json.Marshal(fields)
 }
 

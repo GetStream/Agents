@@ -150,7 +150,7 @@ func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner strin
 	SELECT ca.id FROM campaign_attempts ca
 	JOIN campaign_contacts cc ON cc.id = ca.contact_id
 	WHERE ca.classify_state = ? AND ca.classify_after <= ? AND cc.stage = ?
-		AND (cc.leased_by = '' OR cc.leased_until IS NULL OR cc.leased_until < ?)
+		AND (cc.leased_by = '' OR cc.lease_until IS NULL OR cc.lease_until < ?)
 		AND NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)
 		AND NOT EXISTS (SELECT 1 FROM campaign_attempts newer
 			WHERE newer.contact_id = ca.contact_id AND newer.classify_state = ca.classify_state
@@ -176,7 +176,7 @@ RETURNING ca.*`, classifyPending, now, AwaitingOutcome, now, limit, now.Add(leas
 		var contacts []Contact
 		err = tx.NewUpdate().Model(&contacts).
 			Set("leased_by = ?", owner).
-			Set("leased_until = ?", now.Add(lease)).
+			Set("lease_until = ?", now.Add(lease)).
 			Where("id IN (?)", bun.In(contactIDs)).
 			Returning("*").
 			Scan(ctx)
@@ -215,7 +215,7 @@ func (r *CampaignAttempts) PutOff(ctx context.Context, owner, attemptID string, 
 		result, err := tx.NewUpdate().Model((*Contact)(nil)).
 			TableExpr("campaign_attempts AS ca").
 			Set("leased_by = ''").
-			Set("leased_until = NULL").
+			Set("lease_until = NULL").
 			Where("ca.id = ? AND ca.classify_state = ?", attemptID, classifyPending).
 			Where("cc.id = ca.contact_id AND cc.stage = ? AND cc.leased_by = ?", AwaitingOutcome, owner).
 			Exec(ctx)

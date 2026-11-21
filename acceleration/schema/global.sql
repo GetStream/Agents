@@ -271,8 +271,8 @@ TABLE campaign_contacts
     created_at timestamp with time zone NOT NULL DEFAULT now()
     id text NOT NULL
     instructions text NOT NULL DEFAULT ''::text
+    lease_until timestamp with time zone
     leased_by text NOT NULL DEFAULT ''::text
-    leased_until timestamp with time zone
     next_attempt_at timestamp with time zone
     outcome text NOT NULL DEFAULT ''::text
     reason text
@@ -287,7 +287,7 @@ TABLE campaign_contacts
     CONSTRAINT campaign_contacts_pkey PRIMARY KEY (id)
     CREATE INDEX campaign_contacts_campaign_idx ON public.campaign_contacts USING btree (campaign_id, seq)
     CREATE INDEX campaign_contacts_due_idx ON public.campaign_contacts USING btree (campaign_id, stage, next_attempt_at)
-    CREATE INDEX campaign_contacts_lease_idx ON public.campaign_contacts USING btree (leased_until) WHERE (stage = 'in_progress'::text)
+    CREATE INDEX campaign_contacts_lease_idx ON public.campaign_contacts USING btree (lease_until) WHERE (stage = 'in_progress'::text)
     CREATE UNIQUE INDEX campaign_contacts_number_idx ON public.campaign_contacts USING btree (campaign_id, to_number) WHERE (reason IS DISTINCT FROM 'duplicate'::text)
 
 TABLE campaigns
