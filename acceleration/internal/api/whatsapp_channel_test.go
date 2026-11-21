@@ -253,7 +253,7 @@ func (s *WhatsAppChannelSuite) TestAReplyFinishedAfterStopIsNotSent() {
 // WhatsApp messages from the agent too.
 func (s *WhatsAppChannelSuite) TestAnOptOutOfTheNumberInE164KeepsTheAgentAway() {
 	person := "16505550177"
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: "+" + person, Channel: "whatsapp", Source: "api",
 	}))
 

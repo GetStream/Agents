@@ -428,7 +428,7 @@ func (s *TelnyxChannelSuite) TestEachStopWordRecordsAnOptOutAndEachStartWordRevo
 func (s *TelnyxChannelSuite) TestAMessageWhoseOptOutCannotBeReadIsGivenUpAndReachesNoAgent() {
 	person := "+13125550078"
 	ctx := context.Background()
-	s.Require().NoError(s.store.OptOut(ctx, &store.OptOut{CustomerID: s.customerID(), Recipient: person, Channel: "sms", Source: "keyword"}))
+	s.Require().NoError(s.store.OptOuts.Insert(ctx, &store.OptOut{CustomerID: s.customerID(), Recipient: person, Channel: "sms", Source: "keyword"}))
 	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
 		CREATE FUNCTION telnyx_suite_refuse_read() RETURNS boolean AS $$
 			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;

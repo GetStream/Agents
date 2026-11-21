@@ -47,7 +47,7 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 		Reports:      call.Reports,
 		PlacedAt:     k.now(),
 	}
-	if err := k.store.InsertPhoneCall(ctx, &row); err != nil {
+	if err := k.store.PhoneCalls.Insert(ctx, &row); err != nil {
 		return "", err
 	}
 	return row.Token, nil
@@ -55,7 +55,7 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 
 // Dialed keeps the vendor's own id for the call once it took the dial.
 func (k *Keeper) Dialed(ctx context.Context, token, vendorCallID string) error {
-	_, err := k.store.ChangePhoneCall(ctx, store.PhoneCallWhere{Token: token}, func(row *store.PhoneCall) bool {
+	_, err := k.store.PhoneCalls.Change(ctx, store.PhoneCallWhere{Token: token}, func(row *store.PhoneCall) bool {
 		row.VendorCallID = vendorCallID
 		return true
 	})
@@ -65,7 +65,7 @@ func (k *Keeper) Dialed(ctx context.Context, token, vendorCallID string) error {
 // Failed forgets a call that was never dialled, or that the vendor refused to dial: it never
 // rang, so it has no outcome.
 func (k *Keeper) Failed(ctx context.Context, token string) error {
-	return k.store.DeletePhoneCall(ctx, token)
+	return k.store.PhoneCalls.Delete(ctx, token)
 }
 
 // Refused forgets a call the vendor was asked to dial and refused, as Failed does, and counts
@@ -124,7 +124,7 @@ func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) erro
 
 // ByToken reads the call a token was made for.
 func (k *Keeper) ByToken(ctx context.Context, token string) (Call, error) {
-	row, err := k.store.PhoneCallByToken(ctx, token)
+	row, err := k.store.PhoneCalls.GetByToken(ctx, token)
 	if err != nil {
 		return Call{}, asUnknown(err)
 	}
@@ -146,7 +146,7 @@ func (k *Keeper) Read(ctx context.Context, customerID, callID string) (Call, err
 
 // ReadMany reads the newest call for each of callIDs, by call id. One with no call is left out.
 func (k *Keeper) ReadMany(ctx context.Context, customerID string, callIDs []string) (map[string]Call, error) {
-	rows, err := k.store.PhoneCalls(ctx, customerID, callIDs)
+	rows, err := k.store.PhoneCalls.Select(ctx, customerID, callIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -160,14 +160,14 @@ func (k *Keeper) ReadMany(ctx context.Context, customerID string, callIDs []stri
 // Sweep clears the tokens of calls placed before placedBefore, so a vendor's late post for one
 // is refused, and keeps their outcomes.
 func (k *Keeper) Sweep(ctx context.Context, placedBefore time.Time) (int64, error) {
-	return k.store.ClearPhoneCallTokens(ctx, placedBefore)
+	return k.store.PhoneCalls.ClearTokens(ctx, placedBefore)
 }
 
 // decide runs e on the call where finds, under the row's lock, so events arriving at once each
 // see what the others decided. before is the call as e found it: e is what first ended the
 // call when before has no end, which one event of a call is, whatever order they come in.
 func (k *Keeper) decide(ctx context.Context, where store.PhoneCallWhere, e event) (before, call Call, err error) {
-	row, err := k.store.ChangePhoneCall(ctx, where, func(row *store.PhoneCall) bool {
+	row, err := k.store.PhoneCalls.Change(ctx, where, func(row *store.PhoneCall) bool {
 		before = callOf(*row)
 		after := decide(before, e)
 		if after == before {

@@ -159,7 +159,7 @@ func (s *Server) dispatchArrivingCall(r *http.Request, origin hookOrigin, event 
 
 	// A call the router placed has its own worker already. Its leg comes in through the
 	// number's routing rule, which names the number too, so it would look like a call to dial.
-	placed, err := s.store.CallResourcesInApp(r.Context(), origin.scope(), callType, callID)
+	placed, err := s.store.CallResources.Select(r.Context(), origin.scope(), callType, callID)
 	if err != nil {
 		s.logger.Error("could not tell whether the router placed a call", "cid", event.CallCid, "error", err)
 		return

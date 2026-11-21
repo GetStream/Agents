@@ -317,7 +317,7 @@ func (l telnyxRinger) deliver(form url.Values, signed bool) (int, string, string
 func (l telnyxRinger) attach(e164, uri, username, password string) {
 	s := l.suite
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default"}
@@ -329,7 +329,7 @@ func (l telnyxRinger) attach(e164, uri, username, password string) {
 		attachment.BridgeURI, attachment.BridgeUsername = uri, username
 		attachment.BridgePasswordSealed, attachment.BridgePasswordKEKVersion = sealed, sealer.CurrentVersion()
 	}
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164, attachment))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, attachment))
 }
 
 // TelnyxHookUnconfiguredSuite is a deployment with no Telnyx public key.

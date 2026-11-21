@@ -2396,7 +2396,7 @@ func (s *DataMoveSuite) TestTheCutOverIsOnlyTheCustomersOwn() {
 // seedCampaign stores a campaign on the source in a state and returns its id.
 func (s *DataMoveSuite) seedCampaign(customerID, state string) string {
 	campaign := &Campaign{CustomerID: customerID, Name: "Renewals", ConfigID: "config-1", FromNumber: "+15550100"}
-	s.Require().NoError(s.source.CreateCampaign(s.ctx, campaign))
+	s.Require().NoError(s.source.Campaigns.Insert(s.ctx, campaign))
 	if state != Draft {
 		s.setState(s.source, customerID, campaign.ID, state)
 	}
@@ -2414,11 +2414,11 @@ func (s *DataMoveSuite) TestARunningCampaignArrivesPausedAndTheCutOverNamesIt() 
 
 	s.ElementsMatch([]string{running, scheduled}, campaigns)
 	for id, want := range map[string]string{running: Paused, scheduled: Paused, paused: Paused, draft: Draft} {
-		campaign, err := s.destination.Campaign(s.ctx, "moved", id)
+		campaign, err := s.destination.Campaigns.Get(s.ctx, "moved", id)
 		s.Require().NoError(err)
 		s.Equal(want, campaign.State, "only starting it here rings anybody")
 	}
-	source, err := s.source.Campaign(s.ctx, "acme", running)
+	source, err := s.source.Campaigns.Get(s.ctx, "acme", running)
 	s.Require().NoError(err)
 	s.Equal(Running, source.State, "the deployment it left goes on ringing")
 }
@@ -2434,7 +2434,7 @@ func (s *DataMoveSuite) setState(st *Store, customerID, id, state string) {
 // is waiting for the outcome of its answered call, and whose third is done, each with its dial.
 func (s *DataMoveSuite) midCall() string {
 	campaign := s.seedCampaign("acme", Draft)
-	_, _, err := s.source.AddContacts(s.ctx, campaign, []Contact{
+	_, _, err := s.source.CampaignContacts.InsertMany(s.ctx, campaign, []Contact{
 		{ToNumber: "+15550000001", Variables: map[string]string{"name": "Ada"}, TimeZone: "Europe/Berlin", Instructions: "ask for Ada"},
 		{ToNumber: "+15550000002"}, {ToNumber: "+15550000003"}})
 	s.Require().NoError(err)
@@ -2462,14 +2462,14 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 	s.move("acme", "moved")
 
 	later := time.Now().Add(time.Minute)
-	taken, err := s.destination.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
-	s.Require().NoError(s.destination.ResumeCampaign(s.ctx, "moved", campaign))
+	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -2478,12 +2478,12 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 	s.Equal(map[string]string{"name": "Ada"}, ada.Variables)
 	s.Equal("Europe/Berlin", ada.TimeZone)
 	s.Equal("ask for Ada", ada.Instructions)
-	dial, found, err := s.destination.LatestDial(s.ctx, ada.ID)
+	dial, found, err := s.destination.CampaignAttempts.Latest(s.ctx, ada.ID)
 	s.Require().NoError(err)
 	s.Require().True(found)
 	s.Equal(1, dial.Attempt, "the dial the attempt used is there to settle from")
 	s.Equal("unknown", dial.CallOutcome, "the call it was in ended there, and how is not known here")
-	done, err := s.destination.QueryContacts(s.ctx, campaign, ContactFilter{Number: "+15550000003"})
+	done, err := s.destination.CampaignContacts.Select(s.ctx, campaign, ContactFilter{Number: "+15550000003"})
 	s.Require().NoError(err)
 	s.Require().Len(done, 1)
 	s.Equal(ContactCompleted, done[0].Stage, "a settled contact is not rung again")
@@ -2495,14 +2495,14 @@ func (s *DataMoveSuite) TestAnAnsweredCallsOutcomeIsReadHereOnceTheMoveIsCutOver
 	s.move("acme", "moved")
 
 	later := time.Now().Add(time.Minute)
-	claimed, err := s.destination.ClaimClassifications(s.ctx, "router-b", later, time.Hour, 10)
+	claimed, err := s.destination.CampaignAttempts.ClaimClassifications(s.ctx, "router-b", later, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(claimed, "the source reads it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
-	s.Require().NoError(s.destination.ResumeCampaign(s.ctx, "moved", campaign))
+	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	claimed, err = s.destination.ClaimClassifications(s.ctx, "router-b", later, time.Hour, 10)
+	claimed, err = s.destination.CampaignAttempts.ClaimClassifications(s.ctx, "router-b", later, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1, "its transcript is read here, without waiting out the source's lease")
 	s.Equal("att-+15550000002", claimed[0].Attempt.ID)
@@ -2513,7 +2513,7 @@ func (s *DataMoveSuite) TestAttemptsMoveWithTheirContactsAndAPendingClassificati
 	campaign := s.seedCampaign("acme", Draft)
 	other := s.seedCampaign("other", Draft)
 	for _, c := range []string{campaign, other} {
-		_, _, err := s.source.AddContacts(s.ctx, c, []Contact{{ToNumber: "+15550000001"}})
+		_, _, err := s.source.CampaignContacts.InsertMany(s.ctx, c, []Contact{{ToNumber: "+15550000001"}})
 		s.Require().NoError(err)
 	}
 	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaign_attempts
@@ -2555,8 +2555,8 @@ func (s *DataMoveSuite) TestACampaignStartedHereIsNoLongerTheMovesToName() {
 	running := s.seedCampaign("acme", Running)
 	s.move("acme", "moved")
 
-	s.Require().NoError(s.destination.ResumeCampaign(s.ctx, "moved", running))
-	s.Require().NoError(s.destination.PauseCampaign(s.ctx, "moved", running, ""))
+	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", running))
+	s.Require().NoError(s.destination.Campaigns.Pause(s.ctx, "moved", running, ""))
 
 	_, campaigns := s.resume("moved")
 	s.Empty(campaigns, "the customer paused it here")
@@ -2565,7 +2565,7 @@ func (s *DataMoveSuite) TestACampaignStartedHereIsNoLongerTheMovesToName() {
 // dueOnSource is a running campaign on the source with two contacts due to be rung.
 func (s *DataMoveSuite) dueOnSource() string {
 	campaign := s.seedCampaign("acme", Draft)
-	_, _, err := s.source.AddContacts(s.ctx, campaign, []Contact{{ToNumber: "+15550101"}, {ToNumber: "+15550102"}})
+	_, _, err := s.source.CampaignContacts.InsertMany(s.ctx, campaign, []Contact{{ToNumber: "+15550101"}, {ToNumber: "+15550102"}})
 	s.Require().NoError(err)
 	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = now() WHERE campaign_id = ?", campaign)
 	s.Require().NoError(err)
@@ -2576,7 +2576,7 @@ func (s *DataMoveSuite) dueOnSource() string {
 // ringOnSource rings the source's next due contact, as a runner there does, and returns it in
 // a call.
 func (s *DataMoveSuite) ringOnSource() Contact {
-	claimed, err := s.source.ClaimDueContacts(s.ctx, "router-a", time.Now(), time.Hour, 1)
+	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", time.Now(), time.Hour, 1)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	return claimed[0].Contact
@@ -2584,14 +2584,14 @@ func (s *DataMoveSuite) ringOnSource() Contact {
 
 // hangUpOnSource ends a call the source rang, and the contact with it.
 func (s *DataMoveSuite) hangUpOnSource(contact Contact) {
-	s.Require().NoError(s.source.SettleContact(s.ctx, "router-a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1}))
+	s.Require().NoError(s.source.CampaignContacts.Settle(s.ctx, "router-a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1}))
 }
 
 // resumeHere resumes a moved campaign on the destination and returns the contacts a runner
 // there rings first.
 func (s *DataMoveSuite) resumeHere(campaign string) []Contact {
-	s.Require().NoError(s.destination.ResumeCampaign(s.ctx, "moved", campaign))
-	claimed, err := s.destination.ClaimDueContacts(s.ctx, "router-b", time.Now().Add(time.Minute), time.Hour, 10)
+	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
+	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", time.Now().Add(time.Minute), time.Hour, 10)
 	s.Require().NoError(err)
 	contacts := make([]Contact, 0, len(claimed))
 	for _, claim := range claimed {
@@ -2609,7 +2609,7 @@ func (s *DataMoveSuite) TestACampaignPausedAtTheSourceBeforeTheLastCatchUpRingsN
 	inCall := s.ringOnSource()
 	cursor := s.move("acme", "moved")
 
-	s.Require().NoError(s.source.PauseCampaign(s.ctx, "acme", running, ""))
+	s.Require().NoError(s.source.Campaigns.Pause(s.ctx, "acme", running, ""))
 	s.hangUpOnSource(inCall)
 	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
 	s.Require().NoError(err)
@@ -2617,7 +2617,7 @@ func (s *DataMoveSuite) TestACampaignPausedAtTheSourceBeforeTheLastCatchUpRingsN
 
 	_, campaigns := s.resume("moved")
 	s.Empty(campaigns, "the user paused it at the source")
-	campaign, err := s.destination.Campaign(s.ctx, "moved", running)
+	campaign, err := s.destination.Campaigns.Get(s.ctx, "moved", running)
 	s.Require().NoError(err)
 	s.Equal(Paused, campaign.State, "it rings here only once someone resumes it")
 
@@ -2635,7 +2635,7 @@ func (s *DataMoveSuite) TestACampaignTheCopyPausedIsNamedAndResumesWhereTheCopyL
 
 	_, campaigns := s.resume("moved")
 	s.Equal([]string{running}, campaigns)
-	campaign, err := s.destination.Campaign(s.ctx, "moved", running)
+	campaign, err := s.destination.Campaigns.Get(s.ctx, "moved", running)
 	s.Require().NoError(err)
 	s.Equal(Paused, campaign.State, "the cut-over resumes no campaign")
 
@@ -2685,7 +2685,7 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 		Transport: "tcp", Username: "agent", PasswordSealed: []byte("sealed here"),
 		PasswordKEKVersion: 1, Codecs: []string{"PCMU"},
 	}
-	s.Require().NoError(s.source.CreateSIPTrunk(s.ctx, trunk))
+	s.Require().NoError(s.source.SIPTrunks.Insert(s.ctx, trunk))
 
 	trunks := s.export("acme").of("sip_trunks")
 	s.Require().Len(trunks, 1)
@@ -2693,7 +2693,7 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 
 	s.move("acme", "acme")
 
-	moved, err := s.destination.SIPTrunk(s.ctx, "acme", trunk.ID)
+	moved, err := s.destination.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
 	s.Require().NoError(err)
 	s.Empty(moved.PasswordSealed)
 	s.Equal(0, moved.PasswordKEKVersion)
@@ -2702,10 +2702,10 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 
 func (s *DataMoveSuite) TestAMovedNumberLeavesItsBridgePasswordBehind() {
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000110", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.AttachNumber(s.ctx, "acme", "+15550000110", NumberAttachment{
+	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000110", NumberAttachment{
 		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: "call-1",
 		BridgeURI: "sip:trunk.example.com", BridgeUsername: "agent",
 		BridgePasswordSealed: []byte("sealed bridge"), BridgePasswordKEKVersion: 1,
@@ -2746,34 +2746,34 @@ func (s *DataMoveSuite) TestAMovedNumberLeavesItsBridgePasswordBehind() {
 			"SELECT "+column+" FROM phone_numbers WHERE e164 = ?", "+15550000110").Scan(value))
 		s.False(value.Valid, "%s came along as %q", column, value.String)
 	}
-	_, err = s.destination.AttachedBridge(s.ctx, "telnyx", "+15550000110")
+	_, err = s.destination.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15550000110")
 	s.ErrorIs(err, ErrNoNumber, "it arrives needing to be attached again")
 }
 
 func (s *DataMoveSuite) TestAMovedNumberArrivesNotAttached() {
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000113", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.AttachNumber(s.ctx, "acme", "+15550000113", NumberAttachment{
+	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000113", NumberAttachment{
 		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default",
 	}))
 
 	s.move("acme", "acme")
 
-	moved, err := s.destination.Number(s.ctx, "acme", "+15550000113")
+	moved, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000113")
 	s.Require().NoError(err)
 	s.Nil(moved.AttachedAt)
 }
 
 func (s *DataMoveSuite) TestAMovedNumberIsHeldWhereItArrives() {
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000111", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
 	s.move("acme", "acme")
 	s.move("acme", "acme")
 
-	held, err := s.destination.Number(s.ctx, "acme", "+15550000111")
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000111")
 	s.Require().NoError(err)
 	s.Equal("plivo", held.Vendor)
 }
@@ -2791,7 +2791,7 @@ func (s *DataMoveSuite) TestAChangeAppliedLaterKeepsANumberAttachedOnTheDestinat
 	s.capture("acme")
 	attached := s.numberAttachedHere("+15550000131")
 	// The source attaches it too, to another agent, and its row says so in the change.
-	s.Require().NoError(s.source.AttachNumber(s.ctx, "acme", "+15550000131", NumberAttachment{
+	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000131", NumberAttachment{
 		TrunkID: "trunk-there", RouteID: "route-there", CallType: "default", CallID: "call-there",
 		ConfigID: s.seedAgentConfig(s.source, "acme", "there"), BridgeURI: "sip:there.example.com",
 	}))
@@ -2805,18 +2805,18 @@ func (s *DataMoveSuite) TestAChangeAppliedLaterKeepsANumberAttachedOnTheDestinat
 }
 
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumbersLineOnTheDestination() {
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000132", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
 	s.move("acme", "acme")
 	// On a trunk to place calls, not attached.
-	s.Require().NoError(s.destination.InTrunkGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
+	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.SetLine("+15550000132", "trunk-here", "route-here", NumberBridge{
 				URI: "sip:here.example.com", Username: "agent-here", PasswordSealed: []byte("sealed here"), KEKVersion: 1,
 			})
 		}))
-	lined, err := s.destination.Number(s.ctx, "acme", "+15550000132")
+	lined, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000132")
 	s.Require().NoError(err)
 	s.retag(s.source, "+15550000132")
 
@@ -2826,12 +2826,12 @@ func (s *DataMoveSuite) TestCopyingAgainKeepsANumbersLineOnTheDestination() {
 }
 
 func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDestination() {
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000133", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
 	s.move("acme", "acme")
 	there := s.seedAgentConfig(s.source, "acme", "there")
-	s.Require().NoError(s.source.AttachNumber(s.ctx, "acme", "+15550000133", NumberAttachment{
+	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000133", NumberAttachment{
 		TrunkID: "trunk-there", RouteID: "route-there", StreamAppPK: 42, CallType: "default", CallID: "call-there",
 		ConfigID: there, BridgeURI: "sip:there.example.com", BridgeUsername: "agent-there",
 	}))
@@ -2840,7 +2840,7 @@ func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDesti
 	s.move("acme", "acme")
 
 	// What the source's row says, as before a number on a trunk here kept its line.
-	moved, err := s.destination.Number(s.ctx, "acme", "+15550000133")
+	moved, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000133")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"team": "sales"}, moved.Tags)
 	s.Equal(there, moved.ConfigID)
@@ -2853,24 +2853,24 @@ func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDesti
 
 func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALineOnTheDestination() {
 	first := s.seedAgentConfig(s.source, "acme", "first")
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000134", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.AttachNumber(s.ctx, "acme", "+15550000134", NumberAttachment{
+	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000134", NumberAttachment{
 		TrunkID: "trunk-there", RouteID: "route-there", CallType: "default", CallID: "call-there", ConfigID: first,
 	}))
 	s.move("acme", "acme")
 	// On a line to place calls, which never wrote an agent.
-	s.Require().NoError(s.destination.InTrunkGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
+	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.SetLine("+15550000134", "trunk-here", "route-here", NumberBridge{})
 		}))
 	second := s.seedAgentConfig(s.source, "acme", "second")
-	s.Require().NoError(s.source.SetNumberAgent(s.ctx, "acme", "+15550000134", second))
+	s.Require().NoError(s.source.PhoneNumbers.SetAgent(s.ctx, "acme", "+15550000134", second))
 
 	s.move("acme", "acme")
 
-	moved, err := s.destination.Number(s.ctx, "acme", "+15550000134")
+	moved, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000134")
 	s.Require().NoError(err)
 	s.Equal(second, moved.ConfigID, "the source's agent arrives")
 	s.Equal("trunk-here", moved.StreamTrunkID, "the line stays")
@@ -2878,11 +2878,11 @@ func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALin
 
 func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGaveBack() {
 	attached := s.numberAttachedHere("+15550000135")
-	s.Require().NoError(s.source.ReleaseNumber(s.ctx, "acme", "+15550000135", time.Now()))
+	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000135", time.Now()))
 
 	s.move("acme", "acme")
 
-	numbers, err := s.destination.CustomerNumbers(s.ctx, "acme", true)
+	numbers, err := s.destination.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	var moved *PhoneNumber
 	for i := range numbers {
@@ -2901,16 +2901,16 @@ func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGave
 // numberAttachedHere is a number the source holds, copied here and attached here, as it reads
 // here once attached.
 func (s *DataMoveSuite) numberAttachedHere(e164 string) PhoneNumber {
-	s.Require().NoError(s.source.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
 	s.move("acme", "acme")
-	s.Require().NoError(s.destination.AttachNumber(s.ctx, "acme", e164, NumberAttachment{
+	s.Require().NoError(s.destination.PhoneNumbers.Attach(s.ctx, "acme", e164, NumberAttachment{
 		TrunkID: "trunk-here", RouteID: "route-here", StreamAppPK: 42, CallType: "default", CallID: "call-here",
 		ConfigID: s.seedAgentConfig(s.destination, "acme", "here"), BridgeURI: "sip:here.example.com",
 		BridgeUsername: "agent-here", BridgePasswordSealed: []byte("sealed here"), BridgePasswordKEKVersion: 1,
 	}))
-	attached, err := s.destination.Number(s.ctx, "acme", e164)
+	attached, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", e164)
 	s.Require().NoError(err)
 	return attached
 }
@@ -2924,7 +2924,7 @@ func (s *DataMoveSuite) retag(store *Store, e164 string) {
 // assertLineKept checks the number reads here as it did before the source's row came again,
 // except for the source's edit, which arrives.
 func (s *DataMoveSuite) assertLineKept(before PhoneNumber) {
-	after, err := s.destination.Number(s.ctx, "acme", before.E164)
+	after, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", before.E164)
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"team": "sales"}, after.Tags, "the source's edit arrives")
 	before.Tags = after.Tags
@@ -2932,7 +2932,7 @@ func (s *DataMoveSuite) assertLineKept(before PhoneNumber) {
 }
 
 func (s *DataMoveSuite) TestANumberInAnotherFormIsNotImported() {
-	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000112", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
@@ -2949,21 +2949,21 @@ func (s *DataMoveSuite) TestANumberInAnotherFormIsNotImported() {
 	}})
 	s.ErrorIs(err, ErrNotE164, "nor replayed as a change")
 
-	held, err := s.destination.CustomerNumbers(s.ctx, "other", true)
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Empty(held)
-	_, err = s.destination.Number(s.ctx, "acme", "+15550000112")
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000112")
 	s.NoError(err, "the number stays with who held it")
 }
 
 func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsIsNotImported() {
-	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000113", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "INSERT INTO phone_numbers (e164, vendor, country, customer_id)"+
 		" VALUES ('15550000114', 'plivo', 'US', 'acme')")
 	s.Require().NoError(err, "held in another form, before every write checked the form")
-	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+5550000120", Vendor: "bandwidth", Country: "US", CustomerID: "acme",
 	}))
 
@@ -2978,7 +2978,7 @@ func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsIsNotImported() {
 }
 
 func (s *DataMoveSuite) TestANumberIsReadByItsColumnsAsTheyAreNamed() {
-	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000119", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
@@ -2999,20 +2999,20 @@ func (s *DataMoveSuite) TestANumberIsReadByItsColumnsAsTheyAreNamed() {
 		err = s.destination.ImportRow(s.ctx, "other", "phone_numbers", encoded)
 		s.ErrorIs(err, number.refused, "%s %s", number.vendor, number.e164)
 	}
-	held, err := s.destination.CustomerNumbers(s.ctx, "other", true)
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Empty(held)
 }
 
 func (s *DataMoveSuite) TestANumberNobodyElseHoldsAtAVendorIsImported() {
-	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.destination.ReleaseNumber(s.ctx, "acme", "+15550000115", time.Time{}))
-	s.Require().NoError(s.destination.AddTrunkNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Release(s.ctx, "acme", "+15550000115", time.Time{}))
+	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
 	}))
-	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000117", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
@@ -3049,10 +3049,10 @@ func (s *DataMoveSuite) TestAnImportedNumberCannotPointAtAnotherCustomersTrunk()
 		ID: newID(), CustomerID: "other", Name: "main", Host: "trunk.example.com", Port: 5060,
 		Transport: "tcp", Username: "agent", PasswordSealed: []byte{}, Codecs: []string{"PCMU"},
 	}
-	s.Require().NoError(s.destination.CreateSIPTrunk(s.ctx, trunk))
+	s.Require().NoError(s.destination.SIPTrunks.Insert(s.ctx, trunk))
 
 	own := s.trunkOf(s.source, "acme")
-	s.Require().NoError(s.source.AddTrunkNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000109", Country: "US", CustomerID: "acme", SIPTrunkID: own.ID,
 	}))
 	numbers := s.export("acme").of("phone_numbers")
@@ -3070,7 +3070,7 @@ func (s *DataMoveSuite) trunkOf(store *Store, customerID string) *SIPTrunk {
 		ID: newID(), CustomerID: customerID, Name: "main", Host: "trunk.example.com", Port: 5060,
 		Transport: "tcp", Username: "agent", PasswordSealed: []byte{},
 	}
-	s.Require().NoError(store.CreateSIPTrunk(s.ctx, trunk))
+	s.Require().NoError(store.SIPTrunks.Insert(s.ctx, trunk))
 	return trunk
 }
 
@@ -3228,19 +3228,19 @@ func (s *DataMoveSuite) drewNothing(store *Store, table, column string) {
 func (s *DataMoveSuite) TestAContactAddedToAMovedCampaignIsRungAfterTheMovedOnes() {
 	s.drewNothing(s.destination, "campaign_contacts", "seq")
 	campaign := &Campaign{CustomerID: "acme", Name: "renewals"}
-	s.Require().NoError(s.source.CreateCampaign(s.ctx, campaign))
+	s.Require().NoError(s.source.Campaigns.Insert(s.ctx, campaign))
 	// The source has handed out more places than the destination: its contacts' places are
 	// numbers the destination's sequence has not reached.
 	_, err := s.source.GlobalDB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence('campaign_contacts', 'seq'), 1000)")
 	s.Require().NoError(err)
-	_, _, err = s.source.AddContacts(s.ctx, campaign.ID, []Contact{{ToNumber: "+15550000001"}})
+	_, _, err = s.source.CampaignContacts.InsertMany(s.ctx, campaign.ID, []Contact{{ToNumber: "+15550000001"}})
 	s.Require().NoError(err)
 
 	s.move("acme", "acme")
-	_, _, err = s.destination.AddContacts(s.ctx, campaign.ID, []Contact{{ToNumber: "+15550000002"}})
+	_, _, err = s.destination.CampaignContacts.InsertMany(s.ctx, campaign.ID, []Contact{{ToNumber: "+15550000002"}})
 	s.Require().NoError(err)
 
-	contacts, err := s.destination.QueryContacts(s.ctx, campaign.ID, ContactFilter{})
+	contacts, err := s.destination.CampaignContacts.Select(s.ctx, campaign.ID, ContactFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(contacts, 2)
 	s.Equal("+15550000001", contacts[0].ToNumber, "a contact added here is rung after the ones that moved")

@@ -155,7 +155,7 @@ func (s *ReplicateRepeatSuite) copiedBefore() {
 // recorded records a number of acme's at the source, its digits the number given.
 func (s *ReplicateRepeatSuite) recorded(digits int) {
 	number := &store.PhoneNumber{E164: e164(digits), Vendor: "telnyx", Country: "US", CustomerID: "acme"}
-	s.Require().NoError(s.source.RecordNumber(s.ctx, number))
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, number))
 }
 
 // tagged sets the label tag of a number of acme's in a store.
@@ -474,7 +474,7 @@ func (s *ReplicateRepeatSuite) TestOnlyATableInTheSharedDatabaseMakesAnAppHeld()
 	s.Require().NoError(err)
 	s.Equal("", table, "a row in a shard table does not count")
 
-	s.Require().NoError(s.target.RecordNumber(s.ctx, &store.PhoneNumber{E164: e164(1), Vendor: "telnyx", Country: "US", CustomerID: "acme"}))
+	s.Require().NoError(s.target.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{E164: e164(1), Vendor: "telnyx", Country: "US", CustomerID: "acme"}))
 	table, err = s.target.HoldingTable(s.ctx, "acme")
 	s.Require().NoError(err)
 	s.Equal("phone_numbers", table)

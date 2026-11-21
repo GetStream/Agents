@@ -27,14 +27,14 @@ func (s *TelnyxChannelSuite) TestKeywordsAreAnsweredWithTheNumbersUseCaseTexts()
 	s.useCase("Default", true)
 	assigned := s.useCase("Line", false)
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{E164: s.line, Vendor: "telnyx", Country: "US", CustomerID: s.customerID()}))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{E164: s.line, Vendor: "telnyx", Country: "US", CustomerID: s.customerID()}))
 	// One customer at a time holds a number (phone_numbers_held_idx), and every test's line is
 	// the same one.
 	s.T().Cleanup(func() {
 		_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM phone_numbers WHERE customer_id = ?", s.customerID())
 		s.NoError(err)
 	})
-	s.Require().NoError(s.store.AssignNumbers(ctx, s.customerID(), assigned.ID, []string{s.line}))
+	s.Require().NoError(s.store.UseCases.AssignNumbers(ctx, s.customerID(), assigned.ID, []string{s.line}))
 	person := "+13125550001"
 
 	for i, word := range []string{"STOP", "START", "HELP"} {
@@ -79,7 +79,7 @@ func (s *TelnyxChannelSuite) useCase(name string, isDefault bool) store.UseCase 
 		CustomerID: s.customerID(), Name: name, IsDefault: isDefault, Status: dlc.Draft,
 		OptOutMessage: name + ": stopped.", OptInMessage: name + ": started again.", HelpMessage: name + ": help.",
 	}
-	s.Require().NoError(s.store.CreateUseCase(context.Background(), &useCase))
+	s.Require().NoError(s.store.UseCases.Insert(context.Background(), &useCase))
 	return useCase
 }
 
@@ -115,7 +115,7 @@ func (s *TelnyxSandboxSuite) SetupSuite() {
 
 func (s *TelnyxSandboxSuite) SetupTest() {
 	s.telnyxLine.SetupTest()
-	s.Require().NoError(s.store.SetSandboxRecipients(context.Background(), s.customerID(), []string{sandboxRecipient}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(context.Background(), s.customerID(), []string{sandboxRecipient}))
 }
 
 // A person the sandbox does not list reaches no agent and is sent nothing.
@@ -256,7 +256,7 @@ func (s *SlackChannelSuite) TestASandboxedCustomersSlackThreadIsNeitherGatedNorC
 func (s *WhatsAppChannelSuite) TestASandboxedCustomersRecipientIsAnsweredByTheNumberInE164() {
 	s.holdSandbox(dlc.Sandbox{Enabled: true, Recipients: 2, MessagesPerDay: 30})
 	recipient, other := "16505551234", "16505550199"
-	s.Require().NoError(s.store.SetSandboxRecipients(context.Background(), s.customerID(), []string{"+" + recipient}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(context.Background(), s.customerID(), []string{"+" + recipient}))
 
 	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.unit, other, "Hi")))
 	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.unit, recipient, "Hi")))

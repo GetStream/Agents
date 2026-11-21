@@ -34,6 +34,20 @@ type StreamTrunk struct {
 	CreatedAt                time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 }
 
+// Validate refuses a trunk the table would refuse.
+func (t *StreamTrunk) Validate() error {
+	return validate("stream trunk").
+		required("id", t.ID).
+		required("customer_id", t.CustomerID).
+		required("vendor", t.Vendor).
+		done()
+}
+
+// StreamTrunks are the Stream SIP trunks customers' numbers share, in the shared database.
+type StreamTrunks struct {
+	store *Store
+}
+
 // ErrNoStreamTrunk says the customer has no Stream trunk with that id.
 var ErrNoStreamTrunk = errors.New("store: no such stream trunk")
 
@@ -56,7 +70,7 @@ type NumberBridge struct {
 // TrunkGroupTx is one trunk group's rows, read and written in a transaction that holds the
 // group's lock.
 type TrunkGroupTx struct {
-	// ctx lives only as long as the InTrunkGroup call that made the TrunkGroupTx.
+	// ctx lives only as long as the InGroup call that made the TrunkGroupTx.
 	ctx   context.Context
 	tx    bun.Tx
 	group TrunkGroup
@@ -66,10 +80,10 @@ type TrunkGroupTx struct {
 // the same text.
 const trunkGroupLockSeed = 0
 
-// StreamTrunk returns one of a customer's Stream trunks by Stream's id.
-func (s *Store) StreamTrunk(ctx context.Context, customerID, id string) (StreamTrunk, error) {
+// Get returns one of a customer's Stream trunks by Stream's id.
+func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTrunk, error) {
 	var trunk StreamTrunk
-	err := s.global.NewSelect().Model(&trunk).
+	err := r.store.global.NewSelect().Model(&trunk).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Scan(ctx)
@@ -82,14 +96,14 @@ func (s *Store) StreamTrunk(ctx context.Context, customerID, id string) (StreamT
 	return trunk, nil
 }
 
-// InTrunkGroup runs fn in a transaction that holds a lock on the group, so two numbers
+// InGroup runs fn in a transaction that holds a lock on the group, so two numbers
 // joining at once do not both see room on a trunk and both open a new one.
-func (s *Store) InTrunkGroup(ctx context.Context, group TrunkGroup, fn func(ctx context.Context, tx *TrunkGroupTx) error) error {
+func (r *StreamTrunks) InGroup(ctx context.Context, group TrunkGroup, fn func(ctx context.Context, tx *TrunkGroupTx) error) error {
 	if group.CustomerID == "" || group.Vendor == "" {
 		return stack.Wrap(errors.New("store: a trunk group needs a customer and a vendor"))
 	}
 	key := "stream_trunks:" + group.CustomerID + ":" + strconv.FormatInt(group.StreamAppPK, 10) + ":" + group.Vendor
-	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, key, trunkGroupLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock trunk group: %w", err))
 		}
@@ -114,6 +128,9 @@ func (t *TrunkGroupTx) Trunks() ([]StreamTrunk, error) {
 // another group is refused rather than taken over.
 func (t *TrunkGroupTx) SaveTrunk(trunk StreamTrunk) error {
 	trunk.CustomerID, trunk.StreamAppPK, trunk.Vendor = t.group.CustomerID, t.group.StreamAppPK, t.group.Vendor
+	if err := trunk.Validate(); err != nil {
+		return stack.Wrap(err)
+	}
 	result, err := t.tx.NewInsert().Model(&trunk).
 		On("CONFLICT (id) DO UPDATE").
 		Set("numbers = EXCLUDED.numbers").

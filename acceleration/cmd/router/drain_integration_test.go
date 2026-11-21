@@ -561,14 +561,14 @@ func (s *DrainSuite) TestTheDrainWaitsForACampaignCallInFlight() {
 	s.Require().NoError(err)
 	created := store.Campaign{CustomerID: customerID, Name: "renewals", ConfigID: "config-1",
 		FromNumber: "+15550100000", Concurrency: 1, Sequence: sequence, CallingHours: hours}
-	s.Require().NoError(s.db.CreateCampaign(s.ctx, &created))
-	_, _, err = s.db.AddContacts(s.ctx, created.ID, []store.Contact{{ToNumber: "+15550000001"}})
+	s.Require().NoError(s.db.Campaigns.Insert(s.ctx, &created))
+	_, _, err = s.db.CampaignContacts.InsertMany(s.ctx, created.ID, []store.Contact{{ToNumber: "+15550000001"}})
 	s.Require().NoError(err)
 	now := time.Now()
-	_, err = s.db.LaunchCampaign(s.ctx, customerID, created.ID, store.Launch{StartAt: now, Now: now, APIKey: "key-a"})
+	_, err = s.db.Campaigns.Launch(s.ctx, customerID, created.ID, store.Launch{StartAt: now, Now: now, APIKey: "key-a"})
 	s.Require().NoError(err)
 	// Stopped whatever happens, so no later test's dialer rings it.
-	s.T().Cleanup(func() { s.NoError(s.db.StopCampaign(context.Background(), customerID, created.ID, time.Now())) })
+	s.T().Cleanup(func() { s.NoError(s.db.Campaigns.Stop(context.Background(), customerID, created.ID, time.Now())) })
 
 	release := make(chan struct{})
 	dialer, err := campaign.New(campaign.Options{

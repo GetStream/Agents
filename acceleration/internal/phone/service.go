@@ -528,7 +528,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if s.store == nil {
 		return held, nil
 	}
-	if err := s.store.RecordNumber(ctx, &held); err != nil {
+	if err := s.store.PhoneNumbers.Insert(ctx, &held); err != nil {
 		// The number is bought either way, so saying so is more useful than failing and
 		// leaving the caller thinking it was not.
 		// Support finds the number at the vendor by its order, and the log holds no number.
@@ -588,7 +588,7 @@ func (s *Service) number(ctx context.Context, customerID, e164, doing string) (s
 	if s.store == nil {
 		return store.PhoneNumber{}, stack.Wrap(fmt.Errorf("phone: %s a number needs a database to know who holds it", doing))
 	}
-	return s.store.Number(ctx, customerID, e164)
+	return s.store.PhoneNumbers.GetByE164(ctx, customerID, e164)
 }
 
 // detach stops the vendor sending a held number's callers, then forgets it was attached.
@@ -761,7 +761,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		return Attached{}, stack.Wrap(errors.New("phone: attaching a number needs a database to know who holds it"))
 	}
 
-	held, err := s.store.Number(ctx, attachment.CustomerID, attachment.E164)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, attachment.CustomerID, attachment.E164)
 	if err != nil {
 		return Attached{}, stack.Wrap(err)
 	}
@@ -916,7 +916,7 @@ func (s *Service) finishAttach(ctx context.Context, provider Provider, attachmen
 	// The vendor has already been told to send calls to the trunk. There is no primitive to
 	// un-configure a provider's inbound routing, so a failure here leaves the vendor
 	// pointing at a trunk that, when it is the number's own, is about to be rolled back.
-	if err := s.store.AttachNumber(ctx, attachment.CustomerID, attachment.E164, record); err != nil {
+	if err := s.store.PhoneNumbers.Attach(ctx, attachment.CustomerID, attachment.E164, record); err != nil {
 		return stack.Wrap(err)
 	}
 	return nil
@@ -931,7 +931,7 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if s.sealer == nil {
 		return Bridge{}, stack.Wrap(ErrNoSealer)
 	}
-	stored, err := s.store.AttachedBridge(ctx, vendor, e164)
+	stored, err := s.store.PhoneNumbers.AttachedBridge(ctx, vendor, e164)
 	if err != nil {
 		return Bridge{}, err
 	}
@@ -1048,7 +1048,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		return Placed{}, stack.Wrap(Invalid(errors.New("phone: a call needs one of your numbers to call from")))
 	}
 
-	held, err := s.store.Number(ctx, request.Owner.CustomerID, request.From)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, request.Owner.CustomerID, request.From)
 	if err != nil {
 		return Placed{}, stack.Wrap(err)
 	}
@@ -1221,7 +1221,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	// A shared line outlives the call, so its row costs nothing to undo when the dial fails,
 	// and the call's app (CallPin) is known before its leg arrives.
 	if shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			s.forgetOutcome(ctx, token, callID)
 			return Placed{}, stack.Wrap(err)
 		}
@@ -1263,7 +1263,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	s.logger.Info("placed a phone call", append([]any{"session_id", sessionID,
 		"vendor_call_id", dialed.VendorCallID, "vendor", held.Vendor}, sites.logged()...)...)
 	if !shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			// The call is placed and connecting; deleting its trunk now would drop a live
 			// call. A logged, rare leak beats that. session_ended cannot clean a trunk it
 			// has no row for, which is the cost of this failing.
@@ -1420,7 +1420,7 @@ func (s *Service) park(
 	}
 
 	token := uuid.NewString()
-	err := s.store.ParkBridge(ctx, &store.CallBridge{
+	err := s.store.CallBridges.Insert(ctx, &store.CallBridge{
 		Token:         token,
 		CustomerID:    customerID,
 		Vendor:        vendor,
@@ -1447,7 +1447,7 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 		return Plan{}, errors.New("phone: answering a call needs a database to know what to answer")
 	}
 
-	bridge, err := s.store.ClaimBridge(ctx, token)
+	bridge, err := s.store.CallBridges.Claim(ctx, token)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -1588,7 +1588,7 @@ func (s *Service) SweepBridges(ctx context.Context) (int64, error) {
 	if s.store == nil {
 		return 0, nil
 	}
-	return s.store.SweepBridges(ctx)
+	return s.store.CallBridges.Sweep(ctx)
 }
 
 // statusTokenLifetime is how long a placed call's status URL takes posts: past the longest a
@@ -1614,7 +1614,7 @@ func (s *Service) ReleaseCall(ctx context.Context, scope store.AppScope, callTyp
 	if s.store == nil || (s.stream == nil && s.apps == nil) {
 		return nil
 	}
-	resources, err := s.store.ReleaseCallResourcesInApp(ctx, scope, callType, callID)
+	resources, err := s.store.CallResources.Release(ctx, scope, callType, callID)
 	if err != nil {
 		return fmt.Errorf("phone: release call resources: %w", err)
 	}
@@ -1638,7 +1638,7 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 	if s.store == nil || (s.stream == nil && s.apps == nil) {
 		return 0, nil
 	}
-	stale, err := s.store.StaleCallResources(ctx, before)
+	stale, err := s.store.CallResources.SelectStale(ctx, before)
 	if err != nil {
 		return 0, fmt.Errorf("phone: sweep call resources: %w", err)
 	}
@@ -1658,7 +1658,7 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 				continue
 			}
 		}
-		if err := s.store.ForgetCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Forget(ctx, resource); err != nil {
 			return forgot, fmt.Errorf("phone: sweep call resources: %w", err)
 		}
 		forgot++
@@ -1743,7 +1743,7 @@ func (s *Service) sharedLine(ctx context.Context, stream *Stream, pin int64, pro
 // forgetCallResource deletes the row of a leg on a shared line that was never placed.
 // Best-effort: a failure is logged, never returned, so it cannot mask the dial's own.
 func (s *Service) forgetCallResource(ctx context.Context, resource *store.CallResource) {
-	if err := s.store.DeleteCallResource(ctx, resource.ID); err != nil {
+	if err := s.store.CallResources.Delete(ctx, resource.ID); err != nil {
 		s.logger.Error("could not delete the row of a leg that did not place",
 			"trunk", resource.TrunkID, "call", resource.CallID, "error", err)
 	}
@@ -1835,7 +1835,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		return Dialed{}, stack.Wrap(Invalid(errors.New("phone: a transfer needs one of your numbers to dial from")))
 	}
 
-	held, err := s.store.Number(ctx, request.Owner.CustomerID, request.From)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, request.Owner.CustomerID, request.From)
 	if err != nil {
 		return Dialed{}, stack.Wrap(err)
 	}
@@ -1920,7 +1920,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		Shared:      shared,
 	}
 	if shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			return Dialed{}, stack.Wrap(err)
 		}
 	}
@@ -1948,7 +1948,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		Direction:    store.Outbound, LocalNumber: request.From, RemoteNumber: request.To,
 	}, false)
 	if !shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			// The transfer leg is placed and connecting; deleting its trunk now would drop
 			// a live call. A logged, rare leak beats that. session_ended cannot clean a
 			// trunk it has no row for, which is the cost of this failing.
@@ -1976,7 +1976,7 @@ func (s *Service) SendDigits(ctx context.Context, customerID, vendor, vendorCall
 	if s.store == nil {
 		return stack.Wrap(errors.New("phone: pressing digits needs a database"))
 	}
-	placed, err := s.store.PlacedCallLeg(ctx, customerID, vendor, vendorCallID)
+	placed, err := s.store.CallLegs.Placed(ctx, customerID, vendor, vendorCallID)
 	if err != nil {
 		return err
 	}
@@ -1995,7 +1995,7 @@ func (s *Service) Numbers(ctx context.Context, customerID string, includeRelease
 	if s.store == nil {
 		return nil, stack.Wrap(errors.New("phone: listing numbers needs a database"))
 	}
-	return s.store.CustomerNumbers(ctx, customerID, includeReleased)
+	return s.store.PhoneNumbers.Select(ctx, customerID, store.PhoneNumberFilter{IncludeReleased: includeReleased})
 }
 
 // names renders capabilities for storage, since Postgres holds them as plain text.

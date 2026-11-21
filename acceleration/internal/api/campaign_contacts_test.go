@@ -432,7 +432,7 @@ func (s *CampaignContactsSuite) draft(body map[string]any) Campaign {
 // launched is a running campaign with one contact.
 func (s *CampaignContactsSuite) launched() Campaign {
 	from := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: from, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	created := s.draft(map[string]any{"config_id": s.data.createAgentConfig().Id, "from_number": from})
@@ -481,11 +481,11 @@ func (s *CampaignContactsSuite) dial(campaignID, contactID string, attempt, dial
 		CampaignID: campaignID, ContactID: contactID, StepID: "step_1",
 		Attempt: attempt, Dial: dial, StartedAt: at,
 	}
-	s.Require().NoError(s.store.StartDial(ctx, &row))
+	s.Require().NoError(s.store.CampaignAttempts.Insert(ctx, &row))
 	if result == "" && callOutcome == "" {
 		return
 	}
-	s.Require().NoError(s.store.EndDial(ctx, row.ID, result, callOutcome, s.utils.callID(), "", at.Add(30*time.Second), nil))
+	s.Require().NoError(s.store.CampaignAttempts.End(ctx, row.ID, result, callOutcome, s.utils.callID(), "", at.Add(30*time.Second), nil))
 	if outcome != "" {
 		_, err := s.store.GlobalDB().NewUpdate().Model((*store.CampaignAttempt)(nil)).
 			Set("outcome = ?", outcome).Where("id = ?", row.ID).Exec(ctx)

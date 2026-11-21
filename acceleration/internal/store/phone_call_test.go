@@ -24,7 +24,7 @@ func (s *StoreSuite) placedPhoneCall(token string, change func(*PhoneCall)) Phon
 	if change != nil {
 		change(&call)
 	}
-	s.Require().NoError(s.store.InsertPhoneCall(s.ctx, &call))
+	s.Require().NoError(s.store.PhoneCalls.Insert(s.ctx, &call))
 	return call
 }
 
@@ -35,12 +35,12 @@ func (s *StoreSuite) TestAPhoneCallIsFoundByItsToken() {
 	s.placedPhoneCall("one", nil)
 	s.placedPhoneCall("two", func(call *PhoneCall) { call.CallID = "other" })
 
-	found, err := s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "two"}, unchanged)
+	found, err := s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "two"}, unchanged)
 	s.Require().NoError(err)
 	s.Equal("other", found.CallID)
 	s.Equal(s.base, found.PlacedAt.UTC())
 
-	_, err = s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "three"}, unchanged)
+	_, err = s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "three"}, unchanged)
 	s.ErrorIs(err, ErrNoPhoneCall)
 }
 
@@ -50,25 +50,25 @@ func (s *StoreSuite) TestAPhoneCallIsFoundByItsCallAndNumbers() {
 	s.placedPhoneCall("transfer", func(call *PhoneCall) { call.RemoteNumber = "+15125550142" })
 	where := PhoneCallWhere{CustomerID: "app", CallType: "default", CallID: "call", LocalNumber: "+15125550100", RemoteNumber: "+15125550199"}
 
-	found, err := s.store.ChangePhoneCall(s.ctx, where, unchanged)
+	found, err := s.store.PhoneCalls.Change(s.ctx, where, unchanged)
 	s.Require().NoError(err)
 	s.Equal("again", found.Token, "the newest match")
 
 	where.StreamAppPK = 7
-	_, err = s.store.ChangePhoneCall(s.ctx, where, unchanged)
+	_, err = s.store.PhoneCalls.Change(s.ctx, where, unchanged)
 	s.ErrorIs(err, ErrNoPhoneCall, "another Stream app's call of the same id")
 }
 
 func (s *StoreSuite) TestAChangeThatSaysNoWritesNothing() {
 	s.placedPhoneCall("one", nil)
 
-	_, err := s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "one"}, func(call *PhoneCall) bool {
+	_, err := s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "one"}, func(call *PhoneCall) bool {
 		call.Outcome = "busy"
 		return false
 	})
 	s.Require().NoError(err)
 
-	found, err := s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "one"}, unchanged)
+	found, err := s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "one"}, unchanged)
 	s.Require().NoError(err)
 	s.Empty(found.Outcome)
 }
@@ -79,7 +79,7 @@ func (s *StoreSuite) TestTwoChangesAtOnceSeeEachOther() {
 	var wg sync.WaitGroup
 	for _, word := range []string{"a", "b"} {
 		wg.Go(func() {
-			_, err := s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "one"}, func(call *PhoneCall) bool {
+			_, err := s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "one"}, func(call *PhoneCall) bool {
 				call.VendorStatus += word
 				return true
 			})
@@ -88,7 +88,7 @@ func (s *StoreSuite) TestTwoChangesAtOnceSeeEachOther() {
 	}
 	wg.Wait()
 
-	found, err := s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "one"}, unchanged)
+	found, err := s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "one"}, unchanged)
 	s.Require().NoError(err)
 	s.ElementsMatch([]rune("ab"), []rune(found.VendorStatus), "neither write lost")
 }
@@ -96,9 +96,9 @@ func (s *StoreSuite) TestTwoChangesAtOnceSeeEachOther() {
 func (s *StoreSuite) TestDeletingAPhoneCallLeavesNoRow() {
 	s.placedPhoneCall("one", nil)
 
-	s.Require().NoError(s.store.DeletePhoneCall(s.ctx, "one"))
+	s.Require().NoError(s.store.PhoneCalls.Delete(s.ctx, "one"))
 
-	calls, err := s.store.PhoneCalls(s.ctx, "app", []string{"call"})
+	calls, err := s.store.PhoneCalls.Select(s.ctx, "app", []string{"call"})
 	s.Require().NoError(err)
 	s.Empty(calls)
 }
@@ -110,13 +110,13 @@ func (s *StoreSuite) TestClearingTokensKeepsTheRows() {
 		call.PlacedAt = s.base.Add(time.Hour)
 	})
 
-	cleared, err := s.store.ClearPhoneCallTokens(s.ctx, s.base.Add(time.Minute))
+	cleared, err := s.store.PhoneCalls.ClearTokens(s.ctx, s.base.Add(time.Minute))
 	s.Require().NoError(err)
 	s.EqualValues(1, cleared)
 
-	_, err = s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "old"}, unchanged)
+	_, err = s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "old"}, unchanged)
 	s.ErrorIs(err, ErrNoPhoneCall)
-	calls, err := s.store.PhoneCalls(s.ctx, "app", []string{"old", "new"})
+	calls, err := s.store.PhoneCalls.Select(s.ctx, "app", []string{"old", "new"})
 	s.Require().NoError(err)
 	s.Len(calls, 2)
 }
@@ -130,7 +130,7 @@ func (s *StoreSuite) TestPhoneCallsReadsTheNewestPerCall() {
 		call.PlacedAt = s.base.Add(time.Hour)
 	})
 
-	calls, err := s.store.PhoneCalls(s.ctx, "app", []string{"call", "other", "unknown"})
+	calls, err := s.store.PhoneCalls.Select(s.ctx, "app", []string{"call", "other", "unknown"})
 	s.Require().NoError(err)
 	tokens := map[string]string{}
 	for _, call := range calls {
@@ -142,15 +142,15 @@ func (s *StoreSuite) TestPhoneCallsReadsTheNewestPerCall() {
 func (s *ShardedStoreSuite) TestAPhoneCallAnotherShardPlacedIsChangedThere() {
 	call := PhoneCall{Token: "there", CustomerID: "app", CallType: "default", CallID: "call", Vendor: "telnyx",
 		LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: s.base}
-	s.Require().NoError(s.other.InsertPhoneCall(s.ctx, &call))
+	s.Require().NoError(s.other.PhoneCalls.Insert(s.ctx, &call))
 
-	_, err := s.store.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "there"}, func(call *PhoneCall) bool {
+	_, err := s.store.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "there"}, func(call *PhoneCall) bool {
 		call.Outcome = "busy"
 		return true
 	})
 	s.Require().NoError(err)
 
-	found, err := s.other.ChangePhoneCall(s.ctx, PhoneCallWhere{Token: "there"}, unchanged)
+	found, err := s.other.PhoneCalls.Change(s.ctx, PhoneCallWhere{Token: "there"}, unchanged)
 	s.Require().NoError(err)
 	s.Equal("busy", found.Outcome)
 }

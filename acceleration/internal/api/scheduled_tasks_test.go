@@ -3230,7 +3230,7 @@ func (s *ScheduledTasksSuite) TestATaskTextedOnWhatsAppArrivesThere() {
 // connecting it would, without Telnyx on the line to be pointed anywhere.
 func (s *RouterSuite) seedSMSLine(number string) {
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		CustomerID: s.customerID(), E164: number, Vendor: "telnyx",
 		Capabilities: []string{"sms"},
 	}))
@@ -3637,7 +3637,7 @@ func (s *ScheduledTasksSuite) TestATaskForSomebodyWhoOptedOutRunsNoTurnForThem()
 	config := s.agentOnWhatsApp(number)
 	user := s.data.createUser()
 	s.seedWriter(user, config, number, writer)
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: writer, Channel: "whatsapp", Source: "keyword",
 	}))
 	opened := s.openScheduling(user, config, nil)

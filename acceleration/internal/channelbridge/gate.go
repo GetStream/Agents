@@ -115,7 +115,7 @@ func (b *Bridge) refusesReply(ctx context.Context, thread store.ChannelThread) e
 	if err != nil {
 		return err
 	}
-	optedOut, err := b.store.OptedOut(ctx, thread.CustomerID, to, source.optOuts)
+	optedOut, err := b.store.OptOuts.OptedOut(ctx, thread.CustomerID, to, source.optOuts)
 	if err != nil {
 		return err
 	}

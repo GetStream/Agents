@@ -202,7 +202,7 @@ func (s *CampaignsSuite) TestLaunchingFromANumberTheAppDoesNotHaveIsRefused() {
 	created := s.ready()
 	// The number was the app's when it was set, and is not now.
 	notOurs := s.utils.number()
-	_, err := s.store.UpdateCampaign(context.Background(), s.customerID(), created.Id, store.CampaignChanges{FromNumber: &notOurs})
+	_, err := s.store.Campaigns.Update(context.Background(), s.customerID(), created.Id, store.CampaignChanges{FromNumber: &notOurs})
 	s.Require().NoError(err)
 
 	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
@@ -386,7 +386,7 @@ func (s *CampaignsSuite) TestLaunchCapturesWhoLaunched() {
 	s.Require().Equal(http.StatusOK, launcher.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
 		map[string]any{"consent": true}, nil))
 
-	stored, err := s.store.Campaign(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.Campaigns.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.Equal(key, stored.APIKey, "the key that launched it, not the one that made it")
 	s.NotEqual(s.app.key, stored.APIKey)
@@ -617,7 +617,7 @@ func (s *CampaignsSuite) get(id string) Campaign {
 // heldNumber is a number the app holds, which a campaign may call from.
 func (s *CampaignsSuite) heldNumber() string {
 	e164 := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	return e164

@@ -11,7 +11,7 @@ import (
 // trunkIDs are the ids of the trunks one group sees.
 func (s *StoreSuite) trunkIDs(group TrunkGroup) []string {
 	var ids []string
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		for _, trunk := range trunks {
 			ids = append(ids, trunk.ID)
@@ -23,7 +23,7 @@ func (s *StoreSuite) trunkIDs(group TrunkGroup) []string {
 
 // savedTrunk stores a trunk in a group, defaulting the fields a test does not care about.
 func (s *StoreSuite) savedTrunk(group TrunkGroup, id string) {
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.SaveTrunk(StreamTrunk{
 			ID: id, Numbers: []string{"+15125550000"}, BridgeURI: "sip:" + id + "@sip.example.test",
 			BridgeUsername: id, BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 1,
@@ -51,14 +51,14 @@ func (s *StoreSuite) TestATrunkAnotherGroupHoldsIsNotOverwritten() {
 		{CustomerID: "acme", Vendor: "twilio"},
 		{CustomerID: "acme", StreamAppPK: 7, Vendor: "telnyx"},
 	} {
-		err := s.store.InTrunkGroup(s.ctx, other, func(_ context.Context, tx *TrunkGroupTx) error {
+		err := s.store.StreamTrunks.InGroup(s.ctx, other, func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.SaveTrunk(StreamTrunk{ID: "trunk-taken", Numbers: []string{"+15125559999"},
 				BridgeURI: "sip:x@y", BridgeUsername: "x", BridgePasswordSealed: []byte("theirs"), BridgePasswordKEKVersion: 1})
 		})
 		s.Error(err, other)
 	}
 
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		s.Require().Len(trunks, 1)
 		s.Equal([]string{"+15125550000"}, trunks[0].Numbers)
@@ -83,7 +83,7 @@ func (s *StoreSuite) TestTwoTransactionsOnOneGroupRunOneAfterTheOther() {
 
 	go func() {
 		defer wait.Done()
-		s.NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		s.NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 			close(firstHolds)
 			<-firstMayFinish
 			return tx.SaveTrunk(StreamTrunk{ID: "trunk-first", Numbers: []string{"+15125550000"},
@@ -93,7 +93,7 @@ func (s *StoreSuite) TestTwoTransactionsOnOneGroupRunOneAfterTheOther() {
 	<-firstHolds
 	go func() {
 		defer wait.Done()
-		s.NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		s.NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 			trunks, err := tx.Trunks()
 			for _, trunk := range trunks {
 				seen = append(seen, trunk.ID)
@@ -110,18 +110,18 @@ func (s *StoreSuite) TestTwoTransactionsOnOneGroupRunOneAfterTheOther() {
 }
 
 func (s *StoreSuite) TestSettingALineIsReadBackOnTheNumber() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
 	}))
 	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
 
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.SetLine("+15125551234", "trunk-1", "route-1", NumberBridge{
 			URI: "sip:+15125551234@sip.example.test", Username: "trunk-1", PasswordSealed: []byte("sealed"), KEKVersion: 2,
 		})
 	}))
 
-	held, err := s.store.Number(s.ctx, "acme", "+15125551234")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
 	s.Require().NoError(err)
 	s.Equal("trunk-1", held.StreamTrunkID)
 	s.Equal("route-1", held.StreamRouteID)
@@ -134,17 +134,17 @@ func (s *StoreSuite) TestSettingALineIsReadBackOnTheNumber() {
 }
 
 func (s *StoreSuite) TestReleasingANumberClearsItsAttachedAt() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
 	}))
-	s.Require().NoError(s.store.AttachNumber(s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-1", CallType: "default"}))
-	attached, err := s.store.Number(s.ctx, "acme", "+15125551234")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-1", CallType: "default"}))
+	attached, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
 	s.Require().NoError(err)
 	s.Require().NotNil(attached.AttachedAt)
 
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, "acme", "+15125551234", s.base))
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base))
 
-	numbers, err := s.store.CustomerNumbers(s.ctx, "acme", true)
+	numbers, err := s.store.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Require().Len(numbers, 1)
 	s.Nil(numbers[0].AttachedAt)
@@ -156,16 +156,16 @@ func (s *StoreSuite) TestTwoCallResourcesMayShareATrunk() {
 		resource := &CallResource{
 			TrunkID: "shared-trunk", RouteID: "route-1", CallType: "default", CallID: call, CustomerID: "acme", Shared: true,
 		}
-		s.Require().NoError(s.store.RecordCallResource(s.ctx, resource))
+		s.Require().NoError(s.store.CallResources.Insert(s.ctx, resource))
 		recorded = append(recorded, resource)
 	}
 
-	s.Require().NoError(s.store.DeleteCallResource(s.ctx, recorded[0].ID))
+	s.Require().NoError(s.store.CallResources.Delete(s.ctx, recorded[0].ID))
 
-	gone, err := s.store.CallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+	gone, err := s.store.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
 	s.Require().NoError(err)
 	s.Empty(gone)
-	kept, err := s.store.CallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "call-2")
+	kept, err := s.store.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", "call-2")
 	s.Require().NoError(err)
 	s.Require().Len(kept, 1)
 	s.True(kept[0].Shared)
@@ -173,10 +173,10 @@ func (s *StoreSuite) TestTwoCallResourcesMayShareATrunk() {
 
 // lined is a number a customer holds, on a trunk with a rule.
 func (s *StoreSuite) lined(group TrunkGroup, e164, trunkID string) {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: e164, Vendor: group.Vendor, Country: "US", CustomerID: group.CustomerID, PurchasedAt: s.base,
 	}))
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.SetLine(e164, trunkID, "route-"+trunkID, NumberBridge{
 			URI: "sip:" + e164 + "@sip.example.test", Username: trunkID, PasswordSealed: []byte("sealed"), KEKVersion: 1,
 		})
@@ -187,13 +187,13 @@ func (s *StoreSuite) TestSettingALineLeavesAnotherCustomersNumberAlone() {
 	theirs := TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "telnyx"}
 	s.lined(theirs, "+15125551234", "trunk-theirs")
 
-	err := s.store.InTrunkGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
+	err := s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.SetLine("+15125551234", "trunk-ours", "route-ours", NumberBridge{URI: "sip:x@y"})
 		})
 
 	s.Error(err, "acme holds no such number")
-	held, err := s.store.Number(s.ctx, "globex", "+15125551234")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "globex", "+15125551234")
 	s.Require().NoError(err)
 	s.Equal("trunk-theirs", held.StreamTrunkID)
 }
@@ -201,15 +201,15 @@ func (s *StoreSuite) TestSettingALineLeavesAnotherCustomersNumberAlone() {
 func (s *StoreSuite) TestClearingALineTakesTheNumberOffItsTrunk() {
 	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
 	s.lined(group, "+15125551234", "trunk-1")
-	s.Require().NoError(s.store.AttachNumber(s.ctx, "acme", "+15125551234", NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{
 		TrunkID: "trunk-1", RouteID: "route-trunk-1", StreamAppPK: 7, CallType: "default",
 	}))
 
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.ClearLine("+15125551234")
 	}))
 
-	held, err := s.store.Number(s.ctx, "acme", "+15125551234")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
 	s.Require().NoError(err)
 	s.Empty(held.StreamTrunkID)
 	s.Empty(held.StreamRouteID)
@@ -221,13 +221,13 @@ func (s *StoreSuite) TestClearingALineTakesTheNumberOffItsTrunk() {
 func (s *StoreSuite) TestClearingALineLeavesAnotherCustomersNumberAlone() {
 	s.lined(TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "telnyx"}, "+15125551234", "trunk-theirs")
 
-	err := s.store.InTrunkGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
+	err := s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.ClearLine("+15125551234")
 		})
 
 	s.Error(err, "acme holds no such number")
-	held, err := s.store.Number(s.ctx, "globex", "+15125551234")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "globex", "+15125551234")
 	s.Require().NoError(err)
 	s.Equal("trunk-theirs", held.StreamTrunkID)
 }
@@ -235,19 +235,19 @@ func (s *StoreSuite) TestClearingALineLeavesAnotherCustomersNumberAlone() {
 func (s *StoreSuite) TestDetachClearsAttachedAndKeepsTheLine() {
 	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
 	s.lined(group, "+15125551234", "trunk-1")
-	s.Require().NoError(s.store.AttachNumber(s.ctx, "acme", "+15125551234", NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{
 		TrunkID: "trunk-1", RouteID: "route-trunk-1", StreamAppPK: 7, CallType: "default",
 		BridgeURI: "sip:bridge.example.com", BridgeUsername: "user", BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 1,
 	}))
-	before, err := s.store.Number(s.ctx, "acme", "+15125551234")
+	before, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
 	s.Require().NoError(err)
 	s.Require().NotNil(before.AttachedAt)
 
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.Detach("+15125551234")
 	}))
 
-	after, err := s.store.Number(s.ctx, "acme", "+15125551234")
+	after, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
 	s.Require().NoError(err)
 	s.Nil(after.AttachedAt)
 	s.Nil(after.ReleasedAt)
@@ -259,17 +259,17 @@ func (s *StoreSuite) TestDetachClearsAttachedAndKeepsTheLine() {
 
 func (s *StoreSuite) TestDetachOfANumberAnotherCustomerHoldsFails() {
 	s.lined(TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "telnyx"}, "+15125551234", "trunk-theirs")
-	s.Require().NoError(s.store.AttachNumber(s.ctx, "globex", "+15125551234", NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "globex", "+15125551234", NumberAttachment{
 		TrunkID: "trunk-theirs", RouteID: "route-theirs", StreamAppPK: 7, CallType: "default",
 	}))
 
-	err := s.store.InTrunkGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
+	err := s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.Detach("+15125551234")
 		})
 
 	s.Error(err, "acme holds no such number")
-	held, err := s.store.Number(s.ctx, "globex", "+15125551234")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "globex", "+15125551234")
 	s.Require().NoError(err)
 	s.NotNil(held.AttachedAt)
 	s.Equal("trunk-theirs", held.StreamTrunkID)
@@ -280,7 +280,7 @@ func (s *StoreSuite) TestDeletingATrunkForgetsIt() {
 	s.savedTrunk(group, "trunk-1")
 	s.savedTrunk(group, "trunk-2")
 
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.DeleteTrunk("trunk-1")
 	}))
 
@@ -291,7 +291,7 @@ func (s *StoreSuite) TestDeletingATrunkLeavesAnotherCustomersTrunkAlone() {
 	theirs := TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "twilio"}
 	s.savedTrunk(theirs, "trunk-theirs")
 
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.DeleteTrunk("trunk-theirs")
 		}))
@@ -305,12 +305,12 @@ func (s *StoreSuite) TestDeletingALegKeepsAnotherLegOfTheCallOnTheSameTrunk() {
 		legs[i] = &CallResource{
 			TrunkID: "shared-trunk", RouteID: "route-1", CallType: "default", CallID: "call-1", CustomerID: "acme", Shared: true,
 		}
-		s.Require().NoError(s.store.RecordCallResource(s.ctx, legs[i]))
+		s.Require().NoError(s.store.CallResources.Insert(s.ctx, legs[i]))
 	}
 
-	s.Require().NoError(s.store.DeleteCallResource(s.ctx, legs[1].ID))
+	s.Require().NoError(s.store.CallResources.Delete(s.ctx, legs[1].ID))
 
-	kept, err := s.store.CallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+	kept, err := s.store.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
 	s.Require().NoError(err)
 	s.Require().Len(kept, 1)
 	s.Equal(legs[0].ID, kept[0].ID)
@@ -318,11 +318,11 @@ func (s *StoreSuite) TestDeletingALegKeepsAnotherLegOfTheCallOnTheSameTrunk() {
 
 // linedOnly puts a number of acme's on a line in the deployment's app, without attaching it.
 func (s *StoreSuite) linedOnly(vendor, e164 string) {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: e164, Vendor: vendor, Country: "US", CustomerID: "acme", PurchasedAt: s.base,
 	}))
 	group := TrunkGroup{CustomerID: "acme", Vendor: vendor}
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.SetLine(e164, "trunk-1", "route-1", NumberBridge{
 			URI: "sip:" + e164 + "@sip.example.test", Username: "trunk-1", PasswordSealed: []byte("sealed"), KEKVersion: 2,
 		})
@@ -340,7 +340,7 @@ func (s *StoreSuite) TestANumberLinedOnlyToPlaceCallsIsNotRung() {
 func (s *StoreSuite) TestANumberLinedOnlyToPlaceCallsHasNoInboundBridge() {
 	s.linedOnly("telnyx", "+15125551234")
 
-	_, err := s.store.AttachedBridge(s.ctx, "telnyx", "+15125551234")
+	_, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
 
 	s.ErrorIs(err, ErrNoNumber)
 }
@@ -348,12 +348,12 @@ func (s *StoreSuite) TestANumberLinedOnlyToPlaceCallsHasNoInboundBridge() {
 func (s *StoreSuite) TestAStreamTrunkIsReadByIdForItsOwnCustomerOnly() {
 	s.savedTrunk(TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}, "trunk-read")
 
-	trunk, err := s.store.StreamTrunk(s.ctx, "acme", "trunk-read")
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-read")
 	s.Require().NoError(err)
 	s.Equal("sip:trunk-read@sip.example.test", trunk.BridgeURI)
 
-	_, err = s.store.StreamTrunk(s.ctx, "globex", "trunk-read")
+	_, err = s.store.StreamTrunks.Get(s.ctx, "globex", "trunk-read")
 	s.ErrorIs(err, ErrNoStreamTrunk)
-	_, err = s.store.StreamTrunk(s.ctx, "acme", "missing")
+	_, err = s.store.StreamTrunks.Get(s.ctx, "acme", "missing")
 	s.ErrorIs(err, ErrNoStreamTrunk)
 }

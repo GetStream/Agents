@@ -348,7 +348,7 @@ func (s *Service) inTrunkGroup(ctx context.Context, group store.TrunkGroup, fn f
 		return err
 	}
 	defer unlock()
-	return s.store.InTrunkGroup(ctx, group, fn)
+	return s.store.StreamTrunks.InGroup(ctx, group, fn)
 }
 
 // groupLocks are the trunk groups this process is working on, one waiter at a time each.

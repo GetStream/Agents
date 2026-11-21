@@ -226,7 +226,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 
 // ownsNumber reports whether a number is one this app bought here.
 func (s *Server) ownsNumber(ctx context.Context, customerID, number string) (string, bool) {
-	held, err := s.store.Number(ctx, customerID, number)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, number)
 	if err != nil {
 		return "this app holds no number " + number + ": buy one with POST /v1/phone/numbers", false
 	}

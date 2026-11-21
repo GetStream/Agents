@@ -148,7 +148,7 @@ func (s *StoreSuite) TestAnArrivingCallIsStoredAsInboundEvenWhereAnotherCustomer
 func (s *ShardedStoreSuite) TestACallAnotherShardPlacedIsStoredAsOutbound() {
 	placed := PhoneCall{Token: "there", CustomerID: "acme", CallType: "agent", CallID: "session-there", Vendor: "telnyx",
 		LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: s.base}
-	s.Require().NoError(s.other.InsertPhoneCall(s.ctx, &placed))
+	s.Require().NoError(s.other.PhoneCalls.Insert(s.ctx, &placed))
 	call := Call{ID: "session-there", CustomerID: "acme", CallID: "session-there", AgentID: "agent-there", StartedAt: s.base}
 	s.Require().NoError(s.store.StartCall(s.ctx, &call))
 

@@ -103,7 +103,7 @@ func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
 	s.service.OnUnanswered(func(_ context.Context, customerID, sessionID string) {
 		s.asked = append(s.asked, [2]string{customerID, sessionID})
 	})
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: s.clock.now(),
 	}))
 }

@@ -469,7 +469,7 @@ func (s *LinqSandboxSuite) SetupTest() {
 	s.config.EpisodeCards = true
 	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
 	s.person = s.utils.number()
-	s.Require().NoError(s.store.SetSandboxRecipients(context.Background(), s.customerID(), []string{s.person}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(context.Background(), s.customerID(), []string{s.person}))
 }
 
 // Catches a one-to-one chat under a config with episode_cards off, which opens no episode, whose

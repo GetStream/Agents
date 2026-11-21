@@ -208,7 +208,7 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 		// internal/phone/service.go).
 		PlacedAt: time.Now().UTC().Add(-phone.MaxCallLength - 2*time.Hour),
 	}
-	s.Require().NoError(s.db.InsertPhoneCall(s.ctx, &call))
+	s.Require().NoError(s.db.PhoneCalls.Insert(s.ctx, &call))
 	s.T().Cleanup(func() {
 		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM phone_calls WHERE id = ?", call.ID)
 		s.NoError(err)
@@ -282,7 +282,7 @@ func (s *RouterStartSuite) TestAStartingRouterEndsALegLeftRingingUntilItStops() 
 			Vendor: "telnyx", Direction: store.Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199",
 			DialedAt: time.Now().UTC().Add(-phone.MaxCallLength - time.Hour),
 		}
-		opened, err := s.db.OpenCallLeg(s.ctx, &leg)
+		opened, err := s.db.CallLegs.Open(s.ctx, &leg)
 		s.Require().NoError(err)
 		s.Require().True(opened)
 		s.T().Cleanup(func() {
@@ -335,7 +335,7 @@ func (s *RouterStartSuite) TestAStartingRouterAsksTheVendorAfterItsCampaignsUnti
 			CustomerID: "customer-" + uuid.NewString(), Name: "Support", Status: dlc.VendorPending,
 			Vendor: "telnyx", VendorCampaignID: "campaign-" + uuid.NewString(),
 		}
-		s.Require().NoError(s.db.CreateUseCase(s.ctx, &useCase))
+		s.Require().NoError(s.db.UseCases.Insert(s.ctx, &useCase))
 		// Its review log goes with it (ON DELETE CASCADE).
 		s.T().Cleanup(func() {
 			_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM dlc_use_cases WHERE id = ?", useCase.ID)

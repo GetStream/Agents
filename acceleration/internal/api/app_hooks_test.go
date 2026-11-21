@@ -293,10 +293,10 @@ func (s *AppHooksSuite) TestAnArrivingCallIsDispatchedToTheNumbersOwnerInThatApp
 // attach is a number the customer holds, attached in the app given.
 func (s *AppHooksSuite) attach(e164, call string, app int64) {
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), StreamAppPK: app, CallType: "default", CallID: call,
 	}))
 }
@@ -315,10 +315,10 @@ func (s *AppHooksSuite) TestACallOfTheSameNameInAnotherAppDoesNotHideThisOne() {
 	other := s.numberedApp(streamAppID())
 	ctx := context.Background()
 	otherNumber := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: otherNumber, Vendor: "telnyx", Country: "US", CustomerID: other.app.ID, PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, other.app.ID, otherNumber, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, other.app.ID, otherNumber, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), StreamAppPK: 7, CallType: "default", CallID: line,
 	}))
 	s.attach(s.utils.number(), line, s.appID())

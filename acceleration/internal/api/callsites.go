@@ -193,7 +193,7 @@ func (s *Server) endedPhoneCall(r *http.Request, origin hookOrigin, event callEv
 	}
 	call := endedCall{callType: callType, callID: callID, streamSession: event.SessionID}
 
-	resources, err := s.store.CallResourcesInApp(r.Context(), origin.scope(), callType, callID)
+	resources, err := s.store.CallResources.Select(r.Context(), origin.scope(), callType, callID)
 	if err != nil {
 		s.logger.Warn("could not read an ended call's resources", "session_id", callID, "error", err)
 	}

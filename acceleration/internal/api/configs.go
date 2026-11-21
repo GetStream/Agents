@@ -400,7 +400,7 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	if err != nil {
 		return nil, errUnknownConfig
 	}
-	answering, err := s.store.NumbersAnsweredBy(ctx, customerID, request.Id)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}

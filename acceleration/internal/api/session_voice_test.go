@@ -378,7 +378,7 @@ func (s *SessionVoiceSuite) namedCall() SessionCall {
 
 // pinCall gives a call lines made in the app given, as a placed call's are.
 func (s *SessionVoiceSuite) pinCall(call SessionCall, app int64) {
-	s.Require().NoError(s.store.RecordCallResource(context.Background(), &store.CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(context.Background(), &store.CallResource{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(),
 		CallType: call.Type, CallID: call.Id, CustomerID: s.customerID(), StreamAppPK: app,
 	}))

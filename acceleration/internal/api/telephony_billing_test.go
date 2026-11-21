@@ -512,7 +512,7 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 		pricing.Quantities{pricing.CallSeconds: 60})
 	s.Equal(strconv.FormatInt(minute, 10), leg.Attributes[routing.AttributeFreeCostMicros])
 
-	s.Require().NoError(s.store.CreateUseCase(context.Background(), &store.UseCase{
+	s.Require().NoError(s.store.UseCases.Insert(context.Background(), &store.UseCase{
 		CustomerID: s.customerID(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
 	_, again := s.attached()
@@ -535,7 +535,7 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 func (s *telephonyBilling) smsLine() string {
 	ctx := context.Background()
 	number := "+1555" + digits(s.utils.uuid())
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		CustomerID: s.customerID(), E164: number, Vendor: "telnyx", Country: "US", Capabilities: []string{"sms"},
 	}))
 	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "telnyx-key", Signing: s.public})
@@ -633,8 +633,8 @@ func (s *telephonyBilling) attachedOn(vendor, country, e164 string) (store.Phone
 		E164: e164, Vendor: vendor, Country: country, CustomerID: s.customerID(),
 		Tags: map[string]string{"line": "support"}, PurchasedAt: time.Now().UTC(),
 	}
-	s.Require().NoError(s.store.RecordNumber(ctx, &number))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), number.E164, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &number))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), number.E164, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID,
 	}))
 	return number, callID

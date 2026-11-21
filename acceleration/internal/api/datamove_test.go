@@ -259,7 +259,7 @@ func (s *DataMoveSuite) TestChangesAreAppliedToAnAppThatHoldsData() {
 func (s *DataMoveSuite) TestAnImportCannotClaimAnotherAppsNumberInAnotherForm() {
 	ctx := context.Background()
 	other, e164 := s.utils.uuid(), s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "plivo", Country: "US", CustomerID: other,
 	}))
 
@@ -278,14 +278,14 @@ func (s *DataMoveSuite) TestAnImportCannotClaimAnotherAppsNumberInAnotherForm() 
 
 	status, _ = s.serverClient.call(http.MethodDelete, "/v1/phone/numbers/"+variant, nil)
 	s.Equal(http.StatusNotFound, status)
-	held, err := s.store.CustomerNumbers(ctx, other, false)
+	held, err := s.store.PhoneNumbers.Select(ctx, other, store.PhoneNumberFilter{})
 	s.Require().NoError(err)
 	s.Len(held, 1, "the number stays with the app that holds it")
 }
 
 func (s *DataMoveSuite) TestARefusedNumberDoesNotSayWhoHoldsIt() {
 	other, e164 := s.utils.uuid(), s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: e164, Vendor: "plivo", Country: "US", CustomerID: other,
 	}))
 

@@ -169,7 +169,7 @@ func (s *ReplicateResumeSuite) TestResumeRefusesToCatchUpFromTheSourceFirst() {
 // importedCampaign is a campaign the copy brought in, as it was at the source with fields.
 func (s *ReplicateResumeSuite) importedCampaign(fields string) string {
 	campaign := &store.Campaign{CustomerID: "acme", Name: "Renewals", ConfigID: "config-1", FromNumber: "+15550100"}
-	s.Require().NoError(s.store.CreateCampaign(s.ctx, campaign))
+	s.Require().NoError(s.store.Campaigns.Insert(s.ctx, campaign))
 	var raw []byte
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT to_jsonb(c) || "+fields+" FROM campaigns c WHERE id = ?", campaign.ID).Scan(&raw))
@@ -190,7 +190,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesACampaignStillRunningAtTheSourceP
 		"(POST /v1/agents/campaigns/"+id+"/resume). "+
 		"Do not run --once again after --resume: every run reads the source and makes it the truth again\n",
 		s.cutOver())
-	moved, err := s.store.Campaign(s.ctx, "acme", id)
+	moved, err := s.store.Campaigns.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)
 	s.Equal(store.Paused, moved.State)
 }
@@ -201,7 +201,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesACampaignPausedAtTheSourceAlone()
 	id := s.importedCampaign(`'{"state": "paused"}'`)
 
 	s.Equal("resumed 0 scheduled tasks\n", s.cutOver())
-	moved, err := s.store.Campaign(s.ctx, "acme", id)
+	moved, err := s.store.Campaigns.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)
 	s.Equal(store.Paused, moved.State)
 }
@@ -210,12 +210,12 @@ func (s *ReplicateResumeSuite) TestACampaignScheduledThereIsNamedAndResumesToSch
 	id := s.importedCampaign(`jsonb_build_object('state', 'scheduled', 'start_at', now() + interval '2 days')`)
 
 	s.Contains(s.cutOver(), "campaign "+id+" was still running or scheduled where it came from")
-	moved, err := s.store.Campaign(s.ctx, "acme", id)
+	moved, err := s.store.Campaigns.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)
 	s.Require().Equal(store.Paused, moved.State)
 
-	s.Require().NoError(s.store.ResumeCampaign(s.ctx, "acme", id))
-	moved, err = s.store.Campaign(s.ctx, "acme", id)
+	s.Require().NoError(s.store.Campaigns.Resume(s.ctx, "acme", id))
+	moved, err = s.store.Campaigns.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)
 	s.Equal(store.Scheduled, moved.State, "it was not due to start yet")
 	s.Nil(moved.StartedAt)

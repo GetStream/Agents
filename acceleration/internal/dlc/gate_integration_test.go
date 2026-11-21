@@ -227,7 +227,7 @@ func (s *GateSuite) TestTheConcurrentCallLimitCountsOpenLegs() {
 	s.ErrorContains(err, "allows 1 calls at once")
 	s.NoError(s.gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550123"), "a text is no call")
 
-	ended, err := s.money.Store.EndCallLegs(s.ctx, store.AppScope{Unpinned: true}, "default", up, time.Now())
+	ended, err := s.money.Store.CallLegs.EndCall(s.ctx, store.AppScope{Unpinned: true}, "default", up, time.Now())
 	s.Require().NoError(err)
 	s.Require().Len(ended, 1)
 	s.NoError(s.gate.Allow(s.ctx, s.app(), dlc.Voice, "+15125550123"), "once it ended")
@@ -277,7 +277,7 @@ func (s *GateSuite) leg(direction string, dialed time.Time, up bool) string {
 	if up {
 		leg.StartedAt = &dialed
 	}
-	opened, err := s.money.Store.OpenCallLeg(s.ctx, &leg)
+	opened, err := s.money.Store.CallLegs.Open(s.ctx, &leg)
 	s.Require().NoError(err)
 	s.Require().True(opened)
 	return call
@@ -339,8 +339,8 @@ func (s *GateSuite) TestAnOrganizationWithNoCreditMayNotText() {
 func (s *GateSuite) TestOffModeKeepsOptOutAndTheSandbox() {
 	s.limit(map[string]usage.ChannelLimits{dlc.SMS: {Countries: []string{"GB"}, PerDay: new(0)}})
 	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2}, config.LimitsOff)
-	s.Require().NoError(s.money.Store.SetSandboxRecipients(s.ctx, s.app(), []string{"+15125550001", "+15125550002"}))
-	s.Require().NoError(s.money.Store.OptOut(s.ctx, &store.OptOut{
+	s.Require().NoError(s.money.Store.SandboxRecipients.Replace(s.ctx, s.app(), []string{"+15125550001", "+15125550002"}))
+	s.Require().NoError(s.money.Store.OptOuts.Insert(s.ctx, &store.OptOut{
 		CustomerID: s.app(), Recipient: "+15125550002", Channel: dlc.SMS, Source: "test",
 	}))
 
@@ -379,7 +379,7 @@ func (s *GateSuite) TestAGateWithNoLimitsKeepsTodaysBehaviour() {
 
 func (s *GateSuite) TestCountersCountAnAppWithAnApprovedUseCase() {
 	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2, MessagesPerDay: 30}, config.LimitsEnforce)
-	s.Require().NoError(s.money.Store.CreateUseCase(s.ctx, &store.UseCase{
+	s.Require().NoError(s.money.Store.UseCases.Insert(s.ctx, &store.UseCase{
 		CustomerID: s.app(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
 	sandboxed, err := gate.Sandboxed(s.ctx, s.app())
@@ -455,7 +455,7 @@ func (s *GateSuite) TestShadowStillAllowsWhatItCouldNotCount() {
 }
 
 func (s *GateSuite) TestASandboxWhoseCountersCannotBeReadRefuses() {
-	s.Require().NoError(s.money.Store.SetSandboxRecipients(s.ctx, s.app(), []string{"+15125550123"}))
+	s.Require().NoError(s.money.Store.SandboxRecipients.Replace(s.ctx, s.app(), []string{"+15125550123"}))
 	gate, redis := s.unreachable(dlc.Sandbox{Enabled: true, Recipients: 1, MessagesPerDay: 30, AudioMinutesPerDay: 10}, config.LimitsOff)
 	s.Require().NoError(gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550123"))
 

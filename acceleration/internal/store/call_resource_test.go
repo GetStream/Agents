@@ -3,39 +3,39 @@
 package store
 
 func (s *StoreSuite) TestReleasingACallReturnsItsResourceAndIsIdempotent() {
-	s.Require().NoError(s.store.RecordCallResource(s.ctx, &CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "trunk-1", RouteID: "route-1",
 		CallType: "default", CallID: "call-1", CustomerID: "acme",
 	}))
 
-	released, err := s.store.ReleaseCallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+	released, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
 	s.Require().NoError(err)
 	s.Require().Len(released, 1)
 	s.Equal("trunk-1", released[0].TrunkID)
 	s.Equal("route-1", released[0].RouteID)
 
-	again, err := s.store.ReleaseCallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+	again, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
 	s.Require().NoError(err)
 	s.Empty(again, "a retried delivery finds nothing left to release")
 }
 
 func (s *StoreSuite) TestReleasingAnUnknownCallReturnsNothing() {
-	released, err := s.store.ReleaseCallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "nobody-called")
+	released, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "nobody-called")
 	s.Require().NoError(err)
 	s.Empty(released)
 }
 
 func (s *StoreSuite) TestATransferAddsASecondTrunkToTheSameCall() {
-	s.Require().NoError(s.store.RecordCallResource(s.ctx, &CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "call-trunk", RouteID: "call-route",
 		CallType: "default", CallID: "call-1", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.store.RecordCallResource(s.ctx, &CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "transfer-trunk", RouteID: "transfer-route",
 		CallType: "default", CallID: "call-1", CustomerID: "acme",
 	}))
 
-	released, err := s.store.ReleaseCallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
+	released, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
 	s.Require().NoError(err)
 	s.Require().Len(released, 2, "both the call's own trunk and the transfer's trunk are released")
 
@@ -45,21 +45,21 @@ func (s *StoreSuite) TestATransferAddsASecondTrunkToTheSameCall() {
 }
 
 func (s *StoreSuite) TestRecordCallResourceRequiresATrunk() {
-	err := s.store.RecordCallResource(s.ctx, &CallResource{
+	err := s.store.CallResources.Insert(s.ctx, &CallResource{
 		RouteID: "route-1", CallType: "default", CallID: "call-1", CustomerID: "acme",
 	})
 	s.ErrorContains(err, "trunk")
 }
 
 func (s *StoreSuite) TestRecordCallResourceRequiresARoute() {
-	err := s.store.RecordCallResource(s.ctx, &CallResource{
+	err := s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "trunk-1", CallType: "default", CallID: "call-1", CustomerID: "acme",
 	})
 	s.ErrorContains(err, "route")
 }
 
 func (s *StoreSuite) TestRecordCallResourceRequiresACall() {
-	err := s.store.RecordCallResource(s.ctx, &CallResource{
+	err := s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CustomerID: "acme",
 	})
 	s.ErrorContains(err, "call")
@@ -67,17 +67,17 @@ func (s *StoreSuite) TestRecordCallResourceRequiresACall() {
 
 func (s *StoreSuite) TestReadingACallsResourcesDeletesNothing() {
 	for _, trunk := range []string{"read-trunk-1", "read-trunk-2"} {
-		s.Require().NoError(s.store.RecordCallResource(s.ctx, &CallResource{
+		s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
 			TrunkID: trunk, RouteID: "route-" + trunk,
 			CallType: "default", CallID: "read-call", CustomerID: "acme",
 		}))
 	}
 
-	read, err := s.store.CallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "read-call")
+	read, err := s.store.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", "read-call")
 	s.Require().NoError(err)
 	s.Len(read, 2)
 
-	released, err := s.store.ReleaseCallResourcesInApp(s.ctx, AppScope{Unpinned: true}, "default", "read-call")
+	released, err := s.store.CallResources.Release(s.ctx, AppScope{Unpinned: true}, "default", "read-call")
 	s.Require().NoError(err)
 	s.Len(released, 2, "reading left both rows for the release")
 }

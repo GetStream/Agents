@@ -294,7 +294,7 @@ func (s *StreamAppsSuite) TestAPlacedCallMadeInTheCustomersAppIsJoinedThere() {
 // leg's lines are in that app, routed into the session's call.
 func (s *StreamAppsSuite) placedIn(app int64) string {
 	id := s.utils.uuid()
-	s.Require().NoError(s.store.RecordCallResource(context.Background(), &store.CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(context.Background(), &store.CallResource{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(),
 		CallType: "agent", CallID: id, CustomerID: s.customerID(), StreamAppPK: app,
 	}))

@@ -2156,7 +2156,7 @@ func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error
 	// A call that already has lines, a number's or a placed call's, is in the app they were
 	// made in, and the agent has to join it there.
 	if m.options.Store != nil && spec.CallID != "" && !spec.Text {
-		pin, found, err := m.options.Store.CallPin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
+		pin, found, err := m.options.Store.CallResources.Pin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
 		if err != nil {
 			return streamapp.Bound{}, err
 		}
