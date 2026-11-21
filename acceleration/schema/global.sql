@@ -201,16 +201,6 @@ TABLE audit_log
     CREATE INDEX audit_log_customer_idx ON public.audit_log USING btree (customer_id, created_at DESC, id DESC)
     CREATE INDEX audit_log_resource_idx ON public.audit_log USING btree (customer_id, resource_type, created_at DESC, id DESC)
 
-TABLE balance_notices
-    balance_micros bigint NOT NULL
-    created_at timestamp with time zone NOT NULL DEFAULT now()
-    granted_micros bigint NOT NULL
-    kind text NOT NULL
-    organization_id text NOT NULL
-    threshold_micros bigint NOT NULL
-    CONSTRAINT balance_notices_kind_check CHECK ((kind = ANY (ARRAY['balance_low'::text, 'balance_exhausted'::text])))
-    CONSTRAINT balance_notices_pkey PRIMARY KEY (organization_id, kind, granted_micros)
-
 TABLE business_profiles
     authorized_contact_email text NOT NULL DEFAULT ''::text
     authorized_contact_first_name text NOT NULL DEFAULT ''::text
@@ -760,17 +750,6 @@ TABLE contact_map
     CREATE INDEX contact_map_conversation ON public.contact_map USING btree (customer_id, agent_config_id, conversation_id)
     CREATE INDEX contact_map_retired ON public.contact_map USING btree (customer_id, regexp_replace(address, '^retired:[^:]*:'::text, ''::text)) WHERE (address ~~ 'retired:%'::text)
 
-TABLE cost_anomaly_notices
-    baseline_micros bigint NOT NULL
-    claimed_at timestamp with time zone NOT NULL DEFAULT now()
-    created_at timestamp with time zone NOT NULL DEFAULT now()
-    day date NOT NULL
-    organization_id text NOT NULL
-    posted_at timestamp with time zone
-    spent_micros bigint NOT NULL
-    CONSTRAINT cost_anomaly_notices_pkey PRIMARY KEY (organization_id, day)
-    CREATE INDEX cost_anomaly_notices_unposted ON public.cost_anomaly_notices USING btree (claimed_at) WHERE (posted_at IS NULL)
-
 TABLE custom_models
     api_key_sealed bytea
     base_url text NOT NULL
@@ -1054,20 +1033,6 @@ TABLE limit_grants
     CONSTRAINT limit_grants_used_micros_check CHECK ((used_micros >= 0))
     CREATE INDEX limit_grants_live_idx ON public.limit_grants USING btree (organization_id) WHERE (revoked_at IS NULL)
 
-TABLE limit_notices
-    app_id text NOT NULL DEFAULT ''::text
-    claimed_at timestamp with time zone NOT NULL DEFAULT now()
-    created_at timestamp with time zone NOT NULL DEFAULT now()
-    enforced boolean NOT NULL
-    kind text NOT NULL
-    message text NOT NULL
-    organization_id text NOT NULL
-    posted_at timestamp with time zone
-    tier text NOT NULL DEFAULT ''::text
-    CONSTRAINT limit_notices_kind_check CHECK ((kind = ANY (ARRAY['no_credit'::text, 'spend_hard_limit'::text, 'spend_limit'::text])))
-    CONSTRAINT limit_notices_pkey PRIMARY KEY (organization_id, kind)
-    CREATE INDEX limit_notices_unposted ON public.limit_notices USING btree (claimed_at) WHERE (posted_at IS NULL)
-
 TABLE limits
     api_key text NOT NULL DEFAULT ''::text
     app_id text NOT NULL DEFAULT ''::text
@@ -1090,6 +1055,20 @@ TABLE limits
     CONSTRAINT limits_organization_id_check CHECK ((organization_id <> ''::text))
     CONSTRAINT limits_pkey PRIMARY KEY (id)
     CREATE UNIQUE INDEX limits_one_per_level ON public.limits USING btree (organization_id, subject, level, "interval", app_id, api_key, user_id, category)
+
+TABLE notices
+    claimed_at timestamp with time zone NOT NULL DEFAULT now()
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+    dedupe_key text NOT NULL DEFAULT ''::text
+    kind text NOT NULL
+    organization_id text NOT NULL
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb
+    posted_at timestamp with time zone
+    CONSTRAINT notices_kind_check CHECK ((kind = ANY (ARRAY['no_credit'::text, 'spend_hard_limit'::text, 'spend_limit'::text, 'balance_low'::text, 'balance_exhausted'::text, 'cost_anomaly'::text])))
+    CONSTRAINT notices_organization_id_check CHECK ((organization_id <> ''::text))
+    CONSTRAINT notices_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text))
+    CONSTRAINT notices_pkey PRIMARY KEY (organization_id, kind, dedupe_key)
+    CREATE INDEX notices_unposted ON public.notices USING btree (claimed_at) WHERE (posted_at IS NULL)
 
 TABLE opt_outs
     channel text NOT NULL

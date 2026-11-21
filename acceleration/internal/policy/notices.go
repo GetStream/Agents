@@ -101,7 +101,13 @@ func (m *money) notify(ctx context.Context, due []notice) {
 	ctx, cancel := context.WithTimeout(ctx, noticesTimeout)
 	defer cancel()
 	for _, warning := range due {
-		sent, queued, err := db.NoteBalance(ctx, warning.row(), warning.delivery(), warning.body)
+		row, err := warning.row().Notice()
+		if err != nil {
+			m.failedRead("could not write that an organization's credit is running out", err,
+				"organization", warning.organization, "kind", warning.kind, "due", len(due))
+			continue
+		}
+		sent, queued, err := db.Notices.InsertQueued(ctx, &row, warning.delivery(), warning.body)
 		if err != nil {
 			m.failedRead("could not write that an organization's credit is running out", err,
 				"organization", warning.organization, "kind", warning.kind, "due", len(due))

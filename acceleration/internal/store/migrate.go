@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -320,10 +321,11 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 // written to.
 var changeLogTables = []string{"data_change_capture", "data_changes"}
 
-var createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
+var tableDDL = regexp.MustCompile(`(?i)(CREATE|DROP) TABLE (?:IF (?:NOT )?EXISTS )?([a-z_0-9]+(?:\s*,\s*[a-z_0-9]+)*)`)
 
-// setTables are the tables the set's migrations create, read from their SQL. A table is
-// created by one set alone, except the change log both keep.
+// setTables are the tables the set's migrations create and have not dropped since, read from
+// the Up half of their SQL in the order they run. A table is created by one set alone, except
+// the change log both keep.
 func setTables(set migrationSet) ([]string, error) {
 	files, err := fs.Glob(set.files, "*.sql")
 	if err != nil {
@@ -335,9 +337,16 @@ func setTables(set migrationSet) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, match := range createTable.FindAllStringSubmatch(string(raw), -1) {
-			if !slices.Contains(tables, match[1]) && !slices.Contains(changeLogTables, match[1]) {
-				tables = append(tables, match[1])
+		up, _, _ := strings.Cut(string(raw), "-- +goose Down")
+		for _, match := range tableDDL.FindAllStringSubmatch(up, -1) {
+			for _, table := range strings.Split(match[2], ",") {
+				table = strings.TrimSpace(table)
+				switch {
+				case strings.EqualFold(match[1], "DROP"):
+					tables = slices.DeleteFunc(tables, func(kept string) bool { return kept == table })
+				case !slices.Contains(tables, table) && !slices.Contains(changeLogTables, table):
+					tables = append(tables, table)
+				}
 			}
 		}
 	}

@@ -616,7 +616,7 @@ func newAuthenticator(ctx context.Context, settings config.Config, configs *appc
 		return nil, errAPIKeyNeedsKeyring
 	}
 
-	return auth.New(mode, configs.Lookup(secrets))
+	return auth.New(mode, configs.DB().APIKeys.Lookup(secrets))
 }
 
 func run(settings config.Config, logger *slog.Logger) error {
@@ -781,7 +781,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// deployment's own keys alone.
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
-		customerKeys = providerkeys.NewKeyring(configs, secrets)
+		customerKeys = providerkeys.NewKeyring(configs.DB().ProviderKeys, secrets)
 	}
 
 	// Who each app is acting for, written down once per user rather than once per
@@ -839,7 +839,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 			forwarder.Wake()
 		}
 	}
-	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, logger)
+	// The sender posts the notices of the limits and the cost anomaly check, so it closes after both.
+	sender := noticeSender(settings, pgStore, logger)
+	if sender != nil {
+		sender.Start()
+		defer sender.Close()
+	}
+	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, sender, logger)
 	if err != nil {
 		return err
 	}
@@ -871,7 +877,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	}
 
 	// One router of the deployment checks every organization's spend for a jump each hour.
-	if anomalies := costAnomalies(settings, pgStore, logger); anomalies != nil {
+	if anomalies := costAnomalies(pgStore, sender, logger); anomalies != nil {
 		anomalies.Start()
 		defer anomalies.Close()
 	}
@@ -1985,7 +1991,7 @@ func pruneDataChanges(ctx context.Context, pgStore *store.Store, retention time.
 		} else if removed > 0 {
 			logger.Debug("pruned recorded changes", "rows", removed)
 		}
-		if removed, err := pgStore.PruneGrantUses(ctx); err != nil {
+		if removed, err := pgStore.LimitGrantUses.Prune(ctx); err != nil {
 			logger.Error("could not prune the uses of ended grants", "error", err)
 		} else if removed > 0 {
 			logger.Debug("pruned the uses of ended grants", "rows", removed)
