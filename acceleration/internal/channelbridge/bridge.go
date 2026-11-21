@@ -845,7 +845,7 @@ func (b *Bridge) queuedEpisode(ctx context.Context, thread store.ChannelThread, 
 	if _, carded := episodeSources[message.ConnectorID]; !carded {
 		return omnichannel.Opened{}, nil
 	}
-	config, err := b.store.AgentConfig(ctx, message.CustomerID, message.ConfigID)
+	config, err := b.store.AgentConfigs.Get(ctx, message.CustomerID, message.ConfigID)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return omnichannel.Opened{}, nil
 	}

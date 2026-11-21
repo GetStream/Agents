@@ -82,7 +82,7 @@ func (s *FloorControlSuite) TestASyncStoresTheFloorControlAndTheConfigServesIt()
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+synced.Config.Id, nil, &read))
 	s.Equal(chorusASRFloor(1200), read.FloorControl)
 
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), synced.Config.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), synced.Config.Id)
 	s.Require().NoError(err)
 	s.Equal(store.FloorControl{Model: store.FloorControlChorusASR, MaxWaitMs: 1200}, stored.FloorControl)
 	spec := specOf(CreateSessionRequest{}, s.customerID(), &stored)
@@ -106,7 +106,7 @@ func (s *FloorControlSuite) TestASyncIsToldOfAPointThatFailsTheDictationGuard() 
 func (s *FloorControlSuite) TestAnUnsetFloorControlIsTheDefaultFlowController() {
 	unset := s.syncFloor("unset", "v1", nil)
 	s.Nil(unset.Config.FloorControl)
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), unset.Config.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), unset.Config.Id)
 	s.Require().NoError(err)
 	s.True(stored.FloorControl.IsZero())
 	s.Equal(audiofloor.Off, session.FloorModeOf(specOf(CreateSessionRequest{}, s.customerID(), &stored).FloorControl))
@@ -130,7 +130,7 @@ func (s *FloorControlSuite) TestAnOptOutIsStoredAndReadBackAsSent() {
 	var read AgentConfig
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+synced.Config.Id, nil, &read))
 	s.Equal(optedOut, read.FloorControl, "the agent reads back the opt-out it stored")
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), synced.Config.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), synced.Config.Id)
 	s.Require().NoError(err)
 	s.Equal(store.FloorControl{Model: store.FloorControlFlowController}, stored.FloorControl)
 	s.Equal(store.FloorControl{}, session.FloorControlOf(stored.FloorControl, store.FloorControlChorusASR, true), "and keeps the flow controller whatever the router's default")
@@ -147,7 +147,7 @@ func (s *FloorControlSuite) TestAnOptOutIsStoredAndReadBackAsSent() {
 	status, _ := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		map[string]any{"floor_control": map[string]any{"model": "flow-controller", "max_wait_ms": 1100}})
 	s.Equal(http.StatusBadRequest, status, "the flow controller has no wait to choose")
-	stored, err = s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err = s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.Equal(store.FloorControl{Model: store.FloorControlFlowController}, stored.FloorControl, "nothing refused is written")
 
@@ -195,7 +195,7 @@ func (s *FloorControlSuite) TestAFloorControlNamingNothingKnownIsRefused() {
 	_, message := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{"name": "refused", "hash": "v1",
 		"floor_control": map[string]any{"model": "stream/chorus-asr", "max_wait_ms": 799}})
 	s.Equal("floor_control.max_wait_ms is 799, under every wait the model was measured at: the quickest has a caller wait 800 ms at p90", message)
-	configs, err := s.store.CustomerAgentConfigs(context.Background(), s.customerID())
+	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
 	s.Require().NoError(err)
 	s.Empty(configs, "nothing is written for a refused sync")
 }
@@ -232,7 +232,7 @@ func (s *FloorControlSuite) TestEveryWriteOfAConfigTakesTheFloorControl() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		AgentConfigPatch{FloorControl: &FloorControl{}}, &cleared))
 	s.Nil(cleared.FloorControl, "an empty one is no choice again")
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.True(stored.FloorControl.IsZero())
 
@@ -251,7 +251,7 @@ func (s *FloorControlSuite) TestEveryWriteOfAConfigTakesTheFloorControl() {
 		status, _ := s.serverClient.failure(write.method, write.path, write.body)
 		s.Equal(http.StatusBadRequest, status, "%s %s %v", write.method, write.path, write.body)
 	}
-	stored, err = s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err = s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.True(stored.FloorControl.IsZero(), "nothing refused is written")
 }
@@ -261,7 +261,7 @@ func (s *FloorControlSuite) TestEveryWriteOfAConfigTakesTheFloorControl() {
 func (s *FloorControlSuite) TestASessionChoosesItsFloorControlServerSide() {
 	agent := store.AgentConfig{CustomerID: s.customerID(), Name: "session-" + s.utils.uuid(), Mode: store.AgentModeText,
 		LLM: "en-low-latency", FloorControl: store.FloorControl{Model: store.FloorControlChorusASR, MaxWaitMs: 1400}}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &agent))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &agent))
 
 	request := CreateSessionRequest{ConfigId: &agent.ID, FloorControl: chorusASRFloor(1100)}
 	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
@@ -355,10 +355,10 @@ func (s *FloorControlWithoutChorusASRSuite) TestAFloorControlThatOptsInIsRefused
 		s.Equal(codeNotConfigured, code, "%s %s", write.method, write.path)
 		s.Equal(errNoChorusASR.Message, message)
 	}
-	configs, err := s.store.CustomerAgentConfigs(context.Background(), s.customerID())
+	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
 	s.Require().NoError(err)
 	s.Len(configs, 3, "nothing more is written")
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.True(stored.FloorControl.IsZero(), "and nothing is changed")
 }

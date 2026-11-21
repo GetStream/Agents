@@ -576,7 +576,7 @@ func (d *dispatcher) stillWaits(ctx context.Context, binding store.ConnectorBind
 	if d.store == nil {
 		return false
 	}
-	config, err := d.store.AgentConfig(ctx, d.spec.CustomerID, d.spec.ConfigID)
+	config, err := d.store.AgentConfigs.Get(ctx, d.spec.CustomerID, d.spec.ConfigID)
 	if err != nil {
 		return false
 	}

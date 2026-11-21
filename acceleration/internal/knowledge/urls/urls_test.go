@@ -430,11 +430,11 @@ func (s *URLsSuite) TestAPageWithARefreshIntervalIsReadAgainOnceItHasPassed() {
 func (s *URLsSuite) TestAPageIsNotReadAgainBeforeItsIntervalHasPassed() {
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: 24})
 
-	due, err := s.store.DueKnowledgeURLs(s.ctx, time.Now().UTC().Add(23*time.Hour), 10)
+	due, err := s.store.KnowledgeURLs.SelectDue(s.ctx, time.Now().UTC().Add(23*time.Hour), 10)
 	s.Require().NoError(err)
 	s.Empty(due, "read an hour short of its interval")
 
-	due, err = s.store.DueKnowledgeURLs(s.ctx, time.Now().UTC().Add(25*time.Hour), 10)
+	due, err = s.store.KnowledgeURLs.SelectDue(s.ctx, time.Now().UTC().Add(25*time.Hour), 10)
 	s.Require().NoError(err)
 	s.Require().Len(due, 1)
 	s.Equal(page.ID, due[0].ID)

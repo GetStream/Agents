@@ -89,11 +89,11 @@ func (s *StoreSuite) TestAConfigKeepsItsResumeHistory() {
 	yes := true
 	config := &AgentConfig{CustomerID: "app", Name: "resume", Mode: AgentModeText,
 		ResumeHistory: ResumeHistory{IncludeTools: &yes, MaxCharacters: 120000}}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 	config.ResumeHistory.MaxMessages = 50
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, config))
 
-	stored, err := s.store.AgentConfig(s.ctx, "app", config.ID)
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "app", config.ID)
 
 	s.Require().NoError(err)
 	s.Equal(ResumeHistory{IncludeTools: &yes, MaxMessages: 50, MaxCharacters: 120000}, stored.ResumeHistory)

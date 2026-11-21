@@ -120,7 +120,7 @@ func (s *DispatchTextSuite) openedByEndUser() Session {
 		CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true,
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return s.client.createSession(CreateSessionRequest{Agent: &config.Name})
 }
 

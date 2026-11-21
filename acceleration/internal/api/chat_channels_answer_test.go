@@ -172,7 +172,7 @@ func (s *AppHooksSuite) TestATypeWithNoAnswerAnswersEveryMessageBesideAMentionsO
 	s.holdsType("shifts", memberWrites)
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
 		ChatChannels: []store.ChatChannel{{Type: "callouts", Answer: store.ChatChannelAnswerMentioned}, {Type: "shifts"}}}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	channel := s.emptyChannel("shifts")
 
 	s.says("shifts", channel, "ben", "feel better!", "")
@@ -185,7 +185,7 @@ func (s *AppHooksSuite) TestATypeWithNoAnswerAnswersEveryMessageBesideAMentionsO
 func (s *AppHooksSuite) mentionedIn(channelType string) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
 		ChatChannels: []store.ChatChannel{{Type: channelType, Answer: store.ChatChannelAnswerMentioned}}}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config
 }
 
@@ -259,7 +259,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryNotMentioningTheAgentIsNotQueued() 
 	named := "callouts-" + strings.ToLower(s.utils.uuid())
 	config := store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
 		ChatChannels: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
 
@@ -279,7 +279,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryNotMentioningTheAgentIsNotQueued() 
 func (s *ChatInboundQueueSuite) TestAQueuedDeliveryNotMentioningTheAgentIsNotAnswered() {
 	customer := s.inAppMode()
 	named := "callouts-" + strings.ToLower(s.utils.uuid())
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(),
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "noted/noted-model", ChatChannels: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)

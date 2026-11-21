@@ -20,7 +20,15 @@ func TestASimulationIsBoundedInVariationsAndTurns(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, checkSimulation(simulation(10, 200)))
-	require.Error(t, checkSimulation(simulation(11, 12)))
-	require.Error(t, checkSimulation(simulation(1, 201)))
+	require.NoError(t, simulation(10, 200).Validate())
+	var invalid *ValidationError
+	require.ErrorAs(t, simulation(11, 12).Validate(), &invalid)
+	require.Equal(t, "variations", invalid.Field)
+	require.ErrorAs(t, simulation(1, 201).Validate(), &invalid)
+	require.Equal(t, "max_turns", invalid.Field)
+
+	unrun := simulation(1, 12)
+	unrun.Mode = "video"
+	require.ErrorAs(t, unrun.Validate(), &invalid)
+	require.Equal(t, "mode", invalid.Field)
 }

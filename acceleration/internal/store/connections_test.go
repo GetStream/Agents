@@ -60,7 +60,7 @@ func (s *StoreSuite) expire(id string) {
 // write them. The store has no write for the column until then.
 func (s *StoreSuite) bind(customerID, bindings string) string {
 	config := &AgentConfig{CustomerID: customerID, Name: "agent-" + newID()}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET connectors = ?::jsonb WHERE id = ?", bindings, config.ID)
 	s.Require().NoError(err)
 	return config.ID
@@ -440,7 +440,7 @@ func (s *StoreSuite) TestADeleteWaitsForABindInProgressAndIsRefused() {
 	saver := s.router()
 	saved := make(chan error, 1)
 	go func() {
-		saved <- saver.CreateAgentConfig(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
+		saved <- saver.AgentConfigs.Insert(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
 			Connectors: []ConnectorBinding{fixed(connection.ID)}})
 	}()
 	s.Require().Eventually(func() bool { return s.waitingForTable("agent_configs") == 1 },
@@ -475,7 +475,7 @@ func (s *StoreSuite) TestABindWaitsForADeleteInProgressAndIsRefused() {
 	saver := s.router()
 	saved := make(chan error, 1)
 	go func() {
-		saved <- saver.CreateAgentConfig(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
+		saved <- saver.AgentConfigs.Insert(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
 			Connectors: []ConnectorBinding{fixed(connection.ID)}})
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
@@ -484,7 +484,7 @@ func (s *StoreSuite) TestABindWaitsForADeleteInProgressAndIsRefused() {
 
 	s.NoError(<-deleted)
 	s.ErrorIs(<-saved, ErrNoConnectorConnection)
-	configs, err := s.store.CustomerAgentConfigs(s.ctx, "acme-app")
+	configs, err := s.store.AgentConfigs.Select(s.ctx, "acme-app")
 	s.Require().NoError(err)
 	s.Empty(configs, "no binding to the deleted connection is stored")
 }
@@ -501,7 +501,7 @@ func (s *StoreSuite) TestABindInProgressDoesNotHoldUpACredentialSave() {
 	saver := s.router()
 	saved := make(chan error, 1)
 	go func() {
-		saved <- saver.CreateAgentConfig(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
+		saved <- saver.AgentConfigs.Insert(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
 			Connectors: []ConnectorBinding{fixed(connection.ID)}})
 	}()
 	s.Require().Eventually(func() bool { return s.waitingForTable("agent_configs") == 1 },
@@ -605,7 +605,7 @@ func (s *StoreSuite) TestASessionBindingReferencesNoConnection() {
 func (s *StoreSuite) TestADeletedConfigReferencesNothing() {
 	connection := s.connection("acme-app", nil)
 	configID := s.bind("acme-app", fixedBinding(connection.ID))
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme-app", configID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", configID))
 
 	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -133,7 +134,14 @@ func (s *Server) chatChannelConfig(ctx context.Context, origin hookOrigin, event
 	if s.store == nil || !scoped {
 		return store.AgentConfig{}, false, nil
 	}
-	return s.store.AgentConfigAnsweringChatChannel(ctx, owner, event.ChannelType)
+	config, err := s.store.AgentConfigs.GetByChatChannel(ctx, owner, event.ChannelType)
+	if errors.Is(err, store.ErrNoAgentConfig) {
+		return store.AgentConfig{}, false, nil
+	}
+	if err != nil {
+		return store.AgentConfig{}, false, err
+	}
+	return config, true, nil
 }
 
 // answerChatChannel has the Router's own session answer a message in a channel of a type an

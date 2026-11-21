@@ -39,7 +39,7 @@ func (s *RouterSuite) schedulingModelOn(config *store.AgentConfig) {
 	s.scheduledMu.Unlock()
 	s.schedulingScript.reset()
 	config.LLM = "scheduling/scheduling-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), config))
 }
 
 // schedulingOn has config answer with the scheduling model, scheduling on.

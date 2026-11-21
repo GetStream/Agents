@@ -795,7 +795,7 @@ func (s *EventForwardingSuite) answering(connectionID string) {
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: connectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 }
 
 // threadChannel is the test customer's one thread channel, once the bridge linked it.

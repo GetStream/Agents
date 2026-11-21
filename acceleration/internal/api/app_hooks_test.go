@@ -92,7 +92,7 @@ func (s *AppHooksSuite) fromApp(path, body string) int {
 
 func (s *AppHooksSuite) config(customer string) string {
 	config := store.AgentConfig{CustomerID: customer, Name: "config-" + s.utils.uuid(), Mode: "text"}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config.ID
 }
 
@@ -119,7 +119,7 @@ func (s *AppHooksSuite) messageIn(custom string) string {
 func (s *AppHooksSuite) dispatchingSession() (string, <-chan dispatch.Message) {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	opened := s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	s.T().Cleanup(release)

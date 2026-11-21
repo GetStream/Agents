@@ -119,7 +119,7 @@ func (s *linqLine) SetupTest() {
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: s.connection.ID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &s.config))
 }
 
 // The bearer connection's account is its line, the identity linq.yaml names, which is how the
@@ -267,7 +267,7 @@ func (s *LinqChannelSuite) TestAConnectionStillOnRevision2PassesNoPhotoOn() {
 // answersWith has the line's agent answer with model.
 func (s *LinqChannelSuite) answersWith(model string) {
 	s.config.LLM = model
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 
 // photo is a media part as Linq's events page shows one (events, message.received), its url
@@ -303,7 +303,7 @@ func photoURLs(message map[string]any) []string {
 func (s *LinqChannelSuite) TestAChatIsOneThreadChannelAndOneIMessageCardInTheSendersOmniChannel() {
 	// record writes the card as on does (AI-2856).
 	s.config.EpisodeCardsRecord = true
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 	s.deliver(s.received(chat, s.line, "+12025550199", "first"), time.Now())
 	s.deliver(s.received(chat, s.line, "+12025550199", "second"), time.Now())

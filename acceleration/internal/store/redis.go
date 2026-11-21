@@ -122,6 +122,13 @@ func cached[T any](ctx context.Context, s *Store, name string, load func(context
 	return value, nil
 }
 
+// found is a row looked up together with whether there was one, so that a row nobody holds
+// can be cached as well.
+type found[T any] struct {
+	Value T    `json:"value"`
+	Found bool `json:"found"`
+}
+
 // forget drops cached rows from Redis, which drops them from every replica's local cache
 // too, in one round trip.
 //

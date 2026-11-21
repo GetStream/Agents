@@ -126,7 +126,7 @@ func (s *ChatEpisodesSuite) TestAChatMessageUnderRecordWritesACard() {
 	worker := s.worker()
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
 		LLM: "llm-flow", DispatchText: true, EpisodeCardsRecord: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	s.Require().Equal(http.StatusOK, s.writes(config.ID, "where is my order?"))
 
@@ -991,7 +991,7 @@ func (s *ChatEpisodesSuite) sessionAnswered(config store.AgentConfig) {
 func (s *ChatEpisodesSuite) config(cards bool, llm string) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
 		LLM: llm, DispatchText: true, EpisodeCards: cards}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config
 }
 

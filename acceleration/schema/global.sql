@@ -1009,6 +1009,7 @@ TABLE knowledge_urls
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     url text NOT NULL
     CONSTRAINT knowledge_urls_pkey PRIMARY KEY (id)
+    CREATE INDEX knowledge_urls_due_idx ON public.knowledge_urls USING btree (updated_at) WHERE ((deleted_at IS NULL) AND (refresh_hours > 0) AND (state <> 'pending'::text))
     CREATE INDEX knowledge_urls_namespace_idx ON public.knowledge_urls USING btree (customer_id, namespace) WHERE (deleted_at IS NULL)
     CREATE UNIQUE INDEX knowledge_urls_url_idx ON public.knowledge_urls USING btree (customer_id, namespace, url) WHERE (deleted_at IS NULL)
 

@@ -48,7 +48,7 @@ func (s *Server) listVoices(ctx context.Context, _ *listVoicesRequest) (*listVoi
 		return nil, errNoVoices
 	}
 
-	stored, err := s.store.CustomerVoices(ctx, customerID)
+	stored, err := s.store.Voices.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (s *Server) getVoice(ctx context.Context, request *getVoiceRequest) (*getVo
 		return nil, errNoVoices
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownVoice
 	}
@@ -136,7 +136,7 @@ func (s *Server) updateVoice(ctx context.Context, request *updateVoiceRequest) (
 		Name:        request.Body.Name,
 		Description: text(request.Body.Description),
 	}
-	if err := s.configs.UpdateVoice(ctx, &voice); err != nil {
+	if err := s.store.Voices.Update(ctx, &voice); err != nil {
 		if errors.Is(err, store.ErrNoVoice) {
 			return nil, errUnknownVoice
 		}
@@ -195,7 +195,7 @@ func (s *Server) addVoiceSample(ctx context.Context, request *addVoiceSampleRequ
 		return nil, invalidRequest(err.Error())
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +228,7 @@ func (s *Server) prepareVoice(ctx context.Context, request *prepareVoiceRequest)
 		return nil, invalidRequest(err.Error())
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +331,7 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 	if request.Body == nil || strings.TrimSpace(request.Body.Provider) == "" {
 		return nil, invalidRequest("name the provider to hear the voice through")
 	}
-	if _, err := s.configs.Voice(ctx, customerID, request.Id); err != nil {
+	if _, err := s.store.Voices.Get(ctx, customerID, request.Id); err != nil {
 		return nil, errUnknownVoice
 	}
 

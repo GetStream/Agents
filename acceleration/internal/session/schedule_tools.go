@@ -620,7 +620,7 @@ func (r *scheduleRunner) room(ctx context.Context, task *store.ScheduledTask) ([
 	if task.State == store.ScheduledTaskActive {
 		return nil, nil
 	}
-	if _, err := r.db.AgentConfig(ctx, r.spec.CustomerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
+	if _, err := r.db.AgentConfigs.Get(ctx, r.spec.CustomerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
 		return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
 	}
 	count, err := r.db.ActiveScheduledTaskCount(ctx, r.spec.CustomerID, r.user, task.ConfigID)

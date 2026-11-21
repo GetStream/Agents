@@ -277,7 +277,7 @@ func (m *Manager) sandboxTokens(schemes map[string]core.Scheme) sandbox.Tokens {
 // egress proxy sends it with no further request, as recheck refuses a tool call. A config that
 // cannot be read just now is any other error. One read by primary key.
 func SandboxBound(ctx context.Context, configs *store.Store, grant sandbox.Grant) error {
-	config, err := configs.AgentConfig(ctx, grant.Connection.CustomerID, grant.Config)
+	config, err := configs.AgentConfigs.Get(ctx, grant.Connection.CustomerID, grant.Config)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return fmt.Errorf("%w: %w", sandbox.ErrNoCredential, err)
 	}

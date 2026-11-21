@@ -145,7 +145,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if err := retiredComplaint(patch.Plugins, patch.PluginEvents, patch.McpServers); err != nil {
 		return nil, err
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, request.ID)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.ID)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
@@ -307,7 +307,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 
-	if err := s.configs.UpdateAgentConfig(ctx, &config); err != nil {
+	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)

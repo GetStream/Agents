@@ -149,7 +149,7 @@ func (s *Server) taskThreadSession(ctx context.Context, delivery scheduledDelive
 	if running {
 		return found, false, nil
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return nil, false, err
 	}

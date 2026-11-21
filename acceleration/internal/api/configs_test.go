@@ -328,7 +328,7 @@ func (s *ConfigsSuite) TestEpisodeCardsTakesOnlyOffRecordOrOn() {
 // storedCards checks the two columns a config's mode is stored in.
 func (s *ConfigsSuite) storedCards(id string, on, record bool) {
 	s.T().Helper()
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	s.Equal(on, stored.EpisodeCards, "episode_cards")
 	s.Equal(record, stored.EpisodeCardsRecord, "episode_cards_record")
@@ -770,7 +770,7 @@ func (s *ConfigsSuite) TestAConfigStoredNamingPluginsAndMCPServersReadsWithoutTh
 func (s *ConfigsSuite) storedWithPlugins() store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "legacy-" + s.utils.uuid(), Mode: "text",
 		Instructions: "Be brief."}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	nameRetired(s.T(), s.store, config.ID)
 	return config
 }
@@ -852,7 +852,7 @@ func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() 
 	// Stored before saves were checked; its sessions are refused as they start instead.
 	pinned := "batch/" + batchModel
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	var updated, patched AgentConfig
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+config.ID,
@@ -1104,7 +1104,7 @@ func (s *ConfigsSuite) TestABindingsPolicyIsReadBackExactlyAsItWasWritten() {
 	written, err := json.Marshal(bindings)
 	s.Require().NoError(err)
 	s.JSONEq(string(written), string(read))
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	cancellable := false
 	s.Equal(&store.BindingPolicy{PreSpeech: "Let me look in Slack.", OnInterrupt: store.InterruptWait, Cancellable: &cancellable},

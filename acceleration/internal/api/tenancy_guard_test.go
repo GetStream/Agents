@@ -70,7 +70,7 @@ func (s *TenancyGuardSuite) drive(customer tenant) {
 		ClaimGuestRequest{GuestId: guest.Id, UserId: "account-" + s.utils.uuid()}, nil))
 
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "text"}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 	body := fmt.Sprintf(`{"type": "message.new", "channel_id": %q, "channel_type": "agent", "created_at": %q,
   "channel_custom": {%q: %q}, "message": {"id": %q, "text": "hello", "user": {"id": "sam"}}}`,
 		"chat-"+s.utils.uuid(), time.Now().UTC().Format(time.RFC3339Nano), ConfigField, config.ID, "message-"+s.utils.uuid())

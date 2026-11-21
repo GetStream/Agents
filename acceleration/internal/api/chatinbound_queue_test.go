@@ -562,7 +562,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersSessionsRunOn
 func (s *ChatInboundQueueSuite) dispatchingOn() <-chan dispatch.Message {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	s.T().Cleanup(release)
@@ -607,7 +607,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAThreadChannelThatCouldNotBeReadI
 func (s *ChatInboundQueueSuite) TestADeliveryForADispatchingSessionNoWorkerTookIsTriedAgain() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 
 	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
@@ -715,7 +715,7 @@ func (s *ChatInboundQueueSuite) TestTriesOfOneQueuedDeliveryAtOnceAnswerItOnce()
 func (s *ChatInboundQueueSuite) TestAQueuedDeliveryForADispatchingSessionNoWorkerTookIsQueuedAgain() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	queued := s.row(s.queue(s.message(suiteStreamApp, "", "")))
 
@@ -808,7 +808,7 @@ func (s *ChatInboundQueueSuite) dispatchingBesideAWorkerElsewhere() (*websocket.
 	router.workers = s.deafWorkers(logger)
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
 		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.on(here).createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	return worker, router, s.row(s.queue(s.message(suiteStreamApp, "", "")))
 }

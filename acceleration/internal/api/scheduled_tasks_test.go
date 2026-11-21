@@ -1219,7 +1219,7 @@ func (s *ScheduledTasksSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 	s.Require().NoError(hold.Rollback())
 	s.Require().NoError(<-answered)
 
-	_, err = s.store.AgentConfig(ctx, s.customerID(), config)
+	_, err = s.store.AgentConfigs.Get(ctx, s.customerID(), config)
 	s.Require().ErrorIs(err, store.ErrNoAgentConfig, "the delete committed before the caller hung up")
 	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }

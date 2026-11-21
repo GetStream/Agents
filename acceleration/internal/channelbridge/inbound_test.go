@@ -99,7 +99,7 @@ func (s *InboundSuite) SetupTest() {
 	s.logs = &syncBuffer{}
 	s.customer = "customer-" + uuid.NewString()
 	s.config = store.AgentConfig{CustomerID: s.customer, Name: "Support", EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &s.config))
 }
 
 func (s *InboundSuite) TestAQueuedMessageIsWrittenOnceUnderItsOwnID() {
@@ -259,7 +259,7 @@ func (s *InboundSuite) TestAMessageQueuedBeforeItsConfigTurnedTheCardsOffOpensNo
 func (s *InboundSuite) TestAMessageWhoseConfigWasDeletedOpensNoEpisodeAndLogsNoError() {
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.816139", "hello", nil)
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, s.customer, s.config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, s.customer, s.config.ID))
 	handed := s.handedTo(nil)
 
 	s.Equal(inboundMessageID(thread.ChannelID, "1793125611.816139"), s.handed(handed).ID)
@@ -1203,7 +1203,7 @@ func (s *InboundSuite) writeAhead(thread store.ChannelThread, id, text string) {
 // cardsMode stores the suite's config with episode_cards and episode_cards_record as given.
 func (s *InboundSuite) cardsMode(on, record bool) {
 	s.config.EpisodeCards, s.config.EpisodeCardsRecord = on, record
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &s.config))
 }
 
 // episodes is how many episodes the test's customer has.

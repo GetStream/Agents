@@ -26,7 +26,7 @@ const inProgress = "in_progress"
 func (s *EpisodeReadingSuite) cardsConfig() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText,
 		EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	s.configID = config.ID
 }
 
@@ -172,7 +172,7 @@ WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND 
 // holds only its own episode's lines.
 func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpisodesFromBeforeIt() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	s.configID = config.ID
 	number, user := s.phone("+15550100103").Address, "anya-"+uuid.NewString()
 	first := s.thread("sms-author")
@@ -192,7 +192,7 @@ func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpi
 	s.summarize(s.chatEpisode(user, chat, 0), "Said hello.")
 	s.linkAt(user, number, -3000)
 	config.EpisodeCards = true
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config))
 	s.textFrom(number, first, -60, "my dog is Pepper")
 	s.at(0)
 

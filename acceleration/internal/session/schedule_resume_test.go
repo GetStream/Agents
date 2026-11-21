@@ -147,7 +147,7 @@ func (s *ScheduleResumeSuite) TestATaskAMovePausedThatTheAgentMovesIsStillResume
 func (s *ScheduleResumeSuite) pausedInTheSecondPass() (*scheduleRunner, store.ScheduledTask) {
 	customer, user := "resume-"+uuid.NewString(), "user-"+uuid.NewString()
 	config := store.AgentConfig{CustomerID: customer, Name: "agent-" + uuid.NewString()}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	due := time.Date(2026, 10, 25, 1, 20, 0, 0, time.UTC)
 	task := store.ScheduledTask{
 		CustomerID: customer, ConfigID: config.ID, UserID: user, CallerKind: string(auth.KindAuthenticated),

@@ -609,7 +609,7 @@ func (s *RunnerSuite) TestACampaignWhoseConfigIsGonePausesWithoutUsingAnAttempt(
 
 func (s *RunnerSuite) leavingAMessageWith(config store.AgentConfig, action string) store.Campaign {
 	config.CustomerID, config.Name = s.customerID, "agent-"+uuid.NewString()
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	sequence := s.single()
 	sequence.Steps[0].ConfigID = config.ID
 	sequence.Steps[0].Voicemail = VoicemailSetting{Action: action, Message: "Call us back."}

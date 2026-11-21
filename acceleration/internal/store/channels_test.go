@@ -155,7 +155,7 @@ func (s *StoreSuite) TestTheAgentOnANumberIsTheOneThatNamedIt() {
 		CustomerID: customerID, Name: "channelled-" + newID(),
 		Channels: AgentChannels{WhatsApp: &ChannelLine{Number: e164}, Identity: ChannelIdentityPhone},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 
 	found, ok, err := s.store.ConfigOnChannel(s.ctx, customerID, "whatsapp", e164)
 

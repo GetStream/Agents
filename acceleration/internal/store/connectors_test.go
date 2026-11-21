@@ -962,7 +962,7 @@ func (s *StoreSuite) TestADeleteOfOneAppsConnectorLeavesAnotherAppsOfTheSameIdAl
 	s.NoError(err, "the other app's definition is still there")
 	_, err = s.store.ConnectorConnection(s.ctx, "other-app", theirs.ID)
 	s.NoError(err, "and its connection")
-	read, err := s.store.AgentConfig(s.ctx, "other-app", their.ID)
+	read, err := s.store.AgentConfigs.Get(s.ctx, "other-app", their.ID)
 	s.Require().NoError(err)
 	s.Equal([]ConnectorBinding{crmBinding("inbox", "")}, read.Connectors, "and its binding")
 }
@@ -972,7 +972,7 @@ func (s *StoreSuite) TestAGoneConnectionOrConfigDoesNotKeepAnUnforcedDeleteOff()
 	connection := s.crmConnection("acme-app")
 	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
 	config := s.boundConfig("acme-app", crmBinding("inbox", ""))
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme-app", config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID))
 
 	deleted, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
 
@@ -1018,7 +1018,7 @@ func (s *StoreSuite) TestAForcedDeleteDeletesItsConnectionsAndLeavesTheBindings(
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT credentials_sealed FROM connector_connections WHERE id = ?", granted.ID).Scan(&sealed))
 	s.Empty(sealed, "the credentials went with the connection")
-	read, err := s.store.AgentConfig(s.ctx, "acme-app", config.ID)
+	read, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
 	s.Require().NoError(err)
 	s.Equal([]ConnectorBinding{crmBinding("crm", granted.ID)}, read.Connectors, "left in place, as a forced connection delete leaves it")
 }
@@ -1125,7 +1125,7 @@ func (s *StoreSuite) TestADeleteWaitsForABindingInProgressAndIsRefused() {
 	saver := s.router()
 	saved := make(chan error, 1)
 	go func() {
-		saved <- saver.CreateAgentConfig(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
+		saved <- saver.AgentConfigs.Insert(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
 			Connectors: []ConnectorBinding{crmBinding("crm", "")}})
 	}()
 	s.Require().Eventually(func() bool { return s.waitingForTable("agent_configs") == 1 },
@@ -1151,7 +1151,7 @@ func (s *StoreSuite) TestABindingWaitsForADeleteInProgressAndIsRefused() {
 	saver := s.router()
 	saved := make(chan error, 1)
 	go func() {
-		saved <- saver.CreateAgentConfig(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
+		saved <- saver.AgentConfigs.Insert(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
 			Connectors: []ConnectorBinding{crmBinding("crm", "")}})
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
@@ -1160,7 +1160,7 @@ func (s *StoreSuite) TestABindingWaitsForADeleteInProgressAndIsRefused() {
 
 	s.NoError(<-deleted)
 	s.ErrorIs(<-saved, ErrNoConnectorDefinition)
-	configs, err := s.store.CustomerAgentConfigs(s.ctx, "acme-app")
+	configs, err := s.store.AgentConfigs.Select(s.ctx, "acme-app")
 	s.Require().NoError(err)
 	s.Empty(configs, "no binding to the deleted connector is stored")
 }
@@ -1174,12 +1174,12 @@ func (s *StoreSuite) TestAnUpdateKeepsABindingAForcedConnectorDeleteLeftBehind()
 	s.Require().NoError(err)
 
 	config.Instructions = "be brief"
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config))
 	other := config
 	other.Connectors = append(other.Connectors, ConnectorBinding{Name: "erp", ConnectorID: "custom_erp", Connection: ConnectionBinding{Type: "session"}, Tools: []ToolGrant{}})
-	s.ErrorIs(s.store.UpdateAgentConfig(s.ctx, &other), ErrNoConnectorDefinition, "a binding to a connector the customer has none of is refused")
+	s.ErrorIs(s.store.AgentConfigs.Update(s.ctx, &other), ErrNoConnectorDefinition, "a binding to a connector the customer has none of is refused")
 
-	read, err := s.store.AgentConfig(s.ctx, "acme-app", config.ID)
+	read, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
 	s.Require().NoError(err)
 	s.Equal("be brief", read.Instructions)
 	s.Equal([]ConnectorBinding{crmBinding("inbox", "")}, read.Connectors)
@@ -1261,7 +1261,7 @@ func (s *StoreSuite) TestAForcedDeleteAndASaveBindingItsConnectionDoNotDeadlock(
 	saver := s.router()
 	saved := make(chan error, 1)
 	go func() {
-		saved <- saver.CreateAgentConfig(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
+		saved <- saver.AgentConfigs.Insert(s.ctx, &AgentConfig{CustomerID: "acme-app", Name: "bound",
 			Connectors: []ConnectorBinding{crmBinding("crm", connection.ID)}})
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },

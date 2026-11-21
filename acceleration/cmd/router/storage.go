@@ -70,7 +70,7 @@ func runUsageStorage(ctx context.Context, args []string, settings config.Config,
 		return err
 	}
 	defer stop()
-	base := metered.NewRegionalKnowledge(backends, recording, nil, pgStore)
+	base := metered.NewRegionalKnowledge(backends, recording, nil, pgStore.KnowledgeNamespaces)
 	// The bases kept in customers' own accounts are read on their keys, which only the keyring
 	// they were sealed under opens.
 	secrets, err := newSecretSealer(ctx, settings)
@@ -179,7 +179,7 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 			namespaces = append(namespaces, located{place: store.KnowledgePlace{Region: region, Account: store.KnowledgeAccountStream}, namespace: namespace})
 		}
 	}
-	theirs, err := pgStore.KnowledgeInCustomerAccounts(ctx)
+	theirs, err := pgStore.KnowledgeNamespaces.SelectInCustomerAccounts(ctx)
 	if err != nil {
 		logger.Error("could not list the knowledge bases in customers' own accounts, so no storage is recorded for the hour", "hour", at, "error", err)
 		alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "listing": err.Error()})

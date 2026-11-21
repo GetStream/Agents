@@ -789,7 +789,7 @@ func (s *SandboxGrantsSuite) TestABindingTheConfigNoLongerHoldsAsOpenedGivesNoCr
 
 	s.rebind(config, s.fixed("crm", id, "whoami"))
 	s.ErrorIs(SandboxBound(s.ctx, s.store, grant), sandbox.ErrNoCredential, "sandbox unset")
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, s.customerID, config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, s.customerID, config.ID))
 	s.ErrorIs(SandboxBound(s.ctx, s.store, grant), sandbox.ErrNoCredential, "config deleted")
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)

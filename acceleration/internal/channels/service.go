@@ -280,7 +280,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
-	config, err := s.store.AgentConfig(ctx, notice.CustomerID, notice.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, notice.CustomerID, notice.ConfigID)
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}

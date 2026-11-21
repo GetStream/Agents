@@ -93,29 +93,29 @@ func (s *Server) listAgentConfigs(ctx context.Context, request *listAgentConfigs
 	// here, and an empty answer is an empty list rather than a 404: this is a list endpoint,
 	// and a caller looking a name up is asking whether it is there.
 	if named := value(request.Name.ptr()); named != "" {
-		found, exists, err := s.configs.AgentConfigByName(ctx, customerID, named)
+		found, err := s.store.AgentConfigs.GetByName(ctx, customerID, named)
+		if errors.Is(err, store.ErrNoAgentConfig) {
+			return &listAgentConfigsResponse{Body: []AgentConfig{}}, nil
+		}
 		if err != nil {
 			return nil, err
-		}
-		if !exists {
-			return &listAgentConfigsResponse{Body: []AgentConfig{}}, nil
 		}
 		return &listAgentConfigsResponse{Body: []AgentConfig{agentConfigOf(found)}}, nil
 	}
 
 	// A role is held by one live config at most, so it answers as a name does.
 	if role := request.Role.ptr(); role != nil {
-		found, exists, err := s.store.AgentConfigByRole(ctx, customerID, string(*role))
+		found, err := s.store.AgentConfigs.GetByRole(ctx, customerID, string(*role))
+		if errors.Is(err, store.ErrNoAgentConfig) {
+			return &listAgentConfigsResponse{Body: []AgentConfig{}}, nil
+		}
 		if err != nil {
 			return nil, err
-		}
-		if !exists {
-			return &listAgentConfigsResponse{Body: []AgentConfig{}}, nil
 		}
 		return &listAgentConfigsResponse{Body: []AgentConfig{agentConfigOf(found)}}, nil
 	}
 
-	stored, err := s.store.CustomerAgentConfigs(ctx, customerID)
+	stored, err := s.store.AgentConfigs.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +205,7 @@ func (s *Server) createAgentConfig(ctx context.Context, request *createAgentConf
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	if err := s.configs.CreateAgentConfig(ctx, &config); err != nil {
+	if err := s.store.AgentConfigs.Insert(ctx, &config); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
@@ -226,7 +226,7 @@ func (s *Server) getAgentConfig(ctx context.Context, request *getAgentConfigRequ
 		return nil, errNoConfigs
 	}
 
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Id)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
@@ -252,7 +252,7 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 		return nil, err
 	}
 
-	existing, err := s.configs.AgentConfig(ctx, customerID, request.Id)
+	existing, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
@@ -374,7 +374,7 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	if err := s.configs.UpdateAgentConfig(ctx, &config); err != nil {
+	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
@@ -396,7 +396,7 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	}
 
 	// Read before it goes, so the entry recording the deletion can say what was deleted.
-	existing, err := s.configs.AgentConfig(ctx, customerID, request.Id)
+	existing, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
@@ -414,7 +414,7 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	} else if parent != "" {
 		return nil, conflict(fmt.Sprintf("%q hands work to this agent: take it out of %q's agents first", parent, parent))
 	}
-	if err := s.configs.DeleteAgentConfig(ctx, customerID, request.Id); err != nil {
+	if err := s.store.AgentConfigs.Delete(ctx, customerID, request.Id); err != nil {
 		return nil, errUnknownConfig
 	}
 	// A deleted config's tasks have no agent left to run on: paused, they stop failing
@@ -444,7 +444,7 @@ func (s *Server) listSkills(ctx context.Context, request *listSkillsRequest) (*l
 		return nil, errNoConfigs
 	}
 
-	stored, err := s.store.CustomerSkills(ctx, customerID, value(request.ConfigId.ptr()))
+	stored, err := s.store.Skills.Select(ctx, customerID, store.SkillFilter{ConfigID: value(request.ConfigId.ptr())})
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +471,7 @@ func (s *Server) createSkill(ctx context.Context, request *createSkillRequest) (
 	if message, ok := skillComplaint(*request.Body); !ok {
 		return nil, invalidRequest(message)
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Body.ConfigId)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
@@ -480,7 +480,7 @@ func (s *Server) createSkill(ctx context.Context, request *createSkillRequest) (
 	}
 
 	skill := storedSkill(*request.Body, customerID)
-	if err := s.configs.CreateSkill(ctx, &skill); err != nil {
+	if err := s.store.Skills.Insert(ctx, &skill); err != nil {
 		return nil, storeFailure(err, errSkillNameTaken)
 	}
 	stored := skillOf(skill)
@@ -501,7 +501,7 @@ func (s *Server) getSkill(ctx context.Context, request *getSkillRequest) (*getSk
 		return nil, errNoConfigs
 	}
 
-	skill, err := s.store.Skill(ctx, customerID, request.Id)
+	skill, err := s.store.Skills.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownSkill
 	}
@@ -523,7 +523,7 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 	if message, ok := skillComplaint(*request.Body); !ok {
 		return nil, invalidRequest(message)
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Body.ConfigId)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
@@ -531,7 +531,7 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 		return nil, invalidRequest(message)
 	}
 
-	existing, err := s.store.Skill(ctx, customerID, request.Id)
+	existing, err := s.store.Skills.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownSkill
 	}
@@ -539,7 +539,7 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 	skill := storedSkill(*request.Body, customerID)
 	skill.ID = existing.ID
 	skill.CreatedAt = existing.CreatedAt
-	if err := s.configs.UpdateSkill(ctx, &skill); err != nil {
+	if err := s.store.Skills.Update(ctx, &skill); err != nil {
 		return nil, storeFailure(err, errSkillNameTaken)
 	}
 	stored := skillOf(skill)
@@ -563,11 +563,11 @@ func (s *Server) deleteSkill(ctx context.Context, request *deleteSkillRequest) (
 
 	// Read before it goes, so the entry recording the deletion can say what was deleted and
 	// which agent it was under.
-	existing, err := s.store.Skill(ctx, customerID, request.Id)
+	existing, err := s.store.Skills.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownSkill
 	}
-	if err := s.configs.DeleteSkill(ctx, customerID, request.Id); err != nil {
+	if err := s.store.Skills.Delete(ctx, customerID, request.Id); err != nil {
 		return nil, errUnknownSkill
 	}
 	s.audit(ctx, auditRecord{
@@ -1563,7 +1563,7 @@ func (s *Server) storedSkillSandboxComplaint(ctx context.Context, config store.A
 	if config.Sandbox != "" || config.ID == "" || len(config.Skills) == 0 {
 		return "", true, nil
 	}
-	stored, err := s.configs.SkillsNamed(ctx, config.CustomerID, config.ID, config.Skills)
+	stored, err := s.store.Skills.GetByNames(ctx, config.CustomerID, config.ID, config.Skills)
 	if err != nil {
 		return "", false, err
 	}

@@ -141,7 +141,7 @@ func (s *ConfigsSuite) TestAPatchAndASyncOfARowStillNamingThemSaveAndShowNone() 
 		map[string]any{"name": synced.Name, "hash": "v1", "mode": "text", "instructions": "Be briefer."}, nil))
 
 	for _, config := range []store.AgentConfig{patched, synced} {
-		stored, err := s.store.AgentConfig(context.Background(), s.customerID(), config.ID)
+		stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), config.ID)
 		s.Require().NoError(err)
 		s.Equal("Be briefer.", stored.Instructions)
 		status, read := s.fields(http.MethodGet, "/v1/agents/configs/"+config.ID, nil, "")

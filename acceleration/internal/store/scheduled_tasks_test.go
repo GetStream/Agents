@@ -1063,7 +1063,7 @@ func (s *StoreSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMissed() {
 
 func (s *StoreSuite) TestATaskOnADeletedConfigIsRefused() {
 	deleted := s.boundConfig("acme")
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme", deleted.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme", deleted.ID))
 
 	err := s.store.CreateScheduledTask(s.ctx, &ScheduledTask{
 		CustomerID: "acme", ConfigID: deleted.ID, UserID: "sam", CallerKind: "authenticated",
@@ -1109,7 +1109,7 @@ func (s *StoreSuite) TestACreateWaitsForAConfigDeleteUnderWayAndIsRefused() {
 func (s *StoreSuite) TestATaskOfADeletedConfigIsNotMadeActiveAgain() {
 	config := s.boundConfig("acme")
 	s.task("one", func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskPaused })
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme", config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme", config.ID))
 	stored, err := s.store.ScheduledTask(s.ctx, "acme", "one")
 	s.Require().NoError(err)
 

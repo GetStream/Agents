@@ -160,7 +160,7 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 		return nil, invalidRequest("a request body is required")
 	}
 
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Body.ConfigId)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
 		return nil, errUnknownConfig
 	}

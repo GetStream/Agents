@@ -225,8 +225,9 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 		return nil, err
 	}
 
-	existing, found, err := s.configs.AgentConfigByName(ctx, customerID, name)
-	if err != nil {
+	existing, err := s.store.AgentConfigs.GetByName(ctx, customerID, name)
+	found := err == nil
+	if err != nil && !errors.Is(err, store.ErrNoAgentConfig) {
 		return nil, err
 	}
 	// A router older than ui_instructions kept a sync's hash and dropped them, so the same sync
@@ -402,11 +403,11 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	config.SyncHash = hash
 
 	if found {
-		if err := s.configs.UpdateAgentConfig(ctx, &config); err != nil {
+		if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
 	} else {
-		if err := s.configs.CreateAgentConfig(ctx, &config); err != nil {
+		if err := s.store.AgentConfigs.Insert(ctx, &config); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
 	}
@@ -498,7 +499,7 @@ func syncComplaint(ctx context.Context, body SyncAgentRequest) (string, bool) {
 // replaceSimulations makes the config's simulations exactly the ones declared, finding each
 // by name so its runs stay attached to it.
 func (s *Server) replaceSimulations(ctx context.Context, customerID, configID string, declared []SimulationDeclaration) error {
-	all, err := s.store.CustomerSimulations(ctx, customerID)
+	all, err := s.store.Simulations.Select(ctx, customerID)
 	if err != nil {
 		return err
 	}
@@ -529,18 +530,18 @@ func (s *Server) replaceSimulations(ctx context.Context, customerID, configID st
 		delete(stored, simulation.Name)
 		if ok {
 			simulation.ID = existing.ID
-			if err := s.store.UpdateSimulation(ctx, &simulation); err != nil {
+			if err := s.store.Simulations.Update(ctx, &simulation); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := s.store.CreateSimulation(ctx, &simulation); err != nil {
+		if err := s.store.Simulations.Insert(ctx, &simulation); err != nil {
 			return err
 		}
 	}
 
 	for _, simulation := range stored {
-		if err := s.store.DeleteSimulation(ctx, customerID, simulation.ID); err != nil {
+		if err := s.store.Simulations.Delete(ctx, customerID, simulation.ID); err != nil {
 			return err
 		}
 	}
@@ -664,7 +665,7 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 		names = append(names, strings.TrimSpace(skill.Name))
 	}
 
-	stored, err := s.configs.SkillsNamed(ctx, customerID, configID, names)
+	stored, err := s.store.Skills.GetByNames(ctx, customerID, configID, names)
 	if err != nil {
 		return err
 	}
@@ -679,7 +680,7 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 		if existing, ok := known[row.Name]; ok {
 			row.ID = existing.ID
 			row.CreatedAt = existing.CreatedAt
-			if err := s.configs.UpdateSkill(ctx, &row); err != nil {
+			if err := s.store.Skills.Update(ctx, &row); err != nil {
 				return err
 			}
 			s.audit(ctx, auditRecord{
@@ -689,7 +690,7 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 			})
 			continue
 		}
-		if err := s.configs.CreateSkill(ctx, &row); err != nil {
+		if err := s.store.Skills.Insert(ctx, &row); err != nil {
 			return err
 		}
 		s.audit(ctx, auditRecord{

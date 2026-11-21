@@ -14,7 +14,7 @@ func (s *StoreSuite) answering(customerID string, at time.Time, types ...string)
 	for _, named := range types {
 		config.ChatChannels = append(config.ChatChannels, ChatChannel{Type: named})
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET created_at = ? WHERE id = ?", at, config.ID)
 	s.Require().NoError(err)
 	return config.ID
@@ -26,7 +26,7 @@ func (s *StoreSuite) TestTheOldestConfigNamingAChannelTypeAnswersInIt() {
 	customer, other := "acme-"+newID(), "other-"+newID()
 	now := time.Now().UTC()
 	deleted := s.answering(customer, now.Add(-4*time.Hour), "callouts")
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, customer, deleted))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, customer, deleted))
 	copied := s.answering(customer, now.Add(-3*time.Hour), "callouts")
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET tags = ?::jsonb WHERE id = ?", `{"draft_of": "x"}`, copied)
 	s.Require().NoError(err)
@@ -35,10 +35,9 @@ func (s *StoreSuite) TestTheOldestConfigNamingAChannelTypeAnswersInIt() {
 	oldest := s.answering(customer, now.Add(-time.Hour), "shifts", "callouts")
 	s.answering(customer, now, "callouts")
 
-	config, found, err := s.store.AgentConfigAnsweringChatChannel(s.ctx, customer, "callouts")
+	config, err := s.store.AgentConfigs.GetByChatChannel(s.ctx, customer, "callouts")
 
 	s.Require().NoError(err)
-	s.Require().True(found)
 	s.Equal(oldest, config.ID)
 	s.Equal([]ChatChannel{{Type: "shifts"}, {Type: "callouts"}}, config.ChatChannels)
 }
@@ -50,9 +49,8 @@ func (s *StoreSuite) TestAChannelTypeNoConfigNamesHasNone() {
 	s.answering(customer, time.Now().UTC())
 
 	for _, asked := range []string{"call", "callouts2", "Callouts", "agent"} {
-		_, found, err := s.store.AgentConfigAnsweringChatChannel(s.ctx, customer, asked)
-		s.Require().NoError(err, asked)
-		s.False(found, asked)
+		_, err := s.store.AgentConfigs.GetByChatChannel(s.ctx, customer, asked)
+		s.ErrorIs(err, ErrNoAgentConfig, asked)
 	}
 }
 

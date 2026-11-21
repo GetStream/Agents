@@ -117,7 +117,7 @@ func (s *CloserSuite) closerOver(db *store.Store) *Closer {
 // agentConfig is an agent of the test's customer, on the LLM named.
 func (s *CloserSuite) agentConfig(model string) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "agent-" + uuid.NewString(), LLM: model}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	return config
 }
 

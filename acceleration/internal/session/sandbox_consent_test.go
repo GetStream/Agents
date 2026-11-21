@@ -287,7 +287,7 @@ func (s *SandboxGrantsSuite) TestARunShowsNoConsentWhereNobodyCanAnswerIt() {
 		"in bob's conversation": {text: true, owner: "bob"},
 		"with a rejected token": {text: true, owner: "alice", spoil: func(d *dispatcher) { d.logins.byAlias["crm"].rejected = true }},
 		"after the config dropped it": {text: true, owner: "alice", spoil: func(d *dispatcher) {
-			config, err := s.store.AgentConfig(s.ctx, s.customerID, d.spec.ConfigID)
+			config, err := s.store.AgentConfigs.Get(s.ctx, s.customerID, d.spec.ConfigID)
 			s.Require().NoError(err)
 			s.rebind(config, sandboxed(s.chosen("other", "whoami")))
 		}},

@@ -381,14 +381,14 @@ func (s *StoreSuite) anyToSweep() bool {
 
 func (s *StoreSuite) TestAnyEpisodeToSweepIsWhetherAConfigTurnedTheCardsOn() {
 	off := &AgentConfig{CustomerID: "acme-app", Name: "plain"}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, off))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, off))
 	s.False(s.anyToSweep(), "a config that never had the cards on, and no episode, has nothing to sweep")
 
 	on := &AgentConfig{CustomerID: "acme-app", Name: "carded", EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, on))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, on))
 	s.True(s.anyToSweep())
 
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme-app", on.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", on.ID))
 	s.False(s.anyToSweep(), "a deleted config writes no card")
 }
 
@@ -396,14 +396,14 @@ func (s *StoreSuite) TestAnyEpisodeToSweepIsWhetherAConfigTurnedTheCardsOn() {
 // app chat episodes as on does, and they must close and be summarized (AI-2856).
 func (s *StoreSuite) TestAnyEpisodeToSweepCountsAConfigThatRecordsTheCards() {
 	off := &AgentConfig{CustomerID: "acme-app", Name: "plain"}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, off))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, off))
 	s.Require().False(s.anyToSweep())
 
 	record := &AgentConfig{CustomerID: "acme-app", Name: "recording", EpisodeCardsRecord: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, record))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, record))
 	s.True(s.anyToSweep())
 
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme-app", record.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", record.ID))
 	s.False(s.anyToSweep(), "a deleted config writes no card")
 }
 
@@ -411,11 +411,11 @@ func (s *StoreSuite) TestAnyEpisodeToSweepCountsAConfigThatRecordsTheCards() {
 // again would turn off.
 func (s *StoreSuite) TestAnUpdateStoresWhetherAConfigRecordsTheCards() {
 	config := &AgentConfig{CustomerID: "acme-app", Name: "recording"}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 	config.EpisodeCardsRecord = true
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, config))
 
-	stored, err := s.store.AgentConfig(s.ctx, "acme-app", config.ID)
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
 	s.Require().NoError(err)
 	s.True(stored.EpisodeCardsRecord)
 	s.False(stored.EpisodeCards)
@@ -425,7 +425,7 @@ func (s *StoreSuite) TestAnUpdateStoresWhetherAConfigRecordsTheCards() {
 // router started again with no config's cards on; the episode was never closed.
 func (s *StoreSuite) TestAThreadEpisodeLeftInProgressAfterTheCardsTurnedOffIsToSweep() {
 	off := &AgentConfig{CustomerID: "acme-app", Name: "was carded"}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, off))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, off))
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
 	s.True(s.anyToSweep())
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -42,5 +43,31 @@ func TestUpdatingAConfigWritesEveryFieldOfIt(t *testing.T) {
 
 	for _, column := range configColumns {
 		require.NotContainsf(t, immutable, column, "%s is not an update's to change", column)
+	}
+}
+
+func TestAgentConfigValidate(t *testing.T) {
+	valid := func() AgentConfig {
+		config := AgentConfig{CustomerID: "app", Name: "support"}
+		normalizeConfig(&config)
+		return config
+	}
+	ok := valid()
+	require.NoError(t, ok.Validate())
+
+	for field, broken := range map[string]func(*AgentConfig){
+		"customer_id":      func(c *AgentConfig) { c.CustomerID = "" },
+		"name":             func(c *AgentConfig) { c.Name = "" },
+		"mode":             func(c *AgentConfig) { c.Mode = "video" },
+		"role":             func(c *AgentConfig) { c.Role = "admin" },
+		"region":           func(c *AgentConfig) { c.Region = "EU" },
+		"greeting_mode":    func(c *AgentConfig) { c.GreetingMode = "loud" },
+		"video_max_frames": func(c *AgentConfig) { c.VideoMaxFrames = 0 },
+	} {
+		config := valid()
+		broken(&config)
+		var invalid *ValidationError
+		require.True(t, errors.As(config.Validate(), &invalid), field)
+		require.Equal(t, field, invalid.Field)
 	}
 }

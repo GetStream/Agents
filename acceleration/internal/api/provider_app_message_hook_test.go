@@ -243,7 +243,7 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: bot.ConnectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 
 	status, _ := s.slack.Deliver(s.server.URL+providerAppEventsPath+"slack_bot/"+s.environment["SLACK_BOT_MCP_APP_ID"],
 		s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], s.slackMessage(workspace, "U0000ALICE", "Can you check the build?"), 0)
@@ -301,7 +301,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: bot.ConnectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 	handOver := s.holdHandOffs()
 	status, _ := s.slack.Deliver(s.server.URL+providerAppEventsPath+"slack_bot/"+s.environment["SLACK_BOT_MCP_APP_ID"],
 		s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], s.slackMessage(workspace, "U0000ALICE", "Can you check the build?"), 0)

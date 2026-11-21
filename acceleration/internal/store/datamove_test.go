@@ -305,9 +305,8 @@ func (s *DataMoveSuite) TestAMovedModeratorIsStillTheAppsModerator() {
 
 	s.move("acme", "moved")
 
-	moderator, found, err := s.destination.AgentConfigByRole(s.ctx, "moved", RoleAgentModerator)
-	s.Require().NoError(err)
-	s.Require().True(found, "the chat worker finds the app's moderator by its role")
+	moderator, err := s.destination.AgentConfigs.GetByRole(s.ctx, "moved", RoleAgentModerator)
+	s.Require().NoError(err, "the chat worker finds the app's moderator by its role")
 	s.Equal(id, moderator.ID)
 }
 
@@ -432,11 +431,11 @@ func (s *DataMoveSuite) TestAConfigsBindingsMoveWithIt() {
 		Name: "crm", ConnectorID: "slack", Connection: ConnectionBinding{Type: "session"},
 		Tools: []ToolGrant{{Name: "search", SchemaDigest: strings.Repeat("a", 64)}}, Required: true,
 	}}}
-	s.Require().NoError(s.source.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.source.AgentConfigs.Insert(s.ctx, config))
 
 	s.move("acme", "moved")
 
-	moved, err := s.destination.AgentConfig(s.ctx, "moved", config.ID)
+	moved, err := s.destination.AgentConfigs.Get(s.ctx, "moved", config.ID)
 	s.Require().NoError(err)
 	s.Equal(config.Connectors, moved.Connectors)
 }
@@ -2195,7 +2194,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHerePaused
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	s.move("acme", "moved")
 	// What deleting the config over the API does here.
-	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "moved", "config-1"))
 	s.Require().NoError(s.destination.PauseScheduledTasksForConfig(s.ctx, "moved", "config-1"))
 
 	resumed, skipped, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
@@ -2214,7 +2213,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHereBefore
 	s.capture("acme")
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	cursor := s.move("acme", "moved")
-	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "moved", "config-1"))
 	s.Require().NoError(s.destination.PauseScheduledTasksForConfig(s.ctx, "moved", "config-1"))
 	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET next_run_at = next_run_at + interval '1 day', updated_at = now() WHERE id = 'st-active'")
@@ -2309,7 +2308,7 @@ INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-
 UPDATE scheduled_tasks SET config_id = 'config-2' WHERE id IN ('st-gone-ended', 'st-gone-paused')`)
 	s.Require().NoError(err)
 	s.move("acme", "moved")
-	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-2"))
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "moved", "config-2"))
 	changing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = changing.Rollback() }()

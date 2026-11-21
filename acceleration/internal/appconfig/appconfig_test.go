@@ -264,59 +264,6 @@ func (s *AppConfigSuite) TestPolicy() {
 	})
 }
 
-func (s *AppConfigSuite) TestAgentConfig() {
-	s.Run("a renamed config is no longer found under the name it had", func() {
-		appID, _ := s.app()
-
-		config := store.AgentConfig{CustomerID: appID, Name: "support", Mode: "text"}
-		s.Require().NoError(s.first.CreateAgentConfig(s.ctx, &config))
-
-		found, exists, err := s.other.AgentConfigByName(s.ctx, appID, "support")
-		s.Require().NoError(err)
-		s.Require().True(exists)
-		s.Equal(config.ID, found.ID)
-
-		config.Name = "sales"
-		s.Require().NoError(s.first.UpdateAgentConfig(s.ctx, &config))
-
-		s.Eventually(func() bool {
-			_, exists, err := s.other.AgentConfigByName(s.ctx, appID, "support")
-			return err == nil && !exists
-		}, settleFor, 10*time.Millisecond, "the other node still answers to the old name")
-
-		renamed, exists, err := s.other.AgentConfigByName(s.ctx, appID, "sales")
-		s.Require().NoError(err)
-		s.Require().True(exists)
-		s.Equal(config.ID, renamed.ID)
-	})
-
-	s.Run("an edited skill is read with its new instructions", func() {
-		appID, _ := s.app()
-
-		config := store.AgentConfig{CustomerID: appID, Name: "refunds", Mode: "text"}
-		s.Require().NoError(s.first.CreateAgentConfig(s.ctx, &config))
-
-		skill := store.Skill{
-			CustomerID: appID, ConfigID: config.ID,
-			Name: "refund", Description: "issue a refund", Instructions: "ask first",
-		}
-		s.Require().NoError(s.first.CreateSkill(s.ctx, &skill))
-
-		named, err := s.other.SkillsNamed(s.ctx, appID, config.ID, []string{"refund"})
-		s.Require().NoError(err)
-		s.Require().Len(named, 1)
-		s.Equal("ask first", named[0].Instructions)
-
-		skill.Instructions = "refund without asking"
-		s.Require().NoError(s.first.UpdateSkill(s.ctx, &skill))
-
-		s.Eventually(func() bool {
-			named, err := s.other.SkillsNamed(s.ctx, appID, config.ID, []string{"refund"})
-			return err == nil && len(named) == 1 && named[0].Instructions == "refund without asking"
-		}, settleFor, 10*time.Millisecond, "the other node is still following the old instructions")
-	})
-}
-
 func (s *AppConfigSuite) TestWithoutRedis() {
 	s.Run("a deployment with no redis reads postgres and still sees its own writes", func() {
 		plain, err := New(Options{Store: s.db, Logger: slog.New(slog.DiscardHandler)})

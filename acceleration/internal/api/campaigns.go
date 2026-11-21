@@ -221,7 +221,7 @@ func (s *Server) configAndSequence(ctx context.Context, customerID string, body 
 	// A campaign that names a config nobody has would fail one call at a time, at whatever
 	// hour it was launched.
 	if *config != "" && *config != configID {
-		_, err := s.configs.AgentConfig(ctx, customerID, *config)
+		_, err := s.store.AgentConfigs.Get(ctx, customerID, *config)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return nil, nil, errUnknownConfig
 		}
@@ -509,7 +509,7 @@ func (s *Server) readyToLaunch(ctx context.Context, customerID string, draft sto
 	if draft.ConfigID == "" {
 		return campaignNotReady("a campaign needs an agent config to make its calls with before it can launch")
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, draft.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, draft.ConfigID)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return campaignNotReady("the agent config " + draft.ConfigID + " the campaign calls with no longer exists")
 	}
@@ -579,7 +579,7 @@ func (s *Server) resumeCampaign(ctx context.Context, request *campaignRequest) (
 		}
 		// A launched campaign's config cannot change, so one deleted since leaves it nothing to
 		// ring with: the dialer would pause it again at its first call.
-		_, err := s.configs.AgentConfig(ctx, customerID, current.ConfigID)
+		_, err := s.store.AgentConfigs.Get(ctx, customerID, current.ConfigID)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return campaignNotReady("the agent config " + current.ConfigID + " the campaign calls with was deleted: duplicate the campaign with another")
 		}

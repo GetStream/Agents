@@ -502,7 +502,7 @@ func (s *Server) handOn(ctx context.Context, origin hookOrigin, recorded bool, h
 func (s *Server) unopenedSpec(ctx context.Context, customerID, configID string, event messageEvent) (session.Spec, error) {
 	spec := session.Spec{CustomerID: customerID}
 	if configID != "" {
-		config, err := s.store.AgentConfig(ctx, customerID, configID)
+		config, err := s.store.AgentConfigs.Get(ctx, customerID, configID)
 		switch {
 		case err == nil:
 			spec = session.FromConfig(config)
@@ -688,9 +688,9 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 	}
 
 	if owner, scoped := s.configOwnerOf(origin); scoped {
-		config, err = s.store.AgentConfig(ctx, owner, declared)
+		config, err = s.store.AgentConfigs.Get(ctx, owner, declared)
 	} else {
-		config, err = s.store.AgentConfigOwner(ctx, declared)
+		config, err = s.store.AgentConfigs.GetUnscoped(ctx, declared)
 	}
 	// A config nobody in the app holds is no failure here: an app whose message hooks deliver
 	// to two routers, such as a local one and staging, sends each the other's channels too.

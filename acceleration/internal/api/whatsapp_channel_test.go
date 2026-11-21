@@ -106,7 +106,7 @@ func (s *WhatsAppChannelSuite) SetupTest() {
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: s.connection.ID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &s.config))
 }
 
 // The bearer connection's account is its phone_number_id, the identity whatsapp.yaml names,
@@ -187,7 +187,7 @@ func (s *WhatsAppChannelSuite) TestAWhatsAppMessageIsAnsweredFromTheBusinessNumb
 func (s *WhatsAppChannelSuite) TestAPersonsMessagesAreOneThreadChannelAndOneWhatsAppCard() {
 	// record writes the card as on does (AI-2856).
 	s.config.EpisodeCardsRecord = true
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	person := "16505551234"
 	s.deliver(s.received(s.unit, person, "first"))
 	s.deliver(s.received(s.unit, person, "second"))
@@ -230,7 +230,7 @@ func (s *WhatsAppChannelSuite) TestStopKeepsTheAgentAwayUntilStart() {
 // confirmation (channelbridge.Bridge.reply).
 func (s *WhatsAppChannelSuite) TestAReplyFinishedAfterStopIsNotSent() {
 	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.holding.holds()
 	s.T().Cleanup(s.holding.answers)
 	asked := len(s.holding.replies())
@@ -837,7 +837,7 @@ func (s *WhatsAppChannelSuite) pinTo(revision int) {
 // answersWith makes the test's agent answer with model.
 func (s *WhatsAppChannelSuite) answersWith(model string) {
 	s.config.LLM = model
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 
 // cdn serves the files uploaded to the test's Stream Chat at the URL it answered for each
