@@ -38,6 +38,10 @@ type Call struct {
 	CallType string `bun:"call_type,notnull"`
 	CallID   string `bun:"call_id,notnull"`
 	AgentID  string `bun:"agent_id,notnull"`
+	// ConversationID is the conversation the call was bound to when it started, as its
+	// session's row names it. It outlives that row, so a deleted session's call can still
+	// find its transcript. Empty for a call that kept no conversation.
+	ConversationID string `bun:"conversation_id,nullzero"`
 	// AgentUserID is the Stream user the agent spoke the call's lines as. A line marked as the
 	// agent's is the agent's only when this user or AgentID wrote it (chatlog.Read.Writer).
 	// Empty for a call from before the column, whose lines are read as they were then.
@@ -162,6 +166,7 @@ func (r *Calls) Start(ctx context.Context, call *Call) error {
 		On("CONFLICT (id) DO UPDATE").
 		Set("ended_at = NULL").
 		Set("agent_user_id = COALESCE(c.agent_user_id, EXCLUDED.agent_user_id)").
+		Set("conversation_id = COALESCE(c.conversation_id, EXCLUDED.conversation_id)").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: start call: %w", err))

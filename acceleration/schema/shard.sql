@@ -228,6 +228,7 @@ TABLE calls
     call_type text NOT NULL DEFAULT ''::text
     campaign_id text
     contact_id text
+    conversation_id text
     customer_id text NOT NULL
     direction text NOT NULL DEFAULT 'inbound'::text
     ended_at timestamp with time zone

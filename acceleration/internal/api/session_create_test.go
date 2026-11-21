@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -763,6 +764,74 @@ func (s *SessionCreateSuite) TestAForkOfAConversationPastARefusedTurnCarriesItWi
 		"/v1/agents/sessions/"+opened.Id+"/fork", ForkSessionRequest{}, &forked))
 	s.Equal("user: Where is order 3825?\nassistant: "+answered+"\nuser: "+agent.WithheldInput+"\nuser: And order 4472?",
 		s.answerTo(forked.Id, "And order 4472?"))
+}
+
+// TestADeletedSessionsCallStillReadsItsTranscript: deleting a session keeps its conversation
+// in Chat and its call row, so the call's transcript is read without the session's row.
+func (s *SessionCreateSuite) TestADeletedSessionsCallStillReadsItsTranscript() {
+	opened := s.serverClient.createSession(historySession(false))
+	answered := s.answerTo(opened.Id, "Where is order 3825?")
+	want := []string{"Where is order 3825?", answered}
+	// The call's row is written behind the session's, and once the session is deleted it no
+	// longer names it, so its id is found first.
+	var call Call
+	s.Require().Eventually(func() bool { return s.sessionCall(opened.Id, &call) == http.StatusOK },
+		settleFor, 20*time.Millisecond, "the call's row was never written")
+	transcript := func() (said []string) {
+		var read []TranscriptMessage
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/calls/"+call.Id+"/transcript", nil, &read))
+		for _, line := range read {
+			said = append(said, line.Text)
+		}
+		return said
+	}
+	s.Require().Eventually(func() bool { return slices.Equal(want, transcript()) },
+		settleFor, 20*time.Millisecond, "the call's transcript was never written")
+
+	s.serverClient.deleteSession(opened.Id)
+	_, err := s.store.Sessions.Get(s.T().Context(), s.customerID(), opened.Id)
+	s.Require().Error(err, "the session's row is deleted")
+
+	s.Equal(want, transcript())
+}
+
+// TestADeletedSessionsCallBoundToAConversationStillReadsItsTranscript: a session opened in a
+// conversation another session started writes there, not under its own id, so the call's row
+// is what names the conversation once the session's row is deleted.
+func (s *SessionCreateSuite) TestADeletedSessionsCallBoundToAConversationStillReadsItsTranscript() {
+	first := s.serverClient.createSession(historySession(false))
+	s.answerTo(first.Id, "Where is order 3825?")
+	s.serverClient.stopSession(first.Id)
+
+	request := historySession(false)
+	request.LegacyConversationId = first.ConversationId
+	bound := s.serverClient.createSession(request)
+	s.Require().Equal(value(first.ConversationId), value(bound.ConversationId), "the session is in the first one's conversation")
+	question := "And order 4472?"
+	answered := s.answerTo(bound.Id, question)
+	var call Call
+	s.Require().Eventually(func() bool { return s.sessionCall(bound.Id, &call) == http.StatusOK },
+		settleFor, 20*time.Millisecond, "the call's row was never written")
+	transcript := func() (said []string) {
+		var read []TranscriptMessage
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/calls/"+call.Id+"/transcript", nil, &read))
+		for _, line := range read {
+			said = append(said, line.Text)
+		}
+		return said
+	}
+	s.Require().Eventually(func() bool {
+		return slices.Contains(transcript(), question) && slices.Contains(transcript(), answered)
+	}, settleFor, 20*time.Millisecond, "the call's transcript was never written")
+	want := transcript()
+
+	s.serverClient.deleteSession(bound.Id)
+	_, err := s.store.Sessions.Get(s.T().Context(), s.customerID(), bound.Id)
+	s.Require().Error(err, "the session's row is deleted")
+
+	s.Equal(want, transcript())
 }
 
 // TestAMembersLineInASessionsConversationMarkedAsTheAgentsIsTheirs: the session's call row names

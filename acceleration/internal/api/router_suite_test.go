@@ -2084,6 +2084,7 @@ func (s *RouterSuite) customerID() string { return s.app.app.ID }
 // call names it.
 func (s *RouterSuite) heldCall(call store.Call, configID, conversationID string) store.Call {
 	call.SessionID = s.utils.uuid()
+	call.ConversationID = cmp.Or(call.ConversationID, conversationID)
 	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: call.SessionID,
 		CustomerID: call.CustomerID, AgentID: call.AgentID, ConfigID: configID, ConversationID: conversationID,
 		CreatedAt: call.StartedAt}))

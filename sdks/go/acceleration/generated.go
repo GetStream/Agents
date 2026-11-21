@@ -4684,16 +4684,13 @@ type Call struct {
 	AgentId    string        `json:"agent_id"`
 	CallId     string        `json:"call_id"`
 	CampaignId *string       `json:"campaign_id,omitempty"`
-	ConfigId   *string       `json:"config_id,omitempty"`
 	ContactId  *string       `json:"contact_id,omitempty"`
 	Direction  CallDirection `json:"direction"`
 
 	// EndedAt Absent while the call is still running.
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
 	FromNumber *string    `json:"from_number,omitempty"`
-
-	// Id The session that ran the call, which is what it is held by.
-	Id string `json:"id"`
+	Id         string     `json:"id"`
 
 	// Instructions What the agent was told to be on this call.
 	Instructions *string `json:"instructions,omitempty"`
@@ -4710,6 +4707,9 @@ type Call struct {
 
 	// ReviewScore How well the agent handled it, from 1 to 5.
 	ReviewScore *int `json:"review_score,omitempty"`
+
+	// SessionId The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted.
+	SessionId *string `json:"session_id,omitempty"`
 
 	// Skills What the fast model could hand to the subagent. The instructions behind each name are in the skill registry.
 	Skills    *[]string `json:"skills,omitempty"`
@@ -4746,9 +4746,6 @@ type Call struct {
 
 	// Usage What the call spent, summed over every request it made. Counted once the call is over, so it is absent while one is still running. Requests that failed are included: a model that read the prompt and then fell over is still billed for it.
 	Usage *CallUsage `json:"usage,omitempty"`
-
-	// UserId Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name.
-	UserId *string `json:"user_id,omitempty"`
 
 	// Voice The voice the call asked for, in the provider's own terms. Empty means the provider's default.
 	Voice *string `json:"voice,omitempty"`
@@ -11572,6 +11569,9 @@ type ListCallsParams struct {
 
 	// AgentId Narrow to one agent.
 	AgentId *string `form:"agent_id,omitempty" json:"agent_id,omitempty"`
+
+	// SessionId Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it.
+	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
 
 	// CampaignId Narrow to the calls one campaign placed.
 	CampaignId *string `form:"campaign_id,omitempty" json:"campaign_id,omitempty"`
@@ -23556,6 +23556,18 @@ func NewListCallsRequest(server string, params *ListCallsParams) (*http.Request,
 		if params.AgentId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "agent_id", *params.AgentId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.SessionId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "session_id", *params.SessionId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
