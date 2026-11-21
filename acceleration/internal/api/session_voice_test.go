@@ -254,7 +254,7 @@ func (s *SessionVoiceSuite) TestASessionCarriedOnFromItsRowGoesBackToTheNamedCal
 	opened := s.serverClient.createSession(CreateSessionRequest{StartVoice: pointerTo(true), Call: &call})
 	// The row is written off the request path, and the session is carried on from it.
 	s.Require().Eventually(func() bool {
-		_, err := s.store.StoredSession(context.Background(), s.customerID(), opened.Id)
+		_, err := s.store.Sessions.Get(context.Background(), s.customerID(), opened.Id)
 		return err == nil
 	}, settleFor, 10*time.Millisecond, "the session was never written down")
 	s.serverClient.stopSession(opened.Id)

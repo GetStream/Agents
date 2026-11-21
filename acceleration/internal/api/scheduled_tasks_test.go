@@ -2930,7 +2930,7 @@ func (s *ScheduledTasksSuite) TestACreateNamingASessionThatKeepsNoConversationIs
 		request.Incognito = pointerTo(true)
 	})
 	unkept := store.AgentSession{ID: s.utils.uuid(), CustomerID: s.customerID(), UserID: user.userID, ConfigID: config}
-	s.Require().NoError(s.store.SaveSession(context.Background(), &unkept))
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &unkept))
 
 	for name, id := range map[string]string{"incognito": incognito.Id, "a row with no conversation": unkept.ID} {
 		s.Run(name, func() {

@@ -10,7 +10,7 @@ import (
 )
 
 // turn is a minute's lease on the channel cid in app, held by holder.
-func turn(app int64, cid, holder string) ChannelTurn {
+func channelTurn(app int64, cid, holder string) ChannelTurn {
 	return ChannelTurn{StreamAppPK: app, CID: cid, LeasedBy: holder, LeaseUntil: time.Now().Add(time.Minute)}
 }
 
@@ -21,26 +21,26 @@ func (s *StoreSuite) TestTwoRoutersCannotHoldOneChannelsTurnAtOnce() {
 	s.T().Cleanup(func() { _ = other.Close() })
 	cid := "callouts:" + newID()
 
-	first, err := s.store.ChannelTurns.Take(s.ctx, turn(7, cid, "router-a"))
+	first, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-a"))
 	s.Require().NoError(err)
-	second, err := other.ChannelTurns.Take(s.ctx, turn(7, cid, "router-b"))
+	second, err := other.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-b"))
 	s.Require().NoError(err)
-	elsewhere, err := other.ChannelTurns.Take(s.ctx, turn(8, cid, "router-b"))
+	elsewhere, err := other.ChannelTurns.Take(s.ctx, channelTurn(8, cid, "router-b"))
 	s.Require().NoError(err)
 	s.True(first)
 	s.False(second, "router b waits while router a answers")
 	s.True(elsewhere, "a channel of the same id in another app is another channel")
 
 	s.Require().NoError(other.ChannelTurns.Release(s.ctx, 7, cid, "router-b"))
-	again, err := other.ChannelTurns.Take(s.ctx, turn(7, cid, "router-b"))
+	again, err := other.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-b"))
 	s.Require().NoError(err)
 	s.False(again, "a release by a holder that has no lease releases nothing")
-	held, err := s.store.ChannelTurns.Take(s.ctx, turn(8, cid, "router-c"))
+	held, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(8, cid, "router-c"))
 	s.Require().NoError(err)
 	s.False(held, "a release in one app lets go of no lease in another")
 
 	s.Require().NoError(s.store.ChannelTurns.Release(s.ctx, 7, cid, "router-a"))
-	after, err := other.ChannelTurns.Take(s.ctx, turn(7, cid, "router-b"))
+	after, err := other.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-b"))
 	s.Require().NoError(err)
 	s.True(after)
 }
@@ -60,7 +60,7 @@ func (s *StoreSuite) TestTwoRoutersAskingAtOnceGetOneChannelTurn() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok, err := pool.ChannelTurns.Take(s.ctx, turn(7, cid, fmt.Sprintf("router-%d", i)))
+			ok, err := pool.ChannelTurns.Take(s.ctx, channelTurn(7, cid, fmt.Sprintf("router-%d", i)))
 			s.NoError(err)
 			taken[i] = ok
 		}()
@@ -79,12 +79,12 @@ func (s *StoreSuite) TestTwoRoutersAskingAtOnceGetOneChannelTurn() {
 // A router that stopped mid-turn leaves its lease; it runs out and the next router answers.
 func (s *StoreSuite) TestAChannelTurnWhoseLeaseRanOutCanBeTaken() {
 	cid := "callouts:" + newID()
-	_, err := s.store.ChannelTurns.Take(s.ctx, turn(7, cid, "router-a"))
+	_, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-a"))
 	s.Require().NoError(err)
 	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_turns SET lease_until = now() - interval '1 second' WHERE cid = ?", cid)
 	s.Require().NoError(err)
 
-	taken, err := s.store.ChannelTurns.Take(s.ctx, turn(7, cid, "router-b"))
+	taken, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-b"))
 
 	s.Require().NoError(err)
 	s.True(taken)
@@ -93,9 +93,9 @@ func (s *StoreSuite) TestAChannelTurnWhoseLeaseRanOutCanBeTaken() {
 // The holder of a turn takes it again to stretch its lease: a long reply outlasts no lease.
 func (s *StoreSuite) TestTheHolderOfAChannelTurnExtendsItsLease() {
 	cid := "callouts:" + newID()
-	_, err := s.store.ChannelTurns.Take(s.ctx, turn(7, cid, "router-a"))
+	_, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-a"))
 	s.Require().NoError(err)
-	later := turn(7, cid, "router-a")
+	later := channelTurn(7, cid, "router-a")
 	later.LeaseUntil = time.Now().Add(time.Hour)
 
 	again, err := s.store.ChannelTurns.Take(s.ctx, later)
@@ -110,7 +110,7 @@ func (s *StoreSuite) TestTheHolderOfAChannelTurnExtendsItsLease() {
 func (s *StoreSuite) TestAChannelTurnNoOneHoldsIsNotWritten() {
 	cid := "callouts:" + newID()
 
-	_, err := s.store.ChannelTurns.Take(s.ctx, turn(7, cid, ""))
+	_, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, ""))
 
 	var invalid *ValidationError
 	s.Require().True(errors.As(err, &invalid))
@@ -124,7 +124,7 @@ func (s *StoreSuite) TestChannelTurnQueryBudgets() {
 	cid := "callouts:" + newID()
 
 	s.Equal(1, s.countQueries(func() {
-		taken, err := s.store.ChannelTurns.Take(s.ctx, turn(7, cid, "router-a"))
+		taken, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-a"))
 		s.Require().NoError(err)
 		s.True(taken)
 	}))

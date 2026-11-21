@@ -1902,8 +1902,6 @@ components:
           type: string
         campaign_id:
           type: string
-        config_id:
-          type: string
         contact_id:
           type: string
         direction:
@@ -1918,7 +1916,6 @@ components:
         from_number:
           type: string
         id:
-          description: The session that ran the call, which is what it is held by.
           type: string
         instructions:
           description: What the agent was told to be on this call.
@@ -1936,6 +1933,9 @@ components:
         review_score:
           description: How well the agent handled it, from 1 to 5.
           type: integer
+        session_id:
+          description: The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted.
+          type: string
         skills:
           description: What the fast model could hand to the subagent. The instructions behind each name are in the skill registry.
           items:
@@ -1979,9 +1979,6 @@ components:
           type: string
         usage:
           $ref: '#/components/schemas/CallUsage'
-        user_id:
-          description: Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name.
-          type: string
         voice:
           description: The voice the call asked for, in the provider's own terms. Empty means the provider's default.
           type: string
@@ -13023,6 +13020,13 @@ paths:
           name: agent_id
           schema:
             description: Narrow to one agent.
+            type: string
+        - description: Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it.
+          explode: false
+          in: query
+          name: session_id
+          schema:
+            description: Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it.
             type: string
         - description: Narrow to the calls one campaign placed.
           explode: false

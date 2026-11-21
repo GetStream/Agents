@@ -1010,11 +1010,11 @@ func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id str
 	if s.store == nil {
 		return false, nil
 	}
-	taken, err := s.store.SessionExists(ctx, id)
+	taken, err := s.store.Sessions.Exists(ctx, id)
 	if err != nil || !taken {
 		return false, err
 	}
-	_, err = s.store.StoredSession(ctx, customerID, id)
+	_, err = s.store.Sessions.Get(ctx, customerID, id)
 	return err != nil, nil
 }
 

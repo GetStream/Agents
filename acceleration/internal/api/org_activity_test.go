@@ -407,11 +407,11 @@ func (s *OrganizationActivitySuite) opened(appID string, at time.Time, running b
 // openedAs is opened for the agent named agent.
 func (s *OrganizationActivitySuite) openedAs(agent, appID string, at time.Time, running bool, reason string) string {
 	id := "session-" + s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
-		ID: id, CustomerID: appID, AgentName: agent, CallID: "call-" + id, CreatedAt: at,
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
+		ID: id, CustomerID: appID, AgentName: agent, Modality: store.ModalityVoice, CreatedAt: at,
 	}))
 	if !running {
-		s.Require().NoError(s.store.CloseSession(context.Background(), id, at.Add(time.Minute), reason))
+		s.Require().NoError(s.store.Sessions.Close(context.Background(), id, at.Add(time.Minute), reason))
 	}
 	return id
 }

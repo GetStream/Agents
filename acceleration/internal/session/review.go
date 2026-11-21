@@ -93,6 +93,9 @@ type reviewer struct {
 	llm    *llmrouter.Router
 	store  *store.Store
 	logger *slog.Logger
+	// written is the writer the call's row is queued on. A verdict waits for it, since a
+	// model can answer before the row it updates is written.
+	written *sessionRecorder
 
 	// ctx is cancelled by Close, which is what abandons the reviews still running.
 	ctx    context.Context
@@ -101,14 +104,15 @@ type reviewer struct {
 	running sync.WaitGroup
 }
 
-func newReviewer(router *llmrouter.Router, pgStore *store.Store, logger *slog.Logger) *reviewer {
+func newReviewer(router *llmrouter.Router, pgStore *store.Store, written *sessionRecorder, logger *slog.Logger) *reviewer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &reviewer{
-		llm:    router,
-		store:  pgStore,
-		logger: logger,
-		ctx:    ctx,
-		cancel: cancel,
+		llm:     router,
+		written: written,
+		store:   pgStore,
+		logger:  logger,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 }
 
@@ -160,7 +164,12 @@ func (r *reviewer) review(ctx context.Context, call store.Call, region, target, 
 	if verdict.Score >= 1 && verdict.Score <= 5 {
 		score = &verdict.Score
 	}
-	return r.store.ReviewCall(ctx, call.CustomerID, call.ID, verdict.Summary, score, verdict.Notes)
+	if r.written != nil {
+		if err := r.written.Flush(ctx); err != nil {
+			return err
+		}
+	}
+	return r.store.Calls.Review(ctx, call.CustomerID, call.ID, verdict.Summary, score, verdict.Notes)
 }
 
 // judge asks the reviewer's model what it made of the call.

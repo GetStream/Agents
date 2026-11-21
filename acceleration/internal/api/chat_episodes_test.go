@@ -981,8 +981,8 @@ func (s *ChatEpisodesSuite) writtenIn(configID, text, channel string, created ti
 func (s *ChatEpisodesSuite) sessionAnswered(config store.AgentConfig) {
 	started := time.Now().UTC().Add(-time.Minute)
 	ended := started.Add(30 * time.Second)
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
-		CallID: s.utils.callID(), AgentID: s.channelID, ConfigID: config.ID, Direction: "inbound", StartedAt: started, EndedAt: &ended}))
+	s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		CallID: s.utils.callID(), AgentID: s.channelID, Direction: "inbound", StartedAt: started, EndedAt: &ended}, config.ID, "")
 }
 
 // config is a text agent of the test's app on the LLM named, with episode cards on or off.

@@ -123,10 +123,10 @@ func (s *KeeperSuite) ended(at time.Time) {
 
 // sessionClosed keeps the router's session of the suite's call, closed at at for reason.
 func (s *KeeperSuite) sessionClosed(at time.Time, reason string) {
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
-		ID: s.call.CallID, CustomerID: s.call.CustomerID, CallType: s.call.CallType, CallID: s.call.CallID,
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
+		ID: s.call.CallID, CustomerID: s.call.CustomerID,
 	}))
-	s.Require().NoError(s.store.CloseSession(s.ctx, s.call.CallID, at, reason))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, s.call.CallID, at, reason))
 }
 
 func (s *KeeperSuite) placed() string {

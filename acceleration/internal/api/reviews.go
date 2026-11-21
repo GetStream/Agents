@@ -76,7 +76,7 @@ func (s *Server) analyzeReviews(ctx context.Context, request *analyzeReviewsRequ
 		return nil, invalidRequest("to must be after from")
 	}
 
-	calls, err := s.store.CustomerCalls(ctx, customerID, store.CallFilter{
+	calls, err := s.store.Calls.Select(ctx, customerID, store.CallFilter{
 		From:           request.Body.From,
 		To:             request.Body.To,
 		MaxReviewScore: notGoodScore,
@@ -172,8 +172,8 @@ func reviewsRead(calls []store.Call) string {
 	written.WriteString(strconv.Itoa(len(calls)) + " reviews, newest first:\n")
 	for _, call := range calls {
 		fmt.Fprintf(&written, "\nCall %s", call.ID)
-		if call.ConfigID != "" {
-			fmt.Fprintf(&written, " (agent %s)", call.ConfigID)
+		if call.AgentID != "" {
+			fmt.Fprintf(&written, " (agent %s)", call.AgentID)
 		}
 		if call.ReviewScore != nil {
 			fmt.Fprintf(&written, ", score %d", *call.ReviewScore)

@@ -107,28 +107,38 @@ func (s *Store) NumberRungInApp(ctx context.Context, scope AppScope, e164 string
 	return PhoneNumber{}, ErrAmbiguousHook
 }
 
+// HeldCall is a call and the agent config its session ran under, empty for a call whose
+// session is gone.
+type HeldCall struct {
+	Call     `bun:",extend"`
+	ConfigID string `bun:"config_id,scanonly"`
+}
+
 // CallByAgentInApp is the newest call an agent ran, among the calls made in one app.
-func (s *Store) CallByAgentInApp(ctx context.Context, scope AppScope, agentID string) (Call, error) {
+func (s *Store) CallByAgentInApp(ctx context.Context, scope AppScope, agentID string) (HeldCall, error) {
 	if agentID == "" {
-		return Call{}, errors.New("store: an agent id is required")
+		return HeldCall{}, errors.New("store: an agent id is required")
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]Call, error) {
-		var calls []Call
-		err := db.NewSelect().Model(&calls).Where("agent_id = ?", agentID).
-			ApplyQueryBuilder(scope.where).Order("started_at DESC").Limit(20).Scan(ctx)
+	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]HeldCall, error) {
+		var calls []HeldCall
+		err := db.NewSelect().Model(&calls).
+			ColumnExpr("c.*").
+			ColumnExpr("COALESCE((SELECT s.config_id FROM agent_sessions AS s WHERE s.id = c.session_id), '') AS config_id").
+			Where("c.agent_id = ?", agentID).
+			ApplyQueryBuilder(scope.where).Order("c.started_at DESC").Limit(20).Scan(ctx)
 		return calls, err
 	})
 	if err != nil {
-		return Call{}, fmt.Errorf("store: call by agent: %w", err)
+		return HeldCall{}, fmt.Errorf("store: call by agent: %w", err)
 	}
-	calls := merged(lists, func(a, b Call) int { return b.StartedAt.Compare(a.StartedAt) }, 20)
-	switch customers(calls, func(c Call) string { return c.CustomerID }) {
+	calls := merged(lists, func(a, b HeldCall) int { return b.StartedAt.Compare(a.StartedAt) }, 20)
+	switch customers(calls, func(c HeldCall) string { return c.CustomerID }) {
 	case 0:
-		return Call{}, unknownCall(agentID)
+		return HeldCall{}, unknownCall(agentID)
 	case 1:
 		return calls[0], nil
 	}
-	return Call{}, ErrAmbiguousHook
+	return HeldCall{}, ErrAmbiguousHook
 }
 
 func customers[T any](rows []T, of func(T) string) int {

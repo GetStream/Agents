@@ -305,11 +305,11 @@ func (s *StoreSuite) TestActivityDaysCountEachDayAnAreaNamedAnsweredOnce() {
 // began saves a session of app's opened at at, on the shard of into, and closes it at
 // closed for reason when closed is not zero.
 func (s *StoreSuite) began(into *Store, id, appID string, at, closed time.Time, reason string) {
-	s.Require().NoError(into.SaveSession(s.ctx, &AgentSession{
-		ID: id, CustomerID: appID, AgentName: "agent-" + id, CallID: "call-" + id, CreatedAt: at,
+	s.Require().NoError(into.Sessions.Upsert(s.ctx, &AgentSession{
+		ID: id, CustomerID: appID, AgentName: "agent-" + id, Modality: ModalityVoice, CreatedAt: at,
 	}))
 	if !closed.IsZero() {
-		s.Require().NoError(into.CloseSession(s.ctx, id, closed, reason))
+		s.Require().NoError(into.Sessions.Close(s.ctx, id, closed, reason))
 	}
 }
 
@@ -326,7 +326,7 @@ func (s *StoreSuite) TestSessionEndingsCountTheAppsAskedForByHowTheyEnded() {
 	s.began(s.store, "stranger", "stranger", s.base, later, "transferred")
 	s.began(s.store, "before-since", "one", s.base.Add(-time.Second), later, "unanswered")
 
-	endings, err := s.store.SessionEndings(s.ctx, []string{"one", "two"}, s.base)
+	endings, err := s.store.Sessions.Endings(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)
 
 	s.Equal([]SessionEnding{
@@ -348,12 +348,12 @@ func (s *StoreSuite) TestLatestSessionsAreTheNewestOfTheAppsAskedFor() {
 	s.began(s.store, "two-oldest", "two", s.base, time.Time{}, "")
 	s.began(s.store, "stranger", "stranger", s.base.Add(time.Hour), time.Time{}, "")
 	s.began(s.store, "before-since", "one", s.base.Add(-time.Second), time.Time{}, "")
-	s.Require().NoError(s.store.SaveSession(s.ctx, &AgentSession{
-		ID: "one-text", CustomerID: "one", AgentName: "agent-one-text", CallID: "call-one-text",
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{
+		ID: "one-text", CustomerID: "one", AgentName: "agent-one-text",
 		Modality: ModalityText, CreatedAt: s.base.Add(10 * time.Second),
 	}))
 
-	latest, err := s.store.LatestSessions(s.ctx, []string{"one", "two"}, s.base, 3)
+	latest, err := s.store.Sessions.Latest(s.ctx, []string{"one", "two"}, s.base, 3)
 	s.Require().NoError(err)
 
 	ids := make([]string, 0, len(latest))
@@ -371,7 +371,7 @@ func (s *StoreSuite) TestLatestSessionsAreTheNewestOfTheAppsAskedFor() {
 	s.Equal("hangup", newest.EndReason)
 	s.Nil(latest[1].ClosedAt)
 
-	every, err := s.store.LatestSessions(s.ctx, []string{"one", "two"}, s.base, 20)
+	every, err := s.store.Sessions.Latest(s.ctx, []string{"one", "two"}, s.base, 20)
 	s.Require().NoError(err)
 	s.Len(every, 7)
 	modalities := map[string]string{}
@@ -389,7 +389,7 @@ func (s *StoreSuite) TestLatestSessionsOpenedAtOnceAreListedByIdDescending() {
 	s.began(s.store, "c", "two", s.base, time.Time{}, "")
 	s.began(s.store, "b", "one", s.base, time.Time{}, "")
 
-	latest, err := s.store.LatestSessions(s.ctx, []string{"one", "two"}, s.base, 2)
+	latest, err := s.store.Sessions.Latest(s.ctx, []string{"one", "two"}, s.base, 2)
 	s.Require().NoError(err)
 	s.Require().Len(latest, 2)
 	s.Equal("c", latest[0].ID)
@@ -400,10 +400,10 @@ func (s *StoreSuite) TestLatestSessionsOpenedAtOnceAreListedByIdDescending() {
 func (s *StoreSuite) TestSessionsOfNoAppsAreNone() {
 	s.began(s.store, "one", "one", s.base, time.Time{}, "")
 
-	endings, err := s.store.SessionEndings(s.ctx, nil, s.base)
+	endings, err := s.store.Sessions.Endings(s.ctx, nil, s.base)
 	s.Require().NoError(err)
 	s.Empty(endings)
-	latest, err := s.store.LatestSessions(s.ctx, nil, s.base, 20)
+	latest, err := s.store.Sessions.Latest(s.ctx, nil, s.base, 20)
 	s.Require().NoError(err)
 	s.Empty(latest)
 	legs, err := s.store.TurnLatency(s.ctx, nil, s.base)
@@ -424,13 +424,13 @@ func (s *ShardedStoreSuite) TestSessionsAreReadFromEveryShard() {
 	s.began(s.store, "here-new", "one", s.base.Add(time.Minute), time.Time{}, "")
 	s.began(s.other, "there-old", "two", s.base, later, "agent_hangup")
 
-	endings, err := s.store.SessionEndings(s.ctx, []string{"one", "two"}, s.base)
+	endings, err := s.store.Sessions.Endings(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)
 	s.Equal([]SessionEnding{
 		{Running: true, Sessions: 1}, {EndReason: "agent_hangup", Sessions: 1}, {EndReason: "hangup", Sessions: 2},
 	}, endings)
 
-	latest, err := s.store.LatestSessions(s.ctx, []string{"one", "two"}, s.base, 2)
+	latest, err := s.store.Sessions.Latest(s.ctx, []string{"one", "two"}, s.base, 2)
 	s.Require().NoError(err)
 	s.Require().Len(latest, 2)
 	s.Equal("there-new", latest[0].ID)

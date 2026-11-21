@@ -75,3 +75,16 @@ func (s *MergeHiddenRangesSuite) TestRangesFromTheSameMessageKeepItHiddenIfEithe
 func (s *MergeHiddenRangesSuite) TestNoRangesAreNone() {
 	s.Empty(MergeHiddenRanges(nil))
 }
+
+func TestBranchSwitchValidate(t *testing.T) {
+	refuses(t, func() AgentBranchSwitch {
+		return AgentBranchSwitch{ID: "b", SessionID: "s", CustomerID: "app", Kind: SwitchEdit, State: SwitchResending}
+	}, (*AgentBranchSwitch).Validate, map[string]func(*AgentBranchSwitch){
+		"id":          func(b *AgentBranchSwitch) { b.ID = "" },
+		"session_id":  func(b *AgentBranchSwitch) { b.SessionID = "" },
+		"customer_id": func(b *AgentBranchSwitch) { b.CustomerID = "" },
+		"kind":        func(b *AgentBranchSwitch) { b.Kind = "undo" },
+		"state":       func(b *AgentBranchSwitch) { b.State = "halfway" },
+		"resent":      func(b *AgentBranchSwitch) { b.Resent = -1 },
+	})
+}

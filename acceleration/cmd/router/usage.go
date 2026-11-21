@@ -481,7 +481,7 @@ func (f forgetting) count(ctx context.Context) error {
 			keys += int(found)
 		}
 	}
-	branches, err := f.store.CountUserBranchMessages(ctx, f.app, f.user)
+	branches, err := f.store.BranchMessages.CountUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
@@ -517,7 +517,7 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\n", requests); err != nil {
 		return err
 	}
-	branches, err := f.store.DeleteUserBranchMessages(ctx, f.app, f.user)
+	branches, err := f.store.BranchMessages.DeleteUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}

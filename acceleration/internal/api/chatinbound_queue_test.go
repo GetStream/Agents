@@ -529,10 +529,10 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersCalledOnIsAns
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 	for _, customer := range []string{"someone-" + s.utils.uuid(), "someone-" + s.utils.uuid()} {
-		s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+		s.heldCall(store.Call{
 			ID: s.utils.uuid(), CustomerID: customer, CallID: s.utils.callID(), AgentID: s.channelID,
-			ConfigID: deliveredConfig(&s.RouterSuite, customer), StartedAt: time.Now().UTC(),
-		}))
+			StartedAt: time.Now().UTC(),
+		}, deliveredConfig(&s.RouterSuite, customer), "")
 	}
 
 	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,

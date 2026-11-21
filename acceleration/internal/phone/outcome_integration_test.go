@@ -895,10 +895,10 @@ func (s *OutcomeSuite) TestAnArrivingCallItsAgentLeftOnTheLineIsCountedDropped()
 	before := s.callsCounted()
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
-		ID: callID, CustomerID: s.customer, CallType: defaultCallType, CallID: callID,
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
+		ID: callID, CustomerID: s.customer,
 	}))
-	s.Require().NoError(s.store.CloseSession(s.ctx, callID, s.clock.now(), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, callID, s.clock.now(), ""))
 	s.clock.advance(time.Minute)
 
 	s.ended(defaultCallType, callID)

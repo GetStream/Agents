@@ -361,7 +361,7 @@ func (s *MeteringSuite) TestGPTLiveBillsOnlyItsSecondsWhenTheCallerSpeaksAfterTh
 	spent, err := s.store.Spend.Since(s.ctx, customer, since)
 	s.Require().NoError(err)
 	s.Equal(tenSeconds, spent, "a budget sees only the seconds")
-	used, err := s.store.CallUsage(s.ctx, customer, agentID, "", since, nil)
+	used, err := s.store.Calls.Usage(s.ctx, customer, agentID, "", since, nil)
 	s.Require().NoError(err)
 	s.Equal(tenSeconds, used.CostMicros, "the call's cost is only the seconds")
 	s.Equal(tenSeconds, s.spent(routing.STS, customer))

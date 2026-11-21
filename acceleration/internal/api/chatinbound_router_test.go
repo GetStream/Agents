@@ -402,10 +402,10 @@ func (s *ChatInboundAppSuite) TestAnUnpinnedCallOnTheSameChannelIsNotTheDelivery
 	other := "someone-" + s.utils.uuid()
 	somebodyElse, releaseOther := s.dispatch.Register(other, dispatch.Registration{Capacity: 1})
 	defer releaseOther()
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+	s.heldCall(store.Call{
 		ID: s.utils.uuid(), CustomerID: other, CallID: s.utils.callID(), AgentID: s.channelID,
-		ConfigID: s.config(other), StartedAt: time.Now().UTC(),
-	}))
+		StartedAt: time.Now().UTC(),
+	}, s.config(other), "")
 
 	s.Equal(http.StatusOK, s.delivers(&s.RouterSuite, s.message(s.appID(), s.config(s.customerID()), ""), s.current))
 

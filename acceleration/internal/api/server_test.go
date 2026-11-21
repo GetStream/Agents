@@ -297,8 +297,8 @@ func (s *ServerSuite) TestActivityReportsWhoUsedTheAgentsAndHowMuch() {
 		State:      store.SessionRunning,
 		CreatedAt:  s.base.Add(time.Minute),
 	}
-	s.Require().NoError(s.store.SaveSession(ctx, session))
-	s.Require().NoError(s.store.StartResponse(ctx, &store.AgentResponse{
+	s.Require().NoError(s.store.Sessions.Upsert(ctx, session))
+	s.Require().NoError(s.store.Responses.Insert(ctx, &store.AgentResponse{
 		ID:         s.utils.uuid(),
 		SessionID:  session.ID,
 		CustomerID: s.customerID(),
@@ -325,15 +325,15 @@ func (s *ServerSuite) TestAgentStatsReportThePeakAndTheToolsCalled() {
 		State:      store.SessionRunning,
 		CreatedAt:  s.base.Add(time.Minute),
 	}
-	s.Require().NoError(s.store.SaveSession(ctx, session))
+	s.Require().NoError(s.store.Sessions.Upsert(ctx, session))
 	responseID := s.utils.uuid()
-	s.Require().NoError(s.store.StartResponse(ctx, &store.AgentResponse{
+	s.Require().NoError(s.store.Responses.Insert(ctx, &store.AgentResponse{
 		ID:         responseID,
 		SessionID:  session.ID,
 		CustomerID: s.customerID(),
 		CreatedAt:  s.base.Add(2 * time.Minute),
 	}))
-	s.Require().NoError(s.store.AppendResponseItems(ctx, []store.AgentResponseItem{
+	s.Require().NoError(s.store.ResponseItems.InsertMany(ctx, []store.AgentResponseItem{
 		{ResponseID: responseID, Ordinal: 0, SessionID: session.ID, Kind: store.ItemToolCall,
 			ToolName: "lookup_order", Payload: map[string]any{"call_id": "c1"}, At: s.base.Add(2 * time.Minute)},
 		{ResponseID: responseID, Ordinal: 1, SessionID: session.ID, Kind: store.ItemToolResult,

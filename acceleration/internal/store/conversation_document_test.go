@@ -3,12 +3,13 @@
 package store
 
 import (
+	"fmt"
 	"time"
 )
 
 // attached keeps a document sent in session with turn, as sessionID's owner owner.
 func (s *StoreSuite) attached(id, sessionID, conversationID, owner, turn string, at time.Time) {
-	s.Require().NoError(s.store.AddConversationDocument(s.ctx, &ConversationDocument{
+	s.Require().NoError(s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{
 		ID: id, CustomerID: "app", OwnerUserID: owner, SessionID: sessionID, ConversationID: conversationID,
 		ResponseID: turn, Name: id + ".pdf", Pages: 2, SHA256: "digest", Markdown: "text of " + id, CreatedAt: at,
 	}))
@@ -16,7 +17,7 @@ func (s *StoreSuite) attached(id, sessionID, conversationID, owner, turn string,
 
 // documentIDs are the ids of the documents in scope, in the order they are read.
 func (s *StoreSuite) documentIDs(scope DocumentScope) []string {
-	documents, err := s.store.ConversationDocuments(s.ctx, "app", scope)
+	documents, err := s.store.ConversationDocuments.Select(s.ctx, "app", scope)
 	s.Require().NoError(err)
 	ids := make([]string, 0, len(documents))
 	for _, document := range documents {
@@ -39,7 +40,7 @@ func (s *StoreSuite) TestADocumentIsOnlyItsOwnCustomers() {
 	s.opened("one", "app", s.base, nil)
 	s.attached("lease", "one", "", "jlahey", "", s.base)
 
-	documents, err := s.store.ConversationDocuments(s.ctx, "other-app", DocumentScope{SessionID: "one", Owner: "jlahey"})
+	documents, err := s.store.ConversationDocuments.Select(s.ctx, "other-app", DocumentScope{SessionID: "one", Owner: "jlahey"})
 	s.Require().NoError(err)
 	s.Empty(documents)
 }
@@ -60,7 +61,7 @@ func (s *StoreSuite) TestADocumentSentWithARewoundTurnIsNotRead() {
 	s.attached("kept", "one", "", "jlahey", "first", s.base)
 	s.attached("taken-back", "one", "", "jlahey", "second", s.base.Add(time.Hour))
 
-	s.Require().NoError(s.store.RewindResponses(s.ctx, "app", "one", "first", s.base.Add(2*time.Hour)))
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(2*time.Hour)))
 
 	s.Equal([]string{"kept"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
 }
@@ -78,7 +79,7 @@ func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 }
 
 func (s *StoreSuite) TestAForkStoppingAtATurnThatIsNotThereIsRefused() {
-	_, err := s.store.ConversationDocuments(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "missing"})
+	_, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "missing"})
 
 	s.ErrorIs(err, ErrUnknownResponse)
 }
@@ -88,7 +89,7 @@ func (s *StoreSuite) TestDeletingASessionDeletesItsDocuments() {
 	s.attached("lease", "one", "agent:chat-1", "jlahey", "", s.base)
 	s.attached("other", "two", "agent:chat-1", "jlahey", "", s.base)
 
-	s.Require().NoError(s.store.DeleteSession(s.ctx, "app", "one"))
+	s.Require().NoError(s.store.Sessions.Delete(s.ctx, "app", "one"))
 
 	s.Equal([]string{"other"}, s.documentIDs(DocumentScope{ConversationID: "agent:chat-1", Owner: "jlahey"}),
 		"the person's file goes with the session it was sent in")
@@ -99,12 +100,12 @@ func (s *StoreSuite) TestARegeneratedTurnKeepsACopyOfItsQuestionsDocuments() {
 	s.branchAnswered(s.store, "asked", "", "", s.base)
 	s.attached("lease", "one", "", "jlahey", "asked", s.base.Add(time.Second))
 	// A regenerate leaves the conversation at the replaced turn's parent, then answers again.
-	s.Require().NoError(s.store.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(time.Minute)))
 	s.branchAnswered(s.store, "asked-again", "", "asked", s.base.Add(time.Minute))
 
-	s.Require().NoError(s.store.CopyResponseDocuments(s.ctx, "app", "one", "asked", "asked-again"))
+	s.Require().NoError(s.store.ConversationDocuments.CopyResponse(s.ctx, "app", "one", "asked", "asked-again"))
 
-	documents, err := s.store.ConversationDocuments(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
+	documents, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
 	s.Require().NoError(err)
 	s.Require().Len(documents, 1, "the replaced turn's own is off the conversation")
 	copied := documents[0]
@@ -114,7 +115,7 @@ func (s *StoreSuite) TestARegeneratedTurnKeepsACopyOfItsQuestionsDocuments() {
 	s.Equal(2, copied.Pages)
 	s.True(copied.CreatedAt.Equal(s.base.Add(time.Second)), "attached when the original was")
 
-	s.Require().NoError(s.store.MoveActivePath(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute)))
 	s.Equal([]string{"lease"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}),
 		"activating the replaced turn finds its own, and the copy goes with the regenerated one")
 }
@@ -123,20 +124,20 @@ func (s *StoreSuite) TestCopyingATurnsDocumentsLeavesAnotherCustomersAlone() {
 	s.opened("one", "app", s.base, nil)
 	s.branchAnswered(s.store, "asked", "", "", s.base)
 	s.attached("lease", "one", "", "jlahey", "asked", s.base.Add(time.Second))
-	s.Require().NoError(s.store.AddConversationDocument(s.ctx, &ConversationDocument{
+	s.Require().NoError(s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{
 		ID: "theirs", CustomerID: "other-app", OwnerUserID: "jlahey", SessionID: "one", ResponseID: "asked",
 		Name: "theirs.pdf", SHA256: "digest", Markdown: "text of theirs", CreatedAt: s.base,
 	}))
 
-	s.Require().NoError(s.store.CopyResponseDocuments(s.ctx, "app", "one", "asked", "asked-again"))
+	s.Require().NoError(s.store.ConversationDocuments.CopyResponse(s.ctx, "app", "one", "asked", "asked-again"))
 
-	documents, err := s.store.ConversationDocuments(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
+	documents, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
 	s.Require().NoError(err)
 	s.Len(documents, 2, "the original and its one copy")
 	for _, document := range documents {
 		s.Equal("lease.pdf", document.Name)
 	}
-	theirs, err := s.store.ConversationDocuments(s.ctx, "other-app", DocumentScope{SessionID: "one", Owner: "jlahey"})
+	theirs, err := s.store.ConversationDocuments.Select(s.ctx, "other-app", DocumentScope{SessionID: "one", Owner: "jlahey"})
 	s.Require().NoError(err)
 	s.Require().Len(theirs, 1, "no copy of another customer's file, and none of ours made into theirs")
 	s.Equal("theirs", theirs[0].ID)
@@ -148,17 +149,50 @@ func (s *ShardedStoreSuite) TestACopyIsWrittenBesideTheTurnItWasCopiedTo() {
 	s.opened("one", "app", s.base, nil)
 	s.branchAnswered(s.store, "asked", "", "", s.base)
 	s.attached("lease", "one", "", "jlahey", "asked", s.base.Add(time.Second))
-	s.Require().NoError(s.other.SaveSession(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
-	s.Require().NoError(s.other.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(time.Minute)))
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
+	s.Require().NoError(s.other.Responses.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(time.Minute)))
 	s.branchAnswered(s.other, "asked-again", "", "asked", s.base.Add(time.Minute))
 
-	s.Require().NoError(s.other.CopyResponseDocuments(s.ctx, "app", "one", "asked", "asked-again"))
+	s.Require().NoError(s.other.ConversationDocuments.CopyResponse(s.ctx, "app", "one", "asked", "asked-again"))
 
-	documents, err := s.store.ConversationDocuments(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
+	documents, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
 	s.Require().NoError(err)
 	s.Require().Len(documents, 1)
 	s.Equal("asked-again", documents[0].ResponseID)
-	s.Require().NoError(s.store.MoveActivePath(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute)))
 	s.Equal([]string{"lease"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}),
 		"the copy is rewound with the turn beside it")
+}
+
+func (s *StoreSuite) TestConversationDocumentQueryBudgets() {
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	s.opened("documented", "app", at, func(row *AgentSession) { row.ConversationID = "conversation" })
+	for _, id := range []string{"asked", "retried"} {
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: id, SessionID: "documented",
+			CustomerID: "app", CreatedAt: at}))
+	}
+	for i := range 30 {
+		s.Require().NoError(s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{
+			ID: fmt.Sprintf("document-%02d", i), CustomerID: "app", SessionID: "documented", ResponseID: "asked",
+			Name: "report.pdf", CreatedAt: at.Add(time.Duration(i) * time.Second)}))
+	}
+	s.withinQueryBudgets([]queryBudget{
+		{"Insert", 1, 0, func() error {
+			return s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{ID: "one-more",
+				CustomerID: "app", SessionID: "documented", ResponseID: "asked", CreatedAt: at})
+		}},
+		{"CopyResponse", 1, 1, func() error {
+			return s.store.ConversationDocuments.CopyResponse(s.ctx, "app", "documented", "asked", "retried")
+		}},
+		{"Select", 0, 1, func() error {
+			listed, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "documented"})
+			s.Len(listed, 62, "each document, and its copy onto the retried response")
+			return err
+		}},
+	})
+}
+
+func (s *StoreSuite) TestADocumentOfNoSessionIsNotWritten() {
+	err := s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{ID: "invalid", CustomerID: "app"})
+	s.refusedUnwritten(err, "conversation_documents", "id", "invalid")
 }

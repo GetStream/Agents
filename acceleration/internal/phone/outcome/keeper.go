@@ -192,7 +192,7 @@ func (k *Keeper) count(ctx context.Context, key Key, vendor, direction string, o
 	label := string(outcome)
 	vendor = k.vendorLabel(vendor)
 	if answered != nil {
-		session, err := k.store.StoredSession(ctx, key.CustomerID, key.CallID)
+		session, err := k.store.Sessions.Get(ctx, key.CustomerID, key.CallID)
 		switch {
 		case err == nil && leftOnTheLine(session, ended):
 			label = dropped

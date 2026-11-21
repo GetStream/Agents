@@ -8,6 +8,10 @@ type repos struct {
 	Activities                     *Activities
 	AppOrganizations               *AppOrganizations
 	Apps                           *Apps
+	BranchMessages                 *BranchMessages
+	BranchSwitches                 *BranchSwitches
+	CallEvents                     *CallEvents
+	Calls                          *Calls
 	ChannelAccounts                *ChannelAccounts
 	ChannelDeliveries              *ChannelDeliveries
 	ChannelInbounds                *ChannelInbounds
@@ -28,6 +32,7 @@ type repos struct {
 	ConnectorOAuthClients          *ConnectorOAuthClients
 	ConnectorToolPins              *ConnectorToolPins
 	ContactMapEntries              *ContactMapEntries
+	ConversationDocuments          *ConversationDocuments
 	DeliveriesSeen                 *DeliveriesSeen
 	Episodes                       *Episodes
 	EventDeliveries                *EventDeliveries
@@ -42,10 +47,17 @@ type repos struct {
 	Organizations                  *Organizations
 	Policies                       *Policies
 	ProviderKeys                   *ProviderKeys
+	Recordings                     *Recordings
+	ResponseItems                  *ResponseItems
+	Responses                      *Responses
+	Sandboxes                      *Sandboxes
+	SessionTools                   *SessionTools
+	Sessions                       *Sessions
 	Spend                          *Spend
 	StreamAppTokens                *StreamAppTokens
 	StreamFallbackUses             *StreamFallbackUses
 	TelephonySuspensions           *TelephonySuspensions
+	Turns                          *Turns
 	UsageResets                    *UsageResets
 	UserPhones                     *UserPhones
 	WaitingMessages                *WaitingMessages
@@ -59,6 +71,10 @@ func (s *Store) wire() {
 		Activities:                     &Activities{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},
 		Apps:                           &Apps{store: s},
+		BranchMessages:                 &BranchMessages{store: s},
+		BranchSwitches:                 &BranchSwitches{store: s},
+		CallEvents:                     &CallEvents{store: s},
+		Calls:                          &Calls{store: s},
 		ChannelAccounts:                &ChannelAccounts{store: s},
 		ChannelDeliveries:              &ChannelDeliveries{store: s},
 		ChannelInbounds:                &ChannelInbounds{store: s},
@@ -79,6 +95,7 @@ func (s *Store) wire() {
 		ConnectorOAuthClients:          &ConnectorOAuthClients{store: s},
 		ConnectorToolPins:              &ConnectorToolPins{store: s},
 		ContactMapEntries:              &ContactMapEntries{store: s},
+		ConversationDocuments:          &ConversationDocuments{store: s},
 		DeliveriesSeen:                 &DeliveriesSeen{store: s},
 		Episodes:                       &Episodes{store: s},
 		EventDeliveries:                &EventDeliveries{store: s},
@@ -93,10 +110,17 @@ func (s *Store) wire() {
 		Organizations:                  &Organizations{store: s},
 		Policies:                       &Policies{store: s},
 		ProviderKeys:                   &ProviderKeys{store: s},
+		Recordings:                     &Recordings{store: s},
+		ResponseItems:                  &ResponseItems{store: s},
+		Responses:                      &Responses{store: s},
+		Sandboxes:                      &Sandboxes{store: s},
+		SessionTools:                   &SessionTools{store: s},
+		Sessions:                       &Sessions{store: s},
 		Spend:                          &Spend{store: s},
 		StreamAppTokens:                &StreamAppTokens{store: s},
 		StreamFallbackUses:             &StreamFallbackUses{store: s},
 		TelephonySuspensions:           &TelephonySuspensions{store: s},
+		Turns:                          &Turns{store: s},
 		UsageResets:                    &UsageResets{store: s},
 		UserPhones:                     &UserPhones{store: s},
 		WaitingMessages:                &WaitingMessages{store: s},

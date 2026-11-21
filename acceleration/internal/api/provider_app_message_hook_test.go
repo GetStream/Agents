@@ -318,7 +318,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 		"the worker never wrote the message")
 	opened := s.serverClient.createSession(CreateSessionRequest{Agent: &config.Name, AgentId: &channel})
 	s.Require().Eventually(func() bool {
-		_, err := s.store.StoredSession(ctx, s.customerID(), opened.Id)
+		_, err := s.store.Sessions.Get(ctx, s.customerID(), opened.Id)
 		return err == nil
 	}, settleFor, 20*time.Millisecond, "the session's row was never stored")
 

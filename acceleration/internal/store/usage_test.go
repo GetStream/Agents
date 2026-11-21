@@ -185,7 +185,7 @@ func (s *StoreSuite) TestTagKeysAreEmptyWhenNothingWasRecorded() {
 func (s *StoreSuite) TestActivityCountsWhatWasAskedOfTheAgents() {
 	session := s.opened("one", "acme", s.base, nil)
 	for i := range 3 {
-		s.Require().NoError(s.store.StartResponse(s.ctx, &AgentResponse{
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
 			ID:         fmt.Sprintf("r-%d", i),
 			SessionID:  session.ID,
 			CustomerID: "acme",
@@ -277,16 +277,16 @@ func (s *StoreSuite) TestAMonthOfUsersIsWhoCameBackRatherThanTheSumOfItsDays() {
 }
 
 func (s *StoreSuite) TestPhoneMinutesAreThePartOfTheTalkingThatArrivedOnANumber() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{
 		ID: "over-the-web", CustomerID: "acme", CallID: "c-1", AgentID: "a-1", StartedAt: s.base,
 	}))
-	s.Require().NoError(s.store.FinishCall(s.ctx, "over-the-web", s.base.Add(5*time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "over-the-web", s.base.Add(5*time.Minute)))
 
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{
 		ID: "over-a-number", CustomerID: "acme", CallID: "c-2", AgentID: "a-2",
 		FromNumber: "+15125551234", StartedAt: s.base.Add(time.Minute),
 	}))
-	s.Require().NoError(s.store.FinishCall(s.ctx, "over-a-number", s.base.Add(4*time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "over-a-number", s.base.Add(4*time.Minute)))
 
 	buckets, err := s.store.CustomerActivity(
 		s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
@@ -312,14 +312,14 @@ func (s *StoreSuite) TestActivityIsOnlyTheCallingCustomers() {
 // response of its own.
 func (s *StoreSuite) ranTool(session *AgentSession, tool string, at time.Time, took time.Duration, result string, failed bool) {
 	responseID := fmt.Sprintf("%s-%s-%d", session.ID, tool, at.UnixNano())
-	s.Require().NoError(s.store.StartResponse(s.ctx, &AgentResponse{
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
 		ID: responseID, SessionID: session.ID, CustomerID: session.CustomerID, CreatedAt: at,
 	}))
 	payload := map[string]any{"call_id": "call-1", "arguments": `{"q":"x"}`}
 	if failed {
 		payload["error"] = "it broke"
 	}
-	s.Require().NoError(s.store.AppendResponseItems(s.ctx, []AgentResponseItem{
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
 		{ResponseID: responseID, Ordinal: 0, SessionID: session.ID, Kind: ItemToolCall,
 			ToolName: tool, Payload: map[string]any{"call_id": "call-1"}, At: at},
 		{ResponseID: responseID, Ordinal: 1, SessionID: session.ID, Kind: ItemToolResult,
@@ -329,13 +329,13 @@ func (s *StoreSuite) ranTool(session *AgentSession, tool string, at time.Time, t
 
 func (s *StoreSuite) TestThePeakIsTheMostSessionsOpenAtOnce() {
 	s.opened("first", "acme", s.base, nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "first", s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "first", s.base.Add(10*time.Minute), ""))
 	s.opened("second", "acme", s.base.Add(2*time.Minute), nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "second", s.base.Add(5*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "second", s.base.Add(5*time.Minute), ""))
 	s.opened("third", "acme", s.base.Add(3*time.Minute), nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "third", s.base.Add(4*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "third", s.base.Add(4*time.Minute), ""))
 	s.opened("later", "acme", s.base.Add(20*time.Minute), nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "later", s.base.Add(21*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "later", s.base.Add(21*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -346,9 +346,9 @@ func (s *StoreSuite) TestThePeakIsTheMostSessionsOpenAtOnce() {
 
 func (s *StoreSuite) TestASessionThatClosedAsAnotherOpenedDidNotOverlapIt() {
 	s.opened("before", "acme", s.base, nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "before", s.base.Add(time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "before", s.base.Add(time.Minute), ""))
 	s.opened("after", "acme", s.base.Add(time.Minute), nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "after", s.base.Add(2*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "after", s.base.Add(2*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -418,13 +418,13 @@ func (s *StoreSuite) turned(session *AgentSession, id string, at time.Time, chan
 	if change != nil {
 		change(response)
 	}
-	s.Require().NoError(s.store.StartResponse(s.ctx, response))
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, response))
 }
 
 // calledTool records one call of tool in the turn responseID, its result a second later, with
 // what the session put on each item.
 func (s *StoreSuite) calledTool(session *AgentSession, responseID, tool string, at time.Time, call, result map[string]any) {
-	s.Require().NoError(s.store.AppendResponseItems(s.ctx, []AgentResponseItem{
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
 		{ResponseID: responseID, Ordinal: 0, SessionID: session.ID, Kind: ItemToolCall, ToolName: tool,
 			Payload: call, At: at},
 		{ResponseID: responseID, Ordinal: 1, SessionID: session.ID, Kind: ItemToolResult, ToolName: tool,
@@ -533,7 +533,7 @@ func (s *StoreSuite) TestARedactedCallStillReportsWhatItAndItsToolCost() {
 	_, err := s.store.ShardDB().NewUpdate().Model((*AgentResponseItem)(nil)).
 		Set("redact_at = ?", s.base).Where("session_id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
-	redacted, err := s.store.RedactToolOutput(s.ctx, s.base.Add(time.Hour), 100)
+	redacted, err := s.store.ResponseItems.Redact(s.ctx, s.base.Add(time.Hour), 100)
 	s.Require().NoError(err)
 	s.EqualValues(2, redacted)
 

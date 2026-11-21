@@ -75,8 +75,16 @@ func (s *Store) closeRedis() {
 	s.cache.Close()
 }
 
+// sharedRedis is the Redis every shard shares, or nil without Redis.
+func (s *Store) sharedRedis() rueidis.Client {
+	if s.cache == nil {
+		return nil
+	}
+	return s.cache.Client()
+}
+
 // redisFamilies are the prefixes of every key the store keeps in Redis.
-var redisFamilies = []string{"appcfg:"}
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:"}
 
 // cacheKey names one cached row. Every key is prefixed, so what the store cached can be told
 // from what the rest of the router keeps.

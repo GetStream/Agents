@@ -39,7 +39,7 @@ func (s *ReviewSuite) reviewerOver(logs *bytes.Buffer) (*reviewer, *gatedLLM) {
 	router, err := llmrouter.New(llmrouter.Options{Config: stubConfig(), Registry: reasoning, Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
-	return newReviewer(router, nil, slog.New(slog.NewTextHandler(logs, nil))), model
+	return newReviewer(router, nil, nil, slog.New(slog.NewTextHandler(logs, nil))), model
 }
 
 // asked waits for the review to reach the model, which is where it is held.
@@ -84,7 +84,7 @@ func (s *ReviewSuite) toldWith(guide string) string {
 	router, err := llmrouter.New(llmrouter.Options{Config: stubConfig(), Registry: reasoning, Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
-	reviews := newReviewer(router, nil, slog.New(slog.DiscardHandler))
+	reviews := newReviewer(router, nil, nil, slog.New(slog.DiscardHandler))
 
 	reviews.Review(store.Call{ID: "call-prompted", CustomerID: "customer-reviewed"}, routing.Attribution{}, "", "en-low-latency", guide, []spoken{{text: "hello?"}})
 	reviews.running.Wait()
@@ -186,7 +186,7 @@ func (s *ReviewSuite) TestAReviewFailureLineKeepsTheProvidersReasonAndNotTheKeyI
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
 	var logs bytes.Buffer
-	reviews := newReviewer(router, nil, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{ReplaceAttr: store.RedactLogAttr})))
+	reviews := newReviewer(router, nil, nil, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{ReplaceAttr: store.RedactLogAttr})))
 
 	reviews.Review(store.Call{ID: "call-refused", CustomerID: "customer-reviewed"}, routing.Attribution{}, "", "en-low-latency", "", []spoken{{text: "hello?"}})
 	reviews.running.Wait()
@@ -286,7 +286,7 @@ func (s *ReviewSuite) judgedBy(thinker *llmtest.Thinker) (judgement, error) {
 	router, err := llmrouter.New(llmrouter.Options{Config: stubConfig(), Registry: reasoning, Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
-	reviews := newReviewer(router, nil, slog.New(slog.DiscardHandler))
+	reviews := newReviewer(router, nil, nil, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(reviews.Close)
 	return reviews.judge(context.Background(), store.Call{ID: "call-thought-over", CustomerID: "customer-reviewed"},
 		"", "en-low-latency", "", thoughtOver)
@@ -314,7 +314,7 @@ func screenedBy(s *suite.Suite, config routing.ModalityConfig, provider llmroute
 }
 
 func (s *ReviewSuite) TestACallWithARefusedTurnIsReviewedWithItWithheld() {
-	reviews := newReviewer(screenedBy(&s.Suite, stubConfig(), &llmtest.Thinker{Answer: reviewAnswer}), nil, slog.New(slog.DiscardHandler))
+	reviews := newReviewer(screenedBy(&s.Suite, stubConfig(), &llmtest.Thinker{Answer: reviewAnswer}), nil, nil, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(reviews.Close)
 	call := store.Call{ID: "call-refused", CustomerID: "customer-reviewed"}
 

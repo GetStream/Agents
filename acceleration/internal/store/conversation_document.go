@@ -34,35 +34,64 @@ type ConversationDocument struct {
 	CreatedAt  time.Time `bun:"created_at,notnull"`
 }
 
-// AddConversationDocument keeps a file attached to a conversation. A retried write of the same
-// id is not an error.
-func (s *Store) AddConversationDocument(ctx context.Context, document *ConversationDocument) error {
-	if document.ID == "" || document.CustomerID == "" || document.SessionID == "" {
-		return stack.Wrap(errors.New("store: a document, a customer and a session id are required"))
+// Validate refuses a document that names no id, customer or session.
+func (d *ConversationDocument) Validate() error {
+	return validate("conversation document").
+		required("id", d.ID).
+		required("customer_id", d.CustomerID).
+		required("session_id", d.SessionID).
+		nonNegative("pages", float64(d.Pages)).
+		done()
+}
+
+// DocumentScope is the conversation whose documents are read, and whose they must be.
+type DocumentScope struct {
+	// ConversationID reads a conversation kept in Chat, across every session that held it.
+	// Empty reads SessionID's alone.
+	ConversationID string
+	SessionID      string
+	// Owner is the person reading. A document of anybody else's is never read.
+	Owner string
+	// UntilResponse leaves out documents sent with turns after this one, as a fork that stops
+	// there carries none of them. Empty is all of them.
+	UntilResponse string
+}
+
+// ConversationDocuments are the files people attached to conversations, beside the turns
+// they were sent with.
+type ConversationDocuments struct {
+	store *Store
+}
+
+// Insert keeps a file attached to a conversation. A retried write of the same id is not an
+// error.
+func (r *ConversationDocuments) Insert(ctx context.Context, document *ConversationDocument) error {
+	if err := document.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
 	if document.CreatedAt.IsZero() {
 		document.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.shard.NewInsert().Model(document).On("CONFLICT (id) DO NOTHING").Exec(ctx)
+	_, err := r.store.shard.NewInsert().Model(document).On("CONFLICT (id) DO NOTHING").Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: add conversation document: %w", err))
 	}
 	return nil
 }
 
-// CopyResponseDocuments keeps the documents sent with one of a session's turns again under
-// another, as a regenerate answers the same question as a new turn: the old turn keeps its own,
-// so bringing its branch back finds them. Each copy has an id of its own, and its original's
+// CopyResponse keeps the documents sent with one of a session's turns again under another,
+// as a regenerate answers the same question as a new turn: the old turn keeps its own, so
+// bringing its branch back finds them. Each copy has an id of its own, and its original's
 // owner, conversation and attachment time.
 //
 // The copies are written on this shard, beside the turn this router records as toResponseID,
 // wherever the originals are: a document is read beside its turn's row, which is how it drops
 // out once that turn is rewound.
-func (s *Store) CopyResponseDocuments(ctx context.Context, customerID, sessionID, fromResponseID, toResponseID string) error {
+func (r *ConversationDocuments) CopyResponse(ctx context.Context, customerID, sessionID, fromResponseID, toResponseID string) error {
 	if customerID == "" || sessionID == "" || fromResponseID == "" || toResponseID == "" {
 		return stack.Wrap(errors.New("store: a customer, a session and two response ids are required"))
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]ConversationDocument, error) {
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]ConversationDocument, error) {
 		var documents []ConversationDocument
 		err := db.NewSelect().Model((*ConversationDocument)(nil)).
 			Where("cd.customer_id = ?", customerID).
@@ -84,28 +113,15 @@ func (s *Store) CopyResponseDocuments(ctx context.Context, customerID, sessionID
 	if len(copies) == 0 {
 		return nil
 	}
-	if _, err := s.shard.NewInsert().Model(&copies).Exec(ctx); err != nil {
+	if _, err := r.store.shard.NewInsert().Model(&copies).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: copy response documents: %w", err))
 	}
 	return nil
 }
 
-// DocumentScope is the conversation whose documents are read, and whose they must be.
-type DocumentScope struct {
-	// ConversationID reads a conversation kept in Chat, across every session that held it.
-	// Empty reads SessionID's alone.
-	ConversationID string
-	SessionID      string
-	// Owner is the person reading. A document of anybody else's is never read.
-	Owner string
-	// UntilResponse leaves out documents sent with turns after this one, as a fork that stops
-	// there carries none of them. Empty is all of them.
-	UntilResponse string
-}
-
-// ConversationDocuments are the documents in scope, oldest first, but for those sent with a
-// turn since rewound.
-func (s *Store) ConversationDocuments(ctx context.Context, customerID string, scope DocumentScope) ([]ConversationDocument, error) {
+// Select returns the documents in scope, oldest first, but for those sent with a turn since
+// rewound.
+func (r *ConversationDocuments) Select(ctx context.Context, customerID string, scope DocumentScope) ([]ConversationDocument, error) {
 	if customerID == "" || scope.ConversationID == "" && scope.SessionID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a conversation or session id are required"))
 	}
@@ -113,7 +129,7 @@ func (s *Store) ConversationDocuments(ctx context.Context, customerID string, sc
 	// read first rather than joined in each shard.
 	var until time.Time
 	if scope.UntilResponse != "" {
-		stopped, err := whicheverShard(ctx, s, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
+		stopped, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
 			var response AgentResponse
 			err := db.NewSelect().Model(&response).Column("created_at").
 				Where("id = ?", scope.UntilResponse).Where("customer_id = ?", customerID).Scan(ctx)
@@ -127,7 +143,7 @@ func (s *Store) ConversationDocuments(ctx context.Context, customerID string, sc
 		}
 		until = stopped.CreatedAt
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]ConversationDocument, error) {
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]ConversationDocument, error) {
 		query := db.NewSelect().Model((*ConversationDocument)(nil)).
 			Where("cd.customer_id = ?", customerID).
 			Where("cd.owner_user_id = ?", scope.Owner).

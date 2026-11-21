@@ -321,7 +321,7 @@ func (s *Store) logShardRequests(ctx context.Context, requests []*Request) error
 			outcome, severity = "failed", "error"
 		}
 		entries[i] = AgentLog{
-			CustomerID: request.CustomerID, ConfigID: calls[i].ConfigID, AgentID: request.AgentID, SessionID: calls[i].ID,
+			CustomerID: request.CustomerID, ConfigID: calls[i].configID, AgentID: request.AgentID, SessionID: calls[i].sessionID,
 			Source: "system", Severity: severity, EventType: "provider_request",
 			Message:    request.Modality + " request " + outcome,
 			OccurredAt: request.StartedAt, IngestedAt: time.Now().UTC(),
@@ -348,10 +348,16 @@ func (s *Store) logShardRequests(ctx context.Context, requests []*Request) error
 	})
 }
 
+// requestCall is the session, and the config it ran, of the call a request happened in.
+type requestCall struct {
+	configID  string
+	sessionID string
+}
+
 // callsOf is the call each request happened in, in their order, as the agent log trigger
 // finds it: the agent's latest call of the customer started by the request, the one it names
 // when it names one. A request in no call has an empty one.
-func (s *Store) callsOf(ctx context.Context, requests []*Request) ([]Call, error) {
+func (s *Store) callsOf(ctx context.Context, requests []*Request) ([]requestCall, error) {
 	customers := make([]string, len(requests))
 	agents := make([]string, len(requests))
 	callIDs := make([]string, len(requests))
@@ -361,16 +367,17 @@ func (s *Store) callsOf(ctx context.Context, requests []*Request) ([]Call, error
 		started[i] = request.StartedAt.UTC().Format(time.RFC3339Nano)
 	}
 	var found []struct {
-		Ordinal  int    `bun:"ordinal"`
-		ConfigID string `bun:"config_id"`
-		ID       string `bun:"id"`
+		Ordinal   int    `bun:"ordinal"`
+		ConfigID  string `bun:"config_id"`
+		SessionID string `bun:"session_id"`
 	}
 	err := s.shard.NewRaw(`
-SELECT r.ordinal, c.config_id, c.id
+SELECT r.ordinal, c.config_id, c.session_id
 FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
     AS r (customer_id, agent_id, call_id, started_at, ordinal)
 CROSS JOIN LATERAL (
-    SELECT config_id, id FROM calls
+    SELECT COALESCE(s.config_id, '') AS config_id, COALESCE(calls.session_id, '') AS session_id
+    FROM calls LEFT JOIN agent_sessions AS s ON s.id = calls.session_id
     WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
         AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
     ORDER BY calls.started_at DESC
@@ -380,9 +387,9 @@ CROSS JOIN LATERAL (
 	if err != nil {
 		return nil, err
 	}
-	calls := make([]Call, len(requests))
+	calls := make([]requestCall, len(requests))
 	for _, call := range found {
-		calls[call.Ordinal-1] = Call{ConfigID: call.ConfigID, ID: call.ID}
+		calls[call.Ordinal-1] = requestCall{configID: call.ConfigID, sessionID: call.SessionID}
 	}
 	return calls, nil
 }
