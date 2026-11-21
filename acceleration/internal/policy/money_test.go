@@ -1260,16 +1260,16 @@ func (r *limitsReads) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 }
 
 func (s *PolicySuite) TestAColdStartReadsItsFirstAccountsInBatches() {
-	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
+	// Policies cached in Redis, as a router has them, so the admissions reach their first read
+	// of money together rather than as each read of its policies lands.
+	db, err := redisready.Retry(os.Getenv("ROUTER_REDIS_ADDR"), func() (*store.Store, error) {
+		return store.OpenShards(store.Options{DSN: os.Getenv("ROUTER_POSTGRES_DSN"), Redis: store.Redis{Address: os.Getenv("ROUTER_REDIS_ADDR")}})
+	})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
 	reads := &limitsReads{}
 	db.GlobalDB().AddQueryHook(reads)
-	// Policies cached in Redis, as a router has them, so the admissions reach their first read
-	// of money together rather than as each read of its policies lands.
-	configs, err := redisready.Retry(os.Getenv("ROUTER_REDIS_ADDR"), func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: db, Address: os.Getenv("ROUTER_REDIS_ADDR")})
-	})
+	configs, err := appconfig.New(appconfig.Options{Store: db})
 	s.Require().NoError(err)
 	s.T().Cleanup(configs.Close)
 	// The loops read nothing on their own, and an admission waits for its read as long as the
@@ -1286,13 +1286,13 @@ func (s *PolicySuite) TestAColdStartReadsItsFirstAccountsInBatches() {
 	for i := range apps {
 		apps[i] = fmt.Sprintf("%s-%02d", s.app, i)
 		organization := fmt.Sprintf("%s-%02d", s.org, i)
-		s.Require().NoError(s.store.JoinOrganization(s.ctx, apps[i], organization))
+		s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: apps[i], OrganizationID: organization}))
 		s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: organization, AppID: apps[i], LimitMicros: 1})
 		s.usage().Credit(s.T(), organization, 1_000_000)
 		s.usage().Spend(s.T(), organization, 1, func(event *usage.Event) { event.AppID = apps[i] })
 		_, _, _, err := enforcer.policies(s.ctx, apps[i])
 		s.Require().NoError(err)
-		_, err = configs.HasUserPolicies(s.ctx, apps[i])
+		_, err = configs.DB().Policies.HasUsers(s.ctx, apps[i])
 		s.Require().NoError(err)
 	}
 	before, windowsBefore := reads.reads.Load(), billed.front.windows.Load()
@@ -1331,7 +1331,7 @@ func (s *PolicySuite) TestAChangedLimitIsHeldToTheLastSpendReadAtOnce() {
 	}, 5*time.Second, 10*time.Millisecond, "summed once, when the subject was first seen")
 
 	lower := int64(1_000_000)
-	_, err = s.store.UpdateLimit(s.ctx, s.org, limit.ID, store.LimitChange{LimitMicros: &lower, UpdatedBy: "test"},
+	_, err = s.store.Limits.Update(s.ctx, s.org, limit.ID, store.LimitChange{LimitMicros: &lower, UpdatedBy: "test"},
 		store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI})
 	s.Require().NoError(err)
 
@@ -1443,7 +1443,7 @@ func (s *PolicySuite) TestAnAccountNeverReadFollowsItsTiersFailMode() {
 	learned.Join(s.app, s.org, openTier)
 	s.read(learned.Enforcer, s.org)
 	other := s.app + "-other"
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, other, s.org+"-other"))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: other, OrganizationID: s.org + "-other"}))
 	learned.front.down.Store(true)
 
 	learned.Join(other, s.org+"-other", openTier)

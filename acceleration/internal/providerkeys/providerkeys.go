@@ -98,10 +98,9 @@ func Hint(key string) string {
 	return string(runes[len(runes)-4:])
 }
 
-// Source is where a customer's sealed keys are read: an *appconfig.Store, through its cache, or
-// a *store.Store.
+// Source is where a customer's sealed keys are read: *store.ProviderKeys, through its cache.
 type Source interface {
-	ProviderKeys(ctx context.Context, customerID string) ([]store.ProviderKey, error)
+	SelectAll(ctx context.Context, customerID string) ([]store.ProviderKey, error)
 }
 
 // Keyring opens the keys customers keep, for the work routed on them. It is a
@@ -127,7 +126,7 @@ func (k *Keyring) CustomerKey(ctx context.Context, customerID, provider, region 
 	if customerID == "" {
 		return "", false, nil
 	}
-	keys, err := k.source.ProviderKeys(ctx, customerID)
+	keys, err := k.source.SelectAll(ctx, customerID)
 	if err != nil {
 		return "", false, err
 	}

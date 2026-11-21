@@ -78,7 +78,7 @@ func runUsageStorage(ctx context.Context, args []string, settings config.Config,
 		return fmt.Errorf("usage storage: %w", err)
 	}
 	if secrets != nil {
-		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore, secrets), knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
+		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore.ProviderKeys, secrets), knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
 	}
 	return recordStorage(ctx, base, pgStore, hour, logger, out)
 }
@@ -197,7 +197,7 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 			ids = append(ids, customerID)
 		}
 	}
-	known, err := pgStore.KnownApps(ctx, ids)
+	known, err := pgStore.Apps.Known(ctx, ids)
 	if err != nil {
 		alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "apps": err.Error()})
 		return fmt.Errorf("usage storage: which apps are this deployment's: %w", err)

@@ -1783,88 +1783,6 @@ func (g ActivityGranularity) Valid() bool {
 	return g == ActivityDaily || g == ActivityMonthly
 }
 
-// Organization owns apps. It exists so a bill and a rate limit have something to name that
-// outlives any one app.
-type Organization struct {
-	bun.BaseModel `bun:"table:organizations,alias:o"`
-
-	ID        string    `bun:"id,pk"`
-	Name      string    `bun:"name,notnull"`
-	CreatedAt time.Time `bun:"created_at,notnull"`
-}
-
-// App is the tenant. Its id is what every other table's customer_id holds.
-type App struct {
-	bun.BaseModel `bun:"table:apps,alias:ap"`
-
-	ID             string      `bun:"id,pk"`
-	OrganizationID string      `bun:"organization_id,notnull"`
-	Name           string      `bun:"name,notnull"`
-	Settings       AppSettings `bun:"settings,type:jsonb,notnull"`
-	CreatedAt      time.Time   `bun:"created_at,notnull"`
-}
-
-// AppSettings is what an app has turned on or off.
-//
-// Every field is a pointer because the document is sparse and the absent key has to mean
-// something other than false. A key nobody has written is a feature nobody has expressed
-// an opinion on, and reading that as "off" would turn every app that predates a setting
-// into one that has opted out of it.
-type AppSettings struct {
-	// AllowAnonymous and AllowGuest are which levels of end user this app admits. Nil is
-	// yes for both: an app that has never been configured takes everybody, and a
-	// deployment turning authentication on for the first time must not lock its users
-	// out on the way.
-	AllowAnonymous *bool `json:"allow_anonymous,omitempty"`
-	AllowGuest     *bool `json:"allow_guest,omitempty"`
-	// InternalConnectors is whether the app sees the connectors whose manifest says internal
-	// (visibleTo in connectors.go). Stream sets it on its own apps; no operation writes
-	// settings, so an app cannot set it on itself. Nil is no.
-	InternalConnectors *bool `json:"internal_connectors,omitempty"`
-	// AgentTeams is whether an end user opens only the agent configs of a team they are in,
-	// by Chat's shared-team rule (api.teamsGate). Stream sets it, as it does
-	// InternalConnectors. Nil is no: an app that never asked keeps every config open to
-	// every user, as before the setting existed.
-	AgentTeams *bool `json:"agent_teams,omitempty"`
-}
-
-// AgentTeamsChecked reports whether the app keeps each team's agent configs to its own users.
-func (s AppSettings) AgentTeamsChecked() bool {
-	return s.AgentTeams != nil && *s.AgentTeams
-}
-
-// AnonymousAllowed reports whether the app takes callers who presented no token.
-func (s AppSettings) AnonymousAllowed() bool {
-	return s.AllowAnonymous == nil || *s.AllowAnonymous
-}
-
-// GuestAllowed reports whether the app takes callers holding a guest token.
-func (s AppSettings) GuestAllowed() bool {
-	return s.AllowGuest == nil || *s.AllowGuest
-}
-
-// APIKey is one credential belonging to an app. Several may be live at once, because
-// rotation without downtime is: create the new key, deploy it, watch the old one go quiet,
-// revoke it. One key per app makes every rotation an outage, so rotation stops happening.
-type APIKey struct {
-	bun.BaseModel `bun:"table:api_keys,alias:k"`
-
-	ID     string `bun:"id,pk"`
-	AppID  string `bun:"app_id,notnull"`
-	Name   string `bun:"name,notnull"`
-	Env    string `bun:"environment,notnull"`
-	Sealed []byte `bun:"secret_sealed,notnull"`
-	// KEKVersion names which key encryption key sealed this row.
-	KEKVersion int        `bun:"kek_version,notnull"`
-	Last4      string     `bun:"last4,notnull"`
-	CreatedAt  time.Time  `bun:"created_at,notnull"`
-	CreatedBy  string     `bun:"created_by,notnull"`
-	ExpiresAt  *time.Time `bun:"expires_at"`
-	LastUsedAt *time.Time `bun:"last_used_at"`
-	RevokedAt  *time.Time `bun:"revoked_at"`
-	RevokedBy  string     `bun:"revoked_by,notnull"`
-}
-
 // What a session is doing, as a stored row reports it.
 const (
 	// SessionRunning is a session the router still holds.
@@ -2583,15 +2501,4 @@ type SandboxRecipient struct {
 type CreatedPosition struct {
 	At time.Time `json:"t"`
 	ID string    `json:"id"`
-}
-
-// TelephonySuspension is an app Stream staff stopped from using the phone.
-type TelephonySuspension struct {
-	bun.BaseModel `bun:"table:telephony_suspensions,alias:ts"`
-
-	CustomerID string `bun:"customer_id,pk"`
-	// Reason is why, for the staff who read it later. The app is never shown it.
-	Reason      string    `bun:"reason,notnull"`
-	SuspendedBy string    `bun:"suspended_by,notnull"`
-	SuspendedAt time.Time `bun:"suspended_at,notnull"`
 }

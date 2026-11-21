@@ -215,10 +215,11 @@ func (s *Sweeper) owned(ctx context.Context, rows []store.Request, organizations
 		if row.OrganizationID == "" {
 			organization, known := organizations[row.CustomerID]
 			if !known {
-				var err error
-				if organization, err = s.store.OrganizationOf(ctx, row.CustomerID); err != nil {
+				membership, err := s.store.AppOrganizations.Get(ctx, row.CustomerID)
+				if err != nil {
 					return nil, err
 				}
+				organization = membership.OrganizationID
 				organizations[row.CustomerID] = organization
 			}
 			if organization == "" {

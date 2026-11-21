@@ -354,10 +354,10 @@ func (e *Enforcer) Quota(ctx context.Context, customerID, userID string, default
 	defer cancel()
 	// An app whose users cannot be told apart is taken to have some with a policy, so each is
 	// looked up, and one that fails holds them to the app's quota.
-	if some, err := e.config.HasUserPolicies(reading, customerID); err == nil && !some {
+	if some, err := e.config.DB().Policies.HasUsers(reading, customerID); err == nil && !some {
 		return held
 	}
-	own, err := e.config.Policy(reading, store.ScopeUser, store.UserScopeID(customerID, userID))
+	own, err := e.config.DB().Policies.Get(reading, store.ScopeUser, store.UserScopeID(customerID, userID))
 	if err != nil {
 		if e.userQuotaLogs.Due(customerID, time.Minute) {
 			e.logger.Error("could not read a user's own quota, holding them to their app's",
@@ -406,7 +406,7 @@ func (e *Enforcer) Join(appID, organizationID, tier string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
 		defer cancel()
-		if err := e.config.JoinOrganization(ctx, appID, organizationID); err != nil {
+		if err := e.config.DB().AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
 			e.members.Delete(appID)
 			e.logger.Error("could not record which organization an app belongs to",
 				"app", appID, "organization", organizationID, "error", err)
@@ -482,7 +482,7 @@ func (e *Enforcer) writeTier(organizationID, tier string, seenAt, writtenAt time
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
 		defer cancel()
-		if err := e.config.DB().SetOrganizationTier(ctx, organizationID, tier, seenAt); err != nil {
+		if err := e.config.DB().OrganizationTiers.Upsert(ctx, &store.OrganizationTier{OrganizationID: organizationID, Tier: tier, SeenAt: seenAt}); err != nil {
 			e.tiersMu.Lock()
 			if current := e.tiers[organizationID]; current.written == tier && current.writtenAt.Equal(writtenAt) {
 				current.written, current.writtenAt = "", time.Time{}
@@ -524,7 +524,8 @@ func (e *Enforcer) tier(ctx context.Context, organizationID string) string {
 		e.writeTier(organizationID, seen.tier, seen.at, now)
 		return seen.tier
 	}
-	recorded, err := e.config.DB().TierOf(ctx, organizationID)
+	row, err := e.config.DB().OrganizationTiers.Get(ctx, organizationID)
+	recorded := row.Tier
 	e.tiersMu.Lock()
 	defer e.tiersMu.Unlock()
 	current := e.tiers[organizationID]
@@ -593,7 +594,7 @@ func resumeHistoryOf(document store.PolicyDocument) store.ResumeHistory {
 // Save replaces a scope's policy and drops the decisions it may have changed, so the next
 // request of this process reads them again.
 func (e *Enforcer) Save(ctx context.Context, scope store.PolicyScope, id string, document store.PolicyDocument) error {
-	if err := e.config.SavePolicy(ctx, scope, id, document); err != nil {
+	if err := e.config.DB().Policies.Upsert(ctx, &store.Policy{Scope: scope, ScopeID: id, Document: document}); err != nil {
 		return err
 	}
 	e.changed(scope, id)
@@ -603,12 +604,12 @@ func (e *Enforcer) Save(ctx context.Context, scope store.PolicyScope, id string,
 // Delete removes a scope's policy, drops the decisions it may have changed, and reports
 // whether there was one.
 func (e *Enforcer) Delete(ctx context.Context, scope store.PolicyScope, id string) (bool, error) {
-	deleted, err := e.config.DeletePolicy(ctx, scope, id)
-	if err != nil {
+	err := e.config.DB().Policies.Delete(ctx, scope, id)
+	if err != nil && !errors.Is(err, store.ErrNoPolicy) {
 		return false, err
 	}
 	e.changed(scope, id)
-	return deleted, nil
+	return err == nil, nil
 }
 
 // changed drops the decisions a write of one scope's policy may have changed: the app's, for
@@ -715,12 +716,14 @@ func (e *Enforcer) refresh(customerID string) {
 
 // policies reads the app's policy, the organization it is in and the organization's policy.
 func (e *Enforcer) policies(ctx context.Context, appID string) (app, organization store.PolicyDocument, organizationID string, err error) {
-	if app, err = e.config.Policy(ctx, store.ScopeApp, appID); err != nil {
+	if app, err = e.config.DB().Policies.Get(ctx, store.ScopeApp, appID); err != nil {
 		return app, organization, "", err
 	}
-	if organizationID, err = e.config.OrganizationOf(ctx, appID); err != nil {
+	membership, err := e.config.DB().AppOrganizations.Get(ctx, appID)
+	if err != nil {
 		return app, organization, "", err
 	}
+	organizationID = membership.OrganizationID
 	// An app seen for the first time is recorded under its organization in the background.
 	// Until that lands, the organization it came in under is the one whose floor applies:
 	// an app's first requests are not the ones to escape it.
@@ -728,7 +731,7 @@ func (e *Enforcer) policies(ctx context.Context, appID string) (app, organizatio
 		organizationID, _ = pending.(string)
 	}
 	if organizationID != "" {
-		if organization, err = e.config.Policy(ctx, store.ScopeOrganization, organizationID); err != nil {
+		if organization, err = e.config.DB().Policies.Get(ctx, store.ScopeOrganization, organizationID); err != nil {
 			return app, organization, "", err
 		}
 	}

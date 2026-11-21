@@ -306,12 +306,12 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 	organizations := slices.Sorted(mapsKeys(due))
 	call, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	limits, err := db.LimitsFor(call, organizations)
+	limits, err := db.Limits.SelectOf(call, organizations)
 	if err != nil {
 		m.failedRead("could not read the customers' spend limits, answering with the last ones read", err, "organizations", len(organizations))
 		return false
 	}
-	resets, err := db.Resets(call, organizations, earliestWindow(m.settings.Now()))
+	resets, err := db.UsageResets.Select(call, organizations, earliestWindow(m.settings.Now()))
 	if err != nil {
 		m.failedRead("could not read the customers' usage resets, answering with the last ones read", err, "organizations", len(organizations))
 		return false
@@ -370,7 +370,7 @@ func (m *money) readGrants(ctx context.Context, db *store.Store, keys []string) 
 	organizations = slices.Compact(slices.Sorted(slices.Values(organizations)))
 	from := time.Now()
 	call, cancel := context.WithTimeout(ctx, grantsTimeout)
-	grants, err := db.LiveGrants(call, organizations, m.settings.Now())
+	grants, err := db.LimitGrants.SelectLive(call, organizations, m.settings.Now())
 	cancel()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -398,7 +398,7 @@ func (m *money) reconcilePass(ctx context.Context, db *store.Store) {
 		return
 	}
 	call, cancel := context.WithTimeout(ctx, reconcileTimeout)
-	counted, err := db.ReconcileGrantUses(call)
+	counted, err := db.LimitGrantUses.Reconcile(call)
 	cancel()
 	if counted > 0 {
 		m.enforcer.logger.Warn("counted usage rows toward their grants that their writer had not", "rows", counted)
@@ -681,7 +681,7 @@ func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRe
 				reading.Go(func() {
 					defer func() { <-slots }()
 					call, cancel := context.WithTimeout(ctx, readTimeout)
-					spent, err := db.SubjectSpendSince(call, ref, start)
+					spent, err := db.Spend.Subject(call, ref, start)
 					cancel()
 					mu.Lock()
 					defer mu.Unlock()

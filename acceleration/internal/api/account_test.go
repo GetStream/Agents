@@ -248,7 +248,7 @@ func (s *AccountSuite) TestCreditsPage() {
 
 func (s *AccountSuite) TestUsageEventsAreTheAppsOwnAsTheCustomerMaySeeThem() {
 	sibling := store.App{OrganizationID: s.organization(), Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &sibling))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &sibling))
 	at := time.Now().UTC().Truncate(time.Second)
 	own := s.spend(1_500_000, func(event *usage.Event) {
 		event.OccurredAt, event.UserID, event.UsageCategories = at, "u1", []string{"support", "team:finance"}
@@ -456,7 +456,7 @@ func (s *AccountSuite) TestTheThresholdComesFromThePolicyFirst() {
 
 func (s *AccountSuite) TestTeamsListsEveryTeamWithALimitOrSpend() {
 	sibling := store.App{OrganizationID: s.organization(), Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &sibling))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &sibling))
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/spend/limits",
 		map[string]any{"subject": "team", "team": "legal", "interval": "weekly", "limit_micros": 250_000_000}, nil))
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/spend/limits",

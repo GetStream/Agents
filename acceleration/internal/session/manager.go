@@ -403,7 +403,7 @@ func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
 	if spec.ConfigTeam == "" || m.options.Configs == nil {
 		return "", nil
 	}
-	settings, err := m.options.Configs.AppSettings(ctx, spec.CustomerID)
+	settings, err := m.options.Configs.DB().Apps.GetSettings(ctx, spec.CustomerID)
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrAppSettingsUnreadable, err))
 	}

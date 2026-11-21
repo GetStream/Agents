@@ -126,7 +126,7 @@ func (s *CallHooksSuite) TestACallDeliveredTwiceIsActedOnTwice() {
 
 func (s *CallHooksSuite) TestACallToASuspendedAppIsNotAnsweredAndIsEnded() {
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
@@ -231,7 +231,7 @@ func (s *CallHooksSuite) TestAnArrivingCallTheRouterRefusedIsCountedFailedWhenIt
 	// only here.
 	s.numberVendor = "vonage"
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	failed, completed := s.inboundCalls("vonage", "failed"), s.inboundCalls("vonage", "completed")
@@ -268,7 +268,7 @@ func (s *CallHooksSuite) TestALaterCallerInTheSameCallIsNotCountedRefused() {
 	s.numberVendor = "vonage"
 	s.hold("default", s.callID)
 	ctx := context.Background()
-	s.Require().NoError(s.store.SuspendTelephony(ctx, &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(ctx, &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	arrived := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
@@ -285,7 +285,7 @@ func (s *CallHooksSuite) TestALaterCallerInTheSameCallIsNotCountedRefused() {
 		return err == nil && len(keys) == 1
 	}, settleFor, 10*time.Millisecond, "the refusal was never marked")
 	end("session-1", arrived.Add(10*time.Second))
-	s.Require().NoError(s.store.LiftTelephonySuspension(ctx, s.customerID()))
+	s.Require().NoError(s.store.TelephonySuspensions.Delete(ctx, s.customerID()))
 
 	// A worker takes the second caller: with none, the call is refused (no worker could take it)
 	// and counted failed, which is not what this test is about.

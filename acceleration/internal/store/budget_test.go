@@ -120,3 +120,12 @@ func (s *StoreSuite) countRedis(run func()) int {
 	run()
 	return int(s.roundTrips.sent.Load() - before)
 }
+
+// redisTrips is the n round trips a method makes to Redis when the suite has one, and none
+// when it has not.
+func (s *StoreSuite) redisTrips(n int) int {
+	if s.store.cache == nil {
+		return 0
+	}
+	return n
+}

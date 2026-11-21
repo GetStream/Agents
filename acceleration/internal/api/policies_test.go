@@ -198,8 +198,8 @@ func (s *PoliciesSuite) TestTheOrganizationRequirementIsNotWritableOverHTTP() {
 	s.Contains(failure, "operator")
 
 	required := true
-	s.Require().NoError(s.store.SavePolicy(context.Background(), store.ScopeOrganization,
-		s.app.organization.ID, store.PolicyDocument{RequireOwnStreamApp: &required}))
+	s.Require().NoError(s.store.Policies.Upsert(context.Background(), &store.Policy{Scope: store.ScopeOrganization,
+		ScopeID: s.app.organization.ID, Document: store.PolicyDocument{RequireOwnStreamApp: &required}}))
 	var written Policy
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/organization",
 		map[string]any{"prompt_injection": true}, &written))
@@ -209,8 +209,8 @@ func (s *PoliciesSuite) TestTheOrganizationRequirementIsNotWritableOverHTTP() {
 
 func (s *PoliciesSuite) TestAnOrganizationPolicyReadAndWrittenBackKeepsTheOperatorsRequirement() {
 	required := true
-	s.Require().NoError(s.store.SavePolicy(context.Background(), store.ScopeOrganization,
-		s.app.organization.ID, store.PolicyDocument{RequireOwnStreamApp: &required}))
+	s.Require().NoError(s.store.Policies.Upsert(context.Background(), &store.Policy{Scope: store.ScopeOrganization,
+		ScopeID: s.app.organization.ID, Document: store.PolicyDocument{RequireOwnStreamApp: &required}}))
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/organization",
 		map[string]any{"tags": map[string]string{"team": "a"}}, nil))
 
@@ -233,8 +233,8 @@ func (s *PoliciesSuite) TestAnOrganizationPolicyReadAndWrittenBackKeepsTheOperat
 
 func (s *PoliciesSuite) TestChangingTheOrganizationRequirementOverHTTPIsRefused() {
 	required := true
-	s.Require().NoError(s.store.SavePolicy(context.Background(), store.ScopeOrganization,
-		s.app.organization.ID, store.PolicyDocument{RequireOwnStreamApp: &required}))
+	s.Require().NoError(s.store.Policies.Upsert(context.Background(), &store.Policy{Scope: store.ScopeOrganization,
+		ScopeID: s.app.organization.ID, Document: store.PolicyDocument{RequireOwnStreamApp: &required}}))
 
 	status, failure := s.serverClient.failure(http.MethodPut, "/v1/policies/organization",
 		map[string]any{"require_own_stream_app": false})

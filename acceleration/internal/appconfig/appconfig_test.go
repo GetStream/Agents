@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +22,7 @@ const settleFor = 2 * time.Second
 
 // AppConfigSuite runs two stores over one Postgres and one Redis, which is what two
 // replicas of the router are. A change made through one has to be what the other reads,
-// because the alternative is a revoked key that still works somewhere for an hour.
+// because the alternative is an agent that follows old instructions somewhere for an hour.
 type AppConfigSuite struct {
 	suite.Suite
 	ctx   context.Context
@@ -62,140 +60,18 @@ func (s *AppConfigSuite) node(redisAddr string, logger *slog.Logger) *Store {
 	return node
 }
 
-// app writes an organization, an app and a live key, and returns the app and key ids.
-func (s *AppConfigSuite) app(with ...func(*store.APIKey)) (string, string) {
+// app writes an organization and an app, and returns the app id.
+func (s *AppConfigSuite) app() string {
 	stamp := time.Now().UnixNano()
 	organization := store.Organization{Name: fmt.Sprintf("org-%d", stamp)}
-	s.Require().NoError(s.db.CreateOrganization(s.ctx, &organization))
+	s.Require().NoError(s.db.Organizations.Insert(s.ctx, &organization))
 
 	app := store.App{OrganizationID: organization.ID, Name: fmt.Sprintf("app-%d", stamp)}
-	s.Require().NoError(s.db.CreateApp(s.ctx, &app))
-
-	credential := store.APIKey{
-		ID: fmt.Sprintf("key-%d", stamp), AppID: app.ID, Name: "test", Env: "test",
-		Sealed: []byte("sealed"), KEKVersion: 1, Last4: "abcd", CreatedBy: "appconfig test",
-	}
-	for _, apply := range with {
-		apply(&credential)
-	}
-	s.Require().NoError(s.db.CreateAPIKey(s.ctx, &credential))
-	return app.ID, credential.ID
+	s.Require().NoError(s.db.Apps.Insert(s.ctx, &app))
+	return app.ID
 }
 
-func (s *AppConfigSuite) TestAPIKey() {
-	s.Run("a key is read back with the app behind it", func() {
-		appID, keyID := s.app()
-
-		owner, err := s.first.APIKey(s.ctx, keyID)
-		s.Require().NoError(err)
-		s.Equal(appID, owner.AppID)
-		s.Equal([]byte("sealed"), owner.Sealed)
-	})
-
-	s.Run("an unknown key is unknown rather than empty", func() {
-		_, err := s.first.APIKey(s.ctx, "key-nobody-minted")
-		s.ErrorIs(err, store.ErrNoAPIKey)
-	})
-
-	s.Run("a key revoked on one node stops working on the other", func() {
-		_, keyID := s.app()
-
-		// Both nodes hold it locally before anything is revoked, which is the state a
-		// revocation has to undo rather than one it gets to avoid.
-		_, err := s.first.APIKey(s.ctx, keyID)
-		s.Require().NoError(err)
-		_, err = s.other.APIKey(s.ctx, keyID)
-		s.Require().NoError(err)
-
-		s.Require().NoError(s.first.RevokeAPIKey(s.ctx, keyID, "appconfig test"))
-
-		s.Eventually(func() bool {
-			_, err := s.other.APIKey(s.ctx, keyID)
-			return err != nil
-		}, settleFor, 10*time.Millisecond, "the other node still accepts a revoked key")
-	})
-
-	s.Run("a key cached while it was live stops working when it lapses", func() {
-		_, keyID := s.app(func(key *store.APIKey) {
-			lapses := time.Now().UTC().Add(300 * time.Millisecond)
-			key.ExpiresAt = &lapses
-		})
-
-		_, err := s.first.APIKey(s.ctx, keyID)
-		s.Require().NoError(err)
-
-		time.Sleep(400 * time.Millisecond)
-
-		_, err = s.first.APIKey(s.ctx, keyID)
-		s.ErrorIs(err, store.ErrNoAPIKey)
-	})
-}
-
-func (s *AppConfigSuite) TestPolicy() {
-	s.Run("a policy saved on one node is read by the other", func() {
-		appID, _ := s.app()
-
-		was, err := s.other.Policy(s.ctx, store.ScopeApp, appID)
-		s.Require().NoError(err)
-		s.Nil(was.AllowedModels)
-
-		allowed := []string{"openai/gpt-5"}
-		s.Require().NoError(s.first.SavePolicy(s.ctx, store.ScopeApp, appID,
-			store.PolicyDocument{AllowedModels: &allowed}))
-
-		s.Eventually(func() bool {
-			now, err := s.other.Policy(s.ctx, store.ScopeApp, appID)
-			return err == nil && now.AllowedModels != nil && len(*now.AllowedModels) == 1
-		}, settleFor, 10*time.Millisecond, "the other node is still routing on the old policy")
-	})
-
-	s.Run("an app moved to another organization is answered under the new one", func() {
-		appID, _ := s.app()
-		s.Require().NoError(s.first.JoinOrganization(s.ctx, appID, "org-first"))
-
-		under, err := s.other.OrganizationOf(s.ctx, appID)
-		s.Require().NoError(err)
-		s.Equal("org-first", under)
-
-		s.Require().NoError(s.first.JoinOrganization(s.ctx, appID, "org-second"))
-
-		s.Eventually(func() bool {
-			under, err := s.other.OrganizationOf(s.ctx, appID)
-			return err == nil && under == "org-second"
-		}, settleFor, 10*time.Millisecond, "the other node still has the old organization")
-	})
-
-	s.Run("a policy saved on a node is what that node reads next", func() {
-		// No Eventually here: the node that saved answers its own next request with the new
-		// policy at once. The old copy is in its local cache before every save, and the race
-		// with its invalidation is lost rarely, so many saves run, side by side as a busy
-		// node's are.
-		limit := int64(7)
-		var stale atomic.Int64
-		var saves sync.WaitGroup
-		for writer := range 8 {
-			saves.Go(func() {
-				for attempt := range 1000 {
-					scopeID := fmt.Sprintf("app-%d-%d-%d", time.Now().UnixNano(), writer, attempt)
-					for range 2 {
-						if _, err := s.first.Policy(s.ctx, store.ScopeApp, scopeID); err != nil {
-							stale.Add(1)
-						}
-					}
-					if err := s.first.SavePolicy(s.ctx, store.ScopeApp, scopeID,
-						store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &limit}}); err != nil {
-						stale.Add(1)
-					}
-					if now, err := s.first.Policy(s.ctx, store.ScopeApp, scopeID); err != nil || now.Quota == nil {
-						stale.Add(1)
-					}
-				}
-			})
-		}
-		saves.Wait()
-		s.Zero(stale.Load(), "reads that failed or answered with the policy from before the save")
-	})
-
+func (s *AppConfigSuite) TestCache() {
 	s.Run("a save whose request is cancelled right after the commit still drops the old value", func() {
 		name := key("policy", "app", fmt.Sprintf("app-%d", time.Now().UnixNano()))
 		for _, node := range []*Store{s.first, s.other} {
@@ -266,7 +142,7 @@ func (s *AppConfigSuite) TestPolicy() {
 
 func (s *AppConfigSuite) TestAgentConfig() {
 	s.Run("a renamed config is no longer found under the name it had", func() {
-		appID, _ := s.app()
+		appID := s.app()
 
 		config := store.AgentConfig{CustomerID: appID, Name: "support", Mode: "text"}
 		s.Require().NoError(s.first.CreateAgentConfig(s.ctx, &config))
@@ -291,7 +167,7 @@ func (s *AppConfigSuite) TestAgentConfig() {
 	})
 
 	s.Run("an edited skill is read with its new instructions", func() {
-		appID, _ := s.app()
+		appID := s.app()
 
 		config := store.AgentConfig{CustomerID: appID, Name: "refunds", Mode: "text"}
 		s.Require().NoError(s.first.CreateAgentConfig(s.ctx, &config))
@@ -323,13 +199,17 @@ func (s *AppConfigSuite) TestWithoutRedis() {
 		s.Require().NoError(err)
 		defer plain.Close()
 
-		appID, keyID := s.app()
-		owner, err := plain.APIKey(s.ctx, keyID)
+		appID := s.app()
+		config := store.AgentConfig{CustomerID: appID, Name: "support", Mode: "text"}
+		s.Require().NoError(plain.CreateAgentConfig(s.ctx, &config))
+		found, exists, err := plain.AgentConfigByName(s.ctx, appID, "support")
 		s.Require().NoError(err)
-		s.Equal(appID, owner.AppID)
+		s.Require().True(exists)
+		s.Equal(config.ID, found.ID)
 
-		s.Require().NoError(plain.RevokeAPIKey(s.ctx, keyID, "appconfig test"))
-		_, err = plain.APIKey(s.ctx, keyID)
-		s.ErrorIs(err, store.ErrNoAPIKey)
+		s.Require().NoError(plain.DeleteAgentConfig(s.ctx, appID, config.ID))
+		_, exists, err = plain.AgentConfigByName(s.ctx, appID, "support")
+		s.Require().NoError(err)
+		s.False(exists)
 	})
 }

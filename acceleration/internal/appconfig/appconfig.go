@@ -1,10 +1,10 @@
-// Package appconfig reads the configuration a request is measured against -- the API key
-// it presented, the app and organization behind it, their policies, and the agents,
-// router presets and voices they have written down -- and keeps it in front of Postgres.
+// Package appconfig reads the configuration a request is measured against -- the agents,
+// router presets and voices an app has written down -- and keeps it in front of Postgres.
+// The API key, the app and organization behind it, their policies and provider keys are
+// cached by their own repositories in the store.
 //
 // It exists because that configuration is read on every request and written a few times a
-// week. The key alone was a join on every authenticated call, which is a round trip to
-// Postgres before anything the caller asked for had begun.
+// week.
 //
 // Two tiers, one connection. Redis holds the value, and the client-side cache rueidis
 // keeps alongside it answers without a round trip at all; Redis invalidates that local
@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
@@ -62,9 +61,6 @@ type Store struct {
 	cache  rueidisaside.CacheAsideClient
 	ttl    time.Duration
 	logger *slog.Logger
-	// touched is when this process last recorded each key's use, keyed by key id. It is
-	// per process rather than shared because it guards a write nobody reads in anger.
-	touched sync.Map
 }
 
 // New returns a store reading through Redis, or straight from Postgres when no address

@@ -1,10 +1,13 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 // ValidationError is a row the store refused to write because a field breaks the model's
@@ -76,4 +79,14 @@ func (v *validation) done() error {
 		return nil
 	}
 	return v.err
+}
+
+// constraint is the name of the unique constraint an error violated, empty for anything
+// else.
+func constraint(err error) string {
+	var failure pgdriver.Error
+	if errors.As(err, &failure) && failure.Field('C') == "23505" {
+		return failure.Field('n')
+	}
+	return ""
 }

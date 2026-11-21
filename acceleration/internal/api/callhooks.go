@@ -215,7 +215,7 @@ func (s *Server) dispatchArrivingCall(r *http.Request, origin hookOrigin, event 
 	}
 	// A suspension that cannot be read refuses the call too: it is there to stop fraud that
 	// costs money.
-	if _, err := s.store.TelephonySuspension(r.Context(), number.CustomerID); !errors.Is(err, store.ErrNotSuspended) {
+	if _, err := s.store.TelephonySuspensions.Get(r.Context(), number.CustomerID); !errors.Is(err, store.ErrNotSuspended) {
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to a suspended app",
 			"call", event.CallCid, "customer", number.CustomerID, "error", err)
 		return

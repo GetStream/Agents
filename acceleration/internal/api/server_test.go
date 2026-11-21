@@ -455,7 +455,7 @@ func (s *ServerSuite) recordWho(app, organization string, costMicros int64, user
 // sibling is another app of the suite's app's organization.
 func (s *ServerSuite) sibling() string {
 	app := store.App{OrganizationID: s.app.organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
 	return app.ID
 }
 

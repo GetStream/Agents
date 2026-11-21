@@ -466,7 +466,7 @@ func (s *CampaignsSuite) TestAnalyticsOfANewCampaignAreZero() {
 func (s *CampaignsSuite) TestASuspendedAppCannotLaunch() {
 	s.useApp(s.data.createApp())
 	created := s.ready()
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 
@@ -559,7 +559,7 @@ func (s *CampaignsSuite) TestResumingACampaignWhoseConfigWasDeletedIsRefused() {
 func (s *CampaignsSuite) TestResumingARunningCampaignOfAnAppThatMayNotCallIsAConflict() {
 	s.useApp(s.data.createApp())
 	created := s.launch(s.ready())
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 

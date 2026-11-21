@@ -358,7 +358,7 @@ func (s *MeteringSuite) TestGPTLiveBillsOnlyItsSecondsWhenTheCallerSpeaksAfterTh
 	s.Equal(strconv.FormatInt(s.priced(routing.STS, "openai/gpt-live-1", pricing.Quantities{pricing.AudioMs: 1_000}), 10),
 		reply.Attributes[routing.AttributeFreeCostMicros], "what the caller's second would have cost")
 
-	spent, err := s.store.SpendSince(s.ctx, customer, since)
+	spent, err := s.store.Spend.Since(s.ctx, customer, since)
 	s.Require().NoError(err)
 	s.Equal(tenSeconds, spent, "a budget sees only the seconds")
 	used, err := s.store.CallUsage(s.ctx, customer, agentID, "", since, nil)

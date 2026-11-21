@@ -60,10 +60,10 @@ func (s *StoreSuite) refusedWith(appID, code string, at time.Time) ActivityDelta
 // adding it, so each minute's write replaces the day's count.
 // The organization is the latest write's.
 func (s *StoreSuite) TestTwoWritesForOneRowAreSummed() {
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.refusedWith("app", "forbidden", s.base)}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.refusedWith("app", "forbidden", s.base)}))
 	later := s.served("app", 2, s.base.Add(time.Minute))
 	later.OrganizationID = "moved"
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{later}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{later}))
 
 	row := s.activityOf("app", "agent_setup", AuditSourceCLI)
 	s.Equal(int64(3), row.requests)
@@ -74,7 +74,7 @@ func (s *StoreSuite) TestTwoWritesForOneRowAreSummed() {
 // Defect: an empty refusal code stored as an empty string rather than NULL, so a row never refused reads as
 // refused with a code of nothing.
 func (s *StoreSuite) TestARowNeverRefusedHoldsNoRefusalCode() {
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.served("never-refused", 1, s.base)}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.served("never-refused", 1, s.base)}))
 
 	row := s.activityOf("never-refused", "agent_setup", AuditSourceCLI)
 	s.False(row.code.Valid, "code %q", row.code.String)
@@ -88,7 +88,7 @@ func (s *StoreSuite) TestDeltasForOneRowInOneWriteAreSummed() {
 		s.refusedWith("app", "earlier", s.base), s.served("app", 1, s.base.Add(time.Minute)),
 	}
 	deltas[3].OrganizationID = "moved"
-	s.Require().NoError(s.store.RecordActivity(s.ctx, deltas))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, deltas))
 
 	row := s.activityOf("app", "agent_setup", AuditSourceCLI)
 	s.Equal(int64(4), row.requests)
@@ -103,16 +103,16 @@ func (s *StoreSuite) TestDeltasForOneRowInOneWriteAreSummed() {
 // another's, replacing the latest one; or a write with no refusal clearing it.
 func (s *StoreSuite) TestOnlyALaterRefusalReplacesTheLastOne() {
 	// A row that has known no refusal takes the first one.
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.served("app", 1, s.base)}))
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.refusedWith("app", "second", s.base.Add(2*time.Minute))}))
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.refusedWith("app", "first", s.base.Add(time.Minute))}))
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.served("app", 1, s.base.Add(3*time.Minute))}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.served("app", 1, s.base)}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.refusedWith("app", "second", s.base.Add(2*time.Minute))}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.refusedWith("app", "first", s.base.Add(time.Minute))}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.served("app", 1, s.base.Add(3*time.Minute))}))
 
 	row := s.activityOf("app", "agent_setup", AuditSourceCLI)
 	s.Equal("second", row.code.String)
 	s.True(row.refusedAt.Time.Equal(s.base.Add(2*time.Minute)), row.refusedAt.Time)
 
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.refusedWith("app", "third", s.base.Add(4*time.Minute))}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.refusedWith("app", "third", s.base.Add(4*time.Minute))}))
 	row = s.activityOf("app", "agent_setup", AuditSourceCLI)
 	s.Equal("third", row.code.String)
 	s.True(row.refusedAt.Time.Equal(s.base.Add(4*time.Minute)), row.refusedAt.Time)
@@ -121,10 +121,10 @@ func (s *StoreSuite) TestOnlyALaterRefusalReplacesTheLastOne() {
 // Defect: the first and last times taken from the latest write, so a replica writing an earlier
 // minute late moves the first request forward or the last one back.
 func (s *StoreSuite) TestTheFirstAndLastTimesOnlyWiden() {
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.served("app", 1, s.base.Add(time.Hour))}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.served("app", 1, s.base.Add(time.Hour))}))
 	early, late := s.served("app", 1, s.base), s.served("app", 1, s.base.Add(30*time.Minute))
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{early}))
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{late}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{early}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{late}))
 
 	row := s.activityOf("app", "agent_setup", AuditSourceCLI)
 	s.True(row.firstAt.Equal(s.base), row.firstAt)
@@ -141,7 +141,7 @@ func (s *StoreSuite) TestEachAppAreaClientAndDayIsARowOfItsOwn() {
 	otherDay.Day = s.base.AddDate(0, 0, 1)
 	otherApp.AppID = "another"
 
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{delta, otherArea, otherClient, otherDay, otherApp}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{delta, otherArea, otherClient, otherDay, otherApp}))
 
 	s.Equal(4, s.activityRows("app"))
 	s.Equal(1, s.activityRows("another"))
@@ -156,7 +156,7 @@ func (s *StoreSuite) TestAWriteOfMoreRowsThanOneStatementTakesWritesEveryOne() {
 		deltas = append(deltas, s.served(fmt.Sprintf("app-%d", i), 1, s.base))
 	}
 
-	s.Require().NoError(s.store.RecordActivity(s.ctx, deltas))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, deltas))
 
 	var rows, requests int64
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
@@ -170,14 +170,14 @@ func (s *StoreSuite) TestAWriteOfMoreRowsThanOneStatementTakesWritesEveryOne() {
 func (s *StoreSuite) TestAWriteThatFailsWritesNothing() {
 	// A row whose count one more request takes past what a BIGINT holds, which Postgres
 	// refuses. It sorts after every other row of the write, into its second statement.
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{s.served("app-9999", math.MaxInt64, s.base)}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{s.served("app-9999", math.MaxInt64, s.base)}))
 	deltas := make([]ActivityDelta, 0, activityBatch+1)
 	for i := range activityBatch {
 		deltas = append(deltas, s.served(fmt.Sprintf("app-%04d", i), 1, s.base))
 	}
 	deltas = append(deltas, s.served("app-9999", 1, s.base))
 
-	s.Require().Error(s.store.RecordActivity(s.ctx, deltas))
+	s.Require().Error(s.store.Activities.Add(s.ctx, deltas))
 
 	s.Equal(0, s.activityRows("app-0000"))
 }
@@ -197,7 +197,7 @@ func (s *StoreSuite) TestTwoWritesOfTheSameRowsAtOnceBothSucceed() {
 	var wait sync.WaitGroup
 	for range rounds {
 		for _, deltas := range [][]ActivityDelta{forward, backward} {
-			wait.Go(func() { failures <- s.store.RecordActivity(s.ctx, deltas) })
+			wait.Go(func() { failures <- s.store.Activities.Add(s.ctx, deltas) })
 		}
 	}
 	wait.Wait()
@@ -225,7 +225,7 @@ func (s *StoreSuite) day(appID, area, client string, at time.Time, requests, ref
 // Defect: an area read for one app of the organization, or for every app (a lost IN), or one
 // row per day rather than one per area and client.
 func (s *StoreSuite) TestActivityAreasSumTheAppsAskedForOverDaysAndLeaveOtherAppsOut() {
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{
 		s.day("one", "agent_setup", AuditSourceCLI, s.base.Add(time.Minute), 2, 0),
 		s.day("one", "agent_setup", AuditSourceCLI, s.base.Add(25*time.Hour), 3, 0),
 		s.day("two", "agent_setup", AuditSourceCLI, s.base, 1, 0),
@@ -234,7 +234,7 @@ func (s *StoreSuite) TestActivityAreasSumTheAppsAskedForOverDaysAndLeaveOtherApp
 		s.day("stranger", "workers", AuditSourceAPI, s.base, 100, 0),
 	}))
 
-	areas, err := s.store.ActivityAreas(s.ctx, []string{"one", "two"}, s.base)
+	areas, err := s.store.Activities.Areas(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)
 
 	s.Require().Len(areas, 2, "%+v", areas)
@@ -251,12 +251,12 @@ func (s *StoreSuite) TestActivityAreasSumTheAppsAskedForOverDaysAndLeaveOtherApp
 // Defect: the days before since read too, or the day since falls on left out because its row
 // began before since.
 func (s *StoreSuite) TestActivityAreasReadTheWholeDaySinceFallsOnAndNothingBefore() {
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{
 		s.day("one", "agent_setup", AuditSourceCLI, s.base.Add(-24*time.Hour), 7, 0),
 		s.day("one", "agent_setup", AuditSourceCLI, s.base, 2, 0),
 	}))
 
-	areas, err := s.store.ActivityAreas(s.ctx, []string{"one"}, s.base.Add(3*time.Hour))
+	areas, err := s.store.Activities.Areas(s.ctx, []string{"one"}, s.base.Add(3*time.Hour))
 	s.Require().NoError(err)
 
 	s.Require().Len(areas, 1)
@@ -266,14 +266,14 @@ func (s *StoreSuite) TestActivityAreasReadTheWholeDaySinceFallsOnAndNothingBefor
 // Defect: the code of the earliest refusal kept, or of a later day with none (its NULL sorting
 // first in a descending order).
 func (s *StoreSuite) TestTheCodeOfAnAreaIsItsLatestRefusals() {
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{
 		s.day("one", "agent_setup", AuditSourceCLI, s.base, 1, 1),
 		s.day("one", "agent_setup", AuditSourceCLI, s.base.Add(24*time.Hour), 2, 1),
 		s.day("one", "agent_setup", AuditSourceCLI, s.base.Add(48*time.Hour), 5, 0),
 		s.day("one", "conversations", AuditSourceCLI, s.base, 3, 0),
 	}))
 
-	areas, err := s.store.ActivityAreas(s.ctx, []string{"one"}, s.base)
+	areas, err := s.store.Activities.Areas(s.ctx, []string{"one"}, s.base)
 	s.Require().NoError(err)
 
 	s.Require().Len(areas, 2)
@@ -287,7 +287,7 @@ func (s *StoreSuite) TestTheCodeOfAnAreaIsItsLatestRefusals() {
 // area, another app or before since counted.
 func (s *StoreSuite) TestActivityDaysCountEachDayAnAreaNamedAnsweredOnce() {
 	day := func(n int) time.Time { return s.base.Add(time.Duration(n) * 24 * time.Hour) }
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{
 		s.day("one", "conversations", AuditSourceSDK, day(0), 1, 0),
 		s.day("one", "model_api", AuditSourceSDK, day(0), 1, 0),
 		s.day("two", "model_api", AuditSourceAPI, day(1), 3, 1),
@@ -297,65 +297,9 @@ func (s *StoreSuite) TestActivityDaysCountEachDayAnAreaNamedAnsweredOnce() {
 		s.day("one", "conversations", AuditSourceSDK, day(-1), 1, 0),
 	}))
 
-	days, err := s.store.ActivityDays(s.ctx, []string{"one", "two"}, s.base, []string{"conversations", "model_api"})
+	days, err := s.store.Activities.Days(s.ctx, []string{"one", "two"}, s.base, []string{"conversations", "model_api"})
 	s.Require().NoError(err)
 	s.Equal(2, days)
-}
-
-// usedBy is a request of app's of modality at at, its quantities set by change.
-func (s *StoreSuite) usedBy(appID, modality string, at time.Time, change func(*Request)) {
-	request := &Request{Modality: modality, CustomerID: appID, Provider: "stub", Model: "stub", StartedAt: at, Success: true}
-	change(request)
-	s.Require().NoError(s.store.RecordRequest(s.ctx, request))
-}
-
-// Defect: a meter summed for one app of the organization or for every app, a quantity left
-// out or summed from another column, a request before since counted, or the sliced time of
-// runtime and sandboxes counted as requests.
-func (s *StoreSuite) TestMeterUsesSumTheAppsAskedForByModality() {
-	took := func(ms float64) *float64 { return &ms }
-	s.usedBy("one", "llm", s.base, func(r *Request) { r.InputTokens, r.OutputTokens, r.CostMicros = 10, 20, 5 })
-	s.usedBy("two", "llm", s.base.Add(time.Hour), func(r *Request) { r.InputTokens, r.OutputTokens, r.CostMicros = 1, 2, 1 })
-	s.usedBy("one", "tts", s.base, func(r *Request) { r.AudioMs, r.Characters, r.CostMicros = 1500, 42, 3 })
-	s.usedBy("two", "sandbox", s.base, func(r *Request) { r.DurationMs, r.CostMicros = took(60_000), 7 })
-	s.usedBy("one", "runtime", s.base, func(r *Request) { r.DurationMs, r.CostMicros = took(30_000.4), 2 })
-	s.usedBy("stranger", "llm", s.base, func(r *Request) { r.InputTokens, r.CostMicros = 1000, 1000 })
-	s.usedBy("one", "llm", s.base.Add(-time.Second), func(r *Request) { r.InputTokens, r.CostMicros = 1000, 1000 })
-
-	uses, err := s.store.MeterUses(s.ctx, []string{"one", "two"}, s.base)
-	s.Require().NoError(err)
-
-	s.Equal([]MeterUse{
-		{Modality: "llm", Requests: 2, InputTokens: 11, OutputTokens: 22, CostMicros: 6},
-		{Modality: "runtime", DurationMs: 30_000, CostMicros: 2},
-		{Modality: "sandbox", DurationMs: 60_000, CostMicros: 7},
-		{Modality: "tts", Requests: 1, AudioMs: 1500, Characters: 42, CostMicros: 3},
-	}, uses)
-}
-
-// Defect: the requests of another shard left out, a shard's answer replacing another's, or one
-// modality listed once per shard.
-func (s *ShardedStoreSuite) TestMeterUsesSumEveryShard() {
-	took := 1000.0
-	s.usedBy("one", "llm", s.base, func(r *Request) {
-		r.InputTokens, r.OutputTokens, r.AudioMs, r.Characters, r.DurationMs, r.CostMicros = 10, 20, 30, 40, &took, 5
-	})
-	s.usedBy("one", "tts", s.base, func(r *Request) { r.Characters, r.CostMicros = 9, 1 })
-	request := &Request{Modality: "llm", CustomerID: "two", Provider: "stub", Model: "stub", StartedAt: s.base,
-		InputTokens: 1, OutputTokens: 2, AudioMs: 3, Characters: 4, DurationMs: &took, CostMicros: 1, Success: true}
-	s.Require().NoError(s.other.RecordRequest(s.ctx, request))
-
-	uses, err := s.store.MeterUses(s.ctx, []string{"one", "two"}, s.base)
-	s.Require().NoError(err)
-	s.Equal([]MeterUse{{Modality: "llm", Requests: 2, InputTokens: 11, OutputTokens: 22, AudioMs: 33, Characters: 44,
-		DurationMs: 2000, CostMicros: 6}, {Modality: "tts", Requests: 1, Characters: 9, CostMicros: 1}}, uses)
-}
-
-// Defect: the shards the meters were read from not named, or named in another order than the
-// reads take them, this shard's first.
-func (s *ShardedStoreSuite) TestMeterShardsNameEveryShardThisOneFirst() {
-	s.Equal([]string{"here", "there"}, s.store.MeterShards())
-	s.Equal([]string{"there", "here"}, s.other.MeterShards())
 }
 
 // began saves a session of app's opened at at, on the shard of into, and closes it at
@@ -586,4 +530,21 @@ func (s *ShardedStoreSuite) TestTurnLatencySumsEveryShard() {
 	s.Require().NotNil(roundtrip.P95Ms)
 	s.InEpsilon(100, *roundtrip.P50Ms, 0.05)
 	s.InEpsilon(1000, *roundtrip.P95Ms, 0.05)
+}
+
+func (s *StoreSuite) TestActivityQueryBudgets() {
+	deltas := make([]ActivityDelta, 0, activityBatch+1)
+	for i := range activityBatch + 1 {
+		deltas = append(deltas, s.served(fmt.Sprintf("app-%d", i), 1, s.base))
+	}
+	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.Activities.Add(s.ctx, deltas)) }),
+		"begin, one upsert a batch of rows, commit")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.Activities.Areas(s.ctx, []string{"app-0", "app-1"}, s.base)
+		s.Require().NoError(err)
+	}))
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.Activities.Days(s.ctx, []string{"app-0"}, s.base, []string{"llm"})
+		s.Require().NoError(err)
+	}))
 }

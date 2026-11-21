@@ -1932,7 +1932,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	if scope := request.Scope.ptr(); scope != nil && *scope == spendScopeOrganization {
 		// An app in no organization is its own.
 		if organization := OrganizationFrom(ctx); organization != "" {
-			apps, err := s.store.OrganizationApps(ctx, organization)
+			apps, err := s.store.AppOrganizations.Apps(ctx, organization)
 			if err != nil {
 				return nil, err
 			}

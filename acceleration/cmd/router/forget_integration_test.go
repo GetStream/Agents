@@ -278,21 +278,21 @@ func (s *ForgetUserSuite) settingsOf(app, user string) {
 	shared := s.shards[0]
 	audit := store.LimitAudit{CustomerID: app, Source: store.AuditSourceAPI, ActorID: "staff"}
 	ten := int64(10)
-	s.Require().NoError(shared.SavePolicy(s.ctx, store.ScopeUser, store.UserScopeID(app, user),
-		store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}))
+	s.Require().NoError(shared.Policies.Upsert(s.ctx, &store.Policy{Scope: store.ScopeUser, ScopeID: store.UserScopeID(app, user),
+		Document: store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}}))
 	for _, limit := range []store.Limit{
 		{Subject: usageservice.SubjectUser, Level: store.LevelUser, UserID: user},
 		{Subject: usageservice.SubjectUser, Level: store.LevelApp},
 	} {
 		limit.OrganizationID, limit.AppID, limit.Interval, limit.LimitMicros, limit.UpdatedBy = s.organization, app, usageservice.Daily, 1_000, "staff"
-		s.Require().NoError(shared.CreateLimit(s.ctx, &limit, audit))
+		s.Require().NoError(shared.Limits.Insert(s.ctx, &limit, audit))
 	}
 	start, _ := usageservice.Window(usageservice.Daily, time.Now())
-	s.Require().NoError(shared.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(shared.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		Interval: usageservice.Daily, WindowStart: start, BaselineMicros: 5, Reason: "support", Actor: "staff",
 	}}, audit))
-	s.Require().NoError(shared.AddGrant(s.ctx, &store.LimitGrant{
+	s.Require().NoError(shared.LimitGrants.Insert(s.ctx, &store.LimitGrant{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		AmountMicros: 500, Reason: "support", Actor: "staff",
 	}, audit))
@@ -313,7 +313,7 @@ type userRows struct {
 func (s *ForgetUserSuite) userRows(app, user string) userRows {
 	shared := s.shards[0].GlobalDB()
 	var rows userRows
-	policy, err := s.shards[0].Policy(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
+	policy, err := s.shards[0].Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
 	s.Require().NoError(err)
 	rows.policy = policy.Quota != nil
 	rows.ownLimits, err = shared.NewSelect().Model((*store.Limit)(nil)).Where("app_id = ?", app).Where("level = ?", store.LevelUser).Count(s.ctx)
