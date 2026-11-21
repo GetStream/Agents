@@ -2702,18 +2702,19 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 
 func (s *DataMoveSuite) TestAMovedNumberLeavesItsTrunkBehind() {
 	s.capture("acme")
+	trunkID := "trunk-" + newID()
 	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000110", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
 	s.Require().NoError(s.source.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "telnyx"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			if err := tx.SaveTrunk(StreamTrunk{
-				ID: "trunk-1", BridgeURI: "sip:trunk.example.com", BridgeUsername: "agent",
+				ID: trunkID, BridgeURI: "sip:trunk.example.com", BridgeUsername: "agent",
 				BridgePasswordSealed: []byte("sealed bridge"), BridgePasswordKEKVersion: 1, Own: true,
 			}); err != nil {
 				return err
 			}
-			return tx.Attach("+15550000110", NumberAttachment{TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: "call-1"})
+			return tx.Attach("+15550000110", NumberAttachment{TrunkID: trunkID, RouteID: "route-1", CallType: "default", CallID: "call-1"})
 		}))
 
 	exported := s.export("acme")
@@ -2739,7 +2740,7 @@ func (s *DataMoveSuite) TestAMovedNumberLeavesItsTrunkBehind() {
 
 	s.move("acme", "acme")
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
-	_, err = s.destination.StreamTrunks.Get(s.ctx, "acme", "trunk-1")
+	_, err = s.destination.StreamTrunks.Get(s.ctx, "acme", trunkID)
 	s.ErrorIs(err, ErrNoStreamTrunk)
 
 	// Nor does where its calls went, which a hook finds the number by.
