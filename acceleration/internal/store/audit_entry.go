@@ -190,18 +190,33 @@ func (r *AuditEntries) Insert(ctx context.Context, entry *AuditEntry) error {
 // recordAuditEntry is AuditEntries.Insert on db, which may be the transaction the change was
 // written in, so the change and its record commit together.
 func recordAuditEntry(ctx context.Context, db bun.IDB, entry *AuditEntry) error {
-	if err := entry.Validate(); err != nil {
-		return stack.Wrap(err)
+	entries := []AuditEntry{*entry}
+	err := recordAuditEntries(ctx, db, entries)
+	*entry = entries[0]
+	return err
+}
+
+// recordAuditEntries is recordAuditEntry of every entry, in one statement.
+func recordAuditEntries(ctx context.Context, db bun.IDB, entries []AuditEntry) error {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for i := range entries {
+		entry := &entries[i]
+		if err := entry.Validate(); err != nil {
+			return stack.Wrap(err)
+		}
+		if entry.Changes == nil {
+			entry.Changes = []AuditChange{}
+		}
+		entry.ID = newID()
+		if !slices.Contains(auditSources, entry.Source) {
+			entry.Source = AuditSourceAPI
+		}
+		entry.CreatedAt = now
 	}
-	if entry.Changes == nil {
-		entry.Changes = []AuditChange{}
+	if len(entries) == 0 {
+		return nil
 	}
-	entry.ID = newID()
-	if !slices.Contains(auditSources, entry.Source) {
-		entry.Source = AuditSourceAPI
-	}
-	entry.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := db.NewInsert().Model(entry).Exec(ctx); err != nil {
+	if _, err := db.NewInsert().Model(&entries).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record audit entry: %w", err))
 	}
 	return nil

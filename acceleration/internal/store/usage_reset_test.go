@@ -36,9 +36,10 @@ func (s *StoreSuite) TestUsageResetQueryBudgets() {
 		return UsageReset{OrganizationID: organization, Subject: usage.SubjectApp, AppID: app, Interval: usage.Daily, WindowStart: today, Reason: "r", Actor: "a"}
 	}
 	audit := LimitAudit{CustomerID: "app-" + uuid.NewString(), Source: AuditSourceAPI}
-	s.Equal(6, s.countQueries(func() {
+	const insertMany = 4
+	s.Equal(insertMany, s.countQueries(func() {
 		s.Require().NoError(s.store.UsageResets.InsertMany(s.ctx, []UsageReset{reset("app-1"), reset("app-2"), reset("app-3")}, audit))
-	}), "begin, every reset in one insert, an audit row each, commit")
+	}), "begin, every reset in one insert, every audit row in another, commit")
 	s.Equal(1, s.countQueries(func() {
 		resets, err := s.store.UsageResets.Select(s.ctx, []string{organization}, today)
 		s.Require().NoError(err)
