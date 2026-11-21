@@ -236,14 +236,14 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	workspace := s.slack.TeamID
 	bot := s.connectedBot(workspace, s.slack.InstallBot())
 	config := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "recites/recites-model",
-		EpisodeCards: true,
+		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "recites/recites-model"},
+		EpisodeCards: store.AgentEpisodeCards{On: true},
 		Connectors: []store.ConnectorBinding{{
 			Name: "slack", ConnectorID: "slack_bot",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: bot.ConnectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 
 	status, _ := s.slack.Deliver(s.server.URL+providerAppEventsPath+"slack_bot/"+s.environment["SLACK_BOT_MCP_APP_ID"],
 		s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], s.slackMessage(workspace, "U0000ALICE", "Can you check the build?"), 0)
@@ -295,13 +295,13 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 	token := s.slack.InstallBot()
 	bot := s.connectedBot(workspace, token)
 	config := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "slack", ConnectorID: "slack_bot",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: bot.ConnectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 	handOver := s.holdHandOffs()
 	status, _ := s.slack.Deliver(s.server.URL+providerAppEventsPath+"slack_bot/"+s.environment["SLACK_BOT_MCP_APP_ID"],
 		s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], s.slackMessage(workspace, "U0000ALICE", "Can you check the build?"), 0)

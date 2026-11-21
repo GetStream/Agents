@@ -16,7 +16,6 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/blob"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -33,7 +32,6 @@ type ServiceSuite struct {
 	suite.Suite
 	ctx      context.Context
 	store    *store.Store
-	configs  *appconfig.Store
 	bucket   *blob.Bucket
 	service  *Service
 	resolver *Resolver
@@ -62,10 +60,7 @@ func (s *ServiceSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.store = opened
 	s.Require().NoError(opened.Migrate(s.ctx))
-	configs, err := appconfig.New(appconfig.Options{Store: opened})
-	s.Require().NoError(err)
-	s.configs = configs
-	s.resolver = NewResolver(configs, nil)
+	s.resolver = NewResolver(opened, nil)
 }
 
 func (s *ServiceSuite) TearDownSuite() {
@@ -108,7 +103,7 @@ func (s *ServiceSuite) SetupTest() {
 	s.recorder = routing.NewRecorder(routing.TTS, s.store, nil, list, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(s.recorder.Close)
 
-	service, err := NewService(Options{Store: s.configs, Bucket: bucket, Cloners: cloners, Recorder: s.recorder})
+	service, err := NewService(Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.recorder})
 	s.Require().NoError(err)
 	s.service = service
 }
@@ -253,7 +248,7 @@ func (s *ServiceSuite) TestDeletingAVoiceTakesItsRecordingsWithIt() {
 	_, err = s.bucket.Read(s.ctx, key)
 	s.Require().Error(err, "a deleted voice should not leave audio in the bucket")
 
-	_, err = s.store.Voice(s.ctx, "acme", voice.ID)
+	_, err = s.store.Voices.Get(s.ctx, "acme", voice.ID)
 	s.True(errors.Is(err, store.ErrNoVoice))
 }
 
@@ -267,7 +262,7 @@ func (s *ServiceSuite) TestANameThatIsNotTheirsIsRefusedWhenTheProviderDoesNotHa
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", &findingLister{countingLister: countingLister{voices: []Library{sarah}}})
 
-	_, err := NewResolver(s.configs, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "Sara")
+	_, err := NewResolver(s.store, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "Sara")
 
 	s.Require().ErrorIs(err, routing.ErrRequest)
 	s.Contains(err.Error(), "(EXAVITQu4vr4xnSDxMaL)")
@@ -281,7 +276,7 @@ func (s *ServiceSuite) TestTheirOwnVoiceIsNeverLookedUpInTheProvidersLibrary() {
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", library)
 
-	external, err := NewResolver(s.configs, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "founder")
+	external, err := NewResolver(s.store, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "founder")
 
 	s.Require().NoError(err)
 	s.Equal("el-1", external)
@@ -297,7 +292,7 @@ func (s *ServiceSuite) TestTheirOwnVoiceLeavesNoProviderOutAndIsNeverLookedUp() 
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", library)
 
-	unvouched := NewResolver(s.configs, catalogue).Unvouched(s.ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
+	unvouched := NewResolver(s.store, catalogue).Unvouched(s.ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
 
 	s.Empty(unvouched, "Cartesia may have been given it, and is asked as before")
 	s.Equal(0, library.lookups)
@@ -310,7 +305,7 @@ func (s *ServiceSuite) TestAStoreThatCannotSayWhoseVoiceItIsLeavesNoProviderOut(
 	ctx, cancel := context.WithCancel(s.ctx)
 	cancel()
 
-	unvouched := NewResolver(s.configs, catalogue).Unvouched(ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
+	unvouched := NewResolver(s.store, catalogue).Unvouched(ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
 
 	s.Empty(unvouched, "the candidates meet the store's error in ResolveVoice, as before")
 	s.Equal(0, library.lookups)

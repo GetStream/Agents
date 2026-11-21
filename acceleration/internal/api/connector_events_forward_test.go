@@ -789,13 +789,13 @@ func (s *EventForwardingSuite) connectedBot() string {
 // answering is an agent config of the test's app that binds the bot connection as fixed.
 func (s *EventForwardingSuite) answering(connectionID string) {
 	config := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "slack", ConnectorID: "slack_bot",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: connectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 }
 
 // threadChannel is the test customer's one thread channel, once the bridge linked it.

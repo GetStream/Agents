@@ -334,7 +334,7 @@ func (s *ForwardedDispatchSuite) TestAMessageIsAnsweredByAWorkerOnTheNodeItArriv
 // textChannel is a channel for the suite's app with a text agent's config declared on it.
 func (s *ForwardedDispatchSuite) textChannel() (string, store.AgentConfig) {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "text"}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return "chat-" + s.utils.uuid(), config
 }
 

@@ -266,7 +266,7 @@ func (c *Closer) summarize(parent context.Context, episode store.ClosedEpisode, 
 // write asks the agent config's own LLM for the summary of the episode's lines and writes it
 // into the card as its text, with the status summarized, as author.
 func (c *Closer) write(ctx context.Context, episode store.ClosedEpisode, author string) error {
-	config, err := c.store.AgentConfig(ctx, episode.CustomerID, episode.ConfigID)
+	config, err := c.store.AgentConfigs.Get(ctx, episode.CustomerID, episode.ConfigID)
 	if err != nil {
 		return err
 	}
@@ -295,7 +295,7 @@ func (c *Closer) write(ctx context.Context, episode store.ClosedEpisode, author 
 
 // ask is the summary of the episode's lines, from the agent config's own LLM in its region.
 func (c *Closer) ask(ctx context.Context, config store.AgentConfig, episode store.ClosedEpisode, said told) (string, error) {
-	target := config.LLM
+	target := config.Models.LLM
 	if target == "" {
 		target = defaultSummaryTarget
 	}

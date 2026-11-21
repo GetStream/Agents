@@ -552,6 +552,7 @@ func (s *AgentTeamsSuite) TestAConfigThatCannotBeReadFailsAReopenOnlyWhenChecked
 			_, err := s.store.GlobalDB().NewRaw(`UPDATE agent_configs SET skills = '"unreadable"'::jsonb WHERE id = ?`,
 				value(opened.ConfigId)).Exec(s.T().Context())
 			s.Require().NoError(err)
+			s.store.AgentConfigs.ForgetCached(s.T().Context(), s.customerID(), value(opened.ConfigId))
 		}
 
 		s.Equal(http.StatusInternalServerError, s.status(anya.call(http.MethodPost, s.forking(parent.Id), s.offRecord())), "flag %v", settings != nil)

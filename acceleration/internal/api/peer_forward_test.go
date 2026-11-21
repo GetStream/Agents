@@ -409,15 +409,17 @@ func (s *ScheduledTasksSuite) TestANodeWithNoStoreRefusesAPeersDelivery() {
 }
 
 // A node that could not read the task says so, so the router that handed it over tries
-// again, and nothing is delivered.
+// again, and nothing is delivered. Its store is closed, so it opens no session, and the one
+// the delivery names is held by another node.
 func (s *ScheduledTasksSuite) TestANodeThatCouldNotReadTheTaskAnswersAnError() {
 	closed, err := store.Open(testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
+	holding, _ := s.otherRouter(nil)
 	logged := &loggedText{}
 	other, _, _ := s.otherNodeServingFrom(closed, nil, s.sealer, slog.New(slog.NewTextHandler(logged, nil)))
 
-	text, answer, err := s.forwardDelivery(other, s.suiteCredential())
+	text, answer, err := s.forwardStoredTo(holding, other, s.suiteCredential(), nil, nil)
 
 	s.Require().NoError(err)
 	s.Equal(int32(http.StatusInternalServerError), answer.GetStatus(), "body: %s", answer.GetBody())

@@ -2569,7 +2569,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 
 	defined := map[string]harness.Skill{}
 	if m.options.Store != nil {
-		stored, err := m.options.Configs.SkillsNamed(ctx, customerID, configID, names)
+		stored, err := m.options.Store.Skills.GetByNames(ctx, customerID, configID, names)
 		if err != nil {
 			return harness.Skills{}, err
 		}
@@ -2590,7 +2590,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 	resolved := harness.Skills{Skills: make([]harness.Skill, 0, len(names))}
 	if m.options.Store != nil {
 		resolved.Load = func(ctx context.Context, name string) (harness.Loaded, error) {
-			found, err := m.options.Configs.SkillsNamed(ctx, customerID, configID, []string{name})
+			found, err := m.options.Store.Skills.GetByNames(ctx, customerID, configID, []string{name})
 			if err != nil {
 				return harness.Loaded{}, err
 			}

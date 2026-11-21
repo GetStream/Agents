@@ -577,7 +577,7 @@ func (d *dispatcher) recheck(ctx context.Context, r route) (store.ConnectorBindi
 		return store.ConnectorBinding{}, stack.Wrap(fmt.Errorf("session: connector %q: %s, so %s was not called",
 			r.binding.Name, why, r.binding.Name+mcp.Separator+r.tool))
 	}
-	config, err := d.store.AgentConfig(ctx, d.spec.CustomerID, d.spec.ConfigID)
+	config, err := d.store.AgentConfigs.Get(ctx, d.spec.CustomerID, d.spec.ConfigID)
 	if err != nil {
 		return refuse("the agent config could not be read")
 	}

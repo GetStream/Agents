@@ -1675,7 +1675,7 @@ func (s *RouterSuite) knowledgeWriter(gate routing.Gate) *metered.Knowledge {
 	s.knowledge = newKnowledgeBase()
 	backends := map[string]knowledge.Backend{pricing.DefaultRegion: s.knowledge}
 	maps.Copy(backends, s.knowledgeRegions)
-	return metered.NewRegionalKnowledge(backends, s.metering, gate, s.store)
+	return metered.NewRegionalKnowledge(backends, s.metering, gate, s.store.KnowledgeNamespaces)
 }
 
 // schedulingModel is a model that runs the tool calls its test queued in the suite's
@@ -1758,7 +1758,7 @@ func (s *RouterSuite) voiceService() *voices.Service {
 	cloners := voices.NewRegistry()
 	cloners.Register("elevenlabs", cloner)
 
-	service, err := voices.NewService(voices.Options{Store: s.configs, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
+	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
 	s.Require().NoError(err)
 	return service
 }

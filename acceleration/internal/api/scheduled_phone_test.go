@@ -77,7 +77,7 @@ func (s *ScheduledTasksSuite) placeCall(user *testClient) placedCall {
 		Text: scheduledPrompt(store.ClaimedScheduledTask{Task: task, Run: run}, now), Due: now,
 		APIKey: task.APIKey, UsageCategories: task.UsageCategories,
 	}
-	config, err := s.store.AgentConfig(context.Background(), s.customerID(), configID)
+	config, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), configID)
 	s.Require().NoError(err)
 	to := s.writerNumber()
 	found, live := s.router.sessions.Get(opened.Id, delivery.owner())

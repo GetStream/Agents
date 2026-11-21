@@ -11,7 +11,7 @@ import (
 // linked to it.
 func (s *StoreSuite) historyStory() (chat *ContactMapEntry, own, sunday, monday string) {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	chat = s.made(streamUser("anya", "agent:omni-chat"))
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
@@ -126,7 +126,7 @@ func (s *StoreSuite) TestOnlyABoundaryBeforeTheLinkReadsTheSetAsideRows() {
 // anya of app 4242 reads only her app's past of it.
 func (s *StoreSuite) TestASetAsideRowOfAnotherAppIsNotRead() {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 	own := s.chatEpisode(chat)
@@ -147,7 +147,7 @@ func (s *StoreSuite) TestASetAsideRowOfAnotherAppIsNotRead() {
 // never chatted with the agent, and the number's next row reads its past with all of it.
 func (s *StoreSuite) TestALinkWithAllOfTheHistoryIsReadOnTheNumbersNextRow() {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	sunday := s.smsAt(s.made(contact("+15550100", "agent:omni-sms")), linkedAt.Add(-36*time.Hour))
 	s.linkWith("+15550100", &PhoneHistory{All: true})
@@ -205,7 +205,7 @@ func (s *StoreSuite) TestALinkThePreviousReleaseMadeAgainIsFromItsTime() {
 // link made again (ThreadHistorySince), as her cards read none of it.
 func (s *StoreSuite) TestAThreadOfALinkThePreviousReleaseMadeAgainIsCutAtItsTime() {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true")
 	s.Require().NoError(err)
 	thread := "messaging:thread-" + newID()
 	row := s.made(contact("+15550100", "agent:omni-"+newID()))
@@ -269,7 +269,7 @@ WHERE customer_id = 'acme-app' AND stream_app_pk = 4242 AND user_id = 'anya'`, p
 // none for a link with all of it.
 func (s *StoreSuite) TestAThreadsHistoryIsCutAtItsNumbersLink() {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true")
 	s.Require().NoError(err)
 	thread := "messaging:thread-" + newID()
 	open := func(number string) {

@@ -561,8 +561,8 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersSessionsRunOn
 // leaves text to the customer's dispatch worker, and returns what that worker is handed.
 func (s *ChatInboundQueueSuite) dispatchingOn() <-chan dispatch.Message {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	s.T().Cleanup(release)
@@ -606,8 +606,8 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAThreadChannelThatCouldNotBeReadI
 // take the message: tried again for a worker to connect.
 func (s *ChatInboundQueueSuite) TestADeliveryForADispatchingSessionNoWorkerTookIsTriedAgain() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 
 	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
@@ -714,8 +714,8 @@ func (s *ChatInboundQueueSuite) TestTriesOfOneQueuedDeliveryAtOnceAnswerItOnce()
 // worker's next try to answer.
 func (s *ChatInboundQueueSuite) TestAQueuedDeliveryForADispatchingSessionNoWorkerTookIsQueuedAgain() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	queued := s.row(s.queue(s.message(suiteStreamApp, "", "")))
 
@@ -807,8 +807,8 @@ func (s *ChatInboundQueueSuite) dispatchingBesideAWorkerElsewhere() (*websocket.
 	here, router, _ := s.otherNodeHolding(dispatch.NewPool(), s.sealer, logger)
 	router.workers = s.deafWorkers(logger)
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.on(here).createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	return worker, router, s.row(s.queue(s.message(suiteStreamApp, "", "")))
 }

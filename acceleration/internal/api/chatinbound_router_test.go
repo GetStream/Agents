@@ -647,7 +647,7 @@ func (s *ChatInboundAppSuite) config(customer string) string {
 
 func deliveredConfig(router *RouterSuite, customer string) string {
 	config := store.AgentConfig{CustomerID: customer, Name: "config-" + router.utils.uuid(), Mode: "text"}
-	router.Require().NoError(router.store.CreateAgentConfig(context.Background(), &config))
+	router.Require().NoError(router.store.AgentConfigs.Insert(context.Background(), &config))
 	return config.ID
 }
 

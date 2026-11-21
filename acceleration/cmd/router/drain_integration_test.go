@@ -244,8 +244,8 @@ func (s *DrainSuite) TestARouterDrainsAChatCardInFlight() {
 		s.Require().NoError(free.Close())
 	}
 	agent := store.AgentConfig{CustomerID: "customer-" + uuid.NewString(), Name: "chat-" + uuid.NewString(),
-		Mode: store.AgentModeText, LLM: "llm-flow", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, &agent))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "llm-flow"}, EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	waiting, release := chat.Hold("/message")
 
 	stopped := make(chan struct{})
@@ -331,8 +331,8 @@ func (s *DrainSuite) TestADrainingRouterStopsSayingItTakesTrunkCallsOver() {
 	}
 	// An episode card held in flight is what keeps the router draining.
 	agent := store.AgentConfig{CustomerID: "customer-" + uuid.NewString(), Name: "chat-" + uuid.NewString(),
-		Mode: store.AgentModeText, LLM: "llm-flow", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, &agent))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "llm-flow"}, EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	waiting, release := chat.Hold("/message")
 	before := takers()
 
@@ -421,8 +421,8 @@ func (s *DrainSuite) TestADrainingRouterStillHearsTheRepliesToWorkItCarriedElsew
 	}
 	// An episode card held in flight is what keeps the router draining.
 	agent := store.AgentConfig{CustomerID: "customer-" + uuid.NewString(), Name: "chat-" + uuid.NewString(),
-		Mode: store.AgentModeText, LLM: "llm-flow", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, &agent))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "llm-flow"}, EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	waiting, release := chat.Hold("/message")
 	settings.Node.Advertise = settings.Node.Listen
 	hearing := func() bool {

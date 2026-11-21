@@ -160,11 +160,11 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 		return nil, invalidRequest("a request body is required")
 	}
 
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Body.ConfigId)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
-	if config.Channels.Identity != store.ChannelIdentityLink {
+	if config.Channels.Lines.Identity != store.ChannelIdentityLink {
 		return nil, invalidRequest(config.Name + " identifies a sender by their number, " +
 			"so there is nothing to link: set channels.identity to link to need a code")
 	}
@@ -322,11 +322,11 @@ func (s *Server) channelsComplaint(ctx context.Context, config store.AgentConfig
 // declaring it should not stop syncing meanwhile. Nothing answers on such a line until
 // it is connected, since a message arrives through the connected account.
 func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig) ([]string, string, bool) {
-	named := config.Channels.Lines()
+	named := config.Channels.Lines.Lines()
 	if len(named) == 0 {
 		return nil, "", true
 	}
-	if identity := config.Channels.Identity; identity != store.ChannelIdentityPhone && identity != store.ChannelIdentityLink {
+	if identity := config.Channels.Lines.Identity; identity != store.ChannelIdentityPhone && identity != store.ChannelIdentityLink {
 		return nil, "channels.identity is phone or link, not " + identity, false
 	}
 	var unconnected []string

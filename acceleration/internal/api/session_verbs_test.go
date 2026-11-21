@@ -251,8 +251,8 @@ func (s *SessionVerbsSuite) TestAnOlderSDKCarriesAChatOnByItsChannel() {
 
 func (s *SessionVerbsSuite) TestAReopenedChatIsSummarisedWhole() {
 	// A stopped session is reopened from its row, so the model has to come from a config.
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "summarising", Mode: "text", LLM: "summarising/summarising-model"}
-	s.Require().NoError(s.configs.CreateAgentConfig(context.Background(), &config))
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "summarising", Mode: "text", Models: store.AgentModels{LLM: "summarising/summarising-model"}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	request := textSession(nil)
 	request.Llm = nil
 	request.ConfigId = &config.ID
@@ -278,8 +278,8 @@ func (s *SessionVerbsSuite) TestAReopenedChatIsSummarisedWhole() {
 
 func (s *SessionVerbsSuite) TestAChatIsReviewedByItsAgentsReviewInstructions() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "reviewed-" + s.utils.uuid(), Mode: "text",
-		LLM: "summarising/summarising-model", ReviewInstructions: "Score how well the agent sold the upgrade."}
-	s.Require().NoError(s.configs.CreateAgentConfig(context.Background(), &config))
+		Models: store.AgentModels{LLM: "summarising/summarising-model"}, ReviewInstructions: "Score how well the agent sold the upgrade."}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	request := textSession(nil)
 	request.Llm = nil
 	request.ConfigId = &config.ID

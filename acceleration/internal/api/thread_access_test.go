@@ -411,7 +411,7 @@ func (s *SlackChannelSuite) TestAThreadTheMessageHookOpensIsSharedAndOffersNoCal
 		Name: "mine", ConnectorID: "slack_bot",
 		Connection: store.ConnectionBinding{Type: "session"},
 	})
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	data, foundChannel := s.chat.Channel(channel)

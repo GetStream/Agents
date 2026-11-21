@@ -223,7 +223,7 @@ func (s *ReplicateResumeSuite) TestACampaignScheduledThereIsNamedAndResumesToSch
 
 func (s *ReplicateResumeSuite) TestResumeSaysHowManyTasksItLeftPausedForADeletedConfig() {
 	s.imported("st-active", store.ScheduledTaskActive)
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme", "config-1"))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme", "config-1"))
 
 	var out bytes.Buffer
 	s.Require().NoError(resumeMove(s.ctx, s.store, "acme", &out))

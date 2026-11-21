@@ -136,7 +136,7 @@ type ManagerOptions struct {
 	// organization's, which its agent config can shorten and not lengthen. Nil holds it to
 	// the agent config alone.
 	Policies *policy.Enforcer
-	// Configs reads what a session is opened from -- the skills it names -- through
+	// Configs reads the app settings a session is opened with through
 	// whatever cache is in front of Postgres. Built over Store when it is not given, in
 	// which case every read is a query, which is what a deployment without Redis does.
 	Configs *appconfig.Store

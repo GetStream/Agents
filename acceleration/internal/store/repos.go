@@ -6,6 +6,7 @@ type repos struct {
 	CustomModels                   *CustomModels
 	APIKeys                        *APIKeys
 	Activities                     *Activities
+	AgentConfigs                   *AgentConfigs
 	AgentLogs                      *AgentLogs
 	AppOrganizations               *AppOrganizations
 	Apps                           *Apps
@@ -50,6 +51,9 @@ type repos struct {
 	EventDestinations              *EventDestinations
 	Guests                         *Guests
 	ImageJobs                      *ImageJobs
+	KnowledgeDocuments             *KnowledgeDocuments
+	KnowledgeNamespaces            *KnowledgeNamespaces
+	KnowledgeURLs                  *KnowledgeURLs
 	LimitGrantUses                 *LimitGrantUses
 	LimitGrants                    *LimitGrants
 	Limits                         *Limits
@@ -68,6 +72,7 @@ type repos struct {
 	ResponseItems                  *ResponseItems
 	Responses                      *Responses
 	ReviewLogs                     *ReviewLogs
+	RouterConfigs                  *RouterConfigs
 	SIPTrunks                      *SIPTrunks
 	SandboxRecipients              *SandboxRecipients
 	Sandboxes                      *Sandboxes
@@ -75,6 +80,10 @@ type repos struct {
 	ScheduledTasks                 *ScheduledTasks
 	SessionTools                   *SessionTools
 	Sessions                       *Sessions
+	SimulationCases                *SimulationCases
+	SimulationRuns                 *SimulationRuns
+	Simulations                    *Simulations
+	Skills                         *Skills
 	Spend                          *Spend
 	StreamAppTokens                *StreamAppTokens
 	StreamFallbackUses             *StreamFallbackUses
@@ -86,6 +95,9 @@ type repos struct {
 	UsageResets                    *UsageResets
 	UseCases                       *UseCases
 	UserPhones                     *UserPhones
+	VoiceBindings                  *VoiceBindings
+	VoiceSamples                   *VoiceSamples
+	Voices                         *Voices
 	WaitingMessages                *WaitingMessages
 }
 
@@ -95,6 +107,7 @@ func (s *Store) wire() {
 		CustomModels:                   &CustomModels{store: s},
 		APIKeys:                        &APIKeys{store: s},
 		Activities:                     &Activities{store: s},
+		AgentConfigs:                   &AgentConfigs{store: s},
 		AgentLogs:                      &AgentLogs{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},
 		Apps:                           &Apps{store: s},
@@ -139,6 +152,9 @@ func (s *Store) wire() {
 		EventDestinations:              &EventDestinations{store: s},
 		Guests:                         &Guests{store: s},
 		ImageJobs:                      &ImageJobs{store: s},
+		KnowledgeDocuments:             &KnowledgeDocuments{store: s},
+		KnowledgeNamespaces:            &KnowledgeNamespaces{store: s},
+		KnowledgeURLs:                  &KnowledgeURLs{store: s},
 		LimitGrantUses:                 &LimitGrantUses{store: s},
 		LimitGrants:                    &LimitGrants{store: s},
 		Limits:                         &Limits{store: s},
@@ -157,6 +173,7 @@ func (s *Store) wire() {
 		ResponseItems:                  &ResponseItems{store: s},
 		Responses:                      &Responses{store: s},
 		ReviewLogs:                     &ReviewLogs{store: s},
+		RouterConfigs:                  &RouterConfigs{store: s},
 		SIPTrunks:                      &SIPTrunks{store: s},
 		SandboxRecipients:              &SandboxRecipients{store: s},
 		Sandboxes:                      &Sandboxes{store: s},
@@ -164,6 +181,10 @@ func (s *Store) wire() {
 		ScheduledTasks:                 &ScheduledTasks{store: s},
 		SessionTools:                   &SessionTools{store: s},
 		Sessions:                       &Sessions{store: s},
+		SimulationCases:                &SimulationCases{store: s},
+		SimulationRuns:                 &SimulationRuns{store: s},
+		Simulations:                    &Simulations{store: s},
+		Skills:                         &Skills{store: s},
 		Spend:                          &Spend{store: s},
 		StreamAppTokens:                &StreamAppTokens{store: s},
 		StreamFallbackUses:             &StreamFallbackUses{store: s},
@@ -175,6 +196,9 @@ func (s *Store) wire() {
 		UsageResets:                    &UsageResets{store: s},
 		UseCases:                       &UseCases{store: s},
 		UserPhones:                     &UserPhones{store: s},
+		VoiceBindings:                  &VoiceBindings{store: s},
+		VoiceSamples:                   &VoiceSamples{store: s},
+		Voices:                         &Voices{store: s},
 		WaitingMessages:                &WaitingMessages{store: s},
 	}
 }

@@ -166,7 +166,7 @@ func (s *Store) DropStrays(ctx context.Context) (dropped, left []string, err err
 // person. A stray another stray points at is dropped on a later pass, once the one pointing
 // is gone.
 func dropStrays(ctx context.Context, db *bun.DB, other migrationSet) (dropped, left []string, err error) {
-	tables, err := setTables(other)
+	tables, err := createdTables(other)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -327,6 +327,19 @@ var tableChange = regexp.MustCompile(`(?i)(CREATE TABLE (?:IF NOT EXISTS )?|DROP
 // setTables are the tables the set's migrations leave, read from their Up SQL in order. A
 // table is created by one set alone, except the change log both keep.
 func setTables(set migrationSet) ([]string, error) {
+	return migratedTables(set, false)
+}
+
+// createdTables are the tables the set's migrations ever create, a later one dropping or
+// renaming them included, which a database of the other set may still hold from before the
+// split.
+func createdTables(set migrationSet) ([]string, error) {
+	return migratedTables(set, true)
+}
+
+// migratedTables reads the set's tables from its migrations' Up SQL in order. ever keeps the
+// tables a later migration drops, and the old name of one it renames.
+func migratedTables(set migrationSet, ever bool) ([]string, error) {
 	files, err := fs.Glob(set.files, "*.sql")
 	if err != nil {
 		return nil, err
@@ -348,10 +361,14 @@ func setTables(set migrationSet) ([]string, error) {
 						tables = append(tables, table)
 					}
 				case strings.HasPrefix(verb, "DROP"):
-					tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
+					if !ever {
+						tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
+					}
 				case renamed != "":
-					if i := slices.Index(tables, table); i >= 0 {
+					if i := slices.Index(tables, table); i >= 0 && !ever {
 						tables[i] = renamed
+					} else if i >= 0 && !slices.Contains(tables, renamed) {
+						tables = append(tables, renamed)
 					}
 				}
 			}

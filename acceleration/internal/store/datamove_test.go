@@ -187,17 +187,6 @@ func (s *DataMoveSuite) TestExportCarriesOnlyTheCallersRows() {
 	s.Equal("acme-agent", configs[0]["name"])
 }
 
-func (s *DataMoveSuite) TestExportLeavesCredentialsBehind() {
-	s.seedPluginConnection(s.source, "acme", "xoxb-a-real-token")
-
-	connections := s.export("acme").of("agent_plugin_connections")
-
-	s.Require().Len(connections, 1)
-	for _, column := range []string{"access_token", "refresh_token"} {
-		s.NotContains(connections[0], column, "a credential is not part of a customer's data")
-	}
-}
-
 // A column named like a credential in a table an export carries is left out (isSecret), or is
 // vouched for here as no credential. A new one fails until somebody decides which it is.
 func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
@@ -268,17 +257,6 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 	s.Empty(held)
 }
 
-func (s *DataMoveSuite) TestAnImportedConnectionHasToBeAuthorizedAgain() {
-	s.seedPluginConnection(s.source, "acme", "xoxb-a-real-token")
-
-	s.move("acme", "acme")
-
-	var token string
-	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT access_token FROM agent_plugin_connections").Scan(&token))
-	s.Empty(token)
-}
-
 func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	// What the router recorded of a user is the customer's data: an account arrives an account,
 	// and a claimed guest arrives claimed by the same account, so nobody else can claim it.
@@ -329,9 +307,8 @@ func (s *DataMoveSuite) TestAMovedModeratorIsStillTheAppsModerator() {
 
 	s.move("acme", "moved")
 
-	moderator, found, err := s.destination.AgentConfigByRole(s.ctx, "moved", RoleAgentModerator)
-	s.Require().NoError(err)
-	s.Require().True(found, "the chat worker finds the app's moderator by its role")
+	moderator, err := s.destination.AgentConfigs.GetByRole(s.ctx, "moved", RoleAgentModerator)
+	s.Require().NoError(err, "the chat worker finds the app's moderator by its role")
 	s.Equal(id, moderator.ID)
 }
 
@@ -456,11 +433,11 @@ func (s *DataMoveSuite) TestAConfigsBindingsMoveWithIt() {
 		Name: "crm", ConnectorID: "slack", Connection: ConnectionBinding{Type: "session"},
 		Tools: []ToolGrant{{Name: "search", SchemaDigest: strings.Repeat("a", 64)}}, Required: true,
 	}}}
-	s.Require().NoError(s.source.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.source.AgentConfigs.Insert(s.ctx, config))
 
 	s.move("acme", "moved")
 
-	moved, err := s.destination.AgentConfig(s.ctx, "moved", config.ID)
+	moved, err := s.destination.AgentConfigs.Get(s.ctx, "moved", config.ID)
 	s.Require().NoError(err)
 	s.Equal(config.Connectors, moved.Connectors)
 }
@@ -1470,16 +1447,6 @@ func (s *DataMoveSuite) seedVoice(store *Store, customerID, name string) string 
 	return id
 }
 
-func (s *DataMoveSuite) seedPluginConnection(store *Store, customerID, token string) string {
-	id := newID()
-	_, err := store.GlobalDB().ExecContext(s.ctx,
-		"INSERT INTO agent_plugin_connections (id, customer_id, config_id, plugin_id, access_token)"+
-			" VALUES (?, ?, ?, ?, ?)",
-		id, customerID, newID(), "slack", token)
-	s.Require().NoError(err)
-	return id
-}
-
 // pinnedSession is a session row on the source, pinned to the app given; zero leaves it
 // unpinned, as everything written before pins was.
 func (s *DataMoveSuite) pinnedSession(customerID string, app int64) string {
@@ -2219,7 +2186,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHerePaused
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	s.move("acme", "moved")
 	// What deleting the config over the API does here.
-	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "moved", "config-1"))
 	s.Require().NoError(s.destination.ScheduledTasks.PauseForConfig(s.ctx, "moved", "config-1"))
 
 	resumed, skipped, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
@@ -2238,7 +2205,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHereBefore
 	s.capture("acme")
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	cursor := s.move("acme", "moved")
-	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "moved", "config-1"))
 	s.Require().NoError(s.destination.ScheduledTasks.PauseForConfig(s.ctx, "moved", "config-1"))
 	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET next_run_at = next_run_at + interval '1 day', updated_at = now() WHERE id = 'st-active'")
@@ -2333,7 +2300,7 @@ INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-
 UPDATE scheduled_tasks SET config_id = 'config-2' WHERE id IN ('st-gone-ended', 'st-gone-paused')`)
 	s.Require().NoError(err)
 	s.move("acme", "moved")
-	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-2"))
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "moved", "config-2"))
 	changing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = changing.Rollback() }()
@@ -3574,4 +3541,84 @@ func (s *ShardedStoreSuite) TestARepeatableReadWriteToAShardTableIsNotRefused() 
 	_, err = tx.ExecContext(s.ctx, "INSERT INTO calls (id, customer_id, call_id, agent_id) VALUES ('c', 'acme', 'c', 'agent')")
 	s.Require().NoError(err)
 	s.NoError(tx.Commit())
+}
+
+// An export from a release before the plugin tables were dropped still carries their rows, and
+// changes to them; an import skips them rather than failing the whole move.
+func (s *DataMoveSuite) TestAnImportSkipsTheRowsOfARetiredTable() {
+	connection := json.RawMessage(`{"id": "c1", "customer_id": "acme", "config_id": "x", "plugin_id": "slack", "access_token": "xoxb"}`)
+	for _, table := range retiredTables {
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", table, connection), table)
+	}
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{
+		{Table: "agent_plugin_connections", Op: ChangeInsert, Key: json.RawMessage(`{"id": "c1"}`), Payload: connection},
+		{Table: "agent_plugin_connections", Op: ChangeDelete, Key: json.RawMessage(`{"id": "c1"}`)},
+	}))
+
+	var present bool
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT to_regclass('agent_plugin_connections') IS NOT NULL").Scan(&present))
+	s.False(present)
+	s.ErrorContains(s.destination.ImportRow(s.ctx, "moved", "no_such_table", connection), "is not a table an export carries",
+		"only the retired tables are skipped")
+}
+
+// importAsOlder copies everything a customer has to the other deployment as an export from an
+// older release carries it: each table's columns named again under the names renamed gives.
+func (s *DataMoveSuite) importAsOlder(from, to string, renamed map[string]map[string]string) {
+	reservation, err := s.destination.ReserveImportedIDs(s.ctx)
+	s.Require().NoError(err)
+	for _, row := range s.export(from).rows {
+		for current, older := range renamed[row.table] {
+			row.row[older] = row.row[current]
+			delete(row.row, current)
+		}
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		s.Require().NoError(reservation.Cover(s.ctx, row.table, encoded))
+		s.Require().NoError(s.destination.ImportRow(s.ctx, to, row.table, encoded))
+	}
+}
+
+// An export from a release before the lease was named as the queue's carries it as held_until;
+// the run arrives still held until then rather than written off as never held.
+func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
+	simulation := Simulation{CustomerID: "acme", Name: "order status", Mode: SimulationText,
+		ConfigID: "config", Scenario: "ask where the order is", Assertion: "it says where"}
+	s.Require().NoError(s.source.Simulations.Insert(s.ctx, &simulation))
+	run := SimulationRun{CustomerID: "acme", SimulationID: simulation.ID, Mode: SimulationText}
+	leaseUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+
+	s.importAsOlder("acme", "acme", map[string]map[string]string{"simulation_runs": {"lease_until": "held_until"}})
+
+	moved, err := s.destination.SimulationRuns.Get(s.ctx, "acme", run.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(moved.LeaseUntil)
+	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
+}
+
+// An export from a release before agent_configs grouped its columns names four of them as they
+// were; what they held arrives under the new names rather than as their defaults.
+func (s *DataMoveSuite) TestAConfigFromAnOlderReleaseKeepsItsRenamedSettings() {
+	config := AgentConfig{CustomerID: "acme", Name: "support",
+		Sandbox:      AgentSandbox{Provider: SandboxDaytona},
+		EpisodeCards: AgentEpisodeCards{On: true},
+		Channels: AgentAnswersIn{
+			Lines: AgentChannels{Identity: "link"},
+			Chat:  []ChatChannel{{Type: "team"}},
+		},
+	}
+	s.Require().NoError(s.source.AgentConfigs.Insert(s.ctx, &config))
+
+	s.importAsOlder("acme", "acme", map[string]map[string]string{"agent_configs": {
+		"sandbox_provider": "sandbox", "episode_cards_on": "episode_cards",
+		"channels_lines": "channels", "channels_chat": "chat_channels",
+	}})
+
+	moved, err := s.destination.AgentConfigs.Get(s.ctx, "acme", config.ID)
+	s.Require().NoError(err)
+	s.Equal(config.Sandbox, moved.Sandbox)
+	s.Equal(config.EpisodeCards, moved.EpisodeCards)
+	s.Equal(config.Channels, moved.Channels)
 }

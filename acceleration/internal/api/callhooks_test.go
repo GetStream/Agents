@@ -702,7 +702,7 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWhoseAgentIsGoneIsRefused() 
 	config := s.config("echo/local-model")
 	ctx := context.Background()
 	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, config))
-	s.Require().NoError(s.store.DeleteAgentConfig(ctx, s.customerID(), config))
+	s.Require().NoError(s.store.AgentConfigs.Delete(ctx, s.customerID(), config))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 

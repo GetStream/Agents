@@ -547,7 +547,7 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 		} else {
 			maxActive := store.DefaultMaxActiveTasks
 			// A deleted config leaves a task nothing to run on; any other failure to read it is not that.
-			config, err := s.store.AgentConfig(ctx, customerID, task.ConfigID)
+			config, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID)
 			if errors.Is(err, store.ErrNoAgentConfig) {
 				return nil, errUnknownConfig
 			}

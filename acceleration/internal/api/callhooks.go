@@ -290,7 +290,7 @@ func (s *Server) dispatchArrivingCall(r *http.Request, origin hookOrigin, event 
 // answerWithAgent opens a session of the number's agent on the arriving call. It ends on its
 // own once the caller hangs up, as any phone session does (Session.observe).
 func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager, origin hookOrigin, event callEvent, number store.PhoneNumber, callType, callID string) {
-	config, err := s.configs.AgentConfig(ctx, number.CustomerID, number.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, number.CustomerID, number.ConfigID)
 	if err != nil {
 		s.refuseArrivingCall(ctx, number, callType, callID, event.SessionID, "refused an arriving call to a number whose agent is gone",
 			"call", event.CallCid, "customer", number.CustomerID, "number", number.E164,

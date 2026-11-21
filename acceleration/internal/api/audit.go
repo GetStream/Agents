@@ -254,7 +254,7 @@ func (s *Server) getAgentChanges(ctx context.Context, request *agentChangesReque
 	if s.store == nil {
 		return nil, errNoAudit
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Id)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownConfig
 	}

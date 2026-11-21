@@ -49,7 +49,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return nil, err
 	}
 	if id != "" {
-		found, err := s.configs.AgentConfig(ctx, customerID, id)
+		found, err := s.store.AgentConfigs.Get(ctx, customerID, id)
 		if err != nil {
 			return nil, errUnknownConfig
 		}
@@ -59,15 +59,15 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return &found, nil
 	}
 
-	found, exists, err := s.configs.AgentConfigByName(ctx, customerID, named)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
-	}
-	if !exists {
+	found, err := s.store.AgentConfigs.GetByName(ctx, customerID, named)
+	if errors.Is(err, store.ErrNoAgentConfig) {
 		// Refused rather than started unconfigured. A typo in a name would otherwise get a
 		// working session with default instructions, which is far harder to notice than an
 		// error: the agent answers, just not as the agent that was asked for.
 		return nil, notFound("there is no agent called " + named)
+	}
+	if err != nil {
+		return nil, invalidRequest(err.Error())
 	}
 	if teams.refuses(found) {
 		return nil, notFound("there is no agent called " + named)

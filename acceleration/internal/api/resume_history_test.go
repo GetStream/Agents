@@ -34,9 +34,9 @@ func (s *ResumeHistorySuite) resumable(config store.ResumeHistory, session *Resu
 	ctx := context.Background()
 	agent := store.AgentConfig{
 		CustomerID: s.customerID(), Name: "resume-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "recites/recites-model", ResumeHistory: config,
+		Models: store.AgentModels{LLM: "recites/recites-model"}, ResumeHistory: config,
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &agent))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &agent))
 	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: &agent.ID, ResumeHistory: session})
 	s.answerTo(opened.Id, "Is invoice 7 paid?")
 

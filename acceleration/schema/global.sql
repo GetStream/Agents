@@ -3,15 +3,15 @@
 TABLE agent_configs
     agents jsonb
     calls jsonb NOT NULL DEFAULT '{}'::jsonb
-    channels jsonb NOT NULL DEFAULT '{}'::jsonb
-    chat_channels jsonb NOT NULL DEFAULT '[]'::jsonb
+    channels_chat jsonb NOT NULL DEFAULT '[]'::jsonb
+    channels_lines jsonb NOT NULL DEFAULT '{}'::jsonb
     connectors jsonb NOT NULL DEFAULT '[]'::jsonb
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
     deleted_at timestamp with time zone
     dispatch_incoming_call boolean NOT NULL DEFAULT false
     dispatch_text boolean NOT NULL DEFAULT false
-    episode_cards boolean NOT NULL DEFAULT false
+    episode_cards_on boolean NOT NULL DEFAULT false
     episode_cards_record boolean NOT NULL DEFAULT false
     floor_control jsonb
     greeting text NOT NULL DEFAULT ''::text
@@ -26,18 +26,14 @@ TABLE agent_configs
     left_out_connectors jsonb NOT NULL DEFAULT '[]'::jsonb
     llm text NOT NULL DEFAULT ''::text
     llm_fallbacks jsonb
-    mcp_servers jsonb NOT NULL DEFAULT '[]'::jsonb
     mode text NOT NULL DEFAULT 'voice'::text
     name text NOT NULL
-    plugin_events jsonb NOT NULL DEFAULT '[]'::jsonb
-    plugins jsonb NOT NULL DEFAULT '[]'::jsonb
-    progressive_tools boolean NOT NULL DEFAULT false
     region text NOT NULL DEFAULT 'us'::text
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
     role text NOT NULL DEFAULT ''::text
-    sandbox text NOT NULL DEFAULT ''::text
     sandbox_options jsonb NOT NULL DEFAULT '{}'::jsonb
+    sandbox_provider text NOT NULL DEFAULT ''::text
     scheduling jsonb NOT NULL DEFAULT '{}'::jsonb
     search text NOT NULL DEFAULT ''::text
     skills jsonb NOT NULL DEFAULT '[]'::jsonb
@@ -47,7 +43,6 @@ TABLE agent_configs
     sync_hash text NOT NULL DEFAULT ''::text
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     tool_groups jsonb
-    tool_output_retention text NOT NULL DEFAULT ''::text
     tts text NOT NULL DEFAULT ''::text
     ui_instructions text NOT NULL DEFAULT ''::text
     updated_at timestamp with time zone NOT NULL DEFAULT now()
@@ -81,68 +76,6 @@ TABLE agent_logs
     CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
     CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
     CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
-
-TABLE agent_plugin_clients
-    client_id text NOT NULL
-    config_id text NOT NULL
-    created_at timestamp with time zone NOT NULL
-    customer_id text NOT NULL
-    kek_version integer NOT NULL DEFAULT 0
-    plugin_id text NOT NULL
-    secret_sealed bytea
-    updated_at timestamp with time zone NOT NULL
-    CONSTRAINT agent_plugin_clients_pkey PRIMARY KEY (customer_id, config_id, plugin_id)
-
-TABLE agent_plugin_connections
-    access_token text NOT NULL DEFAULT ''::text
-    client_id text NOT NULL DEFAULT ''::text
-    code_verifier text NOT NULL DEFAULT ''::text
-    config_id text NOT NULL
-    created_at timestamp with time zone NOT NULL DEFAULT now()
-    customer_id text NOT NULL
-    deleted_at timestamp with time zone
-    expires_at timestamp with time zone
-    id text NOT NULL
-    instance_url text NOT NULL DEFAULT ''::text
-    oauth_state text NOT NULL DEFAULT ''::text
-    plugin_id text NOT NULL
-    refresh_token text NOT NULL DEFAULT ''::text
-    status text NOT NULL DEFAULT 'pending'::text
-    token_endpoint text NOT NULL DEFAULT ''::text
-    updated_at timestamp with time zone NOT NULL DEFAULT now()
-    user_id text NOT NULL DEFAULT ''::text
-    CONSTRAINT agent_plugin_connections_pkey PRIMARY KEY (id)
-    CREATE INDEX agent_plugin_connections_config_idx ON public.agent_plugin_connections USING btree (customer_id, config_id) WHERE (deleted_at IS NULL)
-    CREATE UNIQUE INDEX agent_plugin_connections_one_idx ON public.agent_plugin_connections USING btree (config_id, plugin_id, user_id) WHERE (deleted_at IS NULL)
-    CREATE UNIQUE INDEX agent_plugin_connections_state_idx ON public.agent_plugin_connections USING btree (oauth_state) WHERE ((deleted_at IS NULL) AND (oauth_state <> ''::text))
-
-TABLE agent_plugin_event_deliveries
-    event_id text NOT NULL
-    received_at timestamp with time zone NOT NULL
-    subscription_id text NOT NULL
-    CONSTRAINT agent_plugin_event_deliveries_pkey PRIMARY KEY (subscription_id, event_id)
-
-TABLE agent_plugin_event_subscriptions
-    arguments jsonb NOT NULL DEFAULT '{}'::jsonb
-    config_id text NOT NULL
-    created_at timestamp with time zone NOT NULL
-    customer_id text NOT NULL
-    deleted_at timestamp with time zone
-    error text NOT NULL DEFAULT ''::text
-    event text NOT NULL
-    id text NOT NULL
-    key text NOT NULL
-    plugin_id text NOT NULL
-    refresh_before timestamp with time zone
-    remote_id text NOT NULL DEFAULT ''::text
-    secret text NOT NULL
-    status text NOT NULL
-    token text NOT NULL
-    updated_at timestamp with time zone NOT NULL
-    user_id text NOT NULL DEFAULT ''::text
-    CONSTRAINT agent_plugin_event_subscriptions_pkey PRIMARY KEY (id)
-    CREATE UNIQUE INDEX agent_plugin_event_subscriptions_one_idx ON public.agent_plugin_event_subscriptions USING btree (config_id, plugin_id, user_id, key) WHERE (deleted_at IS NULL)
-    CREATE UNIQUE INDEX agent_plugin_event_subscriptions_token_idx ON public.agent_plugin_event_subscriptions USING btree (token)
 
 TABLE api_keys
     app_id text NOT NULL
@@ -931,6 +864,7 @@ TABLE knowledge_urls
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     url text NOT NULL
     CONSTRAINT knowledge_urls_pkey PRIMARY KEY (id)
+    CREATE INDEX knowledge_urls_due_idx ON public.knowledge_urls USING btree (updated_at) WHERE ((deleted_at IS NULL) AND (refresh_hours > 0) AND (state <> 'pending'::text))
     CREATE INDEX knowledge_urls_namespace_idx ON public.knowledge_urls USING btree (customer_id, namespace) WHERE (deleted_at IS NULL)
     CREATE UNIQUE INDEX knowledge_urls_url_idx ON public.knowledge_urls USING btree (customer_id, namespace, url) WHERE (deleted_at IS NULL)
 
@@ -1245,9 +1179,9 @@ TABLE simulation_runs
     error text
     failed integer NOT NULL DEFAULT 0
     finished_at timestamp with time zone
-    held_until timestamp with time zone
     id text NOT NULL
     judge_target text NOT NULL DEFAULT ''::text
+    lease_until timestamp with time zone
     mode text NOT NULL DEFAULT ''::text
     passed integer NOT NULL DEFAULT 0
     scenario text NOT NULL DEFAULT ''::text
@@ -1258,7 +1192,7 @@ TABLE simulation_runs
     CONSTRAINT simulation_runs_pkey PRIMARY KEY (id)
     CONSTRAINT simulation_runs_simulation_id_fkey FOREIGN KEY (simulation_id) REFERENCES simulations(id) ON DELETE CASCADE
     CREATE INDEX simulation_runs_customer_idx ON public.simulation_runs USING btree (customer_id, started_at DESC)
-    CREATE INDEX simulation_runs_held_idx ON public.simulation_runs USING btree (held_until) WHERE (state = 'running'::text)
+    CREATE INDEX simulation_runs_lease_idx ON public.simulation_runs USING btree (lease_until) WHERE (state = 'running'::text)
     CREATE INDEX simulation_runs_simulation_idx ON public.simulation_runs USING btree (simulation_id, started_at DESC)
 
 TABLE simulations

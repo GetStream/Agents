@@ -911,7 +911,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	library := buildLibrary(logger)
 	var resolver routing.VoiceResolver
 	if configs != nil {
-		resolver = voices.NewResolver(configs, library)
+		resolver = voices.NewResolver(configs.DB(), library)
 	}
 
 	bucket, err := blob.Open(ctx, settings.VoicesBucketURL)
@@ -2334,10 +2334,10 @@ func newKnowledge(settings config.Config, recorder *routing.Recorder, gate routi
 		logger.Debug("nothing will be looked up or written down", "error", err)
 		return nil
 	}
-	// A nil *store.Store in the interface would not be a nil interface.
+	// A nil *store.KnowledgeNamespaces in the interface would not be a nil interface.
 	var places metered.NamespacePlaces
 	if pgStore != nil {
-		places = pgStore
+		places = pgStore.KnowledgeNamespaces
 	}
 	base := metered.NewRegionalKnowledge(backends, recorder, gate, places)
 	if keys != nil {
@@ -2500,7 +2500,7 @@ func buildVoices(
 	}
 
 	return voices.NewService(voices.Options{
-		Store:    configs,
+		Store:    configs.DB(),
 		Bucket:   bucket,
 		Cloners:  cloners,
 		Recorder: recorder,

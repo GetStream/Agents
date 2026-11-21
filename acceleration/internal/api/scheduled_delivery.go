@@ -955,7 +955,7 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 	if s.store == nil {
 		return nil, errors.New("this router has no store to open a scheduled task's session from")
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return nil, err
 	}
@@ -1035,7 +1035,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if found.Voicing() {
 		return session.Spec{}, undelivered(scheduling.ReasonOnACall, errors.New("the user is on a call"))
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return session.Spec{}, err
 	}
@@ -1043,7 +1043,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if err != nil {
 		return session.Spec{}, err
 	}
-	from := config.Channels.Lines()["sms"]
+	from := config.Channels.Lines.Lines()["sms"]
 	if from == "" {
 		return session.Spec{}, undelivered(scheduling.ReasonNoLine, errors.New("the agent has no number to call from"))
 	}

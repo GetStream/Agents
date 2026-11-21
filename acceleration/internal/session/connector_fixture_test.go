@@ -174,14 +174,14 @@ func (s *connectorFixture) setState(id string, change func(state *core.Credentia
 // config stores an agent config of the test's tenant with bindings.
 func (s *connectorFixture) config(bindings ...store.ConnectorBinding) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "agent-" + uuid.NewString(), Connectors: bindings}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	return config
 }
 
 // rebind stores the config with bindings in place of its own.
 func (s *connectorFixture) rebind(config store.AgentConfig, bindings ...store.ConnectorBinding) {
 	config.Connectors = bindings
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config))
 }
 
 // fixed and chosen are bindings of the test's connector under alias that grant tools: one

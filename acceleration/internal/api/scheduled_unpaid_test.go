@@ -183,8 +183,8 @@ func (s *TelnyxUnpaidSuite) TestAReplyOfASuspendedOrganizationIsNotSentAndLogsNo
 func (s *TelnyxUnpaidSuite) spentAfterOpening() (*testClient, Session) {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
@@ -233,9 +233,9 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskOfAnOrganizationWithNoCreditIsNotRetrie
 func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTurnIsNotRetried() {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
@@ -443,8 +443,8 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForMoneyInAnOpenSessionIsFinal() {
 func (s *TelnyxUnpaidSuite) TestATurnRefusedWhileMoneyCannotBeCheckedIsRetried() {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
 	s.Require().Eventually(func() bool {
@@ -469,7 +469,7 @@ func (s *TelnyxUnpaidSuite) teamed() {
 		s.config.Tags = map[string]string{}
 	}
 	s.config.Tags[session.TeamTag] = "finance"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 
 // teamSpent tags the config with a team and spends the team's weekly limit. The text gate admits
@@ -517,8 +517,8 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionCannotOpenForATeamLimitIs
 // A turn on which the session reports a failure that is not about money, such as a tool's error,
 // still carries the reply the agent then gives: only a refusal for money ends the capture.
 func (s *TelnyxUnpaidSuite) TestATurnThatReportsAFailureNotAboutMoneyStillCarriesItsReply() {
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
 	s.Require().Eventually(func() bool {
@@ -583,7 +583,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseTurnIsRefusedForATeamLimitIsNotR
 func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChannel() {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
 	s.teamed()
 	user := s.data.createUser()
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
@@ -611,8 +611,8 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChann
 func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 	person := "+1347" + digits(s.utils.uuid())
 	channel := s.creditedThread(person)
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	kept := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
 	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
 	s.Require().True(running)

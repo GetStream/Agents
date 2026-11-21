@@ -97,8 +97,6 @@ func (t dataTable) rollup() bool {
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
-	{name: "agent_plugin_connections", customer: "customer_id"},
-	{name: "agent_plugin_clients", customer: "customer_id"},
 	// Only the customer's own definitions: the built-ins are under no customer, and every
 	// deployment seeds its own. They come before the connections that pin them.
 	{name: "connector_definitions", customer: "customer_id"},
@@ -181,6 +179,10 @@ func isSecret(column string) bool {
 
 // oauthSecrets are an OAuth grant's tokens and the state of one under way.
 var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
+
+// retiredTables are tables an export from an older release may carry that this schema dropped
+// (20270112000100_drop_plugin_tables.sql). An import skips their rows, inserts and deletes alike.
+var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -684,6 +686,9 @@ var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk"
 	"attached_at", "config_id"}
 
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage) error {
+	if slices.Contains(retiredTables, table) {
+		return nil
+	}
 	spec, found := dataTableByName(table)
 	if !found {
 		return fmt.Errorf("store: %q is not a table an export carries", table)
@@ -701,6 +706,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		row, err = requeueImportedContact(row, time.Now())
 	case "campaign_attempts":
 		row, err = endImportedAttempt(row, time.Now())
+	case "simulation_runs":
+		row, err = renameImported(row, map[string]string{"held_until": "lease_until"})
+	case "agent_configs":
+		row, err = renameImported(row, map[string]string{"sandbox": "sandbox_provider", "episode_cards": "episode_cards_on",
+			"channels": "channels_lines", "chat_channels": "channels_chat"})
 	}
 	if err != nil {
 		return err
@@ -950,6 +960,26 @@ func pauseImported(row json.RawMessage, active []string, paused string, claimed 
 	if claimed {
 		fields["leased_by"] = json.RawMessage(`""`)
 		fields["lease_until"] = json.RawMessage("null")
+	}
+	return json.Marshal(fields)
+}
+
+// renameImported carries an imported row's columns that a migration since renamed under their
+// new names (renames, old to new), as an export from an older release names them.
+func renameImported(row json.RawMessage, renames map[string]string) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, fmt.Errorf("store: read an imported row: %w", err)
+	}
+	for old, renamed := range renames {
+		value, found := fields[old]
+		if !found {
+			continue
+		}
+		if _, carried := fields[renamed]; !carried {
+			fields[renamed] = value
+		}
+		delete(fields, old)
 	}
 	return json.Marshal(fields)
 }
@@ -1568,6 +1598,9 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
 // change carrying somebody else's key cannot reach their row.
 func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange) error {
+	if slices.Contains(retiredTables, change.Table) {
+		return nil
+	}
 	spec, found := dataTableByName(change.Table)
 	if !found {
 		return fmt.Errorf("store: %q is not a table an export carries", change.Table)

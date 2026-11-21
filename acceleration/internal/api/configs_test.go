@@ -16,7 +16,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
-	"github.com/stretchr/testify/require"
 )
 
 type ConfigsSuite struct {
@@ -297,7 +296,7 @@ func (s *ConfigsSuite) TestAConfigWritesNoEpisodeCardsUnlessItSaysSo() {
 func (s *ConfigsSuite) TestAConfigWithBothCardColumnsOnReadsAsOn() {
 	created := s.createConfig(map[string]any{"name": "support"})
 	_, err := s.store.GlobalDB().ExecContext(context.Background(),
-		"UPDATE agent_configs SET episode_cards = true, episode_cards_record = true WHERE id = ?", created.Id)
+		"UPDATE agent_configs SET episode_cards_on = true, episode_cards_record = true WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
 	var read AgentConfig
@@ -328,10 +327,10 @@ func (s *ConfigsSuite) TestEpisodeCardsTakesOnlyOffRecordOrOn() {
 // storedCards checks the two columns a config's mode is stored in.
 func (s *ConfigsSuite) storedCards(id string, on, record bool) {
 	s.T().Helper()
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
-	s.Equal(on, stored.EpisodeCards, "episode_cards")
-	s.Equal(record, stored.EpisodeCardsRecord, "episode_cards_record")
+	s.Equal(on, stored.EpisodeCards.On, "episode_cards_on")
+	s.Equal(record, stored.EpisodeCards.Record, "episode_cards_record")
 }
 
 // A config names its functions in tool groups, each offered whole unless it says otherwise,
@@ -651,7 +650,7 @@ func (s *ConfigsSuite) TestAnAllowedDomainThatIsAnIPAddressIsRefused() {
 				"sandbox_options": map[string]any{"allowed_domains": []string{"api.example.com", address}}})
 
 		s.Equal(http.StatusBadRequest, status, address)
-		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains: %q is not a domain", address), address)
+		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains has %q, which is not a domain", address), address)
 	}
 
 	created := s.createConfig(map[string]any{"name": "researcher", "sandbox": "daytona",
@@ -661,7 +660,7 @@ func (s *ConfigsSuite) TestAnAllowedDomainThatIsAnIPAddressIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		map[string]any{"sandbox_options": map[string]any{"allowed_domains": []string{"203.0.113.7"}}})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, `"203.0.113.7" is not a domain`)
+	s.Contains(failure, `"203.0.113.7", which is not a domain`)
 }
 
 // webhookGuardrail is a guardrail.md asking the server at url.
@@ -738,57 +737,6 @@ func (s *ConfigsSuite) TestAPublicGuardrailWebhookIsKeptAsWritten() {
 	s.Equal(webhookGuardrail("https://[2001:4860:4860::8888]/check"), value(patched.Guardrail))
 }
 
-// TestAConfigStoredNamingPluginsAndMCPServersReadsWithoutThem: a row written before they were
-// refused still reads, in the config and in the list, and shows none of them, so a client that
-// saves what it read back is not refused for what it never set.
-func (s *ConfigsSuite) TestAConfigStoredNamingPluginsAndMCPServersReadsWithoutThem() {
-	config := s.storedWithPlugins()
-
-	status, raw := s.serverClient.call(http.MethodGet, "/v1/agents/configs/"+config.ID, nil)
-	s.Require().Equal(http.StatusOK, status)
-	var read map[string]any
-	s.Require().NoError(json.Unmarshal(raw, &read))
-	s.Equal("Be brief.", read["instructions"])
-	for _, key := range []string{"plugins", "plugin_events", "mcp_servers"} {
-		s.NotContains(read, key)
-	}
-	status, raw = s.serverClient.call(http.MethodGet, "/v1/agents/configs", nil)
-	s.Require().Equal(http.StatusOK, status)
-	s.Contains(string(raw), config.ID)
-	for _, key := range []string{`"plugins"`, `"plugin_events"`, `"mcp_servers"`} {
-		s.NotContains(string(raw), key)
-	}
-
-	for _, key := range []string{"id", "created_at", "updated_at", "sync_hash", "duration"} {
-		delete(read, key)
-	}
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+config.ID, read, nil))
-}
-
-// storedWithPlugins is a config whose row names a plugin, a plugin event and an MCP server, as
-// one saved before they were refused does: written into the columns, as no request can now.
-func (s *ConfigsSuite) storedWithPlugins() store.AgentConfig {
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "legacy-" + s.utils.uuid(), Mode: "text",
-		Instructions: "Be brief."}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
-	nameRetired(s.T(), s.store, config.ID)
-	return config
-}
-
-// nameRetired writes a plugin, a plugin event and an MCP server into the columns of config's
-// row, which the model no longer has, as a save before they were refused left them.
-func nameRetired(t *testing.T, stored *store.Store, config string) {
-	t.Helper()
-	result, err := stored.GlobalDB().ExecContext(context.Background(), `UPDATE agent_configs
-		SET plugins = '["linear"]', plugin_events = '[{"plugin":"linear","event":"issue.created"}]',
-		    mcp_servers = '[{"name":"wwsd","url":"https://mcp.wwsd.invalid/mcp"}]'
-		WHERE id = ?`, config)
-	require.NoError(t, err)
-	written, err := result.RowsAffected()
-	require.NoError(t, err)
-	require.EqualValues(t, 1, written)
-}
-
 func (s *ConfigsSuite) TestAVoiceConfigPinnedToABatchTranscriberIsRefused() {
 	pinned := "batch/" + batchModel
 
@@ -851,8 +799,8 @@ func (s *ConfigsSuite) TestPatchingAConfigOntoABatchTranscriberIsRefused() {
 func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() {
 	// Stored before saves were checked; its sessions are refused as they start instead.
 	pinned := "batch/" + batchModel
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, Models: store.AgentModels{STT: pinned}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	var updated, patched AgentConfig
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+config.ID,
@@ -866,7 +814,7 @@ func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() 
 }
 
 func (s *ConfigsSuite) TestADeploymentWithoutATranscriberRouterRefusesNoConfig() {
-	config := store.AgentConfig{Mode: store.AgentModeVoice, STT: "batch/" + batchModel}
+	config := store.AgentConfig{Mode: store.AgentModeVoice, Models: store.AgentModels{STT: "batch/" + batchModel}}
 
 	for name, server := range map[string]*Server{"no streams": {}, "no stt router": {streams: &Streams{}}} {
 		_, ok := server.liveSTTComplaint(config, "")
@@ -1104,7 +1052,7 @@ func (s *ConfigsSuite) TestABindingsPolicyIsReadBackExactlyAsItWasWritten() {
 	written, err := json.Marshal(bindings)
 	s.Require().NoError(err)
 	s.JSONEq(string(written), string(read))
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	cancellable := false
 	s.Equal(&store.BindingPolicy{PreSpeech: "Let me look in Slack.", OnInterrupt: store.InterruptWait, Cancellable: &cancellable},

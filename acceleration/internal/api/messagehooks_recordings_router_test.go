@@ -252,7 +252,7 @@ func (s *MessageHooksSuite) TestAHookIsTakenBeforeItsVoiceRecordingIsHeard() {
 func (s *MessageHooksSuite) TestAVoiceRecordingForAConfigInARegionThatHearsNothingIsSaidSo() {
 	worker := s.workerOf(s.customerID())
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "text", Region: pricing.RegionEU}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	var fetched atomic.Int32
 	recording := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fetched.Add(1)

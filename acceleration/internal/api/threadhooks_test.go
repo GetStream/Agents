@@ -47,8 +47,8 @@ func (s *SlackChannelSuite) TestAMessageTheThreadsSessionRefusesLetsGoOfTheTurnA
 // A message that arrives while the thread's session is still writing another reply waits for
 // it and is then answered: "a response is already running" is the one refusal tried again.
 func (s *SlackChannelSuite) TestAMessageWhileTheThreadsSessionRepliesIsAnsweredAfterIt() {
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	handOver := s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	held := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
@@ -84,8 +84,8 @@ func (s *SlackChannelSuite) TestAMessageWhileTheThreadsSessionRepliesIsAnsweredA
 // its next look at the reply: the session is looked at only hourly here.
 func (s *SlackChannelSuite) TestAScheduledFollowUpWhileTheSessionRepliesWaitsForIt() {
 	s.sessionLookOutlastsTheTest()
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	held := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})

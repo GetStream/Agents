@@ -53,7 +53,7 @@ func (s *KnowledgeFilesSuite) TestAPDFIsReadIntoPassagesThatSayTheirPage() {
 	s.Contains(*read.Text, "<!-- page 7 -->")
 	passage := s.passageContaining("Fryer oil is changed every 48 hours")
 	s.True(strings.HasPrefix(passage, "manual.pdf > p. 7"), passage)
-	stored, err := s.store.KnowledgeDocument(context.Background(), s.customerID(), sent.Id)
+	stored, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), sent.Id)
 	s.Require().NoError(err)
 	s.Empty(stored.ObjectKey, "the file is deleted once read")
 }
