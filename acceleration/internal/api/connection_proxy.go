@@ -122,9 +122,19 @@ func (s *Server) proxyConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := manifest.RateLimitKey(connection.CustomerID, coreConnection(connection))
-	if wait := s.connectorLimiter.Wait(ctx, limit); wait > 0 {
-		w.Header().Set("Retry-After", waitSeconds(wait))
-		writeError(w, rateLimited(fmt.Sprintf("the provider asked to wait: retry after %s", waitSeconds(wait)+"s")))
+	// All customers share the router's egress: one customer's calls to a connector are capped
+	// so they cannot spend a provider's limit for everyone (AI-958).
+	calls := core.CallsKey(connection.CustomerID, connection.ConnectorID)
+	blocked, over := s.connectorLimiter.Admit(ctx, limit, calls, s.proxyCallsPerMinute, proxyCallWindow)
+	if blocked > 0 {
+		w.Header().Set("Retry-After", waitSeconds(blocked))
+		writeError(w, rateLimited(fmt.Sprintf("the provider asked to wait: retry after %s", waitSeconds(blocked)+"s")))
+		return
+	}
+	if over > 0 {
+		w.Header().Set("Retry-After", waitSeconds(over))
+		writeError(w, rateLimited(fmt.Sprintf("this app's direct calls to %s are over %d a minute: retry after %ss",
+			connection.ConnectorID, s.proxyCallsPerMinute, waitSeconds(over))))
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyBody))
@@ -136,16 +146,6 @@ func (s *Server) proxyConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidRequest("the body could not be read"))
 		return
 	}
-	// All customers share the router's egress: one customer's calls to a connector are capped
-	// so they cannot spend a provider's limit for everyone (AI-958).
-	calls := core.CallsKey(connection.CustomerID, connection.ConnectorID)
-	if wait := s.connectorLimiter.Take(ctx, calls, s.proxyCallsPerMinute, proxyCallWindow); wait > 0 {
-		w.Header().Set("Retry-After", waitSeconds(wait))
-		writeError(w, rateLimited(fmt.Sprintf("this app's direct calls to %s are over %d a minute: retry after %ss",
-			connection.ConnectorID, s.proxyCallsPerMinute, waitSeconds(wait))))
-		return
-	}
-
 	observed, exchange := core.WithExchange(ctx)
 	// A bytes.Reader body gets GetBody, so the client can send it again after a 401.
 	request, err := http.NewRequestWithContext(observed, r.Method, target.String(), bytes.NewReader(body))
