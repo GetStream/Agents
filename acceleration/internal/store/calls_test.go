@@ -117,8 +117,8 @@ func (s *StoreSuite) TestACallStartedAgainKeepsTheConversationItWasBoundTo() {
 
 func (s *StoreSuite) TestACallTheRouterPlacedIsStoredAsOutboundBetweenItsNumbers() {
 	// A client opening the session of a call it placed may name neither number.
-	s.placedPhoneCall("placed", func(call *PhoneCall) {
-		call.CustomerID, call.CallType, call.CallID = "acme", "agent", "session-placed"
+	s.placedLeg("placed", func(leg *CallLeg) {
+		leg.CustomerID, leg.CallType, leg.CallID = "acme", "agent", "session-placed"
 	})
 	call := Call{ID: "session-placed", CustomerID: "acme", CallID: "session-placed", AgentID: "agent-placed", StartedAt: s.base}
 	s.Require().NoError(s.store.StartCall(s.ctx, &call))
@@ -131,8 +131,8 @@ func (s *StoreSuite) TestACallTheRouterPlacedIsStoredAsOutboundBetweenItsNumbers
 }
 
 func (s *StoreSuite) TestAnArrivingCallIsStoredAsInboundEvenWhereAnotherCustomerPlacedOne() {
-	s.placedPhoneCall("theirs", func(call *PhoneCall) {
-		call.CustomerID, call.CallType, call.CallID = "someone-else", "agent", "session-arrived"
+	s.placedLeg("theirs", func(leg *CallLeg) {
+		leg.CustomerID, leg.CallType, leg.CallID = "someone-else", "agent", "session-arrived"
 	})
 	call := Call{ID: "session-arrived", CustomerID: "acme", CallID: "session-arrived", AgentID: "agent-arrived",
 		FromNumber: "+15125550142", StartedAt: s.base}
@@ -146,9 +146,10 @@ func (s *StoreSuite) TestAnArrivingCallIsStoredAsInboundEvenWhereAnotherCustomer
 }
 
 func (s *ShardedStoreSuite) TestACallAnotherShardPlacedIsStoredAsOutbound() {
-	placed := PhoneCall{Token: "there", CustomerID: "acme", CallType: "agent", CallID: "session-there", Vendor: "telnyx",
-		LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: s.base}
-	s.Require().NoError(s.other.PhoneCalls.Insert(s.ctx, &placed))
+	at := s.base
+	placed := CallLeg{Token: "there", CustomerID: "acme", CallType: "agent", CallID: "session-there", Vendor: "telnyx",
+		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &at}
+	s.Require().NoError(s.other.CallLegs.Place(s.ctx, &placed))
 	call := Call{ID: "session-there", CustomerID: "acme", CallID: "session-there", AgentID: "agent-there", StartedAt: s.base}
 	s.Require().NoError(s.store.StartCall(s.ctx, &call))
 

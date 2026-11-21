@@ -11,7 +11,6 @@ type repos struct {
 	CallResources     *CallResources
 	CallLegs          *CallLegs
 	CallParticipants  *CallParticipants
-	PhoneCalls        *PhoneCalls
 	Campaigns         *Campaigns
 	CampaignContacts  *CampaignContacts
 	CampaignAttempts  *CampaignAttempts
@@ -33,7 +32,6 @@ func (s *Store) wire() {
 		CallResources:     &CallResources{store: s},
 		CallLegs:          &CallLegs{store: s},
 		CallParticipants:  &CallParticipants{store: s},
-		PhoneCalls:        &PhoneCalls{store: s},
 		Campaigns:         &Campaigns{store: s},
 		CampaignContacts:  &CampaignContacts{store: s},
 		CampaignAttempts:  &CampaignAttempts{store: s},

@@ -28,3 +28,11 @@ func TestEveryExportedTableIsOnTheSideItsSetSays(t *testing.T) {
 		require.Equal(t, slices.Contains(shard, table.name), table.shard, table.name)
 	}
 }
+
+// A table a later migration drops is no longer the set's, though the baseline created it.
+func TestADroppedTableIsNoLongerTheSets(t *testing.T) {
+	shard, err := setTables(shardSet)
+	require.NoError(t, err)
+	require.NotContains(t, shard, "phone_calls")
+	require.Contains(t, shard, "call_legs")
+}

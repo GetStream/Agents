@@ -398,7 +398,7 @@ func (s *KeeperSuite) TestAStoreThatFailsFailsTheEndAndCountsNothing() {
 		err = keeper.Ended(s.ctx, s.call.Key, s.at(1), leg)
 
 		s.Error(err, name)
-		s.NotErrorIs(err, store.ErrNoPhoneCall, name)
+		s.NotErrorIs(err, store.ErrNoPlacedCall, name)
 		s.Zero(s.total()-before, name)
 	}
 }

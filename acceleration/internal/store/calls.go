@@ -43,7 +43,7 @@ func (s *Store) StartCall(ctx context.Context, call *Call) error {
 	// The client opening the session of a call the router placed may name neither number,
 	// so what the router dialled is what the row says.
 	if call.CallID != "" {
-		placed, err := s.PhoneCalls.Select(ctx, call.CustomerID, []string{call.CallID})
+		placed, err := s.CallLegs.SelectPlaced(ctx, call.CustomerID, []string{call.CallID})
 		if err != nil {
 			return err
 		}

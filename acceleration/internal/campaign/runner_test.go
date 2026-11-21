@@ -54,7 +54,7 @@ func (s *RunnerSuite) SetupSuite() {
 
 func (s *RunnerSuite) SetupTest() {
 	// A claim reaches every running campaign in the database, so each test starts with none.
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, phone_calls CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, call_legs CASCADE")
 	s.Require().NoError(err)
 
 	// Tuesday 10:00 UTC, inside the default weekday hours.
@@ -275,9 +275,9 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 		callIDs[one.Contact.ToNumber] = callID
 		s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &store.CampaignAttempt{CampaignID: campaign.ID, ContactID: one.Contact.ID,
 			StepID: "step_1", Attempt: 1, Dial: 1, CallID: callID, StartedAt: died}))
-		s.Require().NoError(s.store.PhoneCalls.Insert(s.ctx, &store.PhoneCall{Token: uuid.NewString(), CustomerID: s.customerID,
+		s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 			CallType: "default", CallID: callID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: one.Contact.ToNumber,
-			PlacedAt: died, Outcome: outcomes[one.Contact.ToNumber]}))
+			PlacedAt: &died, Outcome: outcomes[one.Contact.ToNumber]}))
 	}
 	s.transcripts.write(callIDs["+15550000001"], talked())
 	s.clock.advance(lease + time.Minute)
@@ -1055,9 +1055,9 @@ func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 	callID := uuid.NewString()
 	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &store.CampaignAttempt{CampaignID: campaign.ID, ContactID: claimed[0].Contact.ID,
 		StepID: "step_1", Attempt: 1, Dial: 1, CallID: callID, StartedAt: died}))
-	s.Require().NoError(s.store.PhoneCalls.Insert(s.ctx, &store.PhoneCall{Token: uuid.NewString(), CustomerID: s.customerID,
+	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 		CallType: "default", CallID: callID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
-		PlacedAt: died, Outcome: "busy"}))
+		PlacedAt: &died, Outcome: "busy"}))
 	s.clock.advance(lease + time.Minute)
 
 	s.tick(s.runner)
@@ -1073,7 +1073,7 @@ func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 
 func (s *RunnerSuite) TestACallsOutcomeIsReadFromThePhone() {
 	answeredAt := s.clock.now()
-	calls := map[string]store.PhoneCall{
+	calls := map[string]store.CallLeg{
 		"joined":    {AnsweredAt: &answeredAt},
 		"busy":      {Outcome: "busy"},
 		"undecided": {},
@@ -1082,8 +1082,10 @@ func (s *RunnerSuite) TestACallsOutcomeIsReadFromThePhone() {
 	for name, call := range calls {
 		ids[name] = uuid.NewString()
 		call.Token, call.CustomerID, call.CallType, call.CallID = uuid.NewString(), s.customerID, "default", ids[name]
-		call.Vendor, call.LocalNumber, call.RemoteNumber, call.PlacedAt = "twilio", "+15550100000", "+15550000001", s.clock.now()
-		s.Require().NoError(s.store.PhoneCalls.Insert(s.ctx, &call))
+		placed := s.clock.now()
+		call.Vendor, call.LocalNumber, call.RemoteNumber, call.PlacedAt = "twilio", "+15550100000", "+15550000001", &placed
+		call.Direction = store.Outbound
+		s.Require().NoError(s.store.CallLegs.Place(s.ctx, &call))
 	}
 
 	for name, want := range map[string]outcome.Outcome{"joined": outcome.Completed, "busy": outcome.Busy, "undecided": outcome.Unknown} {

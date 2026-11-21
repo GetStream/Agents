@@ -1246,7 +1246,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	// the Stream call: the leg rings until then, and one never answered is not billed.
 	s.OpenLeg(ctx, request.Owner, store.CallLeg{
 		StreamAppPK: pin, CallType: callType, CallID: callID, Vendor: held.Vendor, VendorCallID: dialed.VendorCallID,
-		Direction: store.Outbound, LocalNumber: request.From, RemoteNumber: request.To,
+		Direction: store.Outbound, LocalNumber: request.From, RemoteNumber: request.To, Token: token,
 	}, false)
 	sites := placedSites{streamSIPHost: BridgeHost(outbound.Bridge.URI)}
 	if trunk != nil {

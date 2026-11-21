@@ -201,21 +201,22 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 	// Well inside the wait below; the production ten minutes would outlast it.
 	phoneSweepEvery = 50 * time.Millisecond
 	s.T().Cleanup(func() { phoneSweepEvery = previous })
-	call := store.PhoneCall{
+	// Past a status url's lifetime, phone.MaxCallLength and an hour (statusTokenLifetime in
+	// internal/phone/service.go).
+	placed := time.Now().UTC().Add(-phone.MaxCallLength - 2*time.Hour)
+	call := store.CallLeg{
 		Token: uuid.NewString(), CustomerID: "customer-" + uuid.NewString(), CallType: "default", CallID: uuid.NewString(),
-		Vendor: "telnyx", LocalNumber: "+15125550100", RemoteNumber: "+15125550199", Reports: true,
-		// Past a status url's lifetime, phone.MaxCallLength and an hour (statusTokenLifetime in
-		// internal/phone/service.go).
-		PlacedAt: time.Now().UTC().Add(-phone.MaxCallLength - 2*time.Hour),
+		Vendor: "telnyx", Direction: store.Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", Reports: true,
+		PlacedAt: &placed,
 	}
-	s.Require().NoError(s.db.PhoneCalls.Insert(s.ctx, &call))
+	s.Require().NoError(s.db.CallLegs.Place(s.ctx, &call))
 	s.T().Cleanup(func() {
-		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM phone_calls WHERE id = ?", call.ID)
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM call_legs WHERE id = ?", call.ID)
 		s.NoError(err)
 	})
 	retired := func() bool {
 		var gone bool
-		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT token IS NULL FROM phone_calls WHERE id = ?", call.ID).Scan(&gone)
+		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT token IS NULL FROM call_legs WHERE id = ?", call.ID).Scan(&gone)
 		return err == nil && gone
 	}
 

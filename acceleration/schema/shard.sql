@@ -146,12 +146,14 @@ TABLE call_bridges
 
 TABLE call_legs
     agent_id text NOT NULL DEFAULT ''::text
+    answered_at timestamp with time zone
     api_key text NOT NULL DEFAULT ''::text
     call_id text NOT NULL
     call_type text NOT NULL
     country text NOT NULL DEFAULT ''::text
     customer_id text NOT NULL
-    dialed_at timestamp with time zone NOT NULL
+    decided_at timestamp with time zone
+    dialed_at timestamp with time zone
     direction text NOT NULL
     end_reason text NOT NULL DEFAULT ''::text
     ended_at timestamp with time zone
@@ -159,25 +161,37 @@ TABLE call_legs
     local_number text NOT NULL
     organization_id text NOT NULL DEFAULT ''::text
     organization_tier text NOT NULL DEFAULT ''::text
+    outcome text
+    outcome_ended_at timestamp with time zone
     participant_session text NOT NULL DEFAULT ''::text
+    placed_at timestamp with time zone
     remote_number text NOT NULL
+    reports boolean NOT NULL DEFAULT false
     started_at timestamp with time zone
     stream_app_pk bigint
     stream_session_id text NOT NULL DEFAULT ''::text
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
+    token text
     usage_categories text[] NOT NULL DEFAULT '{}'::text[]
     user_id text NOT NULL DEFAULT ''::text
     vendor text NOT NULL
     vendor_call_id text
+    vendor_status text
+    CONSTRAINT call_legs_dialed_check CHECK (((dialed_at IS NOT NULL) OR (placed_at IS NOT NULL)))
     CONSTRAINT call_legs_direction_check CHECK ((direction = ANY (ARRAY['inbound'::text, 'outbound'::text])))
+    CONSTRAINT call_legs_outcome_check CHECK ((outcome = ANY (ARRAY['completed'::text, 'busy'::text, 'no_answer'::text, 'failed'::text, 'canceled'::text, 'unknown'::text])))
     CONSTRAINT call_legs_pkey PRIMARY KEY (id)
+    CONSTRAINT call_legs_placed_check CHECK (((placed_at IS NOT NULL) OR ((token IS NULL) AND (outcome IS NULL))))
+    CONSTRAINT call_legs_token_key UNIQUE (token)
     CREATE INDEX call_legs_call_idx ON public.call_legs USING btree (call_type, call_id) WHERE (ended_at IS NULL)
     CREATE INDEX call_legs_ended_idx ON public.call_legs USING btree (ended_at) WHERE (started_at IS NOT NULL)
     CREATE UNIQUE INDEX call_legs_inbound_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), stream_session_id) WHERE (direction = 'inbound'::text)
     CREATE INDEX call_legs_open_idx ON public.call_legs USING btree (organization_id) WHERE ((ended_at IS NULL) AND (started_at IS NOT NULL))
     CREATE INDEX call_legs_open_started_idx ON public.call_legs USING btree (started_at) WHERE (ended_at IS NULL)
     CREATE UNIQUE INDEX call_legs_participant_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), participant_session) WHERE (participant_session <> ''::text)
+    CREATE INDEX call_legs_placed_call_idx ON public.call_legs USING btree (customer_id, call_id, id DESC) WHERE (placed_at IS NOT NULL)
     CREATE INDEX call_legs_ringing_idx ON public.call_legs USING btree (dialed_at) WHERE ((ended_at IS NULL) AND (started_at IS NULL))
+    CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 
 TABLE call_participants
@@ -279,30 +293,6 @@ TABLE data_changes
     CONSTRAINT data_changes_pkey PRIMARY KEY (seq)
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
-
-TABLE phone_calls
-    answered_at timestamp with time zone
-    call_id text NOT NULL
-    call_type text NOT NULL
-    customer_id text NOT NULL
-    decided_at timestamp with time zone
-    ended_at timestamp with time zone
-    id bigint NOT NULL DEFAULT nextval('phone_calls_id_seq'::regclass)
-    local_number text NOT NULL
-    outcome text
-    placed_at timestamp with time zone NOT NULL
-    remote_number text NOT NULL
-    reports boolean NOT NULL
-    stream_app_pk bigint
-    token text
-    vendor text NOT NULL
-    vendor_call_id text
-    vendor_status text
-    CONSTRAINT phone_calls_outcome_check CHECK ((outcome = ANY (ARRAY['completed'::text, 'busy'::text, 'no_answer'::text, 'failed'::text, 'canceled'::text, 'unknown'::text])))
-    CONSTRAINT phone_calls_pkey PRIMARY KEY (id)
-    CONSTRAINT phone_calls_token_key UNIQUE (token)
-    CREATE INDEX phone_calls_customer_call_idx ON public.phone_calls USING btree (customer_id, call_id, id DESC)
-    CREATE INDEX phone_calls_placed_idx ON public.phone_calls USING btree (placed_at) WHERE (token IS NOT NULL)
 
 TABLE recordings
     callback text
