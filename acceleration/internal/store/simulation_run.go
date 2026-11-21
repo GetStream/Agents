@@ -55,9 +55,9 @@ type SimulationRun struct {
 	Error       string     `bun:"error,nullzero"`
 	StartedAt   time.Time  `bun:"started_at,notnull"`
 	FinishedAt  *time.Time `bun:"finished_at"`
-	// HeldUntil is when the router having the conversations stops being their owner unless
+	// LeaseUntil is when the router having the conversations stops being their owner unless
 	// it renews, and StopRequested a cancel asked of a router that may not be that one.
-	HeldUntil     *time.Time `bun:"held_until"`
+	LeaseUntil    *time.Time `bun:"lease_until"`
 	StopRequested bool       `bun:"stop_requested,notnull"`
 }
 
@@ -95,9 +95,9 @@ type SimulationRuns struct {
 }
 
 // Start writes a run and all of its conversations at once, so a run that has only just begun
-// already shows how many ways it is going to ask. It is held until heldUntil, and Renew keeps
+// already shows how many ways it is going to ask. It is leased until leaseUntil, and Renew keeps
 // it held after that.
-func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []SimulationCase, heldUntil time.Time) error {
+func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []SimulationCase, leaseUntil time.Time) error {
 	if len(cases) == 0 {
 		return stack.Wrap(&ValidationError{Model: "simulation run", Field: "cases", Reason: "is empty: a run needs at least one conversation to have"})
 	}
@@ -109,8 +109,8 @@ func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []
 	run.Failed = 0
 	run.StartedAt = time.Now().UTC()
 	run.FinishedAt = nil
-	held := heldUntil.UTC()
-	run.HeldUntil = &held
+	leased := leaseUntil.UTC()
+	run.LeaseUntil = &leased
 	run.StopRequested = false
 	if err := run.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -218,7 +218,7 @@ func (r *SimulationRuns) Renew(ctx context.Context, ids []string, until time.Tim
 
 	var renewed []string
 	err := r.store.global.NewUpdate().Model((*SimulationRun)(nil)).
-		Set("held_until = ?", until.UTC()).
+		Set("lease_until = ?", until.UTC()).
 		Where("id IN (?)", bun.In(ids)).
 		Where("state = ?", SimulationRunning).
 		Where("NOT stop_requested").
@@ -258,7 +258,7 @@ func (r *SimulationRuns) Abandon(ctx context.Context, now time.Time) error {
 			Set("state = ?", SimulationCancelled).
 			Set("finished_at = ?", now).
 			Where("state IN (?)", bun.In([]string{SimulationPending, SimulationRunning})).
-			Where("run_id IN (SELECT id FROM simulation_runs WHERE state = ? AND (held_until IS NULL OR held_until < ?))",
+			Where("run_id IN (SELECT id FROM simulation_runs WHERE state = ? AND (lease_until IS NULL OR lease_until < ?))",
 				SimulationRunning, now).
 			Exec(ctx)
 		if err != nil {
@@ -270,7 +270,7 @@ func (r *SimulationRuns) Abandon(ctx context.Context, now time.Time) error {
 			Set("error = ?", "the router having this run stopped while it was still going").
 			Set("finished_at = ?", now).
 			Where("state = ?", SimulationRunning).
-			Where("held_until IS NULL OR held_until < ?", now).
+			Where("lease_until IS NULL OR lease_until < ?", now).
 			Exec(ctx)
 		return err
 	})

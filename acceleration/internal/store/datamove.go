@@ -677,6 +677,8 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		row, err = requeueImportedContact(row, time.Now())
 	case "campaign_attempts":
 		row, err = endImportedAttempt(row, time.Now())
+	case "simulation_runs":
+		row, err = renameImported(row, map[string]string{"held_until": "lease_until"})
 	}
 	if err != nil {
 		return err
@@ -933,6 +935,26 @@ func pauseImported(row json.RawMessage, active []string, paused string, claimed 
 	if claimed {
 		fields["claim_id"] = json.RawMessage(`""`)
 		fields["lease_until"] = json.RawMessage("null")
+	}
+	return json.Marshal(fields)
+}
+
+// renameImported carries an imported row's columns that a migration since renamed under their
+// new names (renames, old to new), as an export from an older release names them.
+func renameImported(row json.RawMessage, renames map[string]string) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, fmt.Errorf("store: read an imported row: %w", err)
+	}
+	for old, renamed := range renames {
+		value, found := fields[old]
+		if !found {
+			continue
+		}
+		if _, carried := fields[renamed]; !carried {
+			fields[renamed] = value
+		}
+		delete(fields, old)
 	}
 	return json.Marshal(fields)
 }

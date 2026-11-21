@@ -3525,3 +3525,38 @@ func (s *DataMoveSuite) TestAnImportSkipsTheRowsOfARetiredTable() {
 	s.ErrorContains(s.destination.ImportRow(s.ctx, "moved", "no_such_table", connection), "is not a table an export carries",
 		"only the retired tables are skipped")
 }
+
+// importAsOlder copies everything a customer has to the other deployment as an export from an
+// older release carries it: each table's columns named again under the names renamed gives.
+func (s *DataMoveSuite) importAsOlder(from, to string, renamed map[string]map[string]string) {
+	reservation, err := s.destination.ReserveImportedIDs(s.ctx)
+	s.Require().NoError(err)
+	for _, row := range s.export(from).rows {
+		for current, older := range renamed[row.table] {
+			row.row[older] = row.row[current]
+			delete(row.row, current)
+		}
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		s.Require().NoError(reservation.Cover(s.ctx, row.table, encoded))
+		s.Require().NoError(s.destination.ImportRow(s.ctx, to, row.table, encoded))
+	}
+}
+
+// An export from a release before the lease was named as the queue's carries it as held_until;
+// the run arrives still held until then rather than written off as never held.
+func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
+	simulation := Simulation{CustomerID: "acme", Name: "order status", Mode: SimulationText,
+		ConfigID: "config", Scenario: "ask where the order is", Assertion: "it says where"}
+	s.Require().NoError(s.source.Simulations.Insert(s.ctx, &simulation))
+	run := SimulationRun{CustomerID: "acme", SimulationID: simulation.ID, Mode: SimulationText}
+	leaseUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+
+	s.importAsOlder("acme", "acme", map[string]map[string]string{"simulation_runs": {"lease_until": "held_until"}})
+
+	moved, err := s.destination.SimulationRuns.Get(s.ctx, "acme", run.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(moved.LeaseUntil)
+	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
+}

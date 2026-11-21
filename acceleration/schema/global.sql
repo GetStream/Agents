@@ -1262,9 +1262,9 @@ TABLE simulation_runs
     error text
     failed integer NOT NULL DEFAULT 0
     finished_at timestamp with time zone
-    held_until timestamp with time zone
     id text NOT NULL
     judge_target text NOT NULL DEFAULT ''::text
+    lease_until timestamp with time zone
     mode text NOT NULL DEFAULT ''::text
     passed integer NOT NULL DEFAULT 0
     scenario text NOT NULL DEFAULT ''::text
@@ -1275,7 +1275,7 @@ TABLE simulation_runs
     CONSTRAINT simulation_runs_pkey PRIMARY KEY (id)
     CONSTRAINT simulation_runs_simulation_id_fkey FOREIGN KEY (simulation_id) REFERENCES simulations(id) ON DELETE CASCADE
     CREATE INDEX simulation_runs_customer_idx ON public.simulation_runs USING btree (customer_id, started_at DESC)
-    CREATE INDEX simulation_runs_held_idx ON public.simulation_runs USING btree (held_until) WHERE (state = 'running'::text)
+    CREATE INDEX simulation_runs_lease_idx ON public.simulation_runs USING btree (lease_until) WHERE (state = 'running'::text)
     CREATE INDEX simulation_runs_simulation_idx ON public.simulation_runs USING btree (simulation_id, started_at DESC)
 
 TABLE simulations
