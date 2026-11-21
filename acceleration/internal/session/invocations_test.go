@@ -56,14 +56,12 @@ func (s *InvocationLogSuite) logged(connection string, count int) []store.Connec
 	return read()
 }
 
-// stored is every column of connection's log rows as Postgres holds them, with their argument
-// shapes (connector_invocation_arguments), as text.
+// stored is every column of connection's log rows as Postgres holds them, their argument shapes
+// included, as text.
 func (s *InvocationLogSuite) stored(connection string) string {
 	var rows string
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT coalesce(string_agg(to_jsonb(ci)::text || ' ' || coalesce(to_jsonb(cia)::text, ''), ' '), '') "+
-			"FROM connector_invocations AS ci LEFT JOIN connector_invocation_arguments AS cia ON cia.invocation_id = ci.id "+
-			"WHERE connection_id = ?",
+		"SELECT coalesce(string_agg(to_jsonb(ci)::text, ' '), '') FROM connector_invocations AS ci WHERE connection_id = ?",
 		connection).Scan(&rows))
 	return rows
 }
