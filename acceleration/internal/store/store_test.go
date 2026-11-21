@@ -31,7 +31,7 @@ type StoreSuite struct {
 	// router would have, and shardDSN its shard's, which is dsn unless the suite is sharded.
 	dsn      string
 	shardDSN string
-	ctx context.Context
+	ctx      context.Context
 	// base is the start of a fixed hour, so bucket boundaries are predictable.
 	base time.Time
 	// queries and roundTrips count what the store sends Postgres and Redis, for countQueries
