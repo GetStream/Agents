@@ -115,7 +115,7 @@ func (s *telnyxLine) SetupTest() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+s.connection.ID+"/credentials",
 		map[string]any{"expected_revision": s.connection.Revision, "values": map[string]string{bearer.SuppliedToken: s.apiKey}}, &s.connection))
 	s.config = store.AgentConfig{
-		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "sms", ConnectorID: "telnyx",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: s.connection.ID},
@@ -157,7 +157,7 @@ func (s *TelnyxChannelSuite) TestAnSMSIsAnsweredFromTheCustomersNumber() {
 // source sms, in the omni-channel the contact map gives the number (T41).
 func (s *TelnyxChannelSuite) TestANumbersTextsAreOneThreadChannelAndOneSMSCard() {
 	// record writes the card as on does (AI-2856).
-	s.config.EpisodeCardsRecord = true
+	s.config.EpisodeCards.Record = true
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	person := "+13125550001"
 	s.deliver(s.received(s.line, person, "first"), time.Now())
@@ -317,7 +317,7 @@ func (s *TelnyxChannelSuite) TestAKeywordIsAnsweredOnceWhenItsRowIsTakenAgain() 
 // CTIA 5.1.3: «No further messages should be sent following the confirmation message», so a
 // reply the agent was writing when the person texted STOP is not sent.
 func (s *TelnyxChannelSuite) TestAReplyFinishedAfterStopIsNotSent() {
-	s.config.LLM = "holding/holding-model"
+	s.config.Models.LLM = "holding/holding-model"
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.holding.holds()
 	s.T().Cleanup(s.holding.answers)

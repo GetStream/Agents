@@ -38,7 +38,7 @@ func (s *RouterSuite) schedulingModelOn(config *store.AgentConfig) {
 	s.scheduled = nil
 	s.scheduledMu.Unlock()
 	s.schedulingScript.reset()
-	config.LLM = "scheduling/scheduling-model"
+	config.Models.LLM = "scheduling/scheduling-model"
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), config))
 }
 

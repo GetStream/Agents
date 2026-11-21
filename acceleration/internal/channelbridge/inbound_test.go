@@ -98,7 +98,7 @@ func (s *InboundSuite) SetupTest() {
 	}), streamapp.ClientsOptions{})
 	s.logs = &syncBuffer{}
 	s.customer = "customer-" + uuid.NewString()
-	s.config = store.AgentConfig{CustomerID: s.customer, Name: "Support", EpisodeCards: true}
+	s.config = store.AgentConfig{CustomerID: s.customer, Name: "Support", EpisodeCards: store.AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &s.config))
 }
 
@@ -1202,7 +1202,7 @@ func (s *InboundSuite) writeAhead(thread store.ChannelThread, id, text string) {
 
 // cardsMode stores the suite's config with episode_cards and episode_cards_record as given.
 func (s *InboundSuite) cardsMode(on, record bool) {
-	s.config.EpisodeCards, s.config.EpisodeCardsRecord = on, record
+	s.config.EpisodeCards.On, s.config.EpisodeCards.Record = on, record
 	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &s.config))
 }
 

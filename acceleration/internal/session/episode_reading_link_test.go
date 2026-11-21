@@ -25,7 +25,7 @@ const inProgress = "in_progress"
 // number's history aside only for such a config (store.LinkUserPhone, retireHistory).
 func (s *EpisodeReadingSuite) cardsConfig() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText,
-		EpisodeCards: true}
+		EpisodeCards: store.AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	s.configID = config.ID
 }
@@ -191,7 +191,7 @@ func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpi
 	s.write(chat, user, "hello", nil)
 	s.summarize(s.chatEpisode(user, chat, 0), "Said hello.")
 	s.linkAt(user, number, -3000)
-	config.EpisodeCards = true
+	config.EpisodeCards.On = true
 	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config))
 	s.textFrom(number, first, -60, "my dog is Pepper")
 	s.at(0)

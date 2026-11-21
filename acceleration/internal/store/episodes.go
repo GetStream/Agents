@@ -337,7 +337,7 @@ func (s *Store) FinishEpisodeSummary(ctx context.Context, customerID, id, status
 // (episodes_open_thread), whatever its config says now; or a summary lease still held
 // (episode_activity_summary_lease).
 const anyEpisodeToSweepQuery = `
-SELECT EXISTS (SELECT 1 FROM agent_configs WHERE (episode_cards OR episode_cards_record) AND deleted_at IS NULL)
+SELECT EXISTS (SELECT 1 FROM agent_configs WHERE (episode_cards_on OR episode_cards_record) AND deleted_at IS NULL)
     OR EXISTS (SELECT 1 FROM episodes WHERE status = 'in_progress' AND session_id IS NULL)
     OR EXISTS (SELECT 1 FROM episode_activity WHERE summary_lease_until IS NOT NULL)`
 

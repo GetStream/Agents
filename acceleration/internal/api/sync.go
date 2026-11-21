@@ -15,7 +15,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
 // SyncAgentRequest is an agent directory as it is on disk.
@@ -259,6 +258,10 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	// Named whatever the directory says, so the knowledge the sync writes is never written
 	// into a base kept in another region than the agent's.
 	config.Region = cmp.Or(config.Region, pricing.DefaultRegion)
+	// Before anything is written, for the same reason as the simulations in syncComplaint.
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 	if message, ok := textSubagentComplaint(&config, body.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
@@ -296,7 +299,7 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.liveSTTComplaint(config, existing.STT); !ok {
+	if message, ok := s.liveSTTComplaint(config, existing.Models.STT); !ok {
 		return nil, invalidRequest(message)
 	}
 	var prior *store.AgentConfig
@@ -327,7 +330,7 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 
 	skills := skillsOf(body.Skills)
 	// After the settings, so a sandbox stored before and not repeated still counts.
-	if message, ok := skillSandboxComplaint(skills, config.Sandbox != ""); !ok {
+	if message, ok := skillSandboxComplaint(skills, config.Sandbox.Provider != ""); !ok {
 		return nil, invalidRequest(message)
 	}
 	named := make([]string, 0, len(skills))
@@ -454,12 +457,6 @@ func syncComplaint(ctx context.Context, body SyncAgentRequest) (string, bool) {
 	if complaint, ok := guardrailComplaint(ctx, body.Guardrail); !ok {
 		return complaint, false
 	}
-	if len(keytermsOf(body.Keyterms)) > stt.MaxKeyterms {
-		return fmt.Sprintf("a config may name at most %d keyterms", stt.MaxKeyterms), false
-	}
-	if _, ok := sandboxOf(body.Sandbox); !ok {
-		return fmt.Sprintf("there is no sandbox provider called %q", *body.Sandbox), false
-	}
 	if _, ok := harnessOf(body.Harness); !ok {
 		return fmt.Sprintf("there is no harness called %q", *body.Harness), false
 	}
@@ -473,9 +470,6 @@ func syncComplaint(ctx context.Context, body SyncAgentRequest) (string, bool) {
 		return complaint, false
 	}
 	if complaint, ok := chatChannelsComplaint(body.ChatChannels); !ok {
-		return complaint, false
-	}
-	if complaint, ok := sandboxOptionsComplaint(body.SandboxOptions); !ok {
 		return complaint, false
 	}
 	// Simulations are checked here, before anything is written, since a config stored under
@@ -560,8 +554,8 @@ func simulationsOf(list *[]SimulationDeclaration) []SimulationDeclaration {
 // stored, so a target chosen in the dashboard survives a sync.
 func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 	if body.Video != nil {
-		config.VideoSource = override(config.VideoSource, body.Video.Source)
-		config.VideoMaxFrames = override(config.VideoMaxFrames, body.Video.MaxFrames)
+		config.Video.Source = override(config.Video.Source, body.Video.Source)
+		config.Video.MaxFrames = override(config.Video.MaxFrames, body.Video.MaxFrames)
 	}
 	if body.Role != nil {
 		config.Role = string(*body.Role)
@@ -574,28 +568,28 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 		config.Region = *body.Region
 	}
 	if body.Stt != nil {
-		config.STT = *body.Stt
+		config.Models.STT = *body.Stt
 	}
 	if body.Tts != nil {
-		config.TTS = *body.Tts
+		config.Models.TTS = *body.Tts
 	}
 	if body.Sts != nil {
-		config.STS = *body.Sts
+		config.Models.STS = *body.Sts
 	}
 	if body.Voice != nil {
-		config.Voice = *body.Voice
+		config.Models.Voice = *body.Voice
 	}
 	if body.Llm != nil {
-		config.LLM = *body.Llm
+		config.Models.LLM = *body.Llm
 	}
 	if body.Subagent != nil {
-		config.Subagent = *body.Subagent
+		config.Models.Subagent = *body.Subagent
 	}
 	if body.Search != nil {
-		config.Search = *body.Search
+		config.Models.Search = *body.Search
 	}
 	if body.Image != nil {
-		config.Image = *body.Image
+		config.Models.Image = *body.Image
 	}
 	if body.Greeting != nil {
 		config.Greeting, config.GreetingMode = greetingOf(body.Greeting)
@@ -612,24 +606,23 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 	config.ResumeHistory = resumeHistoryOr(config.ResumeHistory, body.ResumeHistory)
 	config.FloorControl = floorControlOr(config.FloorControl, body.FloorControl)
 	if body.Channels != nil {
-		config.Channels = channelsOf(body.Channels)
+		config.Channels.Lines = channelsOf(body.Channels)
 	}
 	if body.ChatChannels != nil {
-		config.ChatChannels = chatChannelsOf(body.ChatChannels)
+		config.Channels.Chat = chatChannelsOf(body.ChatChannels)
 	}
 	if body.Keyterms != nil {
 		config.Keyterms = keytermsOf(body.Keyterms)
 	}
 	if body.Sandbox != nil {
-		box, _ := sandboxOf(body.Sandbox)
-		config.Sandbox = box
+		config.Sandbox.Provider = sandboxOf(body.Sandbox)
 	}
 	if body.Harness != nil {
 		config.Harness, _ = harnessOf(body.Harness)
 	}
 	applyDispatch(config, body.Dispatch)
 	if body.SandboxOptions != nil {
-		config.SandboxOptions = sandboxConfigOf(body.SandboxOptions)
+		config.Sandbox.Options = sandboxConfigOf(body.SandboxOptions)
 	}
 	if body.Tags != nil {
 		config.Tags = *body.Tags

@@ -170,8 +170,8 @@ func (s *AppHooksSuite) completedReplies(cid string) int {
 // with no answer, as before.
 func (s *AppHooksSuite) TestATypeWithNoAnswerAnswersEveryMessageBesideAMentionsOnlyOne() {
 	s.holdsType("shifts", memberWrites)
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
-		ChatChannels: []store.ChatChannel{{Type: "callouts", Answer: store.ChatChannelAnswerMentioned}, {Type: "shifts"}}}
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
+		Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: "callouts", Answer: store.ChatChannelAnswerMentioned}, {Type: "shifts"}}}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	channel := s.emptyChannel("shifts")
 
@@ -183,8 +183,8 @@ func (s *AppHooksSuite) TestATypeWithNoAnswerAnswersEveryMessageBesideAMentionsO
 // mentionedIn is a text config of the app's customer answering only its mentions in the channel
 // type named.
 func (s *AppHooksSuite) mentionedIn(channelType string) store.AgentConfig {
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
-		ChatChannels: []store.ChatChannel{{Type: channelType, Answer: store.ChatChannelAnswerMentioned}}}
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
+		Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: channelType, Answer: store.ChatChannelAnswerMentioned}}}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config
 }
@@ -257,8 +257,8 @@ func (s *RouterSuite) count(input []llm.Message, text string) int {
 func (s *ChatInboundQueueSuite) TestADeliveryNotMentioningTheAgentIsNotQueued() {
 	customer := s.inAppMode()
 	named := "callouts-" + strings.ToLower(s.utils.uuid())
-	config := store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
-		ChatChannels: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}
+	config := store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
+		Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
@@ -280,7 +280,7 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryNotMentioningTheAgentIsNotAns
 	customer := s.inAppMode()
 	named := "callouts-" + strings.ToLower(s.utils.uuid())
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "noted/noted-model", ChatChannels: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}, Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}}))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
 	queued := s.queue(s.ofType(named))

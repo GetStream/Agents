@@ -151,7 +151,7 @@ func (s *Store) ConfigOnChannel(ctx context.Context, customerID, kind, number st
 	var config AgentConfig
 	err := s.global.NewSelect().Model(&config).
 		Where("customer_id = ?", customerID).
-		Where("channels -> ? ->> 'number' = ?", kind, number).
+		Where("channels_lines -> ? ->> 'number' = ?", kind, number).
 		Where("deleted_at IS NULL").
 		Limit(1).
 		Scan(ctx)

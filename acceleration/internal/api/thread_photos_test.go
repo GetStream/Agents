@@ -150,7 +150,7 @@ func (s *SlackChannelSuite) TestPhotosSentAloneOfWhichOneCannotBeFetchedAreAnswe
 // is held in writing, which runs no subagent (Spec.Normalize), so the skill cannot look at it
 // and the agent says it cannot.
 func (s *SlackChannelSuite) TestAPhotoSentAloneToAnAgentWithAVisionSkillIsAnswered() {
-	s.config.LLM, s.config.Subagent, s.config.Skills = "holding/holding-model", "vision/vision-model", []string{"vision"}
+	s.config.Models.LLM, s.config.Models.Subagent, s.config.Skills = "holding/holding-model", "vision/vision-model", []string{"vision"}
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.Require().NoError(s.store.Skills.Insert(context.Background(), &store.Skill{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Name: "vision",
@@ -224,7 +224,7 @@ func (s *SlackChannelSuite) TestAPhotoSentAloneInAThreadIsANoteInTheNextTurnsHis
 
 // answersWith has the test's agent answer with model.
 func (s *SlackChannelSuite) answersWith(model string) {
-	s.config.LLM = model
+	s.config.Models.LLM = model
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 

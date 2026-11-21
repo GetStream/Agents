@@ -497,7 +497,7 @@ func (s *MessageHooksSuite) TestAChannelsMessageReachesTheNewestOfItsCustomersSe
 // off the record, so nothing but the session itself ties it to the channel.
 func (s *MessageHooksSuite) dispatching() string {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return s.serverClient.createSession(CreateSessionRequest{
 		AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true),

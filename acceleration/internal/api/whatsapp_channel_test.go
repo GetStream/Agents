@@ -100,7 +100,7 @@ func (s *WhatsAppChannelSuite) SetupTest() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+s.connection.ID+"/credentials",
 		map[string]any{"expected_revision": s.connection.Revision, "values": map[string]string{bearer.SuppliedToken: s.token}}, &s.connection))
 	s.config = store.AgentConfig{
-		CustomerID: s.customerID(), Name: "whatsapp-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "whatsapp-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "whatsapp", ConnectorID: "whatsapp",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: s.connection.ID},
@@ -186,7 +186,7 @@ func (s *WhatsAppChannelSuite) TestAWhatsAppMessageIsAnsweredFromTheBusinessNumb
 // source whatsapp, in the omni-channel the contact map gives their number in E.164 (T41).
 func (s *WhatsAppChannelSuite) TestAPersonsMessagesAreOneThreadChannelAndOneWhatsAppCard() {
 	// record writes the card as on does (AI-2856).
-	s.config.EpisodeCardsRecord = true
+	s.config.EpisodeCards.Record = true
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	person := "16505551234"
 	s.deliver(s.received(s.unit, person, "first"))
@@ -229,7 +229,7 @@ func (s *WhatsAppChannelSuite) TestStopKeepsTheAgentAwayUntilStart() {
 // A reply the agent was writing when the person sent STOP is not sent: nothing follows the
 // confirmation (channelbridge.Bridge.reply).
 func (s *WhatsAppChannelSuite) TestAReplyFinishedAfterStopIsNotSent() {
-	s.config.LLM = "holding/holding-model"
+	s.config.Models.LLM = "holding/holding-model"
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.holding.holds()
 	s.T().Cleanup(s.holding.answers)
@@ -836,7 +836,7 @@ func (s *WhatsAppChannelSuite) pinTo(revision int) {
 
 // answersWith makes the test's agent answer with model.
 func (s *WhatsAppChannelSuite) answersWith(model string) {
-	s.config.LLM = model
+	s.config.Models.LLM = model
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 

@@ -813,7 +813,7 @@ const (
 // AnswersOnlyMentionsIn is whether the config answers a message in a channel of the type given
 // only when the message mentions the agent.
 func (c AgentConfig) AnswersOnlyMentionsIn(channelType string) bool {
-	for _, channel := range c.ChatChannels {
+	for _, channel := range c.Channels.Chat {
 		if channel.Type == channelType {
 			return channel.Answer == ChatChannelAnswerMentioned
 		}

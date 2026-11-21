@@ -105,7 +105,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheNumbersRowsThatHoldEpisodes() {
 	s.agentConfigs()
 	_, err := s.store.global.ExecContext(s.ctx, "INSERT INTO agent_configs (id, customer_id, name) VALUES ('agent-four', 'acme-app', 'agent-four')")
 	s.Require().NoError(err)
-	_, err = s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id <> 'agent-four'")
+	_, err = s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true WHERE id <> 'agent-four'")
 	s.Require().NoError(err)
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 	anyas := s.chatEpisode(chat)
@@ -159,7 +159,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheRowsOfAConfigThatRecordsTheCards() {
 	s.Require().NoError(s.store.global.NewSelect().Model(&aside).Where("id = ?", sms.ID).Scan(s.ctx))
 	s.Equal(retiredPrefix+sms.ID+":+15550100", aside.Address)
 	s.Equal("agent:omni-sms", aside.ConversationID, "where its card is")
-	_, err = s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err = s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	s.Empty(s.cardsOf(s.omniOf(chat), CardsQuery{}), "turned on, anya reads none of the number's earlier SMS")
 }
@@ -172,7 +172,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheRowsOfAConfigThatRecordsTheCards() {
 // link gives the user name the number (TestALinkWithAllOfTheHistoryReadsWhatTheNumberSaidBeforeIt).
 func (s *StoreSuite) TestASetAsideRowIsStillReachedAtItsNumber() {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true")
 	s.Require().NoError(err)
 	s.made(streamUser("anya", "agent:omni-chat"))
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
@@ -531,7 +531,7 @@ func (s *StoreSuite) TestALinkAndAFirstSightingAtOnceEndOnOneOmniChannel() {
 // episode. Two routers, twenty numbers.
 func (s *StoreSuite) TestALinkAndTheNumbersNextSightingAtOnceJoinNoneOfItsHistory() {
 	s.agentConfigs()
-	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = true")
 	s.Require().NoError(err)
 	pools := s.pools(2)
 	for i := range 20 {

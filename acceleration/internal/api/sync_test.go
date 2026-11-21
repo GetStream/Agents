@@ -223,7 +223,7 @@ func (s *SyncSuite) TestASyncPinningABatchTranscriberIsRefused() {
 
 func (s *SyncSuite) TestASyncLeavingAStoredBatchTranscriberAsItWasIsStored() {
 	pinned := "batch/" + batchModel
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, Models: store.AgentModels{STT: pinned}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	result := s.sync(map[string]any{"name": "support", "hash": "v1", "stt": pinned, "instructions": "Be brief."})
@@ -248,7 +248,7 @@ func (s *SyncSuite) TestASyncAllowingAnIPAddressAsADomainIsRefused() {
 				"sandbox_options": map[string]any{"allowed_domains": []string{"api.example.com", address}}})
 
 		s.Equal(http.StatusBadRequest, status, address)
-		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains: %q is not a domain", address), address)
+		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains has %q, which is not a domain", address), address)
 	}
 }
 
@@ -867,7 +867,7 @@ func (s *SyncSuite) TestASessionFromAnAgentWhoseSkillRunsScriptsWithoutASandboxD
 	})
 	config, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), result.Config.Id)
 	s.Require().NoError(err)
-	config.Sandbox = ""
+	config.Sandbox.Provider = ""
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &config))
 
 	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/sessions",

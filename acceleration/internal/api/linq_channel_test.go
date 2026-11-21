@@ -113,7 +113,7 @@ func (s *linqLine) SetupTest() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+s.connection.ID+"/credentials",
 		map[string]any{"expected_revision": s.connection.Revision, "values": map[string]string{bearer.SuppliedToken: s.apiKey}}, &s.connection))
 	s.config = store.AgentConfig{
-		CustomerID: s.customerID(), Name: "linq-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "linq-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "imessage", ConnectorID: "linq",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: s.connection.ID},
@@ -266,7 +266,7 @@ func (s *LinqChannelSuite) TestAConnectionStillOnRevision2PassesNoPhotoOn() {
 
 // answersWith has the line's agent answer with model.
 func (s *LinqChannelSuite) answersWith(model string) {
-	s.config.LLM = model
+	s.config.Models.LLM = model
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 
@@ -302,7 +302,7 @@ func photoURLs(message map[string]any) []string {
 // omni-channel the contact map gives the sender's number (T41).
 func (s *LinqChannelSuite) TestAChatIsOneThreadChannelAndOneIMessageCardInTheSendersOmniChannel() {
 	// record writes the card as on does (AI-2856).
-	s.config.EpisodeCardsRecord = true
+	s.config.EpisodeCards.Record = true
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 	s.deliver(s.received(chat, s.line, "+12025550199", "first"), time.Now())

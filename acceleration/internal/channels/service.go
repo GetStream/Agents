@@ -284,7 +284,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
-	number := config.Channels.Lines()[string(notice.Kind)]
+	number := config.Channels.Lines.Lines()[string(notice.Kind)]
 	if number == "" {
 		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: the agent answers on no %s line", ErrUnreachable, notice.Kind))
 	}
@@ -498,7 +498,7 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 		Thread:     message.Thread,
 		UserID:     "phone:" + message.From,
 	}
-	if config.Channels.Identity == store.ChannelIdentityLink {
+	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		link, err := s.store.ClaimChannelLink(ctx, account.CustomerID, strings.TrimSpace(message.Text))
 		if err != nil {
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
@@ -517,7 +517,7 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 		s.logger.Error("could not record who is writing", "channel", account.Kind, "error", err)
 		return store.ChannelIdentity{}, false
 	}
-	if config.Channels.Identity == store.ChannelIdentityLink {
+	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		s.say(ctx, line, provider, message, Reply{Text: "This number is yours now. What can I do for you?"},
 			answering(account.CustomerID, identity.UserID))
 		return identity, false

@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -15,6 +18,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
 // AgentConfig is a named set of the decisions a session is created with.
@@ -39,26 +43,12 @@ type AgentConfig struct {
 	// sessions run, its knowledge base and its sandbox are there, and nothing of it is done
 	// elsewhere (20261202135000_agent_region.sql). Empty is stored as pricing.DefaultRegion.
 	Region string `bun:"region,notnull"`
-	// STT, TTS, LLM, Subagent and Search are routing targets. Empty leaves the session
-	// default. STS names one native audio model that hears and speaks for itself; naming
-	// one makes the agent native, and the three cascade targets are then not used.
-	STT            string `bun:"stt,notnull"`
-	TTS            string `bun:"tts,notnull"`
-	STS            string `bun:"sts,notnull"`
-	Voice          string `bun:"voice,notnull"`
-	LLM            string `bun:"llm,notnull"`
-	Subagent       string `bun:"subagent,notnull"`
-	VideoSource    string `bun:"video_source,notnull"`
-	VideoMaxFrames int    `bun:"video_max_frames,notnull"`
-	Search         string `bun:"search,notnull"`
-	// Image is what the agent draws pictures with. Empty offers no drawing tool.
-	Image        string `bun:"image,notnull"`
-	Instructions string `bun:"instructions,notnull"`
-	Greeting     string `bun:"greeting,notnull"`
-
-	// LLMFallbacks are the targets a turn falls back to, in order, when LLM fails it. LLM
-	// is still the first choice; nil falls back only among LLM's own candidates.
-	LLMFallbacks []string `bun:"llm_fallbacks,type:jsonb"`
+	// Models are what the agent's sessions run on, one column each.
+	Models AgentModels `bun:"embed:"`
+	// Video is what the agent sees, in the video_ columns.
+	Video        AgentVideo `bun:"embed:video_"`
+	Instructions string     `bun:"instructions,notnull"`
+	Greeting     string     `bun:"greeting,notnull"`
 
 	// Agents are the app's other text agents this one may hand work to, each offered to its
 	// model as a tool. Only a text agent has them, and none of them has any of its own.
@@ -85,14 +75,8 @@ type AgentConfig struct {
 	// Connectors, because the app has no connection by the id or label they name. Only a
 	// sync writes them, as the SDK sent them; nothing reads them but the API.
 	LeftOutConnectors []LeftOutConnector `bun:"left_out_connectors,type:jsonb"`
-	// Channels are the lines this agent answers on outside a Stream Chat channel: a
-	// WhatsApp number, a number to text, an iMessage line.
-	Channels AgentChannels `bun:"channels,type:jsonb,notnull"`
-	// ChatChannels are the Stream Chat channel types of the customer's own app this agent
-	// answers in besides agent channels, such as a team's group channels
-	// (20261222120000_agent_config_chat_channels.sql). Empty, as every config starts, answers
-	// in agent channels alone.
-	ChatChannels []ChatChannel `bun:"chat_channels,type:jsonb"`
+	// Channels are where the agent answers besides agent channels, in the channels_ columns.
+	Channels AgentAnswersIn `bun:"embed:channels_"`
 	// Scheduling is whether the agent may schedule tasks for its users, and the
 	// defaults those tasks take. The zero value is off.
 	Scheduling AgentScheduling `bun:"scheduling,type:jsonb,notnull"`
@@ -106,33 +90,20 @@ type AgentConfig struct {
 	VisibleTools []string `bun:"visible_tools,type:jsonb"`
 	// KnowledgeNamespace is what the agent may look things up in.
 	KnowledgeNamespace string `bun:"knowledge_namespace,notnull"`
-	// Sandbox is where the subagent may run code it writes, "daytona" being the one
-	// provider there is. Empty means it runs none.
-	Sandbox string `bun:"sandbox,notnull"`
-	// SandboxOptions is how the sandbox is built and how long code may run in it.
-	SandboxOptions sandbox.Config `bun:"sandbox_options,type:jsonb,notnull"`
+	// Sandbox is where the subagent may run code it writes, in the sandbox_ columns.
+	Sandbox AgentSandbox `bun:"embed:sandbox_"`
 	// Harness is which harness the agent's sessions run, "default" being the one there is.
 	Harness string            `bun:"harness,notnull"`
 	Tags    map[string]string `bun:"tags,type:jsonb"`
-	// DispatchIncomingCall and DispatchText leave that work to the customer's own dispatch
-	// worker. With DispatchText an end user's message is handed to a worker instead of the
-	// model, and the model only answers when the worker asks it to.
-	DispatchIncomingCall bool `bun:"dispatch_incoming_call,notnull"`
-	DispatchText         bool `bun:"dispatch_text,notnull"`
-	// EpisodeCards has each session under the config start with the person's other episode
-	// cards (20261007042200_agent_config_episode_cards.sql), and the config write them as
-	// record does: the on mode. Off unless a config turns it on.
-	EpisodeCards bool `bun:"episode_cards,notnull"`
-	// EpisodeCardsRecord has each call, app chat and channel thread under the config write
-	// its episode card and summary into the person's omni-channel while no session reads them
-	// (20261217090000_agent_config_episode_cards_record.sql): the record mode. Read only beside
-	// EpisodeCards off; WritesCards is the two together.
-	EpisodeCardsRecord bool `bun:"episode_cards_record,notnull"`
+	// Dispatch is the work left to the customer's own dispatch worker, in the dispatch_
+	// columns.
+	Dispatch AgentDispatch `bun:"embed:dispatch_"`
+	// EpisodeCards is how the config's conversations use episode cards, in the
+	// episode_cards_ columns.
+	EpisodeCards AgentEpisodeCards `bun:"embed:episode_cards_"`
 	// ToolGroups are the functions an SDK provides that the config's sessions may offer, and
 	// how each group is loaded (20270103090000_agent_config_tool_groups.sql). A function no
-	// group names is not offered. The row's progressive_tools and tool_output_retention
-	// columns, which groups and connector bindings replaced, are not modelled: a router still
-	// running the release before reads them, so they are left in place.
+	// group names is not offered.
 	ToolGroups []ToolGroup `bun:"tool_groups,type:jsonb"`
 	// ResumeHistory is how the config's sessions are handed back a conversation they
 	// carry on. The zero value is the router's default.
@@ -150,10 +121,75 @@ type AgentConfig struct {
 	DeletedAt *time.Time `bun:"deleted_at"`
 }
 
+// AgentModels are the models an agent's sessions run on.
+type AgentModels struct {
+	// STT, TTS, LLM, Subagent and Search are routing targets. Empty leaves the session
+	// default. STS names one native audio model that hears and speaks for itself; naming
+	// one makes the agent native, and the three cascade targets are then not used.
+	STT      string `bun:"stt,notnull"`
+	TTS      string `bun:"tts,notnull"`
+	STS      string `bun:"sts,notnull"`
+	Voice    string `bun:"voice,notnull"`
+	LLM      string `bun:"llm,notnull"`
+	Subagent string `bun:"subagent,notnull"`
+	Search   string `bun:"search,notnull"`
+	// Image is what the agent draws pictures with. Empty offers no drawing tool.
+	Image string `bun:"image,notnull"`
+	// LLMFallbacks are the targets a turn falls back to, in order, when LLM fails it. LLM
+	// is still the first choice; nil falls back only among LLM's own candidates.
+	LLMFallbacks []string `bun:"llm_fallbacks,type:jsonb"`
+}
+
+// AgentVideo is what an agent sees.
+type AgentVideo struct {
+	Source    string `bun:"source,notnull"`
+	MaxFrames int    `bun:"max_frames,notnull"`
+}
+
+// AgentSandbox is where an agent's subagent may run code it writes.
+type AgentSandbox struct {
+	// Provider is "daytona", the one provider there is, or empty, which runs no code.
+	Provider string `bun:"provider,notnull"`
+	// Options is how the sandbox is built and how long code may run in it.
+	Options sandbox.Config `bun:"options,type:jsonb,notnull"`
+}
+
+// AgentDispatch leaves work to the customer's own dispatch worker. With Text an end user's
+// message is handed to a worker instead of the model, and the model only answers when the
+// worker asks it to.
+type AgentDispatch struct {
+	IncomingCall bool `bun:"incoming_call,notnull"`
+	Text         bool `bun:"text,notnull"`
+}
+
+// AgentEpisodeCards is how an agent's conversations use the person's episode cards.
+type AgentEpisodeCards struct {
+	// On has each session under the config start with the person's other episode cards
+	// (20261007042200_agent_config_episode_cards.sql), and the config write them as Record
+	// does. Off unless a config turns it on.
+	On bool `bun:"on,notnull"`
+	// Record has each call, app chat and channel thread under the config write its episode
+	// card and summary into the person's omni-channel while no session reads them
+	// (20261217090000_agent_config_episode_cards_record.sql). Read only beside On off;
+	// WritesCards is the two together.
+	Record bool `bun:"record,notnull"`
+}
+
+// AgentAnswersIn is where an agent answers besides agent channels.
+type AgentAnswersIn struct {
+	// Lines are the lines it answers on outside a Stream Chat channel: a WhatsApp number, a
+	// number to text, an iMessage line.
+	Lines AgentChannels `bun:"lines,type:jsonb,notnull"`
+	// Chat are the Stream Chat channel types of the customer's own app it answers in, such as
+	// a team's group channels (20261222120000_agent_config_chat_channels.sql). Empty, as every
+	// config starts, answers in agent channels alone.
+	Chat []ChatChannel `bun:"chat,type:jsonb"`
+}
+
 // WritesCards is whether the config's calls, app chats and channel threads write episode
-// cards and their summaries: on (EpisodeCards) or record (EpisodeCardsRecord).
+// cards and their summaries: on or record.
 func (c AgentConfig) WritesCards() bool {
-	return c.EpisodeCards || c.EpisodeCardsRecord
+	return c.EpisodeCards.On || c.EpisodeCards.Record
 }
 
 // How an agent is talked to.
@@ -183,8 +219,12 @@ const (
 var regionPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // Validate refuses a config the table would refuse, or one no session could be created from.
-// It reads the config as Insert and Update store it, with its defaults filled in.
+// It reads the config as Insert and Update store it, with its defaults filled in, so a caller
+// may ask before it writes anything else.
 func (c *AgentConfig) Validate() error {
+	stored := *c
+	normalizeConfig(&stored)
+	c = &stored
 	return validate("agent config").
 		required("customer_id", c.CustomerID).
 		required("name", c.Name).
@@ -192,8 +232,54 @@ func (c *AgentConfig) Validate() error {
 		oneOf("role", c.Role, "", RoleAgentModerator).
 		check(regionPattern.MatchString(c.Region), "region", "is not a region such as us or eu").
 		oneOf("greeting_mode", c.GreetingMode, GreetingExact, GreetingVariation).
-		check(c.VideoMaxFrames >= 1, "video_max_frames", "is below 1").
+		check(c.Video.MaxFrames >= 1, "video_max_frames", "is below 1").
+		check(len(c.Keyterms) <= stt.MaxKeyterms, "keyterms", fmt.Sprintf("names more than %d terms", stt.MaxKeyterms)).
+		oneOf("sandbox_provider", c.Sandbox.Provider, "", SandboxDaytona).
+		sandboxOptions(c.Sandbox.Options).
 		done()
+}
+
+// SandboxDaytona is the one sandbox provider there is (AgentSandbox.Provider).
+const SandboxDaytona = "daytona"
+
+// sandboxOptions refuses a sandbox no provider builds, in its schema's bounds.
+func (v *validation) sandboxOptions(options sandbox.Config) *validation {
+	v.check(options.TimeoutMs >= 0 && options.TimeoutMs <= int(sandbox.MaxTimeout.Milliseconds()),
+		"sandbox_options.timeout_ms", fmt.Sprintf("is not between 0 and %d", sandbox.MaxTimeout.Milliseconds())).
+		check(options.CPU >= 0 && options.CPU <= 16, "sandbox_options.cpu", "is not between 0 and 16").
+		check(options.MemoryGB >= 0 && options.MemoryGB <= 64, "sandbox_options.memory_gb", "is not between 0 and 64").
+		check(options.DiskGB >= 0 && options.DiskGB <= 100, "sandbox_options.disk_gb", "is not between 0 and 100").
+		maxLength("sandbox_options.image", options.Image, 256).
+		check(len(options.Setup) <= 32, "sandbox_options.setup", "is more than 32 commands").
+		check(len(options.AllowedDomains) <= 64, "sandbox_options.allowed_domains", "is more than 64 domains").
+		check(len(options.NetworkAllowList) <= 64, "sandbox_options.network_allow_list", "is more than 64 CIDR ranges").
+		check(len(options.AllowedDomains) == 0 || len(options.NetworkAllowList) == 0, "sandbox_options",
+			"takes allowed_domains or network_allow_list, not both")
+	for _, command := range options.Setup {
+		v.check(strings.TrimSpace(command) != "" && len(command) <= 2048, "sandbox_options.setup", "has a command that is not between 1 and 2048 characters")
+	}
+	for _, domain := range options.AllowedDomains {
+		v.check(domain != "" && len(domain) <= 253 && !strings.ContainsAny(domain, ", \t\n/") && !isAddress(domain),
+			"sandbox_options.allowed_domains", fmt.Sprintf("has %q, which is not a domain", domain))
+	}
+	for _, cidr := range options.NetworkAllowList {
+		_, err := netip.ParsePrefix(cidr)
+		v.check(err == nil, "sandbox_options.network_allow_list", fmt.Sprintf("has %q, which is not a CIDR range such as 10.0.0.0/8", cidr))
+	}
+	return v
+}
+
+// isAddress says whether an allowed domain is an IP address, with or without brackets, a port
+// or a trailing dot. The sandbox's egress proxy refuses every address host (sandbox/egress
+// Proxy.ServeHTTP), since a grant names hosts and an address cannot be told apart from another
+// host's.
+func isAddress(domain string) bool {
+	host := domain
+	if split, _, err := net.SplitHostPort(domain); err == nil {
+		host = split
+	}
+	_, err := netip.ParseAddr(strings.Trim(strings.TrimSuffix(host, "."), "[]"))
+	return err == nil
 }
 
 // ErrNoAgentConfig is a config id the customer holds no live config by. A sentinel, so a
@@ -226,8 +312,8 @@ type AgentConfigs struct {
 var configColumns = []string{
 	"name", "role", "mode", "region", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
 	"video_source", "video_max_frames", "search", "image", "instructions", "greeting", "greeting_mode", "guardrail", "review_instructions", "ui_instructions",
-	"skills", "connectors", "left_out_connectors", "channels", "chat_channels", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "sandbox", "sandbox_options", "harness", "tags",
-	"dispatch_incoming_call", "dispatch_text", "episode_cards", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
+	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "sandbox_provider", "sandbox_options", "harness", "tags",
+	"dispatch_incoming_call", "dispatch_text", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
 }
 
 // Insert stores a new config and fills in its id and timestamps. Each connection it binds as
@@ -496,7 +582,7 @@ func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channel
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Where(notTestCopy).
-		Where("chat_channels @> jsonb_build_array(jsonb_build_object('type', ?::text))", channelType).
+		Where("channels_chat @> jsonb_build_array(jsonb_build_object('type', ?::text))", channelType).
 		Order("created_at", "id").
 		Limit(1).
 		Scan(ctx)
@@ -652,8 +738,8 @@ func refuseUndefined(undefined []string, kept []ConnectorBinding) error {
 // normalizeConfig fills in the JSONB columns a nil slice or map would write as null,
 // which the columns are not, and the mode a caller that predates it leaves empty.
 func normalizeConfig(config *AgentConfig) {
-	if config.VideoMaxFrames == 0 {
-		config.VideoMaxFrames = 1
+	if config.Video.MaxFrames == 0 {
+		config.Video.MaxFrames = 1
 	}
 	if config.Mode == "" {
 		config.Mode = AgentModeVoice
@@ -679,8 +765,8 @@ func normalizeConfig(config *AgentConfig) {
 	if config.VisibleTools == nil {
 		config.VisibleTools = []string{}
 	}
-	if config.ChatChannels == nil {
-		config.ChatChannels = []ChatChannel{}
+	if config.Channels.Chat == nil {
+		config.Channels.Chat = []ChatChannel{}
 	}
 	if config.Tags == nil {
 		config.Tags = map[string]string{}

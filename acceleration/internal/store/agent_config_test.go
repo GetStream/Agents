@@ -209,7 +209,7 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.boundConfig("acme-app")
 	}
 	config := AgentConfig{CustomerID: "acme-app", Name: "moderator", Role: RoleAgentModerator,
-		ChatChannels: []ChatChannel{{Type: "callouts"}}, Agents: []ChildAgent{{Config: "child"}}}
+		Channels: AgentAnswersIn{Chat: []ChatChannel{{Type: "callouts"}}}, Agents: []ChildAgent{{Config: "child"}}}
 
 	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
 		"begin, the insert and commit: a config that binds nothing locks no connection")

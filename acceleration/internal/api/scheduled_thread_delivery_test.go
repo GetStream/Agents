@@ -272,7 +272,7 @@ func reportRun() llm.ToolCall {
 // link.
 func (s *TelnyxChannelSuite) TestATaskWhoseReplyIsOnlyAFileTextsTheFile() {
 	person := "+13125550001"
-	s.config.Sandbox = string(Daytona)
+	s.config.Sandbox.Provider = string(Daytona)
 	task, _ := s.scheduledInThread(person)
 	report := s.codeHandsBackAReport()
 	s.schedulingScript.saySilently()
@@ -382,7 +382,7 @@ func reportReply(link string) string {
 // The file the task's code made is texted with the reply's words, as its link after them.
 func (s *TelnyxChannelSuite) TestATaskTextsTheFileItsCodeMadeWithItsWords() {
 	person := "+13125550001"
-	s.config.Sandbox = string(Daytona)
+	s.config.Sandbox.Provider = string(Daytona)
 	task, _ := s.scheduledInThread(person)
 	report := s.codeHandsBackAReport()
 	sent := len(s.telnyx().sent())
@@ -397,7 +397,7 @@ func (s *TelnyxChannelSuite) TestATaskTextsTheFileItsCodeMadeWithItsWords() {
 // back from the thread's conversation, without running the task again.
 func (s *TelnyxChannelSuite) TestATaskWhoseReplyTheLineRefusesTextsItsFileOnTheRetry() {
 	person := "+13125550001"
-	s.config.Sandbox = string(Daytona)
+	s.config.Sandbox.Provider = string(Daytona)
 	task, _ := s.scheduledInThread(person)
 	report := s.codeHandsBackAReport()
 	sent := len(s.telnyx().sent())

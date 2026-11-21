@@ -1043,7 +1043,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if err != nil {
 		return session.Spec{}, err
 	}
-	from := config.Channels.Lines()["sms"]
+	from := config.Channels.Lines.Lines()["sms"]
 	if from == "" {
 		return session.Spec{}, undelivered(scheduling.ReasonNoLine, errors.New("the agent has no number to call from"))
 	}

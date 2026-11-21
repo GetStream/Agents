@@ -62,7 +62,7 @@ func (s *EpisodeSweeperSuite) SetupSuite() {
 func (s *EpisodeSweeperSuite) SetupTest() {
 	// The gate reads every customer's configs, so no earlier test's may have the cards on,
 	// and no earlier episode may be left to sweep. The database is the suite's own.
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = false")
 	s.Require().NoError(err)
 	_, err = s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
@@ -143,10 +143,10 @@ func (s *EpisodeSweeperSuite) TestWithNeitherConnectorsNorCardsNorAnEpisodeTheSw
 // never started, so the episode stayed in progress and was never summarized.
 func (s *EpisodeSweeperSuite) TestAnEpisodeLeftOpenAfterItsConfigTurnedTheCardsOffIsClosedAndItsSummaryFinished() {
 	customer := "sweep-" + uuid.NewString()
-	carded := &store.AgentConfig{CustomerID: customer, Name: "was carded", EpisodeCards: true}
+	carded := &store.AgentConfig{CustomerID: customer, Name: "was carded", EpisodeCards: store.AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, carded))
 	s.idleEpisode(customer, carded.ID)
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false WHERE id = ?", carded.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = false WHERE id = ?", carded.ID)
 	s.Require().NoError(err)
 
 	started, err := startEpisodeSweeper(s.ctx, s.settings, s.store, s.closer)
@@ -193,7 +193,7 @@ func (s *EpisodeSweeperSuite) TestWithConnectorsOnTheSweeperStartsAndClosesAnIdl
 // No episode is in the database yet: the config alone starts the sweeper, for the app chat
 // episodes it will open.
 func (s *EpisodeSweeperSuite) TestWithAConfigThatTurnedCardsOnTheSweeperStartsAndClosesAnIdleEpisode() {
-	carded := &store.AgentConfig{CustomerID: "sweep-" + uuid.NewString(), Name: "carded", EpisodeCards: true}
+	carded := &store.AgentConfig{CustomerID: "sweep-" + uuid.NewString(), Name: "carded", EpisodeCards: store.AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, carded))
 
 	started, err := startEpisodeSweeper(s.ctx, s.settings, s.store, s.closer)

@@ -384,7 +384,7 @@ func (s *StoreSuite) TestAnyEpisodeToSweepIsWhetherAConfigTurnedTheCardsOn() {
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, off))
 	s.False(s.anyToSweep(), "a config that never had the cards on, and no episode, has nothing to sweep")
 
-	on := &AgentConfig{CustomerID: "acme-app", Name: "carded", EpisodeCards: true}
+	on := &AgentConfig{CustomerID: "acme-app", Name: "carded", EpisodeCards: AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, on))
 	s.True(s.anyToSweep())
 
@@ -399,7 +399,7 @@ func (s *StoreSuite) TestAnyEpisodeToSweepCountsAConfigThatRecordsTheCards() {
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, off))
 	s.Require().False(s.anyToSweep())
 
-	record := &AgentConfig{CustomerID: "acme-app", Name: "recording", EpisodeCardsRecord: true}
+	record := &AgentConfig{CustomerID: "acme-app", Name: "recording", EpisodeCards: AgentEpisodeCards{Record: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, record))
 	s.True(s.anyToSweep())
 
@@ -412,13 +412,13 @@ func (s *StoreSuite) TestAnyEpisodeToSweepCountsAConfigThatRecordsTheCards() {
 func (s *StoreSuite) TestAnUpdateStoresWhetherAConfigRecordsTheCards() {
 	config := &AgentConfig{CustomerID: "acme-app", Name: "recording"}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
-	config.EpisodeCardsRecord = true
+	config.EpisodeCards.Record = true
 	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, config))
 
 	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
 	s.Require().NoError(err)
-	s.True(stored.EpisodeCardsRecord)
-	s.False(stored.EpisodeCards)
+	s.True(stored.EpisodeCards.Record)
+	s.False(stored.EpisodeCards.On)
 }
 
 // Catches AI-2771: a config turned the cards off while its chat episode was open, and the

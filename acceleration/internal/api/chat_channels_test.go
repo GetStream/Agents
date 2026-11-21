@@ -125,7 +125,7 @@ func (s *AppHooksSuite) TestTheAgentsOwnReplyInAChannelOfTheTypeIsNotAnswered() 
 func (s *AppHooksSuite) TestAVoiceConfigNamingTheTypeAnswersInWriting() {
 	s.holdsType("callouts", memberWrites)
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeVoice,
-		LLM: "noted/noted-model", ChatChannels: []store.ChatChannel{{Type: "callouts"}}}
+		Models: store.AgentModels{LLM: "noted/noted-model"}, Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: "callouts"}}}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	channel := s.groupChannel("callouts", nil)
 
@@ -142,8 +142,8 @@ func (s *AppHooksSuite) TestAnotherCustomersConfigNamingTheTypeDoesNotAnswerInTh
 	s.holdsType("callouts", memberWrites)
 	other := s.numberedApp(streamAppID())
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &store.AgentConfig{
-		CustomerID: other.app.ID, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
-		ChatChannels: []store.ChatChannel{{Type: "callouts"}},
+		CustomerID: other.app.ID, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
+		Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: "callouts"}}},
 	}))
 	channel := s.groupChannel("callouts", nil)
 
@@ -159,7 +159,7 @@ func (s *AppHooksSuite) TestTheChannelsCustomDataNamingAnotherOwnerIsNotRead() {
 	s.holdsType("callouts", memberWrites)
 	config := s.answeringIn("callouts")
 	other := s.numberedApp(streamAppID())
-	theirs := store.AgentConfig{CustomerID: other.app.ID, Name: "theirs-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model"}
+	theirs := store.AgentConfig{CustomerID: other.app.ID, Name: "theirs-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &theirs))
 	custom := map[string]any{
 		ConfigField: theirs.ID, conversation.CustomerField: other.app.ID, "support_agent_id": theirs.ID,
@@ -233,8 +233,8 @@ func (s *AppHooksSuite) TestAConfigNamingOneTypeAnswersInNoOther() {
 // config answers in a type there.
 func (s *MessageHooksSuite) TestTheSharedAppAnswersNoChannelTypeAConfigNames() {
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &store.AgentConfig{
-		CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
-		ChatChannels: []store.ChatChannel{{Type: "callouts"}},
+		CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
+		Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: "callouts"}}},
 	}))
 	s.chat.SetApp(chattest.App{ID: 1, ChannelTypes: map[string]map[string][]string{"agent": memberWrites, "callouts": memberWrites}, CallTypes: []string{"agent"}})
 	channel := "team-" + s.utils.uuid()
@@ -258,9 +258,9 @@ func (s *AppHooksSuite) holdsType(name string, grants map[string][]string) {
 
 // answeringIn is a text config of the app's customer naming the channel types given.
 func (s *AppHooksSuite) answeringIn(types ...string) store.AgentConfig {
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model"}
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}}
 	for _, named := range types {
-		config.ChatChannels = append(config.ChatChannels, store.ChatChannel{Type: named})
+		config.Channels.Chat = append(config.Channels.Chat, store.ChatChannel{Type: named})
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config
@@ -337,8 +337,8 @@ func (s *ChatInboundQueueSuite) TestADeliveryInAChannelOfATypeAConfigNamesIsQueu
 	customer := s.inAppMode()
 	// Types of the test's own: the deployment app's customer is the same in every test.
 	named, unnamed := "callouts-"+strings.ToLower(rand.Text()), "shifts-"+strings.ToLower(rand.Text())
-	config := store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
-		ChatChannels: []store.ChatChannel{{Type: named}}}
+	config := store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
+		Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named}}}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
@@ -362,7 +362,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryInAChannelOfATypeForACustomerNoLong
 	customer := s.inAppMode()
 	named := "callouts-" + strings.ToLower(rand.Text())
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "noted/noted-model", ChatChannels: []store.ChatChannel{{Type: named}}}))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}, Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named}}}}))
 	s.setApps(customer, func(apps *suiteApps) { apps.readOnly[customer] = true })
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
@@ -379,7 +379,7 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryInAChannelOfANamedTypeWhoseAn
 	customer := s.inAppMode()
 	named := "callouts-" + strings.ToLower(rand.Text())
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &store.AgentConfig{CustomerID: customer, Name: "rota-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "noted/noted-model", ChatChannels: []store.ChatChannel{{Type: named}}}))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}, Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named}}}}))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
 	queued := s.queue(s.ofType(named))

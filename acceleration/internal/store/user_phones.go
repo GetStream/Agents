@@ -418,7 +418,7 @@ func (s *Store) retireHistory(ctx context.Context, tx bun.Tx, link UserPhone) er
 	writesCards := tx.NewSelect().Model((*AgentConfig)(nil)).
 		Column("ac.id").
 		Where("ac.customer_id = ?", link.CustomerID).
-		Where("ac.episode_cards OR ac.episode_cards_record")
+		Where("ac.episode_cards_on OR ac.episode_cards_record")
 	withEpisode := tx.NewSelect().Model((*Episode)(nil)).ColumnExpr("1").Where("ep.contact_id = cm.id")
 	_, err := tx.NewUpdate().Model((*ContactMapEntry)(nil)).
 		Set("address = ? || cm.id || ':' || cm.address", retiredPrefix).

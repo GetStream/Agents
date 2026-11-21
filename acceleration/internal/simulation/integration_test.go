@@ -205,7 +205,7 @@ func (s *IntegrationSuite) agentThat(instructions string) string {
 		Name:         "order taker",
 		Mode:         store.AgentModeText,
 		Instructions: instructions,
-		LLM:          "openai/gpt-5.6-luna",
+		Models:       store.AgentModels{LLM: "openai/gpt-5.6-luna"},
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	return config.ID
@@ -384,7 +384,7 @@ func (s *IntegrationSuite) TestAnAgentIsHeardThroughItsOwnVoiceRatherThanItsOwnW
 		Mode:         store.AgentModeVoice,
 		Instructions: takesOrders,
 		Greeting:     "Northwind Pizza, what can I get you?",
-		LLM:          "openai/gpt-5.6-luna",
+		Models:       store.AgentModels{LLM: "openai/gpt-5.6-luna"},
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 

@@ -679,6 +679,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		row, err = endImportedAttempt(row, time.Now())
 	case "simulation_runs":
 		row, err = renameImported(row, map[string]string{"held_until": "lease_until"})
+	case "agent_configs":
+		row, err = renameImported(row, map[string]string{"sandbox": "sandbox_provider", "episode_cards": "episode_cards_on",
+			"channels": "channels_lines", "chat_channels": "channels_chat"})
 	}
 	if err != nil {
 		return err

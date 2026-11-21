@@ -233,7 +233,7 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 // The router starts the sweep that closes idle episodes where an agent config has the cards on.
 func (s *RouterStartSuite) TestAStartingRouterClosesAnIdleEpisode() {
 	customer := "customer-" + uuid.NewString()
-	carded := &store.AgentConfig{CustomerID: customer, Name: "carded", EpisodeCards: true}
+	carded := &store.AgentConfig{CustomerID: customer, Name: "carded", EpisodeCards: store.AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, carded))
 	s.T().Cleanup(func() { s.NoError(s.db.AgentConfigs.Delete(context.Background(), customer, carded.ID)) })
 	contact := store.ContactMapEntry{

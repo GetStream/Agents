@@ -292,7 +292,7 @@ func (c *Closer) write(ctx context.Context, episode store.ClosedEpisode, author 
 
 // ask is the summary of the episode's lines, from the agent config's own LLM in its region.
 func (c *Closer) ask(ctx context.Context, config store.AgentConfig, episode store.ClosedEpisode, said told) (string, error) {
-	target := config.LLM
+	target := config.Models.LLM
 	if target == "" {
 		target = defaultSummaryTarget
 	}

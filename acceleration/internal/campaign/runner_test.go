@@ -624,7 +624,7 @@ func (s *RunnerSuite) TestACampaignLeavingAMessageWithAConfigThatBecameSpeechToS
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
-	campaign := s.leavingAMessageWith(store.AgentConfig{STS: "stub/stub-sts"}, VoicemailLeaveMessage)
+	campaign := s.leavingAMessageWith(store.AgentConfig{Models: store.AgentModels{STS: "stub/stub-sts"}}, VoicemailLeaveMessage)
 
 	s.tick(runner)
 
@@ -644,7 +644,7 @@ func (s *RunnerSuite) TestACampaignWhoseSessionCouldNotOpenPausesBeforeRinging()
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
-	campaign := s.leavingAMessageWith(store.AgentConfig{VideoMaxFrames: 9}, VoicemailHangUp)
+	campaign := s.leavingAMessageWith(store.AgentConfig{Video: store.AgentVideo{MaxFrames: 9}}, VoicemailHangUp)
 
 	s.tick(runner)
 
@@ -668,7 +668,7 @@ func (s *RunnerSuite) TestASpeechToSpeechConfigIsOnlyRefusedAVoicemailMessage() 
 	dialer := NewPhoneDialer(service, nil, s.store, slog.New(slog.DiscardHandler))
 
 	for action, reason := range map[string]string{VoicemailHangUp: "telephony_suspended", VoicemailLeaveMessage: reasonVoicemailNeedsExactWords} {
-		campaign := s.leavingAMessageWith(store.AgentConfig{STS: "stub/stub-sts"}, action)
+		campaign := s.leavingAMessageWith(store.AgentConfig{Models: store.AgentModels{STS: "stub/stub-sts"}}, action)
 		contacts, err := s.store.QueryContacts(s.ctx, campaign.ID, store.ContactFilter{Limit: 1})
 		s.Require().NoError(err)
 		sequence, err := ParseSequence(campaign.Sequence)

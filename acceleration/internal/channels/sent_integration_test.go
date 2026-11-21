@@ -100,7 +100,7 @@ func (s *SentSuite) TestANoticeCountsTheUserItReachedAsReached() {
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
 	agentConfig := store.AgentConfig{CustomerID: s.owner.CustomerID, Name: "sent-" + uuid.NewString(),
-		Channels: store.AgentChannels{SMS: &store.ChannelLine{Number: line}}}
+		Channels: store.AgentAnswersIn{Lines: store.AgentChannels{SMS: &store.ChannelLine{Number: line}}}}
 	s.Require().NoError(s.money.Store.AgentConfigs.Insert(s.ctx, &agentConfig))
 	s.Require().NoError(s.money.Store.SaveChannelIdentity(s.ctx, &store.ChannelIdentity{
 		CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: string(SMS), Address: writer, UserID: "user-1",

@@ -260,7 +260,7 @@ func (s *FloorControlSuite) TestEveryWriteOfAConfigTakesTheFloorControl() {
 // keeps what it was opened with, which carrying it on from its row keeps.
 func (s *FloorControlSuite) TestASessionChoosesItsFloorControlServerSide() {
 	agent := store.AgentConfig{CustomerID: s.customerID(), Name: "session-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "en-low-latency", FloorControl: store.FloorControl{Model: store.FloorControlChorusASR, MaxWaitMs: 1400}}
+		Models: store.AgentModels{LLM: "en-low-latency"}, FloorControl: store.FloorControl{Model: store.FloorControlChorusASR, MaxWaitMs: 1400}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &agent))
 
 	request := CreateSessionRequest{ConfigId: &agent.ID, FloorControl: chorusASRFloor(1100)}

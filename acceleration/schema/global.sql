@@ -3,15 +3,15 @@
 TABLE agent_configs
     agents jsonb
     calls jsonb NOT NULL DEFAULT '{}'::jsonb
-    channels jsonb NOT NULL DEFAULT '{}'::jsonb
-    chat_channels jsonb NOT NULL DEFAULT '[]'::jsonb
+    channels_chat jsonb NOT NULL DEFAULT '[]'::jsonb
+    channels_lines jsonb NOT NULL DEFAULT '{}'::jsonb
     connectors jsonb NOT NULL DEFAULT '[]'::jsonb
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
     deleted_at timestamp with time zone
     dispatch_incoming_call boolean NOT NULL DEFAULT false
     dispatch_text boolean NOT NULL DEFAULT false
-    episode_cards boolean NOT NULL DEFAULT false
+    episode_cards_on boolean NOT NULL DEFAULT false
     episode_cards_record boolean NOT NULL DEFAULT false
     floor_control jsonb
     greeting text NOT NULL DEFAULT ''::text
@@ -28,13 +28,12 @@ TABLE agent_configs
     llm_fallbacks jsonb
     mode text NOT NULL DEFAULT 'voice'::text
     name text NOT NULL
-    progressive_tools boolean NOT NULL DEFAULT false
     region text NOT NULL DEFAULT 'us'::text
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
     role text NOT NULL DEFAULT ''::text
-    sandbox text NOT NULL DEFAULT ''::text
     sandbox_options jsonb NOT NULL DEFAULT '{}'::jsonb
+    sandbox_provider text NOT NULL DEFAULT ''::text
     scheduling jsonb NOT NULL DEFAULT '{}'::jsonb
     search text NOT NULL DEFAULT ''::text
     skills jsonb NOT NULL DEFAULT '[]'::jsonb
@@ -44,7 +43,6 @@ TABLE agent_configs
     sync_hash text NOT NULL DEFAULT ''::text
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     tool_groups jsonb
-    tool_output_retention text NOT NULL DEFAULT ''::text
     tts text NOT NULL DEFAULT ''::text
     ui_instructions text NOT NULL DEFAULT ''::text
     updated_at timestamp with time zone NOT NULL DEFAULT now()

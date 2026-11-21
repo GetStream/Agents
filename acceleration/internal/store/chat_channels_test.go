@@ -12,7 +12,7 @@ import (
 func (s *StoreSuite) answering(customerID string, at time.Time, types ...string) string {
 	config := &AgentConfig{CustomerID: customerID, Name: "agent-" + newID()}
 	for _, named := range types {
-		config.ChatChannels = append(config.ChatChannels, ChatChannel{Type: named})
+		config.Channels.Chat = append(config.Channels.Chat, ChatChannel{Type: named})
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET created_at = ? WHERE id = ?", at, config.ID)
@@ -39,7 +39,7 @@ func (s *StoreSuite) TestTheOldestConfigNamingAChannelTypeAnswersInIt() {
 
 	s.Require().NoError(err)
 	s.Equal(oldest, config.ID)
-	s.Equal([]ChatChannel{{Type: "shifts"}, {Type: "callouts"}}, config.ChatChannels)
+	s.Equal([]ChatChannel{{Type: "shifts"}, {Type: "callouts"}}, config.Channels.Chat)
 }
 
 // A type is matched whole: one no config names, or that only begins or ends like one, has none.

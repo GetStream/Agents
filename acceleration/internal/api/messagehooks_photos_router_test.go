@@ -575,7 +575,7 @@ func photoServer(paths ...string) *httptest.Server {
 func (s *MessageHooksSuite) TestACallWithAVisionSkillSaysItCannotSeeAWrittenPhoto() {
 	config := store.AgentConfig{
 		CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "voice",
-		LLM: "holding/holding-model", Subagent: "vision/vision-model", Skills: []string{"vision"},
+		Models: store.AgentModels{LLM: "holding/holding-model", Subagent: "vision/vision-model"}, Skills: []string{"vision"},
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.Require().NoError(s.store.Skills.Insert(context.Background(), &store.Skill{

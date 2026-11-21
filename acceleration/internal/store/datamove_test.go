@@ -3560,3 +3560,28 @@ func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
 	s.Require().NotNil(moved.LeaseUntil)
 	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
 }
+
+// An export from a release before agent_configs grouped its columns names four of them as they
+// were; what they held arrives under the new names rather than as their defaults.
+func (s *DataMoveSuite) TestAConfigFromAnOlderReleaseKeepsItsRenamedSettings() {
+	config := AgentConfig{CustomerID: "acme", Name: "support",
+		Sandbox:      AgentSandbox{Provider: SandboxDaytona},
+		EpisodeCards: AgentEpisodeCards{On: true},
+		Channels: AgentAnswersIn{
+			Lines: AgentChannels{Identity: "link"},
+			Chat:  []ChatChannel{{Type: "team"}},
+		},
+	}
+	s.Require().NoError(s.source.AgentConfigs.Insert(s.ctx, &config))
+
+	s.importAsOlder("acme", "acme", map[string]map[string]string{"agent_configs": {
+		"sandbox_provider": "sandbox", "episode_cards_on": "episode_cards",
+		"channels_lines": "channels", "channels_chat": "chat_channels",
+	}})
+
+	moved, err := s.destination.AgentConfigs.Get(s.ctx, "acme", config.ID)
+	s.Require().NoError(err)
+	s.Equal(config.Sandbox, moved.Sandbox)
+	s.Equal(config.EpisodeCards, moved.EpisodeCards)
+	s.Equal(config.Channels, moved.Channels)
+}

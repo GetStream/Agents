@@ -280,7 +280,7 @@ func (s *LinqChannelSuite) sharedAsBefore() {
 		`{"`+store.DraftOfTag+`":"`+s.config.ID+`"}`, s.config.ID)
 	s.Require().NoError(err)
 	newer := store.AgentConfig{CustomerID: s.customerID(), Name: "linq-newer-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "noted/noted-model", Connectors: s.config.Connectors}
+		Models: store.AgentModels{LLM: "noted/noted-model"}, Connectors: s.config.Connectors}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &newer))
 	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = '{}' WHERE id = ?", s.config.ID)
 	s.Require().NoError(err)

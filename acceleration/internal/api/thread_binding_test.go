@@ -46,7 +46,7 @@ func (s *TelnyxChannelSuite) TestAnotherCustomersConfigNamingTheLineNeverAnswers
 	person := "+13125550001"
 	s.smsTurn(person, "Hi, is my order ready?")
 	forged := store.AgentConfig{
-		CustomerID: s.data.createApp().app.ID, Name: "forged-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "echo/echo-model",
+		CustomerID: s.data.createApp().app.ID, Name: "forged-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "echo/echo-model"},
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &forged))
 	_, err := s.store.GlobalDB().ExecContext(ctx,
@@ -64,7 +64,7 @@ func (s *TelnyxChannelSuite) TestAnotherCustomersConfigNamingTheLineNeverAnswers
 func (s *TelnyxChannelSuite) TestALineTwoConfigsBindIsAnsweredByTheOldest() {
 	ctx := context.Background()
 	newer := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "counted/counted-model",
+		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "counted/counted-model"},
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &newer))
 	_, err := s.store.GlobalDB().ExecContext(ctx,
@@ -107,7 +107,7 @@ func (s *TelnyxChannelSuite) rebind() {
 	s.config.Connectors = nil
 	s.Require().NoError(s.store.AgentConfigs.Update(ctx, &s.config))
 	s.config = store.AgentConfig{
-		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "counted/counted-model",
+		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "counted/counted-model"},
 		Connectors: bindings,
 	}
 	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &s.config))

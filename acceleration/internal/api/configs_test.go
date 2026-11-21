@@ -296,7 +296,7 @@ func (s *ConfigsSuite) TestAConfigWritesNoEpisodeCardsUnlessItSaysSo() {
 func (s *ConfigsSuite) TestAConfigWithBothCardColumnsOnReadsAsOn() {
 	created := s.createConfig(map[string]any{"name": "support"})
 	_, err := s.store.GlobalDB().ExecContext(context.Background(),
-		"UPDATE agent_configs SET episode_cards = true, episode_cards_record = true WHERE id = ?", created.Id)
+		"UPDATE agent_configs SET episode_cards_on = true, episode_cards_record = true WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
 	var read AgentConfig
@@ -329,8 +329,8 @@ func (s *ConfigsSuite) storedCards(id string, on, record bool) {
 	s.T().Helper()
 	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
-	s.Equal(on, stored.EpisodeCards, "episode_cards")
-	s.Equal(record, stored.EpisodeCardsRecord, "episode_cards_record")
+	s.Equal(on, stored.EpisodeCards.On, "episode_cards_on")
+	s.Equal(record, stored.EpisodeCards.Record, "episode_cards_record")
 }
 
 // A config names its functions in tool groups, each offered whole unless it says otherwise,
@@ -650,7 +650,7 @@ func (s *ConfigsSuite) TestAnAllowedDomainThatIsAnIPAddressIsRefused() {
 				"sandbox_options": map[string]any{"allowed_domains": []string{"api.example.com", address}}})
 
 		s.Equal(http.StatusBadRequest, status, address)
-		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains: %q is not a domain", address), address)
+		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains has %q, which is not a domain", address), address)
 	}
 
 	created := s.createConfig(map[string]any{"name": "researcher", "sandbox": "daytona",
@@ -660,7 +660,7 @@ func (s *ConfigsSuite) TestAnAllowedDomainThatIsAnIPAddressIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		map[string]any{"sandbox_options": map[string]any{"allowed_domains": []string{"203.0.113.7"}}})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, `"203.0.113.7" is not a domain`)
+	s.Contains(failure, `"203.0.113.7", which is not a domain`)
 }
 
 // webhookGuardrail is a guardrail.md asking the server at url.
@@ -799,7 +799,7 @@ func (s *ConfigsSuite) TestPatchingAConfigOntoABatchTranscriberIsRefused() {
 func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() {
 	// Stored before saves were checked; its sessions are refused as they start instead.
 	pinned := "batch/" + batchModel
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, Models: store.AgentModels{STT: pinned}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	var updated, patched AgentConfig
@@ -814,7 +814,7 @@ func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() 
 }
 
 func (s *ConfigsSuite) TestADeploymentWithoutATranscriberRouterRefusesNoConfig() {
-	config := store.AgentConfig{Mode: store.AgentModeVoice, STT: "batch/" + batchModel}
+	config := store.AgentConfig{Mode: store.AgentModeVoice, Models: store.AgentModels{STT: "batch/" + batchModel}}
 
 	for name, server := range map[string]*Server{"no streams": {}, "no stt router": {streams: &Streams{}}} {
 		_, ok := server.liveSTTComplaint(config, "")

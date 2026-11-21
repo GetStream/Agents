@@ -45,7 +45,7 @@ func (s *UserPhonesSuite) SetupSuite() {
 
 func (s *UserPhonesSuite) SetupTest() {
 	s.telnyxLine.SetupTest()
-	s.config.EpisodeCards, s.config.LLM = true, "recites/recites-model"
+	s.config.EpisodeCards.On, s.config.Models.LLM = true, "recites/recites-model"
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.user, s.person = "user-"+s.utils.uuid(), s.utils.number()
 }
@@ -149,7 +149,7 @@ func (s *UserPhonesSuite) TestTheSameLinkAgainKeepsTheCardsWrittenSinceTheFirst(
 // SMS (AI-2856; the probe of this test at 3b7a53f97 answered one row and one episode), the link
 // is stored all the same, and the SMS after it is answered with no cards read.
 func (s *UserPhonesSuite) TestAConfigWithoutCardsLinksWithNoEpisodeOfTheNumber() {
-	s.config.EpisodeCards = false
+	s.config.EpisodeCards.On = false
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, s.person, "hi"), time.Now()))
 	s.took(1)
@@ -173,14 +173,14 @@ func (s *UserPhonesSuite) TestAConfigWithoutCardsLinksWithNoEpisodeOfTheNumber()
 func (s *UserPhonesSuite) TestCardsTurnedOnAfterTheLinkReadNoneOfTheNumbersSMSFromBeforeIt() {
 	s.textedBeforeTheLink()
 	s.chatCard()
-	s.config.EpisodeCards = false
+	s.config.EpisodeCards.On = false
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.Require().Equal(http.StatusOK, s.put(s.user, `{"phone": "`+s.person+`"}`, nil))
 	var aside int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND address LIKE 'retired:%'", s.customerID()).Scan(&aside))
 	s.Require().Zero(aside, "nothing set aside under off")
-	s.config.EpisodeCards = true
+	s.config.EpisodeCards.On = true
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 
 	s.Equal([]string{store.EpisodeChat}, s.chatReads(s.user), "the user's own chat card alone")
@@ -466,7 +466,7 @@ func (s *LinqSandboxSuite) SetupSuite() {
 
 func (s *LinqSandboxSuite) SetupTest() {
 	s.linqLine.SetupTest()
-	s.config.EpisodeCards = true
+	s.config.EpisodeCards.On = true
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.person = s.utils.number()
 	s.Require().NoError(s.store.SetSandboxRecipients(context.Background(), s.customerID(), []string{s.person}))
@@ -478,7 +478,7 @@ func (s *LinqSandboxSuite) SetupTest() {
 // (store.ChannelThreadStarter), as the sender admit checked. Its reply and a scheduled delivery
 // go out (AI-2856).
 func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswered() {
-	s.config.EpisodeCards = false
+	s.config.EpisodeCards.On = false
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 
@@ -495,7 +495,7 @@ func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswere
 // config said (AI-2856 R1.1). Catches a group chat with no episode whose replies reach nobody,
 // so the sandbox holds them back.
 func (s *LinqSandboxSuite) TestAGroupChatUnderAConfigWithTheCardsOffIsAnswered() {
-	s.config.EpisodeCards = false
+	s.config.EpisodeCards.On = false
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 

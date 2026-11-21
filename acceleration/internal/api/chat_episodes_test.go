@@ -125,7 +125,7 @@ func (s *ChatEpisodesSuite) TestAChatMessageTheWebhookBringsWritesACard() {
 func (s *ChatEpisodesSuite) TestAChatMessageUnderRecordWritesACard() {
 	worker := s.worker()
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "llm-flow", DispatchText: true, EpisodeCardsRecord: true}
+		Models: store.AgentModels{LLM: "llm-flow"}, Dispatch: store.AgentDispatch{Text: true}, EpisodeCards: store.AgentEpisodeCards{Record: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	s.Require().Equal(http.StatusOK, s.writes(config.ID, "where is my order?"))
@@ -990,7 +990,7 @@ func (s *ChatEpisodesSuite) sessionAnswered(config store.AgentConfig) {
 // config is a text agent of the test's app on the LLM named, with episode cards on or off.
 func (s *ChatEpisodesSuite) config(cards bool, llm string) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: llm, DispatchText: true, EpisodeCards: cards}
+		Models: store.AgentModels{LLM: llm}, Dispatch: store.AgentDispatch{Text: true}, EpisodeCards: store.AgentEpisodeCards{On: cards}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config
 }
