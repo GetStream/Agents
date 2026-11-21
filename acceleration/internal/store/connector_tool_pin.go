@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -120,6 +121,25 @@ type ApprovedTool struct {
 	PreviousSchemaDigest string `json:"previous_schema_digest,omitempty"`
 }
 
+// reapprovePins writes every pin of a re-approval in one statement, in the order given, which
+// is the order its row locks are taken in. A tool with a previous digest is moved only from that
+// digest under this grant; one with none replaces only a pin of an earlier grant, as Pin does.
+// It returns each row it wrote, and whether it inserted it: an insert of a tool that was to be
+// moved, or fewer rows than tools, is a pin that moved.
+const reapprovePins = `WITH approved AS (
+    SELECT * FROM unnest(?::text[], ?::text[], ?::text[]) WITH ORDINALITY AS a (tool_name, schema_digest, previous, n)
+)
+INSERT INTO connector_tool_pins AS ctp (connection_id, tool_name, schema_digest, connected_at, pinned_at)
+SELECT ?, tool_name, schema_digest, ?::timestamptz, ? FROM approved ORDER BY n
+ON CONFLICT (connection_id, tool_name) DO UPDATE
+SET schema_digest = EXCLUDED.schema_digest, connected_at = EXCLUDED.connected_at, pinned_at = EXCLUDED.pinned_at
+WHERE CASE (SELECT previous FROM approved WHERE approved.tool_name = EXCLUDED.tool_name)
+    WHEN '' THEN EXCLUDED.connected_at > ctp.connected_at OR (ctp.connected_at IS NULL AND EXCLUDED.connected_at IS NOT NULL)
+    ELSE ctp.schema_digest = (SELECT previous FROM approved WHERE approved.tool_name = EXCLUDED.tool_name)
+        AND ctp.connected_at IS NOT DISTINCT FROM EXCLUDED.connected_at
+END
+RETURNING ctp.tool_name, ctp.xmax = 0 AS inserted`
+
 // Reapprove pins each of tools at its SchemaDigest for connection's grant, the
 // one that began at its ConnectedAt as the caller read it, and records one tool_reapproved
 // audit row naming them, in one transaction: all of it or none.
@@ -138,6 +158,14 @@ func (r *ConnectorToolPins) Reapprove(ctx context.Context, connection ConnectorC
 	// By name, so two approves of the same tools take the pins' locks in one order, as
 	// PinConnectorTools does.
 	ordered := slices.SortedFunc(slices.Values(tools), func(a, b ApprovedTool) int { return strings.Compare(a.Name, b.Name) })
+	names, digests, previous := make([]string, len(ordered)), make([]string, len(ordered)), make([]string, len(ordered))
+	for i, tool := range ordered {
+		pin := ConnectorToolPin{ConnectionID: connection.ID, ToolName: tool.Name, SchemaDigest: tool.SchemaDigest}
+		if err := pin.Validate(); err != nil {
+			return stack.Wrap(err)
+		}
+		names[i], digests[i], previous[i] = tool.Name, tool.SchemaDigest, tool.PreviousSchemaDigest
+	}
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// FOR SHARE: a consent or a credentials write that begins a new grant updates this row,
 		// so one that comes later waits for this transaction, and one that came first is seen.
@@ -156,38 +184,26 @@ func (r *ConnectorToolPins) Reapprove(ctx context.Context, connection ConnectorC
 		if !sameGrant {
 			return ErrConnectorToolPinMoved
 		}
+		var written []struct {
+			ToolName string `bun:"tool_name"`
+			Inserted bool   `bun:"inserted"`
+		}
+		err = tx.NewRaw(reapprovePins, pgdialect.Array(names), pgdialect.Array(digests), pgdialect.Array(previous),
+			connection.ID, connection.ConnectedAt, now).Scan(ctx, &written)
+		if err != nil {
+			return err
+		}
+		if len(written) != len(ordered) {
+			return ErrConnectorToolPinMoved
+		}
+		moved := make(map[string]bool, len(ordered))
 		for _, tool := range ordered {
-			var result sql.Result
-			if tool.PreviousSchemaDigest != "" {
-				result, err = tx.NewUpdate().Model((*ConnectorToolPin)(nil)).
-					Set("schema_digest = ?", tool.SchemaDigest).
-					Set("pinned_at = ?", now).
-					Where("connection_id = ?", connection.ID).
-					Where("tool_name = ?", tool.Name).
-					Where("schema_digest = ?", tool.PreviousSchemaDigest).
-					Where("connected_at IS NOT DISTINCT FROM ?", connection.ConnectedAt).
-					Exec(ctx)
-			} else {
-				// A pin of an earlier grant is replaced, as PinConnectorTools replaces it; one of
-				// this grant was written since the caller read none.
-				pin := &ConnectorToolPin{ConnectionID: connection.ID, ToolName: tool.Name,
-					SchemaDigest: tool.SchemaDigest, ConnectedAt: connection.ConnectedAt, PinnedAt: now}
-				if err := pin.Validate(); err != nil {
-					return err
-				}
-				result, err = tx.NewInsert().Model(pin).
-					On("CONFLICT (connection_id, tool_name) DO UPDATE").
-					Set("schema_digest = EXCLUDED.schema_digest").
-					Set("connected_at = EXCLUDED.connected_at").
-					Set("pinned_at = EXCLUDED.pinned_at").
-					Where("EXCLUDED.connected_at > ctp.connected_at OR (ctp.connected_at IS NULL AND EXCLUDED.connected_at IS NOT NULL)").
-					Exec(ctx)
-			}
-			if err != nil {
-				return err
-			}
-			if written, err := result.RowsAffected(); err != nil || written != 1 {
-				return errors.Join(ErrConnectorToolPinMoved, err)
+			moved[tool.Name] = tool.PreviousSchemaDigest != ""
+		}
+		for _, pin := range written {
+			// The tool was to be moved from a pin that is gone.
+			if pin.Inserted && moved[pin.ToolName] {
+				return ErrConnectorToolPinMoved
 			}
 		}
 		event := ConnectorAuditEvent{ID: newID(), CustomerID: connection.CustomerID,

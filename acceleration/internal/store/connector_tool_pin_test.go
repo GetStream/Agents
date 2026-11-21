@@ -346,6 +346,25 @@ func (s *StoreSuite) TestAToolUnpinnedForTheGrantIsPinnedByAReapproval() {
 	s.Equal(map[string]string{"search": digestOf("b"), "fetch": digestOf("c")}, pins)
 }
 
+// TestAReapprovalOfAPinThatIsGoneWritesNothing: the pin read was dropped since, so there is
+// nothing to move it from, and the approve pins none in its place.
+func (s *StoreSuite) TestAReapprovalOfAPinThatIsGoneWritesNothing() {
+	connection := s.consented(s.connection("acme-app", userOwned("alice")))
+	_, err := s.store.ConnectorToolPins.Pin(s.ctx, connection.ID, connection.ConnectedAt, map[string]string{"search": digestOf("a")})
+	s.Require().NoError(err)
+
+	err = s.store.ConnectorToolPins.Reapprove(s.ctx, connection, "", []ApprovedTool{
+		{Name: "search", SchemaDigest: digestOf("b"), PreviousSchemaDigest: digestOf("a")},
+		{Name: "fetch", SchemaDigest: digestOf("b"), PreviousSchemaDigest: digestOf("a")},
+	})
+
+	s.Require().ErrorIs(err, ErrConnectorToolPinMoved)
+	pins, err := s.store.ConnectorToolPins.Select(s.ctx, connection.ID, connection.ConnectedAt)
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"search": digestOf("a")}, pins)
+	s.Empty(s.reapprovals(connection))
+}
+
 func (s *StoreSuite) TestADeletedConnectionIsNotReapproved() {
 	connection := s.consented(s.connection("acme-app", userOwned("alice")))
 	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
@@ -373,11 +392,13 @@ func (s *StoreSuite) TestConnectorToolPinQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(pins, 30)
 	}), "Select")
-	s.Equal(5, s.countQueries(func() {
+	// The transaction, the grant, every pin in one statement and the audit row, however many tools.
+	const reapprove = 5
+	s.Equal(reapprove, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorToolPins.Reapprove(s.ctx, connection, "request",
 			[]ApprovedTool{{Name: "tool_0", SchemaDigest: "d2", PreviousSchemaDigest: "d1"}}))
 	}), "Reapprove, one tool")
-	s.Equal(7, s.countQueries(func() {
+	s.Equal(reapprove, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorToolPins.Reapprove(s.ctx, connection, "request", []ApprovedTool{
 			{Name: "tool_1", SchemaDigest: "d2", PreviousSchemaDigest: "d1"},
 			{Name: "tool_2", SchemaDigest: "d2", PreviousSchemaDigest: "d1"},
