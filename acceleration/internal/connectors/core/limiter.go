@@ -105,8 +105,9 @@ func (l *Limiter) Wait(ctx context.Context, key string) time.Duration {
 // limit. Both are zero when it may go. The block and the count are one pipeline, one round
 // trip.
 //
-// The call is counted in the window it falls in, refused or not, which changes nothing for a
-// call over limit: the window it is in is already over. Windows are fixed: they start at
+// A call that goes, or is over limit, is counted in the window it falls in, which changes
+// nothing for one over limit: the window it is in is already over. A blocked call is not: its
+// count is given back, a second round trip only then. Windows are fixed: they start at
 // multiples of window, so every router sharing the Redis counts the same one.
 //
 // Like Wait, it fails open: a nil Limiter, an empty key, a limit or window of zero, or an
@@ -130,7 +131,7 @@ func (l *Limiter) Admit(ctx context.Context, blockKey, callsKey string, limit in
 		// Two windows: the count outlives the window it belongs to whatever the call that
 		// started it saw of the clock, and leaves Redis soon after.
 		commands = append(commands, l.redis.B().Eval().Script(countScript).Numkeys(1).
-			Key(callsKey+":"+strconv.FormatInt(start.UnixMilli(), 10)).
+			Key(windowKey(callsKey, start)).
 			Arg(strconv.FormatInt(2*window.Milliseconds(), 10)).Build())
 	}
 	if len(commands) == 0 {
@@ -143,8 +144,12 @@ func (l *Limiter) Admit(ctx context.Context, blockKey, callsKey string, limit in
 		}
 	}
 	if counted {
-		if count, err := results[len(results)-1].AsInt64(); err == nil && count > limit {
-			over = start.Add(window).Sub(now)
+		if count, err := results[len(results)-1].AsInt64(); err == nil {
+			if blocked > 0 {
+				l.redis.Do(ctx, l.redis.B().Decr().Key(windowKey(callsKey, start)).Build())
+			} else if count > limit {
+				over = start.Add(window).Sub(now)
+			}
 		}
 	}
 	return blocked, over
@@ -211,4 +216,9 @@ func accountOf(c Connection) []string {
 		return []string{"account", c.AccountID}
 	}
 	return []string{"connection", c.ID}
+}
+
+// windowKey is the key of callsKey's count for the window starting at start.
+func windowKey(callsKey string, start time.Time) string {
+	return callsKey + ":" + strconv.FormatInt(start.UnixMilli(), 10)
 }

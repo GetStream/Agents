@@ -121,6 +121,15 @@ func (s *Server) proxyConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidRequest(err.Error()))
 		return
 	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyBody))
+	if maxed := (*http.MaxBytesError)(nil); errors.As(err, &maxed) {
+		writeError(w, payloadTooLarge(fmt.Sprintf("the body is over %d bytes", maxProxyBody)))
+		return
+	}
+	if err != nil {
+		writeError(w, invalidRequest("the body could not be read"))
+		return
+	}
 	limit := manifest.RateLimitKey(connection.CustomerID, coreConnection(connection))
 	// All customers share the router's egress: one customer's calls to a connector are capped
 	// so they cannot spend a provider's limit for everyone (AI-958).
@@ -135,15 +144,6 @@ func (s *Server) proxyConnection(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", waitSeconds(over))
 		writeError(w, rateLimited(fmt.Sprintf("this app's direct calls to %s are over %d a minute: retry after %ss",
 			connection.ConnectorID, s.proxyCallsPerMinute, waitSeconds(over))))
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyBody))
-	if maxed := (*http.MaxBytesError)(nil); errors.As(err, &maxed) {
-		writeError(w, payloadTooLarge(fmt.Sprintf("the body is over %d bytes", maxProxyBody)))
-		return
-	}
-	if err != nil {
-		writeError(w, invalidRequest("the body could not be read"))
 		return
 	}
 	observed, exchange := core.WithExchange(ctx)

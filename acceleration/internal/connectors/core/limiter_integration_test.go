@@ -243,26 +243,38 @@ func (s *LimiterSuite) TestAnUnreachableRedisCountsNothing() {
 	}
 }
 
-// TestAdmittingACallReadsTheBlockAndCountsInOneRoundTrip: limit 1 a minute, from 12:00:35,
-// with the provider holding the key for 10s.
+// TestAdmittingACallReadsTheBlockAndCountsInOneRoundTrip: limit 1 a minute, from 12:00:35.
 func (s *LimiterSuite) TestAdmittingACallReadsTheBlockAndCountsInOneRoundTrip() {
 	s.clock.now = s.clock.now.Truncate(time.Minute).Add(35 * time.Second)
 	sent := &roundTrips{}
-	client := rueidishook.WithHook(s.redis, sent)
-	limiter := core.NewLimiter(client, s.clock.Now)
+	limiter := core.NewLimiter(rueidishook.WithHook(s.redis, sent), s.clock.Now)
+	block, calls := s.key+":block", s.key+":calls"
+
+	for _, want := range []time.Duration{0, 25 * time.Second} {
+		before := sent.count.Load()
+		blocked, over := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
+		s.Equal(int64(1), sent.count.Load()-before, "one round trip")
+		s.Zero(blocked)
+		s.Equal(want, over)
+	}
+}
+
+// TestACallRefusedForTheBlockIsNotCounted: limit 1 a minute, from 12:00:35, with the provider
+// holding the key for 10s. A customer retrying through the provider's block keeps their calls.
+func (s *LimiterSuite) TestACallRefusedForTheBlockIsNotCounted() {
+	s.clock.now = s.clock.now.Truncate(time.Minute).Add(35 * time.Second)
+	limiter := core.NewLimiter(s.redis, s.clock.Now)
 	block, calls := s.key+":block", s.key+":calls"
 	s.Require().Equal(10*time.Second, limiter.Block(s.ctx, block, 10*time.Second))
-	before := sent.count.Load()
 
-	blocked, over := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
-
-	s.Equal(int64(1), sent.count.Load()-before, "one round trip")
-	s.Equal(10*time.Second, blocked)
-	s.Zero(over, "the first call of the window is under limit")
+	for range 3 {
+		blocked, _ := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
+		s.Equal(10*time.Second, blocked)
+	}
 	s.clock.Add(10 * time.Second)
-	blocked, over = limiter.Admit(s.ctx, block, calls, 1, time.Minute)
+	blocked, over := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
 	s.Zero(blocked)
-	s.Equal(15*time.Second, over, "the call refused for the block was counted")
+	s.Zero(over, "the first call that goes is the window's first")
 }
 
 // roundTrips counts what a client sends Redis: a command, or a pipeline of them, is one.
