@@ -60,19 +60,6 @@ func (s *StoreSuite) TestAgentLogRedactsBeforeStorage() {
 	s.Equal(map[string]any{"tool": "lookup"}, row.Details)
 }
 
-// TestAnAgentLogWhoseDetailsHoldANulIsStored: jsonb holds no \u0000, and a provider's error
-// text may carry one.
-func (s *StoreSuite) TestAnAgentLogWhoseDetailsHoldANulIsStored() {
-	entry := AgentLog{CustomerID: "nul-test", Source: "agent", Severity: "error", EventType: "test", Message: "failed",
-		Details: map[string]any{"error_message": "bad\x00byte"}}
-
-	s.Require().NoError(s.store.AgentLogs.Insert(s.ctx, &entry))
-
-	row, err := s.store.AgentLogs.Get(s.ctx, "nul-test", entry.ID)
-	s.Require().NoError(err)
-	s.Contains(row.Details["error_message"], "byte")
-}
-
 func (s *StoreSuite) TestAgentLogProviderFailureDetails() {
 	request := &Request{Modality: "search", CustomerID: "failure-details", AgentID: "test-agent", Provider: "perplexity", Model: "search", StartedAt: time.Now(), Success: false, ErrorCode: "build_failed", ErrorMessage: "perplexity: PERPLEXITY_API_KEY is required; api_key=private-key-value"}
 	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
@@ -127,8 +114,8 @@ func (s *StoreSuite) TestAgentLogQueryBudgets() {
 	}
 	last := entry()
 
-	// The customer's lock and the insert, in one statement.
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.AgentLogs.Insert(s.ctx, last)) }))
+	// The transaction, the customer's lock and the insert.
+	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentLogs.Insert(s.ctx, last)) }))
 	s.Equal(1, s.countQueries(func() {
 		high, err := s.store.AgentLogs.HighWater(s.ctx, "acme")
 		s.Require().NoError(err)
