@@ -572,7 +572,8 @@ func (s *RouterSuite) SetupSuite() {
 
 	// A shard database and Redis run the suite as a hosted shard runs: the shared rows in one
 	// place and the calls, sessions and requests in another.
-	options := store.Options{DSN: testDatabase(s.T(), dsn)}
+	options := store.Options{DSN: testDatabase(s.T(), dsn), Redis: store.Redis{Address: redisAddr},
+		ShardRedis: store.Redis{Address: os.Getenv("ROUTER_REDIS_SHARD_ADDR")}}
 	if s.channelProvider != nil && s.database == "" {
 		s.T().Fatal("a suite with the real channel bridge needs a database of its own: its inbound worker takes every queued message there")
 	}
@@ -2079,6 +2080,35 @@ func (s *RouterSuite) useApp(app testApp) {
 // be the ones an endpoint reads back.
 func (s *RouterSuite) customerID() string { return s.app.app.ID }
 
+// heldCall records call as one of a session's, of its customer and agent, under the config
+// and in the conversation named: the session first, as its recorder writes them, since the
+// call names it.
+func (s *RouterSuite) heldCall(call store.Call, configID, conversationID string) store.Call {
+	call.SessionID = s.utils.uuid()
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: call.SessionID,
+		CustomerID: call.CustomerID, AgentID: call.AgentID, ConfigID: configID, ConversationID: conversationID,
+		CreatedAt: call.StartedAt}))
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &call))
+	return call
+}
+
+// sessionCall reads the newest call of session id into into, which may be nil, and answers
+// as a read of the call would: 200, or 404 while none is written.
+func (s *RouterSuite) sessionCall(id string, into *Call) int {
+	var listed []Call
+	status := s.serverClient.do(http.MethodGet, "/v1/agents/calls?session_id="+url.QueryEscape(id), nil, &listed)
+	if status != http.StatusOK {
+		return status
+	}
+	if len(listed) == 0 {
+		return http.StatusNotFound
+	}
+	if into != nil {
+		*into = listed[0]
+	}
+	return http.StatusOK
+}
+
 // signedFor is a token for an end user signed with secret, for a test presenting one that
 // was signed with the wrong one.
 func (s *RouterSuite) signedFor(secret string) string {
@@ -2434,7 +2464,7 @@ func (d testData) briefed(request CreateSessionRequest) (CreateSessionRequest, s
 // straight into the store, for an endpoint that only asks whose a session is.
 func (d testData) storedSession() string {
 	id := "session-" + d.suite.utils.uuid()
-	d.suite.Require().NoError(d.suite.store.SaveSession(context.Background(),
+	d.suite.Require().NoError(d.suite.store.Sessions.Upsert(context.Background(),
 		&store.AgentSession{ID: id, CustomerID: d.suite.customerID()}))
 	return id
 }

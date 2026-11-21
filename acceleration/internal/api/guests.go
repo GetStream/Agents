@@ -344,7 +344,7 @@ func (s *Server) addToGuestChannels(ctx context.Context, customerID, guestID, us
 	// The sessions have already been rewritten, so they are found by the account rather than
 	// by the guest. Only the ones that kept a transcript have a channel to join, and only the
 	// ones the account reaches: an anonymous caller that went by its id is somebody else.
-	moved, err := s.store.QuerySessions(ctx, customerID, store.SessionFilter{
+	moved, err := s.store.Sessions.Select(ctx, customerID, store.SessionFilter{
 		UserID: userID, CallerKinds: []string{string(auth.KindAuthenticated), string(auth.KindServer)}, Limit: 200,
 	})
 	if err != nil {

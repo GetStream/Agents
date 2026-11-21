@@ -167,7 +167,7 @@ func (s *SessionConnectorsSuite) recordedInstructions(connector, instructions st
 	opened := s.client.createSession(s.session(config.Id, map[string]string{"crm": mine}))
 	s.recorded(opened.Id)
 	var call Call
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+opened.Id, nil, &call))
+	s.Require().Equal(http.StatusOK, s.sessionCall(opened.Id, &call))
 	s.client.stopSession(opened.Id)
 	return value(call.Instructions)
 }
@@ -950,7 +950,7 @@ func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 
 	var call Call
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+forked.Id, nil, &call) == http.StatusOK &&
+		return s.sessionCall(forked.Id, &call) == http.StatusOK &&
 			call.ReviewNotes != nil
 	}, 2*settleFor, 10*time.Millisecond, "the fork is reviewed when it ends")
 	review := strings.TrimSuffix(*call.ReviewNotes, "\n\n"+`Answer with JSON only: {"summary": "...", "score": 3, "notes": "..."}`)
@@ -961,7 +961,7 @@ func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 // and a session stopped before it is there loses the review that stopping starts.
 func (s *SessionConnectorsSuite) recorded(id string) {
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+id, nil, nil) == http.StatusOK
+		return s.sessionCall(id, nil) == http.StatusOK
 	}, settleFor, 10*time.Millisecond, "the call is recorded")
 }
 
@@ -989,7 +989,7 @@ func (s *SessionConnectorsSuite) forkSummary(parent string, config *string) stri
 	var summary string
 	s.Require().Eventually(func() bool {
 		var call Call
-		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+forked.Id, nil, &call)
+		s.sessionCall(forked.Id, &call)
 		summary = value(call.Summary)
 		return strings.Contains(summary, "upgrade")
 	}, 2*settleFor, 10*time.Millisecond, "the fork is summarised when it ends")

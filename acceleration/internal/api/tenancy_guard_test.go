@@ -121,7 +121,7 @@ func (s *TenancyGuardSuite) TestTheDeploymentAppsHooksStartNothingForACustomerOn
 	s.chat.SetAppFor(suiteStreamKey, chattest.App{ID: suiteStreamApp})
 	s.useApp(s.numberedApp(streamAppID()))
 	agent := "chat-" + s.utils.uuid()
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &store.Call{
 		ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(), AgentID: agent,
 		StartedAt: time.Now().UTC(),
 	}))

@@ -122,11 +122,12 @@ var dataTables = []dataTable{
 	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
-	{name: "calls", customer: "customer_id", shard: true},
 	{name: "call_bridges", customer: "customer_id", shard: true},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
+	// After the sessions their session_id points at.
+	{name: "calls", customer: "customer_id", shard: true},
 	{name: "agent_responses", customer: "customer_id", shard: true},
 	{name: "agent_response_items", parent: "agent_responses", parentColumn: "response_id", shard: true},
 	{name: "conversation_documents", customer: "customer_id", shard: true},

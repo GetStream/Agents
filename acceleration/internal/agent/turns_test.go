@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/stretchr/testify/suite"
 )
@@ -27,7 +27,7 @@ func TestTurnRecorderSuite(t *testing.T) {
 // recorder is one with nowhere to write. Nothing here lets a row reach the writer, so the
 // store it would need is never touched.
 func (s *TurnRecorderSuite) recorder() *turnRecorder {
-	return newTurnRecorder(nil, nil, routing.Owner{CustomerID: "acme"}, slog.New(slog.DiscardHandler))
+	return newTurnRecorder(nil, routing.Owner{CustomerID: "acme"}, slog.New(slog.DiscardHandler))
 }
 
 // TestATurnRecordedAfterCloseIsLetGo covers the one send that cannot be recovered from.
@@ -77,9 +77,9 @@ func (s *TurnRecorderSuite) TestTurnsRecordedWhileClosingAreLetGo() {
 
 // slowRecorder is one whose writes are whatever write says, not a store, with a logger
 // that keeps what it says.
-func (s *TurnRecorderSuite) slowRecorder(drain time.Duration, write func(context.Context, live.Turn) error) (*turnRecorder, *bytes.Buffer) {
+func (s *TurnRecorderSuite) slowRecorder(drain time.Duration, write func(context.Context, store.Turn) error) (*turnRecorder, *bytes.Buffer) {
 	var logs bytes.Buffer
-	r := buildTurnRecorder(nil, nil, routing.Owner{CustomerID: "acme", AgentID: "agent-1"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	r := buildTurnRecorder(nil, routing.Owner{CustomerID: "acme", AgentID: "agent-1"}, slog.New(slog.NewTextHandler(&logs, nil)))
 	r.drainTimeout = drain
 	r.write = write
 	return r.start(), &logs
@@ -99,7 +99,7 @@ func (s *TurnRecorderSuite) TestTheDrainDeadlineIsTwoWrites() {
 func (s *TurnRecorderSuite) TestCloseGivesUpOnAStoreThatNeverAnswers() {
 	const queued = 20
 	var attempts atomic.Int64
-	r, logs := s.slowRecorder(200*time.Millisecond, func(ctx context.Context, _ live.Turn) error {
+	r, logs := s.slowRecorder(200*time.Millisecond, func(ctx context.Context, _ store.Turn) error {
 		attempts.Add(1)
 		<-ctx.Done()
 		return ctx.Err()
@@ -132,7 +132,7 @@ func (s *TurnRecorderSuite) TestCloseGivesUpOnAStoreThatNeverAnswers() {
 func (s *TurnRecorderSuite) TestCloseWritesEveryQueuedRowWhenTheStoreAnswers() {
 	var mu sync.Mutex
 	var written []string
-	r, logs := s.slowRecorder(time.Minute, func(_ context.Context, row live.Turn) error {
+	r, logs := s.slowRecorder(time.Minute, func(_ context.Context, row store.Turn) error {
 		time.Sleep(time.Millisecond)
 		mu.Lock()
 		defer mu.Unlock()
@@ -160,7 +160,7 @@ func (s *TurnRecorderSuite) TestCloseWritesEveryQueuedRowWhenTheStoreAnswers() {
 // the one in flight when the deadline passes is stored, the two behind it are dropped.
 func (s *TurnRecorderSuite) TestAWriteThatFinishesPastTheDeadlineIsNotCounted() {
 	var attempts atomic.Int64
-	r, _ := s.slowRecorder(50*time.Millisecond, func(context.Context, live.Turn) error {
+	r, _ := s.slowRecorder(50*time.Millisecond, func(context.Context, store.Turn) error {
 		attempts.Add(1)
 		time.Sleep(300 * time.Millisecond)
 		return nil
@@ -179,9 +179,9 @@ func (s *TurnRecorderSuite) TestAWriteThatFinishesPastTheDeadlineIsNotCounted() 
 // in a stuck store: the first rows give up on their own timeout, before any deadline.
 func (s *TurnRecorderSuite) TestAWriteThatTimesOutOnItsOwnIsCounted() {
 	var logs bytes.Buffer
-	r := buildTurnRecorder(nil, nil, routing.Owner{CustomerID: "acme"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	r := buildTurnRecorder(nil, routing.Owner{CustomerID: "acme"}, slog.New(slog.NewTextHandler(&logs, nil)))
 	r.writeTimeout = 20 * time.Millisecond
-	r.write = func(ctx context.Context, _ live.Turn) error {
+	r.write = func(ctx context.Context, _ store.Turn) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -199,7 +199,7 @@ func (s *TurnRecorderSuite) TestAWriteThatTimesOutOnItsOwnIsCounted() {
 // TestAFailedWriteIsNotADrop keeps the count to what the deadline cut: a store that
 // answers with an error is logged by the writer, and the call is not behind.
 func (s *TurnRecorderSuite) TestAFailedWriteIsNotADrop() {
-	r, _ := s.slowRecorder(time.Minute, func(context.Context, live.Turn) error {
+	r, _ := s.slowRecorder(time.Minute, func(context.Context, store.Turn) error {
 		return context.DeadlineExceeded
 	})
 	for i := 0; i < 5; i++ {
@@ -494,9 +494,9 @@ func (s *TurnRecorderSuite) TestACallerTurnAnsweredByALaterLineIsTimedFromTheLas
 // reads back.
 func (s *TurnRecorderSuite) TestATurnsGuardrailCheckIsKeptOnItsRow() {
 	probability := 0.07
-	check := &live.GuardrailCheck{Kind: "decision_model", Model: "typesafe/jev-latest", Probability: &probability, Allowed: true, LatencyMs: 140, Mode: "parallel"}
-	rows := make(chan live.Turn, 2)
-	r, _ := s.slowRecorder(time.Minute, func(_ context.Context, row live.Turn) error {
+	check := &store.GuardrailCheck{Kind: "decision_model", Model: "typesafe/jev-latest", Probability: &probability, Allowed: true, LatencyMs: 140, Mode: "parallel"}
+	rows := make(chan store.Turn, 2)
+	r, _ := s.slowRecorder(time.Minute, func(_ context.Context, row store.Turn) error {
 		rows <- row
 		return nil
 	})

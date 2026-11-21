@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // TimelineSuite pairs turns with the lines of a transcript the way a call stores them: a
@@ -125,10 +125,10 @@ func (s *TimelineSuite) TestATurnTheAgentStartedHeardNothing() {
 }
 
 // turns are turns starting at offsets from the start, in milliseconds.
-func (s *TimelineSuite) turns(offsets ...int) []live.Turn {
-	turns := make([]live.Turn, 0, len(offsets))
+func (s *TimelineSuite) turns(offsets ...int) []store.Turn {
+	turns := make([]store.Turn, 0, len(offsets))
 	for _, offset := range offsets {
-		turns = append(turns, live.Turn{TurnID: "turn-" + strconv.Itoa(offset), StartedAt: s.at(offset)})
+		turns = append(turns, store.Turn{TurnID: "turn-" + strconv.Itoa(offset), StartedAt: s.at(offset)})
 	}
 	return turns
 }

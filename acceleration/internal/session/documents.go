@@ -21,7 +21,7 @@ func (m *Manager) documents(ctx context.Context, spec Spec) []agent.Document {
 			kept := document
 			kept.ID, kept.SessionID, kept.ConversationID, kept.ResponseID = store.NewID(), spec.ID, spec.ConversationID, ""
 			kept.CustomerID, kept.OwnerUserID, kept.CreatedAt = spec.CustomerID, spec.Caller.UserID, document.CreatedAt
-			if err := written.AddConversationDocument(ctx, &kept); err != nil {
+			if err := written.ConversationDocuments.Insert(ctx, &kept); err != nil {
 				m.logger.Error("could not keep a document a fork carried", "session", spec.ID, "error", err)
 				continue
 			}
@@ -33,7 +33,7 @@ func (m *Manager) documents(ctx context.Context, spec Spec) []agent.Document {
 	if written == nil || spec.ConversationID == "" && spec.Reopened.IsZero() {
 		return documents
 	}
-	stored, err := written.ConversationDocuments(ctx, spec.CustomerID, store.DocumentScope{
+	stored, err := written.ConversationDocuments.Select(ctx, spec.CustomerID, store.DocumentScope{
 		ConversationID: spec.ConversationID, SessionID: spec.ID, Owner: spec.Caller.UserID,
 	})
 	if err != nil {

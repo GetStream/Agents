@@ -331,10 +331,10 @@ func (s *ForgetUserSuite) userRows(app, user string) userRows {
 func (s *ForgetUserSuite) snapshotted(shard int, app, user string) string {
 	id := "session-" + uuid.NewString()
 	now := time.Now().UTC()
-	s.Require().NoError(s.shards[shard].SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.shards[shard].Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: id, CustomerID: app, AgentName: "docs", UserID: user, CallerKind: "user", CreatedAt: now,
 	}))
-	s.Require().NoError(s.shards[shard].SaveBranchMessages(s.ctx, []store.AgentBranchMessage{{
+	s.Require().NoError(s.shards[shard].BranchMessages.UpsertMany(s.ctx, []store.AgentBranchMessage{{
 		SessionID: id, OriginalMessageID: "m-" + uuid.NewString(), CustomerID: app, ResponseID: "second",
 		SwitchID: "switch", ChatCreatedAt: now, AuthorID: user, Message: map[string]any{"text": "hello from " + user},
 	}}))

@@ -52,10 +52,10 @@ func (s *StoreSuite) TestASessionKeepsTheFloorControlItWasOpenedWith() {
 	s.opened("chosen", "app", s.base, func(session *AgentSession) { session.FloorControl = waiting })
 	s.opened("default", "app", s.base, nil)
 
-	chosen, err := s.store.StoredSession(s.ctx, "app", "chosen")
+	chosen, err := s.store.Sessions.Get(s.ctx, "app", "chosen")
 	s.Require().NoError(err)
 	s.Equal(waiting, chosen.FloorControl)
-	unchosen, err := s.store.StoredSession(s.ctx, "app", "default")
+	unchosen, err := s.store.Sessions.Get(s.ctx, "app", "default")
 	s.Require().NoError(err)
 	s.True(unchosen.FloorControl.IsZero())
 }

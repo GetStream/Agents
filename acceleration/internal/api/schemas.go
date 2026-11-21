@@ -113,18 +113,18 @@ type Call struct {
 	AgentId      string             `json:"agent_id" doc:"Which agent ran it, and where its transcript is kept."`
 	CallId       string             `json:"call_id"`
 	CampaignId   *string            `json:"campaign_id,omitempty"`
-	ConfigId     *string            `json:"config_id,omitempty"`
 	ContactId    *string            `json:"contact_id,omitempty"`
 	Direction    CallDirection      `json:"direction" enum:"inbound,outbound"`
 	EndedAt      *time.Time         `json:"ended_at,omitempty" doc:"Absent while the call is still running."`
 	FromNumber   *string            `json:"from_number,omitempty"`
-	Id           string             `json:"id" doc:"The session that ran the call, which is what it is held by."`
+	Id           string             `json:"id"`
 	Instructions *string            `json:"instructions,omitempty" doc:"What the agent was told to be on this call."`
 	Llm          *string            `json:"llm,omitempty" doc:"The target that held the conversation."`
 	LlmUsed      *string            `json:"llm_used,omitempty" doc:"The provider/model that held the conversation."`
 	Mode         *SessionMode       `json:"mode,omitempty"`
 	ReviewNotes  *string            `json:"review_notes,omitempty"`
 	ReviewScore  *int               `json:"review_score,omitempty" doc:"How well the agent handled it, from 1 to 5."`
+	SessionId    *string            `json:"session_id,omitempty" doc:"The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted."`
 	Skills       *[]string          `json:"skills,omitempty" doc:"What the fast model could hand to the subagent. The instructions behind each name are in the skill registry."`
 	StartedAt    time.Time          `json:"started_at"`
 	Sts          *string            `json:"sts,omitempty" doc:"The speech-to-speech target, for a native call, on the same terms as stt."`
@@ -139,7 +139,6 @@ type Call struct {
 	Tts          *string            `json:"tts,omitempty" doc:"The voice target, on the same terms as stt."`
 	TtsUsed      *string            `json:"tts_used,omitempty" doc:"The provider/model that spoke, on the same terms as stt_used."`
 	Usage        *CallUsage         `json:"usage,omitempty"`
-	UserId       *string            `json:"user_id,omitempty" doc:"Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name."`
 	Voice        *string            `json:"voice,omitempty" doc:"The voice the call asked for, in the provider's own terms. Empty means the provider's default."`
 	VoiceUsed    *string            `json:"voice_used,omitempty" doc:"The voice that spoke, which is the provider's default when none was asked for. Known only while the call is running."`
 }

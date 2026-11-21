@@ -220,7 +220,7 @@ func (s *Server) listSessionTools(ctx context.Context, request *listSessionTools
 			loadings[tool.Name] = ToolLoading(found.Live.ToolLoading(tool.Name))
 		}
 	} else {
-		stored, err := s.store.SessionTools(ctx, request.Id)
+		stored, err := s.store.SessionTools.Get(ctx, request.Id)
 		if errors.Is(err, store.ErrNoSessionTools) {
 			return nil, errNoSessionTools
 		}

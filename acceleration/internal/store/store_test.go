@@ -629,7 +629,7 @@ func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
 	}))
 
-	used, err := s.store.CallUsedModels(s.ctx, "acme", "agent-1", s.base, nil)
+	used, err := s.store.Calls.UsedModels(s.ctx, "acme", "agent-1", s.base, nil)
 	s.Require().NoError(err)
 	s.Equal([]UsedModel{
 		{Modality: "llm", Provider: "openai", Model: "gpt-5.6-sol"},
@@ -659,7 +659,7 @@ func (s *StoreSuite) TestACallAddsUpWhatEveryOneOfItsRequestsSpent() {
 		InputTokens: 9000, OutputTokens: 9000, CostMicros: 90000, Success: true,
 	}))
 
-	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
+	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
 
 	s.Require().NoError(err)
 	s.Equal(CallUsage{
@@ -679,12 +679,12 @@ func (s *StoreSuite) TestACallsRuntimeIsItsOwnSessionsAndNoRequest() {
 		s.Require().NoError(s.store.RecordRequest(s.ctx, &row))
 	}
 
-	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
+	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
 	s.Require().NoError(err)
 	s.EqualValues(650, spent.CostMicros, "the model's and this session's time, not the other session's")
 	s.EqualValues(1, spent.Requests, "runtime is no request")
 
-	used, err := s.store.CallTokens(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
+	used, err := s.store.Calls.Tokens(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
 	s.Require().NoError(err)
 	var cost, requests int64
 	for _, model := range used {
@@ -708,11 +708,11 @@ func (s *StoreSuite) TestACallDoesNotCountAnotherSessionOfItsAgent() {
 		s.Require().NoError(s.store.RecordRequest(s.ctx, &row))
 	}
 
-	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
+	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
 	s.Require().NoError(err)
 	s.Equal(CallUsage{InputTokens: 107, CostMicros: 53, Requests: 2}, spent)
 
-	used, err := s.store.CallTokens(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
+	used, err := s.store.Calls.Tokens(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
 	s.Require().NoError(err)
 	s.Require().Len(used, 1)
 	s.EqualValues(107, used[0].InputTokens)
@@ -721,7 +721,7 @@ func (s *StoreSuite) TestACallDoesNotCountAnotherSessionOfItsAgent() {
 }
 
 func (s *StoreSuite) TestACallThatMadeNoRequestsSpentNothing() {
-	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-with-no-work", "session-1", s.base, nil)
+	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-with-no-work", "session-1", s.base, nil)
 
 	s.Require().NoError(err)
 	s.Equal(CallUsage{}, spent)
@@ -740,27 +740,15 @@ func (s *StoreSuite) TestWhatWasSpentAfterACallEndedIsNotTheCallsToPayFor() {
 		InputTokens: 7000, CostMicros: 8000, Success: true,
 	}))
 
-	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-1", "session-1", s.base, &ended)
+	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, &ended)
 
 	s.Require().NoError(err)
 	s.Equal(int64(300), spent.InputTokens)
 	s.Equal(int64(1), spent.Requests)
 }
 
-func (s *StoreSuite) TestACallRemembersWhoTheAgentSpokeTo() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{
-		ID: "call-with-a-user", CustomerID: "acme", CallID: "stream-1",
-		AgentID: "agent-1", UserID: "ada", StartedAt: s.base,
-	}))
-
-	found, err := s.store.Call(s.ctx, "acme", "call-with-a-user")
-
-	s.Require().NoError(err)
-	s.Equal("ada", found.UserID)
-}
-
 func (s *StoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "call", CustomerID: "cancel-log", AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
+	s.sessionCall(s.store, Call{ID: "call", SessionID: "session-cancel-log", CustomerID: "cancel-log", AgentID: "agent", StartedAt: s.base}, "cfg")
 	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
 		StartedAt: s.base.Add(time.Second), OutputTokens: 4, Success: false, ErrorCode: ErrorCancelled}))
 	logs, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: "cancel-log", Limit: 10})
@@ -1348,7 +1336,7 @@ func (s *StoreSuite) TestARowPostgresRefusesIsUnwritable() {
 }
 
 func (s *StoreSuite) TestAShardedBatchWritesOneLogRowPerNewRow() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "call", CustomerID: "batch-log", AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
+	s.sessionCall(s.store, Call{ID: "call", SessionID: "session-batch-log", CustomerID: "batch-log", AgentID: "agent", StartedAt: s.base}, "cfg")
 	batch := []Request{
 		s.usageRow("batch-log", func(request *Request) { request.AgentID = "agent" }),
 		s.usageRow("batch-log", func(request *Request) { request.AgentID = "agent" }),
@@ -1364,17 +1352,17 @@ func (s *StoreSuite) TestAShardedBatchWritesOneLogRowPerNewRow() {
 	s.Require().NoError(err)
 	s.Len(logs, 2, "one log row per agent row, and none for a row written again")
 	for _, log := range logs {
-		s.Equal("call", log.SessionID)
+		s.Equal("session-batch-log", log.SessionID)
 	}
 }
 
 func (s *StoreSuite) TestABatchLogsEachRowInItsOwnCall() {
-	for _, call := range []*Call{
-		{ID: "first", CallID: "stream-1", CustomerID: "calls-a", AgentID: "agent", ConfigID: "cfg-1", StartedAt: s.base},
-		{ID: "second", CallID: "stream-2", CustomerID: "calls-a", AgentID: "agent", ConfigID: "cfg-2", StartedAt: s.base.Add(time.Minute)},
-		{ID: "other", CallID: "stream-3", CustomerID: "calls-b", AgentID: "agent", ConfigID: "cfg-3", StartedAt: s.base},
+	for config, call := range map[string]Call{
+		"cfg-1": {ID: "call-first", SessionID: "first", CallID: "stream-1", CustomerID: "calls-a", AgentID: "agent", StartedAt: s.base},
+		"cfg-2": {ID: "call-second", SessionID: "second", CallID: "stream-2", CustomerID: "calls-a", AgentID: "agent", StartedAt: s.base.Add(time.Minute)},
+		"cfg-3": {ID: "call-other", SessionID: "other", CallID: "stream-3", CustomerID: "calls-b", AgentID: "agent", StartedAt: s.base},
 	} {
-		s.Require().NoError(s.store.StartCall(s.ctx, call))
+		s.sessionCall(s.store, call, config)
 	}
 	at := func(customer, callID string, after time.Duration) Request {
 		return s.usageRow(customer, func(request *Request) {

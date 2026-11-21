@@ -349,7 +349,7 @@ func (s *SlackChannelSuite) heldOnThread() string {
 	held := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
 	s.Require().Equal("agent:"+channel, value(held.ConversationId))
 	s.Require().Eventually(func() bool {
-		_, err := s.store.StoredSession(context.Background(), s.customerID(), held.Id)
+		_, err := s.store.Sessions.Get(context.Background(), s.customerID(), held.Id)
 		return err == nil
 	}, settleFor, 20*time.Millisecond, "the session's row was never stored")
 	handOver()

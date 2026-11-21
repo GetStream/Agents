@@ -168,11 +168,11 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 	if err != nil {
 		return nil, err
 	}
-	endings, err := s.store.SessionEndings(ctx, apps, since)
+	endings, err := s.store.Sessions.Endings(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	latest, err := s.store.LatestSessions(ctx, apps, since, latestSessions)
+	latest, err := s.store.Sessions.Latest(ctx, apps, since, latestSessions)
 	if err != nil {
 		return nil, err
 	}

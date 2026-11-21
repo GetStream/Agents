@@ -539,14 +539,13 @@ func (s *MessageHooksSuite) holds() string {
 // ran records a conversation having been held on the channel, which is what a call leaves
 // behind.
 func (s *MessageHooksSuite) ran(configID string) {
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+	s.heldCall(store.Call{
 		ID:         s.utils.uuid(),
 		CustomerID: s.customerID(),
 		CallID:     s.utils.callID(),
 		AgentID:    s.channelID,
-		ConfigID:   configID,
 		StartedAt:  time.Now().UTC(),
-	}))
+	}, configID, "")
 }
 
 // wrote delivers a signed message.new for the channel, as Stream would. The custom data is

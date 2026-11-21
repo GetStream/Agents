@@ -2036,7 +2036,7 @@ func redactToolOutput(ctx context.Context, pgStore *store.Store, logger *slog.Lo
 	for {
 		var redacted int64
 		for range redactBatches {
-			rows, err := pgStore.RedactToolOutput(ctx, time.Now().UTC(), redactBatch)
+			rows, err := pgStore.ResponseItems.Redact(ctx, time.Now().UTC(), redactBatch)
 			if err != nil {
 				logger.Error("could not redact tool output", "error", err)
 				break

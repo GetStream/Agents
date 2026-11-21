@@ -100,13 +100,13 @@ VALUES (?, 'agent_configs', 'insert', '{}', now() - make_interval(secs => ?))`,
 	s.Require().NoError(err)
 	session := &store.AgentSession{ID: uuid.NewString(), CustomerID: customer, AgentName: "docs", ConfigID: "config-1",
 		UserID: "user-1", CallerKind: store.UserKindAuthenticated, State: store.SessionClosed, CreatedAt: time.Now().UTC()}
-	s.Require().NoError(s.db.SaveSession(s.ctx, session))
+	s.Require().NoError(s.db.Sessions.Upsert(s.ctx, session))
 	response := uuid.NewString()
-	s.Require().NoError(s.db.StartResponse(s.ctx, &store.AgentResponse{
+	s.Require().NoError(s.db.Responses.Insert(s.ctx, &store.AgentResponse{
 		ID: response, SessionID: session.ID, CustomerID: customer, Said: "where is my order?", CreatedAt: time.Now().UTC(),
 	}))
 	due := time.Now().UTC().Add(-time.Hour)
-	s.Require().NoError(s.db.AppendResponseItems(s.ctx, []store.AgentResponseItem{{
+	s.Require().NoError(s.db.ResponseItems.InsertMany(s.ctx, []store.AgentResponseItem{{
 		ResponseID: response, SessionID: session.ID, Kind: store.ItemToolResult, ToolName: "orders",
 		Text: `{"email":"someone@example.com"}`, At: time.Now().UTC(), RedactAt: &due,
 	}}))

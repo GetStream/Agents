@@ -1460,7 +1460,7 @@ func (s *DataMoveSuite) seedPluginConnection(store *Store, customerID, token str
 // unpinned, as everything written before pins was.
 func (s *DataMoveSuite) pinnedSession(customerID string, app int64) string {
 	id := uuid.NewString()
-	s.Require().NoError(s.source.SaveSession(s.ctx, &AgentSession{
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
 		ID: id, CustomerID: customerID, StreamAppPK: app, AgentID: "agent", UserID: "user",
 	}))
 	return id

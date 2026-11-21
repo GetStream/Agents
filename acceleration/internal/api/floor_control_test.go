@@ -153,7 +153,7 @@ func (s *FloorControlSuite) TestAnOptOutIsStoredAndReadBackAsSent() {
 
 	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: &synced.Config.Id, FloorControl: chorusASRFloor(1100)})
 	s.Require().Eventually(func() bool {
-		row, err := s.store.StoredSession(context.Background(), s.customerID(), opened.Id)
+		row, err := s.store.Sessions.Get(context.Background(), s.customerID(), opened.Id)
 		return err == nil && row.FloorControl.MaxWaitMs == 1100
 	}, settleFor, 20*time.Millisecond, "a session chooses chorus-asr over its config's opt-out")
 	s.serverClient.stopSession(opened.Id)
@@ -281,11 +281,11 @@ func (s *FloorControlSuite) TestASessionChoosesItsFloorControlServerSide() {
 	opened := s.serverClient.createSession(request)
 	unchosen := s.serverClient.createSession(CreateSessionRequest{ConfigId: &agent.ID})
 	s.Require().Eventually(func() bool {
-		row, err := s.store.StoredSession(context.Background(), s.customerID(), opened.Id)
+		row, err := s.store.Sessions.Get(context.Background(), s.customerID(), opened.Id)
 		return err == nil && row.FloorControl.MaxWaitMs == 1100
 	}, settleFor, 20*time.Millisecond, "the session keeps the choice it was opened with")
 	s.Require().Eventually(func() bool {
-		row, err := s.store.StoredSession(context.Background(), s.customerID(), unchosen.Id)
+		row, err := s.store.Sessions.Get(context.Background(), s.customerID(), unchosen.Id)
 		return err == nil && row.FloorControl == agent.FloorControl
 	}, settleFor, 20*time.Millisecond, "a session takes its config's")
 	// A chat carried on from its row is one somebody wrote in.
@@ -293,7 +293,7 @@ func (s *FloorControlSuite) TestASessionChoosesItsFloorControlServerSide() {
 	respondIn(&s.RouterSuite, s.serverClient, unchosen.Id, "hello")
 	s.Require().Eventually(func() bool {
 		for _, id := range []string{opened.Id, unchosen.Id} {
-			if row, err := s.store.StoredSession(context.Background(), s.customerID(), id); err != nil || row.ConversationID == "" {
+			if row, err := s.store.Sessions.Get(context.Background(), s.customerID(), id); err != nil || row.ConversationID == "" {
 				return false
 			}
 		}

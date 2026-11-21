@@ -28,7 +28,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
@@ -284,7 +283,6 @@ type Options struct {
 	// Store records what each turn cost the participant in waiting. Without it the
 	// timings are still emitted as Turn events, they are just not persisted.
 	Store  *store.Store
-	Live   *live.Client
 	Logger *slog.Logger
 }
 
@@ -803,15 +801,15 @@ func New(options Options) (*Agent, error) {
 	// still measured and still reports itself, it is just not kept. Neither is kept for an
 	// incognito session: a decision holds what was heard, and a turn names the agent. Both
 	// are kept in Redis; a turn's counts also go to Postgres for the stats.
-	if (options.Store != nil || options.Live != nil) && options.AgentID != "" && !options.Incognito {
-		agent.turnStore = newTurnRecorder(options.Store, options.Live, owner, logger)
+	if options.Store != nil && options.AgentID != "" && !options.Incognito {
+		agent.turnStore = newTurnRecorder(options.Store, owner, logger)
 	}
 	var record func(Decided)
 	// The model's checks on the floor are kept with the decisions, and carried by the turns
 	// they lead to either way.
-	var recordFloorCheck func(string, live.FloorCheck)
-	if options.Live != nil && options.CallID != "" && !options.Incognito {
-		agent.decisionStore = newDecisionRecorder(options.Live, owner, logger)
+	var recordFloorCheck func(string, store.FloorCheck)
+	if options.Store != nil && options.CallID != "" && !options.Incognito {
+		agent.decisionStore = newDecisionRecorder(options.Store.CallEvents, owner, logger)
 		record = agent.decisionStore.Record
 		recordFloorCheck = agent.decisionStore.RecordFloorCheck
 	}
@@ -3117,7 +3115,7 @@ type screening struct {
 type checked struct {
 	verdict guardrail.Verdict
 	// check is nil for a check its turn was abandoned under, which answered nothing.
-	check *live.GuardrailCheck
+	check *store.GuardrailCheck
 }
 
 // wait waits for the check to answer, and says how long that was: zero when the answer was
@@ -3134,7 +3132,7 @@ func (s *screening) wait() (checked, float64) {
 }
 
 // held notes on a check how long a reply the model had begun waited for it.
-func held(check *live.GuardrailCheck, heldMs float64) *live.GuardrailCheck {
+func held(check *store.GuardrailCheck, heldMs float64) *store.GuardrailCheck {
 	if check != nil {
 		check.HeldMs = heldMs
 	}
@@ -3244,8 +3242,8 @@ func (a *Agent) screening(ctx context.Context, turnID, text string, history []ll
 // guardrailCheckOf is the record of one check. A webhook answers yes or no, so its check has
 // no model, probability or threshold, and a check that failed has no probability: read as
 // zero, it would say the turn was judged harmless.
-func guardrailCheckOf(policy guardrail.Policy, verdict guardrail.Verdict, latencyMs float64, failed bool) *live.GuardrailCheck {
-	check := &live.GuardrailCheck{
+func guardrailCheckOf(policy guardrail.Policy, verdict guardrail.Verdict, latencyMs float64, failed bool) *store.GuardrailCheck {
+	check := &store.GuardrailCheck{
 		Kind:      string(policy.Kind),
 		Model:     verdict.Model,
 		Allowed:   failed || verdict.Allowed,

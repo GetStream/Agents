@@ -279,7 +279,7 @@ func (s *Server) recordCallSites(ctx context.Context, call endedCall, details ma
 		Message:    "Call sites",
 		Details:    details,
 	}
-	if session, err := s.store.StoredSession(ctx, call.customer, call.callID); err == nil {
+	if session, err := s.store.Sessions.Get(ctx, call.customer, call.callID); err == nil {
 		entry.ConfigID, entry.AgentID = session.ConfigID, session.AgentID
 	}
 	if err := s.store.RecordAgentLog(ctx, entry); err != nil {

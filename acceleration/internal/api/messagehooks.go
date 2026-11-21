@@ -663,7 +663,7 @@ func (s *Server) ownerOf(ctx context.Context, origin hookOrigin, event messageEv
 // not known without it. A channel naming no config, or another one than the row's, is not
 // read, nor one with a voice recording, which unopenedSpec reads. A read that fails costs the
 // card, not the answer: nil.
-func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.Call) *store.AgentConfig {
+func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.HeldCall) *store.AgentConfig {
 	if _, recorded := event.recording(); recorded {
 		return nil
 	}
@@ -712,7 +712,7 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 // that failed. A hook goes on as for a channel that held none when the read fails, as it always
 // has; a queued delivery is tried again instead, so it is answered by the agent that actually
 // ran there.
-func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.Call, bool, error) {
+func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.HeldCall, bool, error) {
 	previous, err := s.store.CallByAgentInApp(ctx, origin.scope(), channelID)
 	switch {
 	case err == nil:

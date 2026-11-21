@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -22,13 +23,13 @@ func TestModelOverwritesEmpty(t *testing.T) {
 // the same as no matches. It is checked here rather than against Postgres because what it
 // is really asserting is which method runs, and that is a decision made before any SQL.
 func TestSearchWithoutWordsNeedsACustomer(t *testing.T) {
-	var store *Store
+	sessions := &Sessions{}
 
 	// Both paths refuse a caller with no customer before touching the database, which is
 	// what makes it safe to assert the fallback without one.
-	_, err := store.SearchSessions(nil, "", "", SessionFilter{})
+	_, err := sessions.Search(nil, "", "", SessionFilter{})
 	require.Error(t, err)
-	_, err = store.QuerySessions(nil, "", SessionFilter{})
+	_, err = sessions.Select(nil, "", SessionFilter{})
 	require.Error(t, err)
 }
 
@@ -38,4 +39,32 @@ func TestJSONBOfSurvivesAValueItCannotEncode(t *testing.T) {
 	// into a broken conversation list.
 	require.Equal(t, "{}", jsonbOf(map[string]any{"cycle": make(chan int)}))
 	require.Equal(t, `{"project":"health"}`, jsonbOf(map[string]string{"project": "health"}))
+}
+
+// refuses checks that each broken copy of a valid row is refused for the field it names.
+func refuses[T any](t *testing.T, valid func() T, validate func(*T) error, broken map[string]func(*T)) {
+	t.Helper()
+	row := valid()
+	require.NoError(t, validate(&row))
+	for field, breaks := range broken {
+		row := valid()
+		breaks(&row)
+		var invalid *ValidationError
+		require.True(t, errors.As(validate(&row), &invalid), field)
+		require.Equal(t, field, invalid.Field)
+	}
+}
+
+func TestSessionValidate(t *testing.T) {
+	score := 6
+	refuses(t, func() AgentSession {
+		return AgentSession{ID: "s", CustomerID: "app", State: SessionRunning, Modality: ModalityVoice}
+	}, (*AgentSession).Validate, map[string]func(*AgentSession){
+		"id":              func(s *AgentSession) { s.ID = "" },
+		"customer_id":     func(s *AgentSession) { s.CustomerID = "" },
+		"state":           func(s *AgentSession) { s.State = "paused" },
+		"modality":        func(s *AgentSession) { s.Modality = "smoke" },
+		"tool_timeout_ms": func(s *AgentSession) { s.ToolTimeoutMs = -1 },
+		"review_score":    func(s *AgentSession) { s.ReviewScore = &score },
+	})
 }

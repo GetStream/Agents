@@ -25,7 +25,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/llmtest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -956,10 +955,9 @@ type AgentSuite struct {
 	performing string
 	// voiceName is the voice the agent is configured to speak in.
 	voiceName string
-	// records is where turns are counted, and live where they are kept, when a test gives
-	// the agent a database and a Redis.
+	// records is where turns are counted and kept, when a test gives the agent a database
+	// and a Redis.
 	records *store.Store
-	live    *live.Client
 	// metering records what memory and knowledge did, when a test reads it back. Nil records
 	// nothing.
 	metering *routing.Recorder
@@ -1298,7 +1296,6 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		Region:             s.region,
 		Incognito:          s.incognito,
 		Store:              s.records,
-		Live:               s.live,
 		SubagentTarget:     subagentTarget,
 		Skills:             s.skills,
 		Telephony:          calling,

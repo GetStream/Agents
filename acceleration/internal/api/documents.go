@@ -181,7 +181,7 @@ func (s *Server) keepDocument(ctx context.Context, found *session.Session, respo
 		return
 	}
 	// The turn is running whether or not the caller is still there to hear it started.
-	err := s.store.AddConversationDocument(context.WithoutCancel(ctx), &store.ConversationDocument{
+	err := s.store.ConversationDocuments.Insert(context.WithoutCancel(ctx), &store.ConversationDocument{
 		ID: sent.read.ID, CustomerID: spec.CustomerID, OwnerUserID: spec.Caller.UserID, SessionID: found.ID(),
 		ConversationID: spec.ConversationID, ResponseID: responseID, Name: sent.read.Name, Pages: sent.read.Pages,
 		SHA256: sent.sha, Markdown: sent.read.Text,
