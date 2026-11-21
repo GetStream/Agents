@@ -154,7 +154,7 @@ func (s *DispatcherSuite) TestADisconnectedAccountIsNotCalledAndTheOtherIsNotUse
 	d, _, _, err := s.attach(s.spec(config, "alice", map[string]string{"primary": primary, "secondary": secondary}))
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, s.customerID, primary))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, s.customerID, primary))
 	_, refused := s.call(d, "primary__whoami", "{}")
 	said, err := s.call(d, "secondary__whoami", "{}")
 
@@ -351,7 +351,7 @@ func (s *DispatcherSuite) TestABindingThatIsNotCancellableStopsWaitingAndLeavesT
 		slowFor, 50*time.Millisecond)
 	s.Equal(1, s.provider.calls("primary"))
 	s.Eventually(func() bool {
-		rows, err := s.store.ConnectorInvocations(s.ctx, s.customerID, app, 0, nil)
+		rows, err := s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: app, Limit: 0, After: nil})
 		return err == nil && len(rows) == 1 && rows[0].ErrorType == store.InvocationOutcomeUnknown
 	}, 5*time.Second, 20*time.Millisecond)
 }

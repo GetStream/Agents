@@ -63,7 +63,7 @@ func (s *SessionConnectorsSuite) SetupSuite() {
 	s.approvalWait = 5 * time.Second
 	s.RouterSuite.SetupSuite()
 	// Seeded as a router start does, for the nessy binding the approval tests set beside crm.
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	s.token = issuedToken(&s.RouterSuite, s.provider)
 }
 
@@ -105,7 +105,7 @@ func (s *SessionConnectorsSuite) TestAToolCallAnswered400KeepsAStaticTokenConnec
 
 	s.Equal(connectorEcho, ran["tool"])
 	s.NotEmpty(ran["error"], "the provider's 400 is the call's answer")
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), mine)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), mine)
 	s.Require().NoError(err)
 	s.Equal(store.ConnectionConnected, connection.Status)
 }
@@ -122,7 +122,7 @@ func (s *SessionConnectorsSuite) TestACustomConnectorsServerInstructionsFollowTh
 // config's instructions alone, as on base (probe on c4d53f3e9: "Be brief.").
 func (s *SessionConnectorsSuite) TestABuiltInConnectorsServerInstructionsAreLeftOut() {
 	builtin := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{builtin + ".yaml": {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{builtin + ".yaml": {
 		Data: []byte(strings.Replace(s.manifest(), "custom_crm", builtin, 1))}}))
 
 	s.Equal("Be brief.", s.recordedInstructions(builtin, "Quote ticket ids whole."))
@@ -134,7 +134,7 @@ func (s *SessionConnectorsSuite) TestABuiltInConnectorsServerInstructionsAreLeft
 // did (probe on c467ee4d6: crm__echo ran with the echo's text and no error, for each).
 func (s *SessionConnectorsSuite) TestARowStillNamingPluginsRunsItsBuiltInAndCustomBindingsAsOnBase() {
 	builtin := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{builtin + ".yaml": {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{builtin + ".yaml": {
 		Data: []byte(strings.Replace(s.manifest(), "custom_crm", builtin, 1))}}))
 	for kind, connector := range map[string]string{"custom": s.connector(), "built-in": builtin} {
 		s.Run(kind, func() {
@@ -757,7 +757,7 @@ func (s *RouterSuite) customConnector(provider *fakeprovider.Server) string {
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest, err := core.ParseManifest([]byte(strings.Replace(customManifest(provider), "custom_crm", id, 1)))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }

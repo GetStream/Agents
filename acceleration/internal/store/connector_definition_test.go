@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing/fstest"
@@ -22,7 +23,7 @@ import (
 
 // seed runs the seeder over one built-in file, as a router start with that file would.
 func (s *StoreSuite) seed(raw string) {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(raw)}}))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(raw)}}))
 }
 
 // revisions is every stored revision of a built-in, oldest first.
@@ -80,11 +81,11 @@ func (s *StoreSuite) seedingANewBuiltInLeavesTheOthersAsTheyWere(id string) {
 		s.Require().NoError(err)
 		before[file.Name()] = &fstest.MapFile{Data: raw}
 	}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, before))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, before))
 	latest := func() map[string]int {
 		revisions := map[string]int{}
 		for name := range before {
-			definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, strings.TrimSuffix(name, ".yaml"))
+			definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, strings.TrimSuffix(name, ".yaml"))
 			s.Require().NoError(err)
 			revisions[definition.ID] = definition.Revision
 		}
@@ -92,10 +93,10 @@ func (s *StoreSuite) seedingANewBuiltInLeavesTheOthersAsTheyWere(id string) {
 	}
 	was := latest()
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 
 	s.Equal(was, latest())
-	added, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, id)
+	added, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, id)
 	s.Require().NoError(err)
 	raw, err := fs.ReadFile(providers.FS, id+".yaml")
 	s.Require().NoError(err)
@@ -121,11 +122,11 @@ func (s *StoreSuite) TestMetabaseRevisionTwoSeedsOverTheRevisionOneTheBuildBefor
 		before[file.Name()] = &fstest.MapFile{Data: raw}
 	}
 	before["metabase.yaml"] = &fstest.MapFile{Data: one}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, before))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, before))
 	latest := func() map[string]int {
 		revisions := map[string]int{}
 		for name := range before {
-			definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, strings.TrimSuffix(name, ".yaml"))
+			definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, strings.TrimSuffix(name, ".yaml"))
 			s.Require().NoError(err)
 			revisions[definition.ID] = definition.Revision
 		}
@@ -134,17 +135,17 @@ func (s *StoreSuite) TestMetabaseRevisionTwoSeedsOverTheRevisionOneTheBuildBefor
 	was := latest()
 	s.Require().Equal(1, was["metabase"])
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 
 	now := latest()
 	s.Equal(3, now["metabase"])
 	delete(was, "metabase")
 	delete(now, "metabase")
 	s.Equal(was, now)
-	first, err := s.store.ConnectorDefinition(s.ctx, "app_1", "metabase", 1)
+	first, err := s.store.ConnectorDefinitions.Get(s.ctx, "app_1", "metabase", 1)
 	s.Require().NoError(err)
 	s.Empty(first.Manifest.Sources[0].Tools, "revision 1 names no tool")
-	_, broken, err := s.store.BrokenConnectorRevision(s.ctx, "metabase", 1)
+	_, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "metabase", 1)
 	s.Require().NoError(err)
 	s.False(broken)
 }
@@ -155,14 +156,14 @@ func (s *StoreSuite) TestMetabaseRevisionTwoSeedsOverTheRevisionOneTheBuildBefor
 func (s *StoreSuite) TestGoogleDriveRevisionSixSeedsOverTheRevisionFourTheBuildBeforeStored() {
 	four, err := os.ReadFile("testdata/google_drive-revision-4.yaml")
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"google_drive.yaml": &fstest.MapFile{Data: four}}))
-	was, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, "google_drive")
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"google_drive.yaml": &fstest.MapFile{Data: four}}))
+	was, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, "google_drive")
 	s.Require().NoError(err)
 	s.Require().Equal(4, was.Revision)
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 
-	now, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, "google_drive")
+	now, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, "google_drive")
 	s.Require().NoError(err)
 	s.Equal(6, now.Revision)
 	s.NotEmpty(now.Manifest.Scopes.CoveredBy)
@@ -191,11 +192,11 @@ func (s *StoreSuite) TestSlackRevisionSixSeedsOverTheRevisionFiveTheBuildBeforeS
 	s.Require().True(found)
 	five = strings.Replace(five, "\nrevision: 7\n", "\nrevision: 5\n", 1) + "\n# [proto]:3-5\n" + rest
 	before["slack.yaml"] = &fstest.MapFile{Data: []byte(five)}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, before))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, before))
 	latest := func() map[string]int {
 		revisions := map[string]int{}
 		for name := range before {
-			definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, strings.TrimSuffix(name, ".yaml"))
+			definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, strings.TrimSuffix(name, ".yaml"))
 			s.Require().NoError(err)
 			revisions[definition.ID] = definition.Revision
 		}
@@ -203,11 +204,11 @@ func (s *StoreSuite) TestSlackRevisionSixSeedsOverTheRevisionFiveTheBuildBeforeS
 	}
 	was := latest()
 	s.Require().Equal(5, was["slack"])
-	_, broken, err := s.store.BrokenConnectorRevision(s.ctx, "slack", 4)
+	_, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "slack", 4)
 	s.Require().NoError(err)
 	s.Require().False(broken, "revision 5 marks nothing")
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS), "the marks are a new revision, not refused")
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS), "the marks are a new revision, not refused")
 
 	now := latest()
 	s.Equal(7, now["slack"])
@@ -215,7 +216,7 @@ func (s *StoreSuite) TestSlackRevisionSixSeedsOverTheRevisionFiveTheBuildBeforeS
 	delete(now, "slack")
 	s.Equal(was, now)
 	for revision, want := range map[int]bool{1: true, 2: true, 3: true, 4: true, 5: false, 6: false, 7: false} {
-		reason, broken, err := s.store.BrokenConnectorRevision(s.ctx, "slack", revision)
+		reason, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "slack", revision)
 		s.Require().NoError(err)
 		s.Equal(want, broken, "revision %d", revision)
 		if want {
@@ -260,11 +261,11 @@ func (s *StoreSuite) TestTheReadOnlyToolsSeedOverTheRevisionsTheBuildBeforeStore
 		was = strings.Replace(was, fmt.Sprintf("\nrevision: %d\n", revision), fmt.Sprintf("\nrevision: %d\n", revision-1), 1)
 		before[id+".yaml"] = &fstest.MapFile{Data: []byte(was)}
 	}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, before))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, before))
 	latest := func() map[string]int {
 		revisions := map[string]int{}
 		for name := range before {
-			definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, strings.TrimSuffix(name, ".yaml"))
+			definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, strings.TrimSuffix(name, ".yaml"))
 			s.Require().NoError(err)
 			revisions[definition.ID] = definition.Revision
 		}
@@ -272,13 +273,13 @@ func (s *StoreSuite) TestTheReadOnlyToolsSeedOverTheRevisionsTheBuildBeforeStore
 	}
 	was := latest()
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS), "the lists are new revisions, not refused")
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS), "the lists are new revisions, not refused")
 
 	now := latest()
 	for id, revision := range listed {
 		s.Equal(revision-1, was[id], id)
 		s.Equal(revision, now[id], id)
-		definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, id)
+		definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, id)
 		s.Require().NoError(err)
 		s.NotEmpty(definition.Manifest.Sources[0].ReadOnlyTools, id)
 		delete(was, id)
@@ -303,11 +304,11 @@ func (s *StoreSuite) TestShopifyRevisionTwoSeedsOverTheRevisionOneTheBuildBefore
 		before[file.Name()] = &fstest.MapFile{Data: raw}
 	}
 	before["shopify.yaml"] = &fstest.MapFile{Data: one}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, before))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, before))
 	latest := func() map[string]int {
 		revisions := map[string]int{}
 		for name := range before {
-			definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, strings.TrimSuffix(name, ".yaml"))
+			definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, strings.TrimSuffix(name, ".yaml"))
 			s.Require().NoError(err)
 			revisions[definition.ID] = definition.Revision
 		}
@@ -315,22 +316,22 @@ func (s *StoreSuite) TestShopifyRevisionTwoSeedsOverTheRevisionOneTheBuildBefore
 	}
 	was := latest()
 	s.Require().Equal(1, was["shopify"])
-	_, broken, err := s.store.BrokenConnectorRevision(s.ctx, "shopify", 1)
+	_, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "shopify", 1)
 	s.Require().NoError(err)
 	s.Require().False(broken, "revision 1 marks nothing")
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 
 	now := latest()
 	s.Equal(2, now["shopify"])
 	delete(was, "shopify")
 	delete(now, "shopify")
 	s.Equal(was, now)
-	reason, broken, err := s.store.BrokenConnectorRevision(s.ctx, "shopify", 1)
+	reason, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "shopify", 1)
 	s.Require().NoError(err)
 	s.True(broken)
 	s.Equal("asked for an OAuth login; the storefront MCP at /api/mcp needs none", reason)
-	_, broken, err = s.store.BrokenConnectorRevision(s.ctx, "shopify", 2)
+	_, broken, err = s.store.ConnectorBrokenRevisions.Get(s.ctx, "shopify", 2)
 	s.Require().NoError(err)
 	s.False(broken)
 }
@@ -344,7 +345,7 @@ func (s *StoreSuite) TestSeedingABuiltInStoresTheRevisionsItMarksBroken() {
 	s.seed(acmeMarking)
 
 	for revision, want := range map[int]bool{1: true, 2: true, 3: false} {
-		reason, broken, err := s.store.BrokenConnectorRevision(s.ctx, "acme", revision)
+		reason, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "acme", revision)
 		s.Require().NoError(err)
 		s.Equal(want, broken, "revision %d", revision)
 		if want {
@@ -369,11 +370,11 @@ func (s *StoreSuite) TestAMarkStaysWhenALaterRevisionDropsItOrGivesAnotherReason
 	s.seed(strings.Replace(acmeManifest, "revision: 1", "revision: 5", 1) +
 		"broken_revisions:\n  - revisions: [1]\n    reason: another reason\n")
 
-	reason, broken, err := s.store.BrokenConnectorRevision(s.ctx, "acme", 1)
+	reason, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "acme", 1)
 	s.Require().NoError(err)
 	s.True(broken)
 	s.Equal("the first reason", reason)
-	_, broken, err = s.store.BrokenConnectorRevision(s.ctx, "acme", 2)
+	_, broken, err = s.store.ConnectorBrokenRevisions.Get(s.ctx, "acme", 2)
 	s.Require().NoError(err)
 	s.True(broken)
 }
@@ -386,14 +387,14 @@ func (s *StoreSuite) TestARestartRestoresAMarkThatWasMissingFromAnAlreadyStoredR
 	s.seed(acmeMarking)
 	_, err := s.store.GlobalDB().NewDelete().Model((*ConnectorBrokenRevision)(nil)).Where("connector_id = ?", "acme").Exec(s.ctx)
 	s.Require().NoError(err)
-	_, broken, err := s.store.BrokenConnectorRevision(s.ctx, "acme", 1)
+	_, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "acme", 1)
 	s.Require().NoError(err)
 	s.Require().False(broken)
 
 	s.seed(acmeMarking)
 
 	for _, revision := range []int{1, 2} {
-		reason, broken, err := s.store.BrokenConnectorRevision(s.ctx, "acme", revision)
+		reason, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "acme", revision)
 		s.Require().NoError(err)
 		s.True(broken, "revision %d", revision)
 		s.Equal("the first reason", reason)
@@ -408,13 +409,13 @@ func (s *StoreSuite) TestAnotherConnectorsMarkDoesNotBreakAConnectionOnTheSameRe
 	s.seed(acmeMarking)
 	other := strings.Replace(acmeManifest, "id: acme", "id: other", 1)
 	s.Require().Contains(other, "id: other")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"other.yaml": {Data: []byte(other)}}))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"other.yaml": {Data: []byte(other)}}))
 	mine, theirs := appConnection(), appConnection()
 	theirs.ConnectorID = "other"
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, mine))
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, theirs))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, mine))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, theirs))
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{*mine, *theirs})
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{*mine, *theirs})
 	s.Require().NoError(err)
 
 	s.Equal(map[string]DefinitionStatus{
@@ -429,18 +430,18 @@ func (s *StoreSuite) TestAConnectionsDefinitionIsCurrentOutdatedOrBroken() {
 	at := func(revision int) ConnectorConnection {
 		connection := appConnection()
 		connection.DefinitionRevision = revision
-		s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+		s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 		return *connection
 	}
 	one, two := at(1), at(2)
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{one, two})
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{one, two})
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{one.ID: {Status: DefinitionOutdated}, two.ID: {Status: DefinitionCurrent}}, statuses)
 
 	s.seed(acmeMarking)
 	three := at(3)
-	statuses, err = s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{one, two, three})
+	statuses, err = s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{one, two, three})
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{
 		one.ID:   {Status: DefinitionBroken, Reason: "the first reason"},
@@ -464,13 +465,14 @@ func (s *StoreSuite) TestOnlyARevisionChangingWhatAConnectionReadsMakesItOutdate
 	s.seed(acmeManifest)
 	s.seed(acmeReadOnly)
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{pinnedTo("one", "acme", 1)})
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{pinnedTo("one", "acme", 1)})
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{"one": {Status: DefinitionCurrent}}, statuses)
 
 	s.seed(strings.Replace(strings.Replace(acmeReadOnly, "revision: 2", "revision: 3", 1), "list: [read, write]", "list: [read]", 1))
-	statuses, err = s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app",
+	statuses, err = s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app",
 		[]ConnectorConnection{pinnedTo("one", "acme", 1), pinnedTo("two", "acme", 2), pinnedTo("three", "acme", 3)})
+
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{
 		"one": {Status: DefinitionOutdated}, "two": {Status: DefinitionOutdated}, "three": {Status: DefinitionCurrent},
@@ -485,10 +487,10 @@ func (s *StoreSuite) TestEachConnectionIsComparedFromItsOwnRevisionWithItsOwnCon
 	s.seed(acmeReverted)
 	for _, raw := range []string{acmeManifest, acmeChanged} {
 		other := strings.Replace(raw, "id: acme", "id: other", 1)
-		s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"other.yaml": {Data: []byte(other)}}))
+		s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"other.yaml": {Data: []byte(other)}}))
 	}
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{
 		pinnedTo("acme 1", "acme", 1), pinnedTo("acme 2", "acme", 2), pinnedTo("acme 3", "acme", 3),
 		pinnedTo("other 1", "other", 1), pinnedTo("other 2", "other", 2),
 	})
@@ -506,7 +508,7 @@ func (s *StoreSuite) TestAConnectionOnARevisionNotStoredIsOutdated() {
 	s.seed(acmeManifest)
 	s.seed(strings.Replace(acmeManifest, "revision: 1", "revision: 3", 1))
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{pinnedTo("two", "acme", 2)})
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{pinnedTo("two", "acme", 2)})
 
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{"two": {Status: DefinitionOutdated}}, statuses)
@@ -516,12 +518,12 @@ func (s *StoreSuite) TestAConnectionOnARevisionNotStoredIsOutdated() {
 // which asks for another scope, is not what the customer's connection reads.
 func (s *StoreSuite) TestAConnectionIsComparedWithItsOwnCustomersRevisionsOnly() {
 	s.crm("acme-app")
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "acme-app", parsed(s.T(), customCRM+"    read_only_tools: [search]\n"))
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app", parsed(s.T(), customCRM+"    read_only_tools: [search]\n"))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(s.ctx, "other-app", parsed(s.T(), customCRM+"scopes:\n  list: [admin]\n"))
+	_, err = s.store.ConnectorDefinitions.Revise(s.ctx, "other-app", parsed(s.T(), customCRM+"scopes:\n  list: [admin]\n"))
 	s.Require().NoError(err)
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", []ConnectorConnection{pinnedTo("one", "custom_crm", 1)})
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{pinnedTo("one", "custom_crm", 1)})
 
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{"one": {Status: DefinitionCurrent}}, statuses)
@@ -549,11 +551,11 @@ func (s *StoreSuite) TestBigQueryRevisionThreeLeavesAConnectionOnRevisionTwoCurr
 	threeAndFour, _, found := strings.Cut(string(after["bigquery.yaml"].Data), "\nsandbox:\n")
 	s.Require().True(found)
 	after["bigquery.yaml"] = &fstest.MapFile{Data: []byte(strings.Replace(threeAndFour, "revision: 4\n", "revision: 3\n", 1))}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, before))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, before))
 	latest := func() map[string]int {
 		revisions := map[string]int{}
 		for name := range before {
-			definition, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, strings.TrimSuffix(name, ".yaml"))
+			definition, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, strings.TrimSuffix(name, ".yaml"))
 			s.Require().NoError(err)
 			revisions[definition.ID] = definition.Revision
 		}
@@ -562,30 +564,30 @@ func (s *StoreSuite) TestBigQueryRevisionThreeLeavesAConnectionOnRevisionTwoCurr
 	was := latest()
 	s.Require().Equal(2, was["bigquery"])
 	pinned := []ConnectorConnection{pinnedTo("bigquery 2", "bigquery", 2)}
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", pinned)
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", pinned)
 	s.Require().NoError(err)
 	s.Require().Equal(DefinitionCurrent, statuses["bigquery 2"].Status)
 
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, after))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, after))
 
 	now := latest()
 	s.Equal(3, now["bigquery"])
 	delete(was, "bigquery")
 	delete(now, "bigquery")
 	s.Equal(was, now)
-	third, err := s.store.LatestBuiltinConnectorDefinition(s.ctx, "bigquery")
+	third, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, "bigquery")
 	s.Require().NoError(err)
 	s.NotContains(third.Manifest.Sources[0].ReadOnlyTools, "execute_sql_readonly")
-	_, broken, err := s.store.BrokenConnectorRevision(s.ctx, "bigquery", 2)
+	_, broken, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "bigquery", 2)
 	s.Require().NoError(err)
 	s.False(broken)
-	statuses, err = s.store.ConnectorDefinitionStatuses(s.ctx, "acme-app", pinned)
+	statuses, err = s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", pinned)
 	s.Require().NoError(err)
 	s.Equal(map[string]DefinitionStatus{"bigquery 2": {Status: DefinitionCurrent}}, statuses)
 }
 
 func (s *StoreSuite) TestSeedingAnEmptyTableStoresEachShippedBuiltInAtTheRevisionItNames() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 	shipped, err := builtinManifests(providers.FS)
 	s.Require().NoError(err)
 	on := true
@@ -593,13 +595,13 @@ func (s *StoreSuite) TestSeedingAnEmptyTableStoresEachShippedBuiltInAtTheRevisio
 
 	// acme has no app row, so it sees no internal built-in (visibleTo).
 	public := slices.DeleteFunc(slices.Clone(shipped), func(m core.Manifest) bool { return m.Internal })
-	noRow, err := s.store.ListConnectorDefinitions(s.ctx, "acme", ConnectorDefinitionFilter{})
+	noRow, err := s.store.ConnectorDefinitions.Select(s.ctx, "acme", ConnectorDefinitionFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(noRow, 23)
 	s.Equal(manifestIDs(public), definitionIDs(noRow))
 
 	// An app with the flag lists every shipped built-in, the internal ones included.
-	listed, err := s.store.ListConnectorDefinitions(s.ctx, flagged, ConnectorDefinitionFilter{})
+	listed, err := s.store.ConnectorDefinitions.Select(s.ctx, flagged, ConnectorDefinitionFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(listed, 24)
 	s.Equal(manifestIDs(shipped), definitionIDs(listed))
@@ -635,13 +637,13 @@ func (s *StoreSuite) TestAChangedManifestAtANewRevisionIsTheLatestAndTheLastOneS
 	s.seed(acmeManifest)
 	s.seed(acmeChanged)
 
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, "anyone", "acme")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, "anyone", "acme")
 	s.Require().NoError(err)
 	s.Equal(2, latest.Revision)
 	s.Equal(2, latest.Manifest.Revision)
 	s.Equal([]string{"read"}, latest.Manifest.Scopes.List)
 
-	first, err := s.store.ConnectorDefinition(s.ctx, "anyone", "acme", 1)
+	first, err := s.store.ConnectorDefinitions.Get(s.ctx, "anyone", "acme", 1)
 	s.Require().NoError(err)
 	s.Equal([]string{"read", "write"}, first.Manifest.Scopes.List, "a connection pinned to revision 1 still reads what it was made from")
 }
@@ -657,7 +659,7 @@ func (s *StoreSuite) TestTwoBuildsSeedingTheirOwnFilesDoNotFlipTheLatest() {
 
 	stored := s.revisions("acme")
 	s.Require().Len(stored, 2, "each build finds its own revision stored")
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, "anyone", "acme")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, "anyone", "acme")
 	s.Require().NoError(err)
 	s.Equal(2, latest.Revision, "an older build starting last does not make its manifest latest")
 	s.Equal([]string{"read"}, latest.Manifest.Scopes.List)
@@ -668,10 +670,10 @@ func (s *StoreSuite) TestAnOlderBuildStartingAfterANewerOneLeavesTheNewerLatest(
 	s.seed(acmeChanged)
 	s.seed(acmeManifest)
 
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, "anyone", "acme")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, "anyone", "acme")
 	s.Require().NoError(err)
 	s.Equal(2, latest.Revision)
-	first, err := s.store.ConnectorDefinition(s.ctx, "anyone", "acme", 1)
+	first, err := s.store.ConnectorDefinitions.Get(s.ctx, "anyone", "acme", 1)
 	s.Require().NoError(err, "the older build's revision is stored for the connections it makes")
 	s.Equal([]string{"read", "write"}, first.Manifest.Scopes.List)
 }
@@ -679,7 +681,7 @@ func (s *StoreSuite) TestAnOlderBuildStartingAfterANewerOneLeavesTheNewerLatest(
 func (s *StoreSuite) TestAnEditWithoutANewRevisionIsRefused() {
 	s.seed(acmeManifest)
 
-	err := s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(acmeEditedInPlace)}})
+	err := s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(acmeEditedInPlace)}})
 
 	s.ErrorContains(err, "acme.yaml says revision 1, which is already stored with other content")
 	stored := s.revisions("acme")
@@ -692,7 +694,7 @@ func (s *StoreSuite) TestRevertingAManifestIsANewRevision() {
 	s.seed(acmeChanged)
 	s.seed(acmeReverted)
 
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, "anyone", "acme")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, "anyone", "acme")
 	s.Require().NoError(err)
 	s.Equal(3, latest.Revision)
 	s.Equal([]string{"read", "write"}, latest.Manifest.Scopes.List)
@@ -721,7 +723,7 @@ func (s *StoreSuite) TestTwoRoutersSeedingAChangeAtOnceStoreOneRevision() {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = router.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(acmeChanged)}})
+			errs[i] = router.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(acmeChanged)}})
 		}()
 	}
 	close(start)
@@ -739,7 +741,7 @@ func (s *StoreSuite) TestAnInvalidBuiltInStoresNoneOfTheBuiltIns() {
 	broken := strings.Replace(acmeManifest, "id: acme", "id: broken", 1)
 	broken = strings.Replace(broken, "schemes: [oauth2_code, test_key, test_mtls]", "schemes: []", 1)
 
-	err := s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{
+	err := s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{
 		"acme.yaml":   {Data: []byte(acmeManifest)},
 		"broken.yaml": {Data: []byte(broken)},
 	})
@@ -750,19 +752,22 @@ func (s *StoreSuite) TestAnInvalidBuiltInStoresNoneOfTheBuiltIns() {
 }
 
 func (s *StoreSuite) TestACustomDefinitionIdStartsWithTheCustomPrefix() {
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "acme", parsed(s.T(), acmeManifest))
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme", parsed(s.T(), acmeManifest))
 
-	s.ErrorContains(err, "a custom connector id starts with custom_")
+	var invalid *ValidationError
+	s.Require().ErrorAs(err, &invalid)
+	s.Equal("id", invalid.Field)
+	s.Empty(s.revisions("acme"), "nothing was stored")
 }
 
 func (s *StoreSuite) TestACustomDefinitionCannotShadowABuiltIn() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 	shadow := parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: slack", 1))
 
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "acme", shadow)
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme", shadow)
 	s.Error(err)
 
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, "acme", "slack")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, "acme", "slack")
 	s.Require().NoError(err)
 	s.Equal(BuiltinCustomer, latest.CustomerID, "slack is still the built-in for this customer")
 	s.Equal("Slack", latest.Name)
@@ -771,7 +776,7 @@ func (s *StoreSuite) TestACustomDefinitionCannotShadowABuiltIn() {
 func (s *StoreSuite) TestNoCustomerCanCreateABuiltIn() {
 	custom := parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_crm", 1))
 
-	_, err := s.store.CreateConnectorDefinition(s.ctx, BuiltinCustomer, custom)
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, BuiltinCustomer, custom)
 
 	s.ErrorContains(err, "customer id is required")
 }
@@ -779,37 +784,39 @@ func (s *StoreSuite) TestNoCustomerCanCreateABuiltIn() {
 func (s *StoreSuite) TestCreatingACustomDefinitionAgainIsTheNextRevisionOnlyWhenItChanged() {
 	custom := strings.Replace(acmeManifest, "id: acme", "id: custom_crm", 1)
 
-	created, err := s.store.CreateConnectorDefinition(s.ctx, "acme", parsed(s.T(), custom))
+	created, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme", parsed(s.T(), custom))
 	s.Require().NoError(err)
 	s.Equal(1, created.Revision)
 	s.Equal("acme", created.CustomerID)
 
-	again, err := s.store.CreateConnectorDefinition(s.ctx, "acme", parsed(s.T(), custom))
+	again, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme", parsed(s.T(), custom))
 	s.Require().NoError(err)
 	s.Equal(1, again.Revision, "the same manifest again is the revision already stored")
 
-	changed, err := s.store.CreateConnectorDefinition(s.ctx, "acme",
+	changed, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme",
 		parsed(s.T(), strings.Replace(acmeChanged, "id: acme", "id: custom_crm", 1)))
+
 	s.Require().NoError(err)
 	s.Equal(2, changed.Revision)
 }
 
 func (s *StoreSuite) TestACustomDefinitionIsOnlyItsOwnCustomers() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "acme",
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme",
 		parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_crm", 1)))
+
 	s.Require().NoError(err)
 
-	_, err = s.store.ConnectorDefinition(s.ctx, "globex", "custom_crm", 1)
+	_, err = s.store.ConnectorDefinitions.Get(s.ctx, "globex", "custom_crm", 1)
 	s.True(errors.Is(err, ErrNoConnectorDefinition), "fetched by id and revision: %v", err)
-	_, err = s.store.LatestConnectorDefinition(s.ctx, "globex", "custom_crm")
+	_, err = s.store.ConnectorDefinitions.Latest(s.ctx, "globex", "custom_crm")
 	s.True(errors.Is(err, ErrNoConnectorDefinition), "fetched as the latest: %v", err)
 
-	theirs, err := s.store.ListConnectorDefinitions(s.ctx, "globex", ConnectorDefinitionFilter{})
+	theirs, err := s.store.ConnectorDefinitions.Select(s.ctx, "globex", ConnectorDefinitionFilter{})
 	s.Require().NoError(err)
 	s.Equal([]string{"bigquery", "calcom", "calendly", "github", "gmail", "gong", "google_calendar", "google_docs", "google_drive", "hubspot", "instacart", "linear", "linear_app", "linq", "metabase", "notion", "salesforce", "sentry", "shopify", "slack", "slack_bot", "telnyx", "whatsapp"}, definitionIDs(theirs), "another customer sees the built-ins alone")
 
-	ours, err := s.store.ListConnectorDefinitions(s.ctx, "acme", ConnectorDefinitionFilter{})
+	ours, err := s.store.ConnectorDefinitions.Select(s.ctx, "acme", ConnectorDefinitionFilter{})
 	s.Require().NoError(err)
 	s.Equal([]string{"bigquery", "calcom", "calendly", "github", "gmail", "gong", "google_calendar", "google_docs", "google_drive", "hubspot", "instacart", "linear", "linear_app", "linq", "metabase", "notion", "salesforce", "sentry", "shopify", "slack", "slack_bot", "telnyx", "whatsapp", "custom_crm"}, definitionIDs(ours), "built-ins first, then the customer's own")
 }
@@ -817,7 +824,7 @@ func (s *StoreSuite) TestACustomDefinitionIsOnlyItsOwnCustomers() {
 func (s *StoreSuite) TestAnUnknownRevisionIsNoDefinition() {
 	s.seed(acmeManifest)
 
-	_, err := s.store.ConnectorDefinition(s.ctx, "acme", "acme", 2)
+	_, err := s.store.ConnectorDefinitions.Get(s.ctx, "acme", "acme", 2)
 
 	s.True(errors.Is(err, ErrNoConnectorDefinition), "got %v", err)
 }
@@ -848,7 +855,7 @@ sources:
 
 // crm stores custom_crm as the customer's own and returns its id.
 func (s *StoreSuite) crm(customerID string) string {
-	_, err := s.store.CreateConnectorDefinition(s.ctx, customerID, parsed(s.T(), customCRM))
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, customerID, parsed(s.T(), customCRM))
 	s.Require().NoError(err)
 	return "custom_crm"
 }
@@ -857,7 +864,7 @@ func (s *StoreSuite) crm(customerID string) string {
 func (s *StoreSuite) crmConnection(customerID string) ConnectorConnection {
 	connection := &ConnectorConnection{CustomerID: customerID, ConnectorID: "custom_crm", DefinitionRevision: 1,
 		OwnerType: OwnerApp, AuthScheme: "test_key"}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 	return *connection
 }
 
@@ -886,19 +893,20 @@ func (s *StoreSuite) secretsOf(customerID, connectorID string) map[string]int {
 
 func (s *StoreSuite) TestAnUnusedCustomDefinitionGoesWithEveryRevisionAndMayBeMadeAgain() {
 	id := s.crm("acme-app")
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "acme-app",
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app",
 		parsed(s.T(), strings.Replace(customCRM, "name: CRM", "name: Our CRM", 1)))
+
 	s.Require().NoError(err)
 
-	deleted, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+	deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 
 	s.Require().NoError(err)
 	s.Empty(deleted.Connections)
 	for _, revision := range []int{1, 2} {
-		_, err = s.store.ConnectorDefinition(s.ctx, "acme-app", id, revision)
+		_, err = s.store.ConnectorDefinitions.Get(s.ctx, "acme-app", id, revision)
 		s.ErrorIs(err, ErrNoConnectorDefinition, "revision %d", revision)
 	}
-	again, err := s.store.CreateConnectorDefinition(s.ctx, "acme-app", parsed(s.T(), customCRM))
+	again, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app", parsed(s.T(), customCRM))
 	s.Require().NoError(err)
 	s.Equal(1, again.Revision, "a new connector, numbered from the start")
 }
@@ -907,13 +915,13 @@ func (s *StoreSuite) TestABuiltInOrAnotherCustomersDefinitionIsNotDeleted() {
 	s.seed(acmeManifest)
 	s.crm("other-app")
 
-	_, builtin := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", "acme", true)
-	_, others := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", "custom_crm", true)
+	_, builtin := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "acme", true)
+	_, others := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm", true)
 
 	s.ErrorIs(builtin, ErrNoConnectorDefinition)
 	s.ErrorIs(others, ErrNoConnectorDefinition)
 	s.Len(s.revisions("acme"), 1)
-	_, err := s.store.LatestConnectorDefinition(s.ctx, "other-app", "custom_crm")
+	_, err := s.store.ConnectorDefinitions.Latest(s.ctx, "other-app", "custom_crm")
 	s.NoError(err, "the other customer's is still there")
 }
 
@@ -925,7 +933,7 @@ func (s *StoreSuite) TestAnUnforcedDeleteOfAUsedDefinitionNamesItsUsersAndChange
 	s.Require().NoError(err)
 	config := s.boundConfig("acme-app", crmBinding("inbox", ""), crmBinding("crm", connection.ID))
 
-	deleted, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+	deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 
 	s.ErrorIs(err, ErrConnectorDefinitionInUse)
 	s.Equal([]string{connection.ID, user.ID}, deleted.Uses.Connections, "the oldest first")
@@ -934,9 +942,9 @@ func (s *StoreSuite) TestAnUnforcedDeleteOfAUsedDefinitionNamesItsUsersAndChange
 		{ConfigID: config.ID, ConfigName: config.Name, Binding: "inbox"},
 	}, deleted.Uses.Bindings)
 	s.Empty(deleted.Connections)
-	_, err = s.store.LatestConnectorDefinition(s.ctx, "acme-app", id)
+	_, err = s.store.ConnectorDefinitions.Latest(s.ctx, "acme-app", id)
 	s.NoError(err)
-	_, err = s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.NoError(err)
 }
 
@@ -946,21 +954,21 @@ func (s *StoreSuite) TestADeleteOfOneAppsConnectorLeavesAnotherAppsOfTheSameIdAl
 	theirs := s.crmConnection("other-app")
 	their := s.boundConfig("other-app", crmBinding("inbox", ""))
 
-	unforced, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+	unforced, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 	s.Require().NoError(err, "the other app's uses do not block it")
 	s.Empty(unforced.Uses.Connections)
 	s.Empty(unforced.Uses.Bindings)
 	s.crm("acme-app")
 	mine := s.crmConnection("acme-app")
-	forced, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, true)
+	forced, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, true)
 
 	s.Require().NoError(err)
 	s.Equal([]string{mine.ID}, forced.Uses.Connections)
 	s.Empty(forced.Uses.Bindings)
 	s.Equal([]DeletedConnection{{ID: mine.ID, ConnectorID: id, OwnerType: OwnerApp}}, forced.Connections)
-	_, err = s.store.LatestConnectorDefinition(s.ctx, "other-app", id)
+	_, err = s.store.ConnectorDefinitions.Latest(s.ctx, "other-app", id)
 	s.NoError(err, "the other app's definition is still there")
-	_, err = s.store.ConnectorConnection(s.ctx, "other-app", theirs.ID)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "other-app", theirs.ID)
 	s.NoError(err, "and its connection")
 	read, err := s.store.AgentConfig(s.ctx, "other-app", their.ID)
 	s.Require().NoError(err)
@@ -970,11 +978,11 @@ func (s *StoreSuite) TestADeleteOfOneAppsConnectorLeavesAnotherAppsOfTheSameIdAl
 func (s *StoreSuite) TestAGoneConnectionOrConfigDoesNotKeepAnUnforcedDeleteOff() {
 	id := s.crm("acme-app")
 	connection := s.crmConnection("acme-app")
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 	config := s.boundConfig("acme-app", crmBinding("inbox", ""))
 	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme-app", config.ID))
 
-	deleted, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+	deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 
 	s.Require().NoError(err)
 	s.Empty(deleted.Uses.Connections)
@@ -985,7 +993,7 @@ func (s *StoreSuite) TestABindingAloneKeepsAnUnforcedDeleteOff() {
 	id := s.crm("acme-app")
 	s.boundConfig("acme-app", crmBinding("inbox", ""))
 
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 
 	s.ErrorIs(err, ErrConnectorDefinitionInUse)
 }
@@ -1002,7 +1010,7 @@ func (s *StoreSuite) TestAForcedDeleteDeletesItsConnectionsAndLeavesTheBindings(
 	s.Require().NoError(err)
 	config := s.boundConfig("acme-app", crmBinding("crm", granted.ID))
 
-	deleted, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, true)
+	deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, true)
 
 	s.Require().NoError(err)
 	s.Equal([]DeletedConnection{
@@ -1011,7 +1019,7 @@ func (s *StoreSuite) TestAForcedDeleteDeletesItsConnectionsAndLeavesTheBindings(
 		{ID: user.ID, ConnectorID: id, OwnerType: OwnerUser, HadGrant: false},
 	}, deleted.Connections)
 	for _, gone := range []string{granted.ID, pending.ID, user.ID} {
-		_, err = s.store.ConnectorConnection(s.ctx, "acme-app", gone)
+		_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", gone)
 		s.ErrorIs(err, ErrNoConnectorConnection)
 	}
 	var sealed []byte
@@ -1026,14 +1034,15 @@ func (s *StoreSuite) TestAForcedDeleteDeletesItsConnectionsAndLeavesTheBindings(
 func (s *StoreSuite) TestADeleteLeavesNoSecretOfTheConnectorBehind() {
 	for _, customer := range []string{"acme-app", "other-app"} {
 		s.crm(customer)
-		_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{CustomerID: customer, ConnectorID: "custom_crm",
+		_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{CustomerID: customer, ConnectorID: "custom_crm",
 			Registration: core.ClientCustomer, ClientID: "client", SecretSealed: []byte("sealed secret"), KEKVersion: 1})
+
 		s.Require().NoError(err)
 		s.configToken(customer, "custom_crm", "sealed", s.base)
 		s.eventDestination(customer, "custom_crm", newID(), "all")
 	}
 
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", "custom_crm", false)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm", false)
 
 	s.Require().NoError(err)
 	none := map[string]int{"connector_oauth_clients": 0, "connector_config_tokens": 0, "connector_event_destinations": 0}
@@ -1055,14 +1064,14 @@ func (s *StoreSuite) TestADeleteWaitsForAConnectionInProgressAndIsRefused() {
 	creator := s.router()
 	created := make(chan error, 1)
 	connection := &ConnectorConnection{CustomerID: "acme-app", ConnectorID: id, DefinitionRevision: 1, OwnerType: OwnerApp, AuthScheme: "test_key"}
-	go func() { created <- creator.CreateConnectorConnection(s.ctx, testSchemes, connection) }()
+	go func() { created <- creator.ConnectorConnections.Insert(s.ctx, testSchemes, connection) }()
 	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the create waits at its INSERT")
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() {
-		_, err := deleter.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+		_, err := deleter.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 		deleted <- err
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
@@ -1071,7 +1080,7 @@ func (s *StoreSuite) TestADeleteWaitsForAConnectionInProgressAndIsRefused() {
 
 	s.Require().NoError(<-created)
 	s.ErrorIs(<-deleted, ErrConnectorDefinitionInUse)
-	_, err = s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.NoError(err)
 }
 
@@ -1085,7 +1094,7 @@ func (s *StoreSuite) deleteHeld(customerID string) (held bun.Tx, deleted chan er
 	deleter := s.router()
 	deleted = make(chan error, 1)
 	go func() {
-		_, err := deleter.DeleteConnectorDefinition(s.ctx, customerID, "custom_crm", false)
+		_, err := deleter.ConnectorDefinitions.Delete(s.ctx, customerID, "custom_crm", false)
 		deleted <- err
 	}()
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_oauth_clients") == 1 },
@@ -1100,8 +1109,9 @@ func (s *StoreSuite) TestAConnectionWaitsForADeleteInProgressAndIsRefused() {
 	creator := s.router()
 	created := make(chan error, 1)
 	go func() {
-		created <- creator.CreateConnectorConnection(s.ctx, testSchemes, &ConnectorConnection{
+		created <- creator.ConnectorConnections.Insert(s.ctx, testSchemes, &ConnectorConnection{
 			CustomerID: "acme-app", ConnectorID: id, DefinitionRevision: 1, OwnerType: OwnerApp, AuthScheme: "test_key"})
+
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
 		2*time.Second, 10*time.Millisecond, "the create waits for the delete's lock on the definition")
@@ -1109,7 +1119,7 @@ func (s *StoreSuite) TestAConnectionWaitsForADeleteInProgressAndIsRefused() {
 
 	s.NoError(<-deleted)
 	s.ErrorIs(<-created, ErrNoConnectorDefinition)
-	connections, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp})
+	connections, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp})
 	s.Require().NoError(err)
 	s.Empty(connections, "no connection to a deleted connector is stored")
 }
@@ -1133,7 +1143,7 @@ func (s *StoreSuite) TestADeleteWaitsForABindingInProgressAndIsRefused() {
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() {
-		_, err := deleter.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+		_, err := deleter.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 		deleted <- err
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
@@ -1170,7 +1180,7 @@ func (s *StoreSuite) TestABindingWaitsForADeleteInProgressAndIsRefused() {
 func (s *StoreSuite) TestAnUpdateKeepsABindingAForcedConnectorDeleteLeftBehind() {
 	id := s.crm("acme-app")
 	config := s.boundConfig("acme-app", crmBinding("inbox", ""))
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, "acme-app", id, true)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, true)
 	s.Require().NoError(err)
 
 	config.Instructions = "be brief"
@@ -1196,8 +1206,9 @@ func (s *StoreSuite) TestAnOAuthClientPutInProgressGoesWithTheConnector() {
 	putter := s.router()
 	put := make(chan error, 1)
 	go func() {
-		_, err := putter.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{CustomerID: "acme-app", ConnectorID: id,
+		_, err := putter.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{CustomerID: "acme-app", ConnectorID: id,
 			Registration: core.ClientCustomer, ClientID: "client", SecretSealed: []byte("sealed secret"), KEKVersion: 1})
+
 		put <- err
 	}()
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_oauth_clients") == 1 },
@@ -1205,7 +1216,7 @@ func (s *StoreSuite) TestAnOAuthClientPutInProgressGoesWithTheConnector() {
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() {
-		_, err := deleter.DeleteConnectorDefinition(s.ctx, "acme-app", id, false)
+		_, err := deleter.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, false)
 		deleted <- err
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
@@ -1224,8 +1235,9 @@ func (s *StoreSuite) TestAnOAuthClientPutWaitsForADeleteInProgressAndIsRefused()
 	putter := s.router()
 	put := make(chan error, 1)
 	go func() {
-		_, err := putter.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{CustomerID: "acme-app", ConnectorID: id,
+		_, err := putter.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{CustomerID: "acme-app", ConnectorID: id,
 			Registration: core.ClientCustomer, ClientID: "client", SecretSealed: []byte("sealed secret"), KEKVersion: 1})
+
 		put <- err
 	}()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
@@ -1253,7 +1265,7 @@ func (s *StoreSuite) TestAForcedDeleteAndASaveBindingItsConnectionDoNotDeadlock(
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() {
-		_, err := deleter.DeleteConnectorDefinition(s.ctx, "acme-app", id, true)
+		_, err := deleter.ConnectorDefinitions.Delete(s.ctx, "acme-app", id, true)
 		deleted <- err
 	}()
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
@@ -1305,27 +1317,30 @@ func (s *StoreSuite) appWith(settings AppSettings) string {
 func (s *StoreSuite) acmeSeenBy(customerID string) map[string]bool {
 	seen := map[string]bool{}
 
-	list, err := s.store.ListConnectorDefinitions(s.ctx, customerID, ConnectorDefinitionFilter{})
+	list, err := s.store.ConnectorDefinitions.Select(s.ctx, customerID, ConnectorDefinitionFilter{})
 	s.Require().NoError(err)
 	seen["list"] = slices.Contains(definitionIDs(list), "acme")
 
-	_, err = s.store.LatestConnectorDefinition(s.ctx, customerID, "acme")
+	_, err = s.store.ConnectorDefinitions.Latest(s.ctx, customerID, "acme")
 	seen["latest"] = s.found(err)
 
-	_, err = s.store.ConnectorDefinition(s.ctx, customerID, "acme", 1)
+	_, err = s.store.ConnectorDefinitions.Get(s.ctx, customerID, "acme", 1)
 	seen["get"] = s.found(err)
 
-	statuses, err := s.store.ConnectorDefinitionStatuses(s.ctx, customerID,
+	statuses, err := s.store.ConnectorDefinitions.Statuses(s.ctx, customerID,
 		[]ConnectorConnection{{ID: "pinned", CustomerID: customerID, ConnectorID: "acme", DefinitionRevision: 1}})
+
 	s.Require().NoError(err)
 	seen["statuses"] = statuses["pinned"].Status == DefinitionOutdated
 
-	err = s.store.CreateConnectorConnection(s.ctx, testSchemes, &ConnectorConnection{CustomerID: customerID,
+	err = s.store.ConnectorConnections.Insert(s.ctx, testSchemes, &ConnectorConnection{CustomerID: customerID,
 		ConnectorID: "acme", DefinitionRevision: 1, OwnerType: OwnerApp, AuthScheme: "test_key"})
+
 	seen["connection"] = s.found(err)
 
-	_, err = s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{CustomerID: customerID, ConnectorID: "acme",
+	_, err = s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{CustomerID: customerID, ConnectorID: "acme",
 		Registration: core.ClientCustomer, ClientID: "client", SecretSealed: []byte("sealed secret"), KEKVersion: 1})
+
 	seen["oauth client"] = s.found(err)
 	return seen
 }
@@ -1399,7 +1414,7 @@ func (s *StoreSuite) TestABuiltInMadeInternalLaterIsHiddenAtEveryRevision() {
 	s.Equal(acmeNowhere, s.acmeSeenBy("no-app-row"))
 	flagged := s.appWith(AppSettings{InternalConnectors: &on})
 	s.Equal(acmeEverywhere, s.acmeSeenBy(flagged))
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, flagged, "acme")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, flagged, "acme")
 	s.Require().NoError(err)
 	s.Equal(2, latest.Revision)
 }
@@ -1424,21 +1439,21 @@ func (s *StoreSuite) TestAPublicBuiltInIsSeenByEveryApp() {
 func (s *StoreSuite) TestACustomDefinitionIsInternalRevisionByRevision() {
 	app := s.appWith(AppSettings{})
 	public := strings.Replace(acmeManifest, "id: acme", "id: custom_crm", 1)
-	_, err := s.store.CreateConnectorDefinition(s.ctx, app, parsed(s.T(), public))
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, app, parsed(s.T(), public))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(s.ctx, app, parsed(s.T(), strings.Replace(public, "name: Acme", "name: Acme Two\ninternal: true", 1)))
+	_, err = s.store.ConnectorDefinitions.Revise(s.ctx, app, parsed(s.T(), strings.Replace(public, "name: Acme", "name: Acme Two\ninternal: true", 1)))
 	s.Require().NoError(err)
 
-	list, err := s.store.ListConnectorDefinitions(s.ctx, app, ConnectorDefinitionFilter{})
+	list, err := s.store.ConnectorDefinitions.Select(s.ctx, app, ConnectorDefinitionFilter{})
 	s.Require().NoError(err)
 	s.Equal([]string{"custom_crm"}, definitionIDs(list))
 	s.Equal(1, list[0].Revision, "the list shows the public revision")
-	latest, err := s.store.LatestConnectorDefinition(s.ctx, app, "custom_crm")
+	latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, app, "custom_crm")
 	s.Require().NoError(err)
 	s.Equal(1, latest.Revision)
-	_, err = s.store.ConnectorDefinition(s.ctx, app, "custom_crm", 1)
+	_, err = s.store.ConnectorDefinitions.Get(s.ctx, app, "custom_crm", 1)
 	s.True(s.found(err), "revision 1 is public")
-	_, err = s.store.ConnectorDefinition(s.ctx, app, "custom_crm", 2)
+	_, err = s.store.ConnectorDefinitions.Get(s.ctx, app, "custom_crm", 2)
 	s.False(s.found(err), "revision 2 is internal")
 }
 
@@ -1446,7 +1461,7 @@ func (s *StoreSuite) TestACustomDefinitionIsInternalRevisionByRevision() {
 // existed: every embedded built-in that is not internal, each found by LatestConnectorDefinition
 // and ConnectorDefinition at its latest revision. An app with the flag sees the internal ones too.
 func (s *StoreSuite) TestWithoutTheFlagEveryAppSeesTheCatalogItSawBefore() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 	files, err := fs.ReadDir(providers.FS, ".")
 	s.Require().NoError(err)
 	var before, all []string
@@ -1468,13 +1483,13 @@ func (s *StoreSuite) TestWithoutTheFlagEveryAppSeesTheCatalogItSawBefore() {
 	on := true
 
 	for customer, want := range map[string][]string{s.appWith(AppSettings{}): before, "no-app-row": before, s.appWith(AppSettings{InternalConnectors: &on}): all} {
-		list, err := s.store.ListConnectorDefinitions(s.ctx, customer, ConnectorDefinitionFilter{Limit: 200})
+		list, err := s.store.ConnectorDefinitions.Select(s.ctx, customer, ConnectorDefinitionFilter{Limit: 200})
 		s.Require().NoError(err)
 		s.Equal(want, definitionIDs(list))
 		for _, definition := range list {
-			latest, err := s.store.LatestConnectorDefinition(s.ctx, customer, definition.ID)
+			latest, err := s.store.ConnectorDefinitions.Latest(s.ctx, customer, definition.ID)
 			s.Require().NoError(err)
-			_, err = s.store.ConnectorDefinition(s.ctx, customer, definition.ID, latest.Revision)
+			_, err = s.store.ConnectorDefinitions.Get(s.ctx, customer, definition.ID, latest.Revision)
 			s.Require().NoError(err)
 		}
 	}
@@ -1486,7 +1501,7 @@ func (s *StoreSuite) TestWithoutTheFlagEveryAppSeesTheCatalogItSawBefore() {
 // one or a deleted one.
 func (s *StoreSuite) TestAClientsGrantedConnectionsAreTheLiveOnesItIssuedAGrantTo() {
 	issued := func(connection ConnectorConnection, registration core.ClientRegistrationMethod, clientID string, grant bool) {
-		s.Require().NoError(s.store.PutConnectorConnectionClient(s.ctx, &ConnectorConnectionClient{
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, &ConnectorConnectionClient{
 			ConnectionID: connection.ID, Registration: registration, ClientID: clientID,
 		}))
 		if grant {
@@ -1506,8 +1521,58 @@ func (s *StoreSuite) TestAClientsGrantedConnectionsAreTheLiveOnesItIssuedAGrantT
 	issued(s.connection("other-app", nil), core.ClientCustomer, "client-1", true)
 	issued(s.lineConnection("acme-app", lineManifest), core.ClientCustomer, "client-1", true)
 
-	found, err := s.store.GrantedConnectorConnectionsOfClient(s.ctx, "acme-app", "acme", core.ClientCustomer, "client-1")
+	found, err := s.store.ConnectorConnections.SelectGrantedOfClient(s.ctx, "acme-app", "acme", core.ClientCustomer, "client-1")
 
 	s.Require().NoError(err)
 	s.Equal([]string{first.ID, second.ID}, connectionIDs(found))
+}
+
+func (s *StoreSuite) TestConnectorDefinitionQueryBudgets() {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
+	for i := range 30 {
+		_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app",
+			parsed(s.T(), strings.Replace(customCRM, "id: custom_crm", "id: custom_crm"+strconv.Itoa(i), 1)))
+		s.Require().NoError(err)
+	}
+	connection := s.connection("acme-app", nil)
+	s.crm("acme-app")
+	crmConnection := s.crmConnection("acme-app")
+	builtins, err := builtinManifests(providers.FS)
+	s.Require().NoError(err)
+
+	// Seed takes one transaction per built-in.
+	s.Equal(4*len(builtins)+2, s.countQueries(func() { s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS)) }), "Seed, unchanged")
+	s.Equal(5, s.countQueries(func() {
+		_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app", parsed(s.T(), strings.Replace(customCRM, "name: CRM", "name: Sales", 1)))
+		s.Require().NoError(err)
+	}), "Revise")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorDefinitions.Get(s.ctx, "acme-app", "custom_crm", 1)
+		s.Require().NoError(err)
+	}), "Get")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorDefinitions.Latest(s.ctx, "acme-app", "custom_crm")
+		s.Require().NoError(err)
+	}), "Latest")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorDefinitions.LatestBuiltin(s.ctx, "slack")
+		s.Require().NoError(err)
+	}), "LatestBuiltin")
+	s.Equal(1, s.countQueries(func() {
+		listed, err := s.store.ConnectorDefinitions.Select(s.ctx, "acme-app", ConnectorDefinitionFilter{Limit: 10})
+		s.Require().NoError(err)
+		s.Len(listed, 11)
+	}), "Select")
+	s.Equal(3, s.countQueries(func() {
+		_, err := s.store.ConnectorDefinitions.Statuses(s.ctx, "acme-app", []ConnectorConnection{connection, crmConnection})
+		s.Require().NoError(err)
+	}), "Statuses")
+	s.Equal(10, s.countQueries(func() {
+		_, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm0", false)
+		s.Require().NoError(err)
+	}), "Delete")
+	s.Equal(1, s.countQueries(func() {
+		_, _, err := s.store.ConnectorBrokenRevisions.Get(s.ctx, "slack", 1)
+		s.Require().NoError(err)
+	}), "ConnectorBrokenRevisions.Get")
 }

@@ -242,8 +242,9 @@ func (s *ForwarderSuite) TestARouterWaitingOnALaterRetryStillSendsAForwardAnothe
 	stopped, err := New(Options{Store: s.store, Secrets: s.sealer, HTTP: target.Client()})
 	s.Require().NoError(err)
 	later := s.destinationOf(stopped, target.URL)
-	_, err = s.store.QueueEventDeliveries(s.ctx, later, "slack_bot", []string{store.ForwardAll},
+	_, err = s.store.EventDeliveries.Queue(s.ctx, later, "slack_bot", []string{store.ForwardAll},
 		store.EventDelivery{ID: "msg_later", Body: []byte(`{"later":1}`), NextAttemptAt: time.Now().Add(time.Hour)})
+
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.dropForwards(later) })
 	s.routerAfterItsFirstLook(target.Client())
@@ -289,7 +290,7 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	notice := store.BalanceNotice{OrganizationID: organization, Kind: store.NoticeBalanceLow, GrantedMicros: 10, BalanceMicros: 4, ThresholdMicros: 5}
 	delivery := store.EventDelivery{
 		ID: "balance:" + organization + ":balance_low:10", Headers: map[string]string{"Content-Type": "application/json"}, NextAttemptAt: time.Now(),
@@ -347,7 +348,7 @@ func (s *ForwarderSuite) destinationOf(forwarder *Forwarder, url string) string 
 	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	return destination.CustomerID
 }
 

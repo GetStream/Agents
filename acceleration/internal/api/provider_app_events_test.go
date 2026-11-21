@@ -89,7 +89,7 @@ func (s *SlackChannelSuite) SetupSuite() {
 	}))
 	s.T().Cleanup(s.images.Close)
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *SlackChannelSuite) SetupTest() {
@@ -734,9 +734,9 @@ func (s *SlackChannelSuite) TestAReplyThatWaitedIsWrittenWithoutTheBotsMention()
 // does, at the event's files, taken out again when the test ends.
 func (s *SlackChannelSuite) TestAReplyThatWaitedIsWrittenWithItsFiles() {
 	ctx := context.Background()
-	connection, err := s.store.ConnectorConnection(ctx, s.customerID(), s.bot.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), s.bot.ConnectionID)
 	s.Require().NoError(err)
-	definition, err := s.store.ConnectorDefinition(ctx, s.customerID(), "slack_bot", connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(ctx, s.customerID(), "slack_bot", connection.DefinitionRevision)
 	s.Require().NoError(err)
 	definition.Revision, definition.Manifest.Revision = 1000, 1000
 	definition.Manifest.Channel.Messages.Media = &core.MediaRule{URL: "$.event.files[*].url_private", MIMEType: "$.event.files[*].mimetype"}
@@ -790,9 +790,9 @@ func (s *SlackChannelSuite) TestAWaitingReplyARepinnedRevisionDoesNotReadIsDropp
 	s.deliver(s.message("U0000BOB", "and the deploy?", "1759740000.000200", "1759740000.000100"), 0)
 	s.Require().Equal(1, s.waiting(), "the reply waits")
 	ctx := context.Background()
-	connection, err := s.store.ConnectorConnection(ctx, s.customerID(), s.bot.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), s.bot.ConnectionID)
 	s.Require().NoError(err)
-	definition, err := s.store.ConnectorDefinition(ctx, s.customerID(), "slack_bot", connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(ctx, s.customerID(), "slack_bot", connection.DefinitionRevision)
 	s.Require().NoError(err)
 	definition.Revision, definition.Manifest.Revision = 1001, 1001
 	definition.Manifest.Channel.Messages.SkipIfPresent = append(definition.Manifest.Channel.Messages.SkipIfPresent, "$.event.thread_ts")
@@ -1035,7 +1035,7 @@ func (s *SlackChannelSuite) providerApp(signingSecret string) store.ConnectorOAu
 	record.SigningSecretSealed, err = s.sealer.SealWithAAD(signingSecret, providerAppAAD(record.CustomerID, "slack_bot", record.ProviderAppID))
 	s.Require().NoError(err)
 	record.SigningKEKVersion = s.sealer.CurrentVersion()
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	return *record
 }
@@ -1173,7 +1173,7 @@ func (s *SlackChannelSuite) streamDelivers(channel string, index int) int {
 
 // status is a connection's status as stored.
 func (s *SlackChannelSuite) status(ref core.ConnectionRef) string {
-	connection, err := s.store.ConnectorConnection(context.Background(), ref.CustomerID, ref.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), ref.CustomerID, ref.ConnectionID)
 	s.Require().NoError(err)
 	return connection.Status
 }

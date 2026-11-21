@@ -47,7 +47,7 @@ func (s *SandboxGrantsSuite) askingSandbox(spec Spec, owner string, begun Consen
 		seen.begun = append(seen.begun, request)
 		if !seen.stored[begun.AuthorizationID] && time.Now().Before(begun.ExpiresAt) {
 			seen.stored[begun.AuthorizationID] = true
-			s.Require().NoError(s.store.CreateConnectorAuthorizationAttempt(ctx, &store.ConnectorAuthorizationAttempt{
+			s.Require().NoError(s.store.ConnectorAuthorizationAttempts.Insert(ctx, &store.ConnectorAuthorizationAttempt{
 				ID: begun.AuthorizationID, CustomerID: s.customerID, ConnectionID: begun.ConnectionID, Kind: store.AttemptConsent,
 				StateHash: store.AuthorizationStateHash(begun.AuthorizationID), AttemptSealed: []byte("sealed"), KEKVersion: 1,
 				ExpiresAt: begun.ExpiresAt,
@@ -207,7 +207,7 @@ func (s *SandboxGrantsSuite) TestAConsentEndedOnAnotherRouterShowsNoNewOne() {
 	_, err := box.Run(s.ctx, "print(1)", nil)
 	s.Require().NoError(err)
 
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, attemptOn(mine))
+	_, err = s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, attemptOn(mine))
 	s.Require().NoError(err)
 	time.Sleep(time.Until(expiring(mine).ExpiresAt)) // past the watch's first read, and the consent's expiry
 	afterExpiry, err := box.Run(s.ctx, "print(1)", nil)
@@ -229,7 +229,7 @@ func (s *SandboxGrantsSuite) TestAConsentConnectedAfterItsAttemptWasUsedUpCarrie
 	_, err := box.Run(s.ctx, "print(1)", nil)
 	s.Require().NoError(err)
 
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, attemptOn(mine))
+	_, err = s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, attemptOn(mine))
 	s.Require().NoError(err)
 	time.Sleep(loginPoll + loginPoll/2) // a poll inside the token exchange
 	s.Require().Zero(s.carriedOn())

@@ -412,11 +412,12 @@ func waitSeconds(wait time.Duration) string {
 func (s *Server) auditProxyCall(ctx context.Context, connection store.ConnectorConnection, host string, status *int, latency int64) {
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	err := s.store.RecordConnectorAudit(ctx, &store.ConnectorAuditEvent{
+	err := s.store.ConnectorAuditEvents.Insert(ctx, &store.ConnectorAuditEvent{
 		CustomerID: connection.CustomerID, ConnectionID: connection.ID, ConnectorID: connection.ConnectorID,
 		OwnerType: connection.OwnerType, Action: store.AuditProxyCall, RequestID: core.CorrelationOf(ctx).RequestID,
 		StatusCode: status, LatencyMs: &latency, Target: host,
 	})
+
 	if err != nil {
 		s.logger.Error("could not record a connector audit row", "connection", connection.ID, "action", store.AuditProxyCall, "error", err)
 	}

@@ -2084,7 +2084,7 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 	}
 	// Seeded whether connectors are on or not: the built-ins are data with no secret in
 	// them, and a deployment that turns connectors on later finds them already there.
-	if err := pgStore.SeedConnectorDefinitions(ctx, providers.FS); err != nil {
+	if err := pgStore.ConnectorDefinitions.Seed(ctx, providers.FS); err != nil {
 		pgStore.Close()
 		return nil, err
 	}

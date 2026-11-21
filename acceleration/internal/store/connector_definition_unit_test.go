@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -140,5 +141,25 @@ func TestTheBaseBuiltInsMarshalAsTheyWereStored(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, string(bytes.TrimSpace(want)), string(got), "%s marshals to other bytes than it was stored with", id)
+	}
+}
+
+func TestConnectorDefinitionValidate(t *testing.T) {
+	require.NoError(t, (&ConnectorDefinition{CustomerID: BuiltinCustomer, ID: "acme", Revision: 1, Name: "Acme"}).Validate())
+	require.NoError(t, (&ConnectorDefinition{CustomerID: "acme-app", ID: "custom_acme", Revision: 3, Name: "Acme"}).Validate())
+
+	for _, tc := range []struct {
+		field      string
+		definition ConnectorDefinition
+	}{
+		{"id", ConnectorDefinition{CustomerID: "acme-app", ID: "", Revision: 1, Name: "Acme"}},
+		{"id", ConnectorDefinition{CustomerID: "acme-app", ID: "acme", Revision: 1, Name: "Acme"}},
+		{"id", ConnectorDefinition{CustomerID: BuiltinCustomer, ID: "custom_acme", Revision: 1, Name: "Acme"}},
+		{"revision", ConnectorDefinition{CustomerID: BuiltinCustomer, ID: "acme", Revision: 0, Name: "Acme"}},
+		{"name", ConnectorDefinition{CustomerID: BuiltinCustomer, ID: "acme", Revision: 1, Name: " "}},
+	} {
+		var invalid *ValidationError
+		require.True(t, errors.As(tc.definition.Validate(), &invalid), "%+v", tc.definition)
+		require.Equal(t, tc.field, invalid.Field, "%+v", tc.definition)
 	}
 }

@@ -81,6 +81,17 @@ type ConnectorAuditEvent struct {
 	Credential *ConnectorAuditCredential `bun:"-"`
 }
 
+// Validate refuses a row the table refuses (connector_audit_action_check), one no list could tie
+// to its connection, and a tool_reapproved row without the tools it approved, or tools on any other.
+func (e *ConnectorAuditEvent) Validate() error {
+	return validate("connector audit event").
+		required("customer_id", e.CustomerID).
+		required("connection_id", e.ConnectionID).
+		oneOf("action", e.Action, AuditGrantCreated, AuditGrantRefreshed, AuditGrantRevoked, AuditProxyCall, AuditTokenExport, AuditToolReapproved).
+		check((e.Action == AuditToolReapproved) == (len(e.Tools) > 0), "tools", "are a tool_reapproved row's, and only its").
+		done()
+}
+
 // ConnectorAuditCredential is a grant event's tokens by core.Fingerprint, never a token
 // (AI-990): Rotated with two different refresh fingerprints is a provider that rotated the
 // refresh token, without the sealed credentials being opened to tell.
@@ -124,20 +135,20 @@ type AuditPosition struct {
 }
 
 // AuditLimit is the page size an audit list uses for the limit asked for.
-// ConnectorAuditEvents returns one row more than this.
+// Select returns one row more than this.
 func AuditLimit(asked int) int {
 	return clampLimit(asked, defaultAuditLimit, maxAuditLimit)
 }
 
-// RecordConnectorAudit stores one audit row, at now, with its Credential when it has one.
-func (s *Store) RecordConnectorAudit(ctx context.Context, event *ConnectorAuditEvent) error {
-	if event.CustomerID == "" || event.ConnectionID == "" {
-		return stack.Wrap(errors.New("store: an audit row needs a customer and a connection"))
-	}
-	switch event.Action {
-	case AuditGrantCreated, AuditGrantRefreshed, AuditGrantRevoked, AuditProxyCall, AuditTokenExport:
-	default:
-		return stack.Wrap(fmt.Errorf("store: %q is not an audit action", event.Action))
+// ConnectorAuditEvents are the connector audit log.
+type ConnectorAuditEvents struct {
+	store *Store
+}
+
+// Insert stores one audit row, at now, with its Credential when it has one.
+func (r *ConnectorAuditEvents) Insert(ctx context.Context, event *ConnectorAuditEvent) error {
+	if err := event.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
 	event.ID = newID()
 	event.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
@@ -145,9 +156,9 @@ func (s *Store) RecordConnectorAudit(ctx context.Context, event *ConnectorAuditE
 	if event.Credential == nil {
 		// One insert needs no transaction: a proxy call, a token export or a delete is most
 		// rows, and the one most often written.
-		_, err = s.global.NewInsert().Model(event).Exec(ctx)
+		_, err = r.store.global.NewInsert().Model(event).Exec(ctx)
 	} else {
-		err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
 				return err
 			}
@@ -162,14 +173,14 @@ func (s *Store) RecordConnectorAudit(ctx context.Context, event *ConnectorAuditE
 	return nil
 }
 
-// ConnectorAuditEvents lists the customer's audit rows, newest first, one more than
+// Select lists the customer's audit rows, newest first, one more than
 // AuditLimit(filter.Limit). A deleted connection's rows are listed too.
-func (s *Store) ConnectorAuditEvents(ctx context.Context, customerID string, filter AuditFilter) ([]ConnectorAuditEvent, error) {
+func (r *ConnectorAuditEvents) Select(ctx context.Context, customerID string, filter AuditFilter) ([]ConnectorAuditEvent, error) {
 	if customerID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer id is required"))
 	}
 	events := []ConnectorAuditEvent{}
-	query := s.global.NewSelect().Model(&events).Where("customer_id = ?", customerID)
+	query := r.store.global.NewSelect().Model(&events).Where("customer_id = ?", customerID)
 	if filter.ConnectionID != "" {
 		query = query.Where("connection_id = ?", filter.ConnectionID)
 	}
@@ -191,7 +202,7 @@ func (s *Store) ConnectorAuditEvents(ctx context.Context, customerID string, fil
 		ids[i] = event.ID
 	}
 	credentials := []ConnectorAuditCredential{}
-	if err := s.global.NewSelect().Model(&credentials).Where("audit_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
+	if err := r.store.global.NewSelect().Model(&credentials).Where("audit_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector audit credentials: %w", err))
 	}
 	byAudit := make(map[string]*ConnectorAuditCredential, len(credentials))

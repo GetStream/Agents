@@ -502,7 +502,7 @@ func (s *ConnectorApprovalSuite) rows(connection string) []store.ConnectorInvoca
 	var rows []store.ConnectorInvocation
 	s.Require().Eventually(func() bool {
 		var err error
-		rows, err = s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		rows, err = s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 		return err == nil && len(rows) > 0
 	}, 5*time.Second, 20*time.Millisecond)
 	return rows

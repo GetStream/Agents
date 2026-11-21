@@ -18,7 +18,7 @@ func (s *StoreSuite) configToken(customerID, connectorID, sealed string, expires
 		CustomerID: customerID, ConnectorID: connectorID,
 		TokensSealed: []byte(sealed), KEKVersion: 1, ExpiresAt: expires,
 	}
-	s.Require().NoError(s.store.PutConnectorConfigToken(s.ctx, &token))
+	s.Require().NoError(s.store.ConnectorConfigTokens.Upsert(s.ctx, &token))
 	return token
 }
 
@@ -26,7 +26,7 @@ func (s *StoreSuite) TestAConfigTokenPutAgainReplacesItsOneRow() {
 	first := s.configToken("acme-app", "slack", "first", s.base)
 	s.configToken("acme-app", "slack", "rotated", s.base.Add(12*time.Hour))
 
-	found, err := s.store.ConnectorConfigToken(s.ctx, "acme-app", "slack")
+	found, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
 
 	s.Require().NoError(err)
 	s.Equal([]byte("rotated"), found.TokensSealed)
@@ -40,26 +40,30 @@ func (s *StoreSuite) TestAConfigTokenPutAgainReplacesItsOneRow() {
 func (s *StoreSuite) TestAConfigTokenIsOnlyItsOwnCustomers() {
 	s.configToken("acme-app", "slack", "acme's", s.base)
 
-	_, err := s.store.ConnectorConfigToken(s.ctx, "other-app", "slack")
+	_, err := s.store.ConnectorConfigTokens.Get(s.ctx, "other-app", "slack")
 
 	s.ErrorIs(err, ErrNoConnectorConfigToken)
 }
 
 func (s *StoreSuite) TestAConfigTokenWithoutAnExpiryIsRefused() {
-	err := s.store.PutConnectorConfigToken(s.ctx, &ConnectorConfigToken{
+	err := s.store.ConnectorConfigTokens.Upsert(s.ctx, &ConnectorConfigToken{
 		CustomerID: "acme-app", ConnectorID: "slack", TokensSealed: []byte("sealed"), KEKVersion: 1,
 	})
 
-	s.ErrorContains(err, "an expiry")
+	var invalid *ValidationError
+	s.Require().ErrorAs(err, &invalid)
+	s.Equal("expires_at", invalid.Field)
+	_, err = s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+	s.ErrorIs(err, ErrNoConnectorConfigToken, "nothing was stored")
 }
 
 func (s *StoreSuite) TestDeletingAConfigTokenRemovesItAndAGoneOneIsNoError() {
 	s.configToken("acme-app", "slack", "sealed", s.base)
 
-	s.Require().NoError(s.store.DeleteConnectorConfigToken(s.ctx, "acme-app", "slack"))
-	s.Require().NoError(s.store.DeleteConnectorConfigToken(s.ctx, "acme-app", "slack"))
+	s.Require().NoError(s.store.ConnectorConfigTokens.Delete(s.ctx, "acme-app", "slack"))
+	s.Require().NoError(s.store.ConnectorConfigTokens.Delete(s.ctx, "acme-app", "slack"))
 
-	_, err := s.store.ConnectorConfigToken(s.ctx, "acme-app", "slack")
+	_, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
 	s.ErrorIs(err, ErrNoConnectorConfigToken)
 }
 
@@ -67,12 +71,12 @@ func (s *StoreSuite) TestAConfigTokenSavedAfterTheCallerGaveUpIsKept() {
 	gone, cancel := context.WithCancel(s.ctx)
 	cancel()
 
-	err := s.store.PutConnectorConfigToken(gone, &ConnectorConfigToken{
+	err := s.store.ConnectorConfigTokens.Upsert(gone, &ConnectorConfigToken{
 		CustomerID: "acme-app", ConnectorID: "slack", TokensSealed: []byte("rotated"), KEKVersion: 1, ExpiresAt: s.base,
 	})
 
 	s.Require().NoError(err, "a token Slack already rotated is kept")
-	found, err := s.store.ConnectorConfigToken(s.ctx, "acme-app", "slack")
+	found, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
 	s.Require().NoError(err)
 	s.Equal([]byte("rotated"), found.TokensSealed)
 }
@@ -91,7 +95,7 @@ func (s *StoreSuite) TestProviderAppLocksOnOneAppNeverOverlapAcrossRouters() {
 	for i, router := range stores {
 		wg.Go(func() {
 			<-start
-			errs[i] = router.WithConnectorProviderAppLock(s.ctx, "acme-app", "slack", func() error {
+			errs[i] = router.ConnectorConfigTokens.WithProviderAppLock(s.ctx, "acme-app", "slack", func() error {
 				if active.Add(1) != 1 {
 					overlapped.Store(true)
 				}
@@ -99,6 +103,7 @@ func (s *StoreSuite) TestProviderAppLocksOnOneAppNeverOverlapAcrossRouters() {
 				active.Add(-1)
 				return nil
 			})
+
 		})
 	}
 	close(start)
@@ -116,11 +121,12 @@ func (s *StoreSuite) TestAnotherCustomersProviderAppLockDoesNotWait() {
 	held := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
-		_ = s.store.WithConnectorProviderAppLock(s.ctx, "acme-app", "slack", func() error {
+		_ = s.store.ConnectorConfigTokens.WithProviderAppLock(s.ctx, "acme-app", "slack", func() error {
 			close(held)
 			<-release
 			return nil
 		})
+
 	}()
 	<-held
 	defer close(release)
@@ -128,7 +134,7 @@ func (s *StoreSuite) TestAnotherCustomersProviderAppLockDoesNotWait() {
 	ctx, cancel := context.WithTimeout(s.ctx, time.Second)
 	defer cancel()
 	ran := false
-	err := other.WithConnectorProviderAppLock(ctx, "other-app", "slack", func() error {
+	err := other.ConnectorConfigTokens.WithProviderAppLock(ctx, "other-app", "slack", func() error {
 		ran = true
 		return nil
 	})
@@ -141,11 +147,12 @@ func (s *StoreSuite) TestAProviderAppLockIsNotAConnectionsCredentialLock() {
 	held := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
-		_ = s.store.WithConnectorProviderAppLock(s.ctx, "acme-app", "slack", func() error {
+		_ = s.store.ConnectorConfigTokens.WithProviderAppLock(s.ctx, "acme-app", "slack", func() error {
 			close(held)
 			<-release
 			return nil
 		})
+
 	}()
 	<-held
 	defer close(release)
@@ -167,4 +174,16 @@ WHERE locktype = 'advisory' AND classid = ? AND objsubid = 2 AND granted
   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
 		providerAppLockNamespace).Scan(&count))
 	return count
+}
+
+func (s *StoreSuite) TestConnectorConfigTokenQueryBudgets() {
+	s.Equal(1, s.countQueries(func() { s.configToken("acme-app", "slack", "sealed", s.base) }), "Upsert")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+		s.Require().NoError(err)
+	}), "Get")
+	s.Equal(2, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConfigTokens.WithProviderAppLock(s.ctx, "acme-app", "slack", func() error { return nil }))
+	}), "WithProviderAppLock")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectorConfigTokens.Delete(s.ctx, "acme-app", "slack")) }), "Delete")
 }

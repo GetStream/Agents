@@ -118,7 +118,7 @@ func (s *connectorFixture) SetupTest() {
 	s.connectorID = "custom_crm"
 	manifest, err := core.ParseManifest([]byte(s.crmManifest(s.connectorID, 1)))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }
@@ -151,7 +151,7 @@ func (s *connectorFixture) connection(user, account string) string {
 	if user != "" {
 		connection.OwnerType, connection.OwnerID = store.OwnerUser, user
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, s.registry, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, s.registry, connection))
 	stored, _, err := bearer.New().Complete(s.ctx, core.CompleteInput{Supplied: map[string]string{bearer.SuppliedToken: tokenOf(account)}})
 	s.Require().NoError(err)
 	s.setState(connection.ID, func(state *core.CredentialState) {

@@ -317,7 +317,7 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	definition, err := s.store.LatestConnectorDefinition(ctx, customerID, sent.ConnectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, sent.ConnectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, invalidRequest(fmt.Sprintf("no such connector: %q", sent.ConnectorID))
 	}
@@ -350,7 +350,7 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 		Inputs:             profile.Inputs,
 		Label:              strings.TrimSpace(sent.Label),
 	}
-	err = s.store.CreateConnectorConnection(ctx, s.connectors, &connection)
+	err = s.store.ConnectorConnections.Insert(ctx, s.connectors, &connection)
 	// Deleted since it was read above (DeleteConnectorDefinition), so answered as one never made.
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, invalidRequest(fmt.Sprintf("no such connector: %q", sent.ConnectorID))
@@ -364,7 +364,7 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	if err != nil {
 		return nil, err
 	}
-	definitions, err := s.store.ConnectorDefinitionStatuses(ctx, customerID, []store.ConnectorConnection{connection})
+	definitions, err := s.store.ConnectorDefinitions.Statuses(ctx, customerID, []store.ConnectorConnection{connection})
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +423,7 @@ func (s *Server) listConnections(ctx context.Context, request *listConnectionsRe
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.ConnectorConnectionsByOwner(ctx, customerID, store.ConnectionFilter{
+	found, err := s.store.ConnectorConnections.Select(ctx, customerID, store.ConnectionFilter{
 		OwnerType:   string(ownerType),
 		OwnerID:     ownerID,
 		EveryUser:   everyUser,
@@ -431,6 +431,7 @@ func (s *Server) listConnections(ctx context.Context, request *listConnectionsRe
 		Limit:       request.Limit,
 		After:       cursor,
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -441,19 +442,19 @@ func (s *Server) listConnections(ctx context.Context, request *listConnectionsRe
 		ids = append(ids, connection.ID)
 	}
 	// One read for the whole page, and two for the revisions.
-	uses, err := s.store.ConnectorConnectionUses(ctx, customerID, ids)
+	uses, err := s.store.ConnectorConnections.Uses(ctx, customerID, ids)
 	if err != nil {
 		return nil, err
 	}
-	definitions, err := s.store.ConnectorDefinitionStatuses(ctx, customerID, kept)
+	definitions, err := s.store.ConnectorDefinitions.Statuses(ctx, customerID, kept)
 	if err != nil {
 		return nil, err
 	}
-	clients, err := s.store.ConnectorConnectionClients(ctx, ids)
+	clients, err := s.store.ConnectorConnections.Clients(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	validations, err := s.store.ConnectorConnectionValidations(ctx, ids)
+	validations, err := s.store.ConnectorConnections.Validations(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -475,19 +476,19 @@ func (s *Server) getConnection(ctx context.Context, request *connectionRequest) 
 	if err != nil {
 		return nil, err
 	}
-	uses, err := s.store.ConnectorConnectionUses(ctx, connection.CustomerID, []string{connection.ID})
+	uses, err := s.store.ConnectorConnections.Uses(ctx, connection.CustomerID, []string{connection.ID})
 	if err != nil {
 		return nil, err
 	}
-	definitions, err := s.store.ConnectorDefinitionStatuses(ctx, connection.CustomerID, []store.ConnectorConnection{connection})
+	definitions, err := s.store.ConnectorDefinitions.Statuses(ctx, connection.CustomerID, []store.ConnectorConnection{connection})
 	if err != nil {
 		return nil, err
 	}
-	clients, err := s.store.ConnectorConnectionClients(ctx, []string{connection.ID})
+	clients, err := s.store.ConnectorConnections.Clients(ctx, []string{connection.ID})
 	if err != nil {
 		return nil, err
 	}
-	validations, err := s.store.ConnectorConnectionValidations(ctx, []string{connection.ID})
+	validations, err := s.store.ConnectorConnections.Validations(ctx, []string{connection.ID})
 	if err != nil {
 		return nil, err
 	}
@@ -509,9 +510,9 @@ func (s *Server) deleteConnection(ctx context.Context, request *deleteConnection
 	// revoked at the provider after it; read before the row goes, since the delete clears them.
 	held := s.heldCredentials(ctx, connection)
 	if request.Force {
-		err = s.store.DeleteConnectorConnection(ctx, connection.CustomerID, connection.ID)
+		err = s.store.ConnectorConnections.Delete(ctx, connection.CustomerID, connection.ID)
 	} else {
-		err = s.store.DeleteUnboundConnectorConnection(ctx, connection.CustomerID, connection.ID)
+		err = s.store.ConnectorConnections.DeleteUnbound(ctx, connection.CustomerID, connection.ID)
 	}
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return nil, errNoSuchConnection
@@ -593,7 +594,7 @@ func (s *Server) revocableGrants(ctx context.Context, connections []store.Connec
 		key := revision{connection.ConnectorID, connection.DefinitionRevision}
 		revokes, read := optsIn[key]
 		if !read {
-			definition, err := s.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+			definition, err := s.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 			if err != nil {
 				s.logger.Warn("could not read whether a connection's grant is revoked", "connection", connection.ID, "error", err)
 				continue
@@ -627,7 +628,7 @@ func (s *Server) revokeHeld(ctx context.Context, connection store.ConnectorConne
 	if held.Credentials.Scheme == "" {
 		return false, nil
 	}
-	definition, err := s.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, held.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, held.DefinitionRevision)
 	if err != nil || !definition.Manifest.RevokeOnDelete {
 		return false, err
 	}
@@ -691,7 +692,7 @@ func (s *Server) auditGrant(ctx context.Context, customerID, connectionID, conne
 	}
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	err := s.store.RecordConnectorAudit(ctx, event)
+	err := s.store.ConnectorAuditEvents.Insert(ctx, event)
 	if err != nil {
 		s.logger.Error("could not record a connector audit row", "connection", connectionID, "action", action, "error", err)
 	}
@@ -708,9 +709,10 @@ func (s *Server) recordClient(ctx context.Context, connectionID string, credenti
 	}
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	err := s.store.PutConnectorConnectionClient(ctx, &store.ConnectorConnectionClient{
+	err := s.store.ConnectorConnections.PutClient(ctx, &store.ConnectorConnectionClient{
 		ConnectionID: connectionID, Registration: client.Registration, ClientID: client.ID,
 	})
+
 	if err != nil {
 		s.logger.Error("could not record a connection's OAuth client", "connection", connectionID, "error", err)
 	}
@@ -726,7 +728,7 @@ func (s *Server) reachableConnection(ctx context.Context, id string) (store.Conn
 	if s.store == nil {
 		return store.ConnectorConnection{}, errNoConnections
 	}
-	connection, err := s.store.ConnectorConnection(ctx, customerID, id)
+	connection, err := s.store.ConnectorConnections.Get(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoConnectorConnection) || err == nil && !mayReach(ctx, connection) {
 		return store.ConnectorConnection{}, errNoSuchConnection
 	}

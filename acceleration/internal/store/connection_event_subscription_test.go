@@ -3,6 +3,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,7 +17,7 @@ func (s *StoreSuite) eventSubscription(customerID, connectionID, configID, key s
 		Event: "issue.created", Key: key, Token: "token-" + connectionID + "-" + configID + "-" + key,
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: ConnectionEventPending, NextAttemptAt: &due,
 	}
-	added, err := s.store.AddConnectionEventSubscription(s.ctx, &sub)
+	added, err := s.store.ConnectionEventSubscriptions.Insert(s.ctx, &sub)
 	s.Require().NoError(err)
 	s.Require().True(added)
 	return sub
@@ -38,7 +39,7 @@ func (s *StoreSuite) TestTheSameSubscriptionAddedTwiceIsStoredOnce() {
 		Status: ConnectionEventPending,
 	}
 
-	added, err := s.store.AddConnectionEventSubscription(s.ctx, &again)
+	added, err := s.store.ConnectionEventSubscriptions.Insert(s.ctx, &again)
 
 	s.Require().NoError(err)
 	s.False(added)
@@ -54,7 +55,7 @@ func (s *StoreSuite) TestAConnectionsSubscriptionsAreOnlyItsCustomers() {
 	held, err := s.connectionEventSubscriptions("other-app", "conn-1")
 	s.Require().NoError(err)
 	s.Empty(held)
-	s.Require().NoError(s.store.DeleteConnectionEventSubscriptions(s.ctx, "other-app", "conn-1"))
+	s.Require().NoError(s.store.ConnectionEventSubscriptions.DeleteConnection(s.ctx, "other-app", "conn-1"))
 	held, err = s.connectionEventSubscriptions("acme-app", "conn-1")
 	s.Require().NoError(err)
 	s.Len(held, 1, "another customer's delete leaves it")
@@ -65,11 +66,11 @@ func (s *StoreSuite) TestAClaimLeasesWhatIsDueAndNotWhatIsNot() {
 	later := s.eventSubscription("acme-app", "conn-1", "config-1", "key-2")
 	future := s.base.Add(time.Hour)
 	later.NextAttemptAt = &future
-	s.Require().NoError(s.store.SaveConnectionEventSubscription(s.ctx, &later))
+	s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &later))
 
-	claimed, err := s.store.ClaimConnectionEventSubscriptions(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
 	s.Require().NoError(err)
-	again, err := s.store.ClaimConnectionEventSubscriptions(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	again, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
 	s.Require().NoError(err)
 
 	s.Require().Len(claimed, 1)
@@ -99,7 +100,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 	byA := make(chan claim, 1)
 
 	go func() {
-		claimed, err := routerA.claimConnectionEventSubscriptions(s.ctx, paused, s.base, 10, s.base.Add(time.Minute))
+		claimed, err := routerA.ConnectionEventSubscriptions.claim(s.ctx, paused, s.base, 10, s.base.Add(time.Minute))
 		byA <- claim{claimed, err}
 	}()
 	s.Require().Eventually(func() bool {
@@ -108,7 +109,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")
-	byB, err := s.store.ClaimConnectionEventSubscriptions(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	byB, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
 	s.Require().NoError(err)
 	a := <-byA
 	s.Require().NoError(a.err)
@@ -118,18 +119,18 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 }
 
 func (s *StoreSuite) TestTheNextSubscriptionDueIsTheFirstAndNoneWhenNoneIsEverDue() {
-	_, found, err := s.store.NextConnectionEventSubscriptionAt(s.ctx)
+	_, found, err := s.store.ConnectionEventSubscriptions.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.False(found, "no subscriptions")
 	sub := s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
 	sub.NextAttemptAt = nil
-	s.Require().NoError(s.store.SaveConnectionEventSubscription(s.ctx, &sub))
+	s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &sub))
 
-	_, found, err = s.store.NextConnectionEventSubscriptionAt(s.ctx)
+	_, found, err = s.store.ConnectionEventSubscriptions.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.False(found, "a grant that does not expire is never due")
 	s.eventSubscription("acme-app", "conn-1", "config-1", "key-2")
-	next, found, err := s.store.NextConnectionEventSubscriptionAt(s.ctx)
+	next, found, err := s.store.ConnectionEventSubscriptions.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.True(found)
 	s.True(next.Equal(s.base))
@@ -138,18 +139,18 @@ func (s *StoreSuite) TestTheNextSubscriptionDueIsTheFirstAndNoneWhenNoneIsEverDu
 func (s *StoreSuite) TestAnEventIsClaimedOnceAndGoesWithItsSubscription() {
 	sub := s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
 
-	first, err := s.store.ClaimConnectionEvent(s.ctx, sub.ID, "evt-1")
+	first, err := s.store.ConnectionEventSubscriptions.FirstEvent(s.ctx, sub.ID, "evt-1")
 	s.Require().NoError(err)
-	again, err := s.store.ClaimConnectionEvent(s.ctx, sub.ID, "evt-1")
+	again, err := s.store.ConnectionEventSubscriptions.FirstEvent(s.ctx, sub.ID, "evt-1")
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.DeleteConnectionEventSubscription(s.ctx, sub.ID))
+	s.Require().NoError(s.store.ConnectionEventSubscriptions.Delete(s.ctx, sub.ID))
 
 	s.True(first)
 	s.False(again)
 	var left int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connection_event_deliveries").Scan(&left))
 	s.Zero(left)
-	_, err = s.store.ConnectionEventSubscriptionByToken(s.ctx, sub.Token)
+	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
 	s.ErrorIs(err, ErrNoConnectionEventSubscription)
 }
 
@@ -158,13 +159,59 @@ func (s *StoreSuite) TestMakingAConnectionDueMakesEveryOneOfItsSubscriptionsDue(
 	other := s.eventSubscription("acme-app", "conn-2", "config-1", "key-1")
 	for _, held := range []*ConnectionEventSubscription{&sub, &other} {
 		held.NextAttemptAt = nil
-		s.Require().NoError(s.store.SaveConnectionEventSubscription(s.ctx, held))
+		s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, held))
 	}
 
-	s.Require().NoError(s.store.DueConnectionEventSubscriptions(s.ctx, "acme-app", "conn-1", s.base))
+	s.Require().NoError(s.store.ConnectionEventSubscriptions.DueConnection(s.ctx, "acme-app", "conn-1", s.base))
 
-	claimed, err := s.store.ClaimConnectionEventSubscriptions(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Equal(sub.ID, claimed[0].ID)
+}
+
+func (s *StoreSuite) TestConnectionEventSubscriptionQueryBudgets() {
+	for i := range 30 {
+		s.eventSubscription("acme-app", "conn-1", "config-1", "key-"+strconv.Itoa(i))
+	}
+	var sub ConnectionEventSubscription
+	s.Equal(1, s.countQueries(func() { sub = s.eventSubscription("acme-app", "conn-1", "config-1", "key-last") }), "Insert")
+
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.Require().NoError(err)
+	}), "GetByToken")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectionEventSubscriptions.GetByBinding(s.ctx, "conn-1", "config-1", "crm", "key-last")
+		s.Require().NoError(err)
+	}), "GetByBinding")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectionEventSubscriptions.DueOthers(s.ctx, "conn-1", "key-last", sub.ID, s.base))
+	}), "DueOthers")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectionEventSubscriptions.Due(s.ctx, sub.ID, s.base))
+	}), "Due")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectionEventSubscriptions.DueConnection(s.ctx, "acme-app", "conn-1", s.base))
+	}), "DueConnection")
+	s.Equal(1, s.countQueries(func() {
+		claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base.Add(time.Second), 20, s.base.Add(time.Minute))
+		s.Require().NoError(err)
+		s.Len(claimed, 20)
+	}), "Claim")
+	s.Equal(1, s.countQueries(func() {
+		_, _, err := s.store.ConnectionEventSubscriptions.NextDue(s.ctx)
+		s.Require().NoError(err)
+	}), "NextDue")
+	sub.Status = ConnectionEventActive
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &sub)) }), "Update")
+	s.Equal(1, s.countQueries(func() {
+		first, err := s.store.ConnectionEventSubscriptions.FirstEvent(s.ctx, sub.ID, "event-1")
+		s.Require().NoError(err)
+		s.True(first)
+	}), "FirstEvent")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectionEventSubscriptions.Delete(s.ctx, sub.ID)) }), "Delete")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectionEventSubscriptions.DeleteConnection(s.ctx, "acme-app", "conn-1"))
+	}), "DeleteConnection")
 }

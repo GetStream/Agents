@@ -175,7 +175,7 @@ func (s *ConnectionEventsSuite) TestARenewalInFlightKeepsTheSubscription() {
 // flight while the stored row is connected again. Reconcile with that copy changes nothing.
 func (s *ConnectionEventsSuite) TestAStaleCopyOfARenewalKeepsTheSubscriptions() {
 	connection := s.subscribed(s.binding(s.connection(), issueCreated))
-	stale, err := s.store.ConnectorConnection(context.Background(), s.customerID(), connection)
+	stale, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), connection)
 	s.Require().NoError(err)
 	stale.Status = store.ConnectionNeedsReauthorization
 
@@ -226,7 +226,7 @@ func (s *ConnectionEventsSuite) TestARowLockedByAnotherRoutersClaimIsNotLookedFo
 	locked := store.ConnectionEventSubscription{CustomerID: s.customerID(), ConnectionID: "gone-" + s.utils.uuid(),
 		ConfigID: s.utils.uuid(), Binding: "crm", Event: issueCreated, Key: "key", Token: s.utils.uuid(),
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: store.ConnectionEventPending, NextAttemptAt: &due}
-	added, err := s.store.AddConnectionEventSubscription(ctx, &locked)
+	added, err := s.store.ConnectionEventSubscriptions.Insert(ctx, &locked)
 	s.Require().NoError(err)
 	s.Require().True(added)
 	claim, err := s.store.GlobalDB().BeginTx(ctx, nil)
@@ -399,7 +399,7 @@ func (s *ConnectionEventsSuite) TestAnIdleRouterTakesARowAnotherRouterAddsWithin
 	left := store.ConnectionEventSubscription{CustomerID: s.customerID(), ConnectionID: "gone-" + s.utils.uuid(),
 		ConfigID: s.utils.uuid(), Binding: "crm", Event: issueCreated, Key: "key", Token: s.utils.uuid(),
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: store.ConnectionEventPending, NextAttemptAt: &due}
-	added, err := s.store.AddConnectionEventSubscription(context.Background(), &left)
+	added, err := s.store.ConnectionEventSubscriptions.Insert(context.Background(), &left)
 	s.Require().NoError(err)
 	s.Require().True(added)
 
@@ -470,7 +470,7 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }

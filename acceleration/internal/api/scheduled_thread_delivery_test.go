@@ -501,7 +501,7 @@ func (s *TelnyxChannelSuite) TestAPersonWhoOptedOutIsNotTextedAndTheTaskIsNotRet
 // A line whose connection was removed fails the task for good.
 func (s *TelnyxChannelSuite) TestATaskOnARemovedLineFailsFinally() {
 	task, _ := s.scheduledInThread("+13125550001")
-	s.Require().NoError(s.store.DeleteConnectorConnection(context.Background(), s.customerID(), s.connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(context.Background(), s.customerID(), s.connection.ID))
 
 	_, _, err := s.deliverTask(task)
 

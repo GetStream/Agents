@@ -288,7 +288,7 @@ func (s *StoreSuite) TestAnotherCustomersAppConnectionOfTheSameAccountIsNotFound
 func (s *StoreSuite) TestADeletedAppConnectionIsNotFound() {
 	bot := s.connection("acme-app", nil)
 	s.account(bot.ID, "T0000TEAM")
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", bot.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", bot.ID))
 
 	_, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
 

@@ -32,7 +32,7 @@ func (m *Manager) sandboxGrant(ctx context.Context, binding store.ConnectorBindi
 	if manifest.Sandbox == nil && binding.Required {
 		return unavailableSandbox, nil
 	}
-	latest, err := m.options.Store.LatestConnectorDefinition(ctx, connection.CustomerID, binding.ConnectorID)
+	latest, err := m.options.Store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, binding.ConnectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		m.logger.Warn("a connector binding gives the sandbox no access: its connector was deleted", "connector", binding.Name,
 			"connection", connection.ID)
@@ -77,7 +77,7 @@ func (m *Manager) lateGrant(ctx context.Context, spec Spec, binding store.Connec
 	if !binding.Sandbox {
 		return nil
 	}
-	definition, err := m.options.Store.LatestConnectorDefinition(ctx, spec.CustomerID, binding.ConnectorID)
+	definition, err := m.options.Store.ConnectorDefinitions.Latest(ctx, spec.CustomerID, binding.ConnectorID)
 	if err != nil && !errors.Is(err, store.ErrNoConnectorDefinition) {
 		return err
 	}

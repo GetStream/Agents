@@ -95,8 +95,8 @@ func (s *ResolverSuite) salesforceConnection() core.ConnectionRef {
 		"https://api.salesforce.com/{mcp_path}", s.f.srv.URL+fakeprovider.PathMCP,
 	).Replace(string(raw))
 	s.Require().NotContains(at, "{login_host}", "every endpoint is at the fake")
-	s.Require().NoError(s.f.db.SeedConnectorDefinitions(s.f.ctx, fstest.MapFS{"salesforce.yaml": {Data: []byte(at)}}))
-	definition, err := s.f.db.LatestConnectorDefinition(s.f.ctx, customer, "salesforce")
+	s.Require().NoError(s.f.db.ConnectorDefinitions.Seed(s.f.ctx, fstest.MapFS{"salesforce.yaml": {Data: []byte(at)}}))
+	definition, err := s.f.db.ConnectorDefinitions.Latest(s.f.ctx, customer, "salesforce")
 	s.Require().NoError(err)
 
 	scheme := s.f.clientCredentials(s.f.srv.Client())
@@ -105,7 +105,7 @@ func (s *ResolverSuite) salesforceConnection() core.ConnectionRef {
 		OwnerType: store.OwnerApp, AuthScheme: oauth2cc.Name,
 	}
 	registry := core.Registry{Schemes: map[string]core.Scheme{oauth2cc.Name: scheme}}
-	s.Require().NoError(s.f.db.CreateConnectorConnection(s.f.ctx, registry, connection))
+	s.Require().NoError(s.f.db.ConnectorConnections.Insert(s.f.ctx, registry, connection))
 	ref := core.ConnectionRef{CustomerID: customer, ConnectionID: connection.ID}
 
 	resolved, err := definition.Manifest.Resolve(oauth2cc.Name, connection.Inputs, nil)

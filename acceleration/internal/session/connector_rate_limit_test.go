@@ -282,7 +282,7 @@ sources:
     endpoint: mcp
 `, s.connectorID, s.provider.URL, per, calls)))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }
@@ -311,7 +311,7 @@ func (s *RateLimitSuite) attachWith(manager *Manager, bindings ...store.Connecto
 // logged is the error types of the count rows connection's calls left, once all are written.
 func (s *RateLimitSuite) logged(connection string, count int) []string {
 	fetch := func() ([]store.ConnectorInvocation, error) {
-		return s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		return s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 	}
 	read := func() []store.ConnectorInvocation {
 		rows, err := fetch()

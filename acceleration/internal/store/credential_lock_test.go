@@ -40,12 +40,13 @@ func (s *StoreSuite) holding(connection ConnectorConnection) (release func()) {
 	held, done, finished := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	holder := s.router()
 	go func() {
-		finished <- holder.WithLockedConnectorConnection(s.ctx, connection.CustomerID, connection.ID,
+		finished <- holder.ConnectorConnections.WithLocked(s.ctx, connection.CustomerID, connection.ID,
 			func(*ConnectorConnection, func() error) (bool, error) {
 				close(held)
 				<-done
 				return false, nil
 			})
+
 	}()
 	<-held
 	return func() {
@@ -66,9 +67,9 @@ func (s *StoreSuite) TestASaveAtTheStoredRevisionAdvancesIt() {
 	connection.AccountID = "acct-1"
 	connection.GrantedScopes = []string{"read"}
 	connection.Metadata = map[string]string{"instance": "https://eu.acme.example"}
-	s.Require().NoError(s.store.SaveConnectorConnectionAtRevision(s.ctx, &connection, 1))
+	s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, 1))
 
-	stored, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	stored, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal(2, stored.Revision)
 	s.Equal(ConnectionConnected, stored.Status)
@@ -87,14 +88,14 @@ func (s *StoreSuite) TestASaveAtAStaleRevisionIsRefused() {
 
 	connection.Revision = 2
 	connection.LastError = "the first writer"
-	s.Require().NoError(s.store.SaveConnectorConnectionAtRevision(s.ctx, &connection, 1))
+	s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, 1))
 
 	stale.Revision = 2
 	stale.LastError = "a writer that read revision 1 too"
-	err := s.store.SaveConnectorConnectionAtRevision(s.ctx, &stale, 1)
+	err := s.store.ConnectorConnections.SaveAtRevision(s.ctx, &stale, 1)
 	s.ErrorIs(err, ErrConnectorConnectionChanged)
 
-	stored, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	stored, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal("the first writer", stored.LastError)
 }
@@ -103,9 +104,9 @@ func (s *StoreSuite) TestASaveIsNewCredentialsAtTheNextRevision() {
 	connection := s.connection("acme-app", nil)
 
 	connection.Revision = 1
-	s.ErrorContains(s.store.SaveConnectorConnectionAtRevision(s.ctx, &connection, 1), "new credentials at revision 2")
+	s.ErrorContains(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, 1), "new credentials at revision 2")
 	connection.Revision = 3
-	s.ErrorContains(s.store.SaveConnectorConnectionAtRevision(s.ctx, &connection, 1), "new credentials at revision 2")
+	s.ErrorContains(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, 1), "new credentials at revision 2")
 	s.Equal(1, s.storedConnection(connection.ID).Revision)
 }
 
@@ -115,17 +116,18 @@ func (s *StoreSuite) TestASaveCannotPutBackCredentialsACheckpointRetired() {
 
 	// A refresh checkpoints needs_reauthorization at the same revision before it spends the
 	// refresh token, and never learns what became of it.
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(locked *ConnectorConnection, checkpoint func() error) (bool, error) {
 			locked.Status = ConnectionNeedsReauthorization
 			locked.LastError = "refresh in flight"
 			return false, checkpoint()
 		})
+
 	s.Require().NoError(err)
 
 	// A save from a snapshot read before it, putting the old credentials back as connected.
 	snapshot.Status = ConnectionConnected
-	s.Error(s.store.SaveConnectorConnectionAtRevision(s.ctx, &snapshot, 1))
+	s.Error(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &snapshot, 1))
 
 	stored := s.storedConnection(connection.ID)
 	s.Equal(ConnectionNeedsReauthorization, stored.Status)
@@ -135,11 +137,12 @@ func (s *StoreSuite) TestASaveCannotPutBackCredentialsACheckpointRetired() {
 func (s *StoreSuite) TestALockedCallbackCannotMoveTheRevisionBack() {
 	connection := s.connection("acme-app", nil)
 
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(locked *ConnectorConnection, _ func() error) (bool, error) {
 			locked.Revision = 0
 			return true, nil
 		})
+
 	s.ErrorContains(err, "behind")
 	s.Equal(1, s.storedConnection(connection.ID).Revision)
 }
@@ -150,7 +153,7 @@ func (s *StoreSuite) TestACommitAfterTheCallersDeadlineStillLands() {
 	// The provider answers after the caller's deadline, with tokens it already rotated.
 	ctx, cancel := context.WithTimeout(s.ctx, 100*time.Millisecond)
 	defer cancel()
-	err := s.store.WithLockedConnectorConnection(ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(ctx, "acme-app", connection.ID,
 		func(locked *ConnectorConnection, _ func() error) (bool, error) {
 			<-ctx.Done()
 			locked.Revision++
@@ -159,6 +162,7 @@ func (s *StoreSuite) TestACommitAfterTheCallersDeadlineStillLands() {
 			locked.CredentialsKEKVersion = 1
 			return true, nil
 		})
+
 	s.Require().NoError(err)
 
 	stored := s.storedConnection(connection.ID)
@@ -176,11 +180,12 @@ func (s *StoreSuite) TestAWaiterOutlastsTheDriversReadTimeout() {
 	var ran atomic.Bool
 	waited := make(chan error, 1)
 	go func() {
-		waited <- waiter.WithLockedConnectorConnection(ctx, "acme-app", connection.ID,
+		waited <- waiter.ConnectorConnections.WithLocked(ctx, "acme-app", connection.ID,
 			func(*ConnectorConnection, func() error) (bool, error) {
 				ran.Store(true)
 				return false, nil
 			})
+
 	}()
 	// Past pgdriver's default ReadTimeout of 10s (newDefaultConfig in
 	// github.com/uptrace/bun/driver/pgdriver v1.2.18), which bounds any one blocking read.
@@ -195,18 +200,18 @@ func (s *StoreSuite) TestAWaiterOutlastsTheDriversReadTimeout() {
 
 // storedConnection is the connection as stored now.
 func (s *StoreSuite) storedConnection(id string) ConnectorConnection {
-	stored, err := s.store.ConnectorConnection(s.ctx, "acme-app", id)
+	stored, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", id)
 	s.Require().NoError(err)
 	return stored
 }
 
 func (s *StoreSuite) TestASaveOntoADeletedConnectionIsRefused() {
 	connection := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
 	connection.Revision = 2
 	connection.CredentialsSealed = []byte("sealed after the delete")
-	s.ErrorIs(s.store.SaveConnectorConnectionAtRevision(s.ctx, &connection, 1), ErrConnectorConnectionChanged)
+	s.ErrorIs(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, 1), ErrConnectorConnectionChanged)
 }
 
 func (s *StoreSuite) TestASaveIsOnlyItsOwnCustomers() {
@@ -214,28 +219,30 @@ func (s *StoreSuite) TestASaveIsOnlyItsOwnCustomers() {
 	theirs.CustomerID = "acme-app"
 	theirs.Revision = 2
 
-	s.ErrorIs(s.store.SaveConnectorConnectionAtRevision(s.ctx, &theirs, 1), ErrConnectorConnectionChanged)
-	_, err := s.store.ConnectorConnection(s.ctx, "acme-app", theirs.ID)
+	s.ErrorIs(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &theirs, 1), ErrConnectorConnectionChanged)
+	_, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", theirs.ID)
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestLockingAnotherCustomersConnectionFindsNone() {
 	theirs := s.connection("other-app", nil)
 
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", theirs.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", theirs.ID,
 		func(*ConnectorConnection, func() error) (bool, error) {
 			s.Fail("the callback runs only for the customer's own connection")
 			return false, nil
 		})
+
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestLockingADeletedConnectionFindsNone() {
 	connection := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(*ConnectorConnection, func() error) (bool, error) { return true, nil })
+
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
@@ -255,7 +262,7 @@ func (s *StoreSuite) TestLockedCallbacksOnOneConnectionNeverOverlapAcrossRouters
 	for i, router := range stores {
 		wg.Go(func() {
 			<-start
-			errs[i] = router.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+			errs[i] = router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 				func(locked *ConnectorConnection, _ func() error) (bool, error) {
 					if active.Add(1) != 1 {
 						overlapped.Store(true)
@@ -266,6 +273,7 @@ func (s *StoreSuite) TestLockedCallbacksOnOneConnectionNeverOverlapAcrossRouters
 					active.Add(-1)
 					return true, nil
 				})
+
 		})
 	}
 	close(start)
@@ -275,7 +283,7 @@ func (s *StoreSuite) TestLockedCallbacksOnOneConnectionNeverOverlapAcrossRouters
 		s.NoError(err)
 	}
 	s.False(overlapped.Load(), "two routers ran the callback for one connection at once")
-	stored, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	stored, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal(1+routers, stored.Revision, "every router saw the revision the one before it committed")
 	s.Zero(s.credentialLocks(true), "every lock is released")
@@ -285,13 +293,13 @@ func (s *StoreSuite) TestACheckpointIsCommittedWhileTheLockIsStillHeld() {
 	connection := s.connection("acme-app", nil)
 	other := s.router()
 
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(locked *ConnectorConnection, checkpoint func() error) (bool, error) {
 			locked.Status = ConnectionNeedsReauthorization
 			locked.LastError = "refresh in flight"
 			s.Require().NoError(checkpoint())
 
-			seen, err := other.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+			seen, err := other.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 			s.Require().NoError(err)
 			s.Equal(ConnectionNeedsReauthorization, seen.Status, "another router reads the checkpoint at once")
 			s.Equal(1, s.credentialLocks(true), "and the lock is still held")
@@ -301,9 +309,10 @@ func (s *StoreSuite) TestACheckpointIsCommittedWhileTheLockIsStillHeld() {
 			locked.LastError = ""
 			return true, nil
 		})
+
 	s.Require().NoError(err)
 
-	stored, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	stored, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal(2, stored.Revision, "the final commit follows the checkpoint's revision")
 	s.Equal(ConnectionConnected, stored.Status)
@@ -313,14 +322,15 @@ func (s *StoreSuite) TestACallbackThatFailsCommitsNothingMore() {
 	connection := s.connection("acme-app", nil)
 	failed := errors.New("the callback failed")
 
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(locked *ConnectorConnection, _ func() error) (bool, error) {
 			locked.Revision++
 			return true, failed
 		})
+
 	s.ErrorIs(err, failed)
 
-	stored, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	stored, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal(1, stored.Revision)
 }
@@ -328,16 +338,16 @@ func (s *StoreSuite) TestACallbackThatFailsCommitsNothingMore() {
 func (s *StoreSuite) TestAWriteThatSkippedTheLockCannotBeOverwrittenByTheLockedCallback() {
 	connection := s.connection("acme-app", nil)
 
-	err := s.store.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err := s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(locked *ConnectorConnection, _ func() error) (bool, error) {
-			// A writer that does not take the lock, which no store method is: only the
-			// revision condition stands between it and the callback.
+
 			_, err := s.store.GlobalDB().ExecContext(s.ctx,
 				"UPDATE connector_connections SET revision = 2 WHERE id = ?", connection.ID)
 			s.Require().NoError(err)
 			locked.Revision++
 			return true, nil
 		})
+
 	s.ErrorIs(err, ErrConnectorConnectionChanged)
 }
 
@@ -349,8 +359,9 @@ func (s *StoreSuite) TestAnotherConnectionsLockDoesNotWait() {
 
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
-	err := s.store.WithLockedConnectorConnection(ctx, "acme-app", free.ID,
+	err := s.store.ConnectorConnections.WithLocked(ctx, "acme-app", free.ID,
 		func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+
 	s.NoError(err)
 }
 
@@ -362,7 +373,7 @@ func (s *StoreSuite) TestAWaiterPastItsDeadlineReturnsAndLeavesNoLockOrConnectio
 	ctx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
 	defer cancel()
 	began := time.Now()
-	err := waiter.WithLockedConnectorConnection(ctx, "acme-app", connection.ID,
+	err := waiter.ConnectorConnections.WithLocked(ctx, "acme-app", connection.ID,
 		func(*ConnectorConnection, func() error) (bool, error) {
 			s.Fail("a waiter that gave up never runs the callback")
 			return false, nil
@@ -383,7 +394,7 @@ func (s *StoreSuite) TestAWaiterThatIsCanceledReturnsAndLeavesNoLockOrConnection
 	// No deadline: a plain cancel, which the driver does not see while a query runs.
 	ctx, cancel := context.WithCancel(s.ctx)
 	time.AfterFunc(200*time.Millisecond, cancel)
-	err := waiter.WithLockedConnectorConnection(ctx, "acme-app", connection.ID,
+	err := waiter.ConnectorConnections.WithLocked(ctx, "acme-app", connection.ID,
 		func(*ConnectorConnection, func() error) (bool, error) {
 			s.Fail("a waiter that gave up never runs the callback")
 			return false, nil
@@ -394,8 +405,9 @@ func (s *StoreSuite) TestAWaiterThatIsCanceledReturnsAndLeavesNoLockOrConnection
 	release()
 	s.assertNothingIsHeld(waiter)
 
-	err = waiter.WithLockedConnectorConnection(s.ctx, "acme-app", connection.ID,
+	err = waiter.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
 		func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+
 	s.NoError(err, "the waiter's router locks the connection again once it is free")
 }
 

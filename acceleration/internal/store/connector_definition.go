@@ -51,7 +51,7 @@ const definitionLockSeed = 833
 // caller has to tell it apart from the database being down.
 var ErrNoConnectorDefinition = errors.New("store: no such connector definition")
 
-// ConnectorDefinition is one revision of a connector's manifest. Built-ins are stored under
+// Get is one revision of a connector's manifest. Built-ins are stored under
 // BuiltinCustomer; a custom definition under the customer that made it.
 type ConnectorDefinition struct {
 	bun.BaseModel `bun:"table:connector_definitions,alias:cd"`
@@ -66,7 +66,25 @@ type ConnectorDefinition struct {
 	CreatedAt   time.Time     `bun:"created_at,notnull"`
 }
 
-// SeedConnectorDefinitions stores every built-in manifest in fsys, one <id>.yaml per
+// Validate refuses a revision the table's checks refuse: a custom id is a customer's and only a
+// customer's (connector_definitions_custom_prefix), and revisions count from 1.
+func (d *ConnectorDefinition) Validate() error {
+	return validate("connector definition").
+		required("id", d.ID).
+		check((d.CustomerID == BuiltinCustomer) != strings.HasPrefix(d.ID, CustomPrefix), "id",
+			"starts with "+CustomPrefix+" when a customer owns it and only then, so no custom definition shadows a built-in").
+		check(d.Revision >= 1, "revision", "is below 1").
+		required("name", d.Name).
+		done()
+}
+
+// ConnectorDefinitions are the connector manifests, built-in and custom, by revision, in the
+// shared database.
+type ConnectorDefinitions struct {
+	store *Store
+}
+
+// Seed stores every built-in manifest in fsys, one <id>.yaml per
 // connector, as a built-in definition at the revision the file names. The file's author
 // numbers built-in revisions, the way a migration is numbered, because two router builds can
 // share a database at once: old and new pods in a rolling deploy, a rollback, or a branch
@@ -74,40 +92,41 @@ type ConnectorDefinition struct {
 // revision already stored and changes nothing, rather than storing its manifest as the next
 // revision and flipping latest back and forth. Every file is parsed before any is written, so
 // one invalid manifest stores none of them.
-func (s *Store) SeedConnectorDefinitions(ctx context.Context, fsys fs.FS) error {
+func (r *ConnectorDefinitions) Seed(ctx context.Context, fsys fs.FS) error {
 	manifests, err := builtinManifests(fsys)
 	if err != nil {
 		return err
 	}
 	for _, manifest := range manifests {
-		if err := s.seedBuiltin(ctx, manifest); err != nil {
+		if err := r.seedBuiltin(ctx, manifest); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// CreateConnectorDefinition stores a customer's own definition as the next revision of its
+// Revise stores a customer's own definition as the next revision of its
 // id, or returns the latest revision when that already says the same. The manifest's own
 // revision is replaced: the store numbers revisions.
-func (s *Store) CreateConnectorDefinition(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
 	if customerID == BuiltinCustomer {
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: customer id is required"))
 	}
-	if !strings.HasPrefix(manifest.ID, CustomPrefix) {
-		return ConnectorDefinition{}, stack.Wrap(fmt.Errorf("store: a custom connector id starts with %s, so it cannot shadow a built-in: %q", CustomPrefix, manifest.ID))
+	probe := ConnectorDefinition{CustomerID: customerID, ID: manifest.ID, Revision: 1, Name: manifest.Name}
+	if err := probe.Validate(); err != nil {
+		return ConnectorDefinition{}, stack.Wrap(err)
 	}
-	return s.saveRevision(ctx, customerID, manifest)
+	return r.saveRevision(ctx, customerID, manifest)
 }
 
-// ConnectorDefinition returns one revision of a definition the customer can see: a built-in
+// Get returns one revision of a definition the customer can see: a built-in
 // or its own.
-func (s *Store) ConnectorDefinition(ctx context.Context, customerID, id string, revision int) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) Get(ctx context.Context, customerID, id string, revision int) (ConnectorDefinition, error) {
 	if customerID == "" || id == "" {
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 
-	return connectorDefinition(ctx, s.global, customerID, id, revision)
+	return connectorDefinition(ctx, r.store.global, customerID, id, revision)
 }
 
 // connectorDefinition is one revision of a definition the customer can see, read on db.
@@ -128,14 +147,14 @@ func connectorDefinition(ctx context.Context, db bun.IDB, customerID, id string,
 	return definition, nil
 }
 
-// LatestConnectorDefinition returns the newest revision of a definition the customer can see.
-func (s *Store) LatestConnectorDefinition(ctx context.Context, customerID, id string) (ConnectorDefinition, error) {
-	return latestVisibleDefinition(ctx, s.global, customerID, id)
+// Latest returns the newest revision of a definition the customer can see.
+func (r *ConnectorDefinitions) Latest(ctx context.Context, customerID, id string) (ConnectorDefinition, error) {
+	return latestVisibleDefinition(ctx, r.store.global, customerID, id)
 }
 
-// Definitions reads the connector definitions a customer can see: a Store, on its pool.
+// Definitions reads the connector definitions a customer can see: ConnectorDefinitions.
 type Definitions interface {
-	LatestConnectorDefinition(ctx context.Context, customerID, id string) (ConnectorDefinition, error)
+	Latest(ctx context.Context, customerID, id string) (ConnectorDefinition, error)
 }
 
 // latestVisibleDefinition is LatestConnectorDefinition read on db.
@@ -153,13 +172,13 @@ func latestVisibleDefinition(ctx context.Context, db bun.IDB, customerID, id str
 	return definition, nil
 }
 
-// LatestBuiltinConnectorDefinition returns the newest revision of a built-in definition, for
+// LatestBuiltin returns the newest revision of a built-in definition, for
 // a caller that is no customer: a provider delivering an event to a connector's route.
-func (s *Store) LatestBuiltinConnectorDefinition(ctx context.Context, id string) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) LatestBuiltin(ctx context.Context, id string) (ConnectorDefinition, error) {
 	if id == "" {
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: a connector id is required"))
 	}
-	definition, err := latestDefinition(ctx, s.global, ownedBy(BuiltinCustomer), id)
+	definition, err := latestDefinition(ctx, r.store.global, ownedBy(BuiltinCustomer), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConnectorDefinition{}, stack.Wrap(fmt.Errorf("%w: %s", ErrNoConnectorDefinition, id))
 	}
@@ -178,7 +197,7 @@ const (
 )
 
 // ConnectorDefinitionLimit is the page size a definition list uses for the limit asked for.
-// ListConnectorDefinitions returns one row more than this.
+// Select returns one row more than this.
 func ConnectorDefinitionLimit(asked int) int {
 	return clampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
 }
@@ -201,17 +220,17 @@ type ConnectorDefinitionPosition struct {
 	ID     string `json:"id"`
 }
 
-// ListConnectorDefinitions returns the newest revision of every definition the customer can
+// Select returns the newest revision of every definition the customer can
 // see that matches the filter: the built-ins first, then its own, each by id. It returns up
 // to one more than ConnectorDefinitionLimit, so a caller can tell the page is not the last.
-func (s *Store) ListConnectorDefinitions(ctx context.Context, customerID string, filter ConnectorDefinitionFilter) ([]ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, filter ConnectorDefinitionFilter) ([]ConnectorDefinition, error) {
 	if customerID == "" {
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
 
 	// The newest revision first, then the text matched on it, so an older revision that
 	// matched cannot stand in for a newer one that does not.
-	latest := s.global.NewSelect().Model((*ConnectorDefinition)(nil)).
+	latest := r.store.global.NewSelect().Model((*ConnectorDefinition)(nil)).
 		DistinctOn("customer_id, id").
 		Apply(visibleTo(customerID)).
 		Order("customer_id", "id", "revision DESC")
@@ -220,7 +239,7 @@ func (s *Store) ListConnectorDefinitions(ctx context.Context, customerID string,
 		latest = latest.Where("(customer_id <> ?, id) > (?, ?)", BuiltinCustomer, after.Custom, after.ID)
 	}
 	var definitions []ConnectorDefinition
-	query := s.global.NewSelect().Model(&definitions).ModelTableExpr("(?) AS cd", latest)
+	query := r.store.global.NewSelect().Model(&definitions).ModelTableExpr("(?) AS cd", latest)
 	if filter.Text != "" {
 		escaped := likeEscaper.Replace(filter.Text)
 		// Each field on its own, so a query cannot match across the boundary of two.
@@ -244,9 +263,9 @@ func (s *Store) ListConnectorDefinitions(ctx context.Context, customerID string,
 // starting at once, or two requests creating the same custom id, take turns: the second
 // finds the first's revision and either matches it or follows it. The primary key would
 // refuse a duplicate revision anyway; the lock is what turns that into a wait, not an error.
-func (s *Store) saveRevision(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
 	var saved ConnectorDefinition
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+manifest.ID, definitionLockSeed); err != nil {
 			return err
 		}
@@ -283,6 +302,9 @@ func (s *Store) saveRevision(ctx context.Context, customerID string, manifest co
 			Manifest:    manifest,
 			CreatedAt:   time.Now().UTC(),
 		}
+		if err := saved.Validate(); err != nil {
+			return err
+		}
 		// Read back what Postgres stored, which keeps microseconds, so the answer to a create
 		// is the row a later read returns.
 		_, err = tx.NewInsert().Model(&saved).Returning("created_at").Exec(ctx)
@@ -304,8 +326,8 @@ func (s *Store) saveRevision(ctx context.Context, customerID string, manifest co
 // The latest is the highest revision, so an older build starting last, even on a database
 // that has never seen its revision, cannot make its manifest latest again. Reverting a
 // manifest is a new revision whose content is the old one.
-func (s *Store) seedBuiltin(ctx context.Context, manifest core.Manifest) error {
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+func (r *ConnectorDefinitions) seedBuiltin(ctx context.Context, manifest core.Manifest) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, BuiltinCustomer+"/"+manifest.ID, definitionLockSeed); err != nil {
 			return err
 		}
@@ -330,7 +352,7 @@ func (s *Store) seedBuiltin(ctx context.Context, manifest core.Manifest) error {
 			return err
 		}
 
-		_, err = tx.NewInsert().Model(&ConnectorDefinition{
+		seeded := ConnectorDefinition{
 			CustomerID:  BuiltinCustomer,
 			ID:          manifest.ID,
 			Revision:    manifest.Revision,
@@ -339,7 +361,11 @@ func (s *Store) seedBuiltin(ctx context.Context, manifest core.Manifest) error {
 			Description: manifest.Description,
 			Manifest:    manifest,
 			CreatedAt:   time.Now().UTC(),
-		}).Exec(ctx)
+		}
+		if err := seeded.Validate(); err != nil {
+			return err
+		}
+		_, err = tx.NewInsert().Model(&seeded).Exec(ctx)
 		if err != nil {
 			return err
 		}
@@ -349,53 +375,6 @@ func (s *Store) seedBuiltin(ctx context.Context, manifest core.Manifest) error {
 		return fmt.Errorf("store: seed connector definition %s: %w", manifest.ID, err)
 	}
 	return nil
-}
-
-// ConnectorBrokenRevision marks one revision of a built-in connector as not working, as a later
-// revision's manifest declared it (core.Manifest.BrokenRevisions). Table
-// connector_broken_revisions; the seeder is its one writer.
-type ConnectorBrokenRevision struct {
-	bun.BaseModel `bun:"table:connector_broken_revisions,alias:cbr"`
-
-	ConnectorID string `bun:"connector_id,pk"`
-	Revision    int    `bun:"revision,pk"`
-	Reason      string `bun:"reason,notnull"`
-	// MarkedBy is the revision whose manifest declared it.
-	MarkedBy  int       `bun:"marked_by,notnull"`
-	CreatedAt time.Time `bun:"created_at,notnull"`
-}
-
-// markBroken stores the marks manifest declares, in the seeder's transaction. A mark already
-// stored is kept as it is, so marks only accumulate: a later revision that lists one no longer,
-// or gives another reason, changes nothing.
-func markBroken(ctx context.Context, tx bun.Tx, manifest core.Manifest) error {
-	broken := manifest.Broken()
-	if len(broken) == 0 {
-		return nil
-	}
-	marks := make([]ConnectorBrokenRevision, 0, len(broken))
-	for revision, reason := range broken {
-		marks = append(marks, ConnectorBrokenRevision{ConnectorID: manifest.ID, Revision: revision, Reason: reason,
-			MarkedBy: manifest.Revision, CreatedAt: time.Now().UTC()})
-	}
-	_, err := tx.NewInsert().Model(&marks).On("CONFLICT (connector_id, revision) DO NOTHING").Exec(ctx)
-	return err
-}
-
-// BrokenConnectorRevision is why revision of connector is marked broken, and whether it is.
-func (s *Store) BrokenConnectorRevision(ctx context.Context, connectorID string, revision int) (string, bool, error) {
-	var mark ConnectorBrokenRevision
-	err := s.global.NewSelect().Model(&mark).
-		Where("connector_id = ?", connectorID).
-		Where("revision = ?", revision).
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, stack.Wrap(fmt.Errorf("store: broken connector revision: %w", err))
-	}
-	return mark.Reason, true, nil
 }
 
 // How a connection's pinned revision compares with its connector's (DefinitionStatus.Status).
@@ -417,10 +396,10 @@ type DefinitionStatus struct {
 	Reason string
 }
 
-// ConnectorDefinitionStatuses is the DefinitionStatus of each of the customer's connections, by
+// Statuses is the DefinitionStatus of each of the customer's connections, by
 // connection id, in at most three reads whatever their number: the latest revision of each
 // connector, the revisions the connections behind it pin, and the marks on them.
-func (s *Store) ConnectorDefinitionStatuses(ctx context.Context, customerID string, connections []ConnectorConnection) (map[string]DefinitionStatus, error) {
+func (r *ConnectorDefinitions) Statuses(ctx context.Context, customerID string, connections []ConnectorConnection) (map[string]DefinitionStatus, error) {
 	statuses := make(map[string]DefinitionStatus, len(connections))
 	if len(connections) == 0 {
 		return statuses, nil
@@ -432,7 +411,7 @@ func (s *Store) ConnectorDefinitionStatuses(ctx context.Context, customerID stri
 		}
 	}
 	var latest []ConnectorDefinition
-	err := s.global.NewSelect().Model(&latest).
+	err := r.store.global.NewSelect().Model(&latest).
 		DistinctOn("cd.id").Column("id", "revision", "manifest").
 		Apply(visibleTo(customerID)).
 		Where("cd.id IN (?)", bun.In(ids)).
@@ -445,12 +424,12 @@ func (s *Store) ConnectorDefinitionStatuses(ctx context.Context, customerID stri
 	for _, definition := range latest {
 		newest[definition.ID] = definition
 	}
-	pinned, err := s.pinnedBehind(ctx, customerID, connections, newest)
+	pinned, err := r.pinnedBehind(ctx, customerID, connections, newest)
 	if err != nil {
 		return nil, err
 	}
 	var marks []ConnectorBrokenRevision
-	err = s.global.NewSelect().Model(&marks).Where("connector_id IN (?)", bun.In(ids)).Scan(ctx)
+	err = r.store.global.NewSelect().Model(&marks).Where("connector_id IN (?)", bun.In(ids)).Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: broken connector revisions: %w", err))
 	}
@@ -482,7 +461,7 @@ type pinnedRevision struct {
 
 // pinnedBehind is the manifest of each revision a connection pins that is older than its
 // connector's newest, in one read, or none when no connection is behind.
-func (s *Store) pinnedBehind(ctx context.Context, customerID string, connections []ConnectorConnection, newest map[string]ConnectorDefinition) (map[pinnedRevision]core.Manifest, error) {
+func (r *ConnectorDefinitions) pinnedBehind(ctx context.Context, customerID string, connections []ConnectorConnection, newest map[string]ConnectorDefinition) (map[pinnedRevision]core.Manifest, error) {
 	var ids []string
 	var revisions []int
 	for _, connection := range connections {
@@ -500,7 +479,7 @@ func (s *Store) pinnedBehind(ctx context.Context, customerID string, connections
 		return nil, nil
 	}
 	var definitions []ConnectorDefinition
-	err := s.global.NewSelect().Model(&definitions).
+	err := r.store.global.NewSelect().Model(&definitions).
 		Column("id", "revision", "manifest").
 		Apply(visibleTo(customerID)).
 		Where("cd.id IN (?)", bun.In(ids)).
@@ -545,7 +524,7 @@ type DeletedConnector struct {
 	Connections []DeletedConnection
 }
 
-// DeleteConnectorDefinition removes every revision of one of the customer's own definitions.
+// Delete removes every revision of one of the customer's own definitions.
 // Unforced, a live connection made from it or a live agent config binding it refuses the
 // delete with ErrConnectorDefinitionInUse, and nothing changes. Forced, its live connections
 // are deleted as a forced connection delete deletes one (softDeleteConnection: credentials and
@@ -565,12 +544,12 @@ type DeletedConnector struct {
 // UPDATE, which a config save's FOR KEY SHARE on the connections it binds does not wait for
 // (https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS, table 13.3),
 // so a save holding a connection while it waits for the definition cannot deadlock with this.
-func (s *Store) DeleteConnectorDefinition(ctx context.Context, customerID, id string, force bool) (DeletedConnector, error) {
+func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string, force bool) (DeletedConnector, error) {
 	if customerID == BuiltinCustomer || id == "" {
 		return DeletedConnector{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	var deleted DeletedConnector
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+id, definitionLockSeed); err != nil {
 			return err
 		}
@@ -768,128 +747,4 @@ func sameManifest(stored, seeded core.Manifest) (bool, error) {
 		return false, err
 	}
 	return bytes.Equal(a, b), nil
-}
-
-// ConnectorConnectionClient is the OAuth client a connection's grant was issued to (AI-990
-// F16), kept in connector_connection_clients
-// (20261011210000_connector_clients_and_argument_shapes.sql) so it is read without unsealing the
-// credentials. A client_id is not a secret (RFC 6749 section 2.2).
-type ConnectorConnectionClient struct {
-	bun.BaseModel `bun:"table:connector_connection_clients,alias:ccc"`
-
-	ConnectionID string                        `bun:"connection_id,pk"`
-	Registration core.ClientRegistrationMethod `bun:"registration,notnull"`
-	ClientID     string                        `bun:"client_id,notnull"`
-	UpdatedAt    time.Time                     `bun:"updated_at,notnull"`
-}
-
-// PutConnectorConnectionClient records the client a consent of the connection used, replacing
-// the one an earlier consent recorded.
-func (s *Store) PutConnectorConnectionClient(ctx context.Context, client *ConnectorConnectionClient) error {
-	if client.ConnectionID == "" || client.ClientID == "" {
-		return stack.Wrap(errors.New("store: a connection client needs a connection and a client id"))
-	}
-	client.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	_, err := s.global.NewInsert().Model(client).
-		On("CONFLICT (connection_id) DO UPDATE").
-		Set("registration = EXCLUDED.registration, client_id = EXCLUDED.client_id, updated_at = EXCLUDED.updated_at").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: put connection client: %w", err))
-	}
-	return nil
-}
-
-// ConnectorConnectionClients is the recorded client of each of connectionIDs that has one, by
-// connection id. The caller has already scoped the ids to its customer.
-func (s *Store) ConnectorConnectionClients(ctx context.Context, connectionIDs []string) (map[string]ConnectorConnectionClient, error) {
-	byConnection := map[string]ConnectorConnectionClient{}
-	if len(connectionIDs) == 0 {
-		return byConnection, nil
-	}
-	clients := []ConnectorConnectionClient{}
-	if err := s.global.NewSelect().Model(&clients).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list connection clients: %w", err))
-	}
-	for _, client := range clients {
-		byConnection[client.ConnectionID] = client
-	}
-	return byConnection, nil
-}
-
-// GrantedConnectorConnectionsOfClient is every live connection of the customer's to the
-// connector that holds credentials its consent got from the client of registration with
-// clientID (ConnectorConnectionClient), oldest first: the grants that client's secret revokes.
-func (s *Store) GrantedConnectorConnectionsOfClient(ctx context.Context, customerID, connectorID string,
-	registration core.ClientRegistrationMethod, clientID string) ([]ConnectorConnection, error) {
-	var connections []ConnectorConnection
-	err := s.global.NewSelect().Model(&connections).
-		Join("JOIN connector_connection_clients AS ccc ON ccc.connection_id = cc.id").
-		Where("cc.customer_id = ?", customerID).
-		Where("cc.connector_id = ?", connectorID).
-		Where("cc.deleted_at IS NULL").
-		Where("cc.credentials_sealed <> ''::bytea").
-		Where("ccc.registration = ?", registration).
-		Where("ccc.client_id = ?", clientID).
-		Order("cc.created_at", "cc.id").
-		Scan(ctx)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list a client's granted connector connections: %w", err))
-	}
-	return connections, nil
-}
-
-// ConnectorConnectionValidation is the last validate of a connection (AI-1052), kept in
-// connector_connection_validations (20261016120000_connector_connection_validations.sql): its
-// status, its code (a stable reason, or the provider's HTTP status), its error and when it ran,
-// and the revision of the credentials it checked. The error is the validate's with the
-// credential's values cut out, and capped (api.storedError).
-type ConnectorConnectionValidation struct {
-	bun.BaseModel `bun:"table:connector_connection_validations,alias:ccv"`
-
-	ConnectionID string `bun:"connection_id,pk"`
-	// Revision is the connection's revision (ConnectorConnection.Revision) whose credentials
-	// the validate checked. A connection read at a later revision has newer credentials than
-	// the validate saw.
-	Revision  int       `bun:"revision,notnull"`
-	Status    string    `bun:"status,notnull"`
-	Code      string    `bun:"code,notnull"`
-	Error     string    `bun:"error,notnull"`
-	CheckedAt time.Time `bun:"checked_at,notnull"`
-}
-
-// PutConnectorConnectionValidation records a validate of the connection, replacing the one an
-// earlier validate recorded. Of two validates at once, the one of the later revision stays,
-// and of two of the same revision the one that ran later, whichever writes last: a validate
-// of credentials replaced while it ran never covers one of the new credentials.
-func (s *Store) PutConnectorConnectionValidation(ctx context.Context, validation *ConnectorConnectionValidation) error {
-	if validation.ConnectionID == "" || validation.Status == "" || validation.CheckedAt.IsZero() {
-		return stack.Wrap(errors.New("store: a connection validation needs a connection, a status and a time"))
-	}
-	_, err := s.global.NewInsert().Model(validation).
-		On("CONFLICT (connection_id) DO UPDATE").
-		Set("revision = EXCLUDED.revision, status = EXCLUDED.status, code = EXCLUDED.code, error = EXCLUDED.error, checked_at = EXCLUDED.checked_at").
-		Where("(ccv.revision, ccv.checked_at) <= (EXCLUDED.revision, EXCLUDED.checked_at)").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: put connection validation: %w", err))
-	}
-	return nil
-}
-
-// ConnectorConnectionValidations is the last validate of each of connectionIDs that was
-// validated, by connection id. The caller has already scoped the ids to its customer.
-func (s *Store) ConnectorConnectionValidations(ctx context.Context, connectionIDs []string) (map[string]ConnectorConnectionValidation, error) {
-	byConnection := map[string]ConnectorConnectionValidation{}
-	if len(connectionIDs) == 0 {
-		return byConnection, nil
-	}
-	validations := []ConnectorConnectionValidation{}
-	if err := s.global.NewSelect().Model(&validations).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list connection validations: %w", err))
-	}
-	for _, validation := range validations {
-		byConnection[validation.ConnectionID] = validation
-	}
-	return byConnection, nil
 }

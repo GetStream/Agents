@@ -9,6 +9,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/uptrace/bun"
 )
 
@@ -21,7 +22,7 @@ func (s *StoreSuite) connection(customerID string, change func(*ConnectorConnect
 	if change != nil {
 		change(connection)
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 	return *connection
 }
 
@@ -31,29 +32,6 @@ func userOwned(userID string) func(*ConnectorConnection) {
 		connection.OwnerType = OwnerUser
 		connection.OwnerID = userID
 	}
-}
-
-// attempt stores an open consent attempt for a connection under state.
-func (s *StoreSuite) attempt(connection ConnectorConnection, state string) ConnectorAuthorizationAttempt {
-	attempt := &ConnectorAuthorizationAttempt{
-		ID:            newID(),
-		CustomerID:    connection.CustomerID,
-		ConnectionID:  connection.ID,
-		Kind:          AttemptConsent,
-		StateHash:     AuthorizationStateHash(state),
-		AttemptSealed: []byte("sealed attempt"),
-		KEKVersion:    1,
-		ExpiresAt:     time.Now().Add(10 * time.Minute),
-	}
-	s.Require().NoError(s.store.CreateConnectorAuthorizationAttempt(s.ctx, attempt))
-	return *attempt
-}
-
-// expire moves an attempt's expiry into the past, which no caller can ask for.
-func (s *StoreSuite) expire(id string) {
-	_, err := s.store.GlobalDB().ExecContext(s.ctx,
-		"UPDATE connector_authorization_attempts SET expires_at = now() - interval '1 second' WHERE id = ?", id)
-	s.Require().NoError(err)
 }
 
 // bind makes a live agent config of the customer's carry bindings, written as T20 will
@@ -86,7 +64,7 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 		connection.Label = "Support workspace"
 	})
 
-	found, err := s.store.ConnectorConnection(s.ctx, "acme-app", created.ID)
+	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", created.ID)
 	s.Require().NoError(err)
 	s.Equal(created.ID, found.ID)
 	s.Equal("acme", found.ConnectorID)
@@ -110,7 +88,7 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 func (s *StoreSuite) TestATLSSchemeIsStoredBesideTheAuthScheme() {
 	created := s.connection("acme-app", func(connection *ConnectorConnection) { connection.TLSScheme = "test_mtls" })
 
-	found, err := s.store.ConnectorConnection(s.ctx, "acme-app", created.ID)
+	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", created.ID)
 	s.Require().NoError(err)
 	s.Equal("test_mtls", found.TLSScheme)
 
@@ -130,7 +108,7 @@ func (s *StoreSuite) TestARegisteredAuthSchemeItsConnectorDoesNotListIsRefused()
 	connection := appConnection()
 	connection.AuthScheme = "test_unlisted"
 
-	err := s.store.CreateConnectorConnection(s.ctx, testSchemes, connection)
+	err := s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection)
 
 	s.ErrorIs(err, ErrSchemeNotAllowed)
 	s.ErrorContains(err, `acme revision 1 does not list auth scheme "test_unlisted"`)
@@ -141,7 +119,7 @@ func (s *StoreSuite) TestARegisteredTLSSchemeItsConnectorDoesNotListIsRefused() 
 	connection := appConnection()
 	connection.TLSScheme = "test_unlisted"
 
-	err := s.store.CreateConnectorConnection(s.ctx, testSchemes, connection)
+	err := s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection)
 
 	s.ErrorIs(err, ErrSchemeNotAllowed)
 	s.ErrorContains(err, `acme revision 1 does not list tls scheme "test_unlisted"`)
@@ -169,7 +147,7 @@ func (s *StoreSuite) TestAConnectionCannotPinARevisionThatDoesNotExist() {
 	connection := appConnection()
 	connection.DefinitionRevision = 2
 
-	err := s.store.CreateConnectorConnection(s.ctx, testSchemes, connection)
+	err := s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection)
 
 	s.ErrorIs(err, ErrNoConnectorDefinition)
 	s.ErrorContains(err, "acme revision 2")
@@ -180,48 +158,50 @@ func (s *StoreSuite) TestAConnectionCanPinAnOlderRevision() {
 	s.seed(acmeChanged)
 	connection := appConnection()
 
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 
-	found, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal(1, found.DefinitionRevision, "a new revision does not move a connection made from the old one")
 }
 
 func (s *StoreSuite) TestAConnectionCanPinTheCustomersOwnDefinition() {
-	custom, err := s.store.CreateConnectorDefinition(s.ctx, "acme-app",
+	custom, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app",
 		parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_acme", 1)))
+
 	s.Require().NoError(err)
 	connection := appConnection()
 	connection.ConnectorID = custom.ID
 
-	s.NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+	s.NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 }
 
 func (s *StoreSuite) TestAConnectionCannotPinAnotherCustomersDefinition() {
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "other-app",
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "other-app",
 		parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_acme", 1)))
+
 	s.Require().NoError(err)
 	connection := appConnection()
 	connection.ConnectorID = "custom_acme"
 
-	s.ErrorIs(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection), ErrNoConnectorDefinition)
+	s.ErrorIs(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection), ErrNoConnectorDefinition)
 }
 
 func (s *StoreSuite) TestAConnectionIsOnlyItsOwnCustomers() {
 	mine := s.connection("acme-app", nil)
 
-	_, err := s.store.ConnectorConnection(s.ctx, "other-app", mine.ID)
+	_, err := s.store.ConnectorConnections.Get(s.ctx, "other-app", mine.ID)
 	s.ErrorIs(err, ErrNoConnectorConnection)
 
-	listed, err := s.store.ConnectorConnectionsByOwner(s.ctx, "other-app", ConnectionFilter{OwnerType: OwnerApp})
+	listed, err := s.store.ConnectorConnections.Select(s.ctx, "other-app", ConnectionFilter{OwnerType: OwnerApp})
 	s.Require().NoError(err)
 	s.Empty(listed)
 
-	_, err = s.store.ConnectorConnectionReferenced(s.ctx, "other-app", mine.ID)
+	_, err = s.store.ConnectorConnections.Referenced(s.ctx, "other-app", mine.ID)
 	s.ErrorIs(err, ErrNoConnectorConnection)
 
-	s.ErrorIs(s.store.DeleteConnectorConnection(s.ctx, "other-app", mine.ID), ErrNoConnectorConnection)
-	_, err = s.store.ConnectorConnection(s.ctx, "acme-app", mine.ID)
+	s.ErrorIs(s.store.ConnectorConnections.Delete(s.ctx, "other-app", mine.ID), ErrNoConnectorConnection)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", mine.ID)
 	s.NoError(err, "another customer's delete leaves it alone")
 }
 
@@ -231,25 +211,26 @@ func (s *StoreSuite) TestListingByOwnerReturnsOnlyThatOwnersConnectionsNewestFir
 	s.connection("acme-app", nil)
 	second := s.connection("acme-app", userOwned("alice"))
 
-	listed, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerUser, OwnerID: "alice"})
+	listed, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerUser, OwnerID: "alice"})
 	s.Require().NoError(err)
 	s.Require().Len(listed, 2)
 	s.Equal(second.ID, listed[0].ID)
 	s.Equal(first.ID, listed[1].ID)
 
-	apps, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp})
+	apps, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp})
 	s.Require().NoError(err)
 	s.Len(apps, 1, "the app's own connections are not any user's, and the other way round")
 }
 
 func (s *StoreSuite) TestListingByOwnerNarrowsToOneConnector() {
-	_, err := s.store.CreateConnectorDefinition(s.ctx, "acme-app",
+	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app",
 		parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_acme", 1)))
+
 	s.Require().NoError(err)
 	s.connection("acme-app", nil)
 	custom := s.connection("acme-app", func(connection *ConnectorConnection) { connection.ConnectorID = "custom_acme" })
 
-	listed, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp, ConnectorID: "custom_acme"})
+	listed, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp, ConnectorID: "custom_acme"})
 	s.Require().NoError(err)
 	s.Require().Len(listed, 1)
 	s.Equal(custom.ID, listed[0].ID)
@@ -260,15 +241,16 @@ func (s *StoreSuite) TestListingByOwnerPagesFromWhereTheLastPageEnded() {
 	middle := s.connection("acme-app", nil)
 	newest := s.connection("acme-app", nil)
 
-	page, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp, Limit: 1})
+	page, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerApp, Limit: 1})
 	s.Require().NoError(err)
 	s.Require().Len(page, 2, "one more than the limit says there is another page")
 	s.Equal(newest.ID, page[0].ID)
 
-	next, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{
+	next, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{
 		OwnerType: OwnerApp, Limit: 2,
 		After: &ConnectionPosition{CreatedAt: page[0].CreatedAt, ID: page[0].ID},
 	})
+
 	s.Require().NoError(err)
 	s.Require().Len(next, 2)
 	s.Equal(middle.ID, next[0].ID)
@@ -277,18 +259,18 @@ func (s *StoreSuite) TestListingByOwnerPagesFromWhereTheLastPageEnded() {
 
 func (s *StoreSuite) TestADeletedConnectionCannotBeRead() {
 	connection := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	_, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	_, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestADeletedConnectionIsNotListed() {
 	kept := s.connection("acme-app", userOwned("alice"))
 	deleted := s.connection("acme-app", userOwned("alice"))
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", deleted.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", deleted.ID))
 
-	listed, err := s.store.ConnectorConnectionsByOwner(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerUser, OwnerID: "alice"})
+	listed, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerUser, OwnerID: "alice"})
 	s.Require().NoError(err)
 	s.Require().Len(listed, 1)
 	s.Equal(kept.ID, listed[0].ID)
@@ -297,25 +279,25 @@ func (s *StoreSuite) TestADeletedConnectionIsNotListed() {
 func (s *StoreSuite) TestADeletedConnectionIsNotAskedAboutReferences() {
 	connection := s.connection("acme-app", nil)
 	s.bind("acme-app", fixedBinding(connection.ID))
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	_, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	_, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestADeletedConnectionCannotBeDeletedAgain() {
 	connection := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	s.ErrorIs(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID), ErrNoConnectorConnection)
+	s.ErrorIs(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID), ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestAnUnforcedDeleteRefusesABoundConnectionAndLeavesItLive() {
 	connection := s.connection("acme-app", nil)
 	s.bind("acme-app", fixedBinding(connection.ID))
 
-	s.ErrorIs(s.store.DeleteUnboundConnectorConnection(s.ctx, "acme-app", connection.ID), ErrConnectorConnectionBound)
-	found, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID), ErrConnectorConnectionBound)
+	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err, "a refused delete leaves the connection live")
 	s.Equal(ConnectionPending, found.Status)
 }
@@ -325,20 +307,20 @@ func (s *StoreSuite) TestAnUnforcedDeleteDeletesAnUnboundConnection() {
 	other := s.connection("acme-app", nil)
 	s.bind("acme-app", fixedBinding(other.ID))
 
-	s.Require().NoError(s.store.DeleteUnboundConnectorConnection(s.ctx, "acme-app", connection.ID))
-	_, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
+	_, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestAnUnforcedDeleteOfAMissingConnectionIsNotFound() {
 	deleted := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", deleted.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", deleted.ID))
 	others := s.connection("other-app", nil)
 	s.bind("other-app", fixedBinding(others.ID))
 
-	s.ErrorIs(s.store.DeleteUnboundConnectorConnection(s.ctx, "acme-app", newID()), ErrNoConnectorConnection)
-	s.ErrorIs(s.store.DeleteUnboundConnectorConnection(s.ctx, "acme-app", deleted.ID), ErrNoConnectorConnection)
-	s.ErrorIs(s.store.DeleteUnboundConnectorConnection(s.ctx, "acme-app", others.ID), ErrNoConnectorConnection,
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", newID()), ErrNoConnectorConnection)
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", deleted.ID), ErrNoConnectorConnection)
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", others.ID), ErrNoConnectorConnection,
 		"another customer's connection is not found, bound or not")
 }
 
@@ -362,7 +344,7 @@ func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt(
 
 	deleter := s.router()
 	deleted := make(chan error, 1)
-	go func() { deleted <- deleter.DeleteUnboundConnectorConnection(s.ctx, "acme-app", connection.ID) }()
+	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
 	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the table lock")
@@ -370,7 +352,7 @@ func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt(
 	s.Require().NoError(held.Commit())
 
 	s.ErrorIs(<-deleted, ErrConnectorConnectionBound)
-	_, err = s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.NoError(err, "the bound connection stays live")
 }
 
@@ -415,7 +397,7 @@ func (s *StoreSuite) TestABindThatCommitsWhileTheDeleteWaitsForTheRowStopsIt() {
 
 	deleter := s.router()
 	deleted := make(chan error, 1)
-	go func() { deleted <- deleter.DeleteUnboundConnectorConnection(s.ctx, "acme-app", connection.ID) }()
+	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
 	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the row")
@@ -423,7 +405,7 @@ func (s *StoreSuite) TestABindThatCommitsWhileTheDeleteWaitsForTheRowStopsIt() {
 	s.Require().NoError(held.Commit())
 
 	s.ErrorIs(<-deleted, ErrConnectorConnectionBound)
-	_, err = s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.NoError(err, "the bound connection stays live")
 }
 
@@ -447,14 +429,14 @@ func (s *StoreSuite) TestADeleteWaitsForABindInProgressAndIsRefused() {
 		2*time.Second, 10*time.Millisecond, "the save waits at its INSERT")
 	deleter := s.router()
 	deleted := make(chan error, 1)
-	go func() { deleted <- deleter.DeleteUnboundConnectorConnection(s.ctx, "acme-app", connection.ID) }()
+	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
 	s.Eventually(func() bool { return s.waitingForALock() == 2 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the save's lock on the connection")
 	s.Require().NoError(held.Commit())
 
 	s.Require().NoError(<-saved)
 	s.ErrorIs(<-deleted, ErrConnectorConnectionBound)
-	_, err = s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.NoError(err, "the bound connection stays live")
 }
 
@@ -469,7 +451,7 @@ func (s *StoreSuite) TestABindWaitsForADeleteInProgressAndIsRefused() {
 
 	deleter := s.router()
 	deleted := make(chan error, 1)
-	go func() { deleted <- deleter.DeleteUnboundConnectorConnection(s.ctx, "acme-app", connection.ID) }()
+	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits at its UPDATE")
 	saver := s.router()
@@ -511,7 +493,7 @@ func (s *StoreSuite) TestABindInProgressDoesNotHoldUpACredentialSave() {
 		connection.Revision = 2
 		connection.CredentialsSealed = []byte("sealed for revision 2")
 		connection.CredentialsKEKVersion = 1
-		credentials <- s.store.SaveConnectorConnectionAtRevision(s.ctx, &connection, 1)
+		credentials <- s.store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, 1)
 	}()
 	select {
 	case err := <-credentials:
@@ -532,7 +514,7 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 		ConnectionConnected, connection.ID)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
 	var sealed []byte
 	var version int
@@ -547,36 +529,11 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 	s.Nil(expires)
 }
 
-func (s *StoreSuite) TestADeletedConnectionsAttemptCannotBeReadOrConsumed() {
-	connection := s.connection("acme-app", nil)
-	attempt := s.attempt(connection, "state-of-a-deleted-connection")
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
-
-	_, err := s.store.ConnectorAuthorizationAttemptByState(s.ctx, "state-of-a-deleted-connection")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-	_, err = s.store.ConnectorAuthorizationAttemptByID(s.ctx, attempt.ID)
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, "state-of-a-deleted-connection")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-}
-
-func (s *StoreSuite) TestADeletedConnectionTakesNoNewAttempt() {
-	connection := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
-
-	err := s.store.CreateConnectorAuthorizationAttempt(s.ctx, &ConnectorAuthorizationAttempt{
-		ID: newID(), CustomerID: "acme-app", ConnectionID: connection.ID, Kind: AttemptReconnect,
-		StateHash: AuthorizationStateHash("too-late"), AttemptSealed: []byte("sealed"), KEKVersion: 1,
-		ExpiresAt: time.Now().Add(time.Minute),
-	})
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
 func (s *StoreSuite) TestAFixedBindingReferencesItsConnection() {
 	connection := s.connection("acme-app", nil)
 	s.bind("acme-app", fixedBinding(connection.ID))
 
-	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.True(referenced)
 }
@@ -586,7 +543,7 @@ func (s *StoreSuite) TestAnUnboundConnectionIsNotReferenced() {
 	other := s.connection("acme-app", nil)
 	s.bind("acme-app", fixedBinding(other.ID))
 
-	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.False(referenced)
 }
@@ -597,7 +554,7 @@ func (s *StoreSuite) TestASessionBindingReferencesNoConnection() {
 	// what decides.
 	s.bind("acme-app", `[{"name": "acme", "connector_id": "acme", "connection": {"type": "session", "connection_id": "`+connection.ID+`"}}]`)
 
-	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.False(referenced)
 }
@@ -607,7 +564,7 @@ func (s *StoreSuite) TestADeletedConfigReferencesNothing() {
 	configID := s.bind("acme-app", fixedBinding(connection.ID))
 	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, "acme-app", configID))
 
-	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.False(referenced)
 }
@@ -616,34 +573,9 @@ func (s *StoreSuite) TestAnotherCustomersConfigReferencesNothingOfMine() {
 	connection := s.connection("acme-app", nil)
 	s.bind("other-app", fixedBinding(connection.ID))
 
-	referenced, err := s.store.ConnectorConnectionReferenced(s.ctx, "acme-app", connection.ID)
+	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.False(referenced)
-}
-
-func (s *StoreSuite) TestAnAttemptIsFoundByItsStateAndByItsID() {
-	connection := s.connection("acme-app", nil)
-	created := s.attempt(connection, "the-state")
-
-	byState, err := s.store.ConnectorAuthorizationAttemptByState(s.ctx, "the-state")
-	s.Require().NoError(err)
-	s.Equal(created.ID, byState.ID)
-	s.Equal(AttemptConsent, byState.Kind)
-	s.Equal([]byte("sealed attempt"), byState.AttemptSealed)
-	s.Equal(1, byState.KEKVersion)
-	s.Equal(connection.ID, byState.ConnectionID)
-	s.Nil(byState.ConsumedAt)
-
-	byID, err := s.store.ConnectorAuthorizationAttemptByID(s.ctx, created.ID)
-	s.Require().NoError(err)
-	s.Equal(created.ID, byID.ID)
-}
-
-func (s *StoreSuite) TestAnAttemptIsNotFoundByAnotherState() {
-	s.attempt(s.connection("acme-app", nil), "the-state")
-
-	_, err := s.store.ConnectorAuthorizationAttemptByState(s.ctx, "a-guessed-state")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
 }
 
 func (s *StoreSuite) TestTheStateItselfIsNotStored() {
@@ -653,184 +585,6 @@ func (s *StoreSuite) TestTheStateItselfIsNotStored() {
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_authorization_attempts WHERE to_jsonb(connector_authorization_attempts)::text LIKE '%bearer-state%'").Scan(&stored))
 	s.Zero(stored)
-}
-
-func (s *StoreSuite) TestAConsumedAttemptCannotBeConsumedOrReadAgain() {
-	created := s.attempt(s.connection("acme-app", nil), "the-state")
-
-	consumed, err := s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, "the-state")
-	s.Require().NoError(err)
-	s.Equal(created.ID, consumed.ID)
-	s.NotNil(consumed.ConsumedAt)
-
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, "the-state")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt, "a replayed callback is refused")
-	_, err = s.store.ConnectorAuthorizationAttemptByState(s.ctx, "the-state")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-	_, err = s.store.ConnectorAuthorizationAttemptByID(s.ctx, created.ID)
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-}
-
-func (s *StoreSuite) TestAnExpiredAttemptCannotBeReadOrConsumed() {
-	created := s.attempt(s.connection("acme-app", nil), "the-state")
-	s.expire(created.ID)
-
-	_, err := s.store.ConnectorAuthorizationAttemptByState(s.ctx, "the-state")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-	_, err = s.store.ConnectorAuthorizationAttemptByID(s.ctx, created.ID)
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, "the-state")
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-}
-
-func (s *StoreSuite) TestCreatingAnAttemptDeletesOnlyTheCustomersExpiredOnes() {
-	mine := s.connection("acme-app", nil)
-	theirs := s.connection("other-app", nil)
-	expired := s.attempt(mine, "expired")
-	open := s.attempt(mine, "open")
-	theirsExpired := s.attempt(theirs, "theirs")
-	s.expire(expired.ID)
-	s.expire(theirsExpired.ID)
-
-	fresh := s.attempt(mine, "new")
-
-	var left []string
-	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("connector_authorization_attempts").
-		Column("id").Scan(s.ctx, &left))
-	s.ElementsMatch([]string{open.ID, theirsExpired.ID, fresh.ID}, left,
-		"another customer's expired attempt waits for that customer's next one")
-}
-
-func (s *StoreSuite) TestAnAttemptForAnotherCustomersConnectionIsRefused() {
-	theirs := s.connection("other-app", nil)
-
-	err := s.store.CreateConnectorAuthorizationAttempt(s.ctx, &ConnectorAuthorizationAttempt{
-		ID: newID(), CustomerID: "acme-app", ConnectionID: theirs.ID, Kind: AttemptConsent,
-		StateHash: AuthorizationStateHash("mine"), AttemptSealed: []byte("sealed"), KEKVersion: 1,
-		ExpiresAt: time.Now().Add(time.Minute),
-	})
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-func (s *StoreSuite) TestCallbacksRacingWithOneStateConsumeItExactlyOnce() {
-	s.attempt(s.connection("acme-app", nil), "raced-state")
-
-	// Each callback is a router of its own with a pool of its own, connected before they
-	// all start at once, so the consumes overlap in Postgres rather than queue on one pool.
-	const callbacks = 16
-	routers := make([]*Store, callbacks)
-	for i := range routers {
-		router, err := s.openRouter()
-		s.Require().NoError(err)
-		s.T().Cleanup(func() { router.Close() })
-		s.Require().NoError(router.Ping(s.ctx))
-		routers[i] = router
-	}
-	errs := make([]error, callbacks)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i, router := range routers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			_, errs[i] = router.ConsumeConnectorAuthorizationAttempt(s.ctx, "raced-state")
-		}()
-	}
-	close(start)
-	wg.Wait()
-
-	won := 0
-	for _, err := range errs {
-		if err == nil {
-			won++
-			continue
-		}
-		s.True(errors.Is(err, ErrNoAuthorizationAttempt), "a callback that loses is told the state is used: %v", err)
-	}
-	s.Equal(1, won)
-}
-
-func (s *StoreSuite) TestAHandoffReplacesTheBlobItWasReadWithOnce() {
-	created := s.attempt(s.connection("acme-app", nil), "the-state")
-
-	s.Require().NoError(s.store.HandOffConnectorAuthorizationAttempt(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 2))
-
-	handedOff, err := s.store.ConnectorAuthorizationAttemptByID(s.ctx, created.ID)
-	s.Require().NoError(err)
-	s.Equal([]byte("handed off"), handedOff.AttemptSealed)
-	s.Equal(2, handedOff.KEKVersion)
-	s.Nil(handedOff.ConsumedAt, "the callback still consumes it")
-	err = s.store.HandOffConnectorAuthorizationAttempt(s.ctx, created.ID, created.AttemptSealed, []byte("again"), 2)
-	s.ErrorIs(err, ErrNoAuthorizationAttempt, "the blob it was read with is gone")
-}
-
-func (s *StoreSuite) TestAnExpiredAttemptCannotBeHandedOff() {
-	created := s.attempt(s.connection("acme-app", nil), "the-state")
-	s.expire(created.ID)
-
-	err := s.store.HandOffConnectorAuthorizationAttempt(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1)
-
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-}
-
-func (s *StoreSuite) TestAConsumedAttemptCannotBeHandedOff() {
-	created := s.attempt(s.connection("acme-app", nil), "the-state")
-	_, err := s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, "the-state")
-	s.Require().NoError(err)
-
-	err = s.store.HandOffConnectorAuthorizationAttempt(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1)
-
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-}
-
-func (s *StoreSuite) TestADeletedConnectionsAttemptCannotBeHandedOff() {
-	connection := s.connection("acme-app", nil)
-	created := s.attempt(connection, "the-state")
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
-
-	err := s.store.HandOffConnectorAuthorizationAttempt(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1)
-
-	s.ErrorIs(err, ErrNoAuthorizationAttempt)
-}
-
-func (s *StoreSuite) TestHandoffsRacingFromOneReadReplaceTheBlobExactlyOnce() {
-	created := s.attempt(s.connection("acme-app", nil), "raced-state")
-
-	// As TestCallbacksRacingWithOneStateConsumeItExactlyOnce: a router and a pool per
-	// handoff, so the updates overlap in Postgres.
-	const handoffs = 16
-	routers := make([]*Store, handoffs)
-	for i := range routers {
-		router, err := s.openRouter()
-		s.Require().NoError(err)
-		s.T().Cleanup(func() { router.Close() })
-		s.Require().NoError(router.Ping(s.ctx))
-		routers[i] = router
-	}
-	errs := make([]error, handoffs)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i, router := range routers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			errs[i] = router.HandOffConnectorAuthorizationAttempt(s.ctx, created.ID, created.AttemptSealed, []byte("handed off "+newID()), 1)
-		}()
-	}
-	close(start)
-	wg.Wait()
-
-	won := 0
-	for _, err := range errs {
-		if err == nil {
-			won++
-			continue
-		}
-		s.True(errors.Is(err, ErrNoAuthorizationAttempt), "a handoff that loses is told the attempt is handed off: %v", err)
-	}
-	s.Equal(1, won)
 }
 
 // lineManifest is a built-in whose events arrive at one URL for every customer: verified with
@@ -876,11 +630,11 @@ var ownLineManifest = strings.Replace(strings.Replace(lineManifest, "id: line", 
 // channel connector, seeding it from raw first.
 func (s *StoreSuite) lineConnection(customerID, raw string) ConnectorConnection {
 	manifest := parsed(s.T(), raw)
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{manifest.ID + ".yaml": {Data: []byte(raw)}}))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{manifest.ID + ".yaml": {Data: []byte(raw)}}))
 	connection := appConnection()
 	connection.CustomerID = customerID
 	connection.ConnectorID = manifest.ID
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 	s.moveTo(*connection, ConnectionConnected)
 	return *connection
 }
@@ -888,7 +642,7 @@ func (s *StoreSuite) lineConnection(customerID, raw string) ConnectorConnection 
 // moveTo saves a new status onto a connection the way the credential store does, under its
 // lock: a consent moves it to connected, a revocation to needs_reauthorization.
 func (s *StoreSuite) moveTo(connection ConnectorConnection, status string) {
-	s.Require().NoError(s.store.WithLockedConnectorConnection(s.ctx, connection.CustomerID, connection.ID,
+	s.Require().NoError(s.store.ConnectorConnections.WithLocked(s.ctx, connection.CustomerID, connection.ID,
 		func(locked *ConnectorConnection, _ func() error) (bool, error) {
 			locked.Status = status
 			return true, nil
@@ -898,9 +652,9 @@ func (s *StoreSuite) moveTo(connection ConnectorConnection, status string) {
 func (s *StoreSuite) TestAConnectionIsFoundByItsConnectorAndProviderUnitWithoutItsCustomer() {
 	connection := s.lineConnection("acme-app", lineManifest)
 	s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "106540352242922"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "106540352242922"))
 
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "106540352242922")
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "106540352242922")
 
 	s.Require().NoError(err)
 	s.Equal(connection.ID, found.ID)
@@ -910,9 +664,9 @@ func (s *StoreSuite) TestAConnectionIsFoundByItsConnectorAndProviderUnitWithoutI
 
 func (s *StoreSuite) TestAProviderUnitNoConnectionHoldsIsNotFound() {
 	connection := s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
 
-	_, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-2")
+	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-2")
 
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
@@ -920,12 +674,12 @@ func (s *StoreSuite) TestAProviderUnitNoConnectionHoldsIsNotFound() {
 func (s *StoreSuite) TestAProviderUnitAnotherCustomerHoldsIsRefused() {
 	first := s.lineConnection("acme-app", lineManifest)
 	second := s.lineConnection("other-app", lineManifest)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
 
-	err := s.store.SetConnectorConnectionProviderUnit(s.ctx, "other-app", second.ID, "unit-1")
+	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", second.ID, "unit-1")
 
 	s.ErrorIs(err, ErrProviderUnitTaken)
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(first.ID, found.ID, "the first holder keeps the unit")
 }
@@ -933,14 +687,14 @@ func (s *StoreSuite) TestAProviderUnitAnotherCustomerHoldsIsRefused() {
 func (s *StoreSuite) TestDeletingAConnectionFreesItsProviderUnit() {
 	first := s.lineConnection("acme-app", lineManifest)
 	second := s.lineConnection("other-app", lineManifest)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", first.ID))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", first.ID))
 
-	_, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.ErrorIs(err, ErrNoConnectorConnection, "a deleted connection is not routed to")
 
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "other-app", second.ID, "unit-1"))
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", second.ID, "unit-1"))
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(second.ID, found.ID)
 }
@@ -948,53 +702,53 @@ func (s *StoreSuite) TestDeletingAConnectionFreesItsProviderUnit() {
 func (s *StoreSuite) TestARevokedConnectionFreesItsProviderUnitForTheNextConsent() {
 	revoked := s.lineConnection("acme-app", lineManifest)
 	next := s.lineConnection("other-app", lineManifest)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", revoked.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", revoked.ID, "unit-1"))
 
 	s.moveTo(revoked, ConnectionNeedsReauthorization)
 
-	_, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.ErrorIs(err, ErrNoConnectorConnection, "an ended grant is not routed to")
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "other-app", next.ID, "unit-1"))
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", next.ID, "unit-1"))
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(next.ID, found.ID)
 
 	s.moveTo(revoked, ConnectionConnected)
-	err = s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", revoked.ID, "unit-1")
+	err = s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", revoked.ID, "unit-1")
 	s.ErrorIs(err, ErrProviderUnitTaken, "a reconnect proves the unit again, and it is taken now")
 }
 
 func (s *StoreSuite) TestASaveThatStaysConnectedKeepsTheProviderUnitTheRowHolds() {
 	connection := s.lineConnection("acme-app", lineManifest)
-	readBefore, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	readBefore, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
 
 	// A refresh that read the row before the unit was stored.
 	readBefore.Revision++
 	readBefore.CredentialsSealed = []byte("refreshed")
 	readBefore.CredentialsKEKVersion = 1
-	s.Require().NoError(s.store.SaveConnectorConnectionAtRevision(s.ctx, &readBefore, readBefore.Revision-1))
+	s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &readBefore, readBefore.Revision-1))
 
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(connection.ID, found.ID)
 }
 
 func (s *StoreSuite) TestValidatedToolsSurviveACredentialsSaveThatReadTheRowBefore() {
 	connection := s.connection("acme-app", nil)
-	readBefore, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	readBefore, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	tools := []ConnectorTool{{Name: "search", Description: "Finds a message.", InputSchema: map[string]any{"type": "object"}, SchemaDigest: "digest-1"}}
 	checked := time.Now()
-	s.Require().NoError(s.store.SetConnectorConnectionTools(s.ctx, "acme-app", connection.ID, tools, "list-1", checked))
+	s.Require().NoError(s.store.ConnectorConnections.SetTools(s.ctx, "acme-app", connection.ID, tools, "list-1", checked))
 
 	readBefore.Revision++
 	readBefore.CredentialsSealed = []byte("renewed")
 	readBefore.CredentialsKEKVersion = 1
-	s.Require().NoError(s.store.SaveConnectorConnectionAtRevision(s.ctx, &readBefore, readBefore.Revision-1))
+	s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &readBefore, readBefore.Revision-1))
 
-	found, err := s.store.ConnectorConnection(s.ctx, "acme-app", connection.ID)
+	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
 	s.Require().NoError(err)
 	s.Equal(tools, found.CachedTools)
 	s.Equal("list-1", found.ToolsDigest)
@@ -1004,9 +758,9 @@ func (s *StoreSuite) TestValidatedToolsSurviveACredentialsSaveThatReadTheRowBefo
 
 func (s *StoreSuite) TestToolsAreNotStoredOnADeletedConnection() {
 	connection := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	err := s.store.SetConnectorConnectionTools(s.ctx, "acme-app", connection.ID, nil, "list-1", time.Now())
+	err := s.store.ConnectorConnections.SetTools(s.ctx, "acme-app", connection.ID, nil, "list-1", time.Now())
 
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
@@ -1015,10 +769,10 @@ func (s *StoreSuite) TestAConnectionThatIsNotConnectedTakesNoProviderUnit() {
 	connection := s.lineConnection("acme-app", lineManifest)
 	s.moveTo(connection, ConnectionPending)
 
-	err := s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
+	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
 
 	s.ErrorIs(err, ErrConnectorConnectionNotConnected)
-	_, err = s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	_, err = s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
@@ -1033,14 +787,14 @@ func (s *StoreSuite) TestARevocationThatCommitsWhileTheUnitIsSetWins() {
 
 	setter := s.router()
 	set := make(chan error, 1)
-	go func() { set <- setter.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1") }()
+	go func() { set <- setter.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1") }()
 	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the set waits for the row")
 	s.Require().NoError(held.Commit())
 
 	s.ErrorIs(<-set, ErrConnectorConnectionChanged)
-	_, err = s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	_, err = s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
@@ -1048,27 +802,27 @@ func (s *StoreSuite) TestTheSameProviderUnitUnderAnotherConnectorIsAllowed() {
 	other := strings.Replace(lineManifest, "id: line", "id: line_two", 1)
 	first := s.lineConnection("acme-app", lineManifest)
 	second := s.lineConnection("other-app", other)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
 
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "other-app", second.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", second.ID, "unit-1"))
 
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line_two", "unit-1")
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line_two", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(second.ID, found.ID)
-	found, err = s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	found, err = s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(first.ID, found.ID)
 }
 
 func (s *StoreSuite) TestANewProviderUnitReplacesAndFreesTheOldOne() {
 	connection := s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
 
-	s.Require().NoError(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-2"))
+	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-2"))
 
-	_, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.ErrorIs(err, ErrNoConnectorConnection)
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-2")
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-2")
 	s.Require().NoError(err)
 	s.Equal(connection.ID, found.ID)
 }
@@ -1076,16 +830,16 @@ func (s *StoreSuite) TestANewProviderUnitReplacesAndFreesTheOldOne() {
 func (s *StoreSuite) TestAnotherCustomersConnectionTakesNoProviderUnitFromMe() {
 	theirs := s.lineConnection("other-app", lineManifest)
 
-	err := s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", theirs.ID, "unit-1")
+	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", theirs.ID, "unit-1")
 
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestADeletedConnectionTakesNoProviderUnit() {
 	connection := s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, "acme-app", connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	err := s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
+	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
 
 	s.ErrorIs(err, ErrNoConnectorConnection)
 }
@@ -1094,21 +848,22 @@ func (s *StoreSuite) TestAConnectorWhoseEventsURLNamesTheCustomerTakesNoProvider
 	own := s.lineConnection("acme-app", ownLineManifest)
 	tools := s.connection("acme-app", nil)
 
-	s.ErrorIs(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", own.ID, "T0001"), ErrNoSharedWebhook,
+	s.ErrorIs(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", own.ID, "T0001"), ErrNoSharedWebhook,
 		"two customers' own apps may sit in one workspace")
-	s.ErrorIs(s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", tools.ID, "T0001"), ErrNoSharedWebhook,
+	s.ErrorIs(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", tools.ID, "T0001"), ErrNoSharedWebhook,
 		"a connector with no channel has no events to route")
 }
 
 func (s *StoreSuite) TestACustomDefinitionTakesNoProviderUnit() {
-	custom, err := s.store.CreateConnectorDefinition(s.ctx, "acme-app",
+	custom, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app",
 		parsed(s.T(), strings.Replace(lineManifest, "id: line", "id: custom_line", 1)))
+
 	s.Require().NoError(err)
 	connection := appConnection()
 	connection.ConnectorID = custom.ID
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, testSchemes, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
 
-	err = s.store.SetConnectorConnectionProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
+	err = s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
 
 	s.ErrorIs(err, ErrNoSharedWebhook, "one customer's definition does not speak for the operator's app")
 }
@@ -1135,7 +890,7 @@ func (s *StoreSuite) TestCustomersRacingForOneProviderUnitLeaveOneHolder() {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = router.SetConnectorConnectionProviderUnit(s.ctx, connections[i].CustomerID, connections[i].ID, "unit-1")
+			errs[i] = router.ConnectorConnections.SetProviderUnit(s.ctx, connections[i].CustomerID, connections[i].ID, "unit-1")
 		}()
 	}
 	close(start)
@@ -1151,7 +906,7 @@ func (s *StoreSuite) TestCustomersRacingForOneProviderUnitLeaveOneHolder() {
 		s.True(errors.Is(err, ErrProviderUnitTaken), "a customer that loses is told the unit is taken: %v", err)
 	}
 	s.Require().NotEqual(-1, winner)
-	found, err := s.store.ConnectorConnectionByProviderUnit(s.ctx, "line", "unit-1")
+	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
 	s.Require().NoError(err)
 	s.Equal(connections[winner].ID, found.ID)
 }
@@ -1172,7 +927,7 @@ func (s *StoreSuite) TestAUsersGrantedConnectionsAreHerLiveOnesThatHoldCredentia
 	}
 	s.deletedKeepingCredentials(gone)
 
-	found, err := s.store.GrantedConnectorConnectionsOfUser(s.ctx, "acme-app", "alice")
+	found, err := s.store.ConnectorConnections.SelectGrantedOfUser(s.ctx, "acme-app", "alice")
 
 	s.Require().NoError(err)
 	s.Equal([]string{first.ID, second.ID}, connectionIDs(found))
@@ -1191,4 +946,338 @@ func connectionIDs(connections []ConnectorConnection) []string {
 		ids = append(ids, connection.ID)
 	}
 	return ids
+}
+
+// granted gives a connection stored credentials, as a consent leaves it.
+func (s *StoreSuite) granted(connection ConnectorConnection) {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
+		"UPDATE connector_connections SET credentials_sealed = 'sealed credentials', credentials_kek_version = 1, status = ? WHERE id = ?",
+		ConnectionConnected, connection.ID)
+	s.Require().NoError(err)
+}
+
+func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothingElse() {
+	live := s.connection("acme-app", userOwned("alice"))
+	s.granted(live)
+	gone := s.connection("acme-app", userOwned("alice"))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", gone.ID))
+	pending := s.connection("acme-app", userOwned("alice"))
+	s.attempt(pending, "state-of-alices-consent")
+	s.invocation(live, time.Second, "")
+	bob := s.connection("acme-app", userOwned("bob"))
+	app := s.connection("acme-app", nil)
+	elsewhere := s.connection("other-app", userOwned("alice"))
+
+	deleted, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]DeletedConnection{
+		{ID: live.ID, ConnectorID: "acme", OwnerType: OwnerUser, HadGrant: true},
+		{ID: gone.ID, ConnectorID: "acme", OwnerType: OwnerUser},
+		{ID: pending.ID, ConnectorID: "acme", OwnerType: OwnerUser},
+	}, deleted)
+	var left int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM connector_connections WHERE customer_id = 'acme-app' AND owner_id = 'alice'").Scan(&left))
+	s.Zero(left, "the soft deleted row, which still held the owner and account ids, is gone too")
+	var invocations, attempts int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM connector_invocations WHERE connection_id = ?", live.ID).Scan(&invocations))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", pending.ID).Scan(&attempts))
+	s.Zero(invocations)
+	s.Zero(attempts)
+	for _, kept := range []ConnectorConnection{bob, app, elsewhere} {
+		_, err := s.store.ConnectorConnections.Get(s.ctx, kept.CustomerID, kept.ID)
+		s.NoError(err, "another user's, the app's and another customer's stay")
+	}
+}
+
+// TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser: the rows stay, with no id that
+// leads back to the user; another user's keep theirs.
+func (s *StoreSuite) TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser() {
+	hers := s.connection("acme-app", userOwned("alice"))
+	his := s.connection("acme-app", userOwned("bob"))
+	for _, connection := range []ConnectorConnection{hers, his} {
+		s.Require().NoError(s.store.ConnectorAuditEvents.Insert(s.ctx, &ConnectorAuditEvent{
+			CustomerID: "acme-app", ConnectionID: connection.ID, ConnectorID: "acme", OwnerType: OwnerUser,
+			Action: AuditGrantCreated, Reason: AuditReasonConsent, Revision: 2,
+			RequestID: "request", SessionID: "session", AttemptID: "attempt",
+		}))
+	}
+
+	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	kept, err := s.store.ConnectorAuditEvents.Select(s.ctx, "acme-app", AuditFilter{ConnectionID: hers.ID})
+	s.Require().NoError(err)
+	s.Require().Len(kept, 1, "the row stays")
+	s.Empty(kept[0].RequestID)
+	s.Empty(kept[0].SessionID)
+	s.Empty(kept[0].AttemptID)
+	s.Equal(AuditGrantCreated, kept[0].Action)
+	others, err := s.store.ConnectorAuditEvents.Select(s.ctx, "acme-app", AuditFilter{ConnectionID: his.ID})
+	s.Require().NoError(err)
+	s.Require().Len(others, 1)
+	s.Equal("session", others[0].SessionID)
+}
+
+func (s *StoreSuite) TestDeletingTheConnectionsOfAUserWithNoneDeletesNothing() {
+	s.connection("acme-app", userOwned("bob"))
+
+	deleted, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	s.Empty(deleted)
+}
+
+func (s *StoreSuite) TestAConnectionIsUsedByTheFixedBindingsOfLiveConfigsThatNameIt() {
+	bound := s.connection("acme-app", nil)
+	unbound := s.connection("acme-app", nil)
+	config := s.bind("acme-app", fixedBinding(bound.ID))
+	s.bind("acme-app", `[{"name": "acme", "connector_id": "acme", "connection": {"type": "session", "connection_id": "`+unbound.ID+`"}}]`)
+	deleted := s.bind("acme-app", fixedBinding(bound.ID))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", deleted)
+	s.Require().NoError(err)
+	s.bind("other-app", fixedBinding(bound.ID))
+	s.bind("acme-app", `{"not": "a list"}`)
+
+	uses, err := s.store.ConnectorConnections.Uses(s.ctx, "acme-app", []string{bound.ID, unbound.ID})
+
+	s.Require().NoError(err)
+	s.Require().Len(uses[bound.ID], 1, "a deleted config and another customer's do not use it")
+	s.Equal(config, uses[bound.ID][0].ConfigID)
+	s.Equal("acme", uses[bound.ID][0].Binding)
+	s.Empty(uses[unbound.ID], "a session binding names no connection")
+}
+
+func (s *StoreSuite) TestALaterValidationReplacesTheLastOne() {
+	connection := s.connection("acme-app", userOwned("alice"))
+	first := time.Now().UTC().Truncate(time.Microsecond)
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Status: "failed", Code: "503", Error: "Service Unavailable", CheckedAt: first}))
+
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Status: "connected", CheckedAt: first.Add(time.Second)}))
+
+	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
+	s.Require().NoError(err)
+	s.Equal("connected", got[connection.ID].Status)
+	s.Empty(got[connection.ID].Code)
+	s.Empty(got[connection.ID].Error)
+	s.True(first.Add(time.Second).Equal(got[connection.ID].CheckedAt))
+}
+
+// TestAValidationThatRanEarlierNeverReplacesALaterOne: of two validates at once, the one that
+// ran first may write last; what the later one found stays.
+func (s *StoreSuite) TestAValidationThatRanEarlierNeverReplacesALaterOne() {
+	connection := s.connection("acme-app", userOwned("alice"))
+	later := time.Now().UTC().Truncate(time.Microsecond)
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Status: "connected", CheckedAt: later}))
+
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Status: "failed", Code: "500", CheckedAt: later.Add(-time.Second)}))
+
+	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
+	s.Require().NoError(err)
+	s.Equal("connected", got[connection.ID].Status)
+	s.True(later.Equal(got[connection.ID].CheckedAt))
+}
+
+// TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOnes: a validate of credentials
+// replaced while it ran writes last, after a validate of the new ones; even though it finished
+// later, what the new credentials' validate found stays.
+func (s *StoreSuite) TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOnes() {
+	connection := s.connection("acme-app", userOwned("alice"))
+	checked := time.Now().UTC().Truncate(time.Microsecond)
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Revision: 3, Status: "connected", CheckedAt: checked}))
+
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Revision: 2, Status: "failed", Code: "503", CheckedAt: checked.Add(time.Second)}))
+
+	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
+	s.Require().NoError(err)
+	s.Equal("connected", got[connection.ID].Status)
+	s.Equal(3, got[connection.ID].Revision)
+}
+
+// TestAValidationOfNewerCredentialsReplacesOneThatRanLater: the newer credentials' result
+// replaces the older ones' whatever the clocks of the two routers say.
+func (s *StoreSuite) TestAValidationOfNewerCredentialsReplacesOneThatRanLater() {
+	connection := s.connection("acme-app", userOwned("alice"))
+	checked := time.Now().UTC().Truncate(time.Microsecond)
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Revision: 2, Status: "failed", Code: "503", CheckedAt: checked}))
+
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
+		ConnectionID: connection.ID, Revision: 3, Status: "connected", CheckedAt: checked.Add(-time.Second)}))
+
+	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
+	s.Require().NoError(err)
+	s.Equal("connected", got[connection.ID].Status)
+	s.Equal(3, got[connection.ID].Revision)
+}
+
+func (s *StoreSuite) TestAConnectionNeverValidatedHasNoValidation() {
+	connection := s.connection("acme-app", userOwned("alice"))
+
+	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
+
+	s.Require().NoError(err)
+	s.Empty(got)
+}
+
+// withAccount gives a connection the metadata a consent for team and user would leave.
+func withAccount(team, user string) func(*ConnectorConnection) {
+	return func(connection *ConnectorConnection) {
+		connection.Metadata = map[string]string{"team_id": team, "user_id": user}
+	}
+}
+
+func (s *StoreSuite) TestConnectionsByIdentityFindTheAccountInEveryCustomer() {
+	mine := s.connection("acme-app", withAccount("T1", "U1"))
+	theirs := s.connection("other-app", withAccount("T1", "U1"))
+	s.connection("acme-app", withAccount("T1", "U2"))
+	s.connection("acme-app", withAccount("T2", "U1"))
+
+	refs, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", nil, map[string]string{"team_id": "T1", "user_id": "U1"})
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]core.ConnectionRef{
+		{CustomerID: "acme-app", ConnectionID: mine.ID},
+		{CustomerID: "other-app", ConnectionID: theirs.ID},
+	}, refs)
+}
+
+// Fewer parts than the identity, such as a workspace uninstall that names no user, are every
+// account that has them.
+func (s *StoreSuite) TestConnectionsByIdentityWithFewerPartsFindEveryAccountWithThem() {
+	alice := s.connection("acme-app", withAccount("T1", "U1"))
+	bob := s.connection("acme-app", withAccount("T1", "U2"))
+	s.connection("acme-app", withAccount("T2", "U1"))
+
+	refs, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", nil, map[string]string{"team_id": "T1"})
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]core.ConnectionRef{
+		{CustomerID: "acme-app", ConnectionID: alice.ID},
+		{CustomerID: "acme-app", ConnectionID: bob.ID},
+	}, refs)
+}
+
+func (s *StoreSuite) TestConnectionsByIdentityLeaveOutADeletedConnection() {
+	gone := s.connection("acme-app", withAccount("T1", "U1"))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", gone.ID))
+
+	refs, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", nil, map[string]string{"team_id": "T1"})
+
+	s.Require().NoError(err)
+	s.Empty(refs)
+}
+
+func (s *StoreSuite) TestConnectionsByIdentityNeedAPart() {
+	_, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", nil, nil)
+
+	s.ErrorContains(err, "at least one identity part are required")
+}
+
+func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
+	var connections []ConnectorConnection
+	for range 30 {
+		connection := s.connection("acme-app", userOwned("alice"))
+		s.granted(connection)
+		connections = append(connections, connection)
+	}
+	ids := connectionIDs(connections)
+	connection := s.storedConnection(connections[0].ID)
+	now := time.Now().UTC()
+
+	s.Equal(4, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, appConnection()))
+	}), "Insert")
+	s.Equal(1, s.countQueries(func() { s.storedConnection(connection.ID) }), "Get")
+	line := s.lineConnection("acme-app", lineManifest)
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", line.ID, "unit-1"))
+	}), "SetProviderUnit")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
+		s.Require().NoError(err)
+	}), "GetByProviderUnit")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.SetTools(s.ctx, "acme-app", connection.ID, []ConnectorTool{}, "digest", now))
+	}), "SetTools")
+	s.Equal(1, s.countQueries(func() {
+		listed, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerUser, OwnerID: "alice", Limit: 10})
+		s.Require().NoError(err)
+		s.Len(listed, 11)
+	}), "Select")
+	s.Equal(1, s.countQueries(func() {
+		granted, err := s.store.ConnectorConnections.SelectGrantedOfUser(s.ctx, "acme-app", "alice")
+		s.Require().NoError(err)
+		s.Len(granted, 30)
+	}), "SelectGrantedOfUser")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorConnections.Uses(s.ctx, "acme-app", ids)
+		s.Require().NoError(err)
+	}), "Uses")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
+		s.Require().NoError(err)
+	}), "Referenced")
+	for _, id := range ids {
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, &ConnectorConnectionClient{ConnectionID: id,
+			Registration: core.ClientDCR, ClientID: "dcr-client", UpdatedAt: now}))
+		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{ConnectionID: id,
+			Revision: 1, Status: "ok", CheckedAt: now}))
+	}
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, &ConnectorConnectionClient{ConnectionID: connection.ID,
+			Registration: core.ClientDCR, ClientID: "dcr-client", UpdatedAt: now}))
+	}), "PutClient")
+	s.Equal(1, s.countQueries(func() {
+		clients, err := s.store.ConnectorConnections.Clients(s.ctx, ids)
+		s.Require().NoError(err)
+		s.Len(clients, 30)
+	}), "Clients")
+	s.Equal(1, s.countQueries(func() {
+		granted, err := s.store.ConnectorConnections.SelectGrantedOfClient(s.ctx, "acme-app", "acme", core.ClientDCR, "dcr-client")
+		s.Require().NoError(err)
+		s.Len(granted, 30)
+	}), "SelectGrantedOfClient")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{ConnectionID: connection.ID,
+			Revision: 1, Status: "ok", CheckedAt: now.Add(time.Second)}))
+	}), "PutValidation")
+	s.Equal(1, s.countQueries(func() {
+		validations, err := s.store.ConnectorConnections.Validations(s.ctx, ids)
+		s.Require().NoError(err)
+		s.Len(validations, 30)
+	}), "Validations")
+	s.Equal(3, s.countQueries(func() {
+		saved := s.storedConnection(connection.ID)
+		saved.Revision++
+		saved.CredentialsSealed = []byte("rotated")
+		s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &saved, saved.Revision-1))
+	})-1, "SaveAtRevision")
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	}), "WithLocked, unchanged")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", map[string]string{"workspace": "acme"}, nil)
+		s.Require().NoError(err)
+	}), "SelectByIdentity")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connections[1].ID))
+	}), "Delete")
+	s.Equal(4, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connections[2].ID))
+	}), "DeleteUnbound")
+	s.Equal(6, s.countQueries(func() {
+		_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+		s.Require().NoError(err)
+	}), "DeleteUser")
 }

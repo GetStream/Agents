@@ -3,20 +3,13 @@ package store
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"database/sql/driver"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/uptrace/bun"
 )
-
-// ErrConnectorConnectionChanged says a credentials write found the connection no longer at the
-// revision it expected, or deleted: someone else saved first, or the connection is gone.
-// The writer reloads under the lock rather than overwrite what it did not see.
-var ErrConnectorConnectionChanged = errors.New("store: connector connection changed while saving")
 
 // credentialLockNamespace is the first key of the two-integer advisory lock a connection's
 // credential state is held under; the second is credentialLockKey. Postgres keeps the one-bigint and the
@@ -48,133 +41,6 @@ const (
 	credentialRetryFirst = 5 * time.Millisecond
 	credentialRetryMost  = 100 * time.Millisecond
 )
-
-// credentialColumns are what a credentials write sets: the credential state itself
-// (core.CredentialState: status, revision, stored credentials, expiry, last error) and what a
-// consent captures beside it (account, scopes,
-// metadata, when it connected, the definition revision it ran on). The prototype's list (SaveConnectorConnectionAtRevision at cf62af0d) with its
-// credential columns renamed to credentials ones and metadata added, less cached_tools and
-// tools_*: those have a writer of their own, and a credentials write would put back a stale copy.
-var credentialColumns = []string{
-	"status", "revision", "credentials_sealed", "credentials_kek_version", "expires_at", "last_error",
-	"account_id", "granted_scopes", "metadata", "connected_at", "definition_revision", "updated_at",
-}
-
-// SaveConnectorConnectionAtRevision saves new stored credentials, already sealed for
-// expectedRevision + 1, onto a connection that is live and still at expectedRevision, under
-// the same lock WithLockedConnectorConnection holds, so it never lands in the middle of a
-// refresh. It always advances the revision by one. A locked callback can commit a status
-// without advancing it (needs_reauthorization before a refresh), so a save at the same
-// revision from a snapshot read before that would pass the compare-and-swap and put back the
-// credentials the callback retired; a save of new credentials replaces them instead.
-func (s *Store) SaveConnectorConnectionAtRevision(ctx context.Context, connection *ConnectorConnection, expectedRevision int) error {
-	if connection.CustomerID == "" || connection.ID == "" {
-		return errors.New("store: a customer and a connection id are required")
-	}
-	if expectedRevision < 1 {
-		return errors.New("store: the expected revision is 1 or more")
-	}
-	if connection.Revision != expectedRevision+1 {
-		return fmt.Errorf("store: a save is new credentials at revision %d, not %d", expectedRevision+1, connection.Revision)
-	}
-	return s.withCredentialLock(ctx, connection.CustomerID, connection.ID, func(conn bun.Conn) error {
-		return s.saveAtRevision(ctx, conn, connection, expectedRevision)
-	})
-}
-
-// WithLockedConnectorConnection loads one live connection under the session-level advisory
-// lock on its credential state and runs fn. fn may call checkpoint to commit the connection as it is
-// now, before a side effect it cannot take back, and keeps the lock while it does; returning
-// changed commits the final state the same way. Each commit is a compare-and-swap on the
-// revision the previous one left. fn must not lock the same connection again: that is a
-// second pool connection waiting on the first.
-func (s *Store) WithLockedConnectorConnection(
-	ctx context.Context,
-	customerID, id string,
-	fn func(connection *ConnectorConnection, checkpoint func() error) (changed bool, err error),
-) error {
-	if customerID == "" || id == "" {
-		return errors.New("store: a customer and a connection id are required")
-	}
-	return s.withCredentialLock(ctx, customerID, id, func(conn bun.Conn) error {
-		var connection ConnectorConnection
-		err := s.global.NewSelect().Conn(conn).Model(&connection).
-			Where("customer_id = ?", customerID).
-			Where("id = ?", id).
-			Where("deleted_at IS NULL").
-			Scan(ctx)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: %s", ErrNoConnectorConnection, id)
-		}
-		if err != nil {
-			return fmt.Errorf("store: load locked connector connection: %w", err)
-		}
-		expected := connection.Revision
-		checkpoint := func() error {
-			if err := s.saveAtRevision(ctx, conn, &connection, expected); err != nil {
-				return err
-			}
-			expected = connection.Revision
-			return nil
-		}
-		changed, err := fn(&connection, checkpoint)
-		if err != nil || !changed {
-			return err
-		}
-		return checkpoint()
-	})
-}
-
-// saveAtRevision is the compare-and-swap every credentials write is: it matches only the live row
-// still at expected, so of two writers that read the same revision one wins and the other
-// gets ErrConnectorConnectionChanged. A write never moves the revision back, since that would
-// make a blob sealed for an earlier revision open again. It runs detached from ctx, within
-// credentialDetachedTimeout: the driver turns a passed deadline into a passed socket deadline
-// (Conn.deadline in github.com/uptrace/bun/driver/pgdriver v1.2.18), which would drop a
-// rotation the provider already made.
-func (s *Store) saveAtRevision(ctx context.Context, conn bun.IConn, connection *ConnectorConnection, expected int) error {
-	if connection.Revision < expected {
-		return fmt.Errorf("store: revision %d is behind the stored %d", connection.Revision, expected)
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
-	defer cancel()
-	connection.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if connection.CredentialsSealed == nil {
-		connection.CredentialsSealed = []byte{}
-	}
-	if connection.Metadata == nil {
-		connection.Metadata = map[string]string{}
-	}
-	if connection.GrantedScopes == nil {
-		connection.GrantedScopes = []string{}
-	}
-	// A save that leaves the connection anything but connected frees its provider unit
-	// (SetConnectorConnectionProviderUnit says why); one that keeps it connected, such as a
-	// refresh, keeps the unit the row holds. The row's, not the caller's copy, which may
-	// predate the unit.
-	if connection.Status != ConnectionConnected {
-		connection.ProviderUnitID = ""
-	}
-	result, err := s.global.NewUpdate().Conn(conn).Model(connection).
-		Column(credentialColumns...).
-		Set("provider_unit_id = CASE WHEN ? = ? THEN cc.provider_unit_id END", connection.Status, ConnectionConnected).
-		Where("id = ?", connection.ID).
-		Where("customer_id = ?", connection.CustomerID).
-		Where("revision = ?", expected).
-		Where("deleted_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("store: save connector credentials: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("store: save connector credentials: %w", err)
-	}
-	if affected == 0 {
-		return ErrConnectorConnectionChanged
-	}
-	return nil
-}
 
 // withCredentialLock runs fn on one pool connection that holds the session-level advisory lock on
 // the connection's credential state, and gives the lock and the connection back when fn returns.

@@ -26,7 +26,7 @@ func TestSyncSuite(t *testing.T) {
 // one. Seeding is idempotent, so suites running beside this one see the same rows.
 func (s *SyncSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, because a sync is named by what the agent

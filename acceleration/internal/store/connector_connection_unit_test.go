@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -58,11 +58,42 @@ func appConnection() *ConnectorConnection {
 	}
 }
 
+func TestConnectorConnectionValidate(t *testing.T) {
+	valid := func() ConnectorConnection {
+		connection := *appConnection()
+		connection.Status, connection.Revision = ConnectionPending, 1
+		return connection
+	}
+	require.NoError(t, (&ConnectorConnection{CustomerID: "acme-app", ConnectorID: "acme", DefinitionRevision: 2,
+		OwnerType: OwnerUser, OwnerID: "alice", AuthScheme: "test_key", Status: ConnectionConnected, Revision: 3}).Validate())
+
+	for _, tc := range []struct {
+		field  string
+		broken func(*ConnectorConnection)
+	}{
+		{"customer_id", func(c *ConnectorConnection) { c.CustomerID = "" }},
+		{"connector_id", func(c *ConnectorConnection) { c.ConnectorID = " " }},
+		{"definition_revision", func(c *ConnectorConnection) { c.DefinitionRevision = 0 }},
+		{"owner_type", func(c *ConnectorConnection) { c.OwnerType = "team" }},
+		{"owner_id", func(c *ConnectorConnection) { c.OwnerID = "alice" }},
+		{"owner_id", func(c *ConnectorConnection) { c.OwnerType = OwnerUser }},
+		{"auth_scheme", func(c *ConnectorConnection) { c.AuthScheme = "" }},
+		{"status", func(c *ConnectorConnection) { c.Status = "revoked" }},
+		{"revision", func(c *ConnectorConnection) { c.Revision = 0 }},
+	} {
+		connection := valid()
+		tc.broken(&connection)
+		var invalid *ValidationError
+		require.True(t, errors.As(connection.Validate(), &invalid), tc.field)
+		require.Equal(t, tc.field, invalid.Field)
+	}
+}
+
 func TestAConnectionWithAnUnregisteredAuthSchemeIsRefused(t *testing.T) {
 	connection := appConnection()
 	connection.AuthScheme = "oauth2_code"
 
-	err := (&Store{}).CreateConnectorConnection(context.Background(), testSchemes, connection)
+	err := (&Store{}).ConnectorConnections.Insert(context.Background(), testSchemes, connection)
 
 	require.ErrorIs(t, err, ErrUnregisteredScheme)
 	require.ErrorContains(t, err, `"oauth2_code"`)
@@ -72,7 +103,7 @@ func TestAConnectionIsNotCreatedWithAProviderUnit(t *testing.T) {
 	connection := appConnection()
 	connection.ProviderUnitID = "106540352242922"
 
-	err := (&Store{}).CreateConnectorConnection(context.Background(), testSchemes, connection)
+	err := (&Store{}).ConnectorConnections.Insert(context.Background(), testSchemes, connection)
 
 	require.ErrorContains(t, err, "a provider unit is set on a connection after consent")
 }
@@ -81,47 +112,29 @@ func TestAConnectionWithAnUnregisteredTLSSchemeIsRefused(t *testing.T) {
 	connection := appConnection()
 	connection.TLSScheme = "mtls"
 
-	err := (&Store{}).CreateConnectorConnection(context.Background(), testSchemes, connection)
+	err := (&Store{}).ConnectorConnections.Insert(context.Background(), testSchemes, connection)
 
 	require.ErrorIs(t, err, ErrUnregisteredScheme)
 	require.ErrorContains(t, err, `tls scheme "mtls"`)
 }
 
 func TestAnEmptyRegistryRegistersNoScheme(t *testing.T) {
-	err := (&Store{}).CreateConnectorConnection(context.Background(), core.Registry{}, appConnection())
+	err := (&Store{}).ConnectorConnections.Insert(context.Background(), core.Registry{}, appConnection())
 
 	require.ErrorIs(t, err, ErrUnregisteredScheme)
-}
-
-func TestAnAppOwnedConnectionNamingAUserIsRefused(t *testing.T) {
-	connection := appConnection()
-	connection.OwnerID = "alice"
-
-	err := (&Store{}).CreateConnectorConnection(context.Background(), testSchemes, connection)
-
-	require.ErrorContains(t, err, "an app owner has no id")
-}
-
-func TestAUserOwnedConnectionNamingNoUserIsRefused(t *testing.T) {
-	connection := appConnection()
-	connection.OwnerType = OwnerUser
-
-	err := (&Store{}).CreateConnectorConnection(context.Background(), testSchemes, connection)
-
-	require.ErrorContains(t, err, "a user owner has one")
 }
 
 func TestAConnectionIsNotCreatedWithCredentials(t *testing.T) {
 	connection := appConnection()
 	connection.CredentialsSealed = []byte("sealed elsewhere")
 
-	err := (&Store{}).CreateConnectorConnection(context.Background(), testSchemes, connection)
+	err := (&Store{}).ConnectorConnections.Insert(context.Background(), testSchemes, connection)
 
 	require.ErrorContains(t, err, "after it exists")
 }
 
 func TestListingConnectionsNeedsAValidOwner(t *testing.T) {
-	_, err := (&Store{}).ConnectorConnectionsByOwner(context.Background(), "acme-app", ConnectionFilter{OwnerType: OwnerUser})
+	_, err := (&Store{}).ConnectorConnections.Select(context.Background(), "acme-app", ConnectionFilter{OwnerType: OwnerUser})
 
 	require.ErrorContains(t, err, "a user owner has one")
 }
@@ -131,55 +144,8 @@ func TestEveryUsersConnectionsNameNoOwner(t *testing.T) {
 		{OwnerType: OwnerUser, OwnerID: "alice", EveryUser: true},
 		{OwnerType: OwnerApp, EveryUser: true},
 	} {
-		_, err := (&Store{}).ConnectorConnectionsByOwner(context.Background(), "acme-app", filter)
+		_, err := (&Store{}).ConnectorConnections.Select(context.Background(), "acme-app", filter)
 
 		require.ErrorContains(t, err, "every user's connections are owner", "%+v", filter)
 	}
-}
-
-func TestAnAttemptOfAnUnknownKindIsRefused(t *testing.T) {
-	attempt := &ConnectorAuthorizationAttempt{
-		ID: "attempt", CustomerID: "acme-app", ConnectionID: "connection", StateHash: AuthorizationStateHash("state"),
-		Kind: "install", AttemptSealed: []byte("sealed"), KEKVersion: 1, ExpiresAt: time.Now().Add(time.Minute),
-	}
-
-	err := (&Store{}).CreateConnectorAuthorizationAttempt(context.Background(), attempt)
-
-	require.ErrorContains(t, err, `kind "install"`)
-}
-
-func TestAnAttemptThatHasAlreadyExpiredIsRefused(t *testing.T) {
-	attempt := &ConnectorAuthorizationAttempt{
-		ID: "attempt", CustomerID: "acme-app", ConnectionID: "connection", StateHash: AuthorizationStateHash("state"),
-		Kind: AttemptConsent, AttemptSealed: []byte("sealed"), KEKVersion: 1, ExpiresAt: time.Now().Add(-time.Second),
-	}
-
-	err := (&Store{}).CreateConnectorAuthorizationAttempt(context.Background(), attempt)
-
-	require.ErrorContains(t, err, "expires in the future")
-}
-
-func TestAnUnsealedAttemptIsRefused(t *testing.T) {
-	attempt := &ConnectorAuthorizationAttempt{
-		ID: "attempt", CustomerID: "acme-app", ConnectionID: "connection", StateHash: AuthorizationStateHash("state"),
-		Kind: AttemptConsent, KEKVersion: 1, ExpiresAt: time.Now().Add(time.Minute),
-	}
-
-	err := (&Store{}).CreateConnectorAuthorizationAttempt(context.Background(), attempt)
-
-	require.ErrorContains(t, err, "an attempt is sealed")
-}
-
-func TestTheStateHashIsNotTheState(t *testing.T) {
-	hash := AuthorizationStateHash("bearer-state")
-
-	require.Len(t, hash, 64, "hex of a SHA-256")
-	require.NotContains(t, hash, "bearer-state")
-	require.Equal(t, hash, AuthorizationStateHash("bearer-state"), "the same state finds the same row")
-}
-
-func TestAHandoffWithoutTheBlobItReadIsRefused(t *testing.T) {
-	err := (&Store{}).HandOffConnectorAuthorizationAttempt(context.Background(), "attempt", nil, []byte("sealed"), 1)
-
-	require.ErrorContains(t, err, "the blob it read")
 }

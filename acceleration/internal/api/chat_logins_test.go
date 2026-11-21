@@ -649,8 +649,9 @@ func (s *ChatLoginsSuite) withToken(user *testClient, connector, token string) s
 
 // connectionsOf is how many live connections user has to connector.
 func (s *ChatLoginsSuite) connectionsOf(user *testClient, connector string) int {
-	connections, err := s.store.ConnectorConnectionsByOwner(context.Background(), s.customerID(),
+	connections, err := s.store.ConnectorConnections.Select(context.Background(), s.customerID(),
 		store.ConnectionFilter{OwnerType: store.OwnerUser, OwnerID: user.userID, ConnectorID: connector})
+
 	s.Require().NoError(err)
 	return len(connections)
 }
@@ -713,7 +714,7 @@ sources:
     endpoint: mcp
 ` + extra))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 }
 
@@ -721,7 +722,7 @@ sources:
 // YAML in extra, as a router start with that file does: only a built-in's later revision marks
 // an earlier one broken.
 func (s *ChatLoginsSuite) builtin(id string, revision int, extra string) {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{id + ".yaml": {Data: []byte(`
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{id + ".yaml": {Data: []byte(`
 id: ` + id + `
 revision: ` + strconv.Itoa(revision) + `
 name: Fake

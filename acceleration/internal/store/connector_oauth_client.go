@@ -42,7 +42,7 @@ var ErrOAuthClientRegistrationNotListed = errors.New("store: the connector's cli
 // provider app: an app belongs to one customer, and its events URL names one tenant.
 var ErrProviderAppTaken = errors.New("store: another customer's OAuth client is this provider app")
 
-// ConnectorOAuthClient is the OAuth client one customer uses at one connector, registered in
+// Get is the OAuth client one customer uses at one connector, registered in
 // advance, and the provider app it belongs to. Its secrets are sealed by the caller before they
 // reach the store.
 //
@@ -78,25 +78,34 @@ type ConnectorOAuthClient struct {
 	UpdatedAt           time.Time `bun:"updated_at,notnull"`
 }
 
-// PutConnectorOAuthClient stores the customer's client for the connector, replacing the one
+// ConnectorOAuthClients are the OAuth clients customers registered in advance, one per
+// customer and connector.
+type ConnectorOAuthClients struct {
+	store *Store
+}
+
+// Upsert stores the customer's client for the connector, replacing the one
 // it had of the same registration in the same statement, so a rotated secret is one row
 // changed. created is false when a client was replaced. A client of another registration is
 // left alone and ErrOAuthClientRegistration returned. A registration the connector's latest
 // manifest does not list is ErrOAuthClientRegistrationNotListed, and a provider app another
 // customer's record names ErrProviderAppTaken. client.StreamAppPK is the pin of a new record;
 // on return it is the pin the record has.
-func (s *Store) PutConnectorOAuthClient(ctx context.Context, client *ConnectorOAuthClient) (created bool, err error) {
-	if err := checkOAuthClient(client); err != nil {
-		return false, err
+func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAuthClient) (created bool, err error) {
+	if client.SecretSealed == nil {
+		client.SecretSealed = []byte{}
 	}
-	if client.CustomerID == "" || client.ConnectorID == "" {
-		return false, stack.Wrap(errors.New("store: a customer and a connector id are required"))
+	if client.SigningSecretSealed == nil {
+		client.SigningSecretSealed = []byte{}
+	}
+	if err := client.Validate(); err != nil {
+		return false, stack.Wrap(err)
 	}
 	// Truncated to what Postgres keeps, so the created_at an insert returns equals it.
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	var createdAt time.Time
 	var pin sql.NullInt64
-	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the client is stored, so a delete of the connector
 		// waits and then deletes it too, or went first and leaves no definition to find
 		// (DeleteConnectorDefinition): no client secret outlives its connector.
@@ -150,14 +159,14 @@ func (s *Store) PutConnectorOAuthClient(ctx context.Context, client *ConnectorOA
 	return createdAt.Equal(now), nil
 }
 
-// ConnectorOAuthClient returns the customer's client for the connector, of whichever
+// Get returns the customer's client for the connector, of whichever
 // registration it is.
-func (s *Store) ConnectorOAuthClient(ctx context.Context, customerID, connectorID string) (ConnectorOAuthClient, error) {
+func (r *ConnectorOAuthClients) Get(ctx context.Context, customerID, connectorID string) (ConnectorOAuthClient, error) {
 	if customerID == "" || connectorID == "" {
 		return ConnectorOAuthClient{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	var client ConnectorOAuthClient
-	err := s.global.NewSelect().Model(&client).
+	err := r.store.global.NewSelect().Model(&client).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID).
 		Scan(ctx)
@@ -170,16 +179,16 @@ func (s *Store) ConnectorOAuthClient(ctx context.Context, customerID, connectorI
 	return client, nil
 }
 
-// ConnectorOAuthClientByProviderApp returns the record of the connector's provider app, the
+// GetByProviderApp returns the record of the connector's provider app, the
 // one customer whose app it is. An inbound request names the app and carries no app
 // credential, so the app id, not a customer, is what finds the row, as the OAuth state finds an
 // attempt (ConnectorAuthorizationAttemptByState).
-func (s *Store) ConnectorOAuthClientByProviderApp(ctx context.Context, connectorID, providerAppID string) (ConnectorOAuthClient, error) {
+func (r *ConnectorOAuthClients) GetByProviderApp(ctx context.Context, connectorID, providerAppID string) (ConnectorOAuthClient, error) {
 	if connectorID == "" || providerAppID == "" {
 		return ConnectorOAuthClient{}, stack.Wrap(errors.New("store: a connector id and a provider app id are required"))
 	}
 	var client ConnectorOAuthClient
-	err := s.global.NewSelect().Model(&client).
+	err := r.store.global.NewSelect().Model(&client).
 		Where("connector_id = ?", connectorID).
 		Where("provider_app_id = ?", providerAppID).
 		Scan(ctx)
@@ -192,24 +201,24 @@ func (s *Store) ConnectorOAuthClientByProviderApp(ctx context.Context, connector
 	return client, nil
 }
 
-// RewrapConnectorOAuthClientSecret replaces the record's sealed client secret with the same
+// RewrapSecret replaces the record's sealed client secret with the same
 // secret sealed under a newer key encryption key.
 // It changes nothing when the secret was replaced meanwhile, and reports whether it applied.
-func (s *Store) RewrapConnectorOAuthClientSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
-	return s.rewrapConnectorOAuthClient(ctx, "secret_sealed", "kek_version", customerID, connectorID, was, sealed, version)
+func (r *ConnectorOAuthClients) RewrapSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
+	return r.rewrap(ctx, "secret_sealed", "kek_version", customerID, connectorID, was, sealed, version)
 }
 
-// RewrapConnectorOAuthClientSigningSecret is RewrapConnectorOAuthClientSecret for the provider
+// RewrapSigningSecret is RewrapConnectorOAuthClientSecret for the provider
 // app's signing secret.
-func (s *Store) RewrapConnectorOAuthClientSigningSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
-	return s.rewrapConnectorOAuthClient(ctx, "signing_secret_sealed", "signing_kek_version", customerID, connectorID, was, sealed, version)
+func (r *ConnectorOAuthClients) RewrapSigningSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
+	return r.rewrap(ctx, "signing_secret_sealed", "signing_kek_version", customerID, connectorID, was, sealed, version)
 }
 
-func (s *Store) rewrapConnectorOAuthClient(ctx context.Context, column, versionColumn, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
+func (r *ConnectorOAuthClients) rewrap(ctx context.Context, column, versionColumn, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
 	if len(was) == 0 || len(sealed) == 0 || version < 1 {
 		return false, stack.Wrap(errors.New("store: a rewrap replaces one sealed secret with another, under a key version of 1 or more"))
 	}
-	result, err := s.global.NewUpdate().Model((*ConnectorOAuthClient)(nil)).
+	result, err := r.store.global.NewUpdate().Model((*ConnectorOAuthClient)(nil)).
 		Set("? = ?", bun.Ident(column), sealed).
 		Set("? = ?", bun.Ident(versionColumn), version).
 		Where("customer_id = ?", customerID).
@@ -226,14 +235,14 @@ func (s *Store) rewrapConnectorOAuthClient(ctx context.Context, column, versionC
 	return written > 0, nil
 }
 
-// DeleteConnectorOAuthClient removes the customer's client of that registration for the
+// Delete removes the customer's client of that registration for the
 // connector. A client of another registration is not the caller's to remove, so it is
 // ErrNoConnectorOAuthClient as a missing one is.
-func (s *Store) DeleteConnectorOAuthClient(ctx context.Context, customerID, connectorID string, registration core.ClientRegistrationMethod) error {
+func (r *ConnectorOAuthClients) Delete(ctx context.Context, customerID, connectorID string, registration core.ClientRegistrationMethod) error {
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
-	result, err := s.global.NewDelete().Model((*ConnectorOAuthClient)(nil)).
+	result, err := r.store.global.NewDelete().Model((*ConnectorOAuthClient)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID).
 		Where("registration = ?", registration).
@@ -251,42 +260,29 @@ func (s *Store) DeleteConnectorOAuthClient(ctx context.Context, customerID, conn
 	return nil
 }
 
-// checkOAuthClient is what the migration leaves to the store: a known registration, a
-// provider app for a managed client, each sealed secret with the key version it was sealed
-// under, or neither, and a client id unless the record is a provider app with a signing
-// secret alone (20261009130000_connector_oauth_clients_provider_app_only.sql).
-func checkOAuthClient(client *ConnectorOAuthClient) error {
-	if client.CustomerID == "" || client.ConnectorID == "" {
-		return stack.Wrap(errors.New("store: an OAuth client needs a customer and a connector id"))
-	}
-	if client.ClientID == "" && len(client.SigningSecretSealed) == 0 {
-		return stack.Wrap(errors.New("store: a record without a client id is a provider app, so it needs a signing secret"))
-	}
-	if !slices.Contains(oauthClientRegistrations, client.Registration) {
-		return stack.Wrap(fmt.Errorf("store: OAuth client registration %q is not one of %v", client.Registration, oauthClientRegistrations))
-	}
-	if client.SecretSealed == nil {
-		client.SecretSealed = []byte{}
-	}
-	if (len(client.SecretSealed) == 0) != (client.KEKVersion == 0) || client.KEKVersion < 0 {
-		return stack.Wrap(errors.New("store: a sealed secret has a key version of 1 or more, and no secret has version 0"))
-	}
-	// The router created a managed app, so it has the id the provider gave it.
-	if client.Registration == core.ClientManaged && client.ProviderAppID == "" {
-		return stack.Wrap(errors.New("store: a managed OAuth client names the provider app the router created"))
-	}
-	// RFC 3986 section 3.3: a dot segment would be removed from the events URL it is in.
-	if client.ProviderAppID != "" && (!providerAppIDPattern.MatchString(client.ProviderAppID) || client.ProviderAppID == "." || client.ProviderAppID == "..") {
-		return stack.Wrap(fmt.Errorf("store: provider app id %q is not unreserved characters (RFC 3986 section 2.3) or is a dot segment", client.ProviderAppID))
-	}
-	if client.SigningSecretSealed == nil {
-		client.SigningSecretSealed = []byte{}
-	}
-	if (len(client.SigningSecretSealed) == 0) != (client.SigningKEKVersion == 0) || client.SigningKEKVersion < 0 {
-		return stack.Wrap(errors.New("store: a sealed signing secret has a key version of 1 or more, and no signing secret has version 0"))
-	}
-	if len(client.SigningSecretSealed) > 0 && client.ProviderAppID == "" {
-		return stack.Wrap(errors.New("store: a signing secret is found by its provider app, so it needs a provider app id"))
-	}
-	return nil
+// Validate refuses a client the table refuses (connector_oauth_clients_client_or_signing_secret,
+// the secret and key version pairs, connector_oauth_clients_signing_secret_app), and what the
+// migration leaves to the store: a known registration, a provider app for a managed client,
+// and a provider app id that is one path segment of its events URL.
+func (c *ConnectorOAuthClient) Validate() error {
+	return validate("connector oauth client").
+		required("customer_id", c.CustomerID).
+		required("connector_id", c.ConnectorID).
+		check(slices.Contains(oauthClientRegistrations, c.Registration), "registration",
+			fmt.Sprintf("is not one of %v", oauthClientRegistrations)).
+		check(c.ClientID != "" || len(c.SigningSecretSealed) > 0, "client_id",
+			"is required unless the record is a provider app with a signing secret").
+		check((len(c.SecretSealed) == 0) == (c.KEKVersion == 0) && c.KEKVersion >= 0, "kek_version",
+			"is 1 or more for a sealed secret and 0 without one").
+		// The router created a managed app, so it has the id the provider gave it.
+		check(c.Registration != core.ClientManaged || c.ProviderAppID != "", "provider_app_id",
+			"is required for a managed client").
+		// RFC 3986 section 3.3: a dot segment would be removed from the events URL it is in.
+		check(c.ProviderAppID == "" || providerAppIDPattern.MatchString(c.ProviderAppID) && c.ProviderAppID != "." && c.ProviderAppID != "..",
+			"provider_app_id", "is not unreserved characters (RFC 3986 section 2.3) or is a dot segment").
+		check((len(c.SigningSecretSealed) == 0) == (c.SigningKEKVersion == 0) && c.SigningKEKVersion >= 0, "signing_kek_version",
+			"is 1 or more for a sealed signing secret and 0 without one").
+		check(len(c.SigningSecretSealed) == 0 || c.ProviderAppID != "", "provider_app_id",
+			"is required with a signing secret, which is found by its provider app").
+		done()
 }

@@ -35,7 +35,7 @@ func TestInvocationLogSuite(t *testing.T) {
 // written late would be seen, and returns them newest first.
 func (s *InvocationLogSuite) logged(connection string, count int) []store.ConnectorInvocation {
 	fetch := func() ([]store.ConnectorInvocation, error) {
-		return s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		return s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 	}
 	read := func() []store.ConnectorInvocation {
 		rows, err := fetch()
@@ -235,7 +235,7 @@ func (s *InvocationLogSuite) revokedAtOpen(spec Spec, app string) []store.Connec
 	s.Require().Len(unavailable, 1, "the binding could not be opened")
 	var rows []store.ConnectorAuditEvent
 	s.Require().Eventually(func() bool {
-		rows, err = s.store.ConnectorAuditEvents(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
+		rows, err = s.store.ConnectorAuditEvents.Select(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	s.Equal(store.AuditGrantRevoked, rows[0].Action)
@@ -267,7 +267,7 @@ func (s *InvocationLogSuite) revokedBy(spec Spec, app string) []store.ConnectorA
 	s.Require().Error(err)
 	var rows []store.ConnectorAuditEvent
 	s.Require().Eventually(func() bool {
-		rows, err = s.store.ConnectorAuditEvents(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
+		rows, err = s.store.ConnectorAuditEvents.Select(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	s.Equal(store.AuditGrantRevoked, rows[0].Action)

@@ -75,7 +75,7 @@ func (s *messageHookHarness) start(connectorsOn bool, publicURL string) {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	s.staff = &testClient{suite: &s.RouterSuite, header: http.Header{opsKeyHeader: {suiteOpsKey}}, kind: noCredential}
 }
 
@@ -177,7 +177,7 @@ func (s *ProviderAppMessageHookSuite) TestCreatingTheAppLeavesThePinnedAppsHooks
 		ConnectorProviderAppRequest{Name: "Acme", ConfigRefreshToken: s.slack.NewConfigToken()})
 
 	s.Require().Equal(http.StatusCreated, status, string(payload))
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Equal(s.appID(), record.StreamAppPK, "pinned to the customer's own app")
 	s.leftAlone(hooks)
@@ -220,7 +220,7 @@ func (s *ProviderAppMessageHookSuite) TestAProviderAppPinnedToTheDeploymentsAppP
 
 	s.Require().Equal(http.StatusCreated, s.operatorApp())
 
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Equal(int64(suiteStreamApp), record.StreamAppPK)
 	s.Equal(before, s.asked(suiteStreamKey, http.MethodPatch, "/api/v2/app"))
@@ -406,7 +406,7 @@ func (s *ProviderAppMessageHookNoAppSuite) TestAProviderAppPinnedToZeroPointsNoH
 
 	s.Require().Equal(http.StatusCreated, s.operatorApp())
 
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Zero(record.StreamAppPK)
 	s.NotZero(s.stream.DeploymentApp())
@@ -445,6 +445,6 @@ func (s *ProviderAppMessageHookOffSuite) TestTheProviderAppPutsAnswerAsBeforeAnd
 	s.Contains(string(operatorBody), "operator apps cannot be set: connectors are not enabled on this deployment")
 	s.Len(s.chat.Requests(s.apiKey), asked, "nothing is asked of the customer's Stream app")
 	s.Empty(s.chat.EventHooks(s.apiKey))
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }

@@ -638,7 +638,7 @@ func (s *ConnectionToolsSuite) connectorWith(scheme, mcp string) string {
 		"mcp: "+s.provider.URL+fakeprovider.PathMCP, "mcp: "+mcp, 1)
 	manifest, err := core.ParseManifest([]byte(yaml))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return connector
 }

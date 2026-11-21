@@ -289,8 +289,9 @@ func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGrante
 
 	s.move("acme", "moved")
 
-	listed, err := s.destination.ConnectorConnectionsByOwner(s.ctx, "moved",
+	listed, err := s.destination.ConnectorConnections.Select(s.ctx, "moved",
 		ConnectionFilter{OwnerType: OwnerUser, OwnerID: "bob"})
+
 	s.Require().NoError(err)
 	s.Require().Len(listed, 1)
 	s.Equal(id, listed[0].ID)
@@ -1678,7 +1679,7 @@ func (s *DataMoveSuite) TestCopyingAgainStillUpdatesAConnectionNotAuthorizedOnTh
 	s.move("acme", "moved")
 
 	s.assertArrivedWithoutCredentials(id, "moved")
-	moved, err := s.destination.ConnectorConnection(s.ctx, "moved", id)
+	moved, err := s.destination.ConnectorConnections.Get(s.ctx, "moved", id)
 	s.Require().NoError(err)
 	s.Equal("renamed", moved.Label, "the source's edit arrives")
 }
@@ -1688,12 +1689,12 @@ func (s *DataMoveSuite) TestCopyingAgainDuringARefreshOnTheDestinationKeepsItsCr
 	s.move("acme", "moved")
 	s.authorizeAgain(s.destination, "moved", id)
 
-	err := s.destination.WithLockedConnectorConnection(s.ctx, "moved", id,
+	err := s.destination.ConnectorConnections.WithLocked(s.ctx, "moved", id,
 		func(connection *ConnectorConnection, checkpoint func() error) (bool, error) {
-			// The resolver checkpoints the row before the refresh token leaves.
+
 			connection.Status = ConnectionNeedsReauthorization
 			s.Require().NoError(checkpoint())
-			// A repeat copy lands while the provider answers.
+
 			s.move("acme", "moved")
 			connection.Status = ConnectionConnected
 			connection.Revision++
@@ -1703,7 +1704,7 @@ func (s *DataMoveSuite) TestCopyingAgainDuringARefreshOnTheDestinationKeepsItsCr
 		})
 
 	s.Require().NoError(err, "the rotated credentials are saved")
-	held, err := s.destination.ConnectorConnection(s.ctx, "moved", id)
+	held, err := s.destination.ConnectorConnections.Get(s.ctx, "moved", id)
 	s.Require().NoError(err)
 	s.Equal(ConnectionConnected, held.Status)
 	s.Equal([]byte("rotated on moved"), held.CredentialsSealed)
@@ -1712,7 +1713,7 @@ func (s *DataMoveSuite) TestCopyingAgainDuringARefreshOnTheDestinationKeepsItsCr
 // authorizeAgain saves new credentials onto a connection, as a consent or a refresh does, and
 // returns the connection as it was saved.
 func (s *DataMoveSuite) authorizeAgain(store *Store, customerID, id string) ConnectorConnection {
-	connection, err := store.ConnectorConnection(s.ctx, customerID, id)
+	connection, err := store.ConnectorConnections.Get(s.ctx, customerID, id)
 	s.Require().NoError(err)
 	expires := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Microsecond)
 	connection.Status = ConnectionConnected
@@ -1720,14 +1721,14 @@ func (s *DataMoveSuite) authorizeAgain(store *Store, customerID, id string) Conn
 	connection.CredentialsSealed = []byte("sealed on " + customerID)
 	connection.CredentialsKEKVersion = 1
 	connection.ExpiresAt = &expires
-	s.Require().NoError(store.SaveConnectorConnectionAtRevision(s.ctx, &connection, connection.Revision-1))
+	s.Require().NoError(store.ConnectorConnections.SaveAtRevision(s.ctx, &connection, connection.Revision-1))
 	return connection
 }
 
 // assertCredentialsKept checks the destination still holds the credential state a save left:
 // the sealed credentials open only at the revision and key version they were sealed under.
 func (s *DataMoveSuite) assertCredentialsKept(saved ConnectorConnection) {
-	held, err := s.destination.ConnectorConnection(s.ctx, saved.CustomerID, saved.ID)
+	held, err := s.destination.ConnectorConnections.Get(s.ctx, saved.CustomerID, saved.ID)
 	s.Require().NoError(err)
 	s.Equal(ConnectionConnected, held.Status)
 	s.Equal(saved.Revision, held.Revision)

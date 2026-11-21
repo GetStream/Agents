@@ -96,7 +96,7 @@ func (s *telnyxLine) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *telnyxLine) telnyx() *fakeTelnyx { return s.fake.Load() }

@@ -153,7 +153,7 @@ func New(cfg Config) (*Resolver, error) {
 // req.Deadline, on a context of its own: a caller whose ctx ends during a refresh gets ctx's
 // error at once, and the refresh finishes and is committed without it.
 func (r *Resolver) Resolve(ctx context.Context, ref core.ConnectionRef, req core.CredentialRequest) (core.AccessCredential, error) {
-	connection, err := r.store.ConnectorConnection(ctx, ref.CustomerID, ref.ConnectionID)
+	connection, err := r.store.ConnectorConnections.Get(ctx, ref.CustomerID, ref.ConnectionID)
 	if err != nil {
 		r.drop(ref)
 		return core.AccessCredential{}, err
@@ -309,14 +309,14 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 		// A connection's inputs and scheme are never rewritten, so they are read outside the
 		// lock. Its metadata and definition revision change with a reconnect's grant, so the
 		// manifest is read and resolved inside it.
-		definition, err := r.store.ConnectorDefinition(ctx, ref.CustomerID, connection.ConnectorID, state.DefinitionRevision)
+		definition, err := r.store.ConnectorDefinitions.Get(ctx, ref.CustomerID, connection.ConnectorID, state.DefinitionRevision)
 		if err != nil {
 			return false, err
 		}
 		// A revision a later one marked broken gets no credential, as a connection that needs
 		// a reconnect does: the person logs in again, and that consent runs on the latest
 		// revision. Nothing is written, so the status stays what the provider last said.
-		reason, broken, err := r.store.BrokenConnectorRevision(ctx, connection.ConnectorID, state.DefinitionRevision)
+		reason, broken, err := r.store.ConnectorBrokenRevisions.Get(ctx, connection.ConnectorID, state.DefinitionRevision)
 		if err != nil {
 			return false, err
 		}
@@ -415,7 +415,7 @@ func (r *Resolver) audit(ctx context.Context, ref core.ConnectionRef, connection
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
 	if connection == nil {
-		read, err := r.store.ConnectorConnection(ctx, ref.CustomerID, ref.ConnectionID)
+		read, err := r.store.ConnectorConnections.Get(ctx, ref.CustomerID, ref.ConnectionID)
 		if err != nil {
 			r.logger.Error("could not record a connector audit row", "connection", ref.ConnectionID, "action", action, "error", err)
 			return
@@ -434,7 +434,7 @@ func (r *Resolver) audit(ctx context.Context, ref core.ConnectionRef, connection
 	if change != (core.CredentialChange{}) {
 		event.Credential = store.AuditCredential(change)
 	}
-	err := r.store.RecordConnectorAudit(ctx, event)
+	err := r.store.ConnectorAuditEvents.Insert(ctx, event)
 	if err != nil {
 		r.logger.Error("could not record a connector audit row", "connection", ref.ConnectionID, "action", action, "error", err)
 	}

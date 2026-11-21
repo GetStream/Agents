@@ -69,6 +69,18 @@ type ConnectorInvocation struct {
 	Arguments []ArgumentShape `bun:"-"`
 }
 
+// Validate refuses an invocation the table refuses (connector_invocations_error_type_check,
+// connector_invocations_latency_ms_check), or one no list could tie to its connection.
+func (i *ConnectorInvocation) Validate() error {
+	return validate("connector invocation").
+		required("customer_id", i.CustomerID).
+		required("connection_id", i.ConnectionID).
+		required("tool", i.Tool).
+		oneOf("error_type", i.ErrorType, "", InvocationCustomerAuth, InvocationExternalServer, InvocationClientTimeout, InvocationOutcomeUnknown, InvocationDenied).
+		check(i.LatencyMs >= 0, "latency_ms", "is negative").
+		done()
+}
+
 // ArgumentShape is one top-level argument of a tool call without its value: its name, its JSON
 // type (RFC 8259 section 3: object, array, string, number, boolean or null) and, for a string
 // or an array, its length, so an empty one shows (thread_ts: string of length 0).
@@ -89,6 +101,14 @@ type connectorInvocationArguments struct {
 	Shape        []ArgumentShape `bun:"shape,type:jsonb,notnull"`
 }
 
+// InvocationFilter picks a page of one connection's calls.
+type InvocationFilter struct {
+	ConnectionID string
+	Limit        int
+	// After is the last call of the previous page.
+	After *InvocationPosition
+}
+
 // InvocationPosition is where a page of invocations ended, newest first.
 type InvocationPosition struct {
 	StartedAt time.Time `json:"s"`
@@ -96,21 +116,21 @@ type InvocationPosition struct {
 }
 
 // InvocationLimit is the page size an invocation list uses for the limit asked for.
-// ConnectorInvocations returns one row more than this, so a caller can tell the page is not
+// Select returns one row more than this, so a caller can tell the page is not
 // the last without counting.
 func InvocationLimit(asked int) int {
 	return clampLimit(asked, defaultInvocationLimit, maxInvocationLimit)
 }
 
-// RecordConnectorInvocation stores one call.
-func (s *Store) RecordConnectorInvocation(ctx context.Context, invocation *ConnectorInvocation) error {
-	if invocation.CustomerID == "" || invocation.ConnectionID == "" || invocation.Tool == "" {
-		return stack.Wrap(errors.New("store: an invocation needs a customer, a connection and a tool"))
-	}
-	switch invocation.ErrorType {
-	case "", InvocationCustomerAuth, InvocationExternalServer, InvocationClientTimeout, InvocationOutcomeUnknown, InvocationDenied:
-	default:
-		return stack.Wrap(fmt.Errorf("store: %q is not an invocation error type", invocation.ErrorType))
+// ConnectorInvocations are the connector tool calls sessions ran.
+type ConnectorInvocations struct {
+	store *Store
+}
+
+// Insert stores one call.
+func (r *ConnectorInvocations) Insert(ctx context.Context, invocation *ConnectorInvocation) error {
+	if err := invocation.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
 	// A caller that names the call before the row exists (the session's log line, AI-1242)
 	// keeps its id.
@@ -121,9 +141,9 @@ func (s *Store) RecordConnectorInvocation(ctx context.Context, invocation *Conne
 	invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
 	var err error
 	if invocation.Arguments == nil {
-		_, err = s.global.NewInsert().Model(invocation).Exec(ctx)
+		_, err = r.store.global.NewInsert().Model(invocation).Exec(ctx)
 	} else {
-		err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if _, err := tx.NewInsert().Model(invocation).Exec(ctx); err != nil {
 				return err
 			}
@@ -137,22 +157,22 @@ func (s *Store) RecordConnectorInvocation(ctx context.Context, invocation *Conne
 	return nil
 }
 
-// ConnectorInvocations lists one connection's calls, newest first, one more than
+// Select lists one connection's calls, newest first, one more than
 // InvocationLimit(limit).
-func (s *Store) ConnectorInvocations(ctx context.Context, customerID, connectionID string, limit int, after *InvocationPosition) ([]ConnectorInvocation, error) {
-	if customerID == "" || connectionID == "" {
+func (r *ConnectorInvocations) Select(ctx context.Context, customerID string, filter InvocationFilter) ([]ConnectorInvocation, error) {
+	if customerID == "" || filter.ConnectionID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	invocations := []ConnectorInvocation{}
-	query := s.global.NewSelect().Model(&invocations).
+	query := r.store.global.NewSelect().Model(&invocations).
 		Where("customer_id = ?", customerID).
-		Where("connection_id = ?", connectionID)
-	if after != nil {
+		Where("connection_id = ?", filter.ConnectionID)
+	if after := filter.After; after != nil {
 		query = query.Where("(started_at, id) < (?, ?)", after.StartedAt, after.ID)
 	}
 	err := query.
 		Order("started_at DESC", "id DESC").
-		Limit(InvocationLimit(limit) + 1).
+		Limit(InvocationLimit(filter.Limit) + 1).
 		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector invocations: %w", err))
@@ -165,7 +185,7 @@ func (s *Store) ConnectorInvocations(ctx context.Context, customerID, connection
 		ids[i] = invocation.ID
 	}
 	shapes := []connectorInvocationArguments{}
-	if err := s.global.NewSelect().Model(&shapes).Where("invocation_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
+	if err := r.store.global.NewSelect().Model(&shapes).Where("invocation_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector invocation arguments: %w", err))
 	}
 	byInvocation := make(map[string][]ArgumentShape, len(shapes))

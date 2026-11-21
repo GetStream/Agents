@@ -17,7 +17,7 @@ const everyPreregistration = "customer, managed, operator"
 // oauthConnector seeds a built-in connector id whose client.registration is registrations,
 // as a router start with that file would. Seeding it again with the same list changes nothing.
 func (s *StoreSuite) oauthConnector(id, registrations string) {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx, fstest.MapFS{id + ".yaml": {Data: []byte(fmt.Sprintf(`
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{id + ".yaml": {Data: []byte(fmt.Sprintf(`
 id: %s
 revision: 1
 name: Acme
@@ -49,7 +49,7 @@ func (s *StoreSuite) oauthClient(customerID, connectorID string, change func(*Co
 	if change != nil {
 		change(client)
 	}
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, client)
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, client)
 	s.Require().NoError(err)
 	return *client
 }
@@ -62,11 +62,11 @@ func (s *StoreSuite) TestPuttingAnOAuthClientAgainReplacesItsOneRow() {
 		ClientID: first.ClientID, AuthMethod: core.AuthClientSecretPost,
 		SecretSealed: []byte("rotated secret"), KEKVersion: 2,
 	}
-	created, err := s.store.PutConnectorOAuthClient(s.ctx, rotated)
+	created, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, rotated)
 
 	s.Require().NoError(err)
 	s.False(created)
-	found, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "github")
+	found, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "github")
 	s.Require().NoError(err)
 	s.Equal([]byte("rotated secret"), found.SecretSealed)
 	s.Equal(2, found.KEKVersion)
@@ -85,11 +85,11 @@ func (s *StoreSuite) TestTheFirstPutOfAnOAuthClientCreatesIt() {
 		AuthMethod: core.AuthNone,
 	}
 
-	created, err := s.store.PutConnectorOAuthClient(s.ctx, client)
+	created, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, client)
 
 	s.Require().NoError(err)
 	s.True(created)
-	found, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "github")
+	found, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "github")
 	s.Require().NoError(err)
 	s.Equal("public", found.ClientID)
 	s.Empty(found.SecretSealed, "a public client has no secret")
@@ -99,17 +99,17 @@ func (s *StoreSuite) TestTheFirstPutOfAnOAuthClientCreatesIt() {
 func (s *StoreSuite) TestAnOAuthClientIsOnlyItsOwnCustomers() {
 	s.oauthClient("acme-app", "github", nil)
 
-	_, err := s.store.ConnectorOAuthClient(s.ctx, "other-app", "github")
+	_, err := s.store.ConnectorOAuthClients.Get(s.ctx, "other-app", "github")
 	s.ErrorIs(err, ErrNoConnectorOAuthClient)
-	s.ErrorIs(s.store.DeleteConnectorOAuthClient(s.ctx, "other-app", "github", core.ClientCustomer), ErrNoConnectorOAuthClient)
-	_, err = s.store.ConnectorOAuthClient(s.ctx, "acme-app", "github")
+	s.ErrorIs(s.store.ConnectorOAuthClients.Delete(s.ctx, "other-app", "github", core.ClientCustomer), ErrNoConnectorOAuthClient)
+	_, err = s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "github")
 	s.NoError(err, "the other customer's delete left it")
 }
 
 func (s *StoreSuite) TestAnOAuthClientIsPerConnector() {
 	s.oauthClient("acme-app", "github", nil)
 
-	_, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "salesforce")
+	_, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "salesforce")
 
 	s.ErrorIs(err, ErrNoConnectorOAuthClient)
 }
@@ -117,23 +117,24 @@ func (s *StoreSuite) TestAnOAuthClientIsPerConnector() {
 func (s *StoreSuite) TestDeletingAnOAuthClientRemovesIt() {
 	s.oauthClient("acme-app", "github", nil)
 
-	s.Require().NoError(s.store.DeleteConnectorOAuthClient(s.ctx, "acme-app", "github", core.ClientCustomer))
+	s.Require().NoError(s.store.ConnectorOAuthClients.Delete(s.ctx, "acme-app", "github", core.ClientCustomer))
 
-	_, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "github")
+	_, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "github")
 	s.ErrorIs(err, ErrNoConnectorOAuthClient)
-	s.ErrorIs(s.store.DeleteConnectorOAuthClient(s.ctx, "acme-app", "github", core.ClientCustomer), ErrNoConnectorOAuthClient)
+	s.ErrorIs(s.store.ConnectorOAuthClients.Delete(s.ctx, "acme-app", "github", core.ClientCustomer), ErrNoConnectorOAuthClient)
 }
 
 func (s *StoreSuite) TestACustomerClientNeitherReplacesNorDeletesTheOperatorsOne() {
 	operator := s.oauthClient("acme-app", "slack", func(c *ConnectorOAuthClient) { c.Registration = core.ClientOperator })
 
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 		CustomerID: "acme-app", ConnectorID: "slack", Registration: core.ClientCustomer, ClientID: "the-apps-own",
 	})
-	s.ErrorIs(err, ErrOAuthClientRegistration)
-	s.ErrorIs(s.store.DeleteConnectorOAuthClient(s.ctx, "acme-app", "slack", core.ClientCustomer), ErrNoConnectorOAuthClient)
 
-	found, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "slack")
+	s.ErrorIs(err, ErrOAuthClientRegistration)
+	s.ErrorIs(s.store.ConnectorOAuthClients.Delete(s.ctx, "acme-app", "slack", core.ClientCustomer), ErrNoConnectorOAuthClient)
+
+	found, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "slack")
 	s.Require().NoError(err)
 	s.Equal(core.ClientOperator, found.Registration)
 	s.Equal(operator.ClientID, found.ClientID)
@@ -153,7 +154,7 @@ func (s *StoreSuite) managedClient(customerID, connectorID, providerAppID string
 func (s *StoreSuite) TestAManagedClientKeepsItsProviderAppAndSigningSecret() {
 	put := s.managedClient("acme-app", "acme_chat", "A012ABCD0A0")
 
-	found, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "acme_chat")
+	found, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "acme_chat")
 
 	s.Require().NoError(err)
 	s.Equal(core.ClientManaged, found.Registration)
@@ -166,18 +167,18 @@ func (s *StoreSuite) TestAManagedClientKeepsItsProviderAppAndSigningSecret() {
 func (s *StoreSuite) TestAConnectorListingOnlyTheOperatorRefusesAManagedClient() {
 	s.oauthConnector("acme_operator_only", "operator")
 
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 		CustomerID: "acme-app", ConnectorID: "acme_operator_only", Registration: core.ClientManaged,
 		ClientID: "created", ProviderAppID: "A012ABCD0A0",
 	})
 
 	s.ErrorIs(err, ErrOAuthClientRegistrationNotListed)
-	_, err = s.store.ConnectorOAuthClient(s.ctx, "acme-app", "acme_operator_only")
+	_, err = s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "acme_operator_only")
 	s.ErrorIs(err, ErrNoConnectorOAuthClient, "nothing was stored")
 }
 
 func (s *StoreSuite) TestAnUnknownConnectorTakesNoOAuthClient() {
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 		CustomerID: "acme-app", ConnectorID: "acme_nowhere", Registration: core.ClientCustomer, ClientID: "id",
 	})
 
@@ -187,12 +188,12 @@ func (s *StoreSuite) TestAnUnknownConnectorTakesNoOAuthClient() {
 func (s *StoreSuite) TestASecondRecordForTheSameAppAndConnectorIsRefused() {
 	managed := s.managedClient("acme-app", "acme_chat", "A012ABCD0A0")
 
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 		CustomerID: "acme-app", ConnectorID: "acme_chat", Registration: core.ClientCustomer, ClientID: "the-apps-own",
 	})
 
 	s.ErrorIs(err, ErrOAuthClientRegistration)
-	found, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "acme_chat")
+	found, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "acme_chat")
 	s.Require().NoError(err)
 	s.Equal(managed.ClientID, found.ClientID)
 	s.Equal("A012ABCD0A0", found.ProviderAppID)
@@ -216,10 +217,11 @@ func (s *StoreSuite) TestTwoRegistrationsRacingForOneAppAndConnectorStoreOneReco
 		go func() {
 			defer wg.Done()
 			<-start
-			_, errs[i] = router.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+			_, errs[i] = router.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 				CustomerID: "acme-app", ConnectorID: "acme_chat", Registration: registrations[i],
 				ClientID: "client-" + string(registrations[i]), ProviderAppID: "A0" + string(registrations[i]),
 			})
+
 		}()
 	}
 	close(start)
@@ -243,31 +245,31 @@ func (s *StoreSuite) TestAProviderAppIsFoundOnlyForTheCustomerWhoseAppItIs() {
 	s.managedClient("acme-app", "acme_chat", "A0ACME")
 	s.managedClient("globex-app", "acme_chat", "A0GLOBEX")
 
-	acme, err := s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_chat", "A0ACME")
+	acme, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_chat", "A0ACME")
 	s.Require().NoError(err)
-	globex, err := s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_chat", "A0GLOBEX")
+	globex, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_chat", "A0GLOBEX")
 	s.Require().NoError(err)
 
 	s.Equal("acme-app", acme.CustomerID)
 	s.Equal([]byte("sealed signing secret of A0ACME"), acme.SigningSecretSealed)
 	s.Equal("globex-app", globex.CustomerID)
 	s.Equal([]byte("sealed signing secret of A0GLOBEX"), globex.SigningSecretSealed)
-	_, err = s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_chat", "A0INITECH")
+	_, err = s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_chat", "A0INITECH")
 	s.ErrorIs(err, ErrNoConnectorOAuthClient)
-	_, err = s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_other", "A0ACME")
+	_, err = s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_other", "A0ACME")
 	s.ErrorIs(err, ErrNoConnectorOAuthClient, "an app id is the connector's")
 }
 
 func (s *StoreSuite) TestAProviderAppBelongsToOneCustomer() {
 	s.managedClient("acme-app", "acme_chat", "A012ABCD0A0")
 
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 		CustomerID: "globex-app", ConnectorID: "acme_chat", Registration: core.ClientManaged,
 		ClientID: "globex-client", ProviderAppID: "A012ABCD0A0",
 	})
 
 	s.ErrorIs(err, ErrProviderAppTaken)
-	found, err := s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_chat", "A012ABCD0A0")
+	found, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_chat", "A012ABCD0A0")
 	s.Require().NoError(err)
 	s.Equal("acme-app", found.CustomerID)
 }
@@ -290,10 +292,11 @@ func (s *StoreSuite) TestCustomersRacingForOneProviderAppStoreOneRecord() {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, errs[i] = router.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+			_, errs[i] = router.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 				CustomerID: fmt.Sprintf("app-%d", i), ConnectorID: "acme_chat", Registration: core.ClientManaged,
 				ClientID: fmt.Sprintf("client-%d", i), ProviderAppID: "A012ABCD0A0",
 			})
+
 		}()
 	}
 	close(start)
@@ -315,7 +318,7 @@ func (s *StoreSuite) TestOneProviderAppIdAtTwoConnectorsIsTwoApps() {
 
 	s.managedClient("globex-app", "acme_other", "A012ABCD0A0")
 
-	found, err := s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_other", "A012ABCD0A0")
+	found, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_other", "A012ABCD0A0")
 	s.Require().NoError(err)
 	s.Equal("globex-app", found.CustomerID)
 }
@@ -341,7 +344,7 @@ func (s *StoreSuite) TestARecordKeepsTheStreamAppItWasCreatedIn() {
 	})
 
 	s.Equal(int64(4242), rotated.StreamAppPK, "the put hands back the pin the record has")
-	found, err := s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_chat", "A012ABCD0A0")
+	found, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_chat", "A012ABCD0A0")
 	s.Require().NoError(err)
 	s.Equal(int64(4242), found.StreamAppPK)
 }
@@ -358,17 +361,17 @@ func (s *StoreSuite) TestARecordMadeInTheDeploymentsAppHasNoPin() {
 func (s *StoreSuite) TestARewrapOfAnOAuthClientAppliesOnlyToTheSecretItRead() {
 	put := s.managedClient("acme-app", "acme_chat", "A012ABCD0A0")
 
-	applied, err := s.store.RewrapConnectorOAuthClientSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("signing under v2"), 2)
+	applied, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("signing under v2"), 2)
 	s.Require().NoError(err)
 	s.True(applied)
-	stale, err := s.store.RewrapConnectorOAuthClientSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("from a stale read"), 3)
+	stale, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("from a stale read"), 3)
 	s.Require().NoError(err)
 	s.False(stale, "the secret it read was replaced meanwhile")
-	applied, err = s.store.RewrapConnectorOAuthClientSecret(s.ctx, "acme-app", "acme_chat", put.SecretSealed, []byte("client under v2"), 2)
+	applied, err = s.store.ConnectorOAuthClients.RewrapSecret(s.ctx, "acme-app", "acme_chat", put.SecretSealed, []byte("client under v2"), 2)
 	s.Require().NoError(err)
 	s.True(applied)
 
-	found, err := s.store.ConnectorOAuthClient(s.ctx, "acme-app", "acme_chat")
+	found, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "acme_chat")
 	s.Require().NoError(err)
 	s.Equal([]byte("signing under v2"), found.SigningSecretSealed)
 	s.Equal(2, found.SigningKEKVersion)
@@ -385,7 +388,7 @@ func (s *StoreSuite) TestAProviderAppWithASigningSecretAndNoClientIDIsStored() {
 		c.SigningSecretSealed, c.SigningKEKVersion = []byte("sealed signing secret"), 1
 	})
 
-	found, err := s.store.ConnectorOAuthClientByProviderApp(s.ctx, "acme_line", stored.ProviderAppID)
+	found, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_line", stored.ProviderAppID)
 	s.Require().NoError(err)
 	s.Empty(found.ClientID)
 	s.Equal([]byte("sealed signing secret"), found.SigningSecretSealed)
@@ -394,12 +397,14 @@ func (s *StoreSuite) TestAProviderAppWithASigningSecretAndNoClientIDIsStored() {
 func (s *StoreSuite) TestARecordWithNeitherAClientIDNorASigningSecretIsRefused() {
 	s.oauthConnector("acme_line", everyPreregistration)
 
-	_, err := s.store.PutConnectorOAuthClient(s.ctx, &ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(s.ctx, &ConnectorOAuthClient{
 		CustomerID: "acme-app", ConnectorID: "acme_line", Registration: core.ClientCustomer, ProviderAppID: "line-" + newID(),
 	})
 
-	s.ErrorContains(err, "needs a signing secret")
-	_, err = s.store.ConnectorOAuthClient(s.ctx, "acme-app", "acme_line")
+	var invalid *ValidationError
+	s.Require().ErrorAs(err, &invalid)
+	s.Equal("client_id", invalid.Field)
+	_, err = s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "acme_line")
 	s.ErrorIs(err, ErrNoConnectorOAuthClient, "nothing was stored")
 }
 
@@ -411,4 +416,30 @@ func (s *StoreSuite) TestTheTableRefusesARowWithNeitherAClientIDNorASigningSecre
 		"acme-"+newID(), "line-"+newID())
 
 	s.ErrorContains(err, "connector_oauth_clients_client_or_signing_secret")
+}
+
+func (s *StoreSuite) TestConnectorOAuthClientQueryBudgets() {
+	s.oauthConnector("acme_chat", everyPreregistration)
+	managed := s.managedClient("acme-app", "acme_chat", "A012ABCD0A0")
+
+	s.Equal(8, s.countQueries(func() { s.managedClient("acme-app", "acme_chat", "A012ABCD0A0") }), "Upsert")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorOAuthClients.Get(s.ctx, "acme-app", "acme_chat")
+		s.Require().NoError(err)
+	}), "Get")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorOAuthClients.GetByProviderApp(s.ctx, "acme_chat", "A012ABCD0A0")
+		s.Require().NoError(err)
+	}), "GetByProviderApp")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorOAuthClients.RewrapSecret(s.ctx, "acme-app", "acme_chat", managed.SecretSealed, []byte("rewrapped"), 2)
+		s.Require().NoError(err)
+	}), "RewrapSecret")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", managed.SigningSecretSealed, []byte("rewrapped"), 2)
+		s.Require().NoError(err)
+	}), "RewrapSigningSecret")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ConnectorOAuthClients.Delete(s.ctx, "acme-app", "acme_chat", core.ClientManaged))
+	}), "Delete")
 }

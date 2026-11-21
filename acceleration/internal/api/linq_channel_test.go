@@ -95,7 +95,7 @@ func (s *linqLine) SetupSuite() {
 	}))
 	s.T().Cleanup(s.images.Close)
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *linqLine) SetupTest() {
@@ -242,9 +242,9 @@ func (s *LinqChannelSuite) TestAConnectionStillOnRevision2PassesNoPhotoOn() {
 	revision2 := strings.NewReplacer("\nrevision: 3\n", "\nrevision: 2\n",
 		"    media:\n      url: $.data.parts[*].url\n      mime_type: $.data.parts[*].mime_type\n", "").Replace(string(raw))
 	s.Require().NotContains(revision2, "mime_type: $")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(ctx, fstest.MapFS{"linq.yaml": {Data: []byte(revision2)}}))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(ctx, fstest.MapFS{"linq.yaml": {Data: []byte(revision2)}}))
 	// Its credentials are sealed for its revision, so that stays.
-	s.Require().NoError(s.store.WithLockedConnectorConnection(ctx, s.customerID(), s.connection.ID,
+	s.Require().NoError(s.store.ConnectorConnections.WithLocked(ctx, s.customerID(), s.connection.ID,
 		func(connection *store.ConnectorConnection, _ func() error) (bool, error) {
 			connection.DefinitionRevision = 2
 			return true, nil

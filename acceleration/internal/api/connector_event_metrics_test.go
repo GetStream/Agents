@@ -77,7 +77,7 @@ func (s *ConnectorEventsSuite) TestACustomConnectorsEventIsCountedAsCustom() {
 	manifest, err := core.ParseManifest([]byte("id: " + connector + "\nrevision: 1\nname: Metrics probe\n" +
 		"endpoints:\n  mcp: https://crm.example/mcp\nschemes: [oauth2_code]\nclient:\n  registration: [customer]\n"))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	appID, secret := "synthetic-custom-"+s.utils.uuid(), "synthetic-custom-signing-"+s.utils.uuid()
 	record := &store.ConnectorOAuthClient{CustomerID: s.customerID(), ConnectorID: connector,
@@ -85,7 +85,7 @@ func (s *ConnectorEventsSuite) TestACustomConnectorsEventIsCountedAsCustom() {
 	record.SigningSecretSealed, err = s.sealer.SealWithAAD(secret, providerAppAAD(record.CustomerID, connector, appID))
 	s.Require().NoError(err)
 	record.SigningKEKVersion = s.sealer.CurrentVersion()
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	before := eventsOf("custom", eventRefused)
 

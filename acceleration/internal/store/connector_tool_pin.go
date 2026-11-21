@@ -31,15 +31,29 @@ type ConnectorToolPin struct {
 	PinnedAt    time.Time  `bun:"pinned_at,notnull"`
 }
 
-// ConnectorToolPins are the digests a connection's tools are pinned at, by tool name, for the
+// Validate refuses a pin with no tool or no digest to compare a later listing with.
+func (p *ConnectorToolPin) Validate() error {
+	return validate("connector tool pin").
+		required("connection_id", p.ConnectionID).
+		required("tool_name", p.ToolName).
+		required("schema_digest", p.SchemaDigest).
+		done()
+}
+
+// ConnectorToolPins are the schema digests connections' tools are pinned at.
+type ConnectorToolPins struct {
+	store *Store
+}
+
+// Select is the digests a connection's tools are pinned at, by tool name, for the
 // grant that began at connectedAt: the connection's ConnectedAt as the caller read it. A pin
 // taken under another grant is not one.
-func (s *Store) ConnectorToolPins(ctx context.Context, connectionID string, connectedAt *time.Time) (map[string]string, error) {
+func (r *ConnectorToolPins) Select(ctx context.Context, connectionID string, connectedAt *time.Time) (map[string]string, error) {
 	if connectionID == "" {
 		return nil, stack.Wrap(errors.New("store: a connection id is required"))
 	}
 	var pins []ConnectorToolPin
-	err := s.global.NewSelect().Model(&pins).
+	err := r.store.global.NewSelect().Model(&pins).
 		Where("ctp.connection_id = ?", connectionID).
 		Where("ctp.connected_at IS NOT DISTINCT FROM ?", connectedAt).
 		Scan(ctx)
@@ -53,15 +67,15 @@ func (s *Store) ConnectorToolPins(ctx context.Context, connectionID string, conn
 	return digests, nil
 }
 
-// PinConnectorTools pins each tool of digests, by name, at its digest for the grant that
+// Pin pins each tool of digests, by name, at its digest for the grant that
 // began at connectedAt, and returns the pins that hold for that grant afterwards, as
-// ConnectorToolPins does.
+// Select does.
 //
 // A pin is written once per grant: a tool already pinned for this grant keeps its digest,
 // so of two sessions that pin at once the first one's stands and both read it back. A pin of
 // an older grant is replaced; one of a newer grant, written by a router that read the
 // connection after a reconnect this caller has not seen, is kept.
-func (s *Store) PinConnectorTools(ctx context.Context, connectionID string, connectedAt *time.Time, digests map[string]string) (map[string]string, error) {
+func (r *ConnectorToolPins) Pin(ctx context.Context, connectionID string, connectedAt *time.Time, digests map[string]string) (map[string]string, error) {
 	if connectionID == "" {
 		return nil, stack.Wrap(errors.New("store: a connection id is required"))
 	}
@@ -71,10 +85,14 @@ func (s *Store) PinConnectorTools(ctx context.Context, connectionID string, conn
 		// In one order, so two sessions pinning the same tools at once take the rows' locks in
 		// the same order and neither waits on the other in a cycle.
 		for _, name := range slices.Sorted(maps.Keys(digests)) {
-			pins = append(pins, ConnectorToolPin{ConnectionID: connectionID, ToolName: name,
-				SchemaDigest: digests[name], ConnectedAt: connectedAt, PinnedAt: now})
+			pin := ConnectorToolPin{ConnectionID: connectionID, ToolName: name,
+				SchemaDigest: digests[name], ConnectedAt: connectedAt, PinnedAt: now}
+			if err := pin.Validate(); err != nil {
+				return nil, stack.Wrap(err)
+			}
+			pins = append(pins, pin)
 		}
-		_, err := s.global.NewInsert().Model(&pins).
+		_, err := r.store.global.NewInsert().Model(&pins).
 			On("CONFLICT (connection_id, tool_name) DO UPDATE").
 			Set("schema_digest = EXCLUDED.schema_digest").
 			Set("connected_at = EXCLUDED.connected_at").
@@ -85,7 +103,7 @@ func (s *Store) PinConnectorTools(ctx context.Context, connectionID string, conn
 			return nil, stack.Wrap(fmt.Errorf("store: pin connector tools: %w", err))
 		}
 	}
-	return s.ConnectorToolPins(ctx, connectionID, connectedAt)
+	return r.store.ConnectorToolPins.Select(ctx, connectionID, connectedAt)
 }
 
 // ErrConnectorToolPinMoved says a re-approval found the connection's grant, or a tool's pin,
@@ -102,7 +120,7 @@ type ApprovedTool struct {
 	PreviousSchemaDigest string `json:"previous_schema_digest,omitempty"`
 }
 
-// ReapproveConnectorTools pins each of tools at its SchemaDigest for connection's grant, the
+// Reapprove pins each of tools at its SchemaDigest for connection's grant, the
 // one that began at its ConnectedAt as the caller read it, and records one tool_reapproved
 // audit row naming them, in one transaction: all of it or none.
 //
@@ -112,7 +130,7 @@ type ApprovedTool struct {
 // error is ErrConnectorToolPinMoved, so an approve that raced another, a session's first pin
 // or a consent never replaces what that one wrote, nor brings back a pin it replaced. A
 // connection deleted since is ErrNoConnectorConnection.
-func (s *Store) ReapproveConnectorTools(ctx context.Context, connection ConnectorConnection, requestID string, tools []ApprovedTool) error {
+func (r *ConnectorToolPins) Reapprove(ctx context.Context, connection ConnectorConnection, requestID string, tools []ApprovedTool) error {
 	if connection.CustomerID == "" || connection.ID == "" || len(tools) == 0 {
 		return stack.Wrap(errors.New("store: a re-approval needs a customer, a connection and a tool"))
 	}
@@ -120,7 +138,7 @@ func (s *Store) ReapproveConnectorTools(ctx context.Context, connection Connecto
 	// By name, so two approves of the same tools take the pins' locks in one order, as
 	// PinConnectorTools does.
 	ordered := slices.SortedFunc(slices.Values(tools), func(a, b ApprovedTool) int { return strings.Compare(a.Name, b.Name) })
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// FOR SHARE: a consent or a credentials write that begins a new grant updates this row,
 		// so one that comes later waits for this transaction, and one that came first is seen.
 		var sameGrant bool
@@ -154,6 +172,9 @@ func (s *Store) ReapproveConnectorTools(ctx context.Context, connection Connecto
 				// this grant was written since the caller read none.
 				pin := &ConnectorToolPin{ConnectionID: connection.ID, ToolName: tool.Name,
 					SchemaDigest: tool.SchemaDigest, ConnectedAt: connection.ConnectedAt, PinnedAt: now}
+				if err := pin.Validate(); err != nil {
+					return err
+				}
 				result, err = tx.NewInsert().Model(pin).
 					On("CONFLICT (connection_id, tool_name) DO UPDATE").
 					Set("schema_digest = EXCLUDED.schema_digest").
@@ -169,10 +190,14 @@ func (s *Store) ReapproveConnectorTools(ctx context.Context, connection Connecto
 				return errors.Join(ErrConnectorToolPinMoved, err)
 			}
 		}
-		_, err = tx.NewInsert().Model(&ConnectorAuditEvent{ID: newID(), CustomerID: connection.CustomerID,
+		event := ConnectorAuditEvent{ID: newID(), CustomerID: connection.CustomerID,
 			ConnectionID: connection.ID, ConnectorID: connection.ConnectorID, OwnerType: connection.OwnerType,
 			Action: AuditToolReapproved, Revision: connection.Revision, RequestID: requestID,
-			Tools: ordered, CreatedAt: now}).Exec(ctx)
+			Tools: ordered, CreatedAt: now}
+		if err := event.Validate(); err != nil {
+			return err
+		}
+		_, err = tx.NewInsert().Model(&event).Exec(ctx)
 		return err
 	})
 	if errors.Is(err, ErrConnectorToolPinMoved) || errors.Is(err, ErrNoConnectorConnection) {

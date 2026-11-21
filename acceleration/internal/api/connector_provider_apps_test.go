@@ -76,7 +76,7 @@ func (s *ConnectorProviderAppsSuite) SetupSuite() {
 	s.operatorApps = ConnectorOperatorApps(getenv)
 	s.publicURL = providerAppPublicURL
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	s.staff = &testClient{suite: &s.RouterSuite, header: http.Header{opsKeyHeader: {suiteOpsKey}}, kind: noCredential}
 }
 
@@ -214,9 +214,9 @@ func (s *ConnectorProviderAppsSuite) TestDeletingTheAppDeletesItAtSlackAndRemove
 	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, providerAppPath("slack_bot"), nil, nil))
 
 	s.True(s.slackApp(created.ProviderAppID).Deleted)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
-	_, err = s.store.ConnectorConfigToken(context.Background(), s.customerID(), "slack_bot")
+	_, err = s.store.ConnectorConfigTokens.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorConfigToken)
 	status, failure := s.serverClient.failure(http.MethodDelete, providerAppPath("slack_bot"), nil)
 	s.Equal(http.StatusNotFound, status)
@@ -229,7 +229,7 @@ func (s *ConnectorProviderAppsSuite) TestAnAppAlreadyDeletedInSlackIsRemovedHere
 
 	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, providerAppPath("slack_bot"), nil, nil))
 
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -241,7 +241,7 @@ func (s *ConnectorProviderAppsSuite) TestTheSlackToolConnectorListingOnlyTheOper
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal("slack takes no app the router creates: its client.registration is [operator], which does not list managed", failure)
 	s.Equal(before, len(s.slack.SlackApps()), "nothing created at Slack")
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -332,7 +332,7 @@ func (s *ConnectorProviderAppsSuite) TestStaffMakeStreamsOwnAppOneCustomersProvi
 
 func (s *ConnectorProviderAppsSuite) TestOnlyStaffMaySetStreamsOwnApp() {
 	s.Equal(http.StatusUnauthorized, s.serverClient.do(http.MethodPut, operatorAppPath(s.customerID()), nil, nil))
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -498,7 +498,7 @@ channel:
         team_id: $.team_id
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }

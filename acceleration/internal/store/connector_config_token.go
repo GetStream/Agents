@@ -21,7 +21,7 @@ const providerAppLockNamespace int32 = 872
 // ErrNoConnectorConfigToken says the customer gave no configuration token for the connector.
 var ErrNoConnectorConfigToken = errors.New("store: no configuration token for this connector")
 
-// ConnectorConfigToken is the app configuration token a customer's workspace admin gave the
+// Get is the app configuration token a customer's workspace admin gave the
 // router for one connector, with its refresh token, sealed by the caller as one blob. It is
 // what creates, updates and deletes the customer's managed provider app.
 type ConnectorConfigToken struct {
@@ -36,18 +36,36 @@ type ConnectorConfigToken struct {
 	UpdatedAt    time.Time `bun:"updated_at,notnull"`
 }
 
-// WithConnectorProviderAppLock runs fn while this router holds the session-level advisory
+// Validate refuses a token the table refuses (connector_config_tokens_kek_version_check,
+// connector_config_tokens_tokens_sealed_check), or one without the expiry its refresh is timed by.
+func (t *ConnectorConfigToken) Validate() error {
+	return validate("connector config token").
+		required("customer_id", t.CustomerID).
+		required("connector_id", t.ConnectorID).
+		check(len(t.TokensSealed) > 0, "tokens_sealed", "is empty").
+		check(t.KEKVersion >= 1, "kek_version", "is below 1").
+		check(!t.ExpiresAt.IsZero(), "expires_at", "is required").
+		done()
+}
+
+// ConnectorConfigTokens are the app configuration tokens customers gave for their managed
+// provider apps.
+type ConnectorConfigTokens struct {
+	store *Store
+}
+
+// WithProviderAppLock runs fn while this router holds the session-level advisory
 // lock on the customer's provider app of the connector. Whatever reads, rotates or spends
 // the configuration token, or creates, updates or deletes the app, runs inside it, so two
 // routers never rotate one refresh token or create two apps for one customer. fn's own writes
 // go through the pool and commit as they are made: a rotated token is saved even when what
 // follows it fails. fn must not take the same lock again.
-func (s *Store) WithConnectorProviderAppLock(ctx context.Context, customerID, connectorID string, fn func() error) error {
+func (r *ConnectorConfigTokens) WithProviderAppLock(ctx context.Context, customerID, connectorID string, fn func() error) error {
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	key := credentialLockKey(customerID, connectorID)
-	conn, err := s.acquireCredentialLock(ctx, providerAppLockNamespace, key)
+	conn, err := r.store.acquireCredentialLock(ctx, providerAppLockNamespace, key)
 	if err != nil {
 		return stack.Wrap(err)
 	}
@@ -55,20 +73,20 @@ func (s *Store) WithConnectorProviderAppLock(ctx context.Context, customerID, co
 	return fn()
 }
 
-// PutConnectorConfigToken stores the customer's configuration token for the connector,
+// Upsert stores the customer's configuration token for the connector,
 // replacing the one it had. It runs detached from ctx, within credentialDetachedTimeout, as a
 // credentials write does: the token is one the provider just rotated, and the refresh token it
 // replaced may no longer work.
-func (s *Store) PutConnectorConfigToken(ctx context.Context, token *ConnectorConfigToken) error {
-	if token.CustomerID == "" || token.ConnectorID == "" || len(token.TokensSealed) == 0 || token.KEKVersion < 1 || token.ExpiresAt.IsZero() {
-		return stack.Wrap(errors.New("store: a configuration token needs a customer, a connector id, a sealed blob, a key version of 1 or more and an expiry"))
+func (r *ConnectorConfigTokens) Upsert(ctx context.Context, token *ConnectorConfigToken) error {
+	if err := token.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
 	defer cancel()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	row := *token
 	row.CreatedAt, row.UpdatedAt = now, now
-	err := s.global.NewInsert().Model(&row).
+	err := r.store.global.NewInsert().Model(&row).
 		On("CONFLICT (customer_id, connector_id) DO UPDATE").
 		Set("tokens_sealed = EXCLUDED.tokens_sealed").
 		Set("kek_version = EXCLUDED.kek_version").
@@ -84,13 +102,13 @@ func (s *Store) PutConnectorConfigToken(ctx context.Context, token *ConnectorCon
 	return nil
 }
 
-// ConnectorConfigToken returns the customer's configuration token for the connector.
-func (s *Store) ConnectorConfigToken(ctx context.Context, customerID, connectorID string) (ConnectorConfigToken, error) {
+// Get returns the customer's configuration token for the connector.
+func (r *ConnectorConfigTokens) Get(ctx context.Context, customerID, connectorID string) (ConnectorConfigToken, error) {
 	if customerID == "" || connectorID == "" {
 		return ConnectorConfigToken{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	var token ConnectorConfigToken
-	err := s.global.NewSelect().Model(&token).
+	err := r.store.global.NewSelect().Model(&token).
 		Where("cct.customer_id = ? AND cct.connector_id = ?", customerID, connectorID).
 		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -102,13 +120,13 @@ func (s *Store) ConnectorConfigToken(ctx context.Context, customerID, connectorI
 	return token, nil
 }
 
-// DeleteConnectorConfigToken removes the customer's configuration token for the connector. A
+// Delete removes the customer's configuration token for the connector. A
 // token already gone is not an error.
-func (s *Store) DeleteConnectorConfigToken(ctx context.Context, customerID, connectorID string) error {
+func (r *ConnectorConfigTokens) Delete(ctx context.Context, customerID, connectorID string) error {
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
-	_, err := s.global.NewDelete().Model((*ConnectorConfigToken)(nil)).
+	_, err := r.store.global.NewDelete().Model((*ConnectorConfigToken)(nil)).
 		Where("customer_id = ? AND connector_id = ?", customerID, connectorID).
 		Exec(ctx)
 	if err != nil {
