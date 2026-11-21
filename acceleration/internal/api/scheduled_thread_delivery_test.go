@@ -419,7 +419,7 @@ func (s *TelnyxChannelSuite) TestAPersonWhoOptsOutBeforeTheReplyGoesOutIsNotText
 	task, _ := s.scheduledInThread(person)
 	sent := len(s.telnyx().sent())
 	s.telnyx().refuse(http.StatusServiceUnavailable, func() {
-		s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+		s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 			CustomerID: task.CustomerID, Recipient: person, Channel: "sms", Source: "keyword",
 		}))
 	})
@@ -485,7 +485,7 @@ func (s *TelnyxChannelSuite) TestAFailedDeliveryNoLongerHoldsItsCommandsReply() 
 func (s *TelnyxChannelSuite) TestAPersonWhoOptedOutIsNotTextedAndTheTaskIsNotRetried() {
 	person := "+13125550001"
 	task, _ := s.scheduledInThread(person)
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: person, Channel: "sms", Source: "keyword",
 	}))
 	sent := len(s.telnyx().sent())

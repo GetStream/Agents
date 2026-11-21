@@ -320,7 +320,7 @@ func (s *ChannelsSuite) TestSomebodyWhoTextsStopIsNotWrittenToAgain() {
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "stop"))
 	s.Contains(s.answer(writer), "unsubscribed", "the confirmation is the one message they are still owed")
-	optedOut, err := s.store.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
 	s.True(optedOut)
 

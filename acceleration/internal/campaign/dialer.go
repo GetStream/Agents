@@ -150,7 +150,7 @@ func (d *phoneDialer) close(created *session.Session) {
 func callOutcome(ctx context.Context, st *store.Store, customerID, callID string) (outcome.Outcome, error) {
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	calls, err := st.PhoneCalls(ctx, customerID, []string{callID})
+	calls, err := st.CallLegs.SelectPlaced(ctx, customerID, []string{callID})
 	if err != nil {
 		return outcome.Unknown, err
 	}

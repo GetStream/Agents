@@ -19,7 +19,7 @@ func (s *StoreSuite) TestAThreadMemberWithALiveOptOutIsFound() {
 		return found
 	}
 	optOut := func(customerID, recipient, channel string) {
-		s.Require().NoError(s.store.OptOut(s.ctx, &OptOut{CustomerID: customerID, Recipient: recipient, Channel: channel, Source: "keyword"}))
+		s.Require().NoError(s.store.OptOuts.Insert(s.ctx, &OptOut{CustomerID: customerID, Recipient: recipient, Channel: channel, Source: "keyword"}))
 	}
 	s.False(optedOut("thread-group"), "nobody opted out")
 
@@ -31,7 +31,7 @@ func (s *StoreSuite) TestAThreadMemberWithALiveOptOutIsFound() {
 	optOut("acme-app", "+12025550198", OptOutAll)
 	s.True(optedOut("thread-group"), "an opt-out of every channel")
 	s.False(optedOut("thread-other"), "a chat the person is not in")
-	s.Require().NoError(s.store.RevokeOptOuts(s.ctx, "acme-app", "+12025550198", "imessage"))
+	s.Require().NoError(s.store.OptOuts.RevokeAll(s.ctx, "acme-app", "+12025550198", "imessage"))
 	s.False(optedOut("thread-group"), "revoked")
 
 	optOut("acme-app", "+12025550199", "imessage")

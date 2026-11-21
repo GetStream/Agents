@@ -13,12 +13,12 @@ func (s *StoreSuite) trunk(customerID string) *SIPTrunk {
 		PasswordSealed: []byte("sealed"), PasswordKEKVersion: 1,
 		LateOffer: true, Codecs: []string{"PCMU", "PCMA"},
 	}
-	s.Require().NoError(s.store.CreateSIPTrunk(s.ctx, trunk))
+	s.Require().NoError(s.store.SIPTrunks.Insert(s.ctx, trunk))
 	return trunk
 }
 
 func (s *StoreSuite) trunkNumber(customerID, trunkID, e164 string) error {
-	return s.store.AddTrunkNumber(s.ctx, &PhoneNumber{
+	return s.store.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: e164, Vendor: "sip_trunk", Country: "US", CustomerID: customerID, SIPTrunkID: trunkID,
 	})
 }
@@ -26,7 +26,7 @@ func (s *StoreSuite) trunkNumber(customerID, trunkID, e164 string) error {
 func (s *StoreSuite) TestATrunkIsReadBackWhole() {
 	created := s.trunk("acme")
 
-	read, err := s.store.SIPTrunk(s.ctx, "acme", created.ID)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", created.ID)
 	s.Require().NoError(err)
 	read.CreatedAt, read.UpdatedAt = created.CreatedAt, created.UpdatedAt
 	s.Equal(*created, read)
@@ -35,17 +35,17 @@ func (s *StoreSuite) TestATrunkIsReadBackWhole() {
 func (s *StoreSuite) TestAnotherCustomersTrunkIsNotFound() {
 	created := s.trunk("acme")
 
-	_, err := s.store.SIPTrunk(s.ctx, "other", created.ID)
+	_, err := s.store.SIPTrunks.Get(s.ctx, "other", created.ID)
 	s.ErrorIs(err, ErrNoSIPTrunk)
 
-	listed, err := s.store.SIPTrunks(s.ctx, "other")
+	listed, err := s.store.SIPTrunks.Select(s.ctx, "other")
 	s.Require().NoError(err)
 	s.Empty(listed)
 
 	updated := *created
 	updated.CustomerID = "other"
-	s.ErrorIs(s.store.UpdateSIPTrunk(s.ctx, &updated), ErrNoSIPTrunk)
-	s.ErrorIs(s.store.DeleteSIPTrunk(s.ctx, "other", created.ID), ErrNoSIPTrunk)
+	s.ErrorIs(s.store.SIPTrunks.Update(s.ctx, &updated), ErrNoSIPTrunk)
+	s.ErrorIs(s.store.SIPTrunks.Delete(s.ctx, "other", created.ID), ErrNoSIPTrunk)
 }
 
 func (s *StoreSuite) TestUpdatingATrunkChangesEveryField() {
@@ -53,9 +53,9 @@ func (s *StoreSuite) TestUpdatingATrunkChangesEveryField() {
 	trunk.Name, trunk.Host, trunk.Port, trunk.Transport = "backup", "other.example.com", 5061, "tls"
 	trunk.Username, trunk.PasswordSealed, trunk.PasswordKEKVersion = "agent2", []byte("resealed"), 2
 	trunk.LateOffer, trunk.Codecs = false, []string{"G722"}
-	s.Require().NoError(s.store.UpdateSIPTrunk(s.ctx, trunk))
+	s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, trunk))
 
-	read, err := s.store.SIPTrunk(s.ctx, "acme", trunk.ID)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
 	s.Require().NoError(err)
 	read.CreatedAt = trunk.CreatedAt
 	s.WithinDuration(trunk.UpdatedAt, read.UpdatedAt, time.Millisecond)
@@ -67,11 +67,11 @@ func (s *StoreSuite) TestATrunkWithANumberCannotBeDeletedUntilTheNumberIsRelease
 	trunk := s.trunk("acme")
 	s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15550000101"))
 
-	s.ErrorIs(s.store.DeleteSIPTrunk(s.ctx, "acme", trunk.ID), ErrSIPTrunkInUse)
+	s.ErrorIs(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID), ErrSIPTrunkInUse)
 
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, "acme", "+15550000101", time.Time{}))
-	s.Require().NoError(s.store.DeleteSIPTrunk(s.ctx, "acme", trunk.ID))
-	_, err := s.store.SIPTrunk(s.ctx, "acme", trunk.ID)
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15550000101", time.Time{}))
+	s.Require().NoError(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID))
+	_, err := s.store.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
 	s.ErrorIs(err, ErrNoSIPTrunk)
 }
 
@@ -79,7 +79,7 @@ func (s *StoreSuite) TestANumberOnATrunkIsHeldUnderSIPTrunk() {
 	trunk := s.trunk("acme")
 	s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15550000102"))
 
-	held, err := s.store.Number(s.ctx, "acme", "+15550000102")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000102")
 	s.Require().NoError(err)
 	s.Equal("sip_trunk", held.Vendor)
 	s.Equal(trunk.ID, held.SIPTrunkID)
@@ -93,7 +93,7 @@ func (s *StoreSuite) TestTwoCustomersCanAddTheSameNumberToTheirTrunks() {
 	s.Require().NoError(s.trunkNumber("other", other.ID, "+15550000103"))
 
 	for customer, trunk := range map[string]string{"acme": acme.ID, "other": other.ID} {
-		held, err := s.store.Number(s.ctx, customer, "+15550000103")
+		held, err := s.store.PhoneNumbers.GetByE164(s.ctx, customer, "+15550000103")
 		s.Require().NoError(err)
 		s.Equal(trunk, held.SIPTrunkID)
 		s.Equal(customer, held.CustomerID)
@@ -108,7 +108,7 @@ func (s *StoreSuite) TestACustomerCannotAddANumberTwice() {
 }
 
 func (s *StoreSuite) TestACustomerCannotAddANumberItAlreadyHolds() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000105", Vendor: "twilio", Country: "US", CustomerID: "acme",
 	}))
 	trunk := s.trunk("acme")
@@ -147,18 +147,38 @@ WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
 }
 
 func (s *StoreSuite) TestANumberNobodyHoldsMatchesErrNoNumber() {
-	_, err := s.store.Number(s.ctx, "acme", "+15550000108")
+	_, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000108")
 	s.ErrorIs(err, ErrNoNumber)
 	s.EqualError(err, "store: +15550000108 is not a number acme holds")
 }
 
 func (s *StoreSuite) TestABoughtNumberIsStillHeldByOneCustomerPerVendor() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000107", Vendor: "twilio", Country: "US", CustomerID: "acme",
 	}))
 
-	err := s.store.RecordNumber(s.ctx, &PhoneNumber{
+	err := s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000107", Vendor: "twilio", Country: "US", CustomerID: "other",
 	})
 	s.True(isViolation(err, uniqueViolation), "the rewritten index still stops a vendor's number being recorded twice: %v", err)
+}
+
+func (s *StoreSuite) TestSIPTrunkQueryBudgets() {
+	for range 3 {
+		s.trunk("acme")
+	}
+	var trunk *SIPTrunk
+	s.Equal(1, s.countQueries(func() { trunk = s.trunk("acme") }), "Insert")
+	s.Equal(1, s.countQueries(func() {
+		trunks, err := s.store.SIPTrunks.Select(s.ctx, "acme")
+		s.Require().NoError(err)
+		s.Len(trunks, 4)
+	}), "Select")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
+		s.Require().NoError(err)
+	}), "Get")
+	trunk.Name = "renamed"
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, trunk)) }), "Update")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID)) }), "Delete")
 }

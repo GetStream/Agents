@@ -354,10 +354,10 @@ func (s *ForwardedDispatchSuite) holdsANumber() string {
 	ctx := context.Background()
 	e164 := s.utils.number()
 	callID := "phone-" + e164
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164,
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164,
 		store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID}))
 	return callID
 }

@@ -108,7 +108,7 @@ func (r Rentals) Bill(ctx context.Context, from, now time.Time) (Rented, error) 
 	if from.After(since) {
 		since = from.UTC()
 	}
-	held, err := r.Store.NumbersHeldSince(ctx, since)
+	held, err := r.Store.PhoneNumbers.HeldSince(ctx, since)
 	if err != nil {
 		return Rented{}, err
 	}

@@ -772,92 +772,12 @@ func (s *StoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 	s.Equal("info", logs[0].Severity)
 }
 
-func (s *StoreSuite) TestANumberIsHeldUntilItIsReleased() {
-	number := &PhoneNumber{
-		E164: "+15125551234", Vendor: "twilio", Country: "US",
-		Capabilities: []string{"voice"}, MonthlyCostMicros: 1_150_000,
-		CustomerID: "acme", PurchasedAt: s.base,
-	}
-	s.Require().NoError(s.store.RecordNumber(s.ctx, number))
-
-	held, err := s.store.CustomerNumbers(s.ctx, "acme", false)
-	s.Require().NoError(err)
-	s.Require().Len(held, 1)
-	s.Equal("+15125551234", held[0].E164)
-	s.Equal([]string{"voice"}, held[0].Capabilities)
-
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
-
-	held, err = s.store.CustomerNumbers(s.ctx, "acme", false)
-	s.Require().NoError(err)
-	s.Empty(held, "a released number is not one you can be called on")
-
-	// The row stays, because what it cost while it was held is still part of the bill.
-	all, err := s.store.CustomerNumbers(s.ctx, "acme", true)
-	s.Require().NoError(err)
-	s.Require().Len(all, 1)
-	s.Require().NotNil(all[0].ReleasedAt)
-}
-
-func (s *StoreSuite) TestANumberSomebodyElseHoldsCannotBeReleased() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
-		E164: "+15125551234", Vendor: "twilio", Country: "US",
-		CustomerID: "acme", PurchasedAt: s.base,
-	}))
-
-	err := s.store.ReleaseNumber(s.ctx, "globex", "+15125551234", s.base)
-
-	s.ErrorContains(err, "is not a number globex holds")
-}
-
-func (s *StoreSuite) TestANumberIsRecordedOnlyInE164Form() {
-	for _, e164 := range []string{"", "15125551234", "5125551234", "+1 512 555 1234", "+05125551234"} {
-		err := s.store.RecordNumber(s.ctx, &PhoneNumber{
-			E164: e164, Vendor: "plivo", Country: "US", CustomerID: "acme",
-		})
-		s.ErrorIs(err, ErrNotE164, "%q", e164)
-	}
-
-	held, err := s.store.CustomerNumbers(s.ctx, "acme", true)
-	s.Require().NoError(err)
-	s.Empty(held)
-}
-
-func (s *StoreSuite) TestANumberWrittenInAnotherFormIsNotHeld() {
-	// Written straight to the table, the way a row could be before every write checked
-	// the form: the vendor reads it as +15125551234.
-	_, err := s.store.global.ExecContext(s.ctx,
-		"INSERT INTO phone_numbers (e164, vendor, country, customer_id) VALUES ('15125551234', 'plivo', 'US', 'globex')")
-	s.Require().NoError(err)
-
-	_, err = s.store.Number(s.ctx, "globex", "15125551234")
-
-	s.ErrorIs(err, ErrNoNumber)
-	s.ErrorContains(err, "is not a number globex holds")
-}
-
-func (s *StoreSuite) TestANumberRemembersWhichTrunkItsCallsArriveOn() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
-		E164: "+15125551234", Vendor: "twilio", Country: "US",
-		CustomerID: "acme", PurchasedAt: s.base,
-	}))
-
-	s.Require().NoError(s.store.AttachNumber(
-		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "default", CallID: "phone-+15125551234"}))
-
-	number, err := s.store.Number(s.ctx, "acme", "+15125551234")
-	s.Require().NoError(err)
-	s.Equal("trunk-7", number.StreamTrunkID)
-	s.Equal("phone-+15125551234", number.StreamCallID)
-	s.Equal("default", number.StreamCallType)
-}
-
 func (s *StoreSuite) TestAnArrivingCallNamesTheCustomerWhoseNumberWasRung() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
 		CustomerID: "acme", PurchasedAt: s.base,
 	}))
-	s.Require().NoError(s.store.AttachNumber(
+	s.Require().NoError(s.store.PhoneNumbers.Attach(
 		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "support", CallID: "the-support-line"}))
 
 	number, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "support", "the-support-line")
@@ -867,8 +787,35 @@ func (s *StoreSuite) TestAnArrivingCallNamesTheCustomerWhoseNumberWasRung() {
 	s.Equal("+15125551234", number.E164)
 }
 
+func (s *StoreSuite) TestANumberFoundByItsCallOrRingCarriesItsTrunksAddress() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.savedTrunk(group, "trunk-7")
+	s.savedTrunk(TrunkGroup{CustomerID: "globex", Vendor: "twilio"}, "trunk-8")
+	s.lined(group, "+15125551234", "trunk-7")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(
+		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "support", CallID: "the-support-line"}))
+	s.lined(group, "+15125551235", "trunk-8")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(
+		s.ctx, "acme", "+15125551235", NumberAttachment{TrunkID: "trunk-8", CallType: "support", CallID: "another-line"}))
+
+	var byCall, rung, theirs PhoneNumber
+	var errs [3]error
+	s.Equal(3, s.countQueries(func() {
+		byCall, errs[0] = s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "support", "the-support-line")
+		rung, errs[1] = s.store.NumberRungInApp(s.ctx, AppScope{Unpinned: true}, "+15125551234")
+		theirs, errs[2] = s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "support", "another-line")
+	}), "one query each, the trunk's address included")
+
+	for _, err := range errs {
+		s.Require().NoError(err)
+	}
+	s.Equal("sip:trunk-7@sip.example.test", byCall.BridgeURI)
+	s.Equal("sip:trunk-7@sip.example.test", rung.BridgeURI)
+	s.Empty(theirs.BridgeURI, "another customer's trunk of that id is not the number's")
+}
+
 func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
 		CustomerID: "acme", PurchasedAt: s.base,
 	}))
@@ -886,7 +833,7 @@ func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 }
 
 func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
 		CustomerID: "acme", PurchasedAt: s.base,
 	}))
@@ -897,104 +844,17 @@ func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
 }
 
 func (s *StoreSuite) TestAReleasedNumbersCallIsNotAttributedToItsFormerHolder() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
 		CustomerID: "acme", PurchasedAt: s.base,
 	}))
-	s.Require().NoError(s.store.AttachNumber(
+	s.Require().NoError(s.store.PhoneNumbers.Attach(
 		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "default", CallID: "phone-+15125551234"}))
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
 
 	_, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
 
 	s.ErrorContains(err, "no number reaches call")
-}
-
-// attachWithBridge holds a number of the vendor for acme and attaches it with trunk
-// credentials.
-func (s *StoreSuite) attachWithBridge(vendor, e164 string) {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
-		E164: e164, Vendor: vendor, Country: "US", CustomerID: "acme", PurchasedAt: s.base,
-	}))
-	s.Require().NoError(s.store.AttachNumber(s.ctx, "acme", e164, NumberAttachment{
-		TrunkID: "trunk-7", CallType: "agent", CallID: "{{uuid}}",
-		BridgeURI: "sip:" + e164 + "@sip.example.test", BridgeUsername: "trunk-user",
-		BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 3,
-	}))
-}
-
-func (s *StoreSuite) TestAnAttachedNumberKeepsItsTrunkCredentials() {
-	s.attachWithBridge("telnyx", "+15125551234")
-
-	bridge, err := s.store.AttachedBridge(s.ctx, "telnyx", "+15125551234")
-
-	s.Require().NoError(err)
-	s.Equal(AttachedBridge{
-		CustomerID: "acme", URI: "sip:+15125551234@sip.example.test", Username: "trunk-user",
-		PasswordSealed: []byte("sealed"), KEKVersion: 3,
-	}, bridge)
-}
-
-func (s *StoreSuite) TestAReleasedNumbersTrunkCredentialsAreGone() {
-	s.attachWithBridge("telnyx", "+15125551234")
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
-
-	_, err := s.store.AttachedBridge(s.ctx, "telnyx", "+15125551234")
-	s.ErrorIs(err, ErrNoNumber)
-
-	var held PhoneNumber
-	s.Require().NoError(s.store.global.NewSelect().Model(&held).Where("e164 = ?", "+15125551234").Scan(s.ctx))
-	s.Empty(held.BridgeURI)
-	s.Empty(held.BridgeUsername)
-	s.Empty(held.BridgePasswordSealed, "a released number does not keep a password")
-	s.Zero(held.BridgePasswordKEKVersion)
-}
-
-func (s *StoreSuite) TestAnotherVendorsNumberHasNoTrunkCredentials() {
-	s.attachWithBridge("twilio", "+15125551234")
-
-	_, err := s.store.AttachedBridge(s.ctx, "telnyx", "+15125551234")
-
-	s.ErrorIs(err, ErrNoNumber)
-}
-
-func (s *StoreSuite) TestANumberAttachedWithoutCredentialsHasNoTrunkCredentials() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
-		E164: "+15125551234", Vendor: "telnyx", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
-	}))
-	s.Require().NoError(s.store.AttachNumber(
-		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "agent", CallID: "{{uuid}}"}))
-
-	_, err := s.store.AttachedBridge(s.ctx, "telnyx", "+15125551234")
-
-	s.ErrorIs(err, ErrNoStoredBridge, "attaching it again keeps them")
-	s.NotErrorIs(err, ErrNoNumber, "it is held and attached, so it is not an unknown number")
-}
-
-func (s *StoreSuite) TestANumberThatIsHeldButNotAttachedHasNoTrunkCredentials() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &PhoneNumber{
-		E164: "+15125551234", Vendor: "telnyx", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
-	}))
-
-	_, err := s.store.AttachedBridge(s.ctx, "telnyx", "+15125551234")
-
-	s.ErrorIs(err, ErrNoNumber)
-}
-
-func (s *StoreSuite) TestTheSameNumberCanBeBoughtAgainAfterBeingReleased() {
-	first := &PhoneNumber{
-		E164: "+15125551234", Vendor: "twilio", Country: "US",
-		CustomerID: "acme", PurchasedAt: s.base,
-	}
-	s.Require().NoError(s.store.RecordNumber(s.ctx, first))
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
-
-	again := &PhoneNumber{
-		E164: "+15125551234", Vendor: "twilio", Country: "US",
-		CustomerID: "acme", PurchasedAt: s.base.Add(2 * time.Hour),
-	}
-
-	s.Require().NoError(s.store.RecordNumber(s.ctx, again))
 }
 
 // tagged stores a labelled request, which is what the tag rollups are built from.

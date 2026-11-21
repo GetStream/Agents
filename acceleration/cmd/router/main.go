@@ -2577,7 +2577,6 @@ func buildPhone(
 
 	service, err = phone.NewService(phone.ServiceOptions{
 		Registry:  vendors.Registry(vendorConfig),
-		Redis:     shared,
 		Store:     pgStore,
 		Apps:      phone.AppsOf(stream),
 		Recorder:  recorder,

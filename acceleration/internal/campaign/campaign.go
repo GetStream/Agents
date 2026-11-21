@@ -264,13 +264,13 @@ func (r *Runner) loop(ctx context.Context) {
 // contacts of routers that died, places the calls that are due, reads the outcomes of answered
 // calls, and completes the campaigns with nobody left.
 func (r *Runner) tick(ctx context.Context) {
-	if err := r.store.StartDueCampaigns(ctx, r.now()); err != nil {
+	if err := r.store.Campaigns.StartDue(ctx, r.now()); err != nil {
 		r.logger.Error("could not start the campaigns that are due", "error", err)
 	}
 	r.takeOver(ctx)
 	r.claim(ctx)
 	r.classifyDue(ctx)
-	if err := r.store.CompleteCampaigns(ctx, r.now()); err != nil {
+	if err := r.store.Campaigns.Complete(ctx, r.now()); err != nil {
 		r.logger.Error("could not complete the campaigns with nobody left", "error", err)
 	}
 }
@@ -287,7 +287,7 @@ func (r *Runner) claim(ctx context.Context) {
 		return
 	}
 
-	claimed, err := r.store.ClaimDueContacts(ctx, r.owner, r.now(), lease, free)
+	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.now(), lease, free)
 	if err != nil {
 		r.logger.Error("could not claim the contacts that are due", "error", err)
 		return
@@ -330,7 +330,7 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 		r.settle(ctx, contact, enrolledAt(hours, zone, now, unused))
 		return
 	}
-	opted, err := r.store.OptedOut(ctx, campaign.CustomerID, contact.ToNumber, voice)
+	opted, err := r.store.OptOuts.OptedOut(ctx, campaign.CustomerID, contact.ToNumber, voice)
 	if err != nil {
 		r.logger.Error("could not check a campaign contact's opt-outs", "contact", contact.ID, "error", err)
 		return
@@ -395,12 +395,12 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 // mayRing reads campaign and contact again, since either may have been paused or stopped
 // since the contact was claimed. A stopped contact settled as enrolled ends stopped.
 func (r *Runner) mayRing(ctx context.Context, campaign store.Campaign, contact store.Contact) (store.Campaign, bool, error) {
-	current, err := r.store.Campaign(ctx, campaign.CustomerID, campaign.ID)
+	current, err := r.store.Campaigns.Get(ctx, campaign.CustomerID, campaign.ID)
 	if err != nil {
 		return store.Campaign{}, false, err
 	}
 	// StopContact marks a contact in a call with the reason it would end with.
-	marked, _, err := r.store.CampaignContact(ctx, campaign.ID, contact.ID)
+	marked, _, err := r.store.CampaignContacts.Get(ctx, campaign.ID, contact.ID)
 	if err != nil {
 		return store.Campaign{}, false, err
 	}
@@ -429,7 +429,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 		CampaignID: campaign.ID, ContactID: contact.ID, StepID: step.ID, Attempt: max(contact.Attempt, 1),
 		Dial: number, CallID: sessionID, StartedAt: r.now(),
 	}
-	if err := r.store.StartDial(ctx, &attempt); err != nil {
+	if err := r.store.CampaignAttempts.Insert(ctx, &attempt); err != nil {
 		return Dialed{}, err
 	}
 
@@ -455,7 +455,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 		at := ended.Add(classifyDelay)
 		classifyAfter = &at
 	}
-	if err := r.store.EndDial(written, attempt.ID, string(dialed.Result), string(dialed.Outcome), dialed.CallID, dialed.VendorCallID, ended, classifyAfter); err != nil {
+	if err := r.store.CampaignAttempts.End(written, attempt.ID, string(dialed.Result), string(dialed.Outcome), dialed.CallID, dialed.VendorCallID, ended, classifyAfter); err != nil {
 		return Dialed{}, err
 	}
 	return dialed, nil
@@ -464,7 +464,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 // takeOver settles the contacts whose router died mid-call, from the call it placed. None is
 // rung again.
 func (r *Runner) takeOver(ctx context.Context) {
-	claimed, err := r.store.TakeOverExpired(ctx, r.owner, r.now(), lease, maxCalls)
+	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.now(), lease, maxCalls)
 	if err != nil {
 		r.logger.Error("could not take over expired campaign leases", "error", err)
 		return
@@ -484,7 +484,7 @@ func (r *Runner) recover(ctx context.Context, claimed store.Claimed) error {
 	}
 	zone := hours.Zone(contact.TimeZone, contact.ToNumber)
 	now := r.now()
-	latest, found, err := r.store.LatestDial(ctx, contact.ID)
+	latest, found, err := r.store.CampaignAttempts.Latest(ctx, contact.ID)
 	if err != nil {
 		return err
 	}
@@ -506,7 +506,7 @@ func (r *Runner) recover(ctx context.Context, claimed store.Claimed) error {
 		if dialed.answered() {
 			classifyAfter = &now
 		}
-		if err := r.store.EndDial(ctx, latest.ID, "", string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
+		if err := r.store.CampaignAttempts.End(ctx, latest.ID, "", string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
 			return err
 		}
 	}
@@ -528,7 +528,7 @@ func (r *Runner) classifyDue(ctx context.Context) {
 	if free <= 0 {
 		return
 	}
-	claimed, err := r.store.ClaimClassifications(ctx, r.owner, r.now(), lease, free)
+	claimed, err := r.store.CampaignAttempts.ClaimClassifications(ctx, r.owner, r.now(), lease, free)
 	if err != nil {
 		r.logger.Error("could not claim campaign calls to classify", "error", err)
 		return
@@ -560,7 +560,7 @@ func (r *Runner) classifyDue(ctx context.Context) {
 func (r *Runner) release(ctx context.Context, attempt store.CampaignAttempt) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
-	err := r.store.PutOffClassification(written, r.owner, attempt.ID, r.now())
+	err := r.store.CampaignAttempts.PutOff(written, r.owner, attempt.ID, r.now())
 	if err != nil && !errors.Is(err, store.ErrNotLeaseHolder) {
 		r.logger.Error("could not give back a campaign call cut off mid-reading", "attempt", attempt.ID, "error", err)
 	}
@@ -585,7 +585,7 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 		r.logger.Warn("could not read a campaign call's transcript", "attempt", attempt.ID, "error", unread)
 	}
 	if (unread != nil || len(said) == 0) && attempt.ClassifyTries < maxClassifyTries {
-		return r.store.PutOffClassification(ctx, r.owner, attempt.ID, r.now().Add(classifyRetry))
+		return r.store.CampaignAttempts.PutOff(ctx, r.owner, attempt.ID, r.now().Add(classifyRetry))
 	}
 
 	var settle store.Settle
@@ -611,18 +611,18 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 
 	if settle.Outcome == OutcomeDoNotCall {
 		optOut := store.OptOut{CustomerID: campaign.CustomerID, Recipient: contact.ToNumber, Channel: voice, Source: optOutSource}
-		if err := r.store.OptOut(ctx, &optOut); err != nil {
+		if err := r.store.OptOuts.Insert(ctx, &optOut); err != nil {
 			return err
 		}
 	}
-	return r.store.ClassifyAndSettle(ctx, r.owner,
+	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner,
 		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome, Converted: settle.Converted}, contact.ID, settle)
 }
 
 // unanswered settles an answered call nobody spoke on like a dial nobody picked up: the next
 // attempt goes on schedule.
 func (r *Runner) unanswered(ctx context.Context, sequence Sequence, hours CallingHours, zone *time.Location, contact store.Contact, attempt store.CampaignAttempt) error {
-	return r.store.ClassifyAndSettle(ctx, r.owner, store.Classification{AttemptID: attempt.ID, Outcome: OutcomeNoResponse},
+	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner, store.Classification{AttemptID: attempt.ID, Outcome: OutcomeNoResponse},
 		contact.ID, afterSilence(sequence, hours, zone, contact, attempt.StartedAt, r.now()))
 }
 
@@ -630,7 +630,7 @@ func (r *Runner) unanswered(ctx context.Context, sequence Sequence, hours Callin
 func (r *Runner) settle(ctx context.Context, contact store.Contact, settle store.Settle) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
-	err := r.store.SettleContact(written, r.owner, contact.ID, settle)
+	err := r.store.CampaignContacts.Settle(written, r.owner, contact.ID, settle)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotLeaseHolder):
@@ -644,7 +644,7 @@ func (r *Runner) settle(ctx context.Context, contact store.Contact, settle store
 func (r *Runner) pause(ctx context.Context, campaign store.Campaign, reason string) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
-	err := r.store.PauseCampaign(written, campaign.CustomerID, campaign.ID, reason)
+	err := r.store.Campaigns.Pause(written, campaign.CustomerID, campaign.ID, reason)
 	switch {
 	case err == nil:
 		r.logger.Info("paused a campaign that may not place calls", "campaign", campaign.ID, "reason", reason)

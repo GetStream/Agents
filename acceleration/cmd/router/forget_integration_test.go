@@ -296,7 +296,7 @@ func (s *ForgetUserSuite) settingsOf(app, user string) {
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		AmountMicros: 500, Reason: "support", Actor: "staff",
 	}, audit))
-	s.Require().NoError(shared.CreateCampaign(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.Campaigns.Insert(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
 }
 
 // userRows is what the shared database holds of app's user: their own policy, the limits naming

@@ -182,7 +182,7 @@ func inserted(id int64) store.DataChange {
 func (s *ReplicateIDsSuite) numbered() (*store.PhoneNumber, error) {
 	s.recorded++
 	number := &store.PhoneNumber{E164: fmt.Sprintf("+1555%07d", 8000+s.recorded), Vendor: "telnyx", Country: "US", CustomerID: "other"}
-	return number, s.target.RecordNumber(s.ctx, number)
+	return number, s.target.PhoneNumbers.Insert(s.ctx, number)
 }
 
 func (s *ReplicateIDsSuite) TestANumberRecordedAfterACopyDrawsAnIDAboveTheCopiedOnes() {

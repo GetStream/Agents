@@ -558,10 +558,10 @@ func (s *AdmissionSuite) TestACallArrivingOverStreamForAnOrganizationThatMayNotP
 			s.SetupTest()
 			e164, callID := s.utils.number(), "phone-"+s.utils.uuid()
 			ctx := context.Background()
-			s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+			s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 				E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 			}))
-			s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164,
+			s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164,
 				store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID}))
 			if refused == codeAccountSuspended {
 				s.usage.Credit(s.T(), s.organization(), 10_000_000)
@@ -649,7 +649,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	s.Never(func() bool { state, reason := read(); return state != CampaignStatePaused || reason != refused },
 		500*time.Millisecond, 20*time.Millisecond, "and it stays paused, with why, whatever its other slots were doing")
 	dialer.Close()
-	contacts, err := s.store.QueryContacts(ctx, created.Id, store.ContactFilter{})
+	contacts, err := s.store.CampaignContacts.Select(ctx, created.Id, store.ContactFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(contacts, 1)
 	s.Equal(store.Enrolled, contacts[0].Stage,
@@ -701,7 +701,7 @@ func (noOutcome) Classify(context.Context, store.Campaign, string, campaign.Step
 // from one of the app's numbers.
 func (s *AdmissionSuite) campaign(concurrency int) Campaign {
 	from := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: from, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	always := []CallingWindow{{Start: "00:00", End: "24:00"}}
@@ -960,7 +960,7 @@ func (s *AdmissionSuite) TestACallOverTheTiersCallsAtOnceIsATierLimitReached() {
 }
 
 func (s *AdmissionSuite) TestACallToSomebodyWhoOptedOutIsStillForbidden() {
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: "+15550001111", Channel: dlc.Voice, Source: "keyword",
 	}))
 

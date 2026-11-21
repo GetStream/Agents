@@ -261,8 +261,8 @@ TABLE campaign_contacts
     created_at timestamp with time zone NOT NULL DEFAULT now()
     id text NOT NULL
     instructions text NOT NULL DEFAULT ''::text
+    lease_until timestamp with time zone
     leased_by text NOT NULL DEFAULT ''::text
-    leased_until timestamp with time zone
     next_attempt_at timestamp with time zone
     outcome text NOT NULL DEFAULT ''::text
     reason text
@@ -277,7 +277,7 @@ TABLE campaign_contacts
     CONSTRAINT campaign_contacts_pkey PRIMARY KEY (id)
     CREATE INDEX campaign_contacts_campaign_idx ON public.campaign_contacts USING btree (campaign_id, seq)
     CREATE INDEX campaign_contacts_due_idx ON public.campaign_contacts USING btree (campaign_id, stage, next_attempt_at)
-    CREATE INDEX campaign_contacts_lease_idx ON public.campaign_contacts USING btree (leased_until) WHERE (stage = 'in_progress'::text)
+    CREATE INDEX campaign_contacts_lease_idx ON public.campaign_contacts USING btree (lease_until) WHERE (stage = 'in_progress'::text)
     CREATE UNIQUE INDEX campaign_contacts_number_idx ON public.campaign_contacts USING btree (campaign_id, to_number) WHERE (reason IS DISTINCT FROM 'duplicate'::text)
 
 TABLE campaigns
@@ -817,6 +817,7 @@ TABLE dlc_use_cases
     CREATE INDEX dlc_use_cases_customer_idx ON public.dlc_use_cases USING btree (customer_id, created_at DESC, id DESC)
     CREATE UNIQUE INDEX dlc_use_cases_default_idx ON public.dlc_use_cases USING btree (customer_id) WHERE is_default
     CREATE INDEX dlc_use_cases_status_idx ON public.dlc_use_cases USING btree (status, updated_at, id)
+    CREATE INDEX dlc_use_cases_vendor_campaign_idx ON public.dlc_use_cases USING btree (vendor, vendor_campaign_id) WHERE (vendor_campaign_id <> ''::text)
 
 TABLE episodes
     call_id text
@@ -1039,10 +1040,6 @@ TABLE organizations
 
 TABLE phone_numbers
     attached_at timestamp with time zone
-    bridge_password_kek_version integer
-    bridge_password_sealed bytea
-    bridge_uri text
-    bridge_username text
     capabilities text[] NOT NULL DEFAULT '{}'::text[]
     config_id text
     country text NOT NULL
@@ -1069,6 +1066,7 @@ TABLE phone_numbers
     CREATE UNIQUE INDEX phone_numbers_held_idx ON public.phone_numbers USING btree (vendor, e164) WHERE ((released_at IS NULL) AND (vendor <> 'sip_trunk'::text))
     CREATE INDEX phone_numbers_tags_idx ON public.phone_numbers USING gin (tags)
     CREATE UNIQUE INDEX phone_numbers_trunk_held_idx ON public.phone_numbers USING btree (customer_id, e164) WHERE ((released_at IS NULL) AND (vendor = 'sip_trunk'::text))
+    CREATE INDEX phone_numbers_trunk_idx ON public.phone_numbers USING btree (customer_id, stream_trunk_id) WHERE (released_at IS NULL)
 
 TABLE policies
     document jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -1345,7 +1343,7 @@ TABLE stream_trunks
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
     id text NOT NULL
-    numbers text[] NOT NULL
+    own boolean NOT NULL DEFAULT false
     stream_app_pk bigint
     vendor text NOT NULL
     CONSTRAINT stream_trunks_pkey PRIMARY KEY (id)

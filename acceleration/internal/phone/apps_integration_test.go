@@ -82,7 +82,7 @@ func (s *AppsSuite) SetupTest() {
 	}
 	s.service = s.serviceAt("https://router.example")
 
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 }
@@ -146,7 +146,7 @@ func (s *AppsSuite) numberOn(vendor string) string {
 	s.service = service
 
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: other.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 	return e164
@@ -227,7 +227,7 @@ func (s *AppsSuite) TestACallOnAVendorThatFetchesItsPlanNeedsAPublicURL() {
 	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps})
 	s.Require().NoError(err)
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: plivo.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 
@@ -252,7 +252,7 @@ func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPassword() {
 	})
 	s.Require().NoError(err)
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: plivo.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 
@@ -273,9 +273,16 @@ func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPassword() {
 }
 
 func (s *AppsSuite) number() store.PhoneNumber {
-	held, err := s.store.Number(s.ctx, s.customer, s.e164)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.Require().NoError(err)
 	return held
+}
+
+// trunk is the stored trunk of the suite's number.
+func (s *AppsSuite) trunk() store.StreamTrunk {
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, s.customer, s.number().StreamTrunkID)
+	s.Require().NoError(err)
+	return trunk
 }
 
 func (s *AppsSuite) TestATrunkIsCreatedInTheAppAttachingTheNumber() {
@@ -313,7 +320,7 @@ func (s *AppsSuite) TestReleasingStopsTheVendorSendingCallsFirst() {
 	s.Require().NoError(s.service.Release(s.ctx, s.customer, s.e164))
 
 	s.Equal([]string{s.e164}, s.vendor.stopped)
-	_, err = s.store.Number(s.ctx, s.customer, s.e164)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.ErrorIs(err, store.ErrNoNumber, "the number is released")
 }
 
@@ -340,7 +347,7 @@ func (s *AppsSuite) TestAReleaseRefusedForANumberJustBoughtSaysItIsSettling() {
 
 	s.ErrorIs(err, ErrNumberSettling)
 	s.ErrorAs(err, new(*VendorError), "the vendor's answer is kept for the log")
-	_, err = s.store.Number(s.ctx, s.customer, s.e164)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.NoError(err, "still held, so it can be released again")
 	s.vendor.releaseErr = nil
 	s.Require().NoError(s.service.Release(s.ctx, s.customer, s.e164))
@@ -377,7 +384,7 @@ func (s *AppsSuite) TestReattachingAfterRegistrationMovesTheTrunk() {
 func (s *AppsSuite) TestReattachingInAnotherAppKeepsTheNumbersAgent() {
 	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: s.e164})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SetNumberAgent(s.ctx, s.customer, s.e164, "config-1"))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(s.ctx, s.customer, s.e164, "config-1"))
 	s.ownApp()
 
 	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: s.e164})
@@ -456,7 +463,7 @@ func (s *AppsSuite) TestDetachingAnotherCustomersNumberFails() {
 	err = s.service.Detach(s.ctx, s.customer, theirs)
 
 	s.ErrorContains(err, "is not a number")
-	held, err := s.store.Number(s.ctx, other, theirs)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, other, theirs)
 	s.Require().NoError(err)
 	s.NotNil(held.AttachedAt)
 	s.Empty(s.vendor.stopped)
@@ -519,20 +526,20 @@ func (s *AppsSuite) TestDetachingLeavesALiveCallAlone() {
 	placed, err := s.callFrom(s.e164)
 	s.Require().NoError(err)
 	scope := store.AppScope{App: 4242}
-	live, err := s.store.CallResourcesInApp(s.ctx, scope, placed.CallType, placed.CallID)
+	live, err := s.store.CallResources.Select(s.ctx, scope, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Require().Len(live, 1)
 
 	s.Require().NoError(s.service.Detach(s.ctx, s.customer, s.e164))
 
-	kept, err := s.store.CallResourcesInApp(s.ctx, scope, placed.CallType, placed.CallID)
+	kept, err := s.store.CallResources.Select(s.ctx, scope, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Equal(live, kept)
 	s.Equal([]string{attached.TrunkID}, s.own.Trunks())
 	s.Equal([]string{attached.RouteID}, s.own.Rules())
 
 	s.Require().NoError(s.service.ReleaseCall(s.ctx, scope, placed.CallType, placed.CallID))
-	ended, err := s.store.CallResourcesInApp(s.ctx, scope, placed.CallType, placed.CallID)
+	ended, err := s.store.CallResources.Select(s.ctx, scope, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Empty(ended)
 	s.Equal([]string{attached.TrunkID}, s.own.Trunks(), "the number's own line outlives its calls")
@@ -556,12 +563,12 @@ func (s *AppsSuite) TestDetachingASipTrunkNumberChangesNothing() {
 		Owner: routing.Owner{CustomerID: s.customer}, TrunkID: trunk.ID, E164: e164, Country: "us",
 	})
 	s.Require().NoError(err)
-	before, err := s.store.Number(s.ctx, s.customer, e164)
+	before, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
 	s.Require().NoError(err)
 
 	s.Require().NoError(service.Detach(s.ctx, s.customer, e164), "sip_trunk is no vendor of the registry")
 
-	after, err := s.store.Number(s.ctx, s.customer, e164)
+	after, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
 	s.Require().NoError(err)
 	s.Equal(before, after)
 }
@@ -609,9 +616,9 @@ func (s *AppsSuite) TestAttachingANumberThatStillNamesAFixedCallChangesNothing()
 	first, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: s.e164})
 	s.Require().NoError(err)
 	held := s.number()
-	s.Require().NoError(s.store.AttachNumber(s.ctx, s.customer, s.e164, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, s.e164, store.NumberAttachment{
 		TrunkID: held.StreamTrunkID, RouteID: held.StreamRouteID, StreamAppPK: held.StreamAppPK,
-		CallType: held.StreamCallType, CallID: "phone-" + s.e164, BridgeURI: held.BridgeURI,
+		CallType: held.StreamCallType, CallID: "phone-" + s.e164,
 	}))
 	s.vendor.inbound = Inbound{}
 
@@ -637,15 +644,14 @@ func (s *AppsSuite) TestAttachingATelnyxNumberWhosePasswordWasNotKeptChangesNoth
 	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps, Sealer: sealer})
 	s.Require().NoError(err)
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: telnyx.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 	first, err := service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.AttachNumber(s.ctx, s.customer, e164, store.NumberAttachment{
-		TrunkID: first.TrunkID, RouteID: first.RouteID, CallType: defaultCallType,
-		BridgeURI: first.Bridge.URI, BridgeUsername: first.Bridge.Username,
-	}))
+	_, err = s.store.GlobalDB().NewUpdate().Table("stream_trunks").Set("bridge_password_sealed = ''::bytea").
+		Where("id = ?", first.TrunkID).Exec(s.ctx)
+	s.Require().NoError(err)
 	telnyx.inbound = Inbound{}
 
 	again, err := service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
@@ -697,7 +703,7 @@ func (s *AppsSuite) TestACampaignCallAndItsSessionShareAnAppAndACall() {
 	s.Equal(placed.SessionID, placed.CallID, "the answered leg lands in the session's own call")
 	s.Equal("agent", placed.CallType)
 	s.Len(s.own.Trunks(), 1)
-	pin, found, err := s.store.CallPin(s.ctx, s.customer, "agent", placed.SessionID)
+	pin, found, err := s.store.CallResources.Pin(s.ctx, s.customer, "agent", placed.SessionID)
 	s.Require().NoError(err)
 	s.True(found)
 	s.Equal(int64(4242), pin, "the session joining it finds the app the call's lines are in")
@@ -948,7 +954,7 @@ func (s *AppsSuite) TestAnotherFormOfANumberReachesNothingAtTheVendor() {
 	s.Empty(s.vendor.released)
 	s.Zero(s.vendor.inbound)
 	s.Zero(s.vendor.dialed)
-	_, err = s.store.Number(s.ctx, s.customer, s.e164)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.NoError(err, "the number stays with who held it")
 }
 
@@ -1075,7 +1081,7 @@ func (s *AppsSuite) TestASlowCallPlacedRowDoesNotFailTheCallOrLoseItsResourceRow
 	s.Require().NoError(err)
 	s.Less(waited, 2*agentLogTimeout, "the reply waits for the row only up to its timeout")
 	s.Empty(s.callPlacedRows(placed))
-	resources, err := s.store.CallResourcesInApp(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
+	resources, err := s.store.CallResources.Select(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Len(resources, 1)
 }
@@ -1181,7 +1187,7 @@ func (s *AppsSuite) TestACallThroughACustomersTrunkOnASharedLineCanBeResumed() {
 
 	resume := call.vendor.dialed.Resume
 	s.Require().NotNil(resume)
-	number, err := s.store.Number(s.ctx, s.customer, call.vendor.dialed.From)
+	number, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, call.vendor.dialed.From)
 	s.Require().NoError(err)
 	s.NotEmpty(number.StreamTrunkID)
 	s.Equal(TrunkCallRef{
@@ -1243,7 +1249,7 @@ func (s *AppsSuite) TestAnAttachedNumbersTrunkCredentialsAreKeptForItsCalls() {
 	password, _ := s.deployment.TrunkAuth(attached.TrunkID)
 	s.Require().NotEmpty(password)
 	s.Equal(password, bridge.Password, "the password the trunk was made with")
-	s.NotContains(string(s.number().BridgePasswordSealed), password, "the password is stored sealed")
+	s.NotContains(string(s.trunk().BridgePasswordSealed), password, "the password is stored sealed")
 }
 
 func (s *AppsSuite) TestWithoutASealerANumberStillAttachesButKeepsNoCredentials() {
@@ -1253,8 +1259,8 @@ func (s *AppsSuite) TestWithoutASealerANumberStillAttachesButKeepsNoCredentials(
 	_, err = s.service.InboundBridge(s.ctx, "twilio", s.e164)
 
 	s.ErrorIs(err, ErrNoSealer)
-	s.Empty(s.number().BridgePasswordSealed)
-	s.Equal(attached.Bridge.URI, s.number().BridgeURI, "the address is not secret, so it is kept")
+	s.Empty(s.trunk().BridgePasswordSealed)
+	s.Equal(attached.Bridge.URI, s.trunk().BridgeURI, "the address is not secret, so it is kept")
 }
 
 // Telnyx asks per call where to send a caller, and the answer is the stored trunk, so a
@@ -1269,7 +1275,7 @@ func (s *AppsSuite) TestWithoutASealerATelnyxNumberIsNotAttached() {
 	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps})
 	s.Require().NoError(err)
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: telnyx.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 
@@ -1334,7 +1340,7 @@ func (s *AppsSuite) sealed() {
 // anotherNumber gives a customer one more number on a vendor.
 func (s *AppsSuite) anotherNumber(customer, vendor string) string {
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: vendor, Country: "US", CustomerID: customer, PurchasedAt: time.Now().UTC(),
 	}))
 	return e164
@@ -1342,7 +1348,7 @@ func (s *AppsSuite) anotherNumber(customer, vendor string) string {
 
 // lineFor puts a customer's number on a trunk in the app the customer makes lines in.
 func (s *AppsSuite) lineFor(customer, e164 string) (TrunkLine, error) {
-	held, err := s.store.Number(s.ctx, customer, e164)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, customer, e164)
 	s.Require().NoError(err)
 	stream, pin, err := s.service.streamFor(s.ctx, customer)
 	s.Require().NoError(err)
@@ -1455,10 +1461,18 @@ func (s *AppsSuite) onItsOwnTrunk() (*Stream, store.NumberAttachment, Bridge) {
 	s.Require().NoError(err)
 	attached := store.NumberAttachment{
 		TrunkID: trunkID, RouteID: routeID, StreamAppPK: pin, CallType: defaultCallType,
-		BridgeURI: bridge.URI, BridgeUsername: bridge.Username,
-		BridgePasswordSealed: sealed, BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(),
 	}
-	s.Require().NoError(s.store.AttachNumber(s.ctx, s.customer, s.e164, attached))
+	group := store.TrunkGroup{CustomerID: s.customer, StreamAppPK: pin, Vendor: s.vendor.vendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		err := tx.SaveTrunk(store.StreamTrunk{
+			ID: trunkID, BridgeURI: bridge.URI, BridgeUsername: bridge.Username,
+			BridgePasswordSealed: sealed, BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(), Own: true,
+		})
+		if err != nil {
+			return err
+		}
+		return tx.Attach(s.e164, attached)
+	}))
 	return stream, attached, bridge
 }
 
@@ -1676,11 +1690,12 @@ func (s *AppsSuite) TestANumberJoiningALostTrunkWhileAnotherRuleAnswersItIsRefus
 func (s *AppsSuite) TestARuleMadeAgainForALineThatThenFailsIsDeleted() {
 	s.sealed()
 	stream, attached, _ := s.onItsOwnTrunk()
-	attached.BridgeURI = "not a sip uri"
-	s.Require().NoError(s.store.AttachNumber(s.ctx, s.customer, s.e164, attached))
+	_, err := s.store.GlobalDB().NewUpdate().Table("stream_trunks").Set("bridge_uri = 'not a sip uri'").
+		Where("id = ?", attached.TrunkID).Exec(s.ctx)
+	s.Require().NoError(err)
 	s.Require().NoError(stream.DeleteRoute(s.ctx, attached.RouteID))
 
-	_, err := s.lineFor(s.customer, s.e164)
+	_, err = s.lineFor(s.customer, s.e164)
 
 	s.Require().ErrorContains(err, "is not a sip uri")
 	s.Empty(s.deployment.Rules())
@@ -1842,7 +1857,7 @@ func (s *AppsSuite) TestARefusedRuleLeavesTheNumberOffTheTrunk() {
 	s.Require().Error(err)
 	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
 	s.Equal([]string{first.RouteID}, s.deployment.Rules())
-	held, err := s.store.Number(s.ctx, s.customer, second)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, second)
 	s.Require().NoError(err)
 	s.Empty(held.StreamTrunkID)
 }
@@ -2271,7 +2286,7 @@ func (s *AppsSuite) TestAFailedDialLeavesNoCallResource() {
 	})
 
 	s.Require().Error(err)
-	resources, err := s.store.CallResourcesInApp(s.ctx, store.AppScope{App: 1, Unpinned: true}, defaultCallType, session)
+	resources, err := s.store.CallResources.Select(s.ctx, store.AppScope{App: 1, Unpinned: true}, defaultCallType, session)
 	s.Require().NoError(err)
 	s.Empty(resources)
 }
@@ -2316,7 +2331,7 @@ func (s *AppsSuite) TestAFailedTransferFromTheCallsOwnNumberKeepsTheCallsRow() {
 	})
 
 	s.Require().Error(err)
-	resources, err := s.store.CallResourcesInApp(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
+	resources, err := s.store.CallResources.Select(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Len(resources, 1, "the call's own leg is still live")
 }
@@ -2405,7 +2420,7 @@ func (s *AppsSuite) TestANumberWhoseTrunkIsAlreadyGoneAtStreamIsReleased() {
 
 	s.Equal([]string{s.e164}, s.vendor.released)
 	group := store.TrunkGroup{CustomerID: s.customer, StreamAppPK: held.StreamAppPK, Vendor: held.Vendor}
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		s.Empty(trunks)
 		return err
@@ -2466,7 +2481,7 @@ func (s *AppsSuite) TestReleasingANumberLinedSinceItWasReadTakesItOffItsTrunk() 
 
 	s.Equal([]string{second}, s.own.TrunkNumbers(lined.TrunkID))
 	s.Equal([]string{other.RouteID}, s.own.Rules())
-	_, err = s.store.Number(s.ctx, s.customer, s.e164)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.ErrorIs(err, store.ErrNoNumber, "the number is released")
 }
 
@@ -2485,7 +2500,7 @@ func (s *AppsSuite) TestAttachingANumberWhoseTrunkPasswordWasNotKeptGivesItATrun
 	s.Equal([]string{again.TrunkID}, s.deployment.Trunks(), "the old trunk is deleted")
 	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(again.TrunkID))
 	s.Equal([]string{again.RouteID}, s.deployment.Rules())
-	s.NotEmpty(s.number().BridgePasswordSealed, "its new trunk's password is kept")
+	s.NotEmpty(s.trunk().BridgePasswordSealed, "its new trunk's password is kept")
 }
 
 func (s *AppsSuite) TestAttachingANumberOnASharedTrunkAgainChangesNothing() {
@@ -2550,7 +2565,7 @@ func (s *AppsSuite) TestAPerCallTrunkStreamWouldNotDeleteIsSweptAgainNextTime() 
 
 	s.Require().NoError(err)
 	s.Equal([]string{trunk}, s.deployment.Trunks())
-	rows, err := s.store.CallResourcesInApp(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
+	rows, err := s.store.CallResources.Select(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.NotEmpty(rows, "the row is what the next sweep finds the trunk by")
 
@@ -2559,7 +2574,7 @@ func (s *AppsSuite) TestAPerCallTrunkStreamWouldNotDeleteIsSweptAgainNextTime() 
 
 	s.Require().NoError(err)
 	s.Empty(s.deployment.Trunks())
-	rows, err = s.store.CallResourcesInApp(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
+	rows, err = s.store.CallResources.Select(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Empty(rows)
 }
@@ -2587,7 +2602,7 @@ func (s *AppsSuite) TestASharedCallWhoseCallNeverEndedLosesItsRowButNotItsLine()
 	s.Positive(swept)
 	s.Len(s.deployment.Trunks(), 1, "the number's other calls use it")
 	s.Len(s.deployment.Rules(), 1)
-	rows, err := s.store.CallResourcesInApp(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
+	rows, err := s.store.CallResources.Select(s.ctx, store.AppScope{App: 1, Unpinned: true}, placed.CallType, placed.CallID)
 	s.Require().NoError(err)
 	s.Empty(rows)
 }
@@ -2612,7 +2627,7 @@ func (s *AppsSuite) TestMoreNumbersLiningAtOnceThanThePoolHasConnectionsAllLine(
 	var wait sync.WaitGroup
 	for _, e164 := range numbers {
 		wait.Go(func() {
-			held, err := s.store.Number(ctx, s.customer, e164)
+			held, err := s.store.PhoneNumbers.GetByE164(ctx, s.customer, e164)
 			if !s.NoError(err) {
 				return
 			}

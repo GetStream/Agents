@@ -1643,7 +1643,6 @@ func (s *RouterSuite) telephonySealedBy(sealer *auth.Sealer, apps phone.Apps, lo
 		Sealer:    sealer,
 		SIPTrunks: siptrunk.New(siptrunk.Options{Logger: logger}),
 		Apps:      apps,
-		Redis:     s.live.Redis(),
 		Logger:    logger,
 	})
 	s.Require().NoError(err)

@@ -67,7 +67,7 @@ func (s *SIPTrunkSuite) SetupTest() {
 
 // placed opens the outbound leg customerID placed through its own trunk, as vendorCallID.
 func (s *SIPTrunkSuite) placed(customerID, vendorCallID string) {
-	_, err := s.store.OpenCallLeg(s.ctx, &store.CallLeg{
+	_, err := s.store.CallLegs.Open(s.ctx, &store.CallLeg{
 		CustomerID: customerID, CallType: "default", CallID: "session-" + vendorCallID,
 		Vendor: SIPTrunkVendor, VendorCallID: vendorCallID, Direction: store.Outbound,
 		LocalNumber: "+15125550100", RemoteNumber: "+15125550101",
@@ -223,7 +223,7 @@ func (s *SIPTrunkSuite) TestReleasingATrunkNumberAsksNoVendor() {
 // A deployment without Stream is ErrNoStream, which the router answers 400, not 500.
 func (s *SIPTrunkSuite) TestAttachingWithoutStreamSaysSo() {
 	number := store.PhoneNumber{E164: "+15550000212", Vendor: "telnyx", CustomerID: "acme"}
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &number))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &number))
 
 	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: "acme", E164: number.E164})
 
@@ -241,10 +241,10 @@ func (s *SIPTrunkSuite) TestAttachingATrunkNumberIsRefused() {
 
 func (s *SIPTrunkSuite) TestABoughtNumberStillGoesThroughTheRegistry() {
 	// bics is declared and not implemented, so it opens without credentials as the stub.
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: "+15550000209", Vendor: "bics", Country: "US", CustomerID: "acme",
 	}))
-	held, err := s.store.Number(s.ctx, "acme", "+15550000209")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000209")
 	s.Require().NoError(err)
 
 	provider, trunk, err := s.service.dialVendor(s.ctx, held)
@@ -299,10 +299,10 @@ var (
 func (s *SIPTrunkSuite) shareLine(id, number string) {
 	sealed, err := s.service.sealer.SealWithAAD(sharedBridgePassword, trunkAAD("acme", id))
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, store.TrunkGroup{CustomerID: "acme", Vendor: SIPTrunkVendor},
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, store.TrunkGroup{CustomerID: "acme", Vendor: SIPTrunkVendor},
 		func(_ context.Context, tx *store.TrunkGroupTx) error {
 			return tx.SaveTrunk(store.StreamTrunk{
-				ID: id, Numbers: []string{number}, BridgeURI: "sip:old@shared.example.test",
+				ID: id, BridgeURI: "sip:old@shared.example.test",
 				BridgeUsername: "bridge-user", BridgePasswordSealed: sealed,
 				BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(),
 			})

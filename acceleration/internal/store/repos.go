@@ -10,8 +10,16 @@ type repos struct {
 	Apps                           *Apps
 	BranchMessages                 *BranchMessages
 	BranchSwitches                 *BranchSwitches
+	BusinessProfiles               *BusinessProfiles
+	CallBridges                    *CallBridges
 	CallEvents                     *CallEvents
+	CallLegs                       *CallLegs
+	CallParticipants               *CallParticipants
+	CallResources                  *CallResources
 	Calls                          *Calls
+	CampaignAttempts               *CampaignAttempts
+	CampaignContacts               *CampaignContacts
+	Campaigns                      *Campaigns
 	ChannelAccounts                *ChannelAccounts
 	ChannelDeliveries              *ChannelDeliveries
 	ChannelInbounds                *ChannelInbounds
@@ -43,22 +51,29 @@ type repos struct {
 	LimitGrants                    *LimitGrants
 	Limits                         *Limits
 	Notices                        *Notices
+	OptOuts                        *OptOuts
 	OrganizationTiers              *OrganizationTiers
 	Organizations                  *Organizations
+	PhoneNumbers                   *PhoneNumbers
 	Policies                       *Policies
 	ProviderKeys                   *ProviderKeys
 	Recordings                     *Recordings
 	ResponseItems                  *ResponseItems
 	Responses                      *Responses
+	ReviewLogs                     *ReviewLogs
+	SIPTrunks                      *SIPTrunks
+	SandboxRecipients              *SandboxRecipients
 	Sandboxes                      *Sandboxes
 	SessionTools                   *SessionTools
 	Sessions                       *Sessions
 	Spend                          *Spend
 	StreamAppTokens                *StreamAppTokens
 	StreamFallbackUses             *StreamFallbackUses
+	StreamTrunks                   *StreamTrunks
 	TelephonySuspensions           *TelephonySuspensions
 	Turns                          *Turns
 	UsageResets                    *UsageResets
+	UseCases                       *UseCases
 	UserPhones                     *UserPhones
 	WaitingMessages                *WaitingMessages
 }
@@ -73,8 +88,16 @@ func (s *Store) wire() {
 		Apps:                           &Apps{store: s},
 		BranchMessages:                 &BranchMessages{store: s},
 		BranchSwitches:                 &BranchSwitches{store: s},
+		BusinessProfiles:               &BusinessProfiles{store: s},
+		CallBridges:                    &CallBridges{store: s},
 		CallEvents:                     &CallEvents{store: s},
+		CallLegs:                       &CallLegs{store: s},
+		CallParticipants:               &CallParticipants{store: s},
+		CallResources:                  &CallResources{store: s},
 		Calls:                          &Calls{store: s},
+		CampaignAttempts:               &CampaignAttempts{store: s},
+		CampaignContacts:               &CampaignContacts{store: s},
+		Campaigns:                      &Campaigns{store: s},
 		ChannelAccounts:                &ChannelAccounts{store: s},
 		ChannelDeliveries:              &ChannelDeliveries{store: s},
 		ChannelInbounds:                &ChannelInbounds{store: s},
@@ -106,22 +129,29 @@ func (s *Store) wire() {
 		LimitGrants:                    &LimitGrants{store: s},
 		Limits:                         &Limits{store: s},
 		Notices:                        &Notices{store: s},
+		OptOuts:                        &OptOuts{store: s},
 		OrganizationTiers:              &OrganizationTiers{store: s},
 		Organizations:                  &Organizations{store: s},
+		PhoneNumbers:                   &PhoneNumbers{store: s},
 		Policies:                       &Policies{store: s},
 		ProviderKeys:                   &ProviderKeys{store: s},
 		Recordings:                     &Recordings{store: s},
 		ResponseItems:                  &ResponseItems{store: s},
 		Responses:                      &Responses{store: s},
+		ReviewLogs:                     &ReviewLogs{store: s},
+		SIPTrunks:                      &SIPTrunks{store: s},
+		SandboxRecipients:              &SandboxRecipients{store: s},
 		Sandboxes:                      &Sandboxes{store: s},
 		SessionTools:                   &SessionTools{store: s},
 		Sessions:                       &Sessions{store: s},
 		Spend:                          &Spend{store: s},
 		StreamAppTokens:                &StreamAppTokens{store: s},
 		StreamFallbackUses:             &StreamFallbackUses{store: s},
+		StreamTrunks:                   &StreamTrunks{store: s},
 		TelephonySuspensions:           &TelephonySuspensions{store: s},
 		Turns:                          &Turns{store: s},
 		UsageResets:                    &UsageResets{store: s},
+		UseCases:                       &UseCases{store: s},
 		UserPhones:                     &UserPhones{store: s},
 		WaitingMessages:                &WaitingMessages{store: s},
 	}
