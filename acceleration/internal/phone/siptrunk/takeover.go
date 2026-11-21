@@ -204,6 +204,35 @@ redis.call('ZREM', KEYS[3], ARGV[2])
 return 1
 `)
 
+// takeScript claims for ARGV[1] the calls whose claims lapsed by ARGV[3], at most ARGV[4] of
+// them, skipping the ones ARGV[1] holds itself, ARGV[6] on. It says each call won, with its
+// record, and forgets a call won without one. The keys of a call are ARGV[5] and its id, all in
+// the hash slot of KEYS[1].
+// KEYS: calls. ARGV: node, holdFor ms, now ms, scanBatch, keys, held ids...
+var takeScript = rueidis.NewLuaScript(`
+local held = {}
+for i = 6, #ARGV do
+  held[ARGV[i]] = true
+end
+local won = {}
+for _, id in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[3], 'LIMIT', 0, ARGV[4])) do
+  if not held[id] then
+    local owner = ARGV[5] .. ':owner:' .. id
+    if redis.call('SET', owner, ARGV[1], 'NX', 'PX', ARGV[2]) then
+      local record = redis.call('GET', ARGV[5] .. ':call:' .. id)
+      if record then
+        table.insert(won, id)
+        table.insert(won, record)
+      else
+        redis.call('DEL', owner)
+        redis.call('ZREM', KEYS[1], id)
+      end
+    end
+  end
+end
+return won
+`)
+
 // Start renews this node's claims until Close and, with r to open a call's credentials,
 // takes over the calls other nodes gave up or stopped renewing until StopTaking. It takes no
 // context: a signal starts a drain, through which this node still relays its calls and must
@@ -444,56 +473,74 @@ func (p *Provider) withdraw(ctx context.Context) bool {
 
 // scan takes over the calls whose claims lapsed.
 func (p *Provider) scan(ctx context.Context) {
-	now := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	ids, err := p.redis.Do(ctx, p.redis.B().Zrangebyscore().Key(p.keys.calls()).Min("-inf").Max(now).
-		Limit(0, scanBatch).Build()).AsStrSlice()
+	won, err := p.claimLapsed(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			p.logger.Warn("could not look for calls through customers' sip trunks no node holds", "error", err)
+			p.logger.Warn("could not take calls through customers' sip trunks no node holds", "error", err)
 		}
 		return
 	}
-	for _, id := range ids {
+	for i, call := range won {
 		if ctx.Err() != nil {
+			p.giveBackAll(won[i:])
 			return
 		}
-		p.take(id)
+		p.take(call.id, call.record)
 	}
 }
 
-// take continues a call no node holds, if this node wins it.
-func (p *Provider) take(id string) {
+// lapsedCall is a call whose claim lapsed and this node won, with its record.
+type lapsedCall struct{ id, record string }
+
+// claimLapsed claims at most scanBatch of the calls whose claims lapsed, in one round trip.
+func (p *Provider) claimLapsed(ctx context.Context) ([]lapsedCall, error) {
 	p.mu.Lock()
-	_, mine := p.calls[id]
-	p.mu.Unlock()
-	if mine {
-		return
+	args := make([]string, 0, 5+len(p.calls))
+	args = append(args, p.node, ms(p.holdFor), strconv.FormatInt(time.Now().UnixMilli(), 10), strconv.Itoa(scanBatch), string(p.keys))
+	for id := range p.calls {
+		args = append(args, id)
 	}
+	p.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, redisTimeout)
+	defer cancel()
+	pairs, err := takeScript.Exec(ctx, p.redis, []string{p.keys.calls()}, args).AsStrSlice()
+	if err != nil {
+		return nil, err
+	}
+	won := make([]lapsedCall, 0, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		won = append(won, lapsedCall{id: pairs[i], record: pairs[i+1]})
+	}
+	return won, nil
+}
+
+// giveBackAll gives back the claims won on calls a stopping scan will not take over, so the
+// next node to scan takes them without waiting for the claims to lapse.
+func (p *Provider) giveBackAll(calls []lapsedCall) {
+	ctx, cancel := context.WithTimeout(context.Background(), redisTimeout)
+	defer cancel()
+	lapse := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	execs := make([]rueidis.LuaExec, len(calls))
+	for i, call := range calls {
+		execs[i] = rueidis.LuaExec{Keys: []string{p.keys.owner(call.id), p.keys.calls()}, Args: []string{p.node, lapse, call.id}}
+	}
+	for _, resp := range giveBackScript.ExecMulti(ctx, p.redis, execs...) {
+		if err := resp.Error(); err != nil {
+			// The claims lapse unrenewed, and a scan takes the calls then.
+			p.logger.Warn("could not give back calls through customers' sip trunks this node stopped before taking over", "error", err)
+			return
+		}
+	}
+}
+
+// take continues a call no node held, which this node won, from its record raw.
+func (p *Provider) take(id, raw string) {
 	log := p.logger.With("vendor", phone.SIPTrunkVendor, "vendor_call_id", id)
 	// Not the loop's context: stopping this node mid-resume would hang the call up. It ends
 	// before the claim won here lapses, so no other node resumes the call meanwhile.
 	ctx, cancel := context.WithTimeout(context.Background(), p.holdFor-p.renewEvery)
 	defer cancel()
 
-	err := p.redis.Do(ctx, p.redis.B().Set().Key(p.keys.owner(id)).Value(p.node).Nx().
-		PxMilliseconds(p.holdFor.Milliseconds()).Build()).Error()
-	if rueidis.IsRedisNil(err) {
-		return
-	}
-	if err != nil {
-		log.Warn("could not claim a call through a customer's sip trunk no node holds", "error", err)
-		return
-	}
-
-	raw, err := p.redis.Do(ctx, p.redis.B().Get().Key(p.keys.record(id)).Build()).ToString()
-	if rueidis.IsRedisNil(err) {
-		p.forget(id, log)
-		return
-	}
-	if err != nil {
-		log.Warn("could not read a call through a customer's sip trunk to take it over", "error", err)
-		return
-	}
 	var rec callRecord
 	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 		log.Error("dropping a call record no node can read", "error", err)
