@@ -71,6 +71,9 @@ func row(created *Session) store.Call {
 		Voice:        spec.Voice,
 		Instructions: spec.prompt(),
 	}
+	// The session's row can be deleted while the conversation stays, and this is what then
+	// names the channel the call's transcript is in.
+	call.ConversationID = spec.ConversationID
 	// Who the agent writes the transcript as (chatlog.Options.Agent), which tells its lines
 	// apart from a member's line carrying the same fields.
 	call.AgentUserID = spec.UserID

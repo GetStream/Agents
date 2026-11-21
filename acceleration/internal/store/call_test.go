@@ -158,6 +158,31 @@ func (s *StoreSuite) TestACallStartedAgainLearnsWhoTheAgentWroteAsAndKeepsIt() {
 	s.Equal("vision-agent", read.AgentUserID)
 }
 
+func (s *StoreSuite) TestACallStartedAgainLearnsTheConversationItWasBoundToAndKeepsIt() {
+	// A call row from before the column names no conversation. The session carrying on under
+	// the same id names it, and the row keeps the first one it was told.
+	call := Call{
+		ID: "session-learns-conversation", CustomerID: "acme",
+		CallID: "call-1", AgentID: "agent-learns-conversation", StartedAt: s.base,
+	}
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+	before, err := s.store.Calls.Get(s.ctx, "acme", call.ID)
+	s.Require().NoError(err)
+	s.Require().Empty(before.ConversationID)
+
+	learned := call
+	learned.ConversationID = "agent:first"
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &learned))
+	other := call
+	other.ConversationID = "agent:second"
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &other))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+
+	read, err := s.store.Calls.Get(s.ctx, "acme", call.ID)
+	s.Require().NoError(err)
+	s.Equal("agent:first", read.ConversationID)
+}
+
 func (s *StoreSuite) TestCallQueryBudgets() {
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	s.opened("called", "app", at, nil)
@@ -218,13 +243,15 @@ func (s *StoreSuite) TestACallGoingNoKnownWayIsNotWritten() {
 // Defect: deleting a session takes its calls with it, or leaves them naming a session that is gone.
 func (s *StoreSuite) TestDeletingASessionKeepsItsCallsWithoutIt() {
 	s.opened("deleted", "app", s.base, nil)
-	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "kept", SessionID: "deleted", CustomerID: "app", StartedAt: s.base}))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "kept", SessionID: "deleted", CustomerID: "app",
+		ConversationID: "agent:deleted", StartedAt: s.base}))
 
 	s.Require().NoError(s.store.Sessions.Delete(s.ctx, "app", "deleted"))
 
 	call, err := s.store.Calls.Get(s.ctx, "app", "kept")
 	s.Require().NoError(err)
 	s.Empty(call.SessionID)
+	s.Equal("agent:deleted", call.ConversationID, "the only place left that names the conversation")
 }
 
 // Defect: a session's calls listed with another session's, out of order, or to another customer.

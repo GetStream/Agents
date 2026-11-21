@@ -6,13 +6,14 @@ ALTER TABLE calls
 -- Every session held its one call under its own id, text sessions included, so each keeps
 -- that call: the existing row gains the session and its Stream call, and a session whose row
 -- was never written gets one.
-INSERT INTO calls (id, session_id, customer_id, stream_app_pk, call_id, call_type, agent_id, direction, started_at, ended_at)
-SELECT s.id, s.id, s.customer_id, s.stream_app_pk, COALESCE(s.call_id, ''), COALESCE(s.call_type, ''), s.agent_id,
-    'inbound', s.created_at, s.closed_at
+INSERT INTO calls (id, session_id, customer_id, stream_app_pk, call_id, call_type, conversation_id, agent_id, direction, started_at, ended_at)
+SELECT s.id, s.id, s.customer_id, s.stream_app_pk, COALESCE(s.call_id, ''), COALESCE(s.call_type, ''), s.conversation_id,
+    s.agent_id, 'inbound', s.created_at, s.closed_at
 FROM agent_sessions AS s
 ON CONFLICT (id) DO UPDATE SET
     session_id = EXCLUDED.session_id,
     call_type = EXCLUDED.call_type,
+    conversation_id = COALESCE(calls.conversation_id, EXCLUDED.conversation_id),
     call_id = CASE WHEN calls.call_id = '' THEN EXCLUDED.call_id ELSE calls.call_id END;
 
 CREATE INDEX calls_session_idx ON calls USING btree (customer_id, session_id, started_at DESC) WHERE (session_id IS NOT NULL);
@@ -42,7 +43,6 @@ END $$;
 -- +goose StatementEnd
 
 ALTER TABLE calls
-    DROP COLUMN conversation_id,
     DROP COLUMN user_id,
     DROP COLUMN config_id;
 
@@ -56,7 +56,6 @@ ALTER TABLE agent_sessions
     ADD COLUMN call_type text;
 
 ALTER TABLE calls
-    ADD COLUMN conversation_id text,
     ADD COLUMN user_id text DEFAULT ''::text NOT NULL,
     ADD COLUMN config_id text;
 
