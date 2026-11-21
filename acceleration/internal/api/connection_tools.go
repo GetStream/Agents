@@ -391,7 +391,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 		return nil, err
 	}
 	validation := response.Body
-	record := &store.ConnectorConnectionValidation{ConnectionID: connection.ID, Revision: revision, Status: string(validation.Status),
+	record := store.ConnectorConnectionValidation{Revision: revision, Status: string(validation.Status),
 		Code: validation.Code, CheckedAt: time.Now().UTC().Truncate(time.Microsecond)}
 	if !moved {
 		record.Error = storedError(validation.Error, s.connectors.Schemes[connection.AuthScheme], credential)
@@ -405,7 +405,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 	if status := answered.status(); record.Code == "" && status >= http.StatusBadRequest {
 		record.Code = strconv.Itoa(status)
 	}
-	if err := s.store.ConnectorConnections.PutValidation(ctx, record); err != nil {
+	if err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, record); err != nil {
 		return nil, err
 	}
 	return response, nil

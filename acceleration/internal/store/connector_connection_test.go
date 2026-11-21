@@ -1054,18 +1054,17 @@ func (s *StoreSuite) TestAConnectionIsUsedByTheFixedBindingsOfLiveConfigsThatNam
 func (s *StoreSuite) TestALaterValidationReplacesTheLastOne() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	first := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Status: "failed", Code: "503", Error: "Service Unavailable", CheckedAt: first}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Status: "failed", Code: "503", Error: "Service Unavailable", CheckedAt: first}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Status: "connected", CheckedAt: first.Add(time.Second)}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Status: "connected", CheckedAt: first.Add(time.Second)}))
 
-	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
-	s.Require().NoError(err)
-	s.Equal("connected", got[connection.ID].Status)
-	s.Empty(got[connection.ID].Code)
-	s.Empty(got[connection.ID].Error)
-	s.True(first.Add(time.Second).Equal(got[connection.ID].CheckedAt))
+	got := s.storedConnection(connection.ID).Validation
+	s.Equal("connected", got.Status)
+	s.Empty(got.Code)
+	s.Empty(got.Error)
+	s.True(first.Add(time.Second).Equal(got.CheckedAt))
 }
 
 // TestAValidationThatRanEarlierNeverReplacesALaterOne: of two validates at once, the one that
@@ -1073,16 +1072,15 @@ func (s *StoreSuite) TestALaterValidationReplacesTheLastOne() {
 func (s *StoreSuite) TestAValidationThatRanEarlierNeverReplacesALaterOne() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	later := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Status: "connected", CheckedAt: later}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Status: "connected", CheckedAt: later}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Status: "failed", Code: "500", CheckedAt: later.Add(-time.Second)}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Status: "failed", Code: "500", CheckedAt: later.Add(-time.Second)}))
 
-	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
-	s.Require().NoError(err)
-	s.Equal("connected", got[connection.ID].Status)
-	s.True(later.Equal(got[connection.ID].CheckedAt))
+	got := s.storedConnection(connection.ID).Validation
+	s.Equal("connected", got.Status)
+	s.True(later.Equal(got.CheckedAt))
 }
 
 // TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOnes: a validate of credentials
@@ -1091,16 +1089,15 @@ func (s *StoreSuite) TestAValidationThatRanEarlierNeverReplacesALaterOne() {
 func (s *StoreSuite) TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOnes() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	checked := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Revision: 3, Status: "connected", CheckedAt: checked}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Revision: 3, Status: "connected", CheckedAt: checked}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Revision: 2, Status: "failed", Code: "503", CheckedAt: checked.Add(time.Second)}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Revision: 2, Status: "failed", Code: "503", CheckedAt: checked.Add(time.Second)}))
 
-	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
-	s.Require().NoError(err)
-	s.Equal("connected", got[connection.ID].Status)
-	s.Equal(3, got[connection.ID].Revision)
+	got := s.storedConnection(connection.ID).Validation
+	s.Equal("connected", got.Status)
+	s.Equal(3, got.Revision)
 }
 
 // TestAValidationOfNewerCredentialsReplacesOneThatRanLater: the newer credentials' result
@@ -1108,24 +1105,21 @@ func (s *StoreSuite) TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOne
 func (s *StoreSuite) TestAValidationOfNewerCredentialsReplacesOneThatRanLater() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	checked := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Revision: 2, Status: "failed", Code: "503", CheckedAt: checked}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Revision: 2, Status: "failed", Code: "503", CheckedAt: checked}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Revision: 3, Status: "connected", CheckedAt: checked.Add(-time.Second)}))
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		Revision: 3, Status: "connected", CheckedAt: checked.Add(-time.Second)}))
 
-	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
-	s.Require().NoError(err)
-	s.Equal("connected", got[connection.ID].Status)
-	s.Equal(3, got[connection.ID].Revision)
+	got := s.storedConnection(connection.ID).Validation
+	s.Equal("connected", got.Status)
+	s.Equal(3, got.Revision)
 }
 
 func (s *StoreSuite) TestAConnectionNeverValidatedHasNoValidation() {
 	connection := s.connection("acme-app", userOwned("alice"))
 
-	got, err := s.store.ConnectorConnections.Validations(s.ctx, []string{connection.ID})
-
-	s.Require().NoError(err)
+	got := s.storedConnection(connection.ID).Validation
 	s.Empty(got)
 }
 
@@ -1228,34 +1222,32 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		s.Require().NoError(err)
 	}), "Referenced")
 	for _, id := range ids {
-		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, &ConnectorConnectionClient{ConnectionID: id,
-			Registration: core.ClientDCR, ClientID: "dcr-client", UpdatedAt: now}))
-		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{ConnectionID: id,
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, id, ConnectorConnectionClient{
+			Registration: core.ClientDCR, ClientID: "dcr-client"}))
+		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, id, ConnectorConnectionValidation{
 			Revision: 1, Status: "ok", CheckedAt: now}))
 	}
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, &ConnectorConnectionClient{ConnectionID: connection.ID,
-			Registration: core.ClientDCR, ClientID: "dcr-client", UpdatedAt: now}))
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, connection.ID, ConnectorConnectionClient{
+			Registration: core.ClientDCR, ClientID: "dcr-client"}))
 	}), "PutClient")
-	s.Equal(1, s.countQueries(func() {
-		clients, err := s.store.ConnectorConnections.Clients(s.ctx, ids)
-		s.Require().NoError(err)
-		s.Len(clients, 30)
-	}), "Clients")
 	s.Equal(1, s.countQueries(func() {
 		granted, err := s.store.ConnectorConnections.SelectGrantedOfClient(s.ctx, "acme-app", "acme", core.ClientDCR, "dcr-client")
 		s.Require().NoError(err)
 		s.Len(granted, 30)
 	}), "SelectGrantedOfClient")
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, &ConnectorConnectionValidation{ConnectionID: connection.ID,
+		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
 			Revision: 1, Status: "ok", CheckedAt: now.Add(time.Second)}))
 	}), "PutValidation")
 	s.Equal(1, s.countQueries(func() {
-		validations, err := s.store.ConnectorConnections.Validations(s.ctx, ids)
+		listed, err := s.store.ConnectorConnections.Select(s.ctx, "acme-app", ConnectionFilter{OwnerType: OwnerUser, OwnerID: "alice", Limit: 50})
 		s.Require().NoError(err)
-		s.Len(validations, 30)
-	}), "Validations")
+		for _, connection := range listed {
+			s.Equal("dcr-client", connection.Client.ClientID)
+			s.Equal("ok", connection.Validation.Status)
+		}
+	}), "Select reads each connection's client and last validation with it")
 	s.Equal(3, s.countQueries(func() {
 		saved := s.storedConnection(connection.ID)
 		saved.Revision++

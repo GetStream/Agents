@@ -151,11 +151,11 @@ func (s *StoreSuite) TestConnectorInvocationQueryBudgets() {
 	}
 
 	s.Equal(1, s.countQueries(func() { s.invocation(connection, time.Minute, "") }), "Insert")
-	s.Equal(4, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorInvocations.Insert(s.ctx, &ConnectorInvocation{CustomerID: "acme-app",
 			ConnectionID: connection.ID, Tool: "search", StartedAt: s.base, Arguments: []ArgumentShape{{Name: "q", Type: "string"}}}))
 	}), "Insert with arguments")
-	s.Equal(2, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		rows, err := s.store.ConnectorInvocations.Select(s.ctx, "acme-app", InvocationFilter{ConnectionID: connection.ID, Limit: 10})
 		s.Require().NoError(err)
 		s.Len(rows, 11)

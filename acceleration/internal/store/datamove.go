@@ -87,12 +87,9 @@ func (t dataTable) rollup() bool {
 // omni-channels and cards they point at live in the Stream app, which a move does not carry
 // either; and user_phones, whose links join only those contact_map rows; and
 // channel_thread_waiting and channel_thread_inbound, messages in flight for minutes. And
-// connector_invocations and connector_audit, with connector_audit_credentials and
-// connector_invocation_arguments: this deployment's record of what it did with credentials
-// sealed under its own key. And connector_tool_pins: the deployment a connection moves to pins
-// its tools again on first use. And connector_connection_clients: the next consent of the
-// connection where it moved to records its client again. And connector_connection_validations:
-// the next validate where it moved to records its result again. And chat_inbound, Stream
+// connector_invocations and connector_audit: this deployment's record of what it did with
+// credentials sealed under its own key. And connector_tool_pins: the deployment a connection
+// moves to pins its tools again on first use. And chat_inbound, Stream
 // Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
@@ -102,7 +99,12 @@ var dataTables = []dataTable{
 	// Only the customer's own definitions: the built-ins are under no customer, and every
 	// deployment seeds its own. They come before the connections that pin them.
 	{name: "connector_definitions", customer: "customer_id"},
-	{name: "connector_connections", customer: "customer_id"},
+	// The next consent where it moved to records its client again, and the next validate its
+	// result.
+	{name: "connector_connections", customer: "customer_id", vouched: []string{
+		"client_registration", "client_id", "client_updated_at",
+		"validation_revision", "validation_status", "validation_code", "validation_error", "validation_checked_at",
+	}},
 	{name: "router_configs", customer: "customer_id"},
 	{name: "voices", customer: "customer_id"},
 	{name: "voice_samples", parent: "voices", parentColumn: "voice_id"},

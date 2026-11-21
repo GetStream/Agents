@@ -519,6 +519,7 @@ TABLE connector_audit
     connection_id text NOT NULL
     connector_id text NOT NULL
     created_at timestamp with time zone NOT NULL
+    credential jsonb
     customer_id text NOT NULL
     id text NOT NULL
     latency_ms integer
@@ -534,18 +535,6 @@ TABLE connector_audit
     CONSTRAINT connector_audit_pkey PRIMARY KEY (id)
     CREATE INDEX connector_audit_connection_idx ON public.connector_audit USING btree (customer_id, connection_id, created_at DESC, id DESC)
     CREATE INDEX connector_audit_customer_idx ON public.connector_audit USING btree (customer_id, created_at DESC, id DESC)
-
-TABLE connector_audit_credentials
-    access_expires_at timestamp with time zone
-    access_fingerprint text NOT NULL DEFAULT ''::text
-    audit_id text NOT NULL
-    previous_access_fingerprint text NOT NULL DEFAULT ''::text
-    previous_refresh_fingerprint text NOT NULL DEFAULT ''::text
-    refresh_expires_at timestamp with time zone
-    refresh_fingerprint text NOT NULL DEFAULT ''::text
-    rotated boolean NOT NULL DEFAULT false
-    CONSTRAINT connector_audit_credentials_audit_id_fkey FOREIGN KEY (audit_id) REFERENCES connector_audit(id) ON DELETE CASCADE
-    CONSTRAINT connector_audit_credentials_pkey PRIMARY KEY (audit_id)
 
 TABLE connector_authorization_attempts
     attempt_sealed bytea NOT NULL
@@ -588,28 +577,13 @@ TABLE connector_config_tokens
     CONSTRAINT connector_config_tokens_pkey PRIMARY KEY (customer_id, connector_id)
     CONSTRAINT connector_config_tokens_tokens_sealed_check CHECK ((tokens_sealed <> '\x'::bytea))
 
-TABLE connector_connection_clients
-    client_id text NOT NULL
-    connection_id text NOT NULL
-    registration text NOT NULL
-    updated_at timestamp with time zone NOT NULL
-    CONSTRAINT connector_connection_clients_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES connector_connections(id) ON DELETE CASCADE
-    CONSTRAINT connector_connection_clients_pkey PRIMARY KEY (connection_id)
-
-TABLE connector_connection_validations
-    checked_at timestamp with time zone NOT NULL
-    code text NOT NULL DEFAULT ''::text
-    connection_id text NOT NULL
-    error text NOT NULL DEFAULT ''::text
-    revision integer NOT NULL
-    status text NOT NULL
-    CONSTRAINT connector_connection_validations_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES connector_connections(id) ON DELETE CASCADE
-    CONSTRAINT connector_connection_validations_pkey PRIMARY KEY (connection_id)
-
 TABLE connector_connections
     account_id text NOT NULL DEFAULT ''::text
     auth_scheme text NOT NULL
     cached_tools jsonb NOT NULL DEFAULT '[]'::jsonb
+    client_id text NOT NULL DEFAULT ''::text
+    client_registration text NOT NULL DEFAULT ''::text
+    client_updated_at timestamp with time zone
     connected_at timestamp with time zone
     connector_id text NOT NULL
     created_at timestamp with time zone NOT NULL DEFAULT now()
@@ -634,6 +608,11 @@ TABLE connector_connections
     tools_checked_at timestamp with time zone
     tools_digest text NOT NULL DEFAULT ''::text
     updated_at timestamp with time zone NOT NULL DEFAULT now()
+    validation_checked_at timestamp with time zone
+    validation_code text NOT NULL DEFAULT ''::text
+    validation_error text NOT NULL DEFAULT ''::text
+    validation_revision integer NOT NULL DEFAULT 0
+    validation_status text NOT NULL DEFAULT ''::text
     CONSTRAINT connector_connections_definition_revision_check CHECK ((definition_revision >= 1))
     CONSTRAINT connector_connections_owner CHECK ((((owner_type = 'app'::text) AND (owner_id = ''::text)) OR ((owner_type = 'user'::text) AND (owner_id <> ''::text))))
     CONSTRAINT connector_connections_pkey PRIMARY KEY (id)
@@ -686,13 +665,8 @@ TABLE connector_event_destinations
     CONSTRAINT connector_event_destinations_secret_sealed_check CHECK ((secret_sealed <> '\x'::bytea))
     CREATE INDEX connector_event_destinations_list ON public.connector_event_destinations USING btree (customer_id, connector_id, created_at DESC, id DESC)
 
-TABLE connector_invocation_arguments
-    invocation_id text NOT NULL
-    shape jsonb NOT NULL
-    CONSTRAINT connector_invocation_arguments_invocation_id_fkey FOREIGN KEY (invocation_id) REFERENCES connector_invocations(id) ON DELETE CASCADE
-    CONSTRAINT connector_invocation_arguments_pkey PRIMARY KEY (invocation_id)
-
 TABLE connector_invocations
+    arguments jsonb
     binding text NOT NULL
     config_id text NOT NULL
     connection_id text NOT NULL

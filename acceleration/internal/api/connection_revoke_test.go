@@ -238,19 +238,18 @@ func (s *AuthorizationsSuite) TestTheClientOfAConsentWhoseCallerHungUpIsKept() {
 	s.connect(consented)
 	stored, _ := s.held(consented)
 	ctx := context.Background()
-	recorded, err := s.store.ConnectorConnections.Clients(ctx, []string{consented})
+	recorded, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), consented)
 	s.Require().NoError(err)
-	s.Require().Contains(recorded, consented, "the consent records its client")
+	s.Require().NotEmpty(recorded.Client.ClientID, "the consent records its client")
 	pending := s.revokingConnection(s.provider.URL+fakeprovider.PathRevoke, optInRevoke)
 
 	gone, hangUp := context.WithCancel(ctx)
 	hangUp()
 	s.router.recordClient(gone, pending, stored)
 
-	clients, err := s.store.ConnectorConnections.Clients(ctx, []string{pending})
+	kept, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), pending)
 	s.Require().NoError(err)
-	s.Require().Contains(clients, pending)
-	s.Equal(recorded[consented].ClientID, clients[pending].ClientID)
+	s.Equal(recorded.Client.ClientID, kept.Client.ClientID)
 }
 
 // A detached write gives up at auditWriteTimeout when the pool has no free connection

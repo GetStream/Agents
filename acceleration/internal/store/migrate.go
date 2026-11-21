@@ -320,10 +320,14 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 // written to.
 var changeLogTables = []string{"data_change_capture", "data_changes"}
 
-var createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
+var (
+	createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
+	dropTable   = regexp.MustCompile(`(?i)DROP TABLE (?:IF EXISTS )?([a-z_0-9]+)`)
+)
 
-// setTables are the tables the set's migrations create, read from their SQL. A table is
-// created by one set alone, except the change log both keep.
+// setTables are the tables the set's migrations leave, read from their SQL in version order:
+// those created and not dropped by a later one. A table is created by one set alone, except
+// the change log both keep.
 func setTables(set migrationSet) ([]string, error) {
 	files, err := fs.Glob(set.files, "*.sql")
 	if err != nil {
@@ -339,6 +343,9 @@ func setTables(set migrationSet) ([]string, error) {
 			if !slices.Contains(tables, match[1]) && !slices.Contains(changeLogTables, match[1]) {
 				tables = append(tables, match[1])
 			}
+		}
+		for _, match := range dropTable.FindAllStringSubmatch(string(raw), -1) {
+			tables = slices.DeleteFunc(tables, func(table string) bool { return table == match[1] })
 		}
 	}
 	slices.Sort(tables)

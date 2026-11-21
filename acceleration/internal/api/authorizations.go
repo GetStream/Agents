@@ -963,8 +963,8 @@ func (s *Server) recordRefusal(ctx context.Context, connection store.ConnectorCo
 	if code == "unauthorized_client" {
 		reason += " " + fmt.Sprintf(unauthorizedClientHint, connectorCallbackURL(s.publicURL))
 	}
-	err := s.store.ConnectorConnections.PutValidation(ctx, &store.ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Revision: connection.Revision, Status: validationFailed,
+	err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, store.ConnectorConnectionValidation{
+		Revision: connection.Revision, Status: validationFailed,
 		Code: codeConsentRefused, Error: reason, CheckedAt: time.Now().UTC(),
 	})
 

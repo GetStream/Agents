@@ -119,6 +119,11 @@ type ConnectorConnection struct {
 	// ConnectedAt is when a consent last stored credentials (core.CredentialState.ConnectedAt).
 	// Nil until one did, and for a connection connected before the column existed.
 	ConnectedAt *time.Time `bun:"connected_at"`
+	// Client is the OAuth client the connection's grant was issued to, zero when none is
+	// recorded.
+	Client ConnectorConnectionClient `bun:"embed:client_"`
+	// Validation is the connection's last validate, zero before the first.
+	Validation ConnectorConnectionValidation `bun:"embed:validation_"`
 }
 
 // Validate refuses a connection the table refuses (connector_connections_owner and the
@@ -726,50 +731,30 @@ func validOwner(ownerType, ownerID string) bool {
 }
 
 // ConnectorConnectionClient is the OAuth client a connection's grant was issued to (AI-990
-// F16), kept in connector_connection_clients
-// (20261011210000_connector_clients_and_argument_shapes.sql) so it is read without unsealing the
-// credentials. A client_id is not a secret (RFC 6749 section 2.2).
+// F16), in columns of its own so it is read without unsealing the credentials. A client_id is
+// not a secret (RFC 6749 section 2.2).
 type ConnectorConnectionClient struct {
-	bun.BaseModel `bun:"table:connector_connection_clients,alias:ccc"`
-
-	ConnectionID string                        `bun:"connection_id,pk"`
 	Registration core.ClientRegistrationMethod `bun:"registration,notnull"`
-	ClientID     string                        `bun:"client_id,notnull"`
-	UpdatedAt    time.Time                     `bun:"updated_at,notnull"`
+	ClientID     string                        `bun:"id,notnull"`
+	UpdatedAt    time.Time                     `bun:"updated_at,nullzero"`
 }
 
 // PutClient records the client a consent of the connection used, replacing
 // the one an earlier consent recorded.
-func (r *ConnectorConnections) PutClient(ctx context.Context, client *ConnectorConnectionClient) error {
-	if client.ConnectionID == "" || client.ClientID == "" {
+func (r *ConnectorConnections) PutClient(ctx context.Context, connectionID string, client ConnectorConnectionClient) error {
+	if connectionID == "" || client.ClientID == "" {
 		return stack.Wrap(errors.New("store: a connection client needs a connection and a client id"))
 	}
-	client.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	_, err := r.store.global.NewInsert().Model(client).
-		On("CONFLICT (connection_id) DO UPDATE").
-		Set("registration = EXCLUDED.registration, client_id = EXCLUDED.client_id, updated_at = EXCLUDED.updated_at").
+	_, err := r.store.global.NewUpdate().Model((*ConnectorConnection)(nil)).
+		Set("client_registration = ?", client.Registration).
+		Set("client_id = ?", client.ClientID).
+		Set("client_updated_at = ?", time.Now().UTC().Truncate(time.Microsecond)).
+		Where("id = ?", connectionID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: put connection client: %w", err))
 	}
 	return nil
-}
-
-// Clients is the recorded client of each of connectionIDs that has one, by
-// connection id. The caller has already scoped the ids to its customer.
-func (r *ConnectorConnections) Clients(ctx context.Context, connectionIDs []string) (map[string]ConnectorConnectionClient, error) {
-	byConnection := map[string]ConnectorConnectionClient{}
-	if len(connectionIDs) == 0 {
-		return byConnection, nil
-	}
-	clients := []ConnectorConnectionClient{}
-	if err := r.store.global.NewSelect().Model(&clients).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list connection clients: %w", err))
-	}
-	for _, client := range clients {
-		byConnection[client.ConnectionID] = client
-	}
-	return byConnection, nil
 }
 
 // SelectGrantedOfClient is every live connection of the customer's to the
@@ -779,13 +764,12 @@ func (r *ConnectorConnections) SelectGrantedOfClient(ctx context.Context, custom
 	registration core.ClientRegistrationMethod, clientID string) ([]ConnectorConnection, error) {
 	var connections []ConnectorConnection
 	err := r.store.global.NewSelect().Model(&connections).
-		Join("JOIN connector_connection_clients AS ccc ON ccc.connection_id = cc.id").
 		Where("cc.customer_id = ?", customerID).
 		Where("cc.connector_id = ?", connectorID).
 		Where("cc.deleted_at IS NULL").
 		Where("cc.credentials_sealed <> ''::bytea").
-		Where("ccc.registration = ?", registration).
-		Where("ccc.client_id = ?", clientID).
+		Where("cc.client_registration = ?", registration).
+		Where("cc.client_id = ?", clientID).
 		Order("cc.created_at", "cc.id").
 		Scan(ctx)
 	if err != nil {
@@ -794,15 +778,11 @@ func (r *ConnectorConnections) SelectGrantedOfClient(ctx context.Context, custom
 	return connections, nil
 }
 
-// ConnectorConnectionValidation is the last validate of a connection (AI-1052), kept in
-// connector_connection_validations (20261016120000_connector_connection_validations.sql): its
-// status, its code (a stable reason, or the provider's HTTP status), its error and when it ran,
-// and the revision of the credentials it checked. The error is the validate's with the
+// ConnectorConnectionValidation is the last validate of a connection (AI-1052): its status,
+// its code (a stable reason, or the provider's HTTP status), its error and when it ran, and
+// the revision of the credentials it checked. The error is the validate's with the
 // credential's values cut out, and capped (api.storedError).
 type ConnectorConnectionValidation struct {
-	bun.BaseModel `bun:"table:connector_connection_validations,alias:ccv"`
-
-	ConnectionID string `bun:"connection_id,pk"`
 	// Revision is the connection's revision (ConnectorConnection.Revision) whose credentials
 	// the validate checked. A connection read at a later revision has newer credentials than
 	// the validate saw.
@@ -810,43 +790,31 @@ type ConnectorConnectionValidation struct {
 	Status    string    `bun:"status,notnull"`
 	Code      string    `bun:"code,notnull"`
 	Error     string    `bun:"error,notnull"`
-	CheckedAt time.Time `bun:"checked_at,notnull"`
+	CheckedAt time.Time `bun:"checked_at,nullzero"`
 }
 
 // PutValidation records a validate of the connection, replacing the one an
 // earlier validate recorded. Of two validates at once, the one of the later revision stays,
 // and of two of the same revision the one that ran later, whichever writes last: a validate
 // of credentials replaced while it ran never covers one of the new credentials.
-func (r *ConnectorConnections) PutValidation(ctx context.Context, validation *ConnectorConnectionValidation) error {
-	if validation.ConnectionID == "" || validation.Status == "" || validation.CheckedAt.IsZero() {
+func (r *ConnectorConnections) PutValidation(ctx context.Context, connectionID string, validation ConnectorConnectionValidation) error {
+	if connectionID == "" || validation.Status == "" || validation.CheckedAt.IsZero() {
 		return stack.Wrap(errors.New("store: a connection validation needs a connection, a status and a time"))
 	}
-	_, err := r.store.global.NewInsert().Model(validation).
-		On("CONFLICT (connection_id) DO UPDATE").
-		Set("revision = EXCLUDED.revision, status = EXCLUDED.status, code = EXCLUDED.code, error = EXCLUDED.error, checked_at = EXCLUDED.checked_at").
-		Where("(ccv.revision, ccv.checked_at) <= (EXCLUDED.revision, EXCLUDED.checked_at)").
+	_, err := r.store.global.NewUpdate().Model((*ConnectorConnection)(nil)).
+		Set("validation_revision = ?", validation.Revision).
+		Set("validation_status = ?", validation.Status).
+		Set("validation_code = ?", validation.Code).
+		Set("validation_error = ?", validation.Error).
+		Set("validation_checked_at = ?", validation.CheckedAt).
+		Where("id = ?", connectionID).
+		Where("validation_checked_at IS NULL OR (validation_revision, validation_checked_at) <= (?, ?)",
+			validation.Revision, validation.CheckedAt).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: put connection validation: %w", err))
 	}
 	return nil
-}
-
-// Validations is the last validate of each of connectionIDs that was
-// validated, by connection id. The caller has already scoped the ids to its customer.
-func (r *ConnectorConnections) Validations(ctx context.Context, connectionIDs []string) (map[string]ConnectorConnectionValidation, error) {
-	byConnection := map[string]ConnectorConnectionValidation{}
-	if len(connectionIDs) == 0 {
-		return byConnection, nil
-	}
-	validations := []ConnectorConnectionValidation{}
-	if err := r.store.global.NewSelect().Model(&validations).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list connection validations: %w", err))
-	}
-	for _, validation := range validations {
-		byConnection[validation.ConnectionID] = validation
-	}
-	return byConnection, nil
 }
 
 // ErrConnectorConnectionChanged says a credentials write found the connection no longer at the

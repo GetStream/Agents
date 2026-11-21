@@ -64,9 +64,8 @@ type ConnectorInvocation struct {
 	// (session.dispatcher.record); empty for a call that answered.
 	ErrorMessage string `bun:"error_message,notnull"`
 	// Arguments is the shape of what the call was asked, never a value (AI-990 F40), nil when
-	// its arguments were not a JSON object. Kept in connector_invocation_arguments
-	// (20261011210000_connector_clients_and_argument_shapes.sql).
-	Arguments []ArgumentShape `bun:"-"`
+	// its arguments were not a JSON object.
+	Arguments []ArgumentShape `bun:"arguments,type:jsonb"`
 }
 
 // Validate refuses an invocation the table refuses (connector_invocations_error_type_check,
@@ -90,15 +89,6 @@ type ArgumentShape struct {
 	// Length is a string's characters (Unicode code points) or an array's elements, nil for
 	// any other type.
 	Length *int `json:"length,omitempty"`
-}
-
-// connectorInvocationArguments is one invocation's ArgumentShapes as connector_invocation_arguments
-// keeps them.
-type connectorInvocationArguments struct {
-	bun.BaseModel `bun:"table:connector_invocation_arguments,alias:cia"`
-
-	InvocationID string          `bun:"invocation_id,pk"`
-	Shape        []ArgumentShape `bun:"shape,type:jsonb,notnull"`
 }
 
 // InvocationFilter picks a page of one connection's calls.
@@ -139,18 +129,7 @@ func (r *ConnectorInvocations) Insert(ctx context.Context, invocation *Connector
 	}
 	// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
 	invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
-	var err error
-	if invocation.Arguments == nil {
-		_, err = r.store.global.NewInsert().Model(invocation).Exec(ctx)
-	} else {
-		err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			if _, err := tx.NewInsert().Model(invocation).Exec(ctx); err != nil {
-				return err
-			}
-			_, err := tx.NewInsert().Model(&connectorInvocationArguments{InvocationID: invocation.ID, Shape: invocation.Arguments}).Exec(ctx)
-			return err
-		})
-	}
+	_, err := r.store.global.NewInsert().Model(invocation).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record connector invocation: %w", err))
 	}
@@ -176,24 +155,6 @@ func (r *ConnectorInvocations) Select(ctx context.Context, customerID string, fi
 		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector invocations: %w", err))
-	}
-	if len(invocations) == 0 {
-		return invocations, nil
-	}
-	ids := make([]string, len(invocations))
-	for i, invocation := range invocations {
-		ids[i] = invocation.ID
-	}
-	shapes := []connectorInvocationArguments{}
-	if err := r.store.global.NewSelect().Model(&shapes).Where("invocation_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list connector invocation arguments: %w", err))
-	}
-	byInvocation := make(map[string][]ArgumentShape, len(shapes))
-	for _, shape := range shapes {
-		byInvocation[shape.InvocationID] = shape.Shape
-	}
-	for i := range invocations {
-		invocations[i].Arguments = byInvocation[invocations[i].ID]
 	}
 	return invocations, nil
 }

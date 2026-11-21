@@ -450,18 +450,10 @@ func (s *Server) listConnections(ctx context.Context, request *listConnectionsRe
 	if err != nil {
 		return nil, err
 	}
-	clients, err := s.store.ConnectorConnections.Clients(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	validations, err := s.store.ConnectorConnections.Validations(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
 	listed := ConnectionPage{Items: make([]Connection, 0, len(kept)), HasMore: more}
 	for _, connection := range kept {
 		listed.Items = append(listed.Items, connectionOf(connection, uses[connection.ID], definitions[connection.ID],
-			clientOf(clients, connection.ID), lastValidationOf(validations, connection)))
+			clientOf(connection.Client), lastValidationOf(connection)))
 	}
 	if more {
 		last := kept[len(kept)-1]
@@ -484,16 +476,8 @@ func (s *Server) getConnection(ctx context.Context, request *connectionRequest) 
 	if err != nil {
 		return nil, err
 	}
-	clients, err := s.store.ConnectorConnections.Clients(ctx, []string{connection.ID})
-	if err != nil {
-		return nil, err
-	}
-	validations, err := s.store.ConnectorConnections.Validations(ctx, []string{connection.ID})
-	if err != nil {
-		return nil, err
-	}
 	return &connectionResponse{Body: connectionOf(connection, uses[connection.ID], definitions[connection.ID],
-		clientOf(clients, connection.ID), lastValidationOf(validations, connection))}, nil
+		clientOf(connection.Client), lastValidationOf(connection))}, nil
 }
 
 // deleteConnection soft deletes one connection the caller may have, unless an
@@ -709,8 +693,8 @@ func (s *Server) recordClient(ctx context.Context, connectionID string, credenti
 	}
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	err := s.store.ConnectorConnections.PutClient(ctx, &store.ConnectorConnectionClient{
-		ConnectionID: connectionID, Registration: client.Registration, ClientID: client.ID,
+	err := s.store.ConnectorConnections.PutClient(ctx, connectionID, store.ConnectorConnectionClient{
+		Registration: client.Registration, ClientID: client.ID,
 	})
 
 	if err != nil {
@@ -789,8 +773,8 @@ func actingUser(ctx context.Context) string {
 // other two are for the operations that write them (T18, T12). uses are the bindings that
 // name it (store.ConnectorConnectionUses), definition how its revision compares with its
 // connector's (store.ConnectorDefinitionStatuses), and client the OAuth client its grant was
-// issued to, nil when none is recorded (store.ConnectorConnectionClients), and validation what
-// its last validate found, nil before the first (store.ConnectorConnectionValidations).
+// issued to, nil when none is recorded (store.ConnectorConnection.Client), and validation what
+// its last validate found, nil before the first (store.ConnectorConnection.Validation).
 func connectionOf(connection store.ConnectorConnection, uses []store.ConnectionUse, definition store.DefinitionStatus,
 	client *ConnectionClient, validation *ConnectionLastValidation) Connection {
 	usedBy := make([]ConnectionUse, 0, len(uses))
@@ -831,9 +815,9 @@ func connectionOf(connection store.ConnectorConnection, uses []store.ConnectionU
 // after it ran. The second is a token saved again as it was, which leaves the revision
 // (pgsealed's commit seals only changed credentials anew) but connects a connection that was
 // not connected from then on (ConnectedAt), and a consent, which always begins a grant.
-func lastValidationOf(validations map[string]store.ConnectorConnectionValidation, connection store.ConnectorConnection) *ConnectionLastValidation {
-	validation, ok := validations[connection.ID]
-	if !ok || validation.Revision < connection.Revision ||
+func lastValidationOf(connection store.ConnectorConnection) *ConnectionLastValidation {
+	validation := connection.Validation
+	if validation.CheckedAt.IsZero() || validation.Revision < connection.Revision ||
 		connection.ConnectedAt != nil && validation.CheckedAt.Before(*connection.ConnectedAt) {
 		return nil
 	}
@@ -841,10 +825,9 @@ func lastValidationOf(validations map[string]store.ConnectorConnectionValidation
 		Error: validation.Error, CheckedAt: validation.CheckedAt}
 }
 
-// clientOf is the recorded client of the connection id names, nil when there is none.
-func clientOf(clients map[string]store.ConnectorConnectionClient, id string) *ConnectionClient {
-	client, ok := clients[id]
-	if !ok {
+// clientOf is the recorded client of a connection, nil when there is none.
+func clientOf(client store.ConnectorConnectionClient) *ConnectionClient {
+	if client.ClientID == "" {
 		return nil
 	}
 	return &ConnectionClient{Registration: ConnectorClientRegistrationMethod(client.Registration), ClientID: client.ClientID}

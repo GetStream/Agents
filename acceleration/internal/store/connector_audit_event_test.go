@@ -60,7 +60,6 @@ func (s *StoreSuite) TestAnAuditRowKeepsTheFingerprintsOfItsTokens() {
 	s.Nil(rows[0].Credential, "the proxy call names no token")
 	got := rows[1].Credential
 	s.Require().NotNil(got)
-	s.Equal(rows[1].ID, got.AuditID)
 	s.Equal("0a0a0a0a", got.PreviousAccessFingerprint)
 	s.Equal("2c2c2c2c", got.AccessFingerprint)
 	s.Equal("1b1b1b1b", got.PreviousRefreshFingerprint)
@@ -114,8 +113,8 @@ func (s *StoreSuite) TestConnectorAuditEventQueryBudgets() {
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectorAuditEvents.Insert(s.ctx, event())) }), "Insert")
 	granted := event()
 	granted.Action, granted.Credential = AuditGrantCreated, &ConnectorAuditCredential{AccessFingerprint: "a1"}
-	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.ConnectorAuditEvents.Insert(s.ctx, granted)) }), "Insert with a credential")
-	s.Equal(2, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ConnectorAuditEvents.Insert(s.ctx, granted)) }), "Insert with a credential")
+	s.Equal(1, s.countQueries(func() {
 		rows, err := s.store.ConnectorAuditEvents.Select(s.ctx, "acme-app", AuditFilter{ConnectionID: connection.ID, Limit: 10})
 		s.Require().NoError(err)
 		s.Len(rows, 11)

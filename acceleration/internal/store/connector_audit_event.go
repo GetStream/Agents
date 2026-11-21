@@ -76,9 +76,8 @@ type ConnectorAuditEvent struct {
 	// Tools are a tool_reapproved row's tools, nil for every other action.
 	Tools []ApprovedTool `bun:"tools,type:jsonb,nullzero"`
 	// Credential names the tokens the event left, by fingerprint, nil when its scheme does not
-	// name them or the event touched no token (a proxy call, an export, a delete). Kept in
-	// connector_audit_credentials (20261011180000_connector_audit_credentials.sql).
-	Credential *ConnectorAuditCredential `bun:"-"`
+	// name them or the event touched no token (a proxy call, an export, a delete).
+	Credential *ConnectorAuditCredential `bun:"credential,type:jsonb"`
 }
 
 // Validate refuses a row the table refuses (connector_audit_action_check), one no list could tie
@@ -96,17 +95,14 @@ func (e *ConnectorAuditEvent) Validate() error {
 // (AI-990): Rotated with two different refresh fingerprints is a provider that rotated the
 // refresh token, without the sealed credentials being opened to tell.
 type ConnectorAuditCredential struct {
-	bun.BaseModel `bun:"table:connector_audit_credentials,alias:cac"`
-
-	AuditID                    string `bun:"audit_id,pk"`
-	AccessFingerprint          string `bun:"access_fingerprint,notnull"`
-	PreviousAccessFingerprint  string `bun:"previous_access_fingerprint,notnull"`
-	RefreshFingerprint         string `bun:"refresh_fingerprint,notnull"`
-	PreviousRefreshFingerprint string `bun:"previous_refresh_fingerprint,notnull"`
-	Rotated                    bool   `bun:"rotated,notnull"`
+	AccessFingerprint          string `json:"access_fingerprint"`
+	PreviousAccessFingerprint  string `json:"previous_access_fingerprint"`
+	RefreshFingerprint         string `json:"refresh_fingerprint"`
+	PreviousRefreshFingerprint string `json:"previous_refresh_fingerprint"`
+	Rotated                    bool   `json:"rotated"`
 	// AccessExpiresAt and RefreshExpiresAt are zero when the provider did not say.
-	AccessExpiresAt  time.Time `bun:"access_expires_at,nullzero"`
-	RefreshExpiresAt time.Time `bun:"refresh_expires_at,nullzero"`
+	AccessExpiresAt  time.Time `json:"access_expires_at,omitzero"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at,omitzero"`
 }
 
 // AuditCredential is change as an audit row keeps it.
@@ -152,21 +148,7 @@ func (r *ConnectorAuditEvents) Insert(ctx context.Context, event *ConnectorAudit
 	}
 	event.ID = newID()
 	event.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	var err error
-	if event.Credential == nil {
-		// One insert needs no transaction: a proxy call, a token export or a delete is most
-		// rows, and the one most often written.
-		_, err = r.store.global.NewInsert().Model(event).Exec(ctx)
-	} else {
-		err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
-				return err
-			}
-			event.Credential.AuditID = event.ID
-			_, err := tx.NewInsert().Model(event.Credential).Exec(ctx)
-			return err
-		})
-	}
+	_, err := r.store.global.NewInsert().Model(event).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record connector audit: %w", err))
 	}
@@ -193,24 +175,6 @@ func (r *ConnectorAuditEvents) Select(ctx context.Context, customerID string, fi
 		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector audit: %w", err))
-	}
-	if len(events) == 0 {
-		return events, nil
-	}
-	ids := make([]string, len(events))
-	for i, event := range events {
-		ids[i] = event.ID
-	}
-	credentials := []ConnectorAuditCredential{}
-	if err := r.store.global.NewSelect().Model(&credentials).Where("audit_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: list connector audit credentials: %w", err))
-	}
-	byAudit := make(map[string]*ConnectorAuditCredential, len(credentials))
-	for i := range credentials {
-		byAudit[credentials[i].AuditID] = &credentials[i]
-	}
-	for i := range events {
-		events[i].Credential = byAudit[events[i].ID]
 	}
 	return events, nil
 }
