@@ -434,12 +434,17 @@ func (d *dispatcher) admit(ctx context.Context, deadline time.Time, r route, cal
 	}
 	waiting, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	release, err := d.slots.take(waiting, r.connection.ID, r.maxInFlight)
+	release, waited, err := d.slots.take(waiting, r.connection.ID, r.maxInFlight)
 	if err != nil {
 		if ctx.Err() == nil {
 			return nil, llm.TextParts(busy(call.Name, r.maxInFlight)), failure{kind: store.InvocationDenied, message: heldByTheCap(r.maxInFlight)}, nil
 		}
 		return nil, nil, failure{kind: store.InvocationClientTimeout}, stack.Wrap(fmt.Errorf("session: %s was not sent: %w", call.Name, err))
+	}
+	// Only a call that waited for its slot reads the hold again: the call it waited behind may
+	// have been answered 429 meanwhile.
+	if !waited {
+		return release, nil, failure{}, nil
 	}
 	if wait := d.limiter.Wait(ctx, r.limit); wait > 0 {
 		release()
