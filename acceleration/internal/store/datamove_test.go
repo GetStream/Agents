@@ -3561,3 +3561,15 @@ func (s *DataMoveSuite) TestALogCopiedBackWhereItCameFromIsNotCopiedAgain() {
 	s.Require().NoError(s.source.GlobalDB().NewSelect().Table("agent_logs").Column("id").Where("customer_id = 'acme'").Scan(s.ctx, &logs))
 	s.Equal([]int64{id}, logs, "the log that went away and came back is the one log it was")
 }
+
+// The trigger on a shard's tables takes the capture starts' lock on a repeatable read write, as
+// the shared database's do, so the shard keeps the table too.
+func (s *ShardedStoreSuite) TestARepeatableReadWriteToAShardTableIsNotRefused() {
+	tx, err := s.store.shard.BeginTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(s.ctx, "INSERT INTO calls (id, customer_id, call_id, agent_id) VALUES ('c', 'acme', 'c', 'agent')")
+	s.Require().NoError(err)
+	s.NoError(tx.Commit())
+}

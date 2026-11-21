@@ -317,8 +317,8 @@ func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found 
 }
 
 // changeLogTables are kept by both sets: a row's change is recorded in the database it is
-// written to.
-var changeLogTables = []string{"data_change_capture", "data_changes"}
+// written to, under the capture starts' lock.
+var changeLogTables = []string{"data_change_capture", "data_changes", "data_change_starts"}
 
 var createTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)`)
 
