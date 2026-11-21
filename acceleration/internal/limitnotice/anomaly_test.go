@@ -133,7 +133,7 @@ func organization() string {
 // spent writes organization's spend on the day daysAgo days before today, at noon.
 func (s *AnomalySuite) spent(organization string, daysAgo int, cost int64) {
 	day := time.Date(today.Year(), today.Month(), today.Day(), 12, 0, 0, 0, time.UTC).AddDate(0, 0, -daysAgo)
-	s.Require().NoError(s.db.RecordRequest(s.ctx, &store.Request{
+	s.Require().NoError(s.db.Requests.Insert(s.ctx, &store.Request{
 		Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization, Provider: "openai", Model: "m",
 		StartedAt: day, CostMicros: cost, Billable: true, Success: true,
 	}))

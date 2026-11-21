@@ -451,13 +451,13 @@ func (s *GuestsSuite) TestAClaimMovesTheGuestsScheduledTasks() {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	account := s.utils.uuid()
 
 	s.claim(guest, account)
 
-	moved, err := s.store.ScheduledTask(ctx, s.customerID(), task.ID)
+	moved, err := s.store.ScheduledTasks.Get(ctx, s.customerID(), task.ID)
 	s.Require().NoError(err)
 	s.Equal(account, moved.UserID, "the task follows up for the account the guest turned out to be")
 }
@@ -504,7 +504,7 @@ func (s *GuestsSuite) TestAClaimLeavesWhatAnAnonymousNamesakeSaidWhereItWas() {
 	s.Contains(s.chat.Members(s.transcriptOf(genuine)), account.userID, "the account reads what the guest said")
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheGuestsName)), account.userID)
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheAccountsName)), account.userID)
-	left, err := s.store.ScheduledTask(context.Background(), s.customerID(), task)
+	left, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task)
 	s.Require().NoError(err)
 	s.Equal(guestID, left.UserID, "the namesake's task is not moved")
 }
@@ -664,8 +664,8 @@ func (s *GuestsSuite) scheduledFor(userID string, kind auth.Kind) string {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	return task.ID
 }
 

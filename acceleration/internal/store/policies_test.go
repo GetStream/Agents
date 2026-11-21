@@ -20,7 +20,7 @@ func (s *StoreSuite) spend(customerID string, costMicros int64, minutesAgo int) 
 		CostMicros: costMicros,
 		Success:    true,
 	}
-	s.Require().NoError(s.store.RecordRequest(s.ctx, request))
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
 }
 
 func (s *StoreSuite) TestAScopeNobodyWroteAPolicyForHasTheEmptyOne() {

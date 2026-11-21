@@ -104,7 +104,7 @@ func (s *PriceSyncSuite) startPrices(ctx context.Context, pgStore *store.Store, 
 }
 
 func (s *PriceSyncSuite) changes(pgStore *store.Store) []store.PriceChange {
-	changes, err := pgStore.PriceChanges(s.ctx, store.PriceChangeFilter{})
+	changes, err := pgStore.PriceChanges.Select(s.ctx, store.PriceChangeFilter{})
 	s.Require().NoError(err)
 	return changes
 }
@@ -129,7 +129,7 @@ func (s *PriceSyncSuite) TestStartupSyncsAndAudits() {
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router v1.3.0", seed.Source)
 	s.Equal("router v1.3.0", seed.CreatedBy)
-	active, err := pgStore.ActivePriceEntries(s.ctx, time.Now())
+	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Len(active, len(prices.Vendor().Entries)+2, "the file's own item and its BYOK twin")
 	for _, row := range active {
@@ -167,7 +167,7 @@ func (s *PriceSyncSuite) TestTheNextReleaseAddsOnlyItsNewItems() {
 	s.Require().Len(changes, 2)
 	s.Regexp(`^\d{14}_release_v1_4_0$`, changes[0].Name)
 	s.Equal("Items new in v1.4.0", changes[0].Reason)
-	_, entries, err := pgStore.PriceChange(s.ctx, changes[0].Name)
+	_, entries, err := pgStore.PriceChanges.Get(s.ctx, changes[0].Name)
 	s.Require().NoError(err)
 	s.Require().Len(entries, 2)
 	s.Equal("own-model", entries[0].Model)
@@ -210,7 +210,7 @@ func (s *PriceSyncSuite) TestRoutersStartingAtOnceLoadOnce() {
 				return
 			}
 			defer pgStore.Close()
-			_, _, _, failed[i] = pgStore.SyncPrices(ctx, load)
+			_, _, _, failed[i] = pgStore.PriceChanges.Sync(ctx, load)
 		})
 	}
 	wg.Wait()
@@ -311,7 +311,7 @@ func (s *PriceSyncSuite) changePrice(pgStore *store.Store, name string, entry pr
 	entry.Rates = map[pricing.Meter]pricing.Rate{pricing.InputTokens: {USD: usd, Per: 1_000_000}}
 	entry.Prices = entry.Rates
 	entry.Tiers, entry.PriceTiers, entry.Version, entry.SKU = nil, nil, "", ""
-	change, _, _, err := pgStore.CreatePriceChange(s.ctx, store.PriceChangeWrite{
+	change, _, _, err := pgStore.PriceChanges.Insert(s.ctx, store.PriceChangeWrite{
 		Name: name, Reason: "A test's change", Source: "the test", EffectiveAt: effectiveAt,
 		Entries: []store.PriceEntryWrite{{Entry: entry}}, ActorID: "tester", ActorName: "tester",
 	}, func(store.PriceListAt, []store.PriceEntryWrite) error { return nil })
@@ -332,7 +332,7 @@ func (s *PriceSyncSuite) tokenPriced() pricing.Entry {
 
 // rateOf is the input token rate the list in force charges for an entry's item and When.
 func (s *PriceSyncSuite) rateOf(pgStore *store.Store, entry pricing.Entry) float64 {
-	active, err := pgStore.ActivePriceEntries(s.ctx, time.Now())
+	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	for _, row := range active {
 		if prices.Name(row.Entry()) == prices.Name(entry) {
@@ -359,7 +359,7 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	s.changePrice(pgStore, "own_later", own, 7, &later)
 	s.Require().InDelta(fileRate*3, s.rateOf(pgStore, vendor), 1e-12)
 	s.Require().InDelta(5.0, s.rateOf(pgStore, own), 1e-12)
-	s.Require().NoError(pgStore.RecordRequest(s.ctx, &store.Request{
+	s.Require().NoError(pgStore.Requests.Insert(s.ctx, &store.Request{
 		Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model, StartedAt: time.Now(),
 		CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
 	}))
@@ -374,10 +374,10 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	seed := changes[0]
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router dev", seed.Source)
-	upcoming, err := pgStore.UpcomingPriceEntries(s.ctx, time.Now())
+	upcoming, err := pgStore.PriceEntries.Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming, "the scheduled change went with the rest")
-	active, err := pgStore.ActivePriceEntries(s.ctx, time.Now())
+	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Len(active, len(prices.Vendor().Entries)+2)
 
@@ -596,7 +596,7 @@ func (s *PriceSyncSuite) TestDriftNamesARowByItsUsageIDWhereItHasOne() {
 // recordWithVendorCost records an LLM row the list priced at cost, of work the vendor said
 // cost vendorCost.
 func (s *PriceSyncSuite) recordWithVendorCost(router *store.Store, model string, cost, vendorCost int64) {
-	s.Require().NoError(router.RecordRequest(s.ctx, &store.Request{
+	s.Require().NoError(router.Requests.Insert(s.ctx, &store.Request{
 		Modality: "llm", CustomerID: "app", Provider: "grok", Model: model, StartedAt: time.Now(),
 		CostMicros: cost, Billable: true, Success: true,
 		Attributes: map[string]string{store.VendorCostAttribute: strconv.FormatInt(vendorCost, 10)},

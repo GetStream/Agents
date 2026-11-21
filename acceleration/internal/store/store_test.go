@@ -4,11 +4,8 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -163,322 +160,8 @@ func (s *StoreSuite) SetupTest() {
 	s.forgetRedis()
 }
 
-// record stores a speech-to-text request, defaulting the fields a test does not care about.
-func (s *StoreSuite) record(customerID string, at time.Time, audioMs int64, latencyMs float64, success bool) {
-	request := &Request{
-		Modality:   "stt",
-		CustomerID: customerID,
-		Provider:   "deepgram",
-		Model:      "flux-general-en",
-		StartedAt:  at,
-		AudioMs:    audioMs,
-		LatencyMs:  &latencyMs,
-		Success:    success,
-	}
-	if !success {
-		request.ErrorCode = "upstream_error"
-	}
-	s.Require().NoError(s.store.RecordRequest(s.ctx, request))
-}
-
 func (s *StoreSuite) TestMigrateIsIdempotent() {
 	s.Require().NoError(s.store.Migrate(s.ctx))
-}
-
-func (s *StoreSuite) TestRecordRequestRequiresACustomer() {
-	err := s.store.RecordRequest(s.ctx, &Request{Modality: "stt", Provider: "deepgram", Model: "flux-general-en"})
-	s.ErrorContains(err, "customer id is required")
-}
-
-func (s *StoreSuite) TestRecordRequestRequiresAModality() {
-	err := s.store.RecordRequest(s.ctx, &Request{CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en"})
-	s.ErrorContains(err, "modality is required")
-}
-
-func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
-	request := &Request{
-		Modality: "stt", CustomerID: "acme",
-		Provider: "deepgram", Model: "flux-general-en", Success: true,
-	}
-
-	s.Require().NoError(s.store.RecordRequest(s.ctx, request))
-
-	s.False(request.StartedAt.IsZero(), "a request with no timestamp should be stamped now")
-	s.Positive(request.ID, "the row should come back with its generated id")
-}
-
-func (s *StoreSuite) TestRollupAggregatesRequestsIntoOneBucket() {
-	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
-	s.record("acme", s.base.Add(2*time.Minute), 2000, 200, true)
-	s.record("acme", s.base.Add(3*time.Minute), 500, 300, false)
-
-	affected, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.EqualValues(1, affected, "three requests in one hour make one bucket")
-
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-
-	bucket := buckets[0]
-	s.Equal(s.base, bucket.Bucket.UTC(), "the bucket is the truncated hour")
-	s.EqualValues(3500, bucket.AudioMsTotal)
-	s.EqualValues(3, bucket.RequestCount)
-	s.EqualValues(1, bucket.ErrorCount)
-	s.Require().NotNil(bucket.LatencyP50Ms)
-	s.InDelta(200.0, *bucket.LatencyP50Ms, 0.001)
-	s.Require().NotNil(bucket.Uptime)
-	s.InDelta(2.0/3.0, *bucket.Uptime, 0.001, "uptime is successes over total")
-}
-
-func (s *StoreSuite) TestRollupSplitsHoursAndKeepsProvidersApart() {
-	s.record("acme", s.base.Add(10*time.Minute), 1000, 100, true)
-	s.record("acme", s.base.Add(70*time.Minute), 1000, 100, true)
-
-	other := &Request{
-		Modality:   "stt",
-		CustomerID: "acme",
-		Provider:   "parakeet",
-		Model:      "parakeet-tdt-0.6b-v3",
-		StartedAt:  s.base.Add(20 * time.Minute),
-		AudioMs:    4000,
-		Success:    true,
-	}
-	s.Require().NoError(s.store.RecordRequest(s.ctx, other))
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(3*time.Hour))
-	s.Require().NoError(err)
-
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(3*time.Hour), nil)
-	s.Require().NoError(err)
-	s.Len(buckets, 3, "two hours for deepgram plus one for parakeet")
-
-	byProvider := map[string]int64{}
-	for _, bucket := range buckets {
-		byProvider[bucket.Provider] += bucket.AudioMsTotal
-	}
-	s.EqualValues(2000, byProvider["deepgram"])
-	s.EqualValues(4000, byProvider["parakeet"])
-}
-
-func (s *StoreSuite) TestModalitiesAreAggregatedSeparately() {
-	s.record("acme", s.base.Add(1*time.Minute), 3000, 100, true)
-
-	spoken := &Request{
-		Modality:   "tts",
-		CustomerID: "acme",
-		Provider:   "elevenlabs",
-		Model:      "eleven_flash_v2_5",
-		StartedAt:  s.base.Add(2 * time.Minute),
-		AudioMs:    1500,
-		Characters: 84,
-		CostMicros: 4200,
-		Success:    true,
-	}
-	s.Require().NoError(s.store.RecordRequest(s.ctx, spoken))
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	transcription, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(transcription, 1, "the synthesis row belongs to the other modality")
-	s.EqualValues(3000, transcription[0].AudioMsTotal)
-	s.Zero(transcription[0].CharactersTotal)
-
-	synthesis, err := s.store.CustomerStats(s.ctx, "tts", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(synthesis, 1)
-	s.EqualValues(84, synthesis[0].CharactersTotal)
-	s.EqualValues(4200, synthesis[0].CostMicrosTotal)
-	s.EqualValues(1500, synthesis[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestRollupIsIdempotent() {
-	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
-
-	for range 3 {
-		_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-		s.Require().NoError(err)
-	}
-
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(1, buckets[0].RequestCount, "re-running a rollup recomputes rather than accumulates")
-	s.EqualValues(1000, buckets[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestRollupPicksUpLateArrivingRequests() {
-	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	s.record("acme", s.base.Add(2*time.Minute), 1000, 100, true)
-	_, err = s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(2, buckets[0].RequestCount)
-	s.EqualValues(2000, buckets[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestDailyRollupCollapsesEveryHourOfTheDay() {
-	s.record("acme", s.base, 1000, 100, true)
-	s.record("acme", s.base.Add(5*time.Hour), 1000, 100, true)
-	s.record("acme", s.base.Add(30*time.Hour), 1000, 100, true)
-
-	_, err := s.store.Rollup(s.ctx, Daily, s.base, s.base.Add(48*time.Hour))
-	s.Require().NoError(err)
-
-	buckets, err := s.store.CustomerStats(
-		s.ctx, "stt", "acme", Daily, s.base.Add(-24*time.Hour), s.base.Add(72*time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 2, "two calendar days")
-	s.EqualValues(2000, buckets[0].AudioMsTotal, "the first day holds two requests")
-	s.EqualValues(1000, buckets[1].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestRollupIgnoresRequestsOutsideTheWindow() {
-	s.record("acme", s.base.Add(-2*time.Hour), 9999, 100, true)
-	s.record("acme", s.base.Add(10*time.Minute), 1000, 100, true)
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	var buckets []Bucket
-	err = s.store.shard.NewSelect().Table("stats_hourly").Where("customer_id = ?", "acme").Scan(s.ctx, &buckets)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(1000, buckets[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestRollupStopsAtTheBucketHoldingTheEndOfTheWindow() {
-	s.record("acme", s.base, 1000, 100, true)
-	s.record("acme", s.base.Add(time.Hour), 9999, 100, true)
-
-	affected, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.EqualValues(1, affected, "a request at the window's end opens the next bucket, which is not touched")
-
-	buckets := s.rolledUp("stats_hourly", "acme")
-	s.Require().Len(buckets, 1)
-	s.Equal(s.base, buckets[0].Bucket.UTC())
-	s.EqualValues(1000, buckets[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestRollupOverPartOfABucketRecomputesAllOfIt() {
-	for _, window := range []struct {
-		name     string
-		from, to time.Duration
-	}{
-		{"starting inside the hour", 30 * time.Minute, 90 * time.Minute},
-		{"ending inside the hour", -time.Hour, 30 * time.Minute},
-		{"inside the hour", 35 * time.Minute, 41 * time.Minute},
-	} {
-		s.Run(window.name, func() {
-			// A customer of its own, so each window starts from no rollup.
-			customer := window.name
-			project := map[string]string{"project": "support"}
-			s.tagged(customer, s.base.Add(10*time.Minute), 1000, project)
-			s.tagged(customer, s.base.Add(40*time.Minute), 2000, project)
-			_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-			s.Require().NoError(err)
-
-			_, err = s.store.Rollup(s.ctx, Hourly, s.base.Add(window.from), s.base.Add(window.to))
-			s.Require().NoError(err)
-
-			buckets := s.rolledUp("stats_hourly", customer)
-			s.Require().Len(buckets, 1)
-			s.EqualValues(3000, buckets[0].AudioMsTotal, "the bucket keeps both requests")
-			s.EqualValues(2, buckets[0].RequestCount)
-
-			tagged, err := s.store.CustomerTagStats(s.ctx, "stt", customer, "project", Hourly, s.base, s.base.Add(time.Hour))
-			s.Require().NoError(err)
-			s.Require().Len(tagged, 1)
-			s.EqualValues(3000, tagged[0].AudioMsTotal, "so does the label's")
-		})
-	}
-}
-
-func (s *StoreSuite) TestDailyRollupOverAnHourRecomputesTheWholeDay() {
-	s.record("acme", s.base.Add(time.Hour), 1000, 100, true)
-	s.record("acme", s.base.Add(5*time.Hour), 2000, 100, true)
-	_, err := s.store.Rollup(s.ctx, Daily, s.base, s.base.Add(24*time.Hour))
-	s.Require().NoError(err)
-
-	_, err = s.store.Rollup(s.ctx, Daily, s.base.Add(time.Hour), s.base.Add(2*time.Hour))
-	s.Require().NoError(err)
-
-	buckets := s.rolledUp("stats_daily", "acme")
-	s.Require().Len(buckets, 1)
-	s.EqualValues(3000, buckets[0].AudioMsTotal, "the day keeps the request outside the hour asked for")
-}
-
-// rolledUp is what a rollup table holds for a customer, oldest first.
-func (s *StoreSuite) rolledUp(table, customer string) []Bucket {
-	var buckets []Bucket
-	err := s.store.shard.NewSelect().Table(table).Where("customer_id = ?", customer).Order("bucket").Scan(s.ctx, &buckets)
-	s.Require().NoError(err)
-	return buckets
-}
-
-func (s *StoreSuite) TestCustomerStatsAreIsolatedPerCustomer() {
-	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
-	s.record("globex", s.base.Add(1*time.Minute), 5000, 100, true)
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	acme, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(acme, 1)
-	s.EqualValues(1000, acme[0].AudioMsTotal)
-
-	globex, err := s.store.CustomerStats(s.ctx, "stt", "globex", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(globex, 1)
-	s.EqualValues(5000, globex[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
-	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
-	s.record("globex", s.base.Add(2*time.Minute), 1000, 100, false)
-	s.record("acme", s.base.Add(-time.Hour), 1000, 100, true)
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
-		Modality: "llm", CustomerID: "acme", Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base, Success: true,
-	}))
-
-	counts, err := s.store.ModelRequests(s.ctx, "stt", s.base)
-	s.Require().NoError(err)
-	s.Equal(map[string]int64{"deepgram/flux-general-en": 2}, counts)
-}
-
-func (s *StoreSuite) TestCustomerStatsIsEmptyForAnUnknownCustomer() {
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "nobody", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Empty(buckets)
-}
-
-func (s *StoreSuite) TestRollupRejectsBadArguments() {
-	_, err := s.store.Rollup(s.ctx, Granularity("weekly"), s.base, s.base.Add(time.Hour))
-	s.ErrorContains(err, `unknown granularity "weekly"`)
-
-	_, err = s.store.Rollup(s.ctx, Hourly, s.base, s.base)
-	s.ErrorContains(err, "window must be non-empty")
-}
-
-func (s *StoreSuite) TestCustomerStatsRejectsBadArguments() {
-	_, err := s.store.CustomerStats(s.ctx, "stt", "", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.ErrorContains(err, "customer id is required")
-
-	_, err = s.store.CustomerStats(s.ctx, "", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.ErrorContains(err, "modality is required")
-
-	_, err = s.store.CustomerStats(s.ctx, "stt", "acme", Granularity("weekly"), s.base, s.base.Add(time.Hour), nil)
-	s.ErrorContains(err, "unknown granularity")
 }
 
 func (s *StoreSuite) TestOpenRequiresADSN() {
@@ -486,144 +169,30 @@ func (s *StoreSuite) TestOpenRequiresADSN() {
 	s.ErrorContains(err, "dsn is required")
 }
 
-func (s *StoreSuite) TestSpendIsBrokenDownByWhateverTheCustomerLabelledIt() {
-	s.tagged("acme", s.base.Add(time.Minute), 1000, map[string]string{"project": "support"})
-	s.tagged("acme", s.base.Add(2*time.Minute), 3000, map[string]string{"project": "support"})
-	s.tagged("acme", s.base.Add(3*time.Minute), 500, map[string]string{"project": "sales"})
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	buckets, err := s.store.CustomerTagStats(
-		s.ctx, "stt", "acme", "project", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	s.Require().Len(buckets, 2, "one row per project")
-	s.Equal("sales", buckets[0].TagValue)
-	s.EqualValues(500, buckets[0].AudioMsTotal)
-	s.Equal("support", buckets[1].TagValue)
-	s.EqualValues(4000, buckets[1].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestARequestCarryingTwoLabelsIsCountedUnderBoth() {
-	s.tagged("acme", s.base.Add(time.Minute), 1000,
-		map[string]string{"project": "support", "environment": "dev"})
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	byProject, err := s.store.CustomerTagStats(
-		s.ctx, "stt", "acme", "project", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(byProject, 1)
-	s.EqualValues(1000, byProject[0].AudioMsTotal)
-
-	byEnvironment, err := s.store.CustomerTagStats(
-		s.ctx, "stt", "acme", "environment", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(byEnvironment, 1)
-	s.EqualValues(1000, byEnvironment[0].AudioMsTotal, "the same request, seen through the other label")
-}
-
-func (s *StoreSuite) TestFilteringByLabelReadsTheRequestsTheRollupHasForgotten() {
-	s.tagged("acme", s.base.Add(time.Minute), 1000, map[string]string{"project": "support"})
-	s.tagged("acme", s.base.Add(2*time.Minute), 9000, map[string]string{"project": "sales"})
-
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly,
-		s.base, s.base.Add(time.Hour), map[string]string{"project": "support"})
-	s.Require().NoError(err)
-
-	s.Require().Len(buckets, 1)
-	s.EqualValues(1000, buckets[0].AudioMsTotal, "only the support request counts")
-}
-
-func (s *StoreSuite) TestTurnStatsReportThePercentilesOfWhatCallersWaited() {
-	for i, roundtrip := range []float64{100, 200, 300, 400} {
-		s.Require().NoError(s.store.RecordTurnStats(s.ctx, s.turn(s.base.Add(time.Duration(i)*time.Minute), roundtrip)))
-	}
-
-	buckets, err := s.store.CustomerTurnStats(s.ctx, "acme", "agent-1", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(4, buckets[0].TurnCount)
-	s.InDelta(8000, buckets[0].AudioOutMsTotal, 0.001)
-	s.Require().NotNil(buckets[0].RoundtripP50Ms)
-	s.InEpsilon(200, *buckets[0].RoundtripP50Ms, 0.05, "the median of 100,200,300,400, to the nearest rank")
-	s.InEpsilon(400, *buckets[0].RoundtripP95Ms, 0.05)
-	s.InEpsilon(120, *buckets[0].LLMTTFTP50Ms, 0.05)
-}
-
-func (s *StoreSuite) TestADayIsItsHoursAddedUp() {
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, s.turn(s.base.Add(time.Minute), 100)))
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, s.turn(s.base.Add(5*time.Hour), 100)))
-	interrupted := s.turn(s.base.Add(9*time.Hour), 900)
-	interrupted.Interrupted = true
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, interrupted))
-
-	hours, err := s.store.CustomerTurnStats(s.ctx, "acme", "", Hourly, s.base, s.base.Add(24*time.Hour))
-	s.Require().NoError(err)
-	days, err := s.store.CustomerTurnStats(s.ctx, "acme", "", Daily, s.base, s.base.Add(24*time.Hour))
-	s.Require().NoError(err)
-
-	s.Len(hours, 3)
-	s.Require().Len(days, 1)
-	s.EqualValues(3, days[0].TurnCount)
-	s.EqualValues(1, days[0].InterruptedCount)
-	s.InEpsilon(100, *days[0].RoundtripP50Ms, 0.05)
-	s.InEpsilon(900, *days[0].RoundtripP99Ms, 0.05, "the slow turn is the day's tail")
-}
-
-func (s *StoreSuite) TestALegThatNeverHappenedIsNotCountedAsInstant() {
-	// A realtime model that hears and speaks for itself has no transcription leg, and
-	// counting that as zero would flatter the percentiles.
-	turn := s.turn(s.base.Add(time.Minute), 300)
-	turn.STTLatencyMs = nil
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, turn))
-
-	buckets, err := s.store.CustomerTurnStats(s.ctx, "acme", "", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.Nil(buckets[0].STTLatencyP50Ms, "no transcription happened, so there is nothing to report")
-	s.NotNil(buckets[0].RoundtripP50Ms)
-}
-
-func (s *StoreSuite) TestOneAgentsTurnsAreNotAnothers() {
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, s.turn(s.base.Add(time.Minute), 100)))
-	theirs := s.turn(s.base.Add(time.Minute), 900)
-	theirs.AgentID = "agent-2"
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, theirs))
-
-	buckets, err := s.store.CustomerTurnStats(s.ctx, "acme", "agent-1", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(1, buckets[0].TurnCount)
-	s.InEpsilon(100, *buckets[0].RoundtripP99Ms, 0.05)
-}
-
 func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "stt", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "deepgram", Model: "flux-general-en",
 		StartedAt: s.base.Add(time.Second), Success: true,
 	}))
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "gemini", Model: "gemini-3.5-flash-lite",
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
 	}))
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol",
 		StartedAt: s.base.Add(3 * time.Second), Success: true,
 	}))
 	// A failed start is not what served the call.
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "tts", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "cartesia", Model: "sonic-preview",
 		StartedAt: s.base.Add(4 * time.Second), Success: false, ErrorCode: "start_failed",
 	}))
 	// Another agent is not this call.
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "stt", CustomerID: "acme", AgentID: "agent-2",
 		Provider: "grok", Model: "grok-stt",
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
@@ -639,21 +208,21 @@ func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
 }
 
 func (s *StoreSuite) TestACallAddsUpWhatEveryOneOfItsRequestsSpent() {
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 800, CachedInputTokens: 500, OutputTokens: 120,
 		CostMicros: 1400, Success: true,
 	}))
 	// A turn the model read and then failed on is still billed for the reading.
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(2 * time.Second),
 		InputTokens: 200, OutputTokens: 0, CostMicros: 100,
 		Success: false, ErrorCode: "overloaded",
 	}))
 	// Another agent's spend is not this call's.
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-2",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 9000, OutputTokens: 9000, CostMicros: 90000, Success: true,
@@ -676,7 +245,7 @@ func (s *StoreSuite) TestACallsRuntimeIsItsOwnSessionsAndNoRequest() {
 		{Modality: RuntimeModality, SessionID: "session-2", Provider: "stream", Model: "voice", CostMicros: 900},
 	} {
 		row.CustomerID, row.AgentID, row.StartedAt, row.Success = "acme", "agent-1", s.base.Add(time.Second), true
-		s.Require().NoError(s.store.RecordRequest(s.ctx, &row))
+		s.Require().NoError(s.store.Requests.Insert(s.ctx, &row))
 	}
 
 	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
@@ -705,7 +274,7 @@ func (s *StoreSuite) TestACallDoesNotCountAnotherSessionOfItsAgent() {
 		{Modality: "llm", Provider: "anthropic", Model: "claude-opus-5-5", InputTokens: 7, CostMicros: 3},
 	} {
 		row.CustomerID, row.AgentID, row.StartedAt, row.Success = "acme", "agent-1", s.base.Add(time.Second), true
-		s.Require().NoError(s.store.RecordRequest(s.ctx, &row))
+		s.Require().NoError(s.store.Requests.Insert(s.ctx, &row))
 	}
 
 	spent, err := s.store.CallUsage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
@@ -729,12 +298,12 @@ func (s *StoreSuite) TestACallThatMadeNoRequestsSpentNothing() {
 
 func (s *StoreSuite) TestWhatWasSpentAfterACallEndedIsNotTheCallsToPayFor() {
 	ended := s.base.Add(10 * time.Second)
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 300, CostMicros: 400, Success: true,
 	}))
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: ended.Add(time.Minute),
 		InputTokens: 7000, CostMicros: 8000, Success: true,
@@ -757,18 +326,6 @@ func (s *StoreSuite) TestACallRemembersWhoTheAgentSpokeTo() {
 
 	s.Require().NoError(err)
 	s.Equal("ada", found.UserID)
-}
-
-func (s *StoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "call", CustomerID: "cancel-log", AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
-		StartedAt: s.base.Add(time.Second), OutputTokens: 4, Success: false, ErrorCode: ErrorCancelled}))
-	logs, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: "cancel-log", Limit: 10})
-	s.Require().NoError(err)
-	s.Require().Len(logs, 1)
-
-	s.Equal("llm request cancelled", logs[0].Message)
-	s.Equal("info", logs[0].Severity)
 }
 
 func (s *StoreSuite) TestANumberIsHeldUntilItIsReleased() {
@@ -996,421 +553,6 @@ func (s *StoreSuite) TestTheSameNumberCanBeBoughtAgainAfterBeingReleased() {
 	s.Require().NoError(s.store.RecordNumber(s.ctx, again))
 }
 
-// tagged stores a labelled request, which is what the tag rollups are built from.
-func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags map[string]string) {
-	latencyMs := 100.0
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
-		Modality:   "stt",
-		CustomerID: customerID,
-		Provider:   "deepgram",
-		Model:      "flux-general-en",
-		Tags:       tags,
-		StartedAt:  at,
-		AudioMs:    audioMs,
-		LatencyMs:  &latencyMs,
-		Success:    true,
-	}))
-}
-
-// turn builds one conversational turn with every leg measured.
-func (s *StoreSuite) turn(at time.Time, roundtripMs float64) TurnSample {
-	sttMs, ttftMs, ttfbMs := 30.0, 120.0, 90.0
-	return TurnSample{
-		CustomerID:   "acme",
-		AgentID:      "agent-1",
-		StartedAt:    at,
-		AudioOutMs:   2000,
-		STTLatencyMs: &sttMs,
-		LLMTTFTMs:    &ttftMs,
-		TTSTTFBMs:    &ttfbMs,
-		RoundtripMs:  &roundtripMs,
-	}
-}
-
-func (s *StoreSuite) TestStatsIncludeNewRequestsWithoutRollups() {
-	s.record("acme", s.base.Add(time.Minute), 1000, 100, true)
-	s.record("other", s.base.Add(time.Minute), 9000, 100, true)
-	buckets, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(1, buckets[0].RequestCount)
-	s.EqualValues(1000, buckets[0].AudioMsTotal)
-	s.record("acme", s.base.Add(2*time.Minute), 2000, 100, true)
-	buckets, err = s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(buckets, 1)
-	s.EqualValues(2, buckets[0].RequestCount)
-	s.EqualValues(3000, buckets[0].AudioMsTotal)
-}
-
-func (s *StoreSuite) TestAgentLogsPageFilterAndResume() {
-	for i := 0; i < 520; i++ {
-		entry := AgentLog{CustomerID: "log-test", ConfigID: "agent-a", SessionID: "session-a", UserID: "user-a", Source: "user", Severity: "info", EventType: "test", Message: "same timestamp", OccurredAt: s.base}
-		if i%2 == 0 {
-			entry.Severity = "error"
-		}
-		s.Require().NoError(s.store.RecordAgentLog(s.ctx, &entry))
-	}
-	other := AgentLog{CustomerID: "other", Source: "system", Severity: "error", EventType: "test", Message: "not yours", OccurredAt: s.base}
-	s.Require().NoError(s.store.RecordAgentLog(s.ctx, &other))
-	high, err := s.store.LogHighWater(s.ctx, "log-test")
-	s.Require().NoError(err)
-	f := LogFilter{CustomerID: "log-test", Limit: 250, Before: high + 1}
-	first, err := s.store.AgentLogs(s.ctx, f)
-	s.Require().NoError(err)
-	s.Require().Len(first, 250)
-	f.Before = first[len(first)-1].ID
-	second, err := s.store.AgentLogs(s.ctx, f)
-	s.Require().NoError(err)
-	s.Require().Len(second, 250)
-	s.Less(second[0].ID, first[len(first)-1].ID)
-	f.Before = second[len(second)-1].ID
-	third, err := s.store.AgentLogs(s.ctx, f)
-	s.Require().NoError(err)
-	s.Len(third, 20)
-	fresh := AgentLog{CustomerID: "log-test", Source: "tool", Severity: "error", EventType: "tool_failed", Message: "Fresh", OccurredAt: s.base}
-	s.Require().NoError(s.store.RecordAgentLog(s.ctx, &fresh))
-	rows, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: "log-test", After: high, Forward: true, Limit: 250})
-	s.Require().NoError(err)
-	s.Require().Len(rows, 1)
-	s.Equal(fresh.ID, rows[0].ID)
-	_, err = s.store.AgentLog(s.ctx, "other", fresh.ID)
-	s.Error(err)
-	rows, err = s.store.AgentLogs(s.ctx, LogFilter{CustomerID: "log-test", Severity: "error", Sources: []string{"user"}, UserID: "user-a", ConfigID: "agent-a", SessionID: "session-a", Limit: 250})
-	s.Require().NoError(err)
-	s.Len(rows, 250)
-	for _, row := range rows {
-		s.Equal("error", row.Severity)
-		s.Equal("user", row.Source)
-		s.Nil(row.Details)
-	}
-}
-
-func (s *StoreSuite) TestAgentLogRedactsBeforeStorage() {
-	entry := AgentLog{CustomerID: "redaction-test", Source: "agent", Severity: "info", EventType: "test", Message: "Bearer private-token api_key=secret-value", Details: map[string]any{"authorization": "secret", "tool": "lookup", "arguments": map[string]string{"password": "private"}}}
-	s.Require().NoError(s.store.RecordAgentLog(s.ctx, &entry))
-	row, err := s.store.AgentLog(s.ctx, "redaction-test", entry.ID)
-	s.Require().NoError(err)
-	s.NotContains(row.Message, "private-token")
-	s.NotContains(row.Message, "secret-value")
-	s.Equal(map[string]any{"tool": "lookup"}, row.Details)
-}
-
-func (s *StoreSuite) TestAgentLogProviderFailureDetails() {
-	request := &Request{Modality: "search", CustomerID: "failure-details", AgentID: "test-agent", Provider: "perplexity", Model: "search", StartedAt: time.Now(), Success: false, ErrorCode: "build_failed", ErrorMessage: "perplexity: PERPLEXITY_API_KEY is required; api_key=private-key-value"}
-	s.Require().NoError(s.store.RecordRequest(s.ctx, request))
-	rows, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: request.CustomerID, Limit: 1})
-	s.Require().NoError(err)
-	s.Require().Len(rows, 1)
-	detail, err := s.store.AgentLog(s.ctx, request.CustomerID, rows[0].ID)
-	s.Require().NoError(err)
-	s.Equal("build_failed", detail.Details["error_code"])
-	s.Contains(detail.Details["error_message"], "PERPLEXITY_API_KEY is required")
-	s.NotContains(detail.Details["error_message"], "private-key-value")
-	_, err = s.store.AgentLog(s.ctx, "another-customer", rows[0].ID)
-	s.Require().Error(err)
-}
-
-func (s *StoreSuite) TestAMovedLogRowNeverShowsTheErrorOfTheRequestHoldingItsNumberHere() {
-	// The destination's own failed request, which a moved log row's number happens to name.
-	own := &Request{Modality: "llm", CustomerID: "moved-logs", AgentID: "agent", Provider: "openai", Model: "gpt",
-		StartedAt: s.base, Success: false, ErrorCode: "upstream_error", ErrorMessage: "the destination's own failure"}
-	s.Require().NoError(s.store.RecordRequest(s.ctx, own))
-	// A row written as an import writes it, details as they came, naming own's number.
-	logged := func(at time.Time, details map[string]any) *AgentLog {
-		details["request_id"] = strconv.FormatInt(own.ID, 10)
-		entry := &AgentLog{CustomerID: "moved-logs", AgentID: "agent", Source: "system", Severity: "info",
-			EventType: "provider_request", Message: "llm request completed", OccurredAt: at, IngestedAt: at, Details: details}
-		_, err := s.store.GlobalDB().NewInsert().Model(entry).Exec(s.ctx)
-		s.Require().NoError(err)
-		read, err := s.store.AgentLog(s.ctx, "moved-logs", entry.ID)
-		s.Require().NoError(err)
-		return read
-	}
-
-	carried := logged(s.base.Add(time.Hour), map[string]any{"error_code": nil, "error_message": nil})
-	older := logged(s.base.Add(time.Hour), map[string]any{})
-	ownOlder := logged(s.base, map[string]any{})
-
-	s.Contains(carried.Details, "error_code")
-	s.Nil(carried.Details["error_code"], "a row carrying its error is its own answer")
-	s.NotContains(older.Details, "error_code", "an older row's number names a request that started at another time")
-	if !s.store.Sharded() {
-		s.Equal("upstream_error", ownOlder.Details["error_code"], "an older row of this deployment still finds its request")
-	}
-}
-
-// recordCancelled stores a request its caller gave up on after it had generated something.
-func (s *StoreSuite) recordCancelled(at time.Time, latencyMs *float64) {
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
-		Modality: "stt", CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en",
-		Tags: map[string]string{"project": "support"}, StartedAt: at,
-		AudioMs: 700, CostMicros: 50, LatencyMs: latencyMs,
-		Success: false, ErrorCode: ErrorCancelled,
-	}))
-}
-
-func (s *StoreSuite) TestACancelledRequestIsSpendButNeitherAnErrorNorALatency() {
-	for index, latency := range []float64{100, 200} {
-		s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
-			Modality: "stt", CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en",
-			Tags: map[string]string{"project": "support"}, StartedAt: s.base.Add(time.Duration(index+1) * time.Minute),
-			AudioMs: 1000, CostMicros: 100, LatencyMs: &latency, Success: true,
-		}))
-	}
-	failedLatency := 900.0
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
-		Modality: "stt", CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en",
-		Tags: map[string]string{"project": "support"}, StartedAt: s.base.Add(3 * time.Minute),
-		AudioMs: 500, CostMicros: 60, LatencyMs: &failedLatency, Success: false, ErrorCode: "upstream_error",
-	}))
-	// Closed after a first token, and so with a latency, and closed before one, with none.
-	cancelledLatency := 5.0
-	s.recordCancelled(s.base.Add(4*time.Minute), &cancelledLatency)
-	s.recordCancelled(s.base.Add(5*time.Minute), nil)
-
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	check := func(name string, requests, errors, audio, cost int64, p50 *float64, uptime *float64) {
-		s.EqualValues(5, requests, name+": a cancelled request is still a request")
-		s.EqualValues(1, errors, name+": and is no error")
-		s.EqualValues(3900, audio, name+": what it generated is still counted")
-		s.EqualValues(360, cost, name+": and still billed")
-		s.Require().NotNil(p50, name)
-		s.InDelta(200.0, *p50, 0.001, name+": its latency is not one the provider had")
-		s.Require().NotNil(uptime, name)
-		s.InDelta(4.0/5.0, *uptime, 0.001, name+": nor is it downtime")
-	}
-
-	byProvider, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(byProvider, 1)
-	bucket := byProvider[0]
-	check("rollup", bucket.RequestCount, bucket.ErrorCount, bucket.AudioMsTotal, bucket.CostMicrosTotal,
-		bucket.LatencyP50Ms, bucket.Uptime)
-
-	byTag, err := s.store.CustomerTagStats(s.ctx, "stt", "acme", "project", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(byTag, 1)
-	tag := byTag[0]
-	s.EqualValues(5, tag.RequestCount, "tag rollup: a cancelled request is still a request")
-	s.EqualValues(1, tag.ErrorCount, "tag rollup: and is no error")
-	s.EqualValues(360, tag.CostMicrosTotal, "tag rollup: and still billed")
-	s.Require().NotNil(tag.LatencyP50Ms)
-	s.InDelta(200.0, *tag.LatencyP50Ms, 0.001, "tag rollup: its latency is not one the provider had")
-
-	filtered, err := s.store.CustomerStats(s.ctx, "stt", "acme", Hourly, s.base, s.base.Add(time.Hour),
-		map[string]string{"project": "support"})
-	s.Require().NoError(err)
-	s.Require().Len(filtered, 1)
-	bucket = filtered[0]
-	check("raw rows", bucket.RequestCount, bucket.ErrorCount, bucket.AudioMsTotal, bucket.CostMicrosTotal,
-		bucket.LatencyP50Ms, bucket.Uptime)
-}
-
-func (s *StoreSuite) TestARefusedRequestIsSpendButNeitherAnErrorNorALatency() {
-	served, refused := 100.0, 900.0
-	for index, request := range []Request{
-		{LatencyMs: &served, Success: true},
-		{LatencyMs: &refused, Success: false, ErrorCode: ErrorRefused},
-	} {
-		request.Modality, request.CustomerID, request.Provider, request.Model = "llm", "acme", "openai", "gpt"
-		request.Tags = map[string]string{"project": "support"}
-		request.StartedAt = s.base.Add(time.Duration(index+1) * time.Minute)
-		request.OutputTokens, request.CostMicros = 10, 25
-		s.Require().NoError(s.store.RecordRequest(s.ctx, &request))
-	}
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-
-	check := func(name string, requests, errors, cost int64, p50 *float64) {
-		s.EqualValues(2, requests, name+": a refused request is still a request")
-		s.EqualValues(0, errors, name+": and is no error of the provider's")
-		s.EqualValues(50, cost, name+": and still billed")
-		s.Require().NotNil(p50, name)
-		s.InDelta(100.0, *p50, 0.001, name+": its latency is not one the provider had")
-	}
-	byProvider, err := s.store.CustomerStats(s.ctx, "llm", "acme", Hourly, s.base, s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Len(byProvider, 1)
-	check("rollup", byProvider[0].RequestCount, byProvider[0].ErrorCount, byProvider[0].CostMicrosTotal, byProvider[0].LatencyP50Ms)
-	s.Require().NotNil(byProvider[0].Uptime)
-	s.InDelta(1.0, *byProvider[0].Uptime, 0.001, "nor is it downtime")
-
-	byTag, err := s.store.CustomerTagStats(s.ctx, "llm", "acme", "project", Hourly, s.base, s.base.Add(time.Hour))
-	s.Require().NoError(err)
-	s.Require().Len(byTag, 1)
-	check("tag rollup", byTag[0].RequestCount, byTag[0].ErrorCount, byTag[0].CostMicrosTotal, byTag[0].LatencyP50Ms)
-
-	filtered, err := s.store.CustomerStats(s.ctx, "llm", "acme", Hourly, s.base, s.base.Add(time.Hour),
-		map[string]string{"project": "support"})
-	s.Require().NoError(err)
-	s.Require().Len(filtered, 1)
-	check("raw rows", filtered[0].RequestCount, filtered[0].ErrorCount, filtered[0].CostMicrosTotal, filtered[0].LatencyP50Ms)
-	s.Require().NotNil(filtered[0].Uptime)
-	s.InDelta(1.0, *filtered[0].Uptime, 0.001, "raw rows: nor is it downtime")
-}
-
-// usageRow is a request with a usage id of its own, defaulting what a test does not care about.
-func (s *StoreSuite) usageRow(customerID string, change func(*Request)) Request {
-	request := Request{
-		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: customerID,
-		Provider: "openai", Model: "gpt", StartedAt: s.base, OutputTokens: 10, CostMicros: 25, Success: true,
-	}
-	if change != nil {
-		change(&request)
-	}
-	return request
-}
-
-// tooBigToIndex is an id longer than a btree index row may be, even compressed.
-func tooBigToIndex() string {
-	raw := make([]byte, 10_000)
-	_, _ = rand.Read(raw)
-	return hex.EncodeToString(raw)
-}
-
-// requestsOf is every row a customer has in this shard, by usage id.
-func (s *StoreSuite) requestsOf(customerID string) map[uuid.UUID]Request {
-	var rows []Request
-	s.Require().NoError(s.store.ShardDB().NewSelect().Model(&rows).Where("customer_id = ?", customerID).Scan(s.ctx))
-	byUsage := map[uuid.UUID]Request{}
-	for _, row := range rows {
-		byUsage[row.UsageID] = row
-	}
-	return byUsage
-}
-
-func (s *StoreSuite) TestRecordRequestsSkipsWrittenUsageIDs() {
-	first, second := s.usageRow("batch", nil), s.usageRow("batch", nil)
-	written, err := s.store.RecordRequests(s.ctx, []Request{first})
-	s.Require().NoError(err)
-	s.Equal([]uuid.UUID{first.UsageID}, written)
-
-	written, err = s.store.RecordRequests(s.ctx, []Request{first, second})
-
-	s.Require().NoError(err)
-	s.Equal([]uuid.UUID{second.UsageID}, written, "a row already written is not written again")
-	s.Len(s.requestsOf("batch"), 2)
-}
-
-func (s *StoreSuite) TestTwoRowsWithOneUsageIDInOneBatchWriteOne() {
-	first := s.usageRow("twice", nil)
-	second := s.usageRow("twice", func(request *Request) { request.UsageID = first.UsageID })
-
-	written, err := s.store.RecordRequests(s.ctx, []Request{first, second})
-
-	s.Require().NoError(err)
-	s.Equal([]uuid.UUID{first.UsageID}, written)
-	s.Len(s.requestsOf("twice"), 1)
-}
-
-func (s *StoreSuite) TestARowWithoutAUsageIDIsRefused() {
-	written, err := s.store.RecordRequests(s.ctx, []Request{
-		s.usageRow("refused", nil),
-		s.usageRow("refused", func(request *Request) { request.UsageID = uuid.Nil }),
-	})
-
-	s.ErrorIs(err, ErrInvalidRequest)
-	s.True(Unwritable(err), "a row with no usage id never becomes writable")
-	s.Empty(written)
-	s.Empty(s.requestsOf("refused"), "the batch is one transaction")
-}
-
-func (s *StoreSuite) TestTheTableRefusesARowWhoseUsageIDIsNull() {
-	_, err := s.store.ShardDB().ExecContext(s.ctx, `INSERT INTO requests (usage_id, modality, customer_id, provider, model, started_at, success)
-VALUES (NULL, 'llm', 'bare', 'openai', 'gpt', now(), true)`)
-
-	s.Require().Error(err, "a writer that skips RecordRequests still cannot write a row with no usage id")
-	s.True(Unwritable(err))
-}
-
-func (s *StoreSuite) TestARowWrittenWithoutAUsageIDGetsOneFromTheTable() {
-	request := s.usageRow("bare", func(request *Request) { request.UsageID = uuid.Nil })
-
-	_, err := s.store.ShardDB().NewInsert().Model(&request).Exec(s.ctx)
-
-	s.Require().NoError(err, "as the router from before usage ids writes")
-	s.Require().Len(s.requestsOf("bare"), 1)
-	for usageID := range s.requestsOf("bare") {
-		s.NotEqual(uuid.Nil, usageID)
-	}
-}
-
-func (s *StoreSuite) TestARowPostgresRefusesIsUnwritable() {
-	_, err := s.store.RecordRequests(s.ctx, []Request{
-		s.usageRow("too-big", func(request *Request) { request.AgentID = tooBigToIndex() }),
-	})
-
-	s.Require().Error(err)
-	s.True(Unwritable(err), "an id too big for its index is refused however often it is sent: %v", err)
-}
-
-func (s *StoreSuite) TestAShardedBatchWritesOneLogRowPerNewRow() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "call", CustomerID: "batch-log", AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
-	batch := []Request{
-		s.usageRow("batch-log", func(request *Request) { request.AgentID = "agent" }),
-		s.usageRow("batch-log", func(request *Request) { request.AgentID = "agent" }),
-		s.usageRow("batch-log", nil),
-	}
-
-	_, err := s.store.RecordRequests(s.ctx, batch)
-	s.Require().NoError(err)
-	_, err = s.store.RecordRequests(s.ctx, batch)
-	s.Require().NoError(err)
-
-	logs, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: "batch-log", Limit: 10})
-	s.Require().NoError(err)
-	s.Len(logs, 2, "one log row per agent row, and none for a row written again")
-	for _, log := range logs {
-		s.Equal("call", log.SessionID)
-	}
-}
-
-func (s *StoreSuite) TestABatchLogsEachRowInItsOwnCall() {
-	for _, call := range []*Call{
-		{ID: "first", CallID: "stream-1", CustomerID: "calls-a", AgentID: "agent", ConfigID: "cfg-1", StartedAt: s.base},
-		{ID: "second", CallID: "stream-2", CustomerID: "calls-a", AgentID: "agent", ConfigID: "cfg-2", StartedAt: s.base.Add(time.Minute)},
-		{ID: "other", CallID: "stream-3", CustomerID: "calls-b", AgentID: "agent", ConfigID: "cfg-3", StartedAt: s.base},
-	} {
-		s.Require().NoError(s.store.StartCall(s.ctx, call))
-	}
-	at := func(customer, callID string, after time.Duration) Request {
-		return s.usageRow(customer, func(request *Request) {
-			request.AgentID, request.CallID, request.StartedAt = "agent", callID, s.base.Add(after)
-		})
-	}
-	batch := []Request{
-		at("calls-a", "stream-1", 2*time.Minute),
-		at("calls-b", "", time.Second),
-		at("calls-a", "", 2*time.Minute),
-		at("calls-a", "", 30*time.Second),
-	}
-
-	_, err := s.store.RecordRequests(s.ctx, batch)
-	s.Require().NoError(err)
-
-	sessions := func(customer string) map[string]string {
-		logs, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: customer, Limit: 10})
-		s.Require().NoError(err)
-		byRequest := map[string]string{}
-		for _, log := range logs {
-			logged, err := s.store.AgentLog(s.ctx, customer, log.ID)
-			s.Require().NoError(err)
-			byRequest[logged.Details["request_id"].(string)] = logged.SessionID + "/" + logged.ConfigID
-		}
-		return byRequest
-	}
-	id := func(request Request) string { return strconv.FormatInt(request.ID, 10) }
-	s.Equal(map[string]string{
-		id(batch[0]): "first/cfg-1",
-		id(batch[2]): "second/cfg-2",
-		id(batch[3]): "first/cfg-1",
-	}, sessions("calls-a"), "the call a row names, else the agent's latest call started by it")
-	s.Equal(map[string]string{id(batch[1]): "other/cfg-3"}, sessions("calls-b"))
-}
-
 // onShard runs a statement on this shard's database, failing the test if it fails.
 func (s *StoreSuite) onShard(query string, args ...any) {
 	_, err := s.store.ShardDB().ExecContext(s.ctx, query, args...)
@@ -1440,7 +582,7 @@ func (s *StoreSuite) TestMigrateBuildsAUsageIndexSomebodyDropped() {
 	s.restoreUsageIndex()
 	s.onShard("DROP INDEX CONCURRENTLY requests_usage_id_idx")
 	row := s.usageRow("dropped-index", nil)
-	_, err := s.store.RecordRequests(s.ctx, []Request{row})
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{row})
 	s.Require().ErrorContains(err, "ON CONFLICT", "nothing to infer the conflict from without the index")
 
 	s.Require().NoError(s.store.Migrate(s.ctx), "the migration is applied already, and Migrate builds the index itself")
@@ -1448,7 +590,7 @@ func (s *StoreSuite) TestMigrateBuildsAUsageIndexSomebodyDropped() {
 	valid, found := s.usageIndex()
 	s.True(found)
 	s.True(valid)
-	written, err := s.store.RecordRequests(s.ctx, []Request{row, row})
+	written, err := s.store.Requests.InsertMany(s.ctx, []Request{row, row})
 	s.Require().NoError(err)
 	s.Equal([]uuid.UUID{row.UsageID}, written)
 }
@@ -1591,118 +733,4 @@ func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	case <-time.After(30 * time.Second):
 		s.FailNow("the waiting router never migrated once the lock was free")
 	}
-}
-
-func (s *StoreSuite) TestBatchesNamingTheSameCustomersInAnotherOrderDoNotDeadlock() {
-	// The agent log trigger locks each customer it logs a row for until the batch commits.
-	batch := func(first, second string) []Request {
-		var rows []Request
-		for range 50 {
-			rows = append(rows, s.usageRow(first, func(request *Request) { request.AgentID = "agent" }))
-		}
-		return append(rows, s.usageRow(second, func(request *Request) { request.AgentID = "agent" }))
-	}
-
-	for range 5 {
-		one, other := batch("order-a", "order-b"), batch("order-b", "order-a")
-		failed := make(chan error, 2)
-		go func() { _, err := s.store.RecordRequests(s.ctx, one); failed <- err }()
-		go func() { _, err := s.store.RecordRequests(s.ctx, other); failed <- err }()
-		s.Require().NoError(<-failed)
-		s.Require().NoError(<-failed)
-	}
-
-	s.Len(s.requestsOf("order-a"), 5*51)
-	s.Len(s.requestsOf("order-b"), 5*51)
-}
-
-func (s *StoreSuite) TestARequestIDADataMoveTookIsWrittenOnTheNextTry() {
-	var next int64
-	s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
-		"SELECT nextval(pg_get_serial_sequence('requests', 'id'))").Scan(&next))
-	// What a data move does: a row carried in with its own id, ahead of the sequence.
-	moved := s.usageRow("moved-id", func(request *Request) { request.ID = next + 1 })
-	_, err := s.store.ShardDB().NewInsert().Model(&moved).Exec(s.ctx)
-	s.Require().NoError(err)
-	row := s.usageRow("moved-id", nil)
-
-	_, err = s.store.RecordRequests(s.ctx, []Request{row})
-	s.Require().Error(err, "the sequence's next id is the moved row's")
-	s.True(IDTaken(err), "%v", err)
-	s.False(Unwritable(err), "the next try draws another id: %v", err)
-
-	written, err := s.store.RecordRequests(s.ctx, []Request{row})
-	s.Require().NoError(err)
-	s.Equal([]uuid.UUID{row.UsageID}, written)
-}
-
-func (s *StoreSuite) TestManyMovedRequestIDsCostOneTry() {
-	var next int64
-	s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
-		"SELECT nextval(pg_get_serial_sequence('requests', 'id'))").Scan(&next))
-	moved := make([]Request, 500)
-	for i := range moved {
-		moved[i] = s.usageRow("many-moved-ids", func(request *Request) { request.ID = next + 1 + int64(i) })
-	}
-	_, err := s.store.ShardDB().NewInsert().Model(&moved).Exec(s.ctx)
-	s.Require().NoError(err)
-	rows := []Request{s.usageRow("many-moved-ids", nil), s.usageRow("many-moved-ids", nil)}
-
-	_, err = s.store.RecordRequests(s.ctx, rows)
-	s.Require().True(IDTaken(err), "%v", err)
-	written, err := s.store.RecordRequests(s.ctx, rows)
-
-	s.Require().NoError(err, "the failed try moved the sequence past every moved id")
-	s.Len(written, 2)
-	s.Greater(rows[0].ID, next+500)
-}
-
-func (s *StoreSuite) TestTheRequestIDSequenceIsNeverMovedBack() {
-	var ahead int64
-	s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
-		"SELECT setval(pg_get_serial_sequence('requests', 'id'), nextval(pg_get_serial_sequence('requests', 'id')) + 1000)").Scan(&ahead))
-
-	s.Require().NoError(s.store.advanceRequestIDs(s.ctx))
-
-	rows := []Request{s.usageRow("sequence-ahead", nil)}
-	_, err := s.store.RecordRequests(s.ctx, rows)
-	s.Require().NoError(err)
-	s.Equal(ahead+1, rows[0].ID, "a sequence ahead of every row is left where it is")
-}
-
-func (s *StoreSuite) TestABatchLeavesItsRowsInTheOrderSentWithTheirIDs() {
-	sent := []Request{s.usageRow("order-z", nil), s.usageRow("order-y", nil), s.usageRow("order-z", nil)}
-
-	_, err := s.store.RecordRequests(s.ctx, sent)
-
-	s.Require().NoError(err)
-	s.Equal([]string{"order-z", "order-y", "order-z"}, []string{sent[0].CustomerID, sent[1].CustomerID, sent[2].CustomerID})
-	stored := s.requestsOf("order-z")
-	s.Equal(sent[0].ID, stored[sent[0].UsageID].ID, "each row sent has the id it was written under")
-	s.Equal(sent[2].ID, stored[sent[2].UsageID].ID)
-	s.Less(sent[0].ID, sent[2].ID, "one customer's rows are written in the order they were sent")
-}
-
-func (s *StoreSuite) TestTheIdentityAndShippingColumnsAreStored() {
-	shipped := s.base.Add(time.Minute)
-	request := s.usageRow("identity", func(request *Request) {
-		request.OrganizationID, request.OrganizationTier, request.APIKey = "org", "tier-a", "key"
-		request.UserID, request.UsageCategories, request.SessionID = "ada", []string{"support", "team:core"}, "session"
-		request.ToShip, request.ShippedAt, request.ShipError = true, &shipped, "refused"
-	})
-	_, err := s.store.RecordRequests(s.ctx, []Request{request})
-	s.Require().NoError(err)
-
-	stored := s.requestsOf("identity")[request.UsageID]
-
-	s.Equal("org", stored.OrganizationID)
-	s.Equal("tier-a", stored.OrganizationTier)
-	s.Equal("key", stored.APIKey)
-	s.Equal("ada", stored.UserID)
-	s.Equal([]string{"support", "team:core"}, stored.UsageCategories)
-	s.Equal("session", stored.SessionID)
-	s.True(stored.ToShip)
-	s.Require().NotNil(stored.ShippedAt)
-	s.True(shipped.Equal(*stored.ShippedAt))
-	s.Equal("refused", stored.ShipError)
 }

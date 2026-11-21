@@ -122,7 +122,7 @@ func (s *LogsSuite) TestOnlyTheAppsOwnBackendMayReadItsLogs() {
 
 // record writes one line as an agent of the suite's app would.
 func (s *LogsSuite) record(severity, message string) {
-	s.Require().NoError(s.store.RecordAgentLog(context.Background(), &store.AgentLog{
+	s.Require().NoError(s.store.AgentLogs.Insert(context.Background(), &store.AgentLog{
 		CustomerID: s.customerID(), Source: "agent", Severity: severity,
 		EventType: "test", Message: message,
 	}))

@@ -77,7 +77,7 @@ func (s *StoreSuite) TestALimitsWritesAreAudited() {
 	_, err = s.store.Limit(s.ctx, "org-1", limit.ID)
 	s.ErrorIs(err, ErrNoLimit)
 
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 3)
 	s.Equal([]string{AuditDeleted, AuditUpdated, AuditCreated}, []string{entries[0].Action, entries[1].Action, entries[2].Action})
@@ -120,7 +120,7 @@ func (s *StoreSuite) TestResetsAreReadFromTheWindowsAsked() {
 	s.Require().NoError(err)
 	s.Require().Len(resets, 1)
 	s.True(resets[0].WindowStart.Equal(today))
-	entries, err := s.store.AuditEntries(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(s.ctx, audit.CustomerID, AuditEntryFilter{ResourceType: AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Len(entries, 2)
 	s.Contains(entries[0].ResourceID, "reset:")
@@ -130,7 +130,7 @@ func (s *StoreSuite) TestASubjectsSpendIsItsBillableRowsAlone() {
 	s.Require().NoError(s.store.JoinOrganization(s.ctx, "app-1", "org-1"))
 	s.Require().NoError(s.store.JoinOrganization(s.ctx, "app-2", "org-1"))
 	row := func(customer, key, user string, categories []string, cost int64, billable bool) {
-		s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{
+		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
 			UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: customer, Provider: "openai", Model: "m",
 			StartedAt: s.base.Add(-time.Minute), APIKey: key, UserID: user, UsageCategories: categories,
 			CostMicros: cost, Billable: billable, Success: true,

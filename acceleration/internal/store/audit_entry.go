@@ -152,36 +152,46 @@ type AuditEntryFilter struct {
 }
 
 // AuditEntryLimit is the page size an audit query uses for the limit asked for.
-// AuditEntries returns one row more than this.
+// AuditEntries.Select returns one row more than this.
 func AuditEntryLimit(asked int) int {
 	return clampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
 }
 
-// RecordAuditEntry stores one change, at now. An entry for a deployment's resource, such as
-// the price list, has no customer; every other one needs its customer.
-func (s *Store) RecordAuditEntry(ctx context.Context, entry *AuditEntry) error {
-	return recordAuditEntry(ctx, s.global, entry)
+// Validate refuses an entry the log would not hold: an audited resource and action, a resource,
+// a customer unless the resource is the deployment's, and something that moved unless it is a
+// sync.
+func (e *AuditEntry) Validate() error {
+	deployment := slices.Contains(deploymentResources, e.ResourceType)
+	return validate("audit entry").
+		oneOf("resource_type", e.ResourceType, auditResourceTypes...).
+		required("resource_id", e.ResourceID).
+		check((e.CustomerID == "") == deployment, "customer_id", "is required unless the resource is the deployment's").
+		oneOf("action", e.Action, auditActions...).
+		// A sync is recorded whether or not it moved anything: what it marks is the moment the
+		// directory and the stored config agreed, which is what the next sync measures the
+		// edits made since against. Every other action is a change, and a change that changed
+		// nothing is not one.
+		check(len(e.Changes) > 0 || e.Action == AuditSynced, "changes", "is empty").
+		done()
 }
 
-// recordAuditEntry is RecordAuditEntry on db, which may be the transaction the change was
+// AuditEntries are the changes somebody made to an app's configuration, in the shared
+// database.
+type AuditEntries struct {
+	store *Store
+}
+
+// Insert stores one change, at now. An entry for a deployment's resource, such as the price
+// list, has no customer; every other one needs its customer.
+func (r *AuditEntries) Insert(ctx context.Context, entry *AuditEntry) error {
+	return recordAuditEntry(ctx, r.store.global, entry)
+}
+
+// recordAuditEntry is AuditEntries.Insert on db, which may be the transaction the change was
 // written in, so the change and its record commit together.
 func recordAuditEntry(ctx context.Context, db bun.IDB, entry *AuditEntry) error {
-	if !slices.Contains(auditResourceTypes, entry.ResourceType) {
-		return stack.Wrap(fmt.Errorf("store: %q is not an audited resource", entry.ResourceType))
-	}
-	deployment := slices.Contains(deploymentResources, entry.ResourceType)
-	if entry.ResourceID == "" || (entry.CustomerID == "") != deployment {
-		return stack.Wrap(errors.New("store: an audit entry needs a resource, and a customer unless the resource is the deployment's"))
-	}
-	if !slices.Contains(auditActions, entry.Action) {
-		return stack.Wrap(fmt.Errorf("store: %q is not an audit action", entry.Action))
-	}
-	// A sync is recorded whether or not it moved anything: what it marks is the moment the
-	// directory and the stored config agreed, which is what the next sync measures the
-	// edits made since against. Every other action is a change, and a change that changed
-	// nothing is not one.
-	if len(entry.Changes) == 0 && entry.Action != AuditSynced {
-		return stack.Wrap(errors.New("store: an audit entry records what moved, and nothing did"))
+	if err := entry.Validate(); err != nil {
+		return stack.Wrap(err)
 	}
 	if entry.Changes == nil {
 		entry.Changes = []AuditChange{}
@@ -197,15 +207,14 @@ func recordAuditEntry(ctx context.Context, db bun.IDB, entry *AuditEntry) error 
 	return nil
 }
 
-// AuditEntries lists the customer's changes, newest first, one more than
-// AuditEntryLimit(filter.Limit). A deleted resource's rows are listed too: that is the
-// point of keeping them.
-func (s *Store) AuditEntries(ctx context.Context, customerID string, filter AuditEntryFilter) ([]AuditEntry, error) {
+// Select lists the customer's changes, newest first, one more than AuditEntryLimit(filter.Limit).
+// A deleted resource's rows are listed too: that is the point of keeping them.
+func (r *AuditEntries) Select(ctx context.Context, customerID string, filter AuditEntryFilter) ([]AuditEntry, error) {
 	if customerID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer id is required"))
 	}
 	entries := []AuditEntry{}
-	query := s.global.NewSelect().Model(&entries).Where("customer_id = ?", customerID)
+	query := r.store.global.NewSelect().Model(&entries).Where("customer_id = ?", customerID)
 	if filter.ResourceType != "" {
 		query = query.Where("resource_type = ?", filter.ResourceType)
 	}
@@ -237,13 +246,13 @@ func (s *Store) AuditEntries(ctx context.Context, customerID string, filter Audi
 	return entries, nil
 }
 
-// LatestAuditEntry returns the newest row the filter matches, and whether there was one. It
-// is what a sync reads to find when the agent was last synced, and what resolves the id a
-// client acknowledges changes up to.
-func (s *Store) LatestAuditEntry(ctx context.Context, customerID string, filter AuditEntryFilter) (AuditEntry, bool, error) {
+// Latest returns the newest row the filter matches, and whether there was one. It is what a
+// sync reads to find when the agent was last synced, and what resolves the id a client
+// acknowledges changes up to.
+func (r *AuditEntries) Latest(ctx context.Context, customerID string, filter AuditEntryFilter) (AuditEntry, bool, error) {
 	filter.Limit = 1
 	filter.After = nil
-	found, err := s.AuditEntries(ctx, customerID, filter)
+	found, err := r.Select(ctx, customerID, filter)
 	if err != nil {
 		return AuditEntry{}, false, err
 	}
@@ -253,13 +262,13 @@ func (s *Store) LatestAuditEntry(ctx context.Context, customerID string, filter 
 	return found[0], true, nil
 }
 
-// AuditEntryByID returns one of the customer's audit rows.
-func (s *Store) AuditEntryByID(ctx context.Context, customerID, id string) (AuditEntry, bool, error) {
+// Get returns one of the customer's audit rows, and whether there was one.
+func (r *AuditEntries) Get(ctx context.Context, customerID, id string) (AuditEntry, bool, error) {
 	if customerID == "" || id == "" {
 		return AuditEntry{}, false, stack.Wrap(errors.New("store: a customer and an entry id are required"))
 	}
 	var entry AuditEntry
-	err := s.global.NewSelect().Model(&entry).
+	err := r.store.global.NewSelect().Model(&entry).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Limit(1).

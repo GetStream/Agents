@@ -108,8 +108,7 @@ func (s *TurnRecordingSuite) TestAFinishedExchangeIsKeptAndCounted() {
 	s.Require().NotNil(turns[0].LLMTTFTMs)
 	s.False(turns[0].Interrupted)
 
-	stats, err := s.pgStore.CustomerTurnStats(
-		context.Background(), "acme", s.agents.agentID, store.Hourly, s.startedAt.Add(-time.Hour), time.Now().Add(time.Hour))
+	stats, err := s.pgStore.TurnBuckets.Select(context.Background(), "acme", store.TurnBucketFilter{AgentID: s.agents.agentID, Granularity: store.Hourly, From: s.startedAt.Add(-time.Hour), To: time.Now().Add(time.Hour)})
 	s.Require().NoError(err)
 	s.Require().Len(stats, 1)
 	s.EqualValues(1, stats[0].TurnCount)

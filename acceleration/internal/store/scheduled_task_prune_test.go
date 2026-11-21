@@ -63,7 +63,7 @@ func (s *StoreSuite) TestPruneDeletesRunsThatFinishedMoreThanNinetyDaysAgo() {
 	s.ranFor("recent", "acme", "t", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 89*day)
 	s.ranFor("running", "acme", "t", ScheduledTaskTriggerSchedule, ScheduledTaskRunRunning, -1)
 
-	runs, tasks, err := s.store.PruneScheduledTasks(s.ctx)
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(4, runs)
@@ -79,7 +79,7 @@ func (s *StoreSuite) TestPruneKeepsTheTasksThatAreActiveOrPausedAndTakesTheirOld
 	s.ranFor("active-new", "acme", "active", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, day)
 	s.ranFor("paused-old", "acme", "paused", ScheduledTaskTriggerSchedule, ScheduledTaskRunMissed, 200*day)
 
-	runs, tasks, err := s.store.PruneScheduledTasks(s.ctx)
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(2, runs)
@@ -96,7 +96,7 @@ func (s *StoreSuite) TestPruneDeletesCompletedAndFailedTasksPastRetentionWithThe
 	s.ranFor("of-completed-old", "acme", "completed-old", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 91*day)
 	s.ranFor("of-completed-new", "acme", "completed-new", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 10*day)
 
-	runs, tasks, err := s.store.PruneScheduledTasks(s.ctx)
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(1, runs)
@@ -120,7 +120,7 @@ func (s *StoreSuite) TestPruneKeepsAnOldCompletedTaskWhileARunOfItIsUnfinishedOr
 	s.ranFor("not-theirs", "acme", "other-customer", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 100*day)
 	s.ranFor("theirs", "globex", "other-customer", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, day)
 
-	runs, tasks, err := s.store.PruneScheduledTasks(s.ctx)
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(2, runs)
@@ -148,7 +148,7 @@ FROM generate_series(1, %d) AS n`, scheduledTaskRunsPruned+1))
 func (s *StoreSuite) TestPruneGoesOnUntilNoBatchIsLeft() {
 	s.backlog()
 
-	runs, tasks, err := s.store.PruneScheduledTasks(s.ctx)
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(scheduledTaskRunsPruned+1, runs)
@@ -169,7 +169,7 @@ func (s *StoreSuite) TestPruneDeletesNoMoreThanABatchInOneStatement() {
 	_, err = before.ExecContext(s.ctx, "SELECT 1")
 	s.Require().NoError(err)
 
-	_, _, err = s.store.PruneScheduledTasks(s.ctx)
+	_, _, err = s.store.ScheduledTasks.Prune(s.ctx)
 	s.Require().NoError(err)
 
 	perStatement := func(query string) []int {
@@ -191,7 +191,7 @@ func (s *StoreSuite) TestPruneRunsBesideFinishesWithoutDeadlock() {
 	for i := range live {
 		s.task(fmt.Sprintf("live-%d", i), func(task *ScheduledTask) { task.NextRunAt = &due })
 	}
-	claimed, err := s.store.ClaimDueScheduledTasks(s.ctx, live, time.Hour)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, live, time.Hour)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, live)
 	for _, c := range claimed {
@@ -210,7 +210,7 @@ func (s *StoreSuite) TestPruneRunsBesideFinishesWithoutDeadlock() {
 	errs := make(chan error, 2*live+8)
 	for _, c := range claimed {
 		wg.Go(func() {
-			applied, err := s.store.FinishScheduledTaskRun(s.ctx, "acme", c.Run.ID, c.ClaimID, ScheduledTaskOutcome{
+			applied, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", c.Run.ID, c.ClaimID, ScheduledTaskOutcome{
 				RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
 				State: ScheduledTaskActive, NextRunAt: &due,
 			})
@@ -223,7 +223,7 @@ func (s *StoreSuite) TestPruneRunsBesideFinishesWithoutDeadlock() {
 	var runs, tasks atomic.Int64
 	for range 4 {
 		wg.Go(func() {
-			r, t, err := s.store.PruneScheduledTasks(s.ctx)
+			r, t, err := s.store.ScheduledTasks.Prune(s.ctx)
 			runs.Add(r)
 			tasks.Add(t)
 			errs <- err
@@ -258,7 +258,7 @@ func (s *StoreSuite) TestPruneLeavesTheRowsAnotherPruneHoldsAndDoesNotWait() {
 
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
-	runs, tasks, err := s.store.PruneScheduledTasks(ctx)
+	runs, tasks, err := s.store.ScheduledTasks.Prune(ctx)
 
 	s.Require().NoError(err, "the prune waited for rows it could have left")
 	s.EqualValues(1, runs)
@@ -267,7 +267,7 @@ func (s *StoreSuite) TestPruneLeavesTheRowsAnotherPruneHoldsAndDoesNotWait() {
 	s.Equal([]string{"acme/held-task"}, s.taskIDs())
 
 	s.Require().NoError(other.Commit())
-	runs, tasks, err = s.store.PruneScheduledTasks(s.ctx)
+	runs, tasks, err = s.store.ScheduledTasks.Prune(s.ctx)
 	s.Require().NoError(err)
 	s.EqualValues(1, runs)
 	s.EqualValues(1, tasks)

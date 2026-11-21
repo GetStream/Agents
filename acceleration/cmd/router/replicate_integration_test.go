@@ -84,7 +84,7 @@ func (s *ReplicateResumeSuite) importedTask(task store.ScheduledTask, state stri
 	}
 	task.UserID, task.CallerKind, task.Title, task.Instructions = "sam", "authenticated", "Stretch", "Remind Sam to stretch."
 	task.Timezone, task.State, task.CreatedBy = "UTC", store.ScheduledTaskActive, "api"
-	s.Require().NoError(s.store.CreateScheduledTask(s.ctx, &task, 25))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, &task, 25))
 	var row map[string]any
 	var raw []byte
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
@@ -106,14 +106,14 @@ func (s *ReplicateResumeSuite) overdue(id, rrule, state string) time.Time {
 
 // task reads a task here as the worker and the API read it.
 func (s *ReplicateResumeSuite) task(id string) store.ScheduledTask {
-	task, err := s.store.ScheduledTask(s.ctx, "acme", id)
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)
 	return task
 }
 
 // claimed is the tasks this deployment's worker would deliver now.
 func (s *ReplicateResumeSuite) claimed() []string {
-	claims, err := s.store.ClaimDueScheduledTasks(s.ctx, 10, time.Minute)
+	claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
 	var ids []string
 	for _, claim := range claims {
@@ -130,7 +130,7 @@ func (s *ReplicateResumeSuite) cutOver() string {
 }
 
 func (s *ReplicateResumeSuite) state(id string) string {
-	task, err := s.store.ScheduledTask(s.ctx, "acme", id)
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)
 	return task.State
 }
@@ -238,7 +238,7 @@ func (s *ReplicateResumeSuite) TestResumeSaysHowManyTasksItLeftPausedForWantOfRo
 		`UPDATE agent_configs SET scheduling = '{"max_tasks_per_user": 1}' WHERE id = 'config-1'`)
 	s.Require().NoError(err)
 	next := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
-	s.Require().NoError(s.store.CreateScheduledTask(s.ctx, &store.ScheduledTask{
+	s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, &store.ScheduledTask{
 		ID: "st-here", CustomerID: "acme", ConfigID: "config-1", UserID: "sam", CallerKind: "authenticated",
 		Title: "Hydrate", Instructions: "Remind Sam to drink.", StartLocal: next, Timezone: "UTC",
 		NextRunAt: &next, CreatedBy: "api",
@@ -262,7 +262,7 @@ func (s *ReplicateResumeSuite) TestResumeCountsTheRoomAfterItSkipsAnOverdueRepea
 		`UPDATE agent_configs SET scheduling = '{"max_tasks_per_user": 2}' WHERE id = 'config-1'`)
 	s.Require().NoError(err)
 	next := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
-	s.Require().NoError(s.store.CreateScheduledTask(s.ctx, &store.ScheduledTask{
+	s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, &store.ScheduledTask{
 		ID: "st-here", CustomerID: "acme", ConfigID: "config-1", UserID: "sam", CallerKind: "authenticated",
 		Title: "Hydrate", Instructions: "Remind Sam to drink.", StartLocal: next, Timezone: "UTC",
 		NextRunAt: &next, CreatedBy: "api",
@@ -456,7 +456,7 @@ VALUES ('run-held', 'st-held', 'acme', ?, 'running', ?, ?, 1)`, due, due, time.N
 			s.Equal(store.ScheduledTaskActive, task.State)
 			s.Require().NotNil(task.NextRunAt)
 			s.Equal(due, task.NextRunAt.UTC(), "the held occurrence is still to deliver")
-			claims, err := s.store.ClaimDueScheduledTasks(s.ctx, 10, time.Minute)
+			claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
 			s.Require().NoError(err)
 			var runs []string
 			for _, claim := range claims {
@@ -557,7 +557,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesAnotherCustomersMoveAlone() {
 
 	s.cutOver()
 
-	task, err := s.store.ScheduledTask(s.ctx, "other", "st-other")
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "other", "st-other")
 	s.Require().NoError(err)
 	s.Require().NotNil(task.NextRunAt)
 	s.Equal(due, task.NextRunAt.UTC(), "another customer's move is cut over on its own")

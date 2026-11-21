@@ -285,7 +285,7 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
-		s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 			CustomerID: s.customerID(), AgentID: call.AgentID,
 			Modality: modality, Provider: "stub", Model: model,
 			StartedAt: s.base.Add(time.Second), Success: true,
@@ -305,7 +305,7 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 
 func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndWhoItSpokeTo() {
 	call := s.started(store.Call{UserID: "ada"})
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt:   s.base.Add(time.Second),
@@ -328,7 +328,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndWhoItSpokeTo() {
 
 func (s *CallsSuite) TestACallStillRunningIsNotToldWhatItHasSpentSoFar() {
 	call := s.started(store.Call{})
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: s.base.Add(time.Second), InputTokens: 900, Success: true,
@@ -353,7 +353,7 @@ func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePrompt
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.RecordRequest(context.Background(), &request))
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
 	}
 
 	var spent CallTokens
@@ -380,7 +380,7 @@ func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.RecordRequest(context.Background(), &request))
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
 	}
 
 	var spent CallTokens
@@ -401,7 +401,7 @@ func (s *CallsSuite) TestTokensAreStillReadUnderTheCallsPathTheyMovedFrom() {
 	call := s.started(store.Call{})
 	request := store.Request{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 700, OutputTokens: 30,
 		CustomerID: s.customerID(), AgentID: call.AgentID, StartedAt: s.base.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &request))
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
 
 	var moved, kept CallTokens
 	s.Require().Equal(http.StatusOK,

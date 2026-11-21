@@ -765,13 +765,13 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
 	}
 
-	// Every writer of a log draws its id under its customer's lock (RecordAgentLog), so ids
+	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
 	// commit in order and a reader resuming after one misses none. The row is read through the
 	// lock, so it is taken before the id is drawn and held until the statement's transaction ends.
 	//
 	// A request's log is a row of agent_logs the export carries, written where the request was
 	// (agent_request_log), so an imported request tells the trigger here it is logged already,
-	// as RecordRequests does, until the statement's transaction ends.
+	// as Requests.InsertMany does, until the statement's transaction ends.
 	locked, through := "", ""
 	switch table {
 	case "agent_logs":
@@ -1767,4 +1767,30 @@ func dataTableByName(name string) (dataTable, bool) {
 		}
 	}
 	return dataTable{}, false
+}
+
+// HoldingTable names the first table an export carries that holds a row of the customer's in the
+// shared database, empty when none does. A table kept in the shards is left out: it holds the
+// customer's own traffic here, and a shard's pod reads only its own shard, so counting it would
+// make the answer depend on which pod runs. A table that belongs to a customer through a parent
+// is left out too: its rows are written only under a parent of the customer's.
+func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, error) {
+	for _, table := range dataTables {
+		if table.customer == "" || table.shard {
+			continue
+		}
+		where := table.customer + " = ?"
+		if table.filter != "" {
+			where += " AND " + table.filter
+		}
+		var holds bool
+		query := "SELECT EXISTS (SELECT 1 FROM " + table.name + " WHERE " + where + ")"
+		if err := s.global.QueryRowContext(ctx, query, customerID).Scan(&holds); err != nil {
+			return "", fmt.Errorf("store: holds %s: %w", table.name, err)
+		}
+		if holds {
+			return table.name, nil
+		}
+	}
+	return "", nil
 }

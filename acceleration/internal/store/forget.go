@@ -31,34 +31,6 @@ func (u UserSettings) Changes() []AuditChange {
 	}
 }
 
-// UserRequests is how many requests on every shard name an app's end user.
-func (s *Store) UserRequests(ctx context.Context, appID, userID string) (int64, error) {
-	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (int, error) {
-		return db.NewSelect().Model((*Request)(nil)).Where("customer_id = ?", appID).Where("user_id = ?", userID).Count(ctx)
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: user requests: %w", err))
-	}
-	var total int64
-	for _, count := range counts {
-		total += int64(count)
-	}
-	return total, nil
-}
-
-// RenameUserRequests replaces an app's end user id with replacement on every shard's requests,
-// and answers how many rows it rewrote.
-func (s *Store) RenameUserRequests(ctx context.Context, appID, userID, replacement string) (int64, error) {
-	renamed, err := onEveryShard(ctx, s, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*Request)(nil)).Set("user_id = ?", replacement).
-			Where("customer_id = ?", appID).Where("user_id = ?", userID).Exec(ctx)
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
-	}
-	return renamed, nil
-}
-
 // UserOrganizations are the organizations an app's end user may have counters and holds under:
 // those of the requests on every shard, and of the limits, resets and grants, naming any of
 // userIDs, and the app's own. A run finishing one that stopped names the replacement too, since

@@ -422,7 +422,7 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	// has committed and nothing pauses them later, so the pause outlives a caller that hung up.
 	paused, cancel := detachedWrite(ctx)
 	defer cancel()
-	if err := s.store.PauseScheduledTasksForConfig(paused, customerID, request.Id); err != nil {
+	if err := s.store.ScheduledTasks.PauseForConfig(paused, customerID, request.Id); err != nil {
 		s.logger.Error("could not pause a deleted config's scheduled tasks",
 			"config", request.Id, "error", err)
 	}

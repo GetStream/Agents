@@ -1337,7 +1337,7 @@ func (s *Service) recordPlaced(
 	details["vendor_call_id"] = placed.VendorCallID
 	ctx, cancel := context.WithTimeout(ctx, agentLogTimeout)
 	defer cancel()
-	err := s.store.RecordAgentLog(ctx, &store.AgentLog{
+	err := s.store.AgentLogs.Insert(ctx, &store.AgentLog{
 		CustomerID: customerID,
 		SessionID:  sessionID,
 		Source:     "system",
@@ -1388,7 +1388,7 @@ func (s *Service) recordBridgeMedia(ctx context.Context, customerID, sessionID s
 	if media.Customer != "" {
 		details["customer_media_addr"] = media.Customer
 	}
-	err := s.store.RecordAgentLog(ctx, &store.AgentLog{
+	err := s.store.AgentLogs.Insert(ctx, &store.AgentLog{
 		CustomerID: customerID,
 		SessionID:  sessionID,
 		Source:     "system",

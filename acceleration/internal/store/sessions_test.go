@@ -1096,7 +1096,7 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 		{"acme", "sams", "sam"},
 		{"globex", "theirs", "guest-1"},
 	} {
-		task, err := s.store.ScheduledTask(s.ctx, want.customer, want.task)
+		task, err := s.store.ScheduledTasks.Get(s.ctx, want.customer, want.task)
 		s.Require().NoError(err)
 		s.Equal(want.user, task.UserID, "%s/%s", want.customer, want.task)
 	}

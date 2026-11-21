@@ -845,7 +845,7 @@ func (r *turnRecorder) persist(ctx context.Context, row live.Turn) error {
 		}
 	}
 	if r.store != nil {
-		if err := r.store.RecordTurnStats(ctx, sampleOf(row)); err != nil {
+		if err := r.store.TurnBuckets.Add(ctx, sampleOf(row)); err != nil {
 			r.logger.Error("could not count turn", "error", err)
 			failures = append(failures, err)
 		}

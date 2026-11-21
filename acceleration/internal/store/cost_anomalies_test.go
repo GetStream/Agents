@@ -17,7 +17,7 @@ func (s *StoreSuite) orgSpend(store *Store, organization string, at time.Time, c
 	for _, apply := range change {
 		apply(request)
 	}
-	s.Require().NoError(store.RecordRequest(s.ctx, request))
+	s.Require().NoError(store.Requests.Insert(s.ctx, request))
 }
 
 func (s *StoreSuite) TestDailySpendIsEachOrganizationsBillableSpendPerUTCDay() {

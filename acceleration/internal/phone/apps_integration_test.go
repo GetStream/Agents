@@ -1019,9 +1019,7 @@ func (s *AppsSuite) callPlacedRows(placed Placed) []store.AgentLog {
 }
 
 func (s *AppsSuite) eventRows(placed Placed, eventType string) []store.AgentLog {
-	rows, err := s.store.AgentLogs(s.ctx, store.LogFilter{
-		CustomerID: s.customer, SessionID: placed.SessionID, Limit: 250,
-	})
+	rows, err := s.store.AgentLogs.Select(s.ctx, s.customer, store.AgentLogFilter{SessionID: placed.SessionID, Limit: 250})
 	s.Require().NoError(err)
 	var found []store.AgentLog
 	for _, row := range rows {
@@ -1040,7 +1038,7 @@ func (s *AppsSuite) TestAPlacedCallWritesACallPlacedRow() {
 
 	rows := s.callPlacedRows(placed)
 	s.Require().Len(rows, 1)
-	row, err := s.store.AgentLog(s.ctx, s.customer, rows[0].ID)
+	row, err := s.store.AgentLogs.Get(s.ctx, s.customer, rows[0].ID)
 	s.Require().NoError(err)
 	s.Equal(BridgeHost(s.vendor.dialed.Bridge.URI), row.Details["stream_sip_host"])
 	s.NotEmpty(row.Details["stream_sip_host"])
@@ -1130,7 +1128,7 @@ func (s *AppsSuite) TestACallThroughACustomersTrunkNamesTheTrunksHostOnly() {
 
 	rows := s.callPlacedRows(call.placed)
 	s.Require().Len(rows, 1)
-	row, err := s.store.AgentLog(s.ctx, s.customer, rows[0].ID)
+	row, err := s.store.AgentLogs.Get(s.ctx, s.customer, rows[0].ID)
 	s.Require().NoError(err)
 	s.Equal("trunk.example.com", row.Details["customer_trunk_host"])
 	s.Equal(SIPTrunkVendor, row.Details["vendor"])
@@ -1151,7 +1149,7 @@ func (s *AppsSuite) TestACallThroughACustomersTrunkKeepsWhereEachSidesAudioComes
 
 	rows := s.eventRows(call.placed, "bridge_media")
 	s.Require().Len(rows, 1)
-	row, err := s.store.AgentLog(s.ctx, s.customer, rows[0].ID)
+	row, err := s.store.AgentLogs.Get(s.ctx, s.customer, rows[0].ID)
 	s.Require().NoError(err)
 	s.Equal(map[string]any{"stream_media_addr": "203.0.113.10", "customer_media_addr": "198.51.100.7"}, row.Details)
 }

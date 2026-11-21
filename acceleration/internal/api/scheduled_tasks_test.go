@@ -477,9 +477,10 @@ func (s *ScheduledTasksSuite) model() *schedulingModel {
 
 // tasksOf is every task the user holds, however it was made.
 func (s *ScheduledTasksSuite) tasksOf(user *testClient) []store.ScheduledTask {
-	tasks, err := s.store.ScheduledTasks(context.Background(), s.customerID(), store.ScheduledTaskFilter{
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{
 		Scope: store.ScheduledTaskScope{UserID: user.userID},
-	}, 25, nil)
+		Limit: 25,
+	})
 	s.Require().NoError(err)
 	return tasks
 }
@@ -508,7 +509,7 @@ func (s *ScheduledTasksSuite) runWorker() {
 func (s *ScheduledTasksSuite) makeDue(task store.ScheduledTask) {
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	// The endpoints kick the worker after a change; a write straight to the
 	// store must too, or a running worker only looks again a lease later.
 	if s.worker != nil {
@@ -518,14 +519,14 @@ func (s *ScheduledTasksSuite) makeDue(task store.ScheduledTask) {
 
 // runsOf is the task's runs, newest first.
 func (s *ScheduledTasksSuite) runsOf(task store.ScheduledTask) []store.ScheduledTaskRun {
-	runs, err := s.store.ScheduledTaskRuns(context.Background(), s.customerID(), task.ID, 25, nil)
+	runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), s.customerID(), store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 	s.Require().NoError(err)
 	return runs
 }
 
 // taskReloaded is the task as the store holds it now.
 func (s *ScheduledTasksSuite) taskReloaded(task store.ScheduledTask) store.ScheduledTask {
-	stored, err := s.store.ScheduledTask(context.Background(), s.customerID(), task.ID)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task.ID)
 	s.Require().NoError(err)
 	return stored
 }
@@ -707,7 +708,7 @@ func (s *ScheduledTasksSuite) seedListedTask(config string, user *testClient, st
 		CallerKind: string(auth.KindServer), Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC), Timezone: "Europe/Amsterdam", State: state,
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 }
 
 func (s *ScheduledTasksSuite) listedTasks(config string, user *testClient) (int, string) {
@@ -765,7 +766,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRewriteWhatABackendToldItToDo() 
 	s.say(user, opened.Id, "make the stretch reminder a joke")
 	s.Contains(s.ranResult(watching), `"error":"server_side_only"`)
 	s.await(watching, "responded")
-	stored, err := s.store.ScheduledTask(context.Background(), s.customerID(), theirs.Id)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), theirs.Id)
 	s.Require().NoError(err)
 	s.Equal("Remind them to stretch.", stored.Instructions)
 
@@ -782,7 +783,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRewriteWhatABackendToldItToDo() 
 		Arguments: `{"id":"` + made.ID + `","action":"reschedule","instructions":"Remind them to drink two glasses."}`})
 	s.say(user, opened.Id, "make it two glasses")
 	s.NotContains(s.ranResult(watching), `"error"`)
-	stored, err = s.store.ScheduledTask(context.Background(), s.customerID(), made.ID)
+	stored, err = s.store.ScheduledTasks.Get(context.Background(), s.customerID(), made.ID)
 	s.Require().NoError(err)
 	s.Equal("Remind them to drink two glasses.", stored.Instructions)
 }
@@ -796,7 +797,7 @@ func (s *ScheduledTasksSuite) TestTheAgentListsRunningTasksFirstAndSaysWhenThere
 			CallerKind: string(auth.KindServer), Title: "Stretch", Instructions: "Remind them to stretch.",
 			StartLocal: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC), Timezone: "Europe/Amsterdam", State: state,
 		}
-		s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+		s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 		return task.ID
 	}
 	// The running ones are the oldest, so newest first alone would bury them.
@@ -1068,7 +1069,7 @@ func (s *ScheduledTasksSuite) TestATaskWithNoSessionYetOpensOneAtItsFirstOccurre
 		StartLocal:   now.UTC(), Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "api",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 25))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
 	s.runWorker()
 
 	run := s.delivered(task)
@@ -1091,8 +1092,8 @@ func (s *ScheduledTasksSuite) TestAReduedOneShotInAFallBackSecondPassIsDueAtThat
 		StartLocal: time.Date(2025, 10, 26, 2, 20, 0, 0, time.UTC), Timezone: "Europe/Berlin",
 		NextRunAt: &again, State: store.ScheduledTaskActive, CreatedBy: "api",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 25))
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &store.ScheduledTaskRun{
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
 		CustomerID: s.customerID(), TaskID: task.ID, ScheduledFor: second,
 		State: store.ScheduledTaskRunMissed, CreatedAt: second,
 	}))
@@ -1117,7 +1118,7 @@ func (s *ScheduledTasksSuite) TestATaskThatComesDueOnACallWaitsForTheCallToEnd()
 		StartLocal:   now.UTC(), Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "api",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 25))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
 	s.runWorker()
 
 	// The worker claims the occurrence, but nothing reaches the model while
@@ -1146,7 +1147,7 @@ func (s *ScheduledTasksSuite) TestADueTaskIsHandedToTheNodeHoldingItsConversatio
 		StartLocal:   now.UTC(), Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "api",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 25))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
 	s.runWorker()
 
 	run := s.delivered(task)
@@ -1305,7 +1306,7 @@ func (s *ScheduledTasksSuite) TestAConfigThatCannotBeReadIsNotReportedAsDeletedO
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "Europe/Amsterdam",
 		State: store.ScheduledTaskPaused,
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	var rendered ScheduledTask
 	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+task.ID+"/resume", nil, &rendered))
@@ -1336,7 +1337,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRescheduleAFailedTaskOfAConfigDe
 	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/configs/"+config, nil, nil))
 	failed := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	failed.State = store.ScheduledTaskFailed
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &failed))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &failed))
 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","in":"PT2H"}`})
@@ -1351,7 +1352,7 @@ func (s *ScheduledTasksSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMis
 	created := s.createTask(user, taskRequest(config))
 	// An occurrence held through quiet hours: running, with no worker on it.
 	until := time.Now().Add(8 * time.Hour)
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &store.ScheduledTaskRun{
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
 		TaskID: created.Id, CustomerID: s.customerID(), ScheduledFor: time.Now().Add(-time.Minute), PostponedUntil: &until,
 	}))
 
@@ -1703,10 +1704,10 @@ func (s *ScheduledTasksSuite) TestATaskStoredWithARepeatNowRefusedStillReadsBack
 	body.Schedule = ScheduledTaskSchedule{At: pointerTo("2026-01-05T09:00:00"), Repeat: pointerTo("FREQ=WEEKLY;BYDAY=MO,WE"),
 		Timezone: pointerTo("Europe/Amsterdam")}
 	created := s.createTask(user, body)
-	task, err := s.store.ScheduledTask(context.Background(), s.customerID(), created.Id)
+	task, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	task.RRule = "FREQ=DAILY;BYDAY=MO,WE"
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 
 	var read ScheduledTask
 	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+created.Id, nil, &read))
@@ -2306,7 +2307,7 @@ func (s *ScheduledTasksSuite) TestATaskAMovePausedThatTheUserPausesIsLeftPausedB
 	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+created.Id+"/pause", nil, &rendered))
 
 	s.Zero(s.cutOver(), "it was paused already, but now the user paused it")
-	task, err := s.store.ScheduledTask(context.Background(), s.customerID(), created.Id)
+	task, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskPaused, task.State)
 }
@@ -2324,7 +2325,7 @@ func (s *ScheduledTasksSuite) TestATaskAMovePausedThatTheUserResumesLosesTheMove
 	s.Require().Equal(store.ScheduledTaskActive, rendered.State)
 
 	// Paused later by the router (an unreadable schedule), the cut-over must not take it for the move's.
-	task, err := s.store.ScheduledTask(context.Background(), s.customerID(), created.Id)
+	task, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.False(task.MovePaused, "the user decided what it does here")
 }
@@ -2342,7 +2343,7 @@ func (s *ScheduledTasksSuite) TestATaskAMovePausedThatTheUserRetitlesIsStillTheC
 		UpdateScheduledTaskRequest{Title: pointerTo("Stretch break")}, &updated))
 
 	s.Equal(int64(1), s.cutOver(), "an edit is not a pause: the source still delivers it until the cut-over")
-	task, err := s.store.ScheduledTask(context.Background(), s.customerID(), created.Id)
+	task, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskActive, task.State)
 	s.Equal("Stretch break", task.Title)
@@ -2585,7 +2586,7 @@ func (s *ScheduledTasksSuite) TestAFailedOneShotIsRefusedOnResumeUntilItIsResche
 	path := "/v1/agents/scheduled-tasks/" + created.Id
 	due := s.ranOut(created.Id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 1)
 	failure := scheduling.ReasonFailed
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &store.ScheduledTaskRun{
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
 		TaskID: created.Id, CustomerID: s.customerID(), ScheduledFor: due,
 		State: store.ScheduledTaskRunFailed, Error: &failure, FinishedAt: &due,
 	}))
@@ -2634,7 +2635,7 @@ func (s *ScheduledTasksSuite) TestResumingALateOneShotLeavesTheRunItsOccurrenceA
 	due := s.pausedAt(created.Id, time.Now().Add(-time.Hour))
 	// What a pause leaves of a run held by quiet hours: missed, with no reason.
 	finished := due.Add(time.Minute)
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &store.ScheduledTaskRun{
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
 		TaskID: created.Id, CustomerID: s.customerID(), ScheduledFor: due,
 		State: store.ScheduledTaskRunMissed, FinishedAt: &finished,
 	}))
@@ -2655,7 +2656,7 @@ func (s *ScheduledTasksSuite) TestAOneShotPausedAfterItsOccurrenceFailedIsRefuse
 	// after by the agent, which pauses a failed task too.
 	due := s.ranOut(created.Id, store.ScheduledTaskPaused, time.Now().Add(-time.Hour), 1)
 	failure := scheduling.ReasonFailed
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &store.ScheduledTaskRun{
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
 		TaskID: created.Id, CustomerID: s.customerID(), ScheduledFor: due,
 		State: store.ScheduledTaskRunFailed, Error: &failure, FinishedAt: &due,
 	}))
@@ -2784,7 +2785,7 @@ func (s *ScheduledTasksSuite) TestRunningATaskByHandDeliversWithoutMovingTheSche
 	s.Equal(created.Id, run.TaskId)
 
 	s.Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), s.customerID(), created.Id, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), s.customerID(), store.ScheduledTaskRunFilter{TaskID: created.Id, Limit: 25})
 		return err == nil && len(runs) == 1 && runs[0].State == store.ScheduledTaskRunDelivered
 	}, 30*time.Second, 250*time.Millisecond, "the manual run was not delivered")
 
@@ -4020,7 +4021,7 @@ func (s *ScheduledTasksSuite) TestPausingATaskWritesTheOccurrenceItHeldMissed() 
 	task := s.tasksOf(user)[0]
 	// An occurrence quiet hours hold is a run left running until the hold ends.
 	held := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: s.customerID(), ScheduledFor: *task.NextRunAt, Attempts: 1}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &held))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &held))
 	path := "/v1/agents/scheduled-tasks/" + created.Id
 
 	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, path+"/pause", nil, nil))
@@ -4039,13 +4040,13 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseWorkersKeepDyingListsACodeAsI
 	task := s.tasksOf(user)[0]
 	due := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	task.NextRunAt = &due
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	// Three workers took it up and died: the store's cap.
 	started := time.Now().Add(-time.Hour)
 	stale := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: s.customerID(), ScheduledFor: due,
 		Trigger: store.ScheduledTaskTriggerSchedule, Prompt: task.Instructions,
 		State: store.ScheduledTaskRunRunning, Attempts: 3, StartedAt: &started}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &stale))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &stale))
 	s.runWorker()
 
 	path := "/v1/agents/scheduled-tasks/" + created.Id
@@ -4068,7 +4069,7 @@ func (s *ScheduledTasksSuite) TestListingReadsWhenEveryTaskLastRanInOneQuery() {
 		at := time.Now().UTC().Add(-time.Duration(hours+1) * time.Hour).Truncate(time.Second)
 		run := store.ScheduledTaskRun{TaskID: created.Id, CustomerID: s.customerID(), ScheduledFor: at,
 			Trigger: store.ScheduledTaskTriggerManual, State: store.ScheduledTaskRunDelivered, FinishedAt: &at}
-		s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &run))
+		s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
 		finished[created.Id] = at.Format(time.RFC3339)
 	}
 
@@ -4130,7 +4131,7 @@ func (s *ScheduledTasksSuite) TestTheAgentResumesATaskWhileOnlyAnotherAgentsTask
 	s.say(user, opened.Id, "turn the stretch reminder back on")
 	s.NotContains(s.ranResult(watching), `"error"`)
 	s.await(watching, "responded")
-	stored, err := s.store.ScheduledTask(context.Background(), s.customerID(), paused.Id)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), paused.Id)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskActive, stored.State)
 

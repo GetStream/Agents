@@ -80,9 +80,9 @@ func (s *DrainSuite) TestTheDrainWaitsForAScheduledDeliveryInFlight() {
 		CallerKind: store.UserKindAuthenticated, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: due, Timezone: "UTC", NextRunAt: &due, State: store.ScheduledTaskActive, CreatedBy: "agent",
 	}
-	s.Require().NoError(s.db.CreateScheduledTask(s.ctx, &task, 25))
+	s.Require().NoError(s.db.ScheduledTasks.Insert(s.ctx, &task, 25))
 	s.T().Cleanup(func() {
-		s.NoError(s.db.DeleteScheduledTask(context.Background(), task.CustomerID, task.ID))
+		s.NoError(s.db.ScheduledTasks.Delete(context.Background(), task.CustomerID, task.ID))
 	})
 	release := make(chan struct{})
 	scheduler := scheduling.NewScheduler(s.db, func(ctx context.Context, _ store.ClaimedScheduledTask) (string, string, error) {

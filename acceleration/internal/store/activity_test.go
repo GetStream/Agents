@@ -306,7 +306,7 @@ func (s *StoreSuite) TestActivityDaysCountEachDayAnAreaNamedAnsweredOnce() {
 func (s *StoreSuite) usedBy(appID, modality string, at time.Time, change func(*Request)) {
 	request := &Request{Modality: modality, CustomerID: appID, Provider: "stub", Model: "stub", StartedAt: at, Success: true}
 	change(request)
-	s.Require().NoError(s.store.RecordRequest(s.ctx, request))
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
 }
 
 // Defect: a meter summed for one app of the organization or for every app, a quantity left
@@ -343,7 +343,7 @@ func (s *ShardedStoreSuite) TestMeterUsesSumEveryShard() {
 	s.usedBy("one", "tts", s.base, func(r *Request) { r.Characters, r.CostMicros = 9, 1 })
 	request := &Request{Modality: "llm", CustomerID: "two", Provider: "stub", Model: "stub", StartedAt: s.base,
 		InputTokens: 1, OutputTokens: 2, AudioMs: 3, Characters: 4, DurationMs: &took, CostMicros: 1, Success: true}
-	s.Require().NoError(s.other.RecordRequest(s.ctx, request))
+	s.Require().NoError(s.other.Requests.Insert(s.ctx, request))
 
 	uses, err := s.store.MeterUses(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)
@@ -462,7 +462,7 @@ func (s *StoreSuite) TestSessionsOfNoAppsAreNone() {
 	latest, err := s.store.LatestSessions(s.ctx, nil, s.base, 20)
 	s.Require().NoError(err)
 	s.Empty(latest)
-	legs, err := s.store.TurnLatency(s.ctx, nil, s.base)
+	legs, err := s.store.TurnBuckets.Latency(s.ctx, nil, s.base)
 	s.Require().NoError(err)
 	s.Len(legs, 4)
 	for _, leg := range legs {
@@ -491,99 +491,4 @@ func (s *ShardedStoreSuite) TestSessionsAreReadFromEveryShard() {
 	s.Require().Len(latest, 2)
 	s.Equal("there-new", latest[0].ID)
 	s.Equal("here-new", latest[1].ID)
-}
-
-// timed is a turn of app's at at whose legs took the milliseconds given, nil for a leg it
-// did not have.
-func timed(appID string, at time.Time, stt, llm, tts, roundtrip *float64) TurnSample {
-	return TurnSample{CustomerID: appID, AgentID: "agent-" + appID, StartedAt: at,
-		STTLatencyMs: stt, LLMTTFTMs: llm, TTSTTFBMs: tts, RoundtripMs: roundtrip}
-}
-
-// lasted is v milliseconds, as a turn holds a leg it had.
-func lasted(v float64) *float64 { return &v }
-
-// Defect: the latency of one app of the organization only, another organization's turns or
-// turns before the hour of since counted, a turn in the hour since falls in left out, a leg
-// read off another leg's bins, or a leg no turn had left out of the list.
-func (s *StoreSuite) TestTurnLatencyReadsEveryLegOfTheAppsAskedFor() {
-	since := s.base.Add(30 * time.Minute)
-	for n := 1; n <= 10; n++ {
-		app := []string{"one", "two"}[n%2]
-		s.Require().NoError(s.store.RecordTurnStats(s.ctx,
-			timed(app, s.base.Add(time.Duration(n)*time.Minute), nil, nil, nil, lasted(float64(n*100)))))
-	}
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, timed("one", s.base.Add(time.Hour), lasted(40), nil, lasted(300), nil)))
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, timed("two", s.base.Add(time.Hour), lasted(40), nil, nil, nil)))
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, timed("stranger", s.base, lasted(60_000), lasted(60_000), lasted(60_000), lasted(60_000))))
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx,
-		timed("one", s.base.Add(-time.Minute), lasted(60_000), lasted(60_000), lasted(60_000), lasted(60_000))))
-
-	legs, err := s.store.TurnLatency(s.ctx, []string{"one", "two"}, since)
-	s.Require().NoError(err)
-
-	s.Require().Equal([]string{"stt_latency", "llm_ttft", "tts_ttfb", "roundtrip"},
-		[]string{legs[0].Leg, legs[1].Leg, legs[2].Leg, legs[3].Leg})
-	s.Equal(int64(2), legs[0].Turns)
-	s.Equal(LegLatency{Leg: "llm_ttft"}, legs[1])
-	s.Equal(int64(1), legs[2].Turns)
-	s.Equal(int64(10), legs[3].Turns)
-	// Bins are 5% wide, so each percentile is within 5% of the turn it falls on.
-	within := func(want float64, got *float64, name string) {
-		s.Require().NotNil(got, name)
-		s.InEpsilon(want, *got, 0.05, name)
-	}
-	within(40, legs[0].P50Ms, "stt p50")
-	within(40, legs[0].P99Ms, "stt p99")
-	within(300, legs[2].P95Ms, "tts p95")
-	within(500, legs[3].P50Ms, "roundtrip p50")
-	within(1000, legs[3].P95Ms, "roundtrip p95")
-	within(1000, legs[3].P99Ms, "roundtrip p99")
-}
-
-// Defect: a percentile picked from the 95th or 50th where the 99th was asked, which turns
-// enough apart tell from each other.
-func (s *StoreSuite) TestTurnLatencyTellsEachPercentileApart() {
-	// Ninety turns of 100 ms, seven of 1000 and three of 5000: the 50th, 95th and 99th turns
-	// each fall in another bin.
-	for n := 1; n <= 100; n++ {
-		took := 100.0
-		if n > 97 {
-			took = 5000
-		} else if n > 90 {
-			took = 1000
-		}
-		s.Require().NoError(s.store.RecordTurnStats(s.ctx, timed("one", s.base, nil, nil, nil, lasted(took))))
-	}
-
-	legs, err := s.store.TurnLatency(s.ctx, []string{"one"}, s.base)
-	s.Require().NoError(err)
-
-	roundtrip := legs[3]
-	s.Require().NotNil(roundtrip.P50Ms)
-	s.Require().NotNil(roundtrip.P95Ms)
-	s.Require().NotNil(roundtrip.P99Ms)
-	s.InEpsilon(100, *roundtrip.P50Ms, 0.05)
-	s.InEpsilon(1000, *roundtrip.P95Ms, 0.05)
-	s.InEpsilon(5000, *roundtrip.P99Ms, 0.05)
-}
-
-// Defect: the turns of another shard left out, or the bins of two shards read in the order
-// the shards answered rather than by latency, which moves the percentiles.
-func (s *ShardedStoreSuite) TestTurnLatencySumsEveryShard() {
-	// This shard's slow turn is answered before the other's fast ones, so only a read that sorts
-	// the bins of both puts it last.
-	s.Require().NoError(s.store.RecordTurnStats(s.ctx, timed("one", s.base, nil, nil, nil, lasted(1000))))
-	s.Require().NoError(s.other.RecordTurnStats(s.ctx, timed("two", s.base, nil, nil, nil, lasted(100))))
-	s.Require().NoError(s.other.RecordTurnStats(s.ctx, timed("two", s.base, nil, nil, nil, lasted(100))))
-
-	legs, err := s.store.TurnLatency(s.ctx, []string{"one", "two"}, s.base)
-	s.Require().NoError(err)
-
-	roundtrip := legs[3]
-	s.Equal(int64(3), roundtrip.Turns)
-	s.Require().NotNil(roundtrip.P50Ms)
-	s.Require().NotNil(roundtrip.P95Ms)
-	s.InEpsilon(100, *roundtrip.P50Ms, 0.05)
-	s.InEpsilon(1000, *roundtrip.P95Ms, 0.05)
 }

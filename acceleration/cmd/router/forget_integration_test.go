@@ -148,7 +148,7 @@ func (s *ForgetUserSuite) recorded(shard int, app, user string, cost int64) uuid
 // written writes one billable row of app's user on a shard, not shipped yet.
 func (s *ForgetUserSuite) written(shard int, app, user string, cost int64) uuid.UUID {
 	id := uuid.Must(uuid.NewV7())
-	_, err := s.shards[shard].RecordRequests(s.ctx, []store.Request{{
+	_, err := s.shards[shard].Requests.InsertMany(s.ctx, []store.Request{{
 		UsageID: id, Modality: "llm", CustomerID: app, OrganizationID: s.organization, OrganizationTier: usageservice.DefaultTier,
 		APIKey: "key", UserID: user, Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(),
 		CostMicros: cost, BaseCostMicros: cost, Billable: true, Success: true,
@@ -165,7 +165,7 @@ func (s *ForgetUserSuite) shipped(id uuid.UUID, app, user string, cost int64) {
 // stopped is what a run that stopped after its first call to the usage service left: every
 // shard and the service rewritten to replacement, and nothing after.
 func (s *ForgetUserSuite) stopped(replacement string) {
-	_, err := s.shards[0].RenameUserRequests(s.ctx, s.app, person, replacement)
+	_, err := s.shards[0].Requests.RenameUser(s.ctx, s.app, person, replacement)
 	s.Require().NoError(err)
 	manage, err := usageservice.NewClient(usageservice.ClientOptions{URL: s.service.URL, ManageKey: s.service.ManageKey})
 	s.Require().NoError(err)
@@ -459,7 +459,7 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 
 	replacement := s.forgottenAs(out)
 	s.NotContains(out, person)
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	entry := entries[0]
@@ -499,7 +499,7 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 	s.Equal(int64(len(routers)), s.present(s.routers, routers))
 	s.Equal(int64(1), s.present(s.counters, counters))
 	s.Equal(before, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Empty(entries)
 }
@@ -605,7 +605,7 @@ func (s *ForgetUserSuite) TestARunThatStoppedIsFinishedWithItsReplacement() {
 	s.Zero(s.present(s.counters, counters))
 	s.Equal(userRows{appLimits: 1, resetUsers: []string{replacement}, grantUsers: []string{replacement},
 		campaignUser: []string{replacement}}, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1, "one audit row, for the run that completed")
 	s.Equal(replacement, entries[0].ResourceID)

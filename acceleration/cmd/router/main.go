@@ -2004,7 +2004,7 @@ func pruneScheduledTasks(ctx context.Context, pgStore *store.Store, logger *slog
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
-		runs, tasks, err := pgStore.PruneScheduledTasks(ctx)
+		runs, tasks, err := pgStore.ScheduledTasks.Prune(ctx)
 		if err != nil {
 			logger.Error("could not prune scheduled tasks", "error", err)
 		} else if runs > 0 || tasks > 0 {
@@ -2524,7 +2524,7 @@ func newPrices(capabilities routing.Config, files store.PriceLoad, version strin
 func newActivePrices(ctx context.Context, pgStore *store.Store, capabilities routing.Config, fallback *pricing.List,
 	requireEntries bool, interval time.Duration, logger *slog.Logger) *pricing.Active {
 	return pricing.NewActive(ctx, pricing.ActiveOptions{
-		Source:         pgStore.PriceSource(),
+		Source:         pgStore.PriceEntries.Source(),
 		Fallback:       fallback,
 		Local:          routing.LocalItems(capabilities),
 		Interval:       interval,

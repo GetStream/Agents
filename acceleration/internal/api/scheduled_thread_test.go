@@ -58,7 +58,7 @@ func (s *RouterSuite) customersTasks(count int) []store.ScheduledTask {
 	var tasks []store.ScheduledTask
 	s.Require().Eventually(func() bool {
 		var err error
-		tasks, err = s.store.ScheduledTasks(context.Background(), s.customerID(), store.ScheduledTaskFilter{}, 25, nil)
+		tasks, err = s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
 		s.Require().NoError(err)
 		return len(tasks) >= count
 	}, settleFor, 10*time.Millisecond, "the customer holds no %d tasks", count)
@@ -193,7 +193,7 @@ func (s *TelnyxChannelSuite) TestTwoPeopleOnOneLineNeverReachEachOthersTasks() {
 	s.planTool("cancel_scheduled_task", `{"id":"`+task.ID+`"}`)
 	s.smsTurn(bob, "cancel "+task.ID)
 	s.toldTheModel(`"error":"scheduled_task_not_found"`)
-	_, err := s.store.ScheduledTask(context.Background(), s.customerID(), task.ID)
+	_, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task.ID)
 	s.Require().NoError(err, "the other person's cancel left the task")
 
 	s.planTool("list_scheduled_tasks", `{}`)
@@ -202,7 +202,7 @@ func (s *TelnyxChannelSuite) TestTwoPeopleOnOneLineNeverReachEachOthersTasks() {
 	s.planTool("cancel_scheduled_task", `{"id":"`+task.ID+`"}`)
 	s.smsTurn(alice, "never mind")
 	s.toldTheModel(`"cancelled":"Stretch"`)
-	_, err = s.store.ScheduledTask(context.Background(), s.customerID(), task.ID)
+	_, err = s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task.ID)
 	s.ErrorIs(err, store.ErrNoScheduledTask)
 }
 
@@ -220,7 +220,7 @@ func (s *TelnyxChannelSuite) TestSomeoneElseWritingInAPersonsThreadIsNotOfferedT
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: "alice", CallerKind: "server", APIKey: s.RouterSuite.app.key,
 		Title: "Alice private review", Instructions: "x", StartLocal: next, Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	s.planTool("list_scheduled_tasks", `{}`)
 	sent, replies := len(s.telnyx().sent()), s.repliesIn(channel)
@@ -268,7 +268,7 @@ func (s *TelnyxChannelSuite) TestTheSamePersonOnAnotherCustomersLineReachesNoneO
 	s.smsTurn(person, "cancel "+task.ID)
 	s.toldTheModel(`"error":"scheduled_task_not_found"`)
 
-	_, err := s.store.ScheduledTask(context.Background(), first, task.ID)
+	_, err := s.store.ScheduledTasks.Get(context.Background(), first, task.ID)
 	s.NoError(err, "the other customer's cancel left the task")
 }
 
@@ -328,7 +328,7 @@ func (s *TelnyxChannelSuite) TestAPersonsLimitCountsTheirOwnTasksOnResume() {
 	s.smsTurn(person, "resume the stretch one")
 
 	s.toldTheModel(`"error":"too_many_tasks"`)
-	stored, err := s.store.ScheduledTask(context.Background(), s.customerID(), paused.ID)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), paused.ID)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskPaused, stored.State)
 }
@@ -341,7 +341,7 @@ func (s *TelnyxChannelSuite) TestAThreadOnAConfigWithoutSchedulingIsOfferedWhatI
 	s.smsTurn("+13125550001", "remind me to stretch in two hours")
 
 	s.Equal([]string{}, s.everyToolOffered())
-	tasks, err := s.store.ScheduledTasks(context.Background(), s.customerID(), store.ScheduledTaskFilter{}, 25, nil)
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
 	s.Require().NoError(err)
 	s.Empty(tasks)
 }

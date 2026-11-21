@@ -282,7 +282,7 @@ func (s *Server) recordCallSites(ctx context.Context, call endedCall, details ma
 	if session, err := s.store.StoredSession(ctx, call.customer, call.callID); err == nil {
 		entry.ConfigID, entry.AgentID = session.ConfigID, session.AgentID
 	}
-	if err := s.store.RecordAgentLog(ctx, entry); err != nil {
+	if err := s.store.AgentLogs.Insert(ctx, entry); err != nil {
 		s.logger.Warn("could not record a phone call's sites", "session_id", call.callID, "error", err)
 	}
 }

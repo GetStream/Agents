@@ -88,7 +88,7 @@ func (s *TelnyxUnpaidSuite) threadTask(channel string) store.ScheduledTask {
 		CallerKind: "server", APIKey: s.RouterSuite.app.key, ChannelThread: channel, Title: "Stretch",
 		Instructions: "Remind them to stretch.", StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next,
 		Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 	return task
 }
 
@@ -107,11 +107,11 @@ func (s *TelnyxUnpaidSuite) settledByTheWorker(task store.ScheduledTask) (store.
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	worker.Kick()
 	var settled store.ScheduledTaskRun
 	s.Require().Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), task.CustomerID, task.ID, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false
@@ -207,7 +207,7 @@ func (s *TelnyxUnpaidSuite) userTask(user *testClient, sessionID string, channel
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, SessionID: sessionID, UserID: user.userID,
 		CallerKind: "authenticated", APIKey: s.RouterSuite.app.key, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next, Channels: channels}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 	return task
 }
 
@@ -250,7 +250,7 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTu
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, SessionID: opened.Id, UserID: user.userID,
 		CallerKind: "authenticated", APIKey: s.RouterSuite.app.key, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next, Channels: []string{"sms"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	model := s.holding
 	model.mu.Lock()
@@ -640,7 +640,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 	}()
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	worker.Kick()
 	s.Require().Eventually(func() bool {
 		model.mu.Lock()
@@ -653,7 +653,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 
 	var settled store.ScheduledTaskRun
 	s.Require().Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), task.CustomerID, task.ID, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false

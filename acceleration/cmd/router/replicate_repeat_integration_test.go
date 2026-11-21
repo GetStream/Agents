@@ -184,7 +184,7 @@ func (s *ReplicateRepeatSuite) label(digits int) string {
 
 // saved is the cursor the target saved for acme's copy from the source.
 func (s *ReplicateRepeatSuite) saved() *store.MoveCursor {
-	saved, err := s.target.MoveCursor(s.ctx, "acme", s.server.URL)
+	saved, err := s.target.MoveCursors.Get(s.ctx, "acme", s.server.URL)
 	s.Require().NoError(err)
 	return saved
 }
@@ -450,25 +450,25 @@ CREATE TRIGGER refuse_poison BEFORE INSERT OR UPDATE ON phone_numbers FOR EACH R
 func (s *ReplicateRepeatSuite) TestACursorNeverMovesBack() {
 	five, three := int64(5), int64(3)
 	earlier := time.Now().Add(-time.Hour)
-	s.Require().NoError(s.target.SaveMoveCursor(s.ctx, "acme", "src", &five, time.Now()))
+	s.Require().NoError(s.target.MoveCursors.Upsert(s.ctx, &store.MoveCursor{CustomerID: "acme", Source: "src", Cursor: &five, ReadAt: time.Now()}))
 
-	s.Require().NoError(s.target.SaveMoveCursor(s.ctx, "acme", "src", &three, earlier))
+	s.Require().NoError(s.target.MoveCursors.Upsert(s.ctx, &store.MoveCursor{CustomerID: "acme", Source: "src", Cursor: &three, ReadAt: earlier}))
 
-	saved, err := s.target.MoveCursor(s.ctx, "acme", "src")
+	saved, err := s.target.MoveCursors.Get(s.ctx, "acme", "src")
 	s.Require().NoError(err)
 	s.Equal(int64(5), *saved.Cursor, "a run that read less cannot undo one that read more")
 	s.WithinDuration(time.Now(), saved.ReadAt, time.Minute)
 
-	s.Require().NoError(s.target.SaveMoveCursor(s.ctx, "acme", "src", nil, earlier))
-	saved, err = s.target.MoveCursor(s.ctx, "acme", "src")
+	s.Require().NoError(s.target.MoveCursors.Upsert(s.ctx, &store.MoveCursor{CustomerID: "acme", Source: "src", ReadAt: earlier}))
+	saved, err = s.target.MoveCursors.Get(s.ctx, "acme", "src")
 	s.Require().NoError(err)
 	s.Nil(saved.Cursor, "a copy that starts again clears it")
 }
 
 func (s *ReplicateRepeatSuite) TestOnlyATableInTheSharedDatabaseMakesAnAppHeld() {
-	// call bridges are kept in the shards, which a pod reads only its own of.
+	// calls are kept in the shards, which a pod reads only its own of.
 	_, err := s.target.GlobalDB().ExecContext(s.ctx,
-		"INSERT INTO call_bridges (token, customer_id, vendor, trunk_uri, call_id, expires_at) VALUES ('t', 'acme', 'telnyx', 'sip:x', 'c', now())")
+		"INSERT INTO calls (id, customer_id, call_id, agent_id) VALUES ('c', 'acme', 'c', 'agent')")
 	s.Require().NoError(err)
 	table, err := s.target.HoldingTable(s.ctx, "acme")
 	s.Require().NoError(err)

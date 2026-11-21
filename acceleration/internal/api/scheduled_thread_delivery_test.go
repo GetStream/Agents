@@ -35,7 +35,7 @@ func (s *RouterSuite) manualRun(task store.ScheduledTask) store.ScheduledTaskRun
 		TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: now, Trigger: store.ScheduledTaskTriggerManual,
 		Prompt: task.Instructions, State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &run))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
 	return run
 }
 
@@ -108,11 +108,11 @@ func (s *RouterSuite) deliveredByTheWorker(task store.ScheduledTask) store.Sched
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	worker.Kick()
 	var settled store.ScheduledTaskRun
 	s.Require().Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), task.CustomerID, task.ID, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false
@@ -683,7 +683,7 @@ func (s *TelnyxChannelSuite) TestAThreadTasksDeliverToCannotChange() {
 
 	s.Equal(http.StatusBadRequest, status, string(raw))
 	s.Contains(string(raw), "a task made in a thread is delivered on that thread")
-	stored, err := s.store.ScheduledTask(context.Background(), task.CustomerID, task.ID)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), task.CustomerID, task.ID)
 	s.Require().NoError(err)
 	s.Equal(task.Channels, stored.Channels)
 	var renamed ScheduledTask
@@ -701,7 +701,7 @@ func (s *TelnyxChannelSuite) TestATaskWithoutAThreadIsDeliveredAsBefore() {
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: "alice", CallerKind: "server", APIKey: s.RouterSuite.app.key,
 		Title: "Stretch", Instructions: "Remind them to stretch.", StartLocal: next, Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	run := s.deliveredByTheWorker(task)
 
@@ -723,7 +723,7 @@ func (s *TelnyxSandboxSuite) TestATaskPastTheSandboxsDailyLimitIsHeldBack() {
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: stored[0]["user_id"].(string),
 		CallerKind: "server", APIKey: s.RouterSuite.app.key, ChannelThread: channel, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next, Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	_, _, err := s.deliverTask(task)
 
