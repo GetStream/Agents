@@ -74,7 +74,6 @@ func (n *PhoneNumber) Validate() error {
 		phoneNumber("e164", n.E164).
 		required("vendor", n.Vendor).
 		nonNegative("monthly_cost_micros", float64(n.MonthlyCostMicros)).
-		check(n.Vendor != sipTrunkVendor || n.SIPTrunkID != "", "sip_trunk_id", "is required for a number on a trunk").
 		done()
 }
 

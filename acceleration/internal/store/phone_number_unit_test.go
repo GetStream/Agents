@@ -19,7 +19,6 @@ func TestPhoneNumberValidate(t *testing.T) {
 		"e164":                func(m *PhoneNumber) { m.E164 = "15551234567" },
 		"vendor":              func(m *PhoneNumber) { m.Vendor = " " },
 		"monthly_cost_micros": func(m *PhoneNumber) { m.MonthlyCostMicros = -1 },
-		"sip_trunk_id":        func(m *PhoneNumber) { m.Vendor = sipTrunkVendor },
 	} {
 		model := valid()
 		broken(&model)
