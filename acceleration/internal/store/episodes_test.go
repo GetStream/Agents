@@ -613,6 +613,9 @@ type previousCard struct {
 // rollback, reads the cards as it did: closing an episode adds no column to episodes, which
 // that release's ep.* would refuse.
 func (s *StoreSuite) TestThePreviousReleaseStillReadsTheCards() {
+	if s.store.Sharded() {
+		s.T().Skip("that release joined the sessions in the shared database, which a new sharded deployment does not hold")
+	}
 	person := s.mapped("+15550100")
 	s.threadAt(person, "agent:thread-one", s.base)
 	s.threadAt(person, "agent:thread-one", s.base.Add(time.Minute))

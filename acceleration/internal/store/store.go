@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,7 +23,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pressly/goose/v3"
 	"github.com/redis/rueidis"
 	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
@@ -33,7 +31,6 @@ import (
 	"github.com/uptrace/bun/extra/bunotel"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
-	"github.com/GetStream/Vision-Agents/acceleration/migrations"
 )
 
 // maxConns is how many Postgres connections one router holds at most.
@@ -55,7 +52,10 @@ type Store struct {
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
-	LogDrops   atomic.Int64
+	// globalIsShard says the shared database is also some shard's own, so its calls are not
+	// strays to drop.
+	globalIsShard bool
+	LogDrops      atomic.Int64
 	// shapes is what each table an export carries looks like, read from the catalogue
 	// once rather than kept in a list here that a migration could leave behind.
 	shapes tableShapes
@@ -114,164 +114,6 @@ func (s *Store) Ping(ctx context.Context) error {
 		return stack.Wrap(err)
 	}
 	return stack.Wrap(s.shard.PingContext(ctx))
-}
-
-// Migrate applies every pending migration, to the shared database and to this shard's.
-func (s *Store) Migrate(ctx context.Context) error {
-	if err := s.migrate(ctx, s.global); err != nil {
-		return err
-	}
-	return s.migrateShard(ctx)
-}
-
-func (s *Store) migrate(ctx context.Context, db *bun.DB) error {
-	// Every shard's routers start against the shared database at once in a rollout, and
-	// two goose runs on one database collide, so one migrates while the others wait.
-	conn, err := db.DB.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("store: migrate: %w", err)
-	}
-	locked := false
-	defer func() {
-		if !locked {
-			_ = conn.Close()
-			return
-		}
-		// Released by hand: closing hands the connection back to the pool, session and lock
-		// intact. A failed unlock ends the session instead, which releases it.
-		if _, err := conn.ExecContext(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock(hashtextextended('router.migrate', 0))"); err != nil {
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-		}
-		_ = conn.Close()
-	}()
-	if err := lockMigrations(ctx, conn); err != nil {
-		return err
-	}
-	locked = true
-
-	goose.SetBaseFS(migrations.FS)
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("store: set dialect: %w", err)
-	}
-	if err := goose.UpContext(ctx, db.DB, "."); err != nil {
-		return fmt.Errorf("store: migrate: %w", err)
-	}
-	if err := ensureUsageIndexes(ctx, conn); err != nil {
-		return err
-	}
-	// Attached here rather than in a migration of their own, so that a table added later
-	// is covered by the deployment reaching it rather than by somebody remembering.
-	return s.watchDataChanges(ctx, db)
-}
-
-// migrateLockFirst and migrateLockMost are the pause between two tries at the migrate lock:
-// the first, doubled after each miss up to the most, which bounds how long a router idles
-// after the one migrating is done.
-const (
-	migrateLockFirst = 20 * time.Millisecond
-	migrateLockMost  = 500 * time.Millisecond
-)
-
-// lockMigrations takes the migrate lock on conn, trying it until it is free. A router waiting
-// in a blocking pg_advisory_lock holds a snapshot all the while, and CREATE INDEX CONCURRENTLY
-// in the migration the holder runs waits for every older snapshot to end, so the two would
-// wait on each other forever. Between two tries the waiter holds none.
-func lockMigrations(ctx context.Context, conn *sql.Conn) error {
-	pause := migrateLockFirst
-	for {
-		var locked bool
-		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtextextended('router.migrate', 0))").Scan(&locked); err != nil {
-			// The lock may have been granted with the answer lost; dropping the connection
-			// ends the session, which releases it.
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			return fmt.Errorf("store: migrate: lock: %w", err)
-		}
-		if locked {
-			return nil
-		}
-		timer := time.NewTimer(pause)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("store: migrate: wait for lock: %w", context.Cause(ctx))
-		case <-timer.C:
-		}
-		pause = min(2*pause, migrateLockMost)
-	}
-}
-
-// usageIndexes are built CONCURRENTLY, so building them stops no write. A build that fails
-// leaves an invalid index behind, which the migration's IF NOT EXISTS then skips once goose
-// has recorded it, and one dropped by hand is never built again by the migration. Writing
-// usage needs requests_usage_id_idx: ON CONFLICT (usage_id) fails without it.
-var usageIndexes = []struct{ name, create string }{
-	{"requests_usage_id_idx", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS requests_usage_id_idx ON requests (usage_id)"},
-	{"requests_to_ship_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_to_ship_idx ON requests (started_at) WHERE to_ship"},
-	// What a subject spent, summed with no usage service (20261112120000_limits.sql).
-	{"requests_key_spend_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_key_spend_idx ON requests (customer_id, api_key, started_at) " +
-		"INCLUDE (cost_micros) WHERE billable"},
-	{"requests_user_spend_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_user_spend_idx ON requests (customer_id, user_id, started_at) " +
-		"INCLUDE (cost_micros) WHERE billable AND user_id <> ''"},
-	{"requests_category_spend_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_category_spend_idx ON requests (customer_id, started_at) " +
-		"INCLUDE (cost_micros, usage_categories) WHERE billable AND usage_categories <> '{}'"},
-	// The rows naming a grant, which a reconcile counts again (20261112121000_requests_limit_grants.sql).
-	{"requests_limit_grants_started_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_limit_grants_started_idx ON requests (started_at, id) " +
-		"WHERE limit_grants <> '{}'"},
-	// What a copied agent log is known by: an import resolves its conflicts on it
-	// (20261206120000_agent_logs_source_id.sql).
-	{"agent_logs_source_idx", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS agent_logs_source_idx ON agent_logs (customer_id, source_id) " +
-		"WHERE source_id IS NOT NULL"},
-	// What a link's join finds one omni-channel's rows of an agent by (20261212100000_user_phones.sql).
-	{"contact_map_conversation", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_conversation ON contact_map (customer_id, agent_config_id, conversation_id)"},
-	// The rows a link set aside, by their number (20261217110000_user_phone_history.sql).
-	{"contact_map_retired", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_retired ON contact_map " +
-		"(customer_id, (regexp_replace(address, '^retired:[^:]*:', ''))) WHERE address LIKE 'retired:%'"},
-	// The leg digits are pressed on (20261215120000_call_legs_vendor_call_id.sql).
-	{"call_legs_vendor_call_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_vendor_call_idx ON call_legs (vendor_call_id) " +
-		"WHERE vendor_call_id IS NOT NULL"},
-	// A response's alternatives, the responses sharing its parent (20261227100000_response_branches.sql).
-	{"agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
-}
-
-// ensureUsageIndexes builds each usage index that is missing, dropping one a failed build left
-// invalid first. A build that fails again fails Migrate, so the router does not start and fail
-// every write; its next start tries again.
-func ensureUsageIndexes(ctx context.Context, conn *sql.Conn) error {
-	for _, index := range usageIndexes {
-		valid, found, err := indexState(ctx, conn, index.name)
-		if err != nil {
-			return err
-		}
-		if found && valid {
-			continue
-		}
-		if found {
-			if _, err := conn.ExecContext(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+index.name); err != nil {
-				return fmt.Errorf("store: migrate: drop invalid %s: %w", index.name, err)
-			}
-		}
-		if _, err := conn.ExecContext(ctx, index.create); err != nil {
-			return fmt.Errorf("store: migrate: build %s: %w", index.name, err)
-		}
-		if valid, found, err = indexState(ctx, conn, index.name); err != nil {
-			return err
-		}
-		if !found || !valid {
-			return fmt.Errorf("store: migrate: %s did not build", index.name)
-		}
-	}
-	return nil
-}
-
-// indexState reports whether the index named is on the search path, and if it is, whether
-// it is valid.
-func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found bool, err error) {
-	var state sql.NullBool
-	err = conn.QueryRowContext(ctx, "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1))", name).Scan(&state)
-	if err != nil {
-		return false, false, fmt.Errorf("store: migrate: check %s: %w", name, err)
-	}
-	return state.Bool, state.Valid, nil
 }
 
 // ErrInvalidRequest is a request that can never be written as it is, because it lacks

@@ -720,7 +720,7 @@ func (s *StoreSuite) TestCallbacksRacingWithOneStateConsumeItExactlyOnce() {
 	const callbacks = 16
 	routers := make([]*Store, callbacks)
 	for i := range routers {
-		router, err := Open(s.dsn)
+		router, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { router.Close() })
 		s.Require().NoError(router.Ping(s.ctx))
@@ -802,7 +802,7 @@ func (s *StoreSuite) TestHandoffsRacingFromOneReadReplaceTheBlobExactlyOnce() {
 	const handoffs = 16
 	routers := make([]*Store, handoffs)
 	for i := range routers {
-		router, err := Open(s.dsn)
+		router, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { router.Close() })
 		s.Require().NoError(router.Ping(s.ctx))
@@ -1121,7 +1121,7 @@ func (s *StoreSuite) TestCustomersRacingForOneProviderUnitLeaveOneHolder() {
 	routers := make([]*Store, customers)
 	for i := range customers {
 		connections[i] = s.lineConnection("app-"+newID(), lineManifest)
-		router, err := Open(s.dsn)
+		router, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { router.Close() })
 		s.Require().NoError(router.Ping(s.ctx))

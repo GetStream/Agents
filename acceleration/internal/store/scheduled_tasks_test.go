@@ -114,7 +114,7 @@ func (s *StoreSuite) TestClaimingGivesEachDueTaskToOneWorker() {
 		due := s.base.Add(-time.Minute)
 		task.NextRunAt = &due
 	})
-	other, err := Open(s.dsn)
+	other, err := s.openRouter()
 	s.Require().NoError(err)
 	defer other.Close()
 

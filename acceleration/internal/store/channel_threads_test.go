@@ -165,7 +165,7 @@ func (s *StoreSuite) TestEachStepClaimsAMessageOnce() {
 func (s *StoreSuite) TestTwoRoutersCannotHoldOneThreadsTurnAtOnce() {
 	_, err := s.store.LinkChannelThread(s.ctx, thread("thread-one", "C0000CHAN:1"))
 	s.Require().NoError(err)
-	other, err := Open(s.dsn)
+	other, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = other.Close() })
 	until := time.Now().Add(time.Minute)
@@ -193,7 +193,7 @@ func (s *StoreSuite) TestTwoRoutersAskingAtOnceGetOneTurn() {
 	s.Require().NoError(err)
 	pools := []*Store{s.store}
 	for range 3 {
-		pool, err := Open(s.dsn)
+		pool, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { _ = pool.Close() })
 		pools = append(pools, pool)

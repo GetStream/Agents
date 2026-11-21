@@ -180,12 +180,12 @@ func (s *StoreSuite) TestOnlyFinishedOrDraftCampaignsCanBeDeleted() {
 func (s *StoreSuite) TestDeletingACampaignKeepsItsCalls() {
 	campaign := s.draftCampaign(newID(), "+15550001")
 	call := Call{ID: newID(), CustomerID: campaign.CustomerID, CampaignID: campaign.ID, StartedAt: s.base}
-	_, err := s.store.GlobalDB().NewInsert().Model(&call).Exec(s.ctx)
+	_, err := s.store.ShardDB().NewInsert().Model(&call).Exec(s.ctx)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.store.DeleteCampaign(s.ctx, campaign.CustomerID, campaign.ID))
 
-	count, err := s.store.GlobalDB().NewSelect().Model((*Call)(nil)).Where("id = ?", call.ID).Count(s.ctx)
+	count, err := s.store.ShardDB().NewSelect().Model((*Call)(nil)).Where("id = ?", call.ID).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(1, count)
 	contacts, err := s.store.QueryContacts(s.ctx, campaign.ID, ContactFilter{})

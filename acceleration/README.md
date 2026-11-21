@@ -38,7 +38,7 @@ and billing as a direct API call.
 | `internal/phone/twilio`, `internal/phone/telnyx` | The two vendors that also answer on a number |
 | `internal/phone/sinch`, `.../bandwidth`, `.../vonage`, `.../bird`, `.../plivo` | Five more that buy numbers and call out on them |
 | `internal/phone/didww`  | Sells numbers and cannot dial: it has no call control API at all    |
-| `internal/store`     | Postgres via bun, plus the goose migrations in `migrations/`        |
+| `internal/store`     | Postgres and Redis state, one repository per model; migrations in `migrations/global` and `migrations/shard` |
 | `internal/live`      | Redis via rueidis: provider health and live per-customer counters   |
 | `internal/api`       | HTTP layer: Huma operations on chi, rendered into `api/openapi.yaml` |
 | `cmd/router`         | Serves the HTTP API                                                 |
@@ -1686,7 +1686,11 @@ redis:
 
 Writes go to this shard's database. Reads of one call, session or recording look in every
 shard, and lists merge every shard's rows, so a session carried on in another region is
-still one session. Migrations run on every database. A socket for a session held in
+still one session. Each database runs the migration set it holds: `migrations/global` on the
+global one and `migrations/shard` on each shard's, both on the one database of a single node
+(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A database migrated
+before the sets were split kept every table; once every router runs a release with two sets,
+`router schema drop-strays` drops the empty ones of the other set. A socket for a session held in
 another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
@@ -2621,10 +2625,12 @@ go run ./cmd/phone list
 go run ./cmd/phone release -number +1719XXXXXXX
 ```
 
-`cmd/router` applies migrations on startup. To run them by hand:
+`cmd/router` applies migrations on startup: the global set and the shard set, each with its own
+goose version table (`goose_global_version`, `goose_shard_version`). After changing a migration,
+regenerate the schema description from `acceleration/`; a test fails while it is out of date:
 
 ```bash
-goose -dir migrations postgres "$ROUTER_POSTGRES_DSN" up
+go run ./cmd/schema
 ```
 
 ## Moving a customer

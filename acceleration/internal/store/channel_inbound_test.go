@@ -387,7 +387,7 @@ func (s *StoreSuite) pausedInboundClaim() string {
 // claimWhileAnotherRouterActs runs router A's paused claim at at and, while A is in its pause,
 // meanwhile on this suite's store, and returns what A took.
 func (s *StoreSuite) claimWhileAnotherRouterActs(at time.Time, meanwhile func()) []ChannelInbound {
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 	type claim struct {

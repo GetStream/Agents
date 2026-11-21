@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -62,7 +61,9 @@ func OpenShards(options Options) (*Store, error) {
 		switch dsn := options.Shards[name]; {
 		case dsn == own:
 			s.shardNames[0] = name
+			s.globalIsShard = s.globalIsShard || dsn == options.DSN
 		case dsn != "":
+			s.globalIsShard = s.globalIsShard || dsn == options.DSN
 			s.peers = append(s.peers, connect(dsn, peerConns))
 			s.shardNames = append(s.shardNames, name)
 		}
@@ -214,17 +215,4 @@ func (s *Store) closeShards() error {
 		failed = append(failed, peer.Close())
 	}
 	return stack.Wrap(errors.Join(failed...))
-}
-
-// migrateShard brings this shard's database to the same schema as the shared one. Every
-// database carries every table, so a deployment can be split, or a shard added, without a
-// second migration history to keep in step.
-func (s *Store) migrateShard(ctx context.Context) error {
-	if !s.Sharded() {
-		return nil
-	}
-	if err := s.migrate(ctx, s.shard); err != nil {
-		return fmt.Errorf("store: shard: %w", err)
-	}
-	return nil
 }

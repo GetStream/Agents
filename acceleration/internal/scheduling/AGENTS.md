@@ -19,9 +19,7 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
                 \                             /
                  v                           v
         internal/store/scheduled_tasks.go  (tables: scheduled_tasks, scheduled_task_runs)
-        migrations/20261105120000_scheduled_tasks.sql
-        migrations/20261105130000_scheduled_tasks_wake.sql  (scheduled_tasks_wake_idx)
-        migrations/20261106120000_scheduled_task_thread.sql (channel_thread)
+        migrations/global/ (scheduled_tasks_wake_idx; schema/global.sql lists both tables)
                  |
                  |  ClaimDueScheduledTasks (FOR UPDATE SKIP LOCKED, lease, claim_id)
                  v

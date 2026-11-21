@@ -396,7 +396,7 @@ func (s *StoreSuite) pausedChatClaim() string {
 // claimChatsWhileAnotherRouterActs runs router A's paused claim at at and, while A is in its
 // pause, meanwhile on this suite's store, and returns what A took.
 func (s *StoreSuite) claimChatsWhileAnotherRouterActs(at time.Time, meanwhile func()) []ChatInbound {
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 	type claim struct {
@@ -473,7 +473,7 @@ func (s *StoreSuite) TestRoutersClaimingChatMessagesConcurrentlyTakeEachExactlyO
 	for i := range messages {
 		s.queuedChat(fmt.Sprintf("msg-%02d", i))
 	}
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 
@@ -729,7 +729,7 @@ func (s *StoreSuite) TestReleasingAChatAnswerLeavesAGivenUpMessageAndAnotherApps
 // Routers starting one message's answer at the same moment start it once between them.
 func (s *StoreSuite) TestRoutersStartingAChatAnswerAtOnceStartItOnce() {
 	s.queuedChat("msg-one")
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 

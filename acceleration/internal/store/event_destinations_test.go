@@ -141,7 +141,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachDeliveryOnce() {
 	}
 	_, err := s.store.QueueEventDeliveries(s.ctx, "acme-app", "slack_bot", []string{ForwardAll}, EventDelivery{ID: "msg_one", Body: []byte("{}"), NextAttemptAt: s.base})
 	s.Require().NoError(err)
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 	ranked := "    WHERE cedl.next_attempt_at <= ?\n), due AS ("

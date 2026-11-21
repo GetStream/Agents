@@ -69,8 +69,8 @@ func (t dataTable) rollup() bool {
 // dataTables is everything that belongs to a customer, parents first.
 //
 // Deliberately absent: organizations, apps and api_keys, which are the credentials rather
-// than the data, and which a deployment mints for itself; and goose_db_version, which is
-// this schema's own bookkeeping. Organization-scope policies are absent too, since one
+// than the data, and which a deployment mints for itself; and the goose version tables,
+// which are this schema's own bookkeeping. Organization-scope policies are absent too, since one
 // organization's decisions cover apps the caller may not have. So are
 // connector_authorization_attempts: one lives minutes, is sealed under this deployment's
 // key and finishes at this deployment's callback, so a copy could only expire. And
@@ -1653,6 +1653,9 @@ SELECT count(*) FROM pruned`,
 // startup and nothing afterwards.
 func (s *Store) watchDataChanges(ctx context.Context, db *bun.DB) error {
 	for _, table := range dataTables {
+		if s.sideOf(table) != db {
+			continue
+		}
 		shape, err := s.shapeOf(ctx, table.name)
 		if err != nil {
 			return err
@@ -1684,13 +1687,14 @@ func (s *Store) shapeOf(ctx context.Context, table string) (shape, error) {
 	if known, found := s.shapes.byName[table]; found {
 		return known, nil
 	}
-	if _, known := dataTableByName(table); !known {
+	spec, known := dataTableByName(table)
+	if !known {
 		return shape{}, fmt.Errorf("store: %q is not a table an export carries", table)
 	}
 
 	read := shape{sequences: map[string]string{}}
 	// pg_get_serial_sequence finds the sequence of a serial and of an identity column alike.
-	rows, err := s.global.QueryContext(ctx, `
+	rows, err := s.sideOf(spec).QueryContext(ctx, `
 SELECT a.attname,
        EXISTS (SELECT 1 FROM pg_index i
                WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)) AS is_key,

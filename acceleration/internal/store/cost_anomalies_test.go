@@ -46,7 +46,7 @@ func (s *StoreSuite) TestDailySpendIsEachOrganizationsBillableSpendPerUTCDay() {
 // a session in Los Angeles files a request made at 03:00 UTC under the day before.
 func (s *StoreSuite) TestDailySpendIsUTCWhateverTheSessionTimeZone() {
 	day := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
-	la, err := Open(s.dsn + "&timezone=America/Los_Angeles")
+	la, err := OpenShards(Options{DSN: s.dsn + "&timezone=America/Los_Angeles", ShardDSN: s.shardDSN + "&timezone=America/Los_Angeles"})
 	s.Require().NoError(err)
 	defer la.Close()
 	var zone string

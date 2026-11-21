@@ -104,7 +104,7 @@ func (s *StoreSuite) TestTwoFirstSightingsOfOneAddressAtOnceAreOneRow() {
 func (s *StoreSuite) pools(count int) []*Store {
 	pools := []*Store{s.store}
 	for len(pools) < count {
-		pool, err := Open(s.dsn)
+		pool, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { _ = pool.Close() })
 		pools = append(pools, pool)

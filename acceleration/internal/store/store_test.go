@@ -28,8 +28,9 @@ type StoreSuite struct {
 	suite.Suite
 	store *Store
 	// dsn is the suite's own database, for a test that needs another pool on it, as a second
-	// router would have.
-	dsn string
+	// router would have, and shardDSN its shard's, which is dsn unless the suite is sharded.
+	dsn      string
+	shardDSN string
 	ctx context.Context
 	// base is the start of a fixed hour, so bucket boundaries are predictable.
 	base time.Time
@@ -58,6 +59,7 @@ func TestShardedStoreSuite(t *testing.T) {
 func (s *StoreSuite) SetupSuite() {
 	s.ctx = context.Background()
 	s.dsn = s.emptyDatabase("store")
+	s.shardDSN = s.dsn
 	store, err := OpenShards(Options{DSN: s.dsn, Redis: s.redis(), redisHook: &s.roundTrips})
 	s.Require().NoError(err)
 	s.store = store
@@ -71,6 +73,7 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	s.ctx = context.Background()
 	s.dsn = s.emptyDatabase("store_global")
 	shard, peer := s.emptyDatabase("store_shard"), s.emptyDatabase("store_peer")
+	s.shardDSN = shard
 
 	other, err := Open(peer)
 	s.Require().NoError(err)
@@ -116,6 +119,11 @@ func (s *StoreSuite) emptyDatabase(name string) string {
 	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
+}
+
+// openRouter opens another router on the suite's databases, laid out as the suite's are.
+func (s *StoreSuite) openRouter() (*Store, error) {
+	return OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
 }
 
 func (s *StoreSuite) TearDownSuite() {
@@ -1553,7 +1561,7 @@ func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	})
 	defer unlock()
 
-	waiter, err := Open(s.dsn)
+	waiter, err := s.openRouter()
 	s.Require().NoError(err)
 	defer waiter.Close()
 	migrated := make(chan error, 1)
@@ -1568,12 +1576,12 @@ func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	// usage migration's on another connection of the pool than the one holding the lock, so
 	// Postgres sees no deadlock to break.
 	s.T().Cleanup(func() {
-		_, err := s.store.GlobalDB().ExecContext(s.ctx, "DROP INDEX CONCURRENTLY IF EXISTS requests_lock_wait_idx")
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "DROP INDEX CONCURRENTLY IF EXISTS agent_logs_lock_wait_idx")
 		s.Require().NoError(err)
 	})
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
-	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE INDEX CONCURRENTLY requests_lock_wait_idx ON requests (customer_id)")
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE INDEX CONCURRENTLY agent_logs_lock_wait_idx ON agent_logs (customer_id)")
 	s.Require().NoError(err, "a router waiting for the lock holds no snapshot the build waits on")
 	unlock()
 

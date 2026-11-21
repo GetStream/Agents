@@ -268,7 +268,7 @@ func (s *StoreSuite) TestAnItemOnlyACancelledChangePricedIsAddedAgain() {
 }
 
 func (s *StoreSuite) TestTwoSyncsAtOnceWriteOnce() {
-	other, err := Open(s.dsn)
+	other, err := s.openRouter()
 	s.Require().NoError(err)
 	defer other.Close()
 	files := load(priced("a", 1), priced("b", 2))

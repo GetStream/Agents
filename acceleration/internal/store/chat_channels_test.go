@@ -58,7 +58,7 @@ func (s *StoreSuite) TestAChannelTypeNoConfigNamesHasNone() {
 
 // Two routers are two pools on one database; only one may run a channel's turn, in that app.
 func (s *StoreSuite) TestTwoRoutersCannotHoldOneChatChannelsTurnAtOnce() {
-	other, err := Open(s.dsn)
+	other, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = other.Close() })
 	cid, until := "callouts:"+newID(), time.Now().Add(time.Minute)
@@ -91,7 +91,7 @@ func (s *StoreSuite) TestTwoRoutersAskingAtOnceGetOneChatChannelTurn() {
 	cid := "callouts:" + newID()
 	pools := []*Store{s.store}
 	for range 3 {
-		pool, err := Open(s.dsn)
+		pool, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { _ = pool.Close() })
 		pools = append(pools, pool)

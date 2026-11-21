@@ -85,7 +85,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 	for _, key := range []string{"one", "two", "three"} {
 		s.eventSubscription("acme-app", "conn-1", "config-1", key)
 	}
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 	read := "    WHERE next_attempt_at <= ?\n"

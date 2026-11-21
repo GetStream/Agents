@@ -14,7 +14,7 @@ import (
 // router is another router's store: a pool of its own on the suite's database, connected
 // before the test starts, so a concurrent caller contends in Postgres, not in one pool.
 func (s *StoreSuite) router() *Store {
-	router, err := Open(s.dsn)
+	router, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { router.Close() })
 	s.Require().NoError(router.Ping(s.ctx))

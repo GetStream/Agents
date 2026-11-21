@@ -707,7 +707,7 @@ func (s *StoreSuite) TestTwoRoutersSeedingAChangeAtOnceStoreOneRevision() {
 	const routers = 8
 	stores := make([]*Store, routers)
 	for i := range stores {
-		router, err := Open(s.dsn)
+		router, err := s.openRouter()
 		s.Require().NoError(err)
 		s.T().Cleanup(func() { router.Close() })
 		s.Require().NoError(router.Ping(s.ctx))
