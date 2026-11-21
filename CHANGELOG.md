@@ -686,6 +686,14 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 A call's `id` was its session's id; it is now the call's own, and a session starts a new call each time voice is started or stopped on it (an incognito session keeps none). `Call` gains `session_id`, absent once the session is deleted, and loses `config_id` and `user_id`, which are the session's. `GET /v1/agents/calls?session_id=` lists one session's calls, newest first. A read of `/v1/agents/calls/{id}` and its `transcript`, `timeline`, `events` and `tokens` with a session id now answers 404 `call_not_found`: list the session's calls for the call id. A call from before keeps the id it had, its session's. The Go SDK's `Sessions.Timeline` and `Sessions.Decisions` read the session's newest call this way, and fail with `client.ErrNoCall` for a session that has none. The other SDKs and the Volt dashboard still read a session id as a call id.
 
+### Deploying this release needs a short stop
+
+The migrations split into a global set and a shard set, each with its own goose table, and they drop and rename tables and columns a router of the previous release reads. Scale the old routers down, run the migrations, then start the new ones; a rolling deploy fails on the old routers until they are replaced.
+
+### Some agent config checks answer `validation_failed`
+
+An agent config with too many keyterms, an unknown sandbox provider, or sandbox domains, CIDR ranges or setup commands out of bounds is now refused by the store with a 400 `validation_failed` instead of `invalid_request`. A sync checks the config before it writes anything, so a refused config leaves no knowledge half written.
+
 ### A JavaScript backend sends its socket credential as headers
 
 A `Backend` holding the API secret put its token on every socket's URL, as `token` (and `authorization` behind the proxy): a token that speaks for the whole app, written into every access log between the process and the router. Such a backend now sends the same credential as headers on the upgrade, `X-Api-Key` and `Authorization` to a router reached directly and `api_key`, `stream-auth-type: jwt` and `Authorization` behind the proxy, and leaves it out of the URL; the socket still never says it is a backend. `backend.socketHeaders()` answers them, and `Socket.open(backend, url)` and `Socket.dial` send them. A `webSocket` option on such a backend is now called with a second argument, `{ headers }`, as Node's own WebSocket and the `ws` package take it; one that ignores it is refused by the router. A page, which has no secret and whose WebSocket sends no headers, keeps its user's token in the URL as before, and `WebSocketConstructor` is still the browser's `WebSocket`. `WebSocketInit` names the second argument, and the option also takes a `HeaderWebSocketConstructor`, a class that requires it (#2144).
@@ -824,6 +832,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 `Folder.load`, and so `Agent.new(folder: "…")`, raise a `ConfigurationError` for a folder whose agent.yaml names `plugins:`, with an error that names the file and points to `connectors:`. An empty or null `plugins` still loads and sends nothing, as before. Folder sync no longer sends `plugins`, and the warning that plugins are deprecated is gone, as is the check that no name is under both `connectors` and `plugins`. Move each plugin to a `connectors:` entry (AI-2528).
 
 ## Bug Fixes
+
+### Connecting one line twice at once no longer fails
+
+Two connects of the same channel line at the same moment could fail one of them on a unique violation. Both now get the same line.
 
 ### A POST from a sandbox through a tunnel to an allowed domain no longer fails after a pause
 
