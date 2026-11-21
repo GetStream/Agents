@@ -302,7 +302,7 @@ func (s *SIPTrunkSuite) shareLine(id, number string) {
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, store.TrunkGroup{CustomerID: "acme", Vendor: SIPTrunkVendor},
 		func(_ context.Context, tx *store.TrunkGroupTx) error {
 			return tx.SaveTrunk(store.StreamTrunk{
-				ID: id, Numbers: []string{number}, BridgeURI: "sip:old@shared.example.test",
+				ID: id, BridgeURI: "sip:old@shared.example.test",
 				BridgeUsername: "bridge-user", BridgePasswordSealed: sealed,
 				BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(),
 			})

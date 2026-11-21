@@ -661,9 +661,9 @@ func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string
 }
 
 // offTrunk takes a number off its trunk and deletes its rule. The trunk is deleted with its
-// last number; one the number had to itself, made before trunks were shared, is not a row
-// and is deleted with it. A trunk Stream would not delete keeps its row, which holds its
-// password and is what a retry deletes it by.
+// last number; one the number had to itself (StreamTrunk.Own), or one without a row, is
+// deleted with it as best it can be. A shared trunk Stream would not delete keeps its row,
+// which holds its password and is what a retry deletes it by.
 func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *Stream, reached error, number store.PhoneNumber, why string) error {
 	if reached != nil {
 		stream = nil
@@ -675,9 +675,14 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 		return err
 	}
 	i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == number.StreamTrunkID })
-	if i < 0 {
+	if i < 0 || trunks[i].Own {
 		if stream != nil {
 			s.deleteLines(ctx, stream, number.StreamRouteID, number.StreamTrunkID, why)
+		}
+		if i >= 0 {
+			if err := tx.DeleteTrunk(number.StreamTrunkID); err != nil {
+				return err
+			}
 		}
 		return tx.ClearLine(number.E164)
 	}
@@ -790,8 +795,19 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 	// The same request is sent on every run of a program waiting for calls, so a number
 	// already attached in this app is answered with what it has.
 	if attachedHere {
-		return Attached{TrunkID: held.StreamTrunkID, RouteID: held.StreamRouteID,
-			Bridge: Bridge{URI: held.BridgeURI}}, nil
+		attached := Attached{TrunkID: held.StreamTrunkID, RouteID: held.StreamRouteID}
+		trunk, err := s.store.StreamTrunks.Get(ctx, held.CustomerID, held.StreamTrunkID)
+		if errors.Is(err, store.ErrNoStreamTrunk) {
+			return attached, nil
+		}
+		if err != nil {
+			return Attached{}, err
+		}
+		attached.Bridge, err = Bridge{URI: trunk.BridgeURI}.WithNumber(held.E164)
+		if err != nil {
+			return Attached{}, err
+		}
+		return attached, nil
 	}
 	// A number lined in another app is taken off there first: the customer's app is where
 	// its calls go now.
@@ -807,7 +823,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		if err == nil {
 			attached := Attached{TrunkID: line.TrunkID, RouteID: line.RouteID, Bridge: line.Bridge}
 			// The line stays when this fails: the number's calls go out on it.
-			if err := s.finishAttach(ctx, provider, attachment, pin, attached, held.ConfigID); err != nil {
+			if err := s.finishAttach(ctx, provider, attachment, pin, held, attached, nil); err != nil {
 				return Attached{}, err
 			}
 			return attached, nil
@@ -874,7 +890,17 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		return Attached{}, stack.Wrap(err)
 	}
 	attached := Attached{TrunkID: trunkID, RouteID: routeID, Bridge: bridge}
-	if err := s.finishAttach(ctx, provider, attachment, pin, attached, held.ConfigID); err != nil {
+	// A vendor that asks per call where to send a caller needs the password then. Without a
+	// key it is not kept, rather than kept in the clear.
+	own := store.StreamTrunk{ID: trunkID, BridgeURI: bridge.URI, BridgeUsername: bridge.Username, Own: true}
+	if s.sealer != nil {
+		own.BridgePasswordSealed, err = s.sealer.SealWithAAD(bridge.Password, bridgeAAD(attachment.CustomerID, attachment.E164))
+		if err != nil {
+			return Attached{}, stack.Wrap(err)
+		}
+		own.BridgePasswordKEKVersion = s.sealer.CurrentVersion()
+	}
+	if err := s.finishAttach(ctx, provider, attachment, pin, held, attached, &own); err != nil {
 		return Attached{}, err
 	}
 	committed = true
@@ -882,23 +908,13 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 }
 
 // finishAttach tells the vendor to send the number's calls to its trunk, and records that
-// they go there. configID is the agent the number had: taking it off its old trunk cleared
-// it, and attaching again never takes away an agent someone set.
-func (s *Service) finishAttach(ctx context.Context, provider Provider, attachment Attachment, pin int64, attached Attached, configID string) error {
+// they go there, saving own, the trunk made for the number alone, with it. The agent the
+// number had stays: taking it off its old trunk cleared it, and attaching again never takes
+// away an agent someone set.
+func (s *Service) finishAttach(ctx context.Context, provider Provider, attachment Attachment, pin int64, held store.PhoneNumber, attached Attached, own *store.StreamTrunk) error {
 	record := store.NumberAttachment{
 		TrunkID: attached.TrunkID, RouteID: attached.RouteID, StreamAppPK: pin, CallType: defaultCallType,
-		ConfigID: configID,
-	}
-	// The address is not secret and a repeat attach answers it. A vendor that asks per call
-	// where to send a caller needs the password then. Without a key it is not kept, rather
-	// than kept in the clear.
-	record.BridgeURI, record.BridgeUsername = attached.Bridge.URI, attached.Bridge.Username
-	if s.sealer != nil {
-		sealed, err := s.sealer.SealWithAAD(attached.Bridge.Password, bridgeAAD(attachment.CustomerID, attachment.E164))
-		if err != nil {
-			return stack.Wrap(err)
-		}
-		record.BridgePasswordSealed, record.BridgePasswordKEKVersion = sealed, s.sealer.CurrentVersion()
+		ConfigID: held.ConfigID,
 	}
 
 	err := provider.ConfigureInbound(ctx, Inbound{E164: attachment.E164, Bridge: attached.Bridge})
@@ -908,10 +924,16 @@ func (s *Service) finishAttach(ctx context.Context, provider Provider, attachmen
 	// The vendor has already been told to send calls to the trunk. There is no primitive to
 	// un-configure a provider's inbound routing, so a failure here leaves the vendor
 	// pointing at a trunk that, when it is the number's own, is about to be rolled back.
-	if err := s.store.PhoneNumbers.Attach(ctx, attachment.CustomerID, attachment.E164, record); err != nil {
-		return stack.Wrap(err)
+	if own == nil {
+		return s.store.PhoneNumbers.Attach(ctx, attachment.CustomerID, attachment.E164, record)
 	}
-	return nil
+	group := store.TrunkGroup{CustomerID: attachment.CustomerID, StreamAppPK: pin, Vendor: held.Vendor}
+	return s.inTrunkGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		if err := tx.SaveTrunk(*own); err != nil {
+			return err
+		}
+		return tx.Attach(attachment.E164, record)
+	})
 }
 
 // InboundBridge is the Stream trunk calls to an attached number of the vendor go to, with
@@ -935,11 +957,15 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if err := s.gate.Admit(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
-	password, err := s.sealer.OpenWithAADVersion(stored.PasswordSealed, bridgeAAD(stored.CustomerID, e164), stored.KEKVersion)
+	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
+	if stored.Own {
+		aad = bridgeAAD(stored.CustomerID, e164)
+	}
+	password, err := s.sealer.OpenWithAADVersion(stored.PasswordSealed, aad, stored.KEKVersion)
 	if err != nil {
 		return Bridge{}, stack.Wrap(fmt.Errorf("phone: open the trunk password of %s: %w", e164, err))
 	}
-	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}, nil
+	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}.WithNumber(e164)
 }
 
 // CallRequest is a call to place from one of the customer's numbers.

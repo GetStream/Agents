@@ -969,10 +969,14 @@ func (s *CallHooksSuite) holdBridged(callType, callID, bridgeURI string) {
 		PurchasedAt: time.Now().UTC(),
 		Tags:        s.numberTags,
 	}))
-	s.Require().NoError(s.store.PhoneNumbers.Attach(
-		ctx, s.customerID(), s.e164, store.NumberAttachment{
-			TrunkID: "trunk-" + s.utils.uuid(), CallType: callType, CallID: callID, BridgeURI: bridgeURI,
-		}))
+	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: callType, CallID: callID}
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: s.numberVendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		if err := tx.SaveTrunk(store.StreamTrunk{ID: attachment.TrunkID, BridgeURI: bridgeURI, Own: true}); err != nil {
+			return err
+		}
+		return tx.Attach(s.e164, attachment)
+	}))
 }
 
 // arrive delivers a signed call.session_started for one call, as Stream would.

@@ -1118,10 +1118,6 @@ TABLE organizations
 
 TABLE phone_numbers
     attached_at timestamp with time zone
-    bridge_password_kek_version integer
-    bridge_password_sealed bytea
-    bridge_uri text
-    bridge_username text
     capabilities text[] NOT NULL DEFAULT '{}'::text[]
     config_id text
     country text NOT NULL
@@ -1148,6 +1144,7 @@ TABLE phone_numbers
     CREATE UNIQUE INDEX phone_numbers_held_idx ON public.phone_numbers USING btree (vendor, e164) WHERE ((released_at IS NULL) AND (vendor <> 'sip_trunk'::text))
     CREATE INDEX phone_numbers_tags_idx ON public.phone_numbers USING gin (tags)
     CREATE UNIQUE INDEX phone_numbers_trunk_held_idx ON public.phone_numbers USING btree (customer_id, e164) WHERE ((released_at IS NULL) AND (vendor = 'sip_trunk'::text))
+    CREATE INDEX phone_numbers_trunk_idx ON public.phone_numbers USING btree (customer_id, stream_trunk_id) WHERE (released_at IS NULL)
 
 TABLE policies
     document jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -1424,7 +1421,7 @@ TABLE stream_trunks
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
     id text NOT NULL
-    numbers text[] NOT NULL
+    own boolean NOT NULL DEFAULT false
     stream_app_pk bigint
     vendor text NOT NULL
     CONSTRAINT stream_trunks_pkey PRIMARY KEY (id)

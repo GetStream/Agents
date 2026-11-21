@@ -2700,20 +2700,27 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 	s.Equal("trunk.example.com", moved.Host)
 }
 
-func (s *DataMoveSuite) TestAMovedNumberLeavesItsBridgePasswordBehind() {
+func (s *DataMoveSuite) TestAMovedNumberLeavesItsTrunkBehind() {
 	s.capture("acme")
 	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000110", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000110", NumberAttachment{
-		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: "call-1",
-		BridgeURI: "sip:trunk.example.com", BridgeUsername: "agent",
-		BridgePasswordSealed: []byte("sealed bridge"), BridgePasswordKEKVersion: 1,
-	}))
+	s.Require().NoError(s.source.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "telnyx"},
+		func(_ context.Context, tx *TrunkGroupTx) error {
+			if err := tx.SaveTrunk(StreamTrunk{
+				ID: "trunk-1", BridgeURI: "sip:trunk.example.com", BridgeUsername: "agent",
+				BridgePasswordSealed: []byte("sealed bridge"), BridgePasswordKEKVersion: 1, Own: true,
+			}); err != nil {
+				return err
+			}
+			return tx.Attach("+15550000110", NumberAttachment{TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: "call-1"})
+		}))
 
-	numbers := s.export("acme").of("phone_numbers")
+	exported := s.export("acme")
+	s.Empty(exported.of("stream_trunks"), "a trunk's credentials are not part of a customer's data")
+	numbers := exported.of("phone_numbers")
 	s.Require().Len(numbers, 1)
-	s.NotContains(numbers[0], "bridge_password_sealed", "a sealed password is not part of a customer's data")
+	s.NotContains(numbers[0], "bridge_", "nor does the number carry its trunk's")
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
@@ -2723,24 +2730,21 @@ func (s *DataMoveSuite) TestAMovedNumberLeavesItsBridgePasswordBehind() {
 			continue
 		}
 		recorded++
-		s.NotContains(string(change.Payload), "bridge_password_sealed")
+		s.NotContains(string(change.Payload), "bridge_")
 	}
 	s.Equal(2, recorded, "the insert and the attach")
+	for _, change := range changes {
+		s.NotEqual("stream_trunks", change.Table, "a trunk's change is not recorded for a move")
+	}
 
 	s.move("acme", "acme")
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
-
-	var sealed []byte
-	var version sql.NullInt64
-	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT bridge_password_sealed, bridge_password_kek_version FROM phone_numbers WHERE e164 = ?",
-		"+15550000110").Scan(&sealed, &version))
-	s.Empty(sealed)
-	s.False(version.Valid, "the source password's key version does not come along")
+	_, err = s.destination.StreamTrunks.Get(s.ctx, "acme", "trunk-1")
+	s.ErrorIs(err, ErrNoStreamTrunk)
 
 	// Nor does where its calls went, which a hook finds the number by.
 	routing := map[string]*sql.NullString{"stream_trunk_id": {}, "stream_route_id": {}, "stream_call_id": {},
-		"stream_call_type": {}, "bridge_uri": {}, "bridge_username": {}}
+		"stream_call_type": {}}
 	for column, value := range routing {
 		s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT "+column+" FROM phone_numbers WHERE e164 = ?", "+15550000110").Scan(value))
@@ -2793,7 +2797,7 @@ func (s *DataMoveSuite) TestAChangeAppliedLaterKeepsANumberAttachedOnTheDestinat
 	// The source attaches it too, to another agent, and its row says so in the change.
 	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000131", NumberAttachment{
 		TrunkID: "trunk-there", RouteID: "route-there", CallType: "default", CallID: "call-there",
-		ConfigID: s.seedAgentConfig(s.source, "acme", "there"), BridgeURI: "sip:there.example.com",
+		ConfigID: s.seedAgentConfig(s.source, "acme", "there"),
 	}))
 	s.retag(s.source, "+15550000131")
 
@@ -2812,9 +2816,7 @@ func (s *DataMoveSuite) TestCopyingAgainKeepsANumbersLineOnTheDestination() {
 	// On a trunk to place calls, not attached.
 	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
-			return tx.SetLine("+15550000132", "trunk-here", "route-here", NumberBridge{
-				URI: "sip:here.example.com", Username: "agent-here", PasswordSealed: []byte("sealed here"), KEKVersion: 1,
-			})
+			return tx.SetLine("+15550000132", "trunk-here", "route-here")
 		}))
 	lined, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000132")
 	s.Require().NoError(err)
@@ -2833,7 +2835,7 @@ func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDesti
 	there := s.seedAgentConfig(s.source, "acme", "there")
 	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000133", NumberAttachment{
 		TrunkID: "trunk-there", RouteID: "route-there", StreamAppPK: 42, CallType: "default", CallID: "call-there",
-		ConfigID: there, BridgeURI: "sip:there.example.com", BridgeUsername: "agent-there",
+		ConfigID: there,
 	}))
 	s.retag(s.source, "+15550000133")
 
@@ -2848,7 +2850,6 @@ func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDesti
 	s.Nil(moved.AttachedAt)
 	s.Empty(moved.StreamTrunkID)
 	s.Empty(moved.StreamCallID)
-	s.Empty(moved.BridgeURI)
 }
 
 func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALineOnTheDestination() {
@@ -2863,7 +2864,7 @@ func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALin
 	// On a line to place calls, which never wrote an agent.
 	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
-			return tx.SetLine("+15550000134", "trunk-here", "route-here", NumberBridge{})
+			return tx.SetLine("+15550000134", "trunk-here", "route-here")
 		}))
 	second := s.seedAgentConfig(s.source, "acme", "second")
 	s.Require().NoError(s.source.PhoneNumbers.SetAgent(s.ctx, "acme", "+15550000134", second))
@@ -2907,8 +2908,7 @@ func (s *DataMoveSuite) numberAttachedHere(e164 string) PhoneNumber {
 	s.move("acme", "acme")
 	s.Require().NoError(s.destination.PhoneNumbers.Attach(s.ctx, "acme", e164, NumberAttachment{
 		TrunkID: "trunk-here", RouteID: "route-here", StreamAppPK: 42, CallType: "default", CallID: "call-here",
-		ConfigID: s.seedAgentConfig(s.destination, "acme", "here"), BridgeURI: "sip:here.example.com",
-		BridgeUsername: "agent-here", BridgePasswordSealed: []byte("sealed here"), BridgePasswordKEKVersion: 1,
+		ConfigID: s.seedAgentConfig(s.destination, "acme", "here"),
 	}))
 	attached, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", e164)
 	s.Require().NoError(err)

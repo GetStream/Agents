@@ -283,7 +283,7 @@ func (s *PhoneSuite) TestANumberThatOnlyPlacedCallsIsNotListedAsAttached() {
 	}))
 	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
 	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
-		return tx.SetLine(number, "trunk-"+s.utils.uuid(), "route-"+s.utils.uuid(), store.NumberBridge{})
+		return tx.SetLine(number, "trunk-"+s.utils.uuid(), "route-"+s.utils.uuid())
 	}))
 
 	var numbers []PhoneNumber

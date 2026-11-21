@@ -14,7 +14,8 @@ import (
 )
 
 // StreamTrunk is a Stream SIP trunk a customer's numbers of one vendor share in one Stream
-// app, with the credentials the vendor presents to it.
+// app, with the credentials the vendor presents to it. Its numbers are the numbers held on it
+// (PhoneNumber.StreamTrunkID).
 type StreamTrunk struct {
 	bun.BaseModel `bun:"table:stream_trunks,alias:st"`
 
@@ -24,14 +25,19 @@ type StreamTrunk struct {
 	// StreamAppPK is the app the trunk is in. Zero, stored as NULL, is the deployment's own.
 	StreamAppPK int64  `bun:"stream_app_pk,nullzero"`
 	Vendor      string `bun:"vendor,notnull"`
-	// Numbers are the numbers the trunk has at Stream.
-	Numbers        []string `bun:"numbers,array,notnull"`
+	// Numbers are the numbers held on the trunk, oldest first, read by TrunkGroupTx.Trunks.
+	Numbers        []string `bun:"numbers,array,scanonly"`
 	BridgeURI      string   `bun:"bridge_uri,notnull"`
 	BridgeUsername string   `bun:"bridge_username,notnull"`
 	// BridgePasswordSealed is sealed once for the trunk, since every number on it shares it.
-	BridgePasswordSealed     []byte    `bun:"bridge_password_sealed,notnull"`
-	BridgePasswordKEKVersion int       `bun:"bridge_password_kek_version,notnull"`
-	CreatedAt                time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	// Empty for an own trunk made without a key to seal it under.
+	BridgePasswordSealed     []byte `bun:"bridge_password_sealed,notnull"`
+	BridgePasswordKEKVersion int    `bun:"bridge_password_kek_version,notnull"`
+	// Own is a trunk made for its one number, before trunks were shared or without a key to
+	// seal a shared one's password. Its password is sealed to the number, no other number
+	// joins it, and a line adopts it into the group as a shared one.
+	Own       bool      `bun:"own,notnull"`
+	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 }
 
 // Validate refuses a trunk the table would refuse.
@@ -57,14 +63,6 @@ type TrunkGroup struct {
 	// StreamAppPK is the app, zero for the deployment's.
 	StreamAppPK int64
 	Vendor      string
-}
-
-// NumberBridge is the trunk a number's calls go to, as kept on the number.
-type NumberBridge struct {
-	URI            string
-	Username       string
-	PasswordSealed []byte
-	KEKVersion     int
 }
 
 // TrunkGroupTx is one trunk group's rows, read and written in a transaction that holds the
@@ -111,10 +109,13 @@ func (r *StreamTrunks) InGroup(ctx context.Context, group TrunkGroup, fn func(ct
 	})
 }
 
-// Trunks are the group's trunks, oldest first.
+// Trunks are the group's trunks, oldest first, each with its numbers.
 func (t *TrunkGroupTx) Trunks() ([]StreamTrunk, error) {
 	var trunks []StreamTrunk
 	err := t.tx.NewSelect().Model(&trunks).
+		ColumnExpr("st.*").
+		ColumnExpr("ARRAY(SELECT pn.e164 FROM phone_numbers pn WHERE pn.customer_id = st.customer_id " +
+			"AND pn.stream_trunk_id = st.id AND pn.released_at IS NULL ORDER BY pn.id) AS numbers").
 		ApplyQueryBuilder(t.where).
 		OrderExpr("created_at, id").
 		Scan(t.ctx)
@@ -128,16 +129,19 @@ func (t *TrunkGroupTx) Trunks() ([]StreamTrunk, error) {
 // another group is refused rather than taken over.
 func (t *TrunkGroupTx) SaveTrunk(trunk StreamTrunk) error {
 	trunk.CustomerID, trunk.StreamAppPK, trunk.Vendor = t.group.CustomerID, t.group.StreamAppPK, t.group.Vendor
+	if trunk.BridgePasswordSealed == nil {
+		trunk.BridgePasswordSealed = []byte{}
+	}
 	if err := trunk.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 	result, err := t.tx.NewInsert().Model(&trunk).
 		On("CONFLICT (id) DO UPDATE").
-		Set("numbers = EXCLUDED.numbers").
 		Set("bridge_uri = EXCLUDED.bridge_uri").
 		Set("bridge_username = EXCLUDED.bridge_username").
 		Set("bridge_password_sealed = EXCLUDED.bridge_password_sealed").
 		Set("bridge_password_kek_version = EXCLUDED.bridge_password_kek_version").
+		Set("own = EXCLUDED.own").
 		Where("st.customer_id = EXCLUDED.customer_id").
 		Where("st.vendor = EXCLUDED.vendor").
 		Where("st.stream_app_pk IS NOT DISTINCT FROM EXCLUDED.stream_app_pk").
@@ -179,16 +183,13 @@ func (t *TrunkGroupTx) ReleaseNumber(e164 string, at time.Time) error {
 	return releaseNumber(t.ctx, t.tx, t.group.CustomerID, e164, at)
 }
 
-// SetLine records the trunk and rule a number held in the group is reached through.
-func (t *TrunkGroupTx) SetLine(e164, trunkID, routeID string, bridge NumberBridge) error {
+// SetLine records the trunk and rule a number held in the group is reached through, which
+// puts it among the trunk's numbers.
+func (t *TrunkGroupTx) SetLine(e164, trunkID, routeID string) error {
 	result, err := t.tx.NewUpdate().Model((*PhoneNumber)(nil)).
 		Set("stream_trunk_id = ?", trunkID).
 		Set("stream_route_id = ?", routeID).
 		Set("stream_app_pk = ?", nullablePin(t.group.StreamAppPK)).
-		Set("bridge_uri = ?", nullable(bridge.URI)).
-		Set("bridge_username = ?", nullable(bridge.Username)).
-		Set("bridge_password_sealed = ?", nullableBytes(bridge.PasswordSealed)).
-		Set("bridge_password_kek_version = ?", nullableVersion(bridge.KEKVersion)).
 		Where("customer_id = ?", t.group.CustomerID).
 		Where("vendor = ?", t.group.Vendor).
 		Where("e164 = ?", e164).
@@ -204,16 +205,18 @@ func (t *TrunkGroupTx) ClearLine(e164 string) error {
 		Set("stream_route_id = NULL").
 		Set("attached_at = NULL").
 		Set("config_id = NULL").
-		Set("bridge_uri = NULL").
-		Set("bridge_username = NULL").
-		Set("bridge_password_sealed = NULL").
-		Set("bridge_password_kek_version = NULL").
 		Where("customer_id = ?", t.group.CustomerID).
 		Where("vendor = ?", t.group.Vendor).
 		Where("e164 = ?", e164).
 		Where("released_at IS NULL").
 		Exec(t.ctx)
 	return t.heldOne(result, err, e164, "clear line")
+}
+
+// Attach records that a number held in the group is attached on its own trunk, which it saves
+// in the same transaction (PhoneNumbers.Attach).
+func (t *TrunkGroupTx) Attach(e164 string, attached NumberAttachment) error {
+	return attachNumber(t.ctx, t.tx, t.group.CustomerID, e164, attached)
 }
 
 // Detach stops a number held in the group from ringing its agent, and keeps its trunk and rule.

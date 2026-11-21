@@ -50,13 +50,9 @@ type PhoneNumber struct {
 	// SIPTrunkID is the customer's own trunk a number with vendor sip_trunk is dialled
 	// through. Empty for a bought number, and cleared when the number is released.
 	SIPTrunkID string `bun:"sip_trunk_id,nullzero"`
-	// BridgeURI, BridgeUsername and the sealed password are the Stream trunk this number's
-	// calls go to, kept because Stream returns the password only when the trunk is made.
-	// Empty until attached, and cleared when the number is released.
-	BridgeURI                string `bun:"bridge_uri,nullzero"`
-	BridgeUsername           string `bun:"bridge_username,nullzero"`
-	BridgePasswordSealed     []byte `bun:"bridge_password_sealed,nullzero"`
-	BridgePasswordKEKVersion int    `bun:"bridge_password_kek_version,nullzero"`
+	// BridgeURI is the address of the number's Stream trunk, read only by NumberByCallInApp
+	// and NumberRungInApp.
+	BridgeURI string `bun:"bridge_uri,scanonly"`
 	// UseCaseID is the 10DLC use case the number sends as. Empty sends as the app's default.
 	UseCaseID   string    `bun:"dlc_use_case_id,nullzero"`
 	PurchasedAt time.Time `bun:"purchased_at,notnull"`
@@ -130,18 +126,15 @@ type NumberAttachment struct {
 	CallID      string
 	// ConfigID is the agent the number keeps answering with. Empty leaves its agent as it is.
 	ConfigID string
-	// BridgeURI and BridgeUsername are the trunk's address, kept whenever a number is attached.
-	// The sealed password is empty for a service with no key to seal it under.
-	BridgeURI                string
-	BridgeUsername           string
-	BridgePasswordSealed     []byte
-	BridgePasswordKEKVersion int
 }
 
 // AttachedBridge is the Stream trunk an attached number's calls go to, with its password
 // still sealed.
 type AttachedBridge struct {
-	CustomerID     string
+	CustomerID string
+	TrunkID    string
+	// Own is a trunk made for the number alone, whose password is sealed to the number.
+	Own            bool
 	URI            string
 	Username       string
 	PasswordSealed []byte
@@ -228,11 +221,15 @@ func (r *PhoneNumbers) Attach(ctx context.Context, customerID, e164 string, atta
 	if customerID == "" || e164 == "" {
 		return stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
+	return attachNumber(ctx, r.store.global, customerID, e164, attached)
+}
+
+// attachNumber records in db that a number is attached.
+func attachNumber(ctx context.Context, db bun.IDB, customerID, e164 string, attached NumberAttachment) error {
 	if attached.TrunkID == "" {
 		return stack.Wrap(errors.New("store: a trunk id is required"))
 	}
-
-	update := r.store.global.NewUpdate().Model((*PhoneNumber)(nil))
+	update := db.NewUpdate().Model((*PhoneNumber)(nil))
 	if attached.ConfigID != "" {
 		update.Set("config_id = ?", attached.ConfigID)
 	}
@@ -242,10 +239,6 @@ func (r *PhoneNumbers) Attach(ctx context.Context, customerID, e164 string, atta
 		Set("stream_app_pk = ?", nullablePin(attached.StreamAppPK)).
 		Set("stream_call_id = ?", attached.CallID).
 		Set("stream_call_type = ?", attached.CallType).
-		Set("bridge_uri = ?", nullable(attached.BridgeURI)).
-		Set("bridge_username = ?", nullable(attached.BridgeUsername)).
-		Set("bridge_password_sealed = ?", nullableBytes(attached.BridgePasswordSealed)).
-		Set("bridge_password_kek_version = ?", nullableVersion(attached.BridgePasswordKEKVersion)).
 		Set("attached_at = now()").
 		Where("customer_id = ?", customerID).
 		Where("e164 = ?", e164).
@@ -266,36 +259,43 @@ func (r *PhoneNumbers) Attach(ctx context.Context, customerID, e164 string, atta
 
 // AttachedBridge returns the trunk calls to a number of the vendor go to. It matches
 // ErrNoNumber when nobody holds the number at that vendor or it is not attached, and
-// ErrNoStoredBridge when it was attached without its credentials kept.
+// ErrNoStoredBridge when its trunk's credentials were not kept.
 func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) (AttachedBridge, error) {
 	if vendor == "" || e164 == "" {
 		return AttachedBridge{}, stack.Wrap(errors.New("store: a vendor and a number are required"))
 	}
 
-	var number PhoneNumber
-	err := r.store.global.NewSelect().Model(&number).
-		Where("vendor = ?", vendor).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Where("attached_at IS NOT NULL").
-		Limit(1).
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AttachedBridge{}, stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not an attached %s number", e164, vendor)})
+	var found []struct {
+		CustomerID     string `bun:"customer_id"`
+		TrunkID        string `bun:"trunk_id"`
+		Own            bool   `bun:"own"`
+		URI            string `bun:"bridge_uri"`
+		Username       string `bun:"bridge_username"`
+		PasswordSealed []byte `bun:"bridge_password_sealed"`
+		KEKVersion     int    `bun:"bridge_password_kek_version"`
 	}
+	err := r.store.global.NewSelect().TableExpr("phone_numbers AS pn").
+		ColumnExpr("pn.customer_id, COALESCE(st.id, '') AS trunk_id, COALESCE(st.own, false) AS own").
+		ColumnExpr("COALESCE(st.bridge_uri, '') AS bridge_uri, COALESCE(st.bridge_username, '') AS bridge_username").
+		ColumnExpr("st.bridge_password_sealed, COALESCE(st.bridge_password_kek_version, 0) AS bridge_password_kek_version").
+		Join("LEFT JOIN stream_trunks AS st ON st.id = pn.stream_trunk_id AND st.customer_id = pn.customer_id").
+		Where("pn.vendor = ?", vendor).
+		Where("pn.e164 = ?", e164).
+		Where("pn.released_at IS NULL").
+		Where("pn.attached_at IS NOT NULL").
+		Limit(1).
+		Scan(ctx, &found)
 	if err != nil {
 		return AttachedBridge{}, stack.Wrap(fmt.Errorf("store: attached bridge: %w", err))
 	}
-	if number.BridgeURI == "" || len(number.BridgePasswordSealed) == 0 {
+	if len(found) == 0 {
+		return AttachedBridge{}, stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not an attached %s number", e164, vendor)})
+	}
+	bridge := found[0]
+	if bridge.URI == "" || len(bridge.PasswordSealed) == 0 {
 		return AttachedBridge{}, stack.Wrap(fmt.Errorf("%w: %s", ErrNoStoredBridge, e164))
 	}
-	return AttachedBridge{
-		CustomerID:     number.CustomerID,
-		URI:            number.BridgeURI,
-		Username:       number.BridgeUsername,
-		PasswordSealed: number.BridgePasswordSealed,
-		KEKVersion:     number.BridgePasswordKEKVersion,
-	}, nil
+	return AttachedBridge(bridge), nil
 }
 
 // Select returns the numbers a customer holds, newest first.
@@ -426,10 +426,6 @@ func releaseNumber(ctx context.Context, db bun.IDB, customerID, e164 string, at 
 		Set("attached_at = NULL").
 		Set("config_id = NULL").
 		Set("sip_trunk_id = NULL").
-		Set("bridge_uri = NULL").
-		Set("bridge_username = NULL").
-		Set("bridge_password_sealed = NULL").
-		Set("bridge_password_kek_version = NULL").
 		Where("customer_id = ?", customerID).
 		Where("e164 = ?", e164).
 		Where("released_at IS NULL").
@@ -468,20 +464,6 @@ func heldNumber(ctx context.Context, query *bun.SelectQuery, customerID, e164 st
 		return PhoneNumber{}, stack.Wrap(fmt.Errorf("store: number: %w", err))
 	}
 	return number, nil
-}
-
-func nullableBytes(value []byte) any {
-	if len(value) == 0 {
-		return nil
-	}
-	return value
-}
-
-func nullableVersion(version int) any {
-	if version == 0 {
-		return nil
-	}
-	return version
 }
 
 // nullablePin stores the deployment's own app as NULL, as every pin written before apps

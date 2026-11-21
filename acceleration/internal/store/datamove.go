@@ -166,7 +166,7 @@ var dataTables = []dataTable{
 // authorized again rather than arriving broken.
 // A guest's refresh secret hash is the same kind of thing: a moved guest is handed a new
 // one by its own token or by the app's backend, or comes back as a new guest.
-var secretColumns = []string{"secret_sealed", "access_token", "refresh_token", "oauth_state", "code_verifier", "credentials_sealed", "password_sealed", "bridge_password_sealed", "refresh_secret_hash"}
+var secretColumns = []string{"secret_sealed", "access_token", "refresh_token", "oauth_state", "code_verifier", "credentials_sealed", "password_sealed", "refresh_secret_hash"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -649,10 +649,9 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 }
 
 // lineColumns are what attaching a number, or giving it a line, writes on its row (AttachNumber,
-// TrunkGroupTx.SetLine): where its calls go and which agent answers them. The sealed bridge
-// password is one too, and an import never writes it (secretColumns).
+// TrunkGroupTx.SetLine): where its calls go and which agent answers them.
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
-	"bridge_uri", "bridge_username", "bridge_password_kek_version", "attached_at", "config_id"}
+	"attached_at", "config_id"}
 
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage) error {
 	spec, found := dataTableByName(table)
@@ -1312,15 +1311,12 @@ func (t dataTable) identity() string {
 	if t.name == "sip_trunks" {
 		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0)"
 	}
-	// An attached number arrives without its bridge password for the same reason, so its key
-	// version stays behind too rather than describing a password that is not there. Nor does
-	// where its calls go: the trunk, route and call it was attached to are named by whatever
+	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers
 	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again.
 	if t.name == "phone_numbers" {
-		return "jsonb_build_object('customer_id', ?::text, 'bridge_password_kek_version', NULL," +
-			" 'stream_trunk_id', NULL, 'stream_route_id', NULL, 'stream_call_id', NULL," +
-			" 'stream_call_type', NULL, 'bridge_uri', NULL, 'bridge_username', NULL, 'attached_at', NULL)"
+		return "jsonb_build_object('customer_id', ?::text, 'stream_trunk_id', NULL, 'stream_route_id', NULL," +
+			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL)"
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows

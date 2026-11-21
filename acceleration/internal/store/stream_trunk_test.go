@@ -6,6 +6,9 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/database"
 )
 
 // trunkIDs are the ids of the trunks one group sees.
@@ -25,7 +28,7 @@ func (s *StoreSuite) trunkIDs(group TrunkGroup) []string {
 func (s *StoreSuite) savedTrunk(group TrunkGroup, id string) {
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		return tx.SaveTrunk(StreamTrunk{
-			ID: id, Numbers: []string{"+15125550000"}, BridgeURI: "sip:" + id + "@sip.example.test",
+			ID: id, BridgeURI: "sip:" + id + "@sip.example.test",
 			BridgeUsername: id, BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 1,
 		})
 	}))
@@ -52,7 +55,7 @@ func (s *StoreSuite) TestATrunkAnotherGroupHoldsIsNotOverwritten() {
 		{CustomerID: "acme", StreamAppPK: 7, Vendor: "telnyx"},
 	} {
 		err := s.store.StreamTrunks.InGroup(s.ctx, other, func(_ context.Context, tx *TrunkGroupTx) error {
-			return tx.SaveTrunk(StreamTrunk{ID: "trunk-taken", Numbers: []string{"+15125559999"},
+			return tx.SaveTrunk(StreamTrunk{ID: "trunk-taken",
 				BridgeURI: "sip:x@y", BridgeUsername: "x", BridgePasswordSealed: []byte("theirs"), BridgePasswordKEKVersion: 1})
 		})
 		s.Error(err, other)
@@ -61,7 +64,7 @@ func (s *StoreSuite) TestATrunkAnotherGroupHoldsIsNotOverwritten() {
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		s.Require().Len(trunks, 1)
-		s.Equal([]string{"+15125550000"}, trunks[0].Numbers)
+		s.Equal("sip:trunk-taken@sip.example.test", trunks[0].BridgeURI)
 		s.Equal([]byte("sealed"), trunks[0].BridgePasswordSealed)
 		return err
 	}))
@@ -86,7 +89,7 @@ func (s *StoreSuite) TestTwoTransactionsOnOneGroupRunOneAfterTheOther() {
 		s.NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 			close(firstHolds)
 			<-firstMayFinish
-			return tx.SaveTrunk(StreamTrunk{ID: "trunk-first", Numbers: []string{"+15125550000"},
+			return tx.SaveTrunk(StreamTrunk{ID: "trunk-first",
 				BridgeURI: "sip:x@y", BridgeUsername: "x", BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 1})
 		}))
 	}()
@@ -116,9 +119,7 @@ func (s *StoreSuite) TestSettingALineIsReadBackOnTheNumber() {
 	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
 
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
-		return tx.SetLine("+15125551234", "trunk-1", "route-1", NumberBridge{
-			URI: "sip:+15125551234@sip.example.test", Username: "trunk-1", PasswordSealed: []byte("sealed"), KEKVersion: 2,
-		})
+		return tx.SetLine("+15125551234", "trunk-1", "route-1")
 	}))
 
 	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
@@ -126,11 +127,33 @@ func (s *StoreSuite) TestSettingALineIsReadBackOnTheNumber() {
 	s.Equal("trunk-1", held.StreamTrunkID)
 	s.Equal("route-1", held.StreamRouteID)
 	s.Equal(int64(7), held.StreamAppPK)
-	s.Equal("sip:+15125551234@sip.example.test", held.BridgeURI)
-	s.Equal("trunk-1", held.BridgeUsername)
-	s.Equal([]byte("sealed"), held.BridgePasswordSealed)
-	s.Equal(2, held.BridgePasswordKEKVersion)
 	s.Nil(held.AttachedAt, "a line is not an attachment")
+}
+
+func (s *StoreSuite) TestATrunksNumbersAreTheNumbersHeldOnIt() {
+	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
+	s.savedTrunk(group, "trunk-1")
+	s.savedTrunk(group, "trunk-2")
+	s.lined(group, "+15125551234", "trunk-1")
+	s.lined(group, "+15125551235", "trunk-1")
+	s.lined(group, "+15125551236", "trunk-1")
+	s.lined(group, "+15125551237", "trunk-2")
+	s.lined(TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "twilio"}, "+15125551238", "trunk-1")
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551235", s.base))
+
+	numbers := map[string][]string{}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		trunks, err := tx.Trunks()
+		for _, trunk := range trunks {
+			numbers[trunk.ID] = trunk.Numbers
+		}
+		return err
+	}))
+
+	s.Equal(map[string][]string{
+		"trunk-1": {"+15125551234", "+15125551236"},
+		"trunk-2": {"+15125551237"},
+	}, numbers, "a released number, and another customer's on a trunk of the same id, are not on it")
 }
 
 func (s *StoreSuite) TestReleasingANumberClearsItsAttachedAt() {
@@ -177,9 +200,7 @@ func (s *StoreSuite) lined(group TrunkGroup, e164, trunkID string) {
 		E164: e164, Vendor: group.Vendor, Country: "US", CustomerID: group.CustomerID, PurchasedAt: s.base,
 	}))
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
-		return tx.SetLine(e164, trunkID, "route-"+trunkID, NumberBridge{
-			URI: "sip:" + e164 + "@sip.example.test", Username: trunkID, PasswordSealed: []byte("sealed"), KEKVersion: 1,
-		})
+		return tx.SetLine(e164, trunkID, "route-"+trunkID)
 	}))
 }
 
@@ -189,7 +210,7 @@ func (s *StoreSuite) TestSettingALineLeavesAnotherCustomersNumberAlone() {
 
 	err := s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"},
 		func(_ context.Context, tx *TrunkGroupTx) error {
-			return tx.SetLine("+15125551234", "trunk-ours", "route-ours", NumberBridge{URI: "sip:x@y"})
+			return tx.SetLine("+15125551234", "trunk-ours", "route-ours")
 		})
 
 	s.Error(err, "acme holds no such number")
@@ -213,8 +234,6 @@ func (s *StoreSuite) TestClearingALineTakesTheNumberOffItsTrunk() {
 	s.Require().NoError(err)
 	s.Empty(held.StreamTrunkID)
 	s.Empty(held.StreamRouteID)
-	s.Empty(held.BridgeURI)
-	s.Empty(held.BridgePasswordSealed)
 	s.Nil(held.AttachedAt)
 }
 
@@ -237,7 +256,6 @@ func (s *StoreSuite) TestDetachClearsAttachedAndKeepsTheLine() {
 	s.lined(group, "+15125551234", "trunk-1")
 	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{
 		TrunkID: "trunk-1", RouteID: "route-trunk-1", StreamAppPK: 7, CallType: "default",
-		BridgeURI: "sip:bridge.example.com", BridgeUsername: "user", BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 1,
 	}))
 	before, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125551234")
 	s.Require().NoError(err)
@@ -253,8 +271,6 @@ func (s *StoreSuite) TestDetachClearsAttachedAndKeepsTheLine() {
 	s.Nil(after.ReleasedAt)
 	s.Equal(before.StreamTrunkID, after.StreamTrunkID)
 	s.Equal(before.StreamRouteID, after.StreamRouteID)
-	s.Equal(before.BridgeURI, after.BridgeURI)
-	s.Equal(before.BridgePasswordSealed, after.BridgePasswordSealed)
 }
 
 func (s *StoreSuite) TestDetachOfANumberAnotherCustomerHoldsFails() {
@@ -323,9 +339,7 @@ func (s *StoreSuite) linedOnly(vendor, e164 string) {
 	}))
 	group := TrunkGroup{CustomerID: "acme", Vendor: vendor}
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
-		return tx.SetLine(e164, "trunk-1", "route-1", NumberBridge{
-			URI: "sip:" + e164 + "@sip.example.test", Username: "trunk-1", PasswordSealed: []byte("sealed"), KEKVersion: 2,
-		})
+		return tx.SetLine(e164, "trunk-1", "route-1")
 	}))
 }
 
@@ -356,4 +370,85 @@ func (s *StoreSuite) TestAStreamTrunkIsReadByIdForItsOwnCustomerOnly() {
 	s.ErrorIs(err, ErrNoStreamTrunk)
 	_, err = s.store.StreamTrunks.Get(s.ctx, "acme", "missing")
 	s.ErrorIs(err, ErrNoStreamTrunk)
+}
+
+// bridgesVersion is the global migration that moves numbers' bridges onto their trunks.
+const bridgesVersion int64 = 20270116000002
+
+func (s *StoreSuite) TestMovingBridgesOntoTrunksKeepsEveryNumbersTrunk() {
+	db, err := Open(s.emptyDatabase("trunk_bridges"))
+	s.Require().NoError(err)
+	defer db.Close()
+	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
+	s.Require().NoError(err)
+	provider, err := goose.NewProvider("", db.global.DB, globalSet.files, goose.WithStore(versions))
+	s.Require().NoError(err)
+	_, err = provider.UpTo(s.ctx, bridgesVersion-1)
+	s.Require().NoError(err)
+
+	_, err = db.global.ExecContext(s.ctx, `
+INSERT INTO stream_trunks (id, customer_id, vendor, numbers, bridge_uri, bridge_username, bridge_password_sealed,
+    bridge_password_kek_version) VALUES
+    ('trunk-shared', 'acme', 'telnyx', '{+15125550101,+15125550102}', 'sip:trunk-shared@bridge.test', 'shared-user',
+        'trunk sealed', 1);
+INSERT INTO phone_numbers (e164, vendor, country, customer_id, purchased_at, stream_trunk_id, bridge_uri, bridge_username,
+    bridge_password_sealed, bridge_password_kek_version, attached_at, released_at) VALUES
+    ('+15125550101', 'telnyx', 'US', 'acme', ?0, 'trunk-shared', 'sip:+15125550101@bridge.test', 'shared-user',
+        'number sealed', 1, ?0, NULL),
+    ('+15125550102', 'telnyx', 'US', 'acme', ?0, 'trunk-shared', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('+15125550103', 'telnyx', 'US', 'acme', ?0, 'trunk-own', 'sip:+15125550103@own.test', 'own-user',
+        'own sealed', 2, ?0, NULL),
+    ('+15125550104', 'telnyx', 'US', 'acme', ?0, 'trunk-unkept', 'sip:+15125550104@own.test', 'unkept-user',
+        NULL, NULL, ?0, NULL),
+    ('+15125550105', 'telnyx', 'US', 'acme', ?0, 'trunk-gone', 'sip:+15125550105@own.test', 'gone-user',
+        'gone sealed', 2, NULL, ?0),
+    ('+15125550106', 'telnyx', 'US', 'acme', ?0, 'trunk-bare', NULL, NULL, NULL, NULL, ?0, NULL)`, s.base)
+	s.Require().NoError(err)
+
+	s.Require().NoError(db.Migrate(s.ctx))
+
+	trunks := map[string]StreamTrunk{}
+	s.Require().NoError(db.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "telnyx"},
+		func(_ context.Context, tx *TrunkGroupTx) error {
+			read, err := tx.Trunks()
+			for _, trunk := range read {
+				trunk.CreatedAt = time.Time{}
+				trunks[trunk.ID] = trunk
+			}
+			return err
+		}))
+	s.Equal(map[string]StreamTrunk{
+		"trunk-shared": {ID: "trunk-shared", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550101", "+15125550102"},
+			BridgeURI: "sip:trunk-shared@bridge.test", BridgeUsername: "shared-user",
+			BridgePasswordSealed: []byte("trunk sealed"), BridgePasswordKEKVersion: 1},
+		"trunk-own": {ID: "trunk-own", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550103"},
+			BridgeURI: "sip:+15125550103@own.test", BridgeUsername: "own-user",
+			BridgePasswordSealed: []byte("own sealed"), BridgePasswordKEKVersion: 2, Own: true},
+		"trunk-unkept": {ID: "trunk-unkept", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550104"},
+			BridgeURI: "sip:+15125550104@own.test", BridgeUsername: "unkept-user", BridgePasswordSealed: []byte{}, Own: true},
+	}, trunks, "a shared trunk keeps its password; a number's own becomes a trunk; a released number's does not")
+
+	shared, err := db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125550101")
+	s.Require().NoError(err)
+	s.Equal([]byte("trunk sealed"), shared.PasswordSealed, "the trunk's password, sealed to the trunk")
+	own, err := db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125550103")
+	s.Require().NoError(err)
+	s.Equal(AttachedBridge{CustomerID: "acme", TrunkID: "trunk-own", Own: true, URI: "sip:+15125550103@own.test",
+		Username: "own-user", PasswordSealed: []byte("own sealed"), KEKVersion: 2}, own)
+	for _, unkept := range []string{"+15125550104", "+15125550106"} {
+		_, err = db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", unkept)
+		s.ErrorIs(err, ErrNoStoredBridge, unkept)
+	}
+}
+
+func (s *StoreSuite) TestAnOwnTrunkMadeWithoutAKeyIsSavedWithNoPassword() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-unsealed", BridgeURI: "sip:+15125551234@sip.example.test", Own: true})
+	}))
+
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-unsealed")
+	s.Require().NoError(err)
+	s.True(trunk.Own)
+	s.Empty(trunk.BridgePasswordSealed)
 }

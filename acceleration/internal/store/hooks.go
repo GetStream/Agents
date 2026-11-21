@@ -52,6 +52,10 @@ func (a AppScope) clause() bun.Safe {
 // is acted on for nobody rather than for whichever came first.
 var ErrAmbiguousHook = errors.New("store: more than one customer holds what that hook names")
 
+// trunkURI reads a number's PhoneNumber.BridgeURI from its trunk.
+const trunkURI = "(SELECT st.bridge_uri FROM stream_trunks AS st WHERE st.id = pn.stream_trunk_id " +
+	"AND st.customer_id = pn.customer_id) AS bridge_uri"
+
 // NumberByCallInApp finds the number whose lines reach a call, among the numbers attached
 // in one app. A routing rule names the call its callers are put in, which is what an
 // arriving call is recognised by; a number attached before its call was stored is found by
@@ -65,7 +69,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 		callType = "agent"
 	}
 	var held []PhoneNumber
-	if err := s.global.NewSelect().Model(&held).
+	if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
 		Where("stream_call_id = ?", callID).Where("stream_call_type = ?", callType).
 		Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 		return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
@@ -75,7 +79,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 		if !named {
 			return PhoneNumber{}, fmt.Errorf("store: no number reaches call %s:%s", callType, callID)
 		}
-		if err := s.global.NewSelect().Model(&held).
+		if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
 			Where("e164 = ?", e164).Where("stream_trunk_id IS NOT NULL").
 			Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 			return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
@@ -94,7 +98,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 // in one app: the call is named for the session answering it, so it carries the number.
 func (s *Store) NumberRungInApp(ctx context.Context, scope AppScope, e164 string) (PhoneNumber, error) {
 	var held []PhoneNumber
-	if err := s.global.NewSelect().Model(&held).
+	if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
 		Where("e164 = ?", e164).Where("attached_at IS NOT NULL").
 		Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 		return PhoneNumber{}, fmt.Errorf("store: number rung: %w", err)

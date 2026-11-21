@@ -786,6 +786,33 @@ func (s *StoreSuite) TestAnArrivingCallNamesTheCustomerWhoseNumberWasRung() {
 	s.Equal("+15125551234", number.E164)
 }
 
+func (s *StoreSuite) TestANumberFoundByItsCallOrRingCarriesItsTrunksAddress() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.savedTrunk(group, "trunk-7")
+	s.savedTrunk(TrunkGroup{CustomerID: "globex", Vendor: "twilio"}, "trunk-8")
+	s.lined(group, "+15125551234", "trunk-7")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(
+		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "support", CallID: "the-support-line"}))
+	s.lined(group, "+15125551235", "trunk-8")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(
+		s.ctx, "acme", "+15125551235", NumberAttachment{TrunkID: "trunk-8", CallType: "support", CallID: "another-line"}))
+
+	var byCall, rung, theirs PhoneNumber
+	var errs [3]error
+	s.Equal(3, s.countQueries(func() {
+		byCall, errs[0] = s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "support", "the-support-line")
+		rung, errs[1] = s.store.NumberRungInApp(s.ctx, AppScope{Unpinned: true}, "+15125551234")
+		theirs, errs[2] = s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "support", "another-line")
+	}), "one query each, the trunk's address included")
+
+	for _, err := range errs {
+		s.Require().NoError(err)
+	}
+	s.Equal("sip:trunk-7@sip.example.test", byCall.BridgeURI)
+	s.Equal("sip:trunk-7@sip.example.test", rung.BridgeURI)
+	s.Empty(theirs.BridgeURI, "another customer's trunk of that id is not the number's")
+}
+
 func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",

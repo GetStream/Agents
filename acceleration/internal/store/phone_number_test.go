@@ -2,7 +2,10 @@
 
 package store
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 func (s *StoreSuite) TestANumberIsHeldUntilItIsReleased() {
 	number := &PhoneNumber{
@@ -86,28 +89,53 @@ func (s *StoreSuite) TestANumberRemembersWhichTrunkItsCallsArriveOn() {
 	s.Equal("default", number.StreamCallType)
 }
 
-// attachWithBridge holds a number of the vendor for acme and attaches it with trunk
-// credentials.
+// attachWithBridge holds a number of the vendor for acme and attaches it on a trunk of its own.
 func (s *StoreSuite) attachWithBridge(vendor, e164 string) {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: e164, Vendor: vendor, Country: "US", CustomerID: "acme", PurchasedAt: s.base,
 	}))
-	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", e164, NumberAttachment{
-		TrunkID: "trunk-7", CallType: "agent", CallID: "{{uuid}}",
-		BridgeURI: "sip:" + e164 + "@sip.example.test", BridgeUsername: "trunk-user",
-		BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 3,
-	}))
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: vendor},
+		func(_ context.Context, tx *TrunkGroupTx) error {
+			if err := tx.SaveTrunk(StreamTrunk{
+				ID: "trunk-7", BridgeURI: "sip:" + e164 + "@sip.example.test", BridgeUsername: "trunk-user",
+				BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 3, Own: true,
+			}); err != nil {
+				return err
+			}
+			return tx.Attach(e164, NumberAttachment{TrunkID: "trunk-7", CallType: "agent", CallID: "{{uuid}}"})
+		}))
 }
 
 func (s *StoreSuite) TestAnAttachedNumberKeepsItsTrunkCredentials() {
 	s.attachWithBridge("telnyx", "+15125551234")
 
+	var bridge AttachedBridge
+	var err error
+	s.Equal(1, s.countQueries(func() {
+		bridge, err = s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
+	}))
+
+	s.Require().NoError(err)
+	s.Equal(AttachedBridge{
+		CustomerID: "acme", TrunkID: "trunk-7", Own: true, URI: "sip:+15125551234@sip.example.test", Username: "trunk-user",
+		PasswordSealed: []byte("sealed"), KEKVersion: 3,
+	}, bridge)
+}
+
+func (s *StoreSuite) TestANumberOnASharedTrunkHasTheTrunksCredentials() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "telnyx"}
+	s.savedTrunk(group, "trunk-shared")
+	s.lined(group, "+15125551234", "trunk-shared")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{
+		TrunkID: "trunk-shared", RouteID: "route-trunk-shared", CallType: "agent",
+	}))
+
 	bridge, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
 
 	s.Require().NoError(err)
 	s.Equal(AttachedBridge{
-		CustomerID: "acme", URI: "sip:+15125551234@sip.example.test", Username: "trunk-user",
-		PasswordSealed: []byte("sealed"), KEKVersion: 3,
+		CustomerID: "acme", TrunkID: "trunk-shared", URI: "sip:trunk-shared@sip.example.test", Username: "trunk-shared",
+		PasswordSealed: []byte("sealed"), KEKVersion: 1,
 	}, bridge)
 }
 
@@ -117,13 +145,6 @@ func (s *StoreSuite) TestAReleasedNumbersTrunkCredentialsAreGone() {
 
 	_, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
 	s.ErrorIs(err, ErrNoNumber)
-
-	var held PhoneNumber
-	s.Require().NoError(s.store.global.NewSelect().Model(&held).Where("e164 = ?", "+15125551234").Scan(s.ctx))
-	s.Empty(held.BridgeURI)
-	s.Empty(held.BridgeUsername)
-	s.Empty(held.BridgePasswordSealed, "a released number does not keep a password")
-	s.Zero(held.BridgePasswordKEKVersion)
 }
 
 func (s *StoreSuite) TestAnotherVendorsNumberHasNoTrunkCredentials() {

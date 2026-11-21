@@ -278,6 +278,13 @@ func (s *AppsSuite) number() store.PhoneNumber {
 	return held
 }
 
+// trunk is the stored trunk of the suite's number.
+func (s *AppsSuite) trunk() store.StreamTrunk {
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, s.customer, s.number().StreamTrunkID)
+	s.Require().NoError(err)
+	return trunk
+}
+
 func (s *AppsSuite) TestATrunkIsCreatedInTheAppAttachingTheNumber() {
 	s.ownApp()
 
@@ -611,7 +618,7 @@ func (s *AppsSuite) TestAttachingANumberThatStillNamesAFixedCallChangesNothing()
 	held := s.number()
 	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, s.e164, store.NumberAttachment{
 		TrunkID: held.StreamTrunkID, RouteID: held.StreamRouteID, StreamAppPK: held.StreamAppPK,
-		CallType: held.StreamCallType, CallID: "phone-" + s.e164, BridgeURI: held.BridgeURI,
+		CallType: held.StreamCallType, CallID: "phone-" + s.e164,
 	}))
 	s.vendor.inbound = Inbound{}
 
@@ -642,10 +649,9 @@ func (s *AppsSuite) TestAttachingATelnyxNumberWhosePasswordWasNotKeptChangesNoth
 	}))
 	first, err := service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, e164, store.NumberAttachment{
-		TrunkID: first.TrunkID, RouteID: first.RouteID, CallType: defaultCallType,
-		BridgeURI: first.Bridge.URI, BridgeUsername: first.Bridge.Username,
-	}))
+	_, err = s.store.GlobalDB().NewUpdate().Table("stream_trunks").Set("bridge_password_sealed = ''::bytea").
+		Where("id = ?", first.TrunkID).Exec(s.ctx)
+	s.Require().NoError(err)
 	telnyx.inbound = Inbound{}
 
 	again, err := service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
@@ -1243,7 +1249,7 @@ func (s *AppsSuite) TestAnAttachedNumbersTrunkCredentialsAreKeptForItsCalls() {
 	password, _ := s.deployment.TrunkAuth(attached.TrunkID)
 	s.Require().NotEmpty(password)
 	s.Equal(password, bridge.Password, "the password the trunk was made with")
-	s.NotContains(string(s.number().BridgePasswordSealed), password, "the password is stored sealed")
+	s.NotContains(string(s.trunk().BridgePasswordSealed), password, "the password is stored sealed")
 }
 
 func (s *AppsSuite) TestWithoutASealerANumberStillAttachesButKeepsNoCredentials() {
@@ -1253,8 +1259,8 @@ func (s *AppsSuite) TestWithoutASealerANumberStillAttachesButKeepsNoCredentials(
 	_, err = s.service.InboundBridge(s.ctx, "twilio", s.e164)
 
 	s.ErrorIs(err, ErrNoSealer)
-	s.Empty(s.number().BridgePasswordSealed)
-	s.Equal(attached.Bridge.URI, s.number().BridgeURI, "the address is not secret, so it is kept")
+	s.Empty(s.trunk().BridgePasswordSealed)
+	s.Equal(attached.Bridge.URI, s.trunk().BridgeURI, "the address is not secret, so it is kept")
 }
 
 // Telnyx asks per call where to send a caller, and the answer is the stored trunk, so a
@@ -1455,10 +1461,18 @@ func (s *AppsSuite) onItsOwnTrunk() (*Stream, store.NumberAttachment, Bridge) {
 	s.Require().NoError(err)
 	attached := store.NumberAttachment{
 		TrunkID: trunkID, RouteID: routeID, StreamAppPK: pin, CallType: defaultCallType,
-		BridgeURI: bridge.URI, BridgeUsername: bridge.Username,
-		BridgePasswordSealed: sealed, BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(),
 	}
-	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, s.e164, attached))
+	group := store.TrunkGroup{CustomerID: s.customer, StreamAppPK: pin, Vendor: s.vendor.vendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		err := tx.SaveTrunk(store.StreamTrunk{
+			ID: trunkID, BridgeURI: bridge.URI, BridgeUsername: bridge.Username,
+			BridgePasswordSealed: sealed, BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(), Own: true,
+		})
+		if err != nil {
+			return err
+		}
+		return tx.Attach(s.e164, attached)
+	}))
 	return stream, attached, bridge
 }
 
@@ -1676,11 +1690,12 @@ func (s *AppsSuite) TestANumberJoiningALostTrunkWhileAnotherRuleAnswersItIsRefus
 func (s *AppsSuite) TestARuleMadeAgainForALineThatThenFailsIsDeleted() {
 	s.sealed()
 	stream, attached, _ := s.onItsOwnTrunk()
-	attached.BridgeURI = "not a sip uri"
-	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, s.e164, attached))
+	_, err := s.store.GlobalDB().NewUpdate().Table("stream_trunks").Set("bridge_uri = 'not a sip uri'").
+		Where("id = ?", attached.TrunkID).Exec(s.ctx)
+	s.Require().NoError(err)
 	s.Require().NoError(stream.DeleteRoute(s.ctx, attached.RouteID))
 
-	_, err := s.lineFor(s.customer, s.e164)
+	_, err = s.lineFor(s.customer, s.e164)
 
 	s.Require().ErrorContains(err, "is not a sip uri")
 	s.Empty(s.deployment.Rules())
@@ -2485,7 +2500,7 @@ func (s *AppsSuite) TestAttachingANumberWhoseTrunkPasswordWasNotKeptGivesItATrun
 	s.Equal([]string{again.TrunkID}, s.deployment.Trunks(), "the old trunk is deleted")
 	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(again.TrunkID))
 	s.Equal([]string{again.RouteID}, s.deployment.Rules())
-	s.NotEmpty(s.number().BridgePasswordSealed, "its new trunk's password is kept")
+	s.NotEmpty(s.trunk().BridgePasswordSealed, "its new trunk's password is kept")
 }
 
 func (s *AppsSuite) TestAttachingANumberOnASharedTrunkAgainChangesNothing() {
