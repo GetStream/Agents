@@ -925,15 +925,18 @@ DELETE FROM scheduled_task_runs WHERE id = ANY(ARRAY(
     SELECT id FROM scheduled_task_runs
     WHERE finished_at < now() - make_interval(secs => ?)
     LIMIT ? FOR UPDATE SKIP LOCKED))`
+	// The batch is a materialized CTE: as an IN subquery a plan may rescan it, and each rescan
+	// skips the rows already deleted and locks the next batch, so one statement takes them all.
 	pruneScheduledTasksSQL = `
-DELETE FROM scheduled_tasks WHERE (customer_id, id) IN (
+WITH batch AS MATERIALIZED (
     SELECT customer_id, id FROM scheduled_tasks
     WHERE state IN ('completed', 'failed') AND updated_at < now() - make_interval(secs => ?0)
     AND NOT EXISTS (
         SELECT 1 FROM scheduled_task_runs r
         WHERE r.customer_id = scheduled_tasks.customer_id AND r.task_id = scheduled_tasks.id
         AND (r.finished_at IS NULL OR r.finished_at >= now() - make_interval(secs => ?0)))
-    LIMIT ?1 FOR UPDATE SKIP LOCKED)`
+    LIMIT ?1 FOR UPDATE SKIP LOCKED)
+DELETE FROM scheduled_tasks AS t USING batch WHERE t.customer_id = batch.customer_id AND t.id = batch.id`
 )
 
 // Prune deletes the runs that finished, and the tasks that completed or failed,
