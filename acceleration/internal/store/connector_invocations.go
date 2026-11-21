@@ -121,9 +121,9 @@ func (s *Store) RecordConnectorInvocation(ctx context.Context, invocation *Conne
 	invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
 	var err error
 	if invocation.Arguments == nil {
-		_, err = s.db.NewInsert().Model(invocation).Exec(ctx)
+		_, err = s.global.NewInsert().Model(invocation).Exec(ctx)
 	} else {
-		err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if _, err := tx.NewInsert().Model(invocation).Exec(ctx); err != nil {
 				return err
 			}
@@ -144,7 +144,7 @@ func (s *Store) ConnectorInvocations(ctx context.Context, customerID, connection
 		return nil, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	invocations := []ConnectorInvocation{}
-	query := s.db.NewSelect().Model(&invocations).
+	query := s.global.NewSelect().Model(&invocations).
 		Where("customer_id = ?", customerID).
 		Where("connection_id = ?", connectionID)
 	if after != nil {
@@ -165,7 +165,7 @@ func (s *Store) ConnectorInvocations(ctx context.Context, customerID, connection
 		ids[i] = invocation.ID
 	}
 	shapes := []connectorInvocationArguments{}
-	if err := s.db.NewSelect().Model(&shapes).Where("invocation_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
+	if err := s.global.NewSelect().Model(&shapes).Where("invocation_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector invocation arguments: %w", err))
 	}
 	byInvocation := make(map[string][]ArgumentShape, len(shapes))

@@ -49,19 +49,19 @@ func (s *PausedReasonMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "pausedmig")
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", beforePausedReason))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", beforePausedReason))
 	s.db = db
 }
 
 func (s *PausedReasonMigrationSuite) TestADatabaseAtTheNewestMigrationUpgradesInPlace() {
-	_, err := s.db.DB().ExecContext(s.ctx, `INSERT INTO campaigns (id, customer_id, name, state) VALUES ('old', 'acme', 'may', 'paused')`)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaigns (id, customer_id, name, state) VALUES ('old', 'acme', 'may', 'paused')`)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.db.Migrate(s.ctx), "a router starting on it migrates it, with no version older than one applied")
@@ -78,12 +78,12 @@ func (s *PausedReasonMigrationSuite) TestADatabaseAtTheNewestMigrationUpgradesIn
 }
 
 func (s *PausedReasonMigrationSuite) TestTheMigrationComesOffAndAppliesAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", pausedReason))
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", beforePausedReason))
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", pausedReason))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", pausedReason))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", beforePausedReason))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", pausedReason))
 
 	var columns int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		`SELECT count(*) FROM information_schema.columns WHERE table_name = 'campaigns' AND column_name = 'paused_reason'`).Scan(&columns))
 	s.Equal(1, columns)
 }

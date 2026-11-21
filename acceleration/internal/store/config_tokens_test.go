@@ -33,7 +33,7 @@ func (s *StoreSuite) TestAConfigTokenPutAgainReplacesItsOneRow() {
 	s.True(found.ExpiresAt.Equal(s.base.Add(12 * time.Hour)))
 	s.True(found.CreatedAt.Equal(first.CreatedAt), "the row is the first put's")
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_config_tokens").Scan(&rows))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_config_tokens").Scan(&rows))
 	s.Equal(1, rows)
 }
 
@@ -161,7 +161,7 @@ func (s *StoreSuite) TestAProviderAppLockIsNotAConnectionsCredentialLock() {
 // namespace, as credentialLocks does for credential locks.
 func (s *StoreSuite) providerAppLocks() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT count(*) FROM pg_locks
 WHERE locktype = 'advisory' AND classid = ? AND objsubid = 2 AND granted
   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,

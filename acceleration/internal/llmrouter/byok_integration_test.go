@@ -89,7 +89,7 @@ func (s *BYOKSuite) router(config routing.ModalityConfig, prices pricing.Pricer)
 // rows are the customer's rows, in the order they were recorded.
 func (s *BYOKSuite) rows() []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Order("id ASC").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Order("id ASC").Scan(s.ctx))
 	return rows
 }
 

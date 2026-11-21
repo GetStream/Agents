@@ -98,7 +98,7 @@ func (s *Store) WithLockedConnectorConnection(
 	}
 	return s.withCredentialLock(ctx, customerID, id, func(conn bun.Conn) error {
 		var connection ConnectorConnection
-		err := s.db.NewSelect().Conn(conn).Model(&connection).
+		err := s.global.NewSelect().Conn(conn).Model(&connection).
 			Where("customer_id = ?", customerID).
 			Where("id = ?", id).
 			Where("deleted_at IS NULL").
@@ -155,7 +155,7 @@ func (s *Store) saveAtRevision(ctx context.Context, conn bun.IConn, connection *
 	if connection.Status != ConnectionConnected {
 		connection.ProviderUnitID = ""
 	}
-	result, err := s.db.NewUpdate().Conn(conn).Model(connection).
+	result, err := s.global.NewUpdate().Conn(conn).Model(connection).
 		Column(credentialColumns...).
 		Set("provider_unit_id = CASE WHEN ? = ? THEN cc.provider_unit_id END", connection.Status, ConnectionConnected).
 		Where("id = ?", connection.ID).
@@ -212,7 +212,7 @@ func (s *Store) withCredentialLock(ctx context.Context, customerID, id string, f
 func (s *Store) acquireCredentialLock(ctx context.Context, namespace, key int32) (bun.Conn, error) {
 	pause := credentialRetryFirst
 	for {
-		conn, err := s.db.Conn(ctx)
+		conn, err := s.global.Conn(ctx)
 		if err != nil {
 			return bun.Conn{}, fmt.Errorf("store: credential lock connection: %w", err)
 		}

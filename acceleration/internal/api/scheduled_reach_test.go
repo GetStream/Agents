@@ -65,7 +65,7 @@ func (s *ScheduledTasksSuite) TestAWhatsAppMessageMoreThanADayAfterThePersonWrot
 	config := s.agentOnWhatsApp(number)
 	user := s.data.createUser()
 	s.seedWriter(user, config, number, writer)
-	_, err := s.store.DB().NewRaw("UPDATE channel_deliveries SET received_at = ? WHERE account_id = ?",
+	_, err := s.store.GlobalDB().NewRaw("UPDATE channel_deliveries SET received_at = ? WHERE account_id = ?",
 		time.Now().Add(-25*time.Hour), line.Id).Exec(context.Background())
 	s.Require().NoError(err)
 

@@ -52,19 +52,19 @@ func (s *StoredPricesMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "pricemig")
 	s.exec(db, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", beforeStoredPrices))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", beforeStoredPrices))
 	s.db = db
 }
 
 func (s *StoredPricesMigrationSuite) exec(db *Store, statements ...string) {
 	for _, statement := range statements {
-		_, err := db.DB().ExecContext(s.ctx, statement)
+		_, err := db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err, statement)
 	}
 }
@@ -110,7 +110,7 @@ func (s *StoredPricesMigrationSuite) oldList() {
 
 // migrate runs the migrations up to this one, the last that names the table price_entries.
 func (s *StoredPricesMigrationSuite) migrate() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", storedPrices))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", storedPrices))
 }
 
 // migratedRow is what the migration left on one entry.
@@ -124,7 +124,7 @@ type migratedRow struct {
 func (s *StoredPricesMigrationSuite) row(change, model, attributes string) migratedRow {
 	var sku string
 	var prices, tiers []byte
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		`SELECT sku, prices, price_tiers FROM price_entries WHERE change = ? AND model = ? AND attributes = ?::jsonb`,
 		change, model, attributes).Scan(&sku, &prices, &tiers))
 	row := migratedRow{SKU: sku}
@@ -164,7 +164,7 @@ func (s *StoredPricesMigrationSuite) TestEveryEntryIsPricedAtWhatItWasCharged() 
 	s.Equal(map[pricing.Meter]pricing.Rate{pricing.InputTokens: perMillionTokens(1.3)}, s.row("20261120000001_cancelled", "c", "{}").Prices,
 		"a cancelled change's own 90% never applied: the 30% before it would have")
 	var empty int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM price_entries WHERE sku = ''").Scan(&empty))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM price_entries WHERE sku = ''").Scan(&empty))
 	s.Zero(empty)
 }
 
@@ -210,11 +210,11 @@ func (s *StoredPricesMigrationSuite) TestTheGuardStillRefusesEveryUpdate() {
 		`UPDATE price_entries SET rates = '{}' WHERE model = 'a'`,
 		`DELETE FROM price_entries WHERE model = 'a'`,
 	} {
-		_, err := s.db.DB().ExecContext(s.ctx, statement)
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, statement)
 		s.ErrorContains(err, "price_entries rows are never changed or deleted", statement)
 	}
 	var functions int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM pg_proc WHERE proname = 'price_entries_marked'").Scan(&functions))
 	s.Zero(functions, "the backfill's helper is gone")
 }
@@ -234,25 +234,25 @@ func (s *StoredPricesMigrationSuite) TestAnEmptyListMigratesAndSeedsAtTheFactor(
 	s.Equal(map[pricing.Meter]pricing.Rate{pricing.InputTokens: perMillionTokens(1.08)}, rows[0].Prices)
 	s.Equal("llm-openai-a-us", rows[0].SKU)
 	var sku string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT column_default FROM information_schema.columns WHERE table_name = 'requests' AND column_name = 'sku'").Scan(&sku))
 	s.Equal("''::text", sku, "a router built before it writes requests without the column")
 }
 
 func (s *StoredPricesMigrationSuite) TestTheMigrationComesOffAndAppliesAgain() {
 	s.oldList()
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", storedPrices))
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", beforeStoredPrices))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", storedPrices))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", beforeStoredPrices))
 
 	var columns int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
 WHERE table_name IN ('price_entries', 'requests') AND column_name IN ('sku', 'prices', 'price_tiers')`).Scan(&columns))
 	s.Zero(columns)
 	var markup int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT markup_bps FROM price_changes WHERE name = '20261101000000_seed'").Scan(&markup))
 	s.Equal(2000, markup, "the markup a router built before it reads is still there")
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", storedPrices))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", storedPrices))
 	s.Equal("llm-openai-a", s.row("20261101000000_seed", "a", "{}").SKU)
 }

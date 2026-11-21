@@ -162,7 +162,7 @@ func (s *StoreSuite) TestOnlyFinishedOrDraftCampaignsCanBeDeleted() {
 	customerID := newID()
 	for state, deletable := range map[string]bool{Draft: true, Scheduled: false, Running: false, Paused: false, Stopped: true, Completed: true} {
 		campaign := s.draftCampaign(customerID)
-		_, err := s.store.DB().ExecContext(s.ctx, "UPDATE campaigns SET state = ? WHERE id = ?", state, campaign.ID)
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaigns SET state = ? WHERE id = ?", state, campaign.ID)
 		s.Require().NoError(err)
 
 		err = s.store.DeleteCampaign(s.ctx, customerID, campaign.ID)
@@ -180,12 +180,12 @@ func (s *StoreSuite) TestOnlyFinishedOrDraftCampaignsCanBeDeleted() {
 func (s *StoreSuite) TestDeletingACampaignKeepsItsCalls() {
 	campaign := s.draftCampaign(newID(), "+15550001")
 	call := Call{ID: newID(), CustomerID: campaign.CustomerID, CampaignID: campaign.ID, StartedAt: s.base}
-	_, err := s.store.DB().NewInsert().Model(&call).Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewInsert().Model(&call).Exec(s.ctx)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.store.DeleteCampaign(s.ctx, campaign.CustomerID, campaign.ID))
 
-	count, err := s.store.DB().NewSelect().Model((*Call)(nil)).Where("id = ?", call.ID).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*Call)(nil)).Where("id = ?", call.ID).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(1, count)
 	contacts, err := s.store.QueryContacts(s.ctx, campaign.ID, ContactFilter{})
@@ -203,9 +203,9 @@ func (s *StoreSuite) TestADuplicateOfNotContactedTakesOnlyContactsNeverDialed() 
 	s.Require().NoError(err)
 	s.launch(original, s.base)
 	dialed := s.contactsOf(original)[0]
-	_, err = s.store.DB().NewInsert().Model(&CampaignAttempt{ID: newID(), CampaignID: original.ID, ContactID: dialed.ID, StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: s.base}).Exec(s.ctx)
+	_, err = s.store.GlobalDB().NewInsert().Model(&CampaignAttempt{ID: newID(), CampaignID: original.ID, ContactID: dialed.ID, StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: s.base}).Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE campaign_contacts SET stage = 'completed', outcome = 'won', converted = true, attempt = 2 WHERE id = ?", dialed.ID)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET stage = 'completed', outcome = 'won', converted = true, attempt = 2 WHERE id = ?", dialed.ID)
 	s.Require().NoError(err)
 
 	_, err = s.store.DuplicateCampaign(s.ctx, original.CustomerID, original.ID, "not_contacted")
@@ -267,7 +267,7 @@ func (s *StoreSuite) TestTheSameNumberTwiceIsADuplicate() {
 
 func (s *StoreSuite) TestANumberAlreadyMarkedDuplicateByTheMigrationDoesNotBlockAddingIt() {
 	campaign := s.draftCampaign(newID(), "+15550001")
-	_, err := s.store.DB().ExecContext(s.ctx, `INSERT INTO campaign_contacts (id, campaign_id, to_number, stage, reason) VALUES (?, ?, '+15550001', 'rejected', 'duplicate')`, newID(), campaign.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaign_contacts (id, campaign_id, to_number, stage, reason) VALUES (?, ?, '+15550001', 'rejected', 'duplicate')`, newID(), campaign.ID)
 	s.Require().NoError(err)
 
 	_, duplicates, err := s.store.AddContacts(s.ctx, campaign.ID, []Contact{{CampaignID: campaign.ID, ToNumber: "+15550001"}, {CampaignID: campaign.ID, ToNumber: "+15550009"}})
@@ -281,7 +281,7 @@ func (s *StoreSuite) TestACampaignHoldsAtMostAHundredThousandContacts() {
 	// Replica mode skips the row triggers (the data change capture and the campaign foreign
 	// key) for these setup rows only, which is most of what 99,999 rows cost: on a busy runner
 	// the insert outlasted the driver's 10s read timeout. AddContacts below runs with them.
-	err := s.store.DB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.store.GlobalDB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL session_replication_role = replica"); err != nil {
 			return err
 		}
@@ -302,7 +302,7 @@ func (s *StoreSuite) TestACampaignHoldsAtMostAHundredThousandContacts() {
 
 	_, _, err = s.store.AddContacts(s.ctx, campaign.ID, []Contact{{ToNumber: "+18888888888"}, {ToNumber: "+11"}})
 	s.ErrorIs(err, ErrTooManyContacts)
-	count, err := s.store.DB().NewSelect().Model((*Contact)(nil)).Where("campaign_id = ?", campaign.ID).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*Contact)(nil)).Where("campaign_id = ?", campaign.ID).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(100000, count, "a refused batch stores none of it")
 }
@@ -342,7 +342,7 @@ func (s *StoreSuite) TestContactsPageInTheOrderTheyWereAdded() {
 func (s *StoreSuite) TestFilteringByInProgressIncludesCallsAwaitingAnOutcome() {
 	campaign := s.draftCampaign(newID(), "+15550001", "+15550002", "+15550003")
 	for number, stage := range map[string]string{"+15550001": InProgress, "+15550002": AwaitingOutcome} {
-		_, err := s.store.DB().ExecContext(s.ctx, "UPDATE campaign_contacts SET stage = ? WHERE campaign_id = ? AND to_number = ?", stage, campaign.ID, number)
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET stage = ? WHERE campaign_id = ? AND to_number = ?", stage, campaign.ID, number)
 		s.Require().NoError(err)
 	}
 
@@ -401,7 +401,7 @@ func (s *StoreSuite) TestPausingAndResumingFollowTheState() {
 	s.Equal("insufficient_credits", paused.PausedReason)
 	s.ErrorIs(s.store.PauseCampaign(s.ctx, campaign.CustomerID, campaign.ID, ""), ErrCampaignLocked)
 
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE campaigns SET move_paused = true WHERE id = ?", campaign.ID)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaigns SET move_paused = true WHERE id = ?", campaign.ID)
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.ResumeCampaign(s.ctx, campaign.CustomerID, campaign.ID))
 	resumed, err := s.store.Campaign(s.ctx, campaign.CustomerID, campaign.ID)
@@ -409,7 +409,7 @@ func (s *StoreSuite) TestPausingAndResumingFollowTheState() {
 	s.Equal(Running, resumed.State)
 	s.Empty(resumed.PausedReason)
 	var movePaused bool
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT move_paused FROM campaigns WHERE id = ?", campaign.ID).Scan(&movePaused))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT move_paused FROM campaigns WHERE id = ?", campaign.ID).Scan(&movePaused))
 	s.False(movePaused)
 	s.ErrorIs(s.store.ResumeCampaign(s.ctx, campaign.CustomerID, campaign.ID), ErrCampaignLocked, "only a paused campaign resumes")
 }
@@ -420,7 +420,7 @@ func (s *StoreSuite) TestResumingBeforeTheStartTimeReturnsToScheduledAndAfterItR
 		want    string
 	}{"before": {time.Hour, Scheduled}, "after": {-time.Hour, Running}} {
 		campaign := s.draftCampaign(newID(), "+15550001")
-		_, err := s.store.DB().ExecContext(s.ctx,
+		_, err := s.store.GlobalDB().ExecContext(s.ctx,
 			"UPDATE campaigns SET state = 'paused', start_at = ?, started_at = NULL WHERE id = ?", time.Now().Add(tc.startAt), campaign.ID)
 		s.Require().NoError(err, name)
 
@@ -440,7 +440,7 @@ func (s *StoreSuite) TestResumingBeforeTheStartTimeReturnsToScheduledAndAfterItR
 func (s *StoreSuite) TestStoppingAContactEndsItsWaitOrMarksItsCall() {
 	campaign := s.draftCampaign(newID(), "+15550001", "+15550002")
 	contacts := s.contactsOf(campaign)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE campaign_contacts SET stage = 'in_progress' WHERE id = ?", contacts[1].ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET stage = 'in_progress' WHERE id = ?", contacts[1].ID)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.store.StopContact(s.ctx, campaign.ID, contacts[0].ID))
@@ -459,7 +459,7 @@ func (s *StoreSuite) TestAContactListsItsAttemptsOldestFirst() {
 	campaign := s.draftCampaign(newID(), "+15550001")
 	contact := s.contactsOf(campaign)[0]
 	for i, id := range []string{"b-second", "a-first"} {
-		_, err := s.store.DB().NewInsert().Model(&CampaignAttempt{ID: id, CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 2 - i, Dial: 1, StartedAt: s.base.Add(time.Duration(1-i) * time.Hour)}).Exec(s.ctx)
+		_, err := s.store.GlobalDB().NewInsert().Model(&CampaignAttempt{ID: id, CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 2 - i, Dial: 1, StartedAt: s.base.Add(time.Duration(1-i) * time.Hour)}).Exec(s.ctx)
 		s.Require().NoError(err)
 	}
 
@@ -476,7 +476,7 @@ func (s *StoreSuite) TestCampaignsListNewestFirstByStateAndPage() {
 	var made []Campaign
 	for i := range 3 {
 		campaign := s.draftCampaign(customerID)
-		_, err := s.store.DB().ExecContext(s.ctx, "UPDATE campaigns SET created_at = ?, state = ? WHERE id = ?", s.base.Add(time.Duration(i)*time.Hour), []string{Draft, Stopped, Draft}[i], campaign.ID)
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaigns SET created_at = ?, state = ? WHERE id = ?", s.base.Add(time.Duration(i)*time.Hour), []string{Draft, Stopped, Draft}[i], campaign.ID)
 		s.Require().NoError(err)
 		made = append(made, campaign)
 	}

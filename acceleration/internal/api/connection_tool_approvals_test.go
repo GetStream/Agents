@@ -163,7 +163,7 @@ func (s *SessionConnectorsSuite) TestAToolApprovedAgainIsOfferedToTheNextSession
 func (s *ConnectionToolsSuite) racedApprove(id string, change string, args ...any) (int, string) {
 	approval := s.approval(id, "echo")
 	ctx := context.Background()
-	tx, err := s.store.DB().BeginTx(ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, "SELECT 1 FROM connector_connections WHERE id = ? FOR UPDATE", id)
@@ -179,7 +179,7 @@ func (s *ConnectionToolsSuite) racedApprove(id string, change string, args ...an
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		_ = s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "+
+		_ = s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "+
 			"AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'").Scan(&waiting)
 		return waiting > 0
 	}, 10*time.Second, 10*time.Millisecond)

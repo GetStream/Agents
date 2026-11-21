@@ -160,7 +160,7 @@ func (s *UserPhonesSuite) TestAConfigWithoutCardsLinksWithNoEpisodeOfTheNumber()
 	s.NotContains(s.took(2)[1].text, "earlier episodes")
 	s.Zero(s.episodes())
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ?", s.customerID()).Scan(&rows))
 	s.Zero(rows)
 	s.Equal([]string{s.person}, s.links())
@@ -177,7 +177,7 @@ func (s *UserPhonesSuite) TestCardsTurnedOnAfterTheLinkReadNoneOfTheNumbersSMSFr
 	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
 	s.Require().Equal(http.StatusOK, s.put(s.user, `{"phone": "`+s.person+`"}`, nil))
 	var aside int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND address LIKE 'retired:%'", s.customerID()).Scan(&aside))
 	s.Require().Zero(aside, "nothing set aside under off")
 	s.config.EpisodeCards = true
@@ -326,7 +326,7 @@ func (s *UserPhonesSuite) TestAnotherCustomerLinksItsOwnUser() {
 
 	s.Equal([]string{s.person}, s.links())
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM user_phones WHERE customer_id = ?", first).Scan(&count))
 	s.Equal(1, count)
 }
@@ -349,7 +349,7 @@ func (s *UserPhonesSuite) TestTheSameUserInASecondStreamAppIsAnotherPerson() {
 	s.Equal(second, *got.Phone, "app 7102's link")
 
 	var apps []int64
-	s.Require().NoError(s.store.DB().NewSelect().Table("user_phones").Column("stream_app_pk").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("user_phones").Column("stream_app_pk").
 		Where("customer_id = ? AND user_id = ?", s.customerID(), s.user).Order("stream_app_pk").Scan(context.Background(), &apps))
 	s.Equal([]int64{7101, 7102}, apps)
 }
@@ -530,7 +530,7 @@ func (s *LinqSandboxSuite) TestAChatWhoseNumberIsLinkedMidConversationIsStillAns
 // rows is the count a query of the test's customer answers.
 func (s *LinqSandboxSuite) rows(query string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(), query, s.customerID()).Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), query, s.customerID()).Scan(&count))
 	return count
 }
 
@@ -564,7 +564,7 @@ func (s *UserPhonesSuite) textedBeforeTheLink() {
 // idle closes the test customer's open episodes, as the idle sweeper does an hour after their
 // last message, so the next message opens an episode of its own.
 func (s *UserPhonesSuite) idle() {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE episodes SET status = ?, ended_at = now() WHERE customer_id = ? AND status = 'in_progress'",
 		store.EpisodeEnded, s.customerID())
 	s.Require().NoError(err)
@@ -597,7 +597,7 @@ func (s *UserPhonesSuite) put(user, body string, into any) int {
 // links are the numbers the test's customer has linked.
 func (s *UserPhonesSuite) links() []string {
 	var phones []string
-	s.Require().NoError(s.store.DB().NewSelect().Table("user_phones").Column("phone").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("user_phones").Column("phone").
 		Where("customer_id = ?", s.customerID()).Scan(context.Background(), &phones))
 	return phones
 }
@@ -629,7 +629,7 @@ func (s *UserPhonesSuite) chatCardOf(user, summary string) string {
 		UserID: &omni, Set: map[string]any{"text": summary, "status": store.EpisodeSummarized},
 	})
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx, "UPDATE episodes SET status = ?, ended_at = now() WHERE id = ?",
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET status = ?, ended_at = now() WHERE id = ?",
 		store.EpisodeSummarized, opened.Episode.ID)
 	s.Require().NoError(err)
 	return omni

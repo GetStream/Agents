@@ -77,7 +77,7 @@ func (s *StoreSuite) TestAConfigWithoutBindingsStoresAnEmptyList() {
 	created := s.boundConfig("acme-app")
 
 	var stored string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT connectors::text FROM agent_configs WHERE id = ?", created.ID).Scan(&stored))
 	s.Equal("[]", stored)
 }

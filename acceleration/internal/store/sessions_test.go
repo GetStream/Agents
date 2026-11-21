@@ -24,7 +24,7 @@ func (s *StoreSuite) opened(id, customerID string, at time.Time, change func(*Ag
 		change(session)
 	}
 	s.Require().NoError(s.store.SaveSession(s.ctx, session))
-	_, err := s.store.db.NewUpdate().Model((*AgentSession)(nil)).
+	_, err := s.store.global.NewUpdate().Model((*AgentSession)(nil)).
 		Set("updated_at = ?", at).Where("id = ?", id).Exec(s.ctx)
 	s.Require().NoError(err)
 	session.UpdatedAt = at

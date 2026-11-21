@@ -235,7 +235,7 @@ func (s *Store) StartDataCapture(ctx context.Context, customerID string, retenti
 	if customerID == "" {
 		return errors.New("store: a customer id is required")
 	}
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A lock_timeout of 0 waits for ever.
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)",
 			fmt.Sprintf("%dms", max(within.Milliseconds(), 1))); err != nil {
@@ -297,7 +297,7 @@ var ErrWritesOpen = errors.New("store: a write from before the capture started i
 func (s *Store) WaitForOpenWrites(ctx context.Context, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	var open []string
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.global.QueryRowContext(ctx, `
 SELECT COALESCE(array_agg(l.transactionid::text), '{}') FROM pg_locks l
 JOIN pg_stat_activity a ON a.pid = l.pid
 WHERE l.locktype = 'transactionid'
@@ -314,7 +314,7 @@ WHERE l.locktype = 'transactionid'
 			return ctx.Err()
 		case <-time.After(min(pause, time.Until(deadline))):
 		}
-		if err := s.db.QueryRowContext(ctx, `
+		if err := s.global.QueryRowContext(ctx, `
 SELECT COALESCE(array_agg(transactionid::text), '{}') FROM pg_locks
 WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 			pgdialect.Array(open)).Scan(pgdialect.Array(&open)); err != nil {
@@ -355,7 +355,7 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 	if err != nil {
 		return 0, err
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	tx, err := s.global.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return 0, fmt.Errorf("store: export: %w", err)
 	}
@@ -547,13 +547,13 @@ func addNumbers(a, b json.Number) json.Number {
 // either the lock is there and the mark is below the number, or its transaction has ended.
 func (s *Store) changeWatermark(ctx context.Context) (int64, error) {
 	var handedOut int64
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.global.QueryRowContext(ctx,
 		"SELECT CASE WHEN is_called THEN last_value ELSE last_value - 1 END FROM data_changes_seq_seq",
 	).Scan(&handedOut); err != nil {
 		return 0, fmt.Errorf("store: change watermark: %w", err)
 	}
 	var held sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.global.QueryRowContext(ctx, `
 SELECT MIN((classid::bigint << 32) | objid::bigint) FROM pg_locks
 WHERE locktype = 'advisory' AND objsubid = 2
   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&held); err != nil {
@@ -645,7 +645,7 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 	if table.shard {
 		return s.shard
 	}
-	return s.db
+	return s.global
 }
 
 // lineColumns are what attaching a number, or giving it a line, writes on its row (AttachNumber,
@@ -990,7 +990,7 @@ func endImportedAttempt(row json.RawMessage, now time.Time) (json.RawMessage, er
 // task is completed and loses the mark.
 func (s *Store) SkipOccurrencesBeforeCutOver(ctx context.Context, customerID string, cutOver time.Time,
 	next func(ScheduledTask) (*time.Time, *ScheduledTaskRun, error)) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var tasks []ScheduledTask
 		// Locked, as a pause or an edit here may land meanwhile and writes the whole row.
 		if err := tx.NewSelect().Model(&tasks).
@@ -1093,7 +1093,7 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 // person. Any change of a campaign's state here clears the mark (transitionIn). Running it
 // again resumes nothing twice.
 func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed, skipped, overLimit int64, campaigns []string, err error) {
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var marked []ScheduledTask
 		if err := tx.NewSelect().Model(&marked).
 			Column("id", "user_id", "config_id").
@@ -1443,7 +1443,7 @@ func (s *Store) Changes(ctx context.Context, customerID string, after int64, lim
 	// rows after the cursor, and the rows read would then start above them with the check
 	// already passed. The mark is read before the transaction, as in an export, so every
 	// change at or below it has ended before the snapshot is taken.
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	tx, err := s.global.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: changes: %w", err)
 	}
@@ -1509,7 +1509,7 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 		return errors.New("store: a customer id is required")
 	}
 	if !s.Sharded() {
-		return s.applyChanges(ctx, s.db, customerID, changes)
+		return s.applyChanges(ctx, s.global, customerID, changes)
 	}
 	var shared, sharded []DataChange
 	for _, change := range changes {
@@ -1519,7 +1519,7 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 			shared = append(shared, change)
 		}
 	}
-	if err := s.applyChanges(ctx, s.db, customerID, shared); err != nil {
+	if err := s.applyChanges(ctx, s.global, customerID, shared); err != nil {
 		return err
 	}
 	return s.applyChanges(ctx, s.shard, customerID, sharded)
@@ -1621,7 +1621,7 @@ func (s *Store) PruneDataChanges(ctx context.Context, retention time.Duration) (
 	// pruned_through only goes up. A WITH statement that changes rows runs once and to the end
 	// whether or not the query reads it (https://www.postgresql.org/docs/current/queries-with.html).
 	var removed int64
-	err = s.db.QueryRowContext(ctx, `
+	err = s.global.QueryRowContext(ctx, `
 WITH pruned AS (
   DELETE FROM data_changes
   WHERE at < now() - make_interval(secs => ?)
@@ -1690,7 +1690,7 @@ func (s *Store) shapeOf(ctx context.Context, table string) (shape, error) {
 
 	read := shape{sequences: map[string]string{}}
 	// pg_get_serial_sequence finds the sequence of a serial and of an identity column alike.
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.global.QueryContext(ctx, `
 SELECT a.attname,
        EXISTS (SELECT 1 FROM pg_index i
                WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)) AS is_key,

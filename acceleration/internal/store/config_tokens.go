@@ -68,7 +68,7 @@ func (s *Store) PutConnectorConfigToken(ctx context.Context, token *ConnectorCon
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	row := *token
 	row.CreatedAt, row.UpdatedAt = now, now
-	err := s.db.NewInsert().Model(&row).
+	err := s.global.NewInsert().Model(&row).
 		On("CONFLICT (customer_id, connector_id) DO UPDATE").
 		Set("tokens_sealed = EXCLUDED.tokens_sealed").
 		Set("kek_version = EXCLUDED.kek_version").
@@ -90,7 +90,7 @@ func (s *Store) ConnectorConfigToken(ctx context.Context, customerID, connectorI
 		return ConnectorConfigToken{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	var token ConnectorConfigToken
-	err := s.db.NewSelect().Model(&token).
+	err := s.global.NewSelect().Model(&token).
 		Where("cct.customer_id = ? AND cct.connector_id = ?", customerID, connectorID).
 		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -108,7 +108,7 @@ func (s *Store) DeleteConnectorConfigToken(ctx context.Context, customerID, conn
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
-	_, err := s.db.NewDelete().Model((*ConnectorConfigToken)(nil)).
+	_, err := s.global.NewDelete().Model((*ConnectorConfigToken)(nil)).
 		Where("customer_id = ? AND connector_id = ?", customerID, connectorID).
 		Exec(ctx)
 	if err != nil {

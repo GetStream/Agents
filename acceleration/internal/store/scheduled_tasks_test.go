@@ -155,11 +155,11 @@ func (s *StoreSuite) TestAStaleRunIsReclaimedUnderTheSameRun() {
 	first := claimed[0]
 
 	// The worker dies: its run ages past the stale window and its lease lapses.
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("started_at = ?", s.base.Add(-time.Hour)).
 		Where("id = ?", first.Run.ID).Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = ?", s.base.Add(-time.Minute)).
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -325,11 +325,11 @@ func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	// recently it started, because nobody is delivering it. It started before
 	// the hold was recorded, as every held run did.
 	ended := time.Now().Add(-time.Minute)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = ?", ended).
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("postponed_until = ?", ended).
 		Set("started_at = ?", ended.Add(-time.Second)).
 		Where("id = ?", claimed[0].Run.ID).Exec(s.ctx)
@@ -373,7 +373,7 @@ func (s *StoreSuite) TestAUserTimezoneIsStoredAndMoved() {
 	s.Equal("Asia/Tokyo", zone)
 
 	var user User
-	s.Require().NoError(s.store.db.NewSelect().Model(&user).
+	s.Require().NoError(s.store.global.NewSelect().Model(&user).
 		Where("customer_id = ?", "acme").Where("id = ?", "sam").Scan(s.ctx))
 	s.Equal("authenticated", user.Kind, "moving a zone never rewrites what the credential proved")
 }
@@ -435,11 +435,11 @@ func (s *StoreSuite) TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingIt
 	s.Empty(reason, "another customer's run tells nothing")
 
 	// The worker dies: its run ages past the stale window and its lease lapses.
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("started_at = ?", s.base.Add(-time.Hour)).
 		Where("id = ?", run.ID).Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = ?", s.base.Add(-time.Minute)).
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -469,7 +469,7 @@ func (s *StoreSuite) held(id string, until time.Time) ClaimedScheduledTask {
 // run reads one run back.
 func (s *StoreSuite) run(id string) ScheduledTaskRun {
 	var run ScheduledTaskRun
-	s.Require().NoError(s.store.db.NewSelect().Model(&run).Where("id = ?", id).Scan(s.ctx))
+	s.Require().NoError(s.store.global.NewSelect().Model(&run).Where("id = ?", id).Scan(s.ctx))
 	return run
 }
 
@@ -630,12 +630,12 @@ func (s *StoreSuite) TestAnEditedOneShotTakenUpAgainAfterItsHoldKeepsItsClaim() 
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 	claim := s.held("one", time.Now().Add(8*time.Hour))
 	// The hold ended a moment ago, and a worker takes the occurrence up again.
-	_, err := s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("started_at = now() - interval '2 seconds'").
 		Set("postponed_until = now() - interval '1 second'").
 		Where("id = ?", claim.Run.ID).Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -661,7 +661,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseWorkerLeaseLapsedComesDueAgain() {
 	claimed, err := s.store.ClaimDueScheduledTasks(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -688,7 +688,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseLostWorkerPlacedACallIsCompletedNot
 	took, _, err := s.store.TakeScheduledTaskRunCall(s.ctx, "acme", claimed[0].Run.ID, "call-1")
 	s.Require().NoError(err)
 	s.Require().True(took)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -718,7 +718,7 @@ func (s *StoreSuite) TestAOneShotMovedOffAnOccurrenceWhoseLostWorkerPlacedACallS
 	took, _, err := s.store.TakeScheduledTaskRunCall(s.ctx, "acme", claimed[0].Run.ID, "call-1")
 	s.Require().NoError(err)
 	s.Require().True(took)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -760,11 +760,11 @@ func (s *StoreSuite) TestAOneShotMovedWhileBeingDeliveredLetsThatDeliveryGo() {
 // lapse ages a run past the stale window and lets its task's lease run out,
 // as a worker that died leaves them.
 func (s *StoreSuite) lapse(taskID, runID string) {
-	_, err := s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("started_at = ?", time.Now().Add(-time.Hour)).
 		Where("id = ?", runID).Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = ?", time.Now().Add(-time.Minute)).
 		Where("id = ?", taskID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -852,10 +852,10 @@ func (s *StoreSuite) TestALeaseLapsingAfterAHoldWasTakenUpIsParkedLikeAnyOther()
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 	claim := s.held("one", time.Now().Add(time.Hour))
 	ended := time.Now().Add(-time.Minute)
-	_, err := s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = ?", ended).Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("postponed_until = ?", ended).Set("started_at = ?", ended.Add(-time.Second)).
 		Where("id = ?", claim.Run.ID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -865,7 +865,7 @@ func (s *StoreSuite) TestALeaseLapsingAfterAHoldWasTakenUpIsParkedLikeAnyOther()
 
 	// The worker that took it up stops renewing a moment later: it may only be
 	// slow, so the run waits out the stale window like any other.
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
 	again, err := s.store.ClaimDueScheduledTasks(s.ctx, 16, time.Minute)
@@ -888,11 +888,11 @@ func (s *StoreSuite) TestALastAttemptWhoseLeaseLapsesAMomentIsParkedNotFailed() 
 	// Two takeovers ago, and the worker on the third started a moment ago: it
 	// may only be slow, so its delivery is not cut by the attempt cap.
 	started := time.Now().Add(-time.Minute)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("attempts = ?", maxScheduledTaskRunAttempts).Set("started_at = ?", started).
 		Where("id = ?", runID).Exec(s.ctx)
 	s.Require().NoError(err)
-	_, err = s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
 
@@ -914,7 +914,7 @@ func (s *StoreSuite) TestTheNextWakeIsWhenATaskMayBeClaimedNotWhenItWasDue() {
 		return &when
 	}
 	lease := func(id string, until *time.Time) {
-		_, err := s.store.db.NewUpdate().Model((*ScheduledTask)(nil)).
+		_, err := s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("lease_until = ?", until).Where("id = ?", id).Exec(s.ctx)
 		s.Require().NoError(err)
 	}
@@ -951,13 +951,13 @@ func (q *queries) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 // off scheduled_tasks_wake_idx in order, not by sorting every active task.
 func (s *StoreSuite) TestTheNextWakeIsReadOffItsIndex() {
 	sent := &queries{}
-	watched := &Store{db: s.store.db.WithQueryHook(sent)}
+	watched := &Store{global: s.store.global.WithQueryHook(sent)}
 	_, _, err := watched.NextDueScheduledTask(s.ctx)
 	s.Require().NoError(err)
 	s.Require().Len(sent.sent, 1)
 
 	var plan []string
-	err = s.store.db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
@@ -1081,7 +1081,7 @@ func (s *StoreSuite) TestATaskOnADeletedConfigIsRefused() {
 
 func (s *StoreSuite) TestACreateWaitsForAConfigDeleteUnderWayAndIsRefused() {
 	config := s.boundConfig("acme")
-	deleting, err := s.store.db.BeginTx(s.ctx, nil)
+	deleting, err := s.store.global.BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = deleting.Rollback() }()
 	_, err = deleting.ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config.ID)
@@ -1097,7 +1097,7 @@ func (s *StoreSuite) TestACreateWaitsForAConfigDeleteUnderWayAndIsRefused() {
 	// The suite's database is its own, so a backend waiting on a lock in it is the create.
 	s.Require().Eventually(func() bool {
 		var waiting int
-		s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT count(*) FROM pg_stat_activity"+
+		s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT count(*) FROM pg_stat_activity"+
 			" WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting))
 		return waiting > 0
 	}, 5*time.Second, 10*time.Millisecond, "the create read the config without waiting for the delete under way")
@@ -1153,7 +1153,7 @@ func (s *StoreSuite) holdRun() (ClaimedScheduledTask, func()) {
 	claimed, err := s.store.ClaimDueScheduledTasks(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
-	holder, err := s.store.db.BeginTx(s.ctx, nil)
+	holder, err := s.store.global.BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	_, err = holder.ExecContext(s.ctx, "SELECT id FROM scheduled_task_runs WHERE id = ? FOR UPDATE", claimed[0].Run.ID)
 	s.Require().NoError(err)
@@ -1225,14 +1225,14 @@ func (s *StoreSuite) TestAnUnchangedUserTimezoneIsNotWrittenAgain() {
 // every write to it, even one that sets a column to what it held.
 func (s *StoreSuite) userRowVersion(userID string) string {
 	var version string
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx,
 		"SELECT xmin::text FROM users WHERE customer_id = ? AND id = ?", "acme", userID).Scan(&version))
 	return version
 }
 
 func (s *StoreSuite) TestAUserWithNoZoneYetIsGivenOne() {
 	// A row written before zones were kept holds none, not an empty one.
-	_, err := s.store.db.ExecContext(s.ctx,
+	_, err := s.store.global.ExecContext(s.ctx,
 		"INSERT INTO users (customer_id, id, kind, name, timezone) VALUES ('acme', 'sam', 'authenticated', '', NULL)")
 	s.Require().NoError(err)
 

@@ -95,7 +95,7 @@ func (s *DataMoveSuite) TearDownSuite() {
 func (s *DataMoveSuite) SetupTest() {
 	tables := strings.Join(append(DataTables(), "data_changes", "data_change_capture"), ", ")
 	for _, store := range []*Store{s.source, s.destination} {
-		_, err := store.DB().ExecContext(s.ctx, "TRUNCATE "+tables+" CASCADE")
+		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+tables+" CASCADE")
 		s.Require().NoError(err)
 		store.SetStreamPins(StreamPins{})
 	}
@@ -240,7 +240,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 	})
 
 	var held []byte
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT refresh_secret_hash FROM users WHERE customer_id = 'moved' AND id = 'guest-1'").Scan(&held))
 	s.Empty(held)
 }
@@ -251,7 +251,7 @@ func (s *DataMoveSuite) TestAnImportedConnectionHasToBeAuthorizedAgain() {
 	s.move("acme", "acme")
 
 	var token string
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT access_token FROM agent_plugin_connections").Scan(&token))
 	s.Empty(token)
 }
@@ -282,7 +282,7 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGranted() {
 	// The owner is who reaches it, and the account is what a reconnect has to match.
 	id := s.seedConnectorConnection(s.source, "acme")
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE connector_connections SET owner_type = ?, owner_id = 'bob', account_id = 'bob-at-acme',"+
 			" granted_scopes = '[\"read\"]' WHERE id = ?", OwnerUser, id)
 	s.Require().NoError(err)
@@ -300,7 +300,7 @@ func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGrante
 
 func (s *DataMoveSuite) TestAMovedModeratorIsStillTheAppsModerator() {
 	id := s.seedAgentConfig(s.source, "acme", "nora")
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE agent_configs SET role = ? WHERE id = ?", RoleAgentModerator, id)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET role = ? WHERE id = ?", RoleAgentModerator, id)
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
@@ -336,7 +336,7 @@ func (s *DataMoveSuite) TestAMoveCarriesTheAppsActivityUnderTheImportingApp() {
 	s.move(from, to)
 
 	var requests int64
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT requests FROM customer_activity WHERE app_id = ? AND area = 'agent_setup'", to).Scan(&requests))
 	s.Equal(int64(3), requests)
 }
@@ -354,7 +354,7 @@ func (s *DataMoveSuite) TestAnImportBringsLaterEditsAcross() {
 	id := s.seedAgentConfig(s.source, "acme", "first-draft")
 	s.move("acme", "acme")
 
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE agent_configs SET name = ? WHERE id = ?", "second-draft", id)
 	s.Require().NoError(err)
 	s.move("acme", "acme")
@@ -412,7 +412,7 @@ func (s *DataMoveSuite) TestADeleteIsReplayedToo() {
 	id := s.seedAgentConfig(s.source, "acme", "doomed")
 	cursor := s.move("acme", "acme")
 
-	_, err := s.source.DB().ExecContext(s.ctx, "DELETE FROM agent_configs WHERE id = ?", id)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_configs WHERE id = ?", id)
 	s.Require().NoError(err)
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
@@ -446,7 +446,7 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 	// The destination already holds a row with that id, belonging to somebody else.
 	// Primary keys come across as they are, so an import naming an id it has no business
 	// with is the shape of the attack.
-	_, err := s.destination.DB().ExecContext(s.ctx,
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, ?, ?, ?)",
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
@@ -454,7 +454,7 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 	s.move("acme", "intruder")
 
 	var name, owner string
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT name, customer_id FROM agent_configs WHERE id = ?", id).Scan(&name, &owner))
 	s.Equal("theirs", name)
 	s.Equal("resident", owner)
@@ -463,12 +463,12 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 	s.capture("acme")
 	id := s.seedAgentConfig(s.source, "acme", "mine")
-	_, err := s.source.DB().ExecContext(s.ctx, "DELETE FROM agent_configs WHERE id = ?", id)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_configs WHERE id = ?", id)
 	s.Require().NoError(err)
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
 
-	_, err = s.destination.DB().ExecContext(s.ctx,
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, ?, ?, ?)",
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
@@ -476,7 +476,7 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", changes))
 
 	var count int
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM agent_configs WHERE id = ?", id).Scan(&count))
 	s.Equal(1, count)
 }
@@ -487,7 +487,7 @@ func (s *DataMoveSuite) TestAnExpiredCursorSaysToExportAgain() {
 	_, cursor, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
 
-	_, err = s.source.DB().ExecContext(s.ctx, "DELETE FROM data_changes")
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM data_changes")
 	s.Require().NoError(err)
 	s.seedAgentConfig(s.source, "acme", "two")
 
@@ -544,7 +544,7 @@ func (s *DataMoveSuite) TestACursorRightBeforeTheOldestChangeKeptIsAnswered() {
 // lapse lets a customer's capture expire, as it does when nobody reads their changes for longer
 // than the retention.
 func (s *DataMoveSuite) lapse(customerID string) {
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE data_change_capture SET expires_at = now() - interval '1 minute' WHERE customer_id = ?", customerID)
 	s.Require().NoError(err)
 }
@@ -610,7 +610,7 @@ func (s *DataMoveSuite) TestACursorFollowedWithinTheRetentionIsAnsweredEveryChan
 func (s *DataMoveSuite) TestACaptureRenewedJustBeforeItExpiresCountsAsLapsed() {
 	s.capture("acme")
 	cursor := s.export("acme").cursor
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE data_change_capture SET expires_at = now() + interval '1 second' WHERE customer_id = ?", "acme")
 	s.Require().NoError(err)
 	s.capture("acme")
@@ -676,7 +676,7 @@ func (s *DataMoveSuite) exportAtRestart(customerID string) int64 {
 	s.capture(customerID)
 	cursor := s.export(customerID).cursor
 	var since int64
-	s.Require().NoError(s.source.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT recorded_since FROM data_change_capture WHERE customer_id = ?", customerID).Scan(&since))
 	s.Require().Positive(since)
 	s.Require().Equal(since, cursor)
@@ -837,7 +837,7 @@ func (s *DataMoveSuite) TestAPruneCommittingAfterOneThatDroppedHigherNumbersKeep
 	s.capture("acme")
 	s.ageChange(s.seedAgentConfig(s.source, "acme", "aged out"))
 	_, cursor := s.follow("acme", 0)
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE data_change_capture SET pruned_through = ? WHERE customer_id = 'acme'", cursor+10)
 	s.Require().NoError(err)
 	s.prune()
@@ -893,7 +893,7 @@ func (s *DataMoveSuite) TestAPruneBetweenTheTwoReadsOfAFeedDoesNotLoseRowsAfterT
 		s.NoError(err)
 		s.Positive(removed)
 	}}
-	s.source.DB().AddQueryHook(hook)
+	s.source.GlobalDB().AddQueryHook(hook)
 	s.T().Cleanup(hook.disarm)
 
 	changes, next, err := s.source.Changes(s.ctx, "acme", cursor, 100)
@@ -927,7 +927,7 @@ func (s *DataMoveSuite) TestAQuietCustomerWhoseCursorAgedOutIsNotRefused() {
 
 // age makes every change recorded so far older than the retention prune keeps.
 func (s *DataMoveSuite) age() {
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE data_changes SET at = now() - interval '30 days'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_changes SET at = now() - interval '30 days'")
 	s.Require().NoError(err)
 }
 
@@ -941,7 +941,7 @@ func (s *DataMoveSuite) TestPruningDropsWhatNobodyCanResumeFrom() {
 	s.capture("acme")
 	s.seedAgentConfig(s.source, "acme", "old")
 	s.seedAgentConfig(s.source, "acme", "older")
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE data_changes SET at = now() - interval '30 days'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_changes SET at = now() - interval '30 days'")
 	s.Require().NoError(err)
 
 	removed, err := s.source.PruneDataChanges(s.ctx, 7*24*time.Hour)
@@ -993,7 +993,7 @@ func (s *DataMoveSuite) TestAChangeInFlightRightAfterTheCursorDoesNotExpireIt() 
 // table with no change kept, it is not one pruned either.
 func (s *DataMoveSuite) TestANumberRolledBackRightAfterAnExportCursorIsNotAPrunedChange() {
 	s.capture("acme")
-	_, err := s.source.DB().ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', 1000, true)")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', 1000, true)")
 	s.Require().NoError(err)
 	cursor := s.export("acme").cursor
 	rolledBack := s.begin()
@@ -1011,7 +1011,7 @@ func (s *DataMoveSuite) TestANumberRolledBackRightAfterAnExportCursorIsNotAPrune
 func (s *DataMoveSuite) TestAChangeInFlightIsHeldBackWhateverTheHalvesOfItsNumber() {
 	s.capture("acme")
 	for _, start := range []int64{1<<31 + 5, 1<<32 + 3, 1<<32 + 1<<31 + 7} {
-		_, err := s.source.DB().ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', ?, true)", start)
+		_, err := s.source.GlobalDB().ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', ?, true)", start)
 		s.Require().NoError(err)
 		cursor := s.export("acme").cursor
 		older := s.begin()
@@ -1039,7 +1039,7 @@ func (s *DataMoveSuite) TestAQuietFeedHandsOutEveryChangeUpToTheNewest() {
 		s.seedAgentConfig(s.source, "acme", "three"),
 	}
 	var newest int64
-	s.Require().NoError(s.source.DB().QueryRowContext(s.ctx, "SELECT MAX(seq) FROM data_changes").Scan(&newest))
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx, "SELECT MAX(seq) FROM data_changes").Scan(&newest))
 
 	handed, next := s.follow("acme", cursor)
 
@@ -1097,7 +1097,7 @@ func (s *DataMoveSuite) TestAChangeInFlightInAnotherDatabaseDoesNotHoldTheFeedBa
 	s.capture("acme")
 	cursor := s.export("acme").cursor
 	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
-	elsewhere, err := s.destination.DB().BeginTx(s.ctx, nil)
+	elsewhere, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = elsewhere.Rollback() })
 	_, err = elsewhere.ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', 1, false)")
@@ -1113,7 +1113,7 @@ func (s *DataMoveSuite) TestAChangeInFlightInAnotherDatabaseDoesNotHoldTheFeedBa
 func (s *DataMoveSuite) TestAnExportCursorStaysBelowAChangeInFlight() {
 	s.capture("acme")
 	// A sequence that has handed out nothing yet holds the first number it will hand out.
-	_, err := s.source.DB().ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', 1, false)")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "SELECT setval('data_changes_seq_seq', 1, false)")
 	s.Require().NoError(err)
 	inFlight := s.begin()
 	late := s.writeIn(inFlight, "acme", "in flight")
@@ -1224,7 +1224,7 @@ func (s *DataMoveSuite) TestWaitingForOpenWritesIgnoresATransactionThatOnlyReads
 // Transaction ids are counted across the whole Postgres server; another database's writes are
 // none of this one's.
 func (s *DataMoveSuite) TestWaitingForOpenWritesIgnoresAnotherDatabase() {
-	elsewhere, err := s.destination.DB().BeginTx(s.ctx, nil)
+	elsewhere, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = elsewhere.Rollback() })
 	s.writeIn(elsewhere, "acme", "in the other database")
@@ -1295,7 +1295,7 @@ func (s *DataMoveSuite) TestPushingOutACaptureStillOnWaitsForNobody() {
 // A capture that expired is off, so turning it on again is a start.
 func (s *DataMoveSuite) TestRenewingAnExpiredCaptureIsAStart() {
 	s.capture("acme")
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE data_change_capture SET expires_at = now() - interval '1 minute' WHERE customer_id = 'acme'")
 	s.Require().NoError(err)
 	before := s.beginAt(sql.LevelRepeatableRead)
@@ -1313,14 +1313,14 @@ func (s *DataMoveSuite) TestARepeatableReadWriteWithNobodyMovingRecordsNothing()
 	s.Require().NoError(writing.Commit())
 
 	var recorded int
-	s.Require().NoError(s.source.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM data_changes").Scan(&recorded))
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM data_changes").Scan(&recorded))
 	s.Zero(recorded)
 }
 
 // A transaction that only reads writes nothing a capture could miss, however old its snapshot,
 // so an export neither waits for it nor is refused for it.
 func (s *DataMoveSuite) TestALongReadDoesNotHoldAnExport() {
-	reading, err := s.source.DB().BeginTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	reading, err := s.source.GlobalDB().BeginTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = reading.Rollback() })
 	s.Require().NoError(reading.QueryRowContext(s.ctx,
@@ -1336,7 +1336,7 @@ const serializationFailure = "40001"
 
 // beginAt opens a transaction at an isolation level and takes its snapshot.
 func (s *DataMoveSuite) beginAt(level sql.IsolationLevel) bun.Tx {
-	tx, err := s.source.DB().BeginTx(s.ctx, &sql.TxOptions{Isolation: level})
+	tx, err := s.source.GlobalDB().BeginTx(s.ctx, &sql.TxOptions{Isolation: level})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = tx.Rollback() })
 	s.Require().NoError(tx.QueryRowContext(s.ctx, "SELECT count(*) FROM agent_configs").Scan(new(int)))
@@ -1345,7 +1345,7 @@ func (s *DataMoveSuite) beginAt(level sql.IsolationLevel) bun.Tx {
 
 // begin opens a transaction on the source that the test commits when it says so.
 func (s *DataMoveSuite) begin() bun.Tx {
-	tx, err := s.source.DB().BeginTx(s.ctx, nil)
+	tx, err := s.source.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = tx.Rollback() })
 	return tx
@@ -1384,14 +1384,14 @@ func (s *DataMoveSuite) follow(customerID string, cursor int64) ([]string, int64
 
 // ageChange makes the change of one row older than the retention prune keeps.
 func (s *DataMoveSuite) ageChange(id string) {
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE data_changes SET at = now() - interval '30 days' WHERE key ->> 'id' = ?", id)
 	s.Require().NoError(err)
 }
 
 func (s *DataMoveSuite) TestChildRowsFollowTheirParent() {
 	voice := s.seedVoice(s.source, "acme", "narrator")
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO voice_samples (id, voice_id, object_key) VALUES (?, ?, ?)",
 		newID(), voice, "voices/acme/1.wav")
 	s.Require().NoError(err)
@@ -1411,13 +1411,13 @@ func (s *DataMoveSuite) TestAChildRowCannotBeImportedOntoSomebodyElsesParent() {
 	s.Require().NoError(s.destination.ImportRow(s.ctx, "intruder", "voice_samples", sample))
 
 	var count int
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM voice_samples WHERE voice_id = ?", voice).Scan(&count))
 	s.Zero(count, "a row is only written where its parent belongs to the importing customer")
 }
 
 func (s *DataMoveSuite) TestOnlyTheAppsOwnPolicyMoves() {
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO policies (scope, scope_id, document, updated_at)"+
 			" VALUES ('app', ?, ?, now()), ('organization', ?, ?, now())",
 		"acme", `{"prompt_injection": true}`, "acme", `{"prompt_injection": false}`)
@@ -1431,7 +1431,7 @@ func (s *DataMoveSuite) TestOnlyTheAppsOwnPolicyMoves() {
 
 func (s *DataMoveSuite) seedAgentConfig(store *Store, customerID, name string) string {
 	id := newID()
-	_, err := store.DB().ExecContext(s.ctx,
+	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, ?, ?, ?)",
 		id, customerID, name, "be brief")
 	s.Require().NoError(err)
@@ -1440,7 +1440,7 @@ func (s *DataMoveSuite) seedAgentConfig(store *Store, customerID, name string) s
 
 func (s *DataMoveSuite) seedVoice(store *Store, customerID, name string) string {
 	id := newID()
-	_, err := store.DB().ExecContext(s.ctx,
+	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO voices (id, customer_id, name) VALUES (?, ?, ?)", id, customerID, name)
 	s.Require().NoError(err)
 	return id
@@ -1448,7 +1448,7 @@ func (s *DataMoveSuite) seedVoice(store *Store, customerID, name string) string 
 
 func (s *DataMoveSuite) seedPluginConnection(store *Store, customerID, token string) string {
 	id := newID()
-	_, err := store.DB().ExecContext(s.ctx,
+	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_plugin_connections (id, customer_id, config_id, plugin_id, access_token)"+
 			" VALUES (?, ?, ?, ?, ?)",
 		id, customerID, newID(), "slack", token)
@@ -1469,7 +1469,7 @@ func (s *DataMoveSuite) pinnedSession(customerID string, app int64) string {
 // pinOnDestination is the pin a moved session arrived with, nil for none.
 func (s *DataMoveSuite) pinOnDestination(id string) *int64 {
 	var pin *int64
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT stream_app_pk FROM agent_sessions WHERE id = ?", id).Scan(&pin))
 	return pin
 }
@@ -1549,7 +1549,7 @@ func (s *DataMoveSuite) TestBackfillPinsTheDeploymentAppsRows() {
 	s.GreaterOrEqual(pinned["agent_sessions"], int64(1))
 	for id, want := range map[string]int64{unpinned: 1, own: 4242} {
 		var pin int64
-		s.Require().NoError(s.source.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT stream_app_pk FROM agent_sessions WHERE id = ?", id).Scan(&pin))
 		s.Equal(want, pin, "a row already pinned keeps its app")
 	}
@@ -1586,12 +1586,12 @@ func (s *DataMoveSuite) TestAMovedConnectorConnectionArrivesNeedingReauthorizati
 func (s *DataMoveSuite) TestAMovedConnectorConnectionLeavesItsProviderUnitBehind() {
 	s.capture("acme")
 	id := s.seedConnectorConnection(s.source, "acme")
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE connector_connections SET provider_unit_id = 'unit-1' WHERE id = ?", id)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET provider_unit_id = 'unit-1' WHERE id = ?", id)
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
 	var imported sql.NullString
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT provider_unit_id FROM connector_connections WHERE id = ?", id).Scan(&imported))
 	s.False(imported.Valid, "an import proves no unit is the importer's")
 
@@ -1599,14 +1599,14 @@ func (s *DataMoveSuite) TestAMovedConnectorConnectionLeavesItsProviderUnitBehind
 	s.Require().NoError(err)
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", changes))
 	var applied sql.NullString
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT provider_unit_id FROM connector_connections WHERE id = ?", id).Scan(&applied))
 	s.False(applied.Valid, "nor does a change applied after it")
 }
 
 func (s *DataMoveSuite) TestACustomConnectorDefinitionMovesAndABuiltInDoesNot() {
 	s.seedConnectorConnection(s.source, "acme")
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES ('', 'acme', 1, 'Acme', '{}')")
 	s.Require().NoError(err)
 
@@ -1622,7 +1622,7 @@ func (s *DataMoveSuite) TestAChangeToAConnectorConnectionLeavesItsCredentialsBeh
 	s.capture("acme")
 	id := s.seedConnectorConnection(s.source, "acme")
 
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE connector_connections SET credentials_sealed = 'rotated credentials', revision = 2 WHERE id = ?", id)
 	s.Require().NoError(err)
 
@@ -1672,7 +1672,7 @@ func (s *DataMoveSuite) TestAChangeAppliedLaterKeepsAConnectionAuthorizedAgainOn
 func (s *DataMoveSuite) TestCopyingAgainStillUpdatesAConnectionNotAuthorizedOnTheDestination() {
 	id := s.seedConnectorConnection(s.source, "acme")
 	s.move("acme", "moved")
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE connector_connections SET label = 'renamed' WHERE id = ?", id)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET label = 'renamed' WHERE id = ?", id)
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
@@ -1742,7 +1742,7 @@ func (s *DataMoveSuite) assertCredentialsKept(saved ConnectorConnection) {
 // seedScheduledTask stores a task on the source with its run, and the agent config it runs
 // on, config-1, unless the source already holds that id.
 func (s *DataMoveSuite) seedScheduledTask(id, customerID, state string) {
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-1', ?, 'a', 'be brief') ON CONFLICT (id) DO NOTHING",
 		customerID)
 	s.Require().NoError(err)
@@ -1753,10 +1753,10 @@ func (s *DataMoveSuite) seedScheduledTask(id, customerID, state string) {
 		State: state, NextRunAt: &next, CreatedBy: "api",
 	}
 	s.Require().NoError(s.source.CreateScheduledTask(s.ctx, task, 25))
-	_, err = s.source.DB().ExecContext(s.ctx,
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET claim_id = 'claim-1', lease_until = now() + interval '1 hour' WHERE id = ?", id)
 	s.Require().NoError(err)
-	_, err = s.source.DB().ExecContext(s.ctx, `
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, state, finished_at)
 VALUES (?, ?, ?, ?, 'delivered', now())`, id+"-run", id, customerID, next.Add(-day))
 	s.Require().NoError(err)
@@ -1765,7 +1765,7 @@ VALUES (?, ?, ?, ?, 'delivered', now())`, id+"-run", id, customerID, next.Add(-d
 // scheduledTaskOn reads a task's state, claim and next run from a deployment.
 func (s *DataMoveSuite) scheduledTaskOn(store *Store, id string) (state, claim string, leased bool, next time.Time) {
 	var lease sql.NullTime
-	s.Require().NoError(store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT state, claim_id, lease_until, next_run_at FROM scheduled_tasks WHERE id = ?", id).
 		Scan(&state, &claim, &lease, &next))
 	return state, claim, lease.Valid, next
@@ -1808,7 +1808,7 @@ func (s *DataMoveSuite) TestAScheduledTaskChangeAppliedLaterArrivesPausedToo() {
 	s.seedScheduledTask("st-first", "acme", ScheduledTaskActive)
 	cursor := s.move("acme", "moved")
 
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET title = 'Stretch more' WHERE id = 'st-first'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET title = 'Stretch more' WHERE id = 'st-first'")
 	s.Require().NoError(err)
 	s.seedScheduledTask("st-second", "acme", ScheduledTaskActive)
 
@@ -1823,7 +1823,7 @@ func (s *DataMoveSuite) TestAScheduledTaskChangeAppliedLaterArrivesPausedToo() {
 		s.False(leased, id)
 	}
 	var title string
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT title FROM scheduled_tasks WHERE id = 'st-first'").Scan(&title))
 	s.Equal("Stretch more", title, "the rest of the change is applied")
 }
@@ -1838,7 +1838,7 @@ func (s *DataMoveSuite) resume(customerID string) (int64, []string) {
 // movePausedOn reads whether a task on the destination carries the move's mark.
 func (s *DataMoveSuite) movePausedOn(id string) bool {
 	var marked bool
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT move_paused FROM scheduled_tasks WHERE id = ?", id).Scan(&marked))
 	return marked
 }
@@ -1878,7 +1878,7 @@ func (s *DataMoveSuite) TestATaskTheUserPausedAtTheSourceDuringTheMoveStaysPause
 	s.seedScheduledTask("st-first", "acme", ScheduledTaskActive)
 	cursor := s.move("acme", "moved")
 
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'paused' WHERE id = 'st-first'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'paused' WHERE id = 'st-first'")
 	s.Require().NoError(err)
 	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
 	s.Require().NoError(err)
@@ -1896,7 +1896,7 @@ func (s *DataMoveSuite) TestATaskTheUserResumedAtTheSourceDuringTheMoveIsResumed
 	s.seedScheduledTask("st-first", "acme", ScheduledTaskPaused)
 	cursor := s.move("acme", "moved")
 
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active' WHERE id = 'st-first'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active' WHERE id = 'st-first'")
 	s.Require().NoError(err)
 	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
 	s.Require().NoError(err)
@@ -1926,7 +1926,7 @@ func (s *DataMoveSuite) TestATaskPausedAtTheSourceIsNotResumedWhateverMarkItCarr
 
 // limitHere sets how many active tasks a user may hold on config-1 on the destination.
 func (s *DataMoveSuite) limitHere(limit int) {
-	_, err := s.destination.DB().ExecContext(s.ctx,
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"UPDATE agent_configs SET scheduling = jsonb_build_object('max_tasks_per_user', ?::int) WHERE id = 'config-1'", limit)
 	s.Require().NoError(err)
 }
@@ -2000,7 +2000,7 @@ func (s *DataMoveSuite) TestTheCutOverRunAgainResumesWhatItLeftOnceTheUserHasRoo
 	s.madeHere("st-here", "sam", "config-1")
 	_, _, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
 	s.Require().NoError(err)
-	_, err = s.destination.DB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'completed' WHERE id = 'st-here'")
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'completed' WHERE id = 'st-here'")
 	s.Require().NoError(err)
 
 	resumed, _, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
@@ -2019,20 +2019,20 @@ func (s *DataMoveSuite) TestTheCutOverResumesEveryTaskThatFitsUnderTheLimit() {
 	s.seedScheduledTask("st-sam-1", "acme", ScheduledTaskActive)
 	s.seedScheduledTask("st-sam-other-config", "acme", ScheduledTaskActive)
 	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
-	_, err := s.source.DB().ExecContext(s.ctx, `
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'acme', 'b', 'be brief');
 UPDATE scheduled_tasks SET config_id = 'config-2' WHERE id = 'st-sam-other-config';
 UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'`)
 	s.Require().NoError(err)
 	s.move("acme", "moved")
 	s.limitHere(2)
-	_, err = s.destination.DB().ExecContext(s.ctx,
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx,
 		`UPDATE agent_configs SET scheduling = '{"max_tasks_per_user": 2}' WHERE id = 'config-2'`)
 	s.Require().NoError(err)
 	s.madeHere("st-here", "sam", "config-1")
 	s.madeHere("st-here-other-config", "sam", "config-2")
 	s.madeHere("st-here-paused", "sam", "config-1")
-	_, err = s.destination.DB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'paused' WHERE id = 'st-here-paused'")
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'paused' WHERE id = 'st-here-paused'")
 	s.Require().NoError(err)
 
 	resumed, _, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
@@ -2090,23 +2090,23 @@ func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQuery
 	for _, id := range slices.Sorted(maps.Keys(tasks)) {
 		s.seedScheduledTask(id, "acme", ScheduledTaskActive)
 	}
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'acme', 'b', 'be brief')")
 	s.Require().NoError(err)
 	for id, holder := range tasks {
-		_, err := s.source.DB().ExecContext(s.ctx,
+		_, err := s.source.GlobalDB().ExecContext(s.ctx,
 			"UPDATE scheduled_tasks SET user_id = ?, config_id = ? WHERE id = ?", holder[0], holder[1], id)
 		s.Require().NoError(err)
 	}
 	s.move("acme", "moved")
 	s.limitHere(2)
-	_, err = s.destination.DB().ExecContext(s.ctx,
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx,
 		`UPDATE agent_configs SET scheduling = '{"max_tasks_per_user": 1}' WHERE id = 'config-2'`)
 	s.Require().NoError(err)
 	s.madeHere("st-here-sam-1", "sam", "config-1")
 	s.madeHere("st-here-kim-2", "kim", "config-2")
 	sent := &queriesSent{on: true}
-	s.destination.DB().AddQueryHook(sent)
+	s.destination.GlobalDB().AddQueryHook(sent)
 
 	resumed, skipped, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
 
@@ -2147,7 +2147,7 @@ func (s *DataMoveSuite) TestTheCutOverCountsOnlyTheCustomersOwnTasks() {
 	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
 	s.move("acme", "moved")
 	s.limitHere(1)
-	_, err := s.destination.DB().ExecContext(s.ctx, `
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_tasks (id, customer_id, config_id, user_id, caller_kind, title, instructions, start_local,
 	timezone, state, next_run_at, created_by, created_at, updated_at)
 VALUES ('st-theirs', 'other', 'config-1', 'sam', 'authenticated', 'Hydrate', 'Remind Sam to drink.', now(),
@@ -2216,7 +2216,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHereBefore
 	cursor := s.move("acme", "moved")
 	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-1"))
 	s.Require().NoError(s.destination.PauseScheduledTasksForConfig(s.ctx, "moved", "config-1"))
-	_, err := s.source.DB().ExecContext(s.ctx,
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET next_run_at = next_run_at + interval '1 day', updated_at = now() WHERE id = 'st-active'")
 	s.Require().NoError(err)
 	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
@@ -2237,7 +2237,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHereBefore
 func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigIsAnotherCustomersHerePaused() {
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	// The destination holds config-1 for somebody else, so the move cannot bring it.
-	_, err := s.destination.DB().ExecContext(s.ctx,
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-1', 'resident', 'theirs', 'be brief')")
 	s.Require().NoError(err)
 	s.move("acme", "moved")
@@ -2255,7 +2255,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigIsAnotherCustomersHe
 func (s *DataMoveSuite) TestTheCutOverWaitsForADeleteOfTheConfigInFlight() {
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	s.move("acme", "moved")
-	deleting, err := s.destination.DB().BeginTx(s.ctx, nil)
+	deleting, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = deleting.Rollback() }()
 	_, err = deleting.ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = 'config-1'")
@@ -2280,7 +2280,7 @@ func (s *DataMoveSuite) TestTheCutOverWaitsForADeleteOfTheConfigInFlight() {
 			result = &got
 		case <-time.After(50 * time.Millisecond):
 			var waiting int
-			s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 				"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting))
 			if waiting > 0 {
 				s.Require().NoError(deleting.Commit())
@@ -2304,13 +2304,13 @@ func (s *DataMoveSuite) TestTheCutOverDoesNotResumeATaskThatChangedWhileItReadTh
 	// unless they change meanwhile.
 	s.seedScheduledTask("st-gone-ended", "acme", ScheduledTaskActive)
 	s.seedScheduledTask("st-gone-paused", "acme", ScheduledTaskActive)
-	_, err := s.source.DB().ExecContext(s.ctx, `
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'acme', 'b', 'be brief');
 UPDATE scheduled_tasks SET config_id = 'config-2' WHERE id IN ('st-gone-ended', 'st-gone-paused')`)
 	s.Require().NoError(err)
 	s.move("acme", "moved")
 	s.Require().NoError(s.destination.DeleteAgentConfig(s.ctx, "moved", "config-2"))
-	changing, err := s.destination.DB().BeginTx(s.ctx, nil)
+	changing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = changing.Rollback() }()
 	_, err = changing.ExecContext(s.ctx, `
@@ -2336,7 +2336,7 @@ UPDATE scheduled_tasks SET move_paused = false WHERE id IN ('st-paused', 'st-gon
 			result = &got
 		case <-time.After(50 * time.Millisecond):
 			var waiting int
-			s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 				"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting))
 			if waiting > 0 {
 				s.Require().NoError(changing.Commit())
@@ -2361,7 +2361,7 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskThatEndedHereAsItIs() {
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
 	s.move("acme", "moved")
 	// Resumed here by hand and delivered: the mark is what the move left, the state is not.
-	_, err := s.destination.DB().ExecContext(s.ctx,
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET state = 'completed' WHERE id = 'st-active'")
 	s.Require().NoError(err)
 
@@ -2425,7 +2425,7 @@ func (s *DataMoveSuite) TestARunningCampaignArrivesPausedAndTheCutOverNamesIt() 
 
 // setState puts a campaign on st in a state, as the runner and the API leave it.
 func (s *DataMoveSuite) setState(st *Store, customerID, id, state string) {
-	_, err := st.DB().NewUpdate().Model((*Campaign)(nil)).Set("state = ?", state).
+	_, err := st.GlobalDB().NewUpdate().Model((*Campaign)(nil)).Set("state = ?", state).
 		Where("id = ?", id).Where("customer_id = ?", customerID).Exec(s.ctx)
 	s.Require().NoError(err)
 }
@@ -2439,12 +2439,12 @@ func (s *DataMoveSuite) midCall() string {
 		{ToNumber: "+15550000002"}, {ToNumber: "+15550000003"}})
 	s.Require().NoError(err)
 	s.setState(s.source, "acme", campaign, Running)
-	_, err = s.source.DB().ExecContext(s.ctx, `UPDATE campaign_contacts SET
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, `UPDATE campaign_contacts SET
 		stage = CASE to_number WHEN '+15550000001' THEN 'in_progress' WHEN '+15550000002' THEN 'awaiting_outcome' ELSE 'completed' END,
 		attempt = 1, leased_by = 'router-a', leased_until = now() + interval '1 hour', next_attempt_at = now() + interval '2 days'
 		WHERE campaign_id = ?`, campaign)
 	s.Require().NoError(err)
-	_, err = s.source.DB().ExecContext(s.ctx, `INSERT INTO campaign_attempts
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaign_attempts
 		(id, campaign_id, contact_id, step_id, attempt, call_outcome, ended_at, classify_state, classify_after)
 		SELECT 'att-' || to_number, campaign_id, id, 'step_1', 1,
 			CASE to_number WHEN '+15550000001' THEN NULL ELSE 'completed' END,
@@ -2516,37 +2516,37 @@ func (s *DataMoveSuite) TestAttemptsMoveWithTheirContactsAndAPendingClassificati
 		_, _, err := s.source.AddContacts(s.ctx, c, []Contact{{ToNumber: "+15550000001"}})
 		s.Require().NoError(err)
 	}
-	_, err := s.source.DB().ExecContext(s.ctx, `INSERT INTO campaign_attempts
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaign_attempts
 		(id, campaign_id, contact_id, step_id, attempt, call_outcome, ended_at, classify_state, classify_after)
 		SELECT 'att-' || campaign_id, campaign_id, id, 'step_1', 1, 'completed', now(), 'pending', now() FROM campaign_contacts`)
 	s.Require().NoError(err)
-	_, err = s.source.DB().ExecContext(s.ctx, `INSERT INTO campaign_attempts (id, campaign_id, contact_id, step_id, attempt, result)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO campaign_attempts (id, campaign_id, contact_id, step_id, attempt, result)
 		SELECT 'live-' || campaign_id, campaign_id, id, 'step_1', 2, '' FROM campaign_contacts WHERE campaign_id = ?`, campaign)
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
 
 	var ids []string
-	s.Require().NoError(s.destination.DB().NewRaw("SELECT id FROM campaign_attempts").Scan(s.ctx, &ids))
+	s.Require().NoError(s.destination.GlobalDB().NewRaw("SELECT id FROM campaign_attempts").Scan(s.ctx, &ids))
 	s.ElementsMatch([]string{"att-" + campaign, "live-" + campaign}, ids, "another customer's attempts do not move")
 	var state string
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT classify_state FROM campaign_attempts WHERE id = ?", "att-"+campaign).Scan(&state))
 	s.Equal("pending", state, "its transcript is read here once the move is cut over")
 	var source string
-	s.Require().NoError(s.source.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT classify_state FROM campaign_attempts WHERE id = ?", "att-"+campaign).Scan(&source))
 	s.Equal("pending", source)
 
 	var called *string
 	var endedAt *time.Time
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT call_outcome, ended_at FROM campaign_attempts WHERE id = ?", "live-"+campaign).Scan(&called, &endedAt))
 	s.Require().NotNil(called)
 	s.Equal("unknown", *called, "the call that was happening there will not be ended here")
 	s.Require().NotNil(endedAt)
 	s.WithinDuration(time.Now(), *endedAt, time.Minute)
-	s.Require().NoError(s.source.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT call_outcome FROM campaign_attempts WHERE id = ?", "live-"+campaign).Scan(&called))
 	s.Nil(called, "the source's own row is left alone")
 }
@@ -2567,7 +2567,7 @@ func (s *DataMoveSuite) dueOnSource() string {
 	campaign := s.seedCampaign("acme", Draft)
 	_, _, err := s.source.AddContacts(s.ctx, campaign, []Contact{{ToNumber: "+15550101"}, {ToNumber: "+15550102"}})
 	s.Require().NoError(err)
-	_, err = s.source.DB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = now() WHERE campaign_id = ?", campaign)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = now() WHERE campaign_id = ?", campaign)
 	s.Require().NoError(err)
 	s.setState(s.source, "acme", campaign, Running)
 	return campaign
@@ -2652,7 +2652,7 @@ func (s *DataMoveSuite) assertArrivedWithoutCredentials(id, owner string) {
 	var kekVersion int
 	var expiresAt sql.NullTime
 	var status, customer string
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT credentials_sealed, credentials_kek_version, expires_at, status, customer_id FROM connector_connections WHERE id = ?",
 		id).Scan(&sealed, &kekVersion, &expiresAt, &status, &customer))
 	s.Empty(sealed)
@@ -2665,12 +2665,12 @@ func (s *DataMoveSuite) assertArrivedWithoutCredentials(id, owner string) {
 // seedConnectorConnection stores a custom definition and a connected connection to it with
 // sealed credentials under key version 1 and an expiry, the state a credentials write leaves.
 func (s *DataMoveSuite) seedConnectorConnection(store *Store, customerID string) string {
-	_, err := store.DB().ExecContext(s.ctx,
+	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES (?, 'custom_acme', 1, 'Acme', '{}')",
 		customerID)
 	s.Require().NoError(err)
 	id := newID()
-	_, err = store.DB().ExecContext(s.ctx,
+	_, err = store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_connections (id, customer_id, connector_id, definition_revision, owner_type, auth_scheme,"+
 			" status, credentials_sealed, credentials_kek_version, expires_at)"+
 			" VALUES (?, ?, 'custom_acme', 1, 'app', 'test_key', ?, 'sealed credentials', 1, now() + interval '1 hour')",
@@ -2732,7 +2732,7 @@ func (s *DataMoveSuite) TestAMovedNumberLeavesItsBridgePasswordBehind() {
 
 	var sealed []byte
 	var version sql.NullInt64
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT bridge_password_sealed, bridge_password_kek_version FROM phone_numbers WHERE e164 = ?",
 		"+15550000110").Scan(&sealed, &version))
 	s.Empty(sealed)
@@ -2742,7 +2742,7 @@ func (s *DataMoveSuite) TestAMovedNumberLeavesItsBridgePasswordBehind() {
 	routing := map[string]*sql.NullString{"stream_trunk_id": {}, "stream_route_id": {}, "stream_call_id": {},
 		"stream_call_type": {}, "bridge_uri": {}, "bridge_username": {}}
 	for column, value := range routing {
-		s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT "+column+" FROM phone_numbers WHERE e164 = ?", "+15550000110").Scan(value))
 		s.False(value.Valid, "%s came along as %q", column, value.String)
 	}
@@ -2917,7 +2917,7 @@ func (s *DataMoveSuite) numberAttachedHere(e164 string) PhoneNumber {
 
 // retag edits a number on the source the way its owner would, in a column of its own.
 func (s *DataMoveSuite) retag(store *Store, e164 string) {
-	_, err := store.DB().ExecContext(s.ctx, `UPDATE phone_numbers SET tags = '{"team": "sales"}' WHERE e164 = ?`, e164)
+	_, err := store.GlobalDB().ExecContext(s.ctx, `UPDATE phone_numbers SET tags = '{"team": "sales"}' WHERE e164 = ?`, e164)
 	s.Require().NoError(err)
 }
 
@@ -2960,7 +2960,7 @@ func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsIsNotImported() {
 	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
 		E164: "+15550000113", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
-	_, err := s.destination.DB().ExecContext(s.ctx, "INSERT INTO phone_numbers (e164, vendor, country, customer_id)"+
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "INSERT INTO phone_numbers (e164, vendor, country, customer_id)"+
 		" VALUES ('15550000114', 'plivo', 'US', 'acme')")
 	s.Require().NoError(err, "held in another form, before every write checked the form")
 	s.Require().NoError(s.destination.RecordNumber(s.ctx, &PhoneNumber{
@@ -3221,7 +3221,7 @@ func (s *DataMoveSuite) TestADeletedRequestFromBeforeUsageIDsIsReplayedToo() {
 // drewNothing restarts the sequence behind a column, so the store has drawn nothing from it yet.
 // A truncate leaves sequences where they were, and the databases outlive a run.
 func (s *DataMoveSuite) drewNothing(store *Store, table, column string) {
-	_, err := store.DB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence(?, ?), 1, false)", table, column)
+	_, err := store.GlobalDB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence(?, ?), 1, false)", table, column)
 	s.Require().NoError(err)
 }
 
@@ -3231,7 +3231,7 @@ func (s *DataMoveSuite) TestAContactAddedToAMovedCampaignIsRungAfterTheMovedOnes
 	s.Require().NoError(s.source.CreateCampaign(s.ctx, campaign))
 	// The source has handed out more places than the destination: its contacts' places are
 	// numbers the destination's sequence has not reached.
-	_, err := s.source.DB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence('campaign_contacts', 'seq'), 1000)")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence('campaign_contacts', 'seq'), 1000)")
 	s.Require().NoError(err)
 	_, _, err = s.source.AddContacts(s.ctx, campaign.ID, []Contact{{ToNumber: "+15550000001"}})
 	s.Require().NoError(err)
@@ -3273,13 +3273,13 @@ func (s *DataMoveSuite) seedLog(customerID, message string) int64 {
 func (s *DataMoveSuite) placeHere(row map[string]any) {
 	encoded, err := json.Marshal(row)
 	s.Require().NoError(err)
-	_, err = s.destination.DB().ExecContext(s.ctx,
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_logs SELECT * FROM jsonb_populate_record(NULL::agent_logs, ?::jsonb)", string(encoded))
 	s.Require().NoError(err)
 	// An explicit id leaves the sequence where it was, and SetupTest truncates without
 	// restarting it, so both sides draw in step: the destination's next id would be this one.
 	// A deployment that wrote the log itself has drawn past it.
-	_, err = s.destination.DB().ExecContext(s.ctx, "SELECT setval('agent_logs_id_seq', GREATEST("+
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "SELECT setval('agent_logs_id_seq', GREATEST("+
 		"(SELECT max(id) FROM agent_logs), (SELECT last_value FROM agent_logs_id_seq)))")
 	s.Require().NoError(err)
 }
@@ -3293,7 +3293,7 @@ func (s *DataMoveSuite) exportedLog() map[string]any {
 
 // logsHere are a customer's agent logs on the destination: their message by id.
 func (s *DataMoveSuite) logsHere(customerID string) map[int64]string {
-	rows, err := s.destination.DB().QueryContext(s.ctx, "SELECT id, message FROM agent_logs WHERE customer_id = ?", customerID)
+	rows, err := s.destination.GlobalDB().QueryContext(s.ctx, "SELECT id, message FROM agent_logs WHERE customer_id = ?", customerID)
 	s.Require().NoError(err)
 	defer rows.Close()
 	logs := map[int64]string{}
@@ -3349,7 +3349,7 @@ func (s *DataMoveSuite) TestALogHereThatDiffersOnlyInWhenItWasIngestedIsAnotherL
 
 	s.Len(s.logsHere("acme"), 2, "two logs written at different times are two logs")
 	var ingested time.Time
-	s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx, "SELECT ingested_at FROM agent_logs WHERE id = ?", id).Scan(&ingested))
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, "SELECT ingested_at FROM agent_logs WHERE id = ?", id).Scan(&ingested))
 	s.True(ingested.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)), "the log written here is not overwritten")
 }
 
@@ -3408,7 +3408,7 @@ func (s *DataMoveSuite) TestAReplayedDeleteOfALogRemovesItsCopyAndNotTheLogHoldi
 	s.placeHere(own)
 	cursor := s.move("acme", "acme")
 
-	_, err := s.source.DB().ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", id)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", id)
 	s.Require().NoError(err)
 	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
 	s.Require().NoError(err)
@@ -3422,7 +3422,7 @@ func (s *DataMoveSuite) TestACopiedLogIsNumberedUnderTheLockItsAppsLogsAreNumber
 	encoded, err := json.Marshal(s.exportedLog())
 	s.Require().NoError(err)
 	// A log of acme's being written here, holding the lock RecordAgentLog takes.
-	writing, err := s.destination.DB().BeginTx(s.ctx, nil)
+	writing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = writing.Rollback() }()
 	_, err = writing.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('acme', 731))")
@@ -3433,7 +3433,7 @@ func (s *DataMoveSuite) TestACopiedLogIsNumberedUnderTheLockItsAppsLogsAreNumber
 
 	s.Eventually(func() bool {
 		var waiting bool
-		s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks"+
+		s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks"+
 			" WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))").Scan(&waiting))
 		return waiting
 	}, 10*time.Second, 10*time.Millisecond, "the copy waits for the log being written")
@@ -3462,7 +3462,7 @@ func (s *DataMoveSuite) TestTheSameLogUnderAnotherIDHereIsNotTakenForACopy() {
 
 func (s *DataMoveSuite) TestMigrateBuildsTheIndexCopiedLogsAreKnownByAgain() {
 	// As somebody dropping it by hand, or a CONCURRENTLY build that failed, leaves it.
-	_, err := s.destination.DB().ExecContext(s.ctx, "DROP INDEX CONCURRENTLY agent_logs_source_idx")
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "DROP INDEX CONCURRENTLY agent_logs_source_idx")
 	s.Require().NoError(err)
 	s.seedLog("acme", "copied")
 
@@ -3514,7 +3514,7 @@ func (s *DataMoveSuite) TestALogHereThatDiffersInAnyColumnIsAnotherLog() {
 			s.move("acme", "acme")
 
 			var logs int
-			s.Require().NoError(s.destination.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM agent_logs").Scan(&logs))
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM agent_logs").Scan(&logs))
 			s.Equal(2, logs, "a log here differing in %s is not the copied one", column)
 		})
 	}
@@ -3522,7 +3522,7 @@ func (s *DataMoveSuite) TestALogHereThatDiffersInAnyColumnIsAnotherLog() {
 
 func (s *DataMoveSuite) TestALogCopiedBackWhereItCameFromIsNotCopiedAgain() {
 	// Each deployment draws its own ids: the copy holds another id than the log it came from.
-	_, err := s.destination.DB().ExecContext(s.ctx, "SELECT setval('agent_logs_id_seq', (SELECT last_value FROM agent_logs_id_seq) + 1000)")
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "SELECT setval('agent_logs_id_seq', (SELECT last_value FROM agent_logs_id_seq) + 1000)")
 	s.Require().NoError(err)
 	id := s.seedLog("acme", "original")
 	s.move("acme", "acme")
@@ -3535,6 +3535,6 @@ func (s *DataMoveSuite) TestALogCopiedBackWhereItCameFromIsNotCopiedAgain() {
 	}
 
 	var logs []int64
-	s.Require().NoError(s.source.DB().NewSelect().Table("agent_logs").Column("id").Where("customer_id = 'acme'").Scan(s.ctx, &logs))
+	s.Require().NoError(s.source.GlobalDB().NewSelect().Table("agent_logs").Column("id").Where("customer_id = 'acme'").Scan(s.ctx, &logs))
 	s.Equal([]int64{id}, logs, "the log that went away and came back is the one log it was")
 }

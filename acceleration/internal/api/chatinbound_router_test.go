@@ -532,7 +532,7 @@ func (d *chatInbounds) hooked(router *RouterSuite, path, body, secret string) in
 
 // queued is how many rows the endpoint queued for the channel.
 func (d *chatInbounds) queued(router *RouterSuite) int {
-	count, err := router.store.DB().NewSelect().Table("chat_inbound").
+	count, err := router.store.GlobalDB().NewSelect().Table("chat_inbound").
 		Where("position(? in body) > 0", []byte(fmt.Sprintf("%q", d.channelID))).Count(context.Background())
 	router.Require().NoError(err)
 	return count

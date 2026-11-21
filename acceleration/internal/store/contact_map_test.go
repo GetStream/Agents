@@ -115,6 +115,6 @@ func (s *StoreSuite) pools(count int) []*Store {
 // contactRows is how many contact map rows there are.
 func (s *StoreSuite) contactRows() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM contact_map").Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM contact_map").Scan(&count))
 	return count
 }

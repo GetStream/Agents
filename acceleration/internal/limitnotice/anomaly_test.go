@@ -60,7 +60,7 @@ func (s *AnomalySuite) SetupSuite() {
 }
 
 func (s *AnomalySuite) SetupTest() {
-	_, err := s.db.DB().ExecContext(s.ctx, "TRUNCATE requests, cost_anomaly_notices")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "TRUNCATE requests, cost_anomaly_notices")
 	s.Require().NoError(err)
 	s.slack = newSlackServer()
 	s.T().Cleanup(s.slack.Close)
@@ -297,7 +297,7 @@ func (s *AnomalySuite) TestAPostThatFailedIsPostedByALaterCheck() {
 	s.slack.fail.Store(false)
 	s.checked(s.reads.Load())
 	s.Empty(s.noticed(spike), "its writer's claim stands for a while")
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE cost_anomaly_notices SET claimed_at = now() - interval '1 hour'")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE cost_anomaly_notices SET claimed_at = now() - interval '1 hour'")
 	s.Require().NoError(err)
 	s.Require().Eventually(func() bool { return len(s.noticed(spike)) == 1 }, settleFor, time.Millisecond)
 	s.checked(s.reads.Load())

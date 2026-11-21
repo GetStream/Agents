@@ -39,7 +39,7 @@ func (s *PolicySuite) tiered() *tiered {
 	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	reads := &tierReads{}
-	db.DB().AddQueryHook(reads)
+	db.GlobalDB().AddQueryHook(reads)
 	configs, err := appconfig.New(appconfig.Options{Store: db})
 	s.Require().NoError(err)
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))

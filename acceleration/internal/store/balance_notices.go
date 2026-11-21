@@ -48,7 +48,7 @@ func (s *Store) NoteBalance(ctx context.Context, notice BalanceNotice, delivery 
 	if notice.Kind != NoticeBalanceLow && notice.Kind != NoticeBalanceExhausted {
 		return false, 0, stack.Wrap(fmt.Errorf("store: a balance notice is %s or %s, not %q", NoticeBalanceLow, NoticeBalanceExhausted, notice.Kind))
 	}
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		written, err := tx.NewInsert().Model(&notice).On("CONFLICT DO NOTHING").Exec(ctx)
 		if err != nil {
 			return err

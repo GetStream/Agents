@@ -566,7 +566,7 @@ func (s *Store) EndedCallLegs(ctx context.Context, from, to time.Time, limit int
 // after it. It is what a month of rental is billed from.
 func (s *Store) NumbersHeldSince(ctx context.Context, since time.Time) ([]PhoneNumber, error) {
 	var held []PhoneNumber
-	err := s.db.NewSelect().Model(&held).
+	err := s.global.NewSelect().Model(&held).
 		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.Where("released_at IS NULL").WhereOr("released_at > ?", since.UTC())
 		}).

@@ -39,7 +39,7 @@ func (s *Store) ConnectorToolPins(ctx context.Context, connectionID string, conn
 		return nil, stack.Wrap(errors.New("store: a connection id is required"))
 	}
 	var pins []ConnectorToolPin
-	err := s.db.NewSelect().Model(&pins).
+	err := s.global.NewSelect().Model(&pins).
 		Where("ctp.connection_id = ?", connectionID).
 		Where("ctp.connected_at IS NOT DISTINCT FROM ?", connectedAt).
 		Scan(ctx)
@@ -74,7 +74,7 @@ func (s *Store) PinConnectorTools(ctx context.Context, connectionID string, conn
 			pins = append(pins, ConnectorToolPin{ConnectionID: connectionID, ToolName: name,
 				SchemaDigest: digests[name], ConnectedAt: connectedAt, PinnedAt: now})
 		}
-		_, err := s.db.NewInsert().Model(&pins).
+		_, err := s.global.NewInsert().Model(&pins).
 			On("CONFLICT (connection_id, tool_name) DO UPDATE").
 			Set("schema_digest = EXCLUDED.schema_digest").
 			Set("connected_at = EXCLUDED.connected_at").
@@ -120,7 +120,7 @@ func (s *Store) ReapproveConnectorTools(ctx context.Context, connection Connecto
 	// By name, so two approves of the same tools take the pins' locks in one order, as
 	// PinConnectorTools does.
 	ordered := slices.SortedFunc(slices.Values(tools), func(a, b ApprovedTool) int { return strings.Compare(a.Name, b.Name) })
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// FOR SHARE: a consent or a credentials write that begins a new grant updates this row,
 		// so one that comes later waits for this transaction, and one that came first is seen.
 		var sameGrant bool

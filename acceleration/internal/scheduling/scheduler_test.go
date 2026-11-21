@@ -49,7 +49,7 @@ func (s *SchedulerSuite) SetupSuite() {
 // suite's worker shares would take the tasks made here.
 func (s *SchedulerSuite) TestTheSuiteRunsOnADatabaseOfItsOwn() {
 	var database string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 
 	s.Contains(database, "_scheduler_test")
 }
@@ -975,7 +975,7 @@ func (s *SchedulerSuite) TestADrainStopsARetryWaitAndLeavesTheRunToItsLease() {
 	// Another router takes the run up once its lease has run out and the run
 	// has sat in running for the store's stale-run time, which the test skips
 	// by dating the run's start back.
-	_, err := s.db.DB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
+	_, err := s.db.GlobalDB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
 		Set("started_at = now() - interval '1 hour'").
 		Where("id = ?", runs[0].ID).
 		Exec(s.ctx)

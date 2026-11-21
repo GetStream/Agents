@@ -72,7 +72,7 @@ func (s *OAuthClientsSuite) TestTheFirstPutCreatesTheClientAndTheNextReplacesIts
 	}, replaced)
 	s.True(replaced.UpdatedAt.After(created.UpdatedAt))
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_oauth_clients WHERE customer_id = ?", s.customerID()).Scan(&rows))
 	s.Equal(1, rows)
 }
@@ -605,7 +605,7 @@ func (s *OAuthClientsSuite) TestASigningSecretMovedToAnotherProviderAppDoesNotOp
 	s.useApp(s.data.createApp())
 	second := s.providerApp("github", core.ClientCustomer, "second-client-secret", "second-signing-secret")
 
-	_, err := s.store.DB().ExecContext(context.Background(), `
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
 UPDATE connector_oauth_clients AS target
 SET signing_secret_sealed = source.signing_secret_sealed, signing_kek_version = source.signing_kek_version
 FROM connector_oauth_clients AS source
@@ -722,7 +722,7 @@ func (s *OAuthClientsSuite) lookup(connector string, registration core.ClientReg
 // moveSecret copies one row's sealed secret onto another, as somebody with write access to
 // the table could, which the secret's AAD is there to defeat.
 func (s *OAuthClientsSuite) moveSecret(fromCustomer, fromConnector, toCustomer, toConnector string) {
-	_, err := s.store.DB().ExecContext(context.Background(), `
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
 UPDATE connector_oauth_clients AS target
 SET secret_sealed = source.secret_sealed, kek_version = source.kek_version
 FROM connector_oauth_clients AS source

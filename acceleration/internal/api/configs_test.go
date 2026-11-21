@@ -296,7 +296,7 @@ func (s *ConfigsSuite) TestAConfigWritesNoEpisodeCardsUnlessItSaysSo() {
 // previous release reads decides, so both releases take it the same way.
 func (s *ConfigsSuite) TestAConfigWithBothCardColumnsOnReadsAsOn() {
 	created := s.createConfig(map[string]any{"name": "support"})
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE agent_configs SET episode_cards = true, episode_cards_record = true WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
@@ -779,7 +779,7 @@ func (s *ConfigsSuite) storedWithPlugins() store.AgentConfig {
 // row, which the model no longer has, as a save before they were refused left them.
 func nameRetired(t *testing.T, stored *store.Store, config string) {
 	t.Helper()
-	result, err := stored.DB().ExecContext(context.Background(), `UPDATE agent_configs
+	result, err := stored.GlobalDB().ExecContext(context.Background(), `UPDATE agent_configs
 		SET plugins = '["linear"]', plugin_events = '[{"plugin":"linear","event":"issue.created"}]',
 		    mcp_servers = '[{"name":"wwsd","url":"https://mcp.wwsd.invalid/mcp"}]'
 		WHERE id = ?`, config)
@@ -1086,7 +1086,7 @@ func (s *ConfigsSuite) readConnectors(id string) (json.RawMessage, string) {
 	}
 	s.Require().NoError(json.Unmarshal(raw, &read))
 	var stored string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT connectors::text FROM agent_configs WHERE id = ?", id).Scan(&stored))
 	return read.Connectors, stored
 }
@@ -2374,7 +2374,7 @@ func (s *ConfigsSuite) TestAConnectionWhoseConnectorTheAppCanNoLongerSeeListsIts
 	s.useInternalApp()
 	id := s.connectionTo("nessy", "")
 	s.listTools(id, "org_lookup")
-	_, err := s.store.DB().NewUpdate().Model(&store.App{ID: s.customerID(), Settings: store.AppSettings{}}).
+	_, err := s.store.GlobalDB().NewUpdate().Model(&store.App{ID: s.customerID(), Settings: store.AppSettings{}}).
 		Column("settings").WherePK().Exec(context.Background())
 	s.Require().NoError(err)
 

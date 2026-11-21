@@ -180,7 +180,7 @@ func (s *MigrationOrderSuite) TestDownOfCustomModelsSucceedsWhenTheTableIsAlread
 	s.False(s.customModelsExists(db))
 
 	s.goose()
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", indexSwapVersion))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", indexSwapVersion))
 
 	s.False(s.customModelsExists(db))
 	applied := s.applied(db)
@@ -195,7 +195,7 @@ func (s *MigrationOrderSuite) open() *Store {
 		s.NoError(db.Close())
 	})
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().NotEqual("model_router", name)
 	s.Require().NotEqual("model_router_test", name)
@@ -212,7 +212,7 @@ func (s *MigrationOrderSuite) goose() {
 
 func (s *MigrationOrderSuite) upTo(db *Store, version int64) {
 	s.goose()
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", version))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", version))
 }
 
 func (s *MigrationOrderSuite) applyShippedValidation(db *Store) {
@@ -223,19 +223,19 @@ func (s *MigrationOrderSuite) applyShippedValidation(db *Store) {
 }
 
 func (s *MigrationOrderSuite) recordVersion(db *Store, version int64) {
-	_, err := db.DB().ExecContext(s.ctx, `INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, true)`, version)
+	_, err := db.GlobalDB().ExecContext(s.ctx, `INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, true)`, version)
 	s.Require().NoError(err)
 }
 
 func (s *MigrationOrderSuite) exec(db *Store, statements ...string) {
 	for _, statement := range statements {
-		_, err := db.DB().ExecContext(s.ctx, statement)
+		_, err := db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err)
 	}
 }
 
 func (s *MigrationOrderSuite) applied(db *Store) map[int64]bool {
-	rows, err := db.DB().QueryContext(s.ctx, `SELECT version_id FROM goose_db_version WHERE is_applied`)
+	rows, err := db.GlobalDB().QueryContext(s.ctx, `SELECT version_id FROM goose_db_version WHERE is_applied`)
 	s.Require().NoError(err)
 	defer rows.Close()
 	got := map[int64]bool{}
@@ -250,18 +250,18 @@ func (s *MigrationOrderSuite) applied(db *Store) map[int64]bool {
 
 func (s *MigrationOrderSuite) maxVersion(db *Store) int64 {
 	var version int64
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version))
 	return version
 }
 
 func (s *MigrationOrderSuite) customModelsExists(db *Store) bool {
 	var exists bool
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, `SELECT to_regclass('public.custom_models') IS NOT NULL`).Scan(&exists))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, `SELECT to_regclass('public.custom_models') IS NOT NULL`).Scan(&exists))
 	return exists
 }
 
 func (s *MigrationOrderSuite) customModelIndexes(db *Store) []customModelIndex {
-	rows, err := db.DB().QueryContext(s.ctx, `
+	rows, err := db.GlobalDB().QueryContext(s.ctx, `
 SELECT indexname, indexdef FROM pg_indexes
 WHERE schemaname = 'public' AND tablename = 'custom_models'
 ORDER BY indexname`)
@@ -278,7 +278,7 @@ ORDER BY indexname`)
 }
 
 func (s *MigrationOrderSuite) customModelColumns(db *Store) []string {
-	rows, err := db.DB().QueryContext(s.ctx, `
+	rows, err := db.GlobalDB().QueryContext(s.ctx, `
 SELECT column_name FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'custom_models'
 ORDER BY ordinal_position`)
@@ -296,7 +296,7 @@ ORDER BY ordinal_position`)
 
 func (s *MigrationOrderSuite) keptName(db *Store) string {
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, `SELECT name FROM custom_models WHERE id = 'kept'`).Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, `SELECT name FROM custom_models WHERE id = 'kept'`).Scan(&name))
 	return name
 }
 
@@ -340,7 +340,7 @@ func (s *MigrationOrderSuite) TestTheAuditCheckKeepsEveryRowAndTakesToolReapprov
 	db := s.open()
 	s.upTo(db, beforeToolReapproved)
 	audit := func(action string) error {
-		_, err := db.DB().ExecContext(s.ctx, "INSERT INTO connector_audit (id, customer_id, connection_id, connector_id, "+
+		_, err := db.GlobalDB().ExecContext(s.ctx, "INSERT INTO connector_audit (id, customer_id, connection_id, connector_id, "+
 			"owner_type, action, created_at) VALUES (?, 'app', 'connection', 'acme', 'app', ?, now())", newID(), action)
 		return err
 	}
@@ -355,11 +355,11 @@ func (s *MigrationOrderSuite) TestTheAuditCheckKeepsEveryRowAndTakesToolReapprov
 	s.Require().ErrorContains(audit("tool_approved"), "connector_audit_action_check")
 	// Added NOT VALID: the old CHECK already held for every row, so none is read again.
 	var validated bool
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT convalidated FROM pg_constraint "+
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT convalidated FROM pg_constraint "+
 		"WHERE conname = 'connector_audit_action_check' AND conrelid = 'connector_audit'::regclass").Scan(&validated))
 	s.False(validated)
 	s.goose()
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", beforeToolReapproved))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", beforeToolReapproved))
 	s.Equal(6, s.auditRows(db))
 	s.Require().ErrorContains(audit(AuditToolReapproved), "connector_audit_action_check")
 }
@@ -378,13 +378,13 @@ func (s *MigrationOrderSuite) TestTheAuditLogKeepsEveryRowAndTakesTheManagementA
 	db := s.open()
 	s.upTo(db, beforeAuditManage)
 	audit := func(resource, source string) error {
-		_, err := db.DB().ExecContext(s.ctx, "INSERT INTO audit_log (id, customer_id, resource_type, resource_id, "+
+		_, err := db.GlobalDB().ExecContext(s.ctx, "INSERT INTO audit_log (id, customer_id, resource_type, resource_id, "+
 			"action, source, created_at) VALUES (?, '', ?, 'resource', 'created', ?, now())", newID(), resource, source)
 		return err
 	}
 	rows := func() int {
 		var count int
-		s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM audit_log").Scan(&count))
+		s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM audit_log").Scan(&count))
 		return count
 	}
 	for _, resource := range []string{"agent_config", "skill", "knowledge", "knowledge_url", "router_config", "plugin", "policy"} {
@@ -403,7 +403,7 @@ func (s *MigrationOrderSuite) TestTheAuditLogKeepsEveryRowAndTakesTheManagementA
 	s.Require().ErrorContains(audit("limit", "manage"), "audit_log_resource_type_check")
 	s.Require().ErrorContains(audit("policy", "staff"), "audit_log_source_check")
 	s.goose()
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", beforeAuditManage))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", beforeAuditManage))
 	s.Equal(11, rows())
 	s.Require().ErrorContains(audit("price_list", "api"), "audit_log_resource_type_check")
 	s.Require().ErrorContains(audit("policy", "manage"), "audit_log_source_check")
@@ -446,7 +446,7 @@ func (s *MigrationOrderSuite) TestThePreviousRouterRunsOnThePriceTables() {
 	s.exec(db, oldRequestInsert)
 	filenode := func() int64 {
 		var node int64
-		s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT pg_relation_filenode('requests')").Scan(&node))
+		s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT pg_relation_filenode('requests')").Scan(&node))
 		return node
 	}
 	before := filenode()
@@ -456,7 +456,7 @@ func (s *MigrationOrderSuite) TestThePreviousRouterRunsOnThePriceTables() {
 	s.Equal(before, filenode(), "adding the columns does not rewrite requests")
 	var version string
 	var base int64
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT price_version, base_cost_micros FROM requests").Scan(&version, &base))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT price_version, base_cost_micros FROM requests").Scan(&version, &base))
 	s.Empty(version)
 	s.Zero(base)
 
@@ -474,20 +474,20 @@ func (s *MigrationOrderSuite) TestThePreviousRouterRunsOnThePriceTables() {
 	}
 	goose.SetBaseFS(previous)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpContext(s.ctx, db.DB().DB, "."), "the previous router migrates a newer database as a no-op")
+	s.Require().NoError(goose.UpContext(s.ctx, db.GlobalDB().DB, "."), "the previous router migrates a newer database as a no-op")
 	s.exec(db, oldRequestInsert)
 
 	s.goose()
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.Require().NoError(db.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt",
 		StartedAt: time.Now(), CostMicros: 1, Success: true}))
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", beforePriceTables))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", beforePriceTables))
 	var exists bool
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, `SELECT to_regclass('public.price_entries') IS NOT NULL
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, `SELECT to_regclass('public.price_entries') IS NOT NULL
 OR to_regclass('public.price_changes') IS NOT NULL`).Scan(&exists))
 	s.False(exists)
 	var rows int
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM requests").Scan(&rows))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM requests").Scan(&rows))
 	s.Equal(3, rows)
 	s.exec(db, oldRequestInsert)
 }
@@ -505,13 +505,13 @@ func (s *MigrationOrderSuite) TestTheAuditLogTakesCancelledAndThePreviousRouterS
 	before := s.migrationBefore(auditCancelledVersion)
 	s.upTo(db, before)
 	audit := func(action string) error {
-		_, err := db.DB().ExecContext(s.ctx, "INSERT INTO audit_log (id, customer_id, resource_type, resource_id, "+
+		_, err := db.GlobalDB().ExecContext(s.ctx, "INSERT INTO audit_log (id, customer_id, resource_type, resource_id, "+
 			"action, source, created_at) VALUES (?, '', 'price_list', 'change', ?, 'manage', now())", newID(), action)
 		return err
 	}
 	rows := func() int {
 		var count int
-		s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM audit_log").Scan(&count))
+		s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM audit_log").Scan(&count))
 		return count
 	}
 	for _, action := range []string{"created", "updated", "deleted", "synced"} {
@@ -526,7 +526,7 @@ func (s *MigrationOrderSuite) TestTheAuditLogTakesCancelledAndThePreviousRouterS
 	s.Require().ErrorContains(audit("withdrawn"), "audit_log_action_check")
 	// Added NOT VALID: the old CHECK already held for every row, so none is read again.
 	var validated bool
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT convalidated FROM pg_constraint "+
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT convalidated FROM pg_constraint "+
 		"WHERE conname = 'audit_log_action_check' AND conrelid = 'audit_log'::regclass").Scan(&validated))
 	s.False(validated)
 
@@ -543,12 +543,12 @@ func (s *MigrationOrderSuite) TestTheAuditLogTakesCancelledAndThePreviousRouterS
 	}
 	goose.SetBaseFS(previous)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpContext(s.ctx, db.DB().DB, "."), "the previous router migrates a newer database as a no-op")
+	s.Require().NoError(goose.UpContext(s.ctx, db.GlobalDB().DB, "."), "the previous router migrates a newer database as a no-op")
 	s.exec(db, oldRequestInsert)
 	s.Require().NoError(audit(AuditCreated))
 
 	s.goose()
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", before))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", before))
 	s.Equal(6, rows())
 	s.Require().ErrorContains(audit(AuditCancelled), "audit_log_action_check")
 	s.Require().NoError(audit(AuditCreated))
@@ -566,13 +566,13 @@ func (s *MigrationOrderSuite) TestThePoliciesTakeTheUserScopeAndThePreviousRoute
 	before := s.migrationBefore(userScopeVersion)
 	s.upTo(db, before)
 	policy := func(scope, id string) error {
-		_, err := db.DB().ExecContext(s.ctx, "INSERT INTO policies (scope, scope_id, document, updated_at) "+
+		_, err := db.GlobalDB().ExecContext(s.ctx, "INSERT INTO policies (scope, scope_id, document, updated_at) "+
 			"VALUES (?, ?, '{}', now()) ON CONFLICT (scope, scope_id) DO UPDATE SET updated_at = now()", scope, id)
 		return err
 	}
 	rows := func() int {
 		var count int
-		s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM policies").Scan(&count))
+		s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM policies").Scan(&count))
 		return count
 	}
 	s.Require().NoError(policy("organization", "org-1"))
@@ -598,11 +598,11 @@ func (s *MigrationOrderSuite) TestThePoliciesTakeTheUserScopeAndThePreviousRoute
 	}
 	goose.SetBaseFS(previous)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpContext(s.ctx, db.DB().DB, "."), "the previous router migrates a newer database as a no-op")
+	s.Require().NoError(goose.UpContext(s.ctx, db.GlobalDB().DB, "."), "the previous router migrates a newer database as a no-op")
 	s.Require().NoError(policy("app", "app-1"))
 
 	s.goose()
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", before))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", before))
 	s.Equal(3, rows(), "a user's policy is kept for the next Up")
 	s.Require().ErrorContains(policy("user", "app-1/bea"), "policies_scope_check")
 	s.Require().NoError(policy("organization", "org-1"))
@@ -615,7 +615,7 @@ func (s *MigrationOrderSuite) TestThePoliciesTakeTheUserScopeAndThePreviousRoute
 
 func (s *MigrationOrderSuite) auditRows(db *Store) int {
 	var rows int
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_audit").Scan(&rows))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_audit").Scan(&rows))
 	return rows
 }
 
@@ -629,14 +629,14 @@ func (s *MigrationOrderSuite) TestChatInboundComeOffAndGoOnAgain() {
 	s.Require().NoError(db.Migrate(s.ctx))
 	exists := func() bool {
 		var found bool
-		s.Require().NoError(db.DB().QueryRowContext(s.ctx, `SELECT to_regclass('public.chat_inbound') IS NOT NULL`).Scan(&found))
+		s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, `SELECT to_regclass('public.chat_inbound') IS NOT NULL`).Scan(&found))
 		return found
 	}
 	s.True(exists())
 	before := s.migrationBefore(chatInboundVersion)
 
 	s.goose()
-	s.Require().NoError(goose.DownToContext(s.ctx, db.DB().DB, ".", before))
+	s.Require().NoError(goose.DownToContext(s.ctx, db.GlobalDB().DB, ".", before))
 
 	s.False(exists())
 	applied := s.applied(db)

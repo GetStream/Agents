@@ -34,7 +34,7 @@ func (s *Store) CreateAgentConfig(ctx context.Context, config *AgentConfig) erro
 	config.DeletedAt = nil
 	normalizeConfig(config)
 
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		missing, err := lockBoundConnections(ctx, tx, config)
 		if err != nil {
 			return err
@@ -99,7 +99,7 @@ func (s *Store) updateAgentConfig(ctx context.Context, config *AgentConfig) erro
 	config.UpdatedAt = time.Now().UTC()
 	normalizeConfig(config)
 
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		missing, err := lockBoundConnections(ctx, tx, config)
 		if err != nil {
 			return err
@@ -241,7 +241,7 @@ func (s *Store) DeleteAgentConfig(ctx context.Context, customerID, id string) er
 		return stack.Wrap(errors.New("store: a customer and a config id are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*AgentConfig)(nil)).
+	result, err := s.global.NewUpdate().Model((*AgentConfig)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -267,7 +267,7 @@ func (s *Store) AgentConfig(ctx context.Context, customerID, id string) (AgentCo
 	}
 
 	var config AgentConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
@@ -290,7 +290,7 @@ func (s *Store) AgentConfigAnsweringChatChannel(ctx context.Context, customerID,
 	if customerID == "" || channelType == "" {
 		return AgentConfig{}, false, stack.Wrap(errors.New("store: a customer and a channel type are required"))
 	}
-	err = s.db.NewSelect().Model(&config).
+	err = s.global.NewSelect().Model(&config).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Where(notTestCopy).
@@ -320,7 +320,7 @@ func (s *Store) AgentConfigOwner(ctx context.Context, id string) (AgentConfig, e
 	}
 
 	var config AgentConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("id = ?", id).
 		Where("deleted_at IS NULL").
 		Limit(1).
@@ -341,7 +341,7 @@ func (s *Store) AgentConfigByName(ctx context.Context, customerID, name string) 
 	}
 
 	var config AgentConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("customer_id = ?", customerID).
 		Where("name = ?", name).
 		Where("deleted_at IS NULL").
@@ -364,7 +364,7 @@ func (s *Store) AgentConfigCalling(ctx context.Context, customerID, child, excep
 		return "", stack.Wrap(err)
 	}
 	var parent string
-	err = s.db.NewSelect().Model((*AgentConfig)(nil)).Column("name").
+	err = s.global.NewSelect().Model((*AgentConfig)(nil)).Column("name").
 		Where("customer_id = ?", customerID).
 		Where("id <> ?", except).
 		Where("agents @> ?::jsonb", string(named)).
@@ -388,7 +388,7 @@ func (s *Store) AgentConfigByRole(ctx context.Context, customerID, role string) 
 	}
 
 	var config AgentConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("customer_id = ?", customerID).
 		Where("role = ?", role).
 		Where("deleted_at IS NULL").
@@ -411,7 +411,7 @@ func (s *Store) CustomerAgentConfigs(ctx context.Context, customerID string) ([]
 	}
 
 	var configs []AgentConfig
-	err := s.db.NewSelect().Model(&configs).
+	err := s.global.NewSelect().Model(&configs).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Order("created_at DESC").
@@ -443,7 +443,7 @@ func (s *Store) CreateSkill(ctx context.Context, skill *Skill) error {
 		skill.Files = map[string]string{}
 	}
 
-	if _, err := s.db.NewInsert().Model(skill).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(skill).Exec(ctx); err != nil {
 		if constraint(err) == "skills_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
@@ -466,7 +466,7 @@ func (s *Store) UpdateSkill(ctx context.Context, skill *Skill) error {
 		skill.Files = map[string]string{}
 	}
 
-	result, err := s.db.NewUpdate().Model(skill).
+	result, err := s.global.NewUpdate().Model(skill).
 		Column("config_id", "name", "description", "instructions", "files", "capture_video", "deadline_ms", "updated_at").
 		Where("id = ?", skill.ID).
 		Where("customer_id = ?", skill.CustomerID).
@@ -494,7 +494,7 @@ func (s *Store) DeleteSkill(ctx context.Context, customerID, id string) error {
 		return stack.Wrap(errors.New("store: a customer and a skill id are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*Skill)(nil)).
+	result, err := s.global.NewUpdate().Model((*Skill)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -520,7 +520,7 @@ func (s *Store) Skill(ctx context.Context, customerID, id string) (Skill, error)
 	}
 
 	var skill Skill
-	err := s.db.NewSelect().Model(&skill).
+	err := s.global.NewSelect().Model(&skill).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
@@ -543,7 +543,7 @@ func (s *Store) CustomerSkills(ctx context.Context, customerID, configID string)
 	}
 
 	var skills []Skill
-	query := s.db.NewSelect().Model(&skills).
+	query := s.global.NewSelect().Model(&skills).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL")
 	if configID != "" {
@@ -568,7 +568,7 @@ func (s *Store) SkillsNamed(ctx context.Context, customerID, configID string, na
 	}
 
 	var skills []Skill
-	err := s.db.NewSelect().Model(&skills).
+	err := s.global.NewSelect().Model(&skills).
 		Where("customer_id = ?", customerID).
 		Where("config_id = ?", configID).
 		Where("name IN (?)", bun.In(names)).

@@ -41,7 +41,7 @@ func (s *Store) CreateSimulation(ctx context.Context, simulation *Simulation) er
 	simulation.DeletedAt = nil
 	normalizeSimulation(simulation)
 
-	if _, err := s.db.NewInsert().Model(simulation).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(simulation).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create simulation: %w", err))
 	}
 	return nil
@@ -60,7 +60,7 @@ func (s *Store) UpdateSimulation(ctx context.Context, simulation *Simulation) er
 	simulation.UpdatedAt = time.Now().UTC()
 	normalizeSimulation(simulation)
 
-	result, err := s.db.NewUpdate().Model(simulation).
+	result, err := s.global.NewUpdate().Model(simulation).
 		Column("name", "mode", "config_id", "scenario", "assertion", "variations",
 			"judge_target", "caller_target", "caller_tts", "caller_stt", "caller_voice",
 			"max_turns", "tags", "updated_at").
@@ -88,7 +88,7 @@ func (s *Store) DeleteSimulation(ctx context.Context, customerID, id string) err
 		return stack.Wrap(errors.New("store: a customer and a simulation id are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*Simulation)(nil)).
+	result, err := s.global.NewUpdate().Model((*Simulation)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -114,7 +114,7 @@ func (s *Store) Simulation(ctx context.Context, customerID, id string) (Simulati
 	}
 
 	var simulation Simulation
-	err := s.db.NewSelect().Model(&simulation).
+	err := s.global.NewSelect().Model(&simulation).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
@@ -136,7 +136,7 @@ func (s *Store) CustomerSimulations(ctx context.Context, customerID string) ([]S
 	}
 
 	var simulations []Simulation
-	err := s.db.NewSelect().Model(&simulations).
+	err := s.global.NewSelect().Model(&simulations).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Order("created_at DESC").
@@ -179,7 +179,7 @@ func (s *Store) StartSimulationRun(ctx context.Context, run *SimulationRun, case
 		}
 	}
 
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.NewInsert().Model(run).Exec(ctx); err != nil {
 			return err
 		}
@@ -199,7 +199,7 @@ func (s *Store) StartSimulationCase(ctx context.Context, id, callID string) erro
 		return errors.New("store: a case id is required")
 	}
 
-	_, err := s.db.NewUpdate().Model((*SimulationCase)(nil)).
+	_, err := s.global.NewUpdate().Model((*SimulationCase)(nil)).
 		Set("state = ?", SimulationRunning).
 		Set("call_id = ?", callID).
 		Where("id = ?", id).
@@ -225,7 +225,7 @@ func (s *Store) FinishSimulationCase(ctx context.Context, kase SimulationCase) e
 	now := time.Now().UTC()
 	kase.FinishedAt = &now
 
-	_, err := s.db.NewUpdate().Model(&kase).
+	_, err := s.global.NewUpdate().Model(&kase).
 		Column("state", "call_id", "transcript", "turns", "passed", "verdict", "score",
 			"ended", "error", "finished_at").
 		Where("id = ?", kase.ID).
@@ -264,7 +264,7 @@ func (s *Store) FinishSimulationRun(ctx context.Context, run SimulationRun) erro
 	now := time.Now().UTC()
 	run.FinishedAt = &now
 
-	_, err := s.db.NewUpdate().Model(&run).
+	_, err := s.global.NewUpdate().Model(&run).
 		Column("state", "passed", "failed", "error", "finished_at").
 		Where("id = ?", run.ID).
 		Exec(ctx)
@@ -281,7 +281,7 @@ func (s *Store) SimulationRun(ctx context.Context, customerID, id string) (Simul
 	}
 
 	var run SimulationRun
-	err := s.db.NewSelect().Model(&run).
+	err := s.global.NewSelect().Model(&run).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Limit(1).
@@ -307,7 +307,7 @@ func (s *Store) SimulationRuns(ctx context.Context, filter SimulationRunFilter) 
 	}
 
 	var runs []SimulationRun
-	query := s.db.NewSelect().Model(&runs).
+	query := s.global.NewSelect().Model(&runs).
 		Where("customer_id = ?", filter.CustomerID)
 	if filter.SimulationID != "" {
 		query = query.Where("simulation_id = ?", filter.SimulationID)
@@ -329,7 +329,7 @@ func (s *Store) SimulationCases(ctx context.Context, runID string) ([]Simulation
 	}
 
 	var cases []SimulationCase
-	err := s.db.NewSelect().Model(&cases).
+	err := s.global.NewSelect().Model(&cases).
 		Where("run_id = ?", runID).
 		Order("variation ASC").
 		Scan(ctx)
@@ -347,7 +347,7 @@ func (s *Store) RenewSimulationRuns(ctx context.Context, ids []string, until tim
 	}
 
 	var renewed []string
-	err := s.db.NewUpdate().Model((*SimulationRun)(nil)).
+	err := s.global.NewUpdate().Model((*SimulationRun)(nil)).
 		Set("held_until = ?", until.UTC()).
 		Where("id IN (?)", bun.In(ids)).
 		Where("state = ?", SimulationRunning).
@@ -364,7 +364,7 @@ func (s *Store) RenewSimulationRuns(ctx context.Context, ids []string, until tim
 
 // StopSimulationRun asks whichever router is holding a run to stop it.
 func (s *Store) StopSimulationRun(ctx context.Context, customerID, id string) error {
-	_, err := s.db.NewUpdate().Model((*SimulationRun)(nil)).
+	_, err := s.global.NewUpdate().Model((*SimulationRun)(nil)).
 		Set("stop_requested = true").
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -382,7 +382,7 @@ func (s *Store) StopSimulationRun(ctx context.Context, customerID, id string) er
 func (s *Store) AbandonSimulationRuns(ctx context.Context, now time.Time) error {
 	now = now.UTC()
 
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewUpdate().Model((*SimulationCase)(nil)).
 			Set("state = ?", SimulationCancelled).
 			Set("finished_at = ?", now).

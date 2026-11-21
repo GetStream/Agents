@@ -70,9 +70,9 @@ func (s *InboundSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.store = db
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.sealer, err = auth.NewSealerWithKeyring(1, map[int]string{1: "test key one"})
@@ -153,7 +153,7 @@ func (s *InboundSuite) TestARetryWritesTheCardWhenTheRoutersClockIsBehindPostgre
 	thread := s.thread("slack_bot")
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "1793125611.816139", "hello", nil)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at + interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at + interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
 	s.Require().NoError(err)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour}})
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
@@ -311,7 +311,7 @@ func (s *InboundSuite) TestALaterMessageOfAnOpenEpisodeWritesNoCard() {
 func (s *InboundSuite) TestAMessageOfAnEpisodeOpenedAfterItWasQueuedWritesNoCard() {
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.000002", "second", nil)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at - interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at - interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
 	s.Require().NoError(err)
 	message := s.row(thread, "1793125611.000002")
 	bridge := s.newBridge(nil)
@@ -392,7 +392,7 @@ func (s *InboundSuite) TestAMessageThatNeverGetsThroughIsGivenUpAndItsDeliveryFo
 	s.Equal(3, s.row(thread, "m-1").Attempts, "the first attempt and the two waits")
 	s.Equal(2, strings.Count(s.logs.String(), "level=WARN msg=\"gave up an inbound message: it was never written into its thread channel or handed to the agent, so no agent answers it\""))
 	var deliveries []store.EventDelivery
-	s.Require().NoError(s.store.DB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
 	s.Require().Len(deliveries, 1)
 	s.Equal([]byte(`{"text":"hello"}`), deliveries[0].Body)
 	s.Equal(forward.Headers, deliveries[0].Headers)
@@ -426,7 +426,7 @@ func (s *InboundSuite) TestADeliveryWhoseForwardFailedIsForwardedByItsNextMessag
 	s.Equal(store.ChannelInboundFailed, s.row(thread, "m-1").State, "given up although its forward failed")
 	s.Contains(s.logs.String(), "synthetic forward failure")
 	var deliveries []store.EventDelivery
-	s.Require().NoError(s.store.DB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
 	s.Require().Len(deliveries, 1)
 	s.Equal([]byte(`{"text":"again"}`), deliveries[0].Body, "the second message forwards it, the third does not")
 	s.Equal(int32(2), calls.Load())
@@ -447,7 +447,7 @@ func (s *InboundSuite) TestAMessageStreamChatRefusesIsGivenUpAtOnce() {
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundFailed }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(1, s.row(thread, "m-1").Attempts)
 	s.Equal(1, strings.Count(s.logs.String(), "level=WARN msg=\"gave up an inbound message"))
-	count, err := s.store.DB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(1, count)
 }
@@ -476,7 +476,7 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 	thread := s.thread("fake_line")
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", &store.ChannelInboundForward{ID: "Ev0001"})
-	_, err = s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 1").
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 1").
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, "m-1").Exec(s.ctx)
 	s.Require().NoError(err)
 	stale, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Millisecond))
@@ -493,7 +493,7 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 	s.Equal(store.ChannelInboundQueued, row.State)
 	s.Equal(1, row.Attempts)
 	s.NotContains(s.logs.String(), "level=WARN")
-	count, err := s.store.DB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(count)
 }
@@ -501,7 +501,7 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 // A STOP whose opt-out the store keeps failing to record is never given up: past the waits it
 // is due again after the last one. A trigger refuses the test customer's opt-outs.
 func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
-	_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 		CREATE FUNCTION inbound_suite_refuse_opt_out() RETURNS trigger AS $$
 			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
 		CREATE TRIGGER inbound_suite_refuse_opt_out BEFORE INSERT ON opt_outs FOR EACH ROW
@@ -509,7 +509,7 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 		COMMIT`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 			DROP TRIGGER inbound_suite_refuse_opt_out ON opt_outs;
 			DROP FUNCTION inbound_suite_refuse_opt_out();
 			COMMIT`)
@@ -518,7 +518,7 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 	s.emptyQueue()
 	thread := s.thread("telnyx")
 	s.queue(thread, "m-1", "STOP", nil)
-	_, err = s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 2").
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 2").
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, "m-1").Exec(s.ctx)
 	s.Require().NoError(err)
 	claimed, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
@@ -537,7 +537,7 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 // The WARN for a STOP that is still not recorded starts past the waits: attempt 1 and the attempt
 // that uses the last wait are retried at INFO only.
 func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
-	_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 		CREATE FUNCTION inbound_suite_refuse_opt_out() RETURNS trigger AS $$
 			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
 		CREATE TRIGGER inbound_suite_refuse_opt_out BEFORE INSERT ON opt_outs FOR EACH ROW
@@ -545,7 +545,7 @@ func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
 		COMMIT`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 			DROP TRIGGER inbound_suite_refuse_opt_out ON opt_outs;
 			DROP FUNCTION inbound_suite_refuse_opt_out();
 			COMMIT`)
@@ -560,7 +560,7 @@ func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
 		id := fmt.Sprintf("m-%d", tried)
 		s.emptyQueue()
 		s.queue(thread, id, "STOP", nil)
-		_, err = s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = ?", tried).
+		_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = ?", tried).
 			Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, id).Exec(s.ctx)
 		s.Require().NoError(err)
 		claimed, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
@@ -605,7 +605,7 @@ func (s *InboundSuite) TestAGivenUpMessageWithNoForwardForwardsNothing() {
 	s.bridge(&Options{InboundRetries: []time.Duration{time.Millisecond}, Unanswered: forwarder.ForwardUnanswered})
 
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundFailed }, 5*time.Second, 10*time.Millisecond)
-	count, err := s.store.DB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(count)
 }
@@ -764,7 +764,7 @@ func (s *InboundSuite) TestTheWorkerDeletesRowsPastTheirKeepOnceAnHour() {
 	bridge.writeDue(s.ctx)
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
-	_, err := s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).
 		Set("state = 'done'").Set("finished_at = ?", time.Now().Add(-25*time.Hour)).
 		Where("channel_id = ? AND provider_message_id = 'm-1'", thread.ChannelID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -780,7 +780,7 @@ func (s *InboundSuite) TestTheWorkerDeletesAWrittenMessagesRowAfterADay() {
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
 	s.queue(thread, "m-2", "hello", nil)
-	_, err := s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).
 		Set("state = 'done'").Set("finished_at = ?", time.Now().Add(-25*time.Hour)).
 		Where("channel_id = ? AND provider_message_id = 'm-1'", thread.ChannelID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -1115,7 +1115,7 @@ func (s *InboundSuite) openEpisode(thread store.ChannelThread, message store.Cha
 // emptyQueue deletes every row of the suite's own database's queue, the ones earlier tests
 // left too.
 func (s *InboundSuite) emptyQueue() {
-	_, err := s.store.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("TRUE").Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("TRUE").Exec(s.ctx)
 	s.Require().NoError(err)
 }
 
@@ -1161,14 +1161,14 @@ func (s *InboundSuite) queueAt(thread store.ChannelThread, providerMessageID, te
 // row is a queued message's row as it is now.
 func (s *InboundSuite) row(thread store.ChannelThread, providerMessageID string) store.ChannelInbound {
 	var row store.ChannelInbound
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, providerMessageID).Scan(s.ctx))
 	return row
 }
 
 // rows is how many rows thread has.
 func (s *InboundSuite) rows(thread store.ChannelThread) int {
-	count, err := s.store.DB().NewSelect().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Count(s.ctx)
 	s.Require().NoError(err)
 	return count
 }
@@ -1209,7 +1209,7 @@ func (s *InboundSuite) cardsMode(on, record bool) {
 // episodes is how many episodes the test's customer has.
 func (s *InboundSuite) episodes() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes WHERE customer_id = ?", s.customer).Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes WHERE customer_id = ?", s.customer).Scan(&count))
 	return count
 }
 
@@ -1227,7 +1227,7 @@ func (s *InboundSuite) omniRequests() int {
 // card is the omni-channel id and the card message id of thread's episode.
 func (s *InboundSuite) card(thread store.ChannelThread) (omni, card string) {
 	var conversation string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `SELECT cm.conversation_id, ep.card_message_id FROM episodes ep
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT cm.conversation_id, ep.card_message_id FROM episodes ep
 JOIN contact_map cm ON cm.id = ep.contact_id WHERE ep.thread_channel = ?`, chatlog.ChannelType+":"+thread.ChannelID).Scan(&conversation, &card))
 	return strings.TrimPrefix(conversation, chatlog.ChannelType+":"), card
 }

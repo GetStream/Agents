@@ -68,7 +68,7 @@ func (s *AdmissionSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
 	s.line = telnyxRinger{suite: &s.RouterSuite, private: private}
 	// A run cut short leaves its campaigns ringing, and this run's dialer would ring them.
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
 		store.Stopped, store.Scheduled, store.Running, store.Paused)
 	s.Require().NoError(err)
 }

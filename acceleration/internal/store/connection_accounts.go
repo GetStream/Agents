@@ -34,7 +34,7 @@ func (s *Store) ConnectionsByIdentity(ctx context.Context, connectorID string, i
 		return nil, stack.Wrap(err)
 	}
 	var connections []ConnectorConnection
-	err = s.db.NewSelect().Model(&connections).
+	err = s.global.NewSelect().Model(&connections).
 		Column("customer_id", "id").
 		Where("connector_id = ?", connectorID).
 		Where("inputs @> ?::jsonb", string(inputsJSON)).

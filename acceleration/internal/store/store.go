@@ -25,6 +25,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
+	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -39,11 +41,17 @@ const maxConns = 40
 
 // Store reads and writes router statistics.
 type Store struct {
-	// db is the database every shard shares, and shard this one's, which is db for a
+	// repos are the repositories, one per model, each holding the handle its table lives in.
+	repos
+	// global is the database every shard shares, and shard this one's, which is global for a
 	// deployment of one shard. peers are the other shards' (see shards.go).
-	db    *bun.DB
-	shard *bun.DB
-	peers []*bun.DB
+	global *bun.DB
+	shard  *bun.DB
+	peers  []*bun.DB
+	// cache is the shared Redis, holding copies of rows read on every request, and redis the
+	// shard's, holding the state of its running calls. Both are nil without Redis.
+	cache rueidisaside.CacheAsideClient
+	redis rueidis.Client
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
@@ -73,30 +81,36 @@ func connect(dsn string, conns int) *bun.DB {
 	sqldb.SetMaxOpenConns(conns)
 	sqldb.SetMaxIdleConns(conns)
 	sqldb.SetConnMaxIdleTime(5 * time.Minute)
-	db := bun.NewDB(sqldb, pgdialect.New())
+	// A release rolled back past a migration that added a column still reads the row.
+	db := bun.NewDB(sqldb, pgdialect.New(), bun.WithDiscardUnknownColumns())
 	// A span per query, so a request's trace says which reads it waited on. Queries are
 	// recorded unformatted: the arguments of these are customer ids and api keys.
 	db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithDBName("router")))
 	return db
 }
 
-// DB exposes the shared database's bun handle so callers can run queries this store does
-// not wrap.
-func (s *Store) DB() *bun.DB { return s.db }
-
-// ShardDB is this shard's bun handle, where its calls, sessions and requests are. It is
-// DB when the deployment has one database.
-func (s *Store) ShardDB() *bun.DB { return s.shard }
+// Server names the shared database and the address its server answers on, as it sees itself.
+// The address is empty over a unix socket.
+func (s *Store) Server(ctx context.Context) (database, address string, err error) {
+	var server sql.NullString
+	err = s.global.QueryRowContext(ctx,
+		"SELECT current_database(), host(inet_server_addr()) || ':' || inet_server_port()").Scan(&database, &server)
+	if err != nil {
+		return "", "", stack.Wrap(fmt.Errorf("store: server: %w", err))
+	}
+	return database, server.String, nil
+}
 
 // Close releases the connection pools.
 func (s *Store) Close() error {
-	return errors.Join(s.closeShards(), s.db.Close())
+	s.closeRedis()
+	return errors.Join(s.closeShards(), s.global.Close())
 }
 
 // Ping verifies the shared database and this shard's are usable. Another shard being down
 // is not this router failing: it only leaves that shard's calls off a page.
 func (s *Store) Ping(ctx context.Context) error {
-	if err := s.db.PingContext(ctx); err != nil {
+	if err := s.global.PingContext(ctx); err != nil {
 		return stack.Wrap(err)
 	}
 	return stack.Wrap(s.shard.PingContext(ctx))
@@ -104,7 +118,7 @@ func (s *Store) Ping(ctx context.Context) error {
 
 // Migrate applies every pending migration, to the shared database and to this shard's.
 func (s *Store) Migrate(ctx context.Context) error {
-	if err := s.migrate(ctx, s.db); err != nil {
+	if err := s.migrate(ctx, s.global); err != nil {
 		return err
 	}
 	return s.migrateShard(ctx)
@@ -482,7 +496,7 @@ func (s *Store) logShardRequests(ctx context.Context, requests []*Request) error
 	}
 	slices.Sort(customers)
 	customers = slices.Compact(customers)
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// unnest reads the array in order, so the locks are taken in it.
 		if _, err := tx.ExecContext(ctx,
 			"SELECT pg_advisory_xact_lock(hashtextextended(customer, ?)) FROM unnest(?::text[]) AS customer",
@@ -876,16 +890,16 @@ func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) 
 func (s *Store) OrganizationApps(ctx context.Context, organizationID string) ([]string, error) {
 	// One statement, so an app a request records under the organization meanwhile is in one
 	// half or the other.
-	namedOther := s.db.NewSelect().Model((*AppOrganization)(nil)).
+	namedOther := s.global.NewSelect().Model((*AppOrganization)(nil)).
 		ColumnExpr("1").
 		Where("ao.app_id = ap.id AND ao.organization_id <> ?", organizationID)
-	named := s.db.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("organization_id = ?", organizationID).
-		Union(s.db.NewSelect().Model((*App)(nil)).
+	named := s.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("organization_id = ?", organizationID).
+		Union(s.global.NewSelect().Model((*App)(nil)).
 			Column("id").
 			Where("ap.organization_id = ?", organizationID).
 			Where("NOT EXISTS (?)", namedOther))
 	var members []string
-	err := s.db.NewSelect().TableExpr("(?) AS member", named).Column("member.app_id").OrderExpr("1").Scan(ctx, &members)
+	err := s.global.NewSelect().TableExpr("(?) AS member", named).Column("member.app_id").OrderExpr("1").Scan(ctx, &members)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: organization apps: %w", err))
 	}
@@ -908,7 +922,7 @@ func (s *Store) OrganizationActivityApps(ctx context.Context, organizationID str
 		return nil, err
 	}
 	var own bool
-	err = s.db.NewRaw(`SELECT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0 AND organization_id = ?0)
+	err = s.global.NewRaw(`SELECT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0 AND organization_id = ?0)
   OR (NOT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0)
       AND NOT EXISTS (SELECT 1 FROM apps WHERE id = ?0 AND organization_id <> ?0))`, organizationID).Scan(ctx, &own)
 	if err != nil {
@@ -1299,7 +1313,7 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 	claimed := map[string]string{}
 	if len(ids) > 0 {
 		var guests []User
-		err := s.db.NewSelect().Model(&guests).Column("id", "claimed_by").
+		err := s.global.NewSelect().Model(&guests).Column("id", "claimed_by").
 			Where("customer_id = ?", customerID).
 			Where("kind = ?", UserKindGuest).
 			Where("claimed_by IS NOT NULL AND claimed_by <> ''").
@@ -1695,7 +1709,7 @@ func (s *Store) RecordNumber(ctx context.Context, number *PhoneNumber) error {
 		number.Capabilities = []string{}
 	}
 
-	if _, err := s.db.NewInsert().Model(number).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(number).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number: %w", err))
 	}
 	return nil
@@ -1707,7 +1721,7 @@ func (s *Store) ReleaseNumber(ctx context.Context, customerID, e164 string, at t
 	if customerID == "" || e164 == "" {
 		return stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	return releaseNumber(ctx, s.db, customerID, e164, at)
+	return releaseNumber(ctx, s.global, customerID, e164, at)
 }
 
 // releaseNumber marks a number as given back, in db.
@@ -1755,7 +1769,7 @@ func (s *Store) AttachNumber(ctx context.Context, customerID, e164 string, attac
 		return stack.Wrap(errors.New("store: a trunk id is required"))
 	}
 
-	update := s.db.NewUpdate().Model((*PhoneNumber)(nil))
+	update := s.global.NewUpdate().Model((*PhoneNumber)(nil))
 	if attached.ConfigID != "" {
 		update.Set("config_id = ?", attached.ConfigID)
 	}
@@ -1829,7 +1843,7 @@ func (s *Store) AttachedBridge(ctx context.Context, vendor, e164 string) (Attach
 	}
 
 	var number PhoneNumber
-	err := s.db.NewSelect().Model(&number).
+	err := s.global.NewSelect().Model(&number).
 		Where("vendor = ?", vendor).
 		Where("e164 = ?", e164).
 		Where("released_at IS NULL").
@@ -1884,7 +1898,7 @@ func (s *Store) CustomerNumbers(ctx context.Context, customerID string, includeR
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
 
-	query := s.db.NewSelect().Model((*PhoneNumber)(nil)).
+	query := s.global.NewSelect().Model((*PhoneNumber)(nil)).
 		Where("customer_id = ?", customerID).
 		Order("purchased_at DESC")
 	if !includeReleased {
@@ -1903,7 +1917,7 @@ func (s *Store) Number(ctx context.Context, customerID, e164 string) (PhoneNumbe
 	if customerID == "" || e164 == "" {
 		return PhoneNumber{}, stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	return heldNumber(ctx, s.db.NewSelect(), customerID, e164)
+	return heldNumber(ctx, s.global.NewSelect(), customerID, e164)
 }
 
 // SetNumberAgent makes a config answer an attached number's calls, replacing any it had.
@@ -1913,7 +1927,7 @@ func (s *Store) SetNumberAgent(ctx context.Context, customerID, e164, configID s
 	}
 	// Only an attached number has an agent, and a detach can land between the caller's
 	// read and this write.
-	result, err := s.db.NewUpdate().Model((*PhoneNumber)(nil)).
+	result, err := s.global.NewUpdate().Model((*PhoneNumber)(nil)).
 		Set("config_id = ?", configID).
 		Where("customer_id = ?", customerID).
 		Where("e164 = ?", e164).
@@ -1939,7 +1953,7 @@ func (s *Store) ClearNumberAgent(ctx context.Context, customerID, e164 string) e
 	if customerID == "" || e164 == "" {
 		return stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	result, err := s.db.NewUpdate().Model((*PhoneNumber)(nil)).
+	result, err := s.global.NewUpdate().Model((*PhoneNumber)(nil)).
 		Set("config_id = NULL").
 		Where("customer_id = ?", customerID).
 		Where("e164 = ?", e164).
@@ -1964,7 +1978,7 @@ func (s *Store) NumbersAnsweredBy(ctx context.Context, customerID, configID stri
 		return nil, stack.Wrap(errors.New("store: a customer and a config are required"))
 	}
 	var numbers []string
-	err := s.db.NewSelect().Model((*PhoneNumber)(nil)).
+	err := s.global.NewSelect().Model((*PhoneNumber)(nil)).
 		Column("e164").
 		Where("customer_id = ?", customerID).
 		Where("config_id = ?", configID).

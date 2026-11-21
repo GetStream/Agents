@@ -72,7 +72,7 @@ func (s *Store) CreateCampaign(ctx context.Context, campaign *Campaign) error {
 		campaign.Tags = map[string]string{}
 	}
 
-	if _, err := s.db.NewInsert().Model(campaign).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(campaign).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create campaign: %w", err))
 	}
 	return nil
@@ -80,7 +80,7 @@ func (s *Store) CreateCampaign(ctx context.Context, campaign *Campaign) error {
 
 // Campaign returns one campaign a customer holds.
 func (s *Store) Campaign(ctx context.Context, customerID, id string) (Campaign, error) {
-	return campaignIn(ctx, s.db, customerID, id)
+	return campaignIn(ctx, s.global, customerID, id)
 }
 
 func campaignIn(ctx context.Context, db bun.IDB, customerID, id string) (Campaign, error) {
@@ -118,7 +118,7 @@ func (s *Store) QueryCampaigns(ctx context.Context, customerID string, filter Ca
 	}
 
 	var campaigns []Campaign
-	query := s.db.NewSelect().Model(&campaigns).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&campaigns).Where("customer_id = ?", customerID)
 	if filter.State != "" {
 		query = query.Where("state = ?", filter.State)
 	}
@@ -150,7 +150,7 @@ func (s *Store) UpdateCampaign(ctx context.Context, customerID, id string, chang
 		return Campaign{}, stack.Wrap(fmt.Errorf("store: a campaign may run between 1 and %d calls at once", maxConcurrency))
 	}
 
-	query := s.db.NewUpdate().Model((*Campaign)(nil)).Where("id = ?", id).Where("customer_id = ?", customerID)
+	query := s.global.NewUpdate().Model((*Campaign)(nil)).Where("id = ?", id).Where("customer_id = ?", customerID)
 	changed := 0
 	var same []string
 	var sameArgs []any
@@ -206,7 +206,7 @@ func (s *Store) UpdateCampaign(ctx context.Context, customerID, id string, chang
 	if affected, err := result.RowsAffected(); err != nil {
 		return Campaign{}, stack.Wrap(fmt.Errorf("store: update campaign: %w", err))
 	} else if affected == 0 {
-		return Campaign{}, s.whyNotChanged(ctx, s.db, customerID, id)
+		return Campaign{}, s.whyNotChanged(ctx, s.global, customerID, id)
 	}
 	return s.Campaign(ctx, customerID, id)
 }
@@ -226,7 +226,7 @@ func (s *Store) DeleteCampaign(ctx context.Context, customerID, id string) error
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a campaign id are required"))
 	}
-	result, err := s.db.NewDelete().Model((*Campaign)(nil)).
+	result, err := s.global.NewDelete().Model((*Campaign)(nil)).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("state IN (?)", bun.In([]string{Draft, Stopped, Completed})).
@@ -244,7 +244,7 @@ func (s *Store) guarded(ctx context.Context, result sql.Result, customerID, id s
 		return stack.Wrap(fmt.Errorf("store: campaign write: %w", err))
 	}
 	if affected == 0 {
-		return s.whyNotChanged(ctx, s.db, customerID, id)
+		return s.whyNotChanged(ctx, s.global, customerID, id)
 	}
 	return nil
 }
@@ -265,7 +265,7 @@ func (s *Store) DuplicateCampaign(ctx context.Context, customerID, id, contacts 
 	}
 
 	var copied Campaign
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		source, err := campaignIn(ctx, tx, customerID, id)
 		if err != nil {
 			return err
@@ -332,7 +332,7 @@ func (s *Store) LaunchCampaign(ctx context.Context, customerID, id string, launc
 	}
 
 	var launched Campaign
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		query := tx.NewUpdate().Model((*Campaign)(nil)).
 			Set("state = ?", state).
 			Set("start_at = ?", launch.StartAt).
@@ -418,7 +418,7 @@ func (s *Store) ResumeCampaign(ctx context.Context, customerID, id string) error
 // StopCampaign ends a campaign for good. Contacts still waiting stay enrolled, and are never
 // rung; calls in progress are left to finish.
 func (s *Store) StopCampaign(ctx context.Context, customerID, id string, now time.Time) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		err := s.transitionIn(ctx, tx, customerID, id, []string{Scheduled, Running, Paused}, Stopped, func(query *bun.UpdateQuery) *bun.UpdateQuery {
 			return query.Set("paused_reason = NULL").Set("stopped_at = ?", now)
 		})
@@ -438,7 +438,7 @@ func (s *Store) StopCampaign(ctx context.Context, customerID, id string, now tim
 }
 
 func (s *Store) transition(ctx context.Context, customerID, id string, from []string, to string, set func(*bun.UpdateQuery) *bun.UpdateQuery) error {
-	return stack.Wrap(s.transitionIn(ctx, s.db, customerID, id, from, to, set))
+	return stack.Wrap(s.transitionIn(ctx, s.global, customerID, id, from, to, set))
 }
 
 // transitionIn moves a campaign from one of the states to another, and says why when it was not
@@ -494,7 +494,7 @@ func (s *Store) AddContacts(ctx context.Context, campaignID string, contacts []C
 	}
 
 	stored := make(map[string]int64, len(contacts))
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockDraft(ctx, tx, campaignID); err != nil {
 			return err
 		}
@@ -563,7 +563,7 @@ func lockDraft(ctx context.Context, tx bun.Tx, campaignID string) error {
 
 // DeleteContacts removes every contact of a draft campaign.
 func (s *Store) DeleteContacts(ctx context.Context, campaignID string) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockDraft(ctx, tx, campaignID); err != nil {
 			return err
 		}
@@ -596,7 +596,7 @@ func (s *Store) QueryContacts(ctx context.Context, campaignID string, filter Con
 	}
 
 	var contacts []Contact
-	query := s.db.NewSelect().Model(&contacts).Where("campaign_id = ?", campaignID)
+	query := s.global.NewSelect().Model(&contacts).Where("campaign_id = ?", campaignID)
 	switch filter.Stage {
 	case "":
 	case InProgress:
@@ -619,7 +619,7 @@ func (s *Store) QueryContacts(ctx context.Context, campaignID string, filter Con
 // CampaignContact returns one contact of a campaign with its attempts, oldest first.
 func (s *Store) CampaignContact(ctx context.Context, campaignID, contactID string) (Contact, []CampaignAttempt, error) {
 	var contact Contact
-	err := s.db.NewSelect().Model(&contact).Where("id = ?", contactID).Where("campaign_id = ?", campaignID).Limit(1).Scan(ctx)
+	err := s.global.NewSelect().Model(&contact).Where("id = ?", contactID).Where("campaign_id = ?", campaignID).Limit(1).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Contact{}, nil, unknownContact(contactID)
 	}
@@ -627,7 +627,7 @@ func (s *Store) CampaignContact(ctx context.Context, campaignID, contactID strin
 		return Contact{}, nil, stack.Wrap(fmt.Errorf("store: campaign contact: %w", err))
 	}
 	var attempts []CampaignAttempt
-	err = s.db.NewSelect().Model(&attempts).Where("contact_id = ?", contactID).Order("started_at ASC", "id ASC").Scan(ctx)
+	err = s.global.NewSelect().Model(&attempts).Where("contact_id = ?", contactID).Order("started_at ASC", "id ASC").Scan(ctx)
 	if err != nil {
 		return Contact{}, nil, stack.Wrap(fmt.Errorf("store: contact attempts: %w", err))
 	}
@@ -638,7 +638,7 @@ func (s *Store) CampaignContact(ctx context.Context, campaignID, contactID strin
 // in a call is marked, and is stopped when the call settles, not cut off. A contact the
 // sequence is done with is left as it is.
 func (s *Store) StopContact(ctx context.Context, campaignID, contactID string) error {
-	result, err := s.db.NewUpdate().Model((*Contact)(nil)).
+	result, err := s.global.NewUpdate().Model((*Contact)(nil)).
 		Set("stage = CASE WHEN stage = ? THEN ? ELSE stage END", Enrolled, ContactStopped).
 		Set("next_attempt_at = CASE WHEN stage = ? THEN NULL ELSE next_attempt_at END", Enrolled).
 		Set("reason = CASE WHEN stage = ? THEN reason ELSE 'stopped' END", Enrolled).

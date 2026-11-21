@@ -46,7 +46,7 @@ func (s *Store) RotateGuestSecret(ctx context.Context, customerID, id string, sp
 	}
 
 	var guest User
-	err := s.db.NewUpdate().Model(&guest).
+	err := s.global.NewUpdate().Model(&guest).
 		Set("refresh_secret_hash = ?", next).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
@@ -71,7 +71,7 @@ func (s *Store) SetGuestSecret(ctx context.Context, customerID, id string, hash 
 		return stack.Wrap(errors.New("store: a customer, a guest id and a secret hash are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*User)(nil)).
+	result, err := s.global.NewUpdate().Model((*User)(nil)).
 		Set("refresh_secret_hash = ?", hash).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
@@ -96,7 +96,7 @@ func (s *Store) GiveGuestASecret(ctx context.Context, customerID, id string, has
 		return false, stack.Wrap(errors.New("store: a customer, a guest id and a secret hash are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*User)(nil)).
+	result, err := s.global.NewUpdate().Model((*User)(nil)).
 		Set("refresh_secret_hash = ?", hash).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
@@ -121,7 +121,7 @@ func (s *Store) SetGuestProfile(ctx context.Context, customerID, id, name string
 		custom = map[string]any{}
 	}
 
-	result, err := s.db.NewUpdate().Model((*User)(nil)).
+	result, err := s.global.NewUpdate().Model((*User)(nil)).
 		Set("name = ?", name).
 		Set("custom = ?", custom).
 		Where("customer_id = ?", customerID).

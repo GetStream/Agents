@@ -135,7 +135,7 @@ func (s *DispatcherSuite) TestAConnectionThatNowReachesElsewhereIsNotCalled() {
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
 	s.Require().NoError(err)
 
-	_, err = s.store.DB().NewUpdate().Model((*store.ConnectorConnection)(nil)).
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ConnectorConnection)(nil)).
 		Set("inputs = ?", `{"account":"moved"}`).Where("id = ?", app).Exec(s.ctx)
 	s.Require().NoError(err)
 	_, err = s.call(d, "crm__whoami", "{}")

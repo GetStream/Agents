@@ -373,7 +373,7 @@ func (s *RecordFlushSuite) holdWriter() (release func()) {
 // until the returned release rolls that transaction back, or the test ends.
 func (s *RecordFlushSuite) heldRow() (store.AgentSession, func()) {
 	held := s.row()
-	tx, err := s.store.DB().BeginTx(s.ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	rollback := sync.OnceFunc(func() { s.NoError(tx.Rollback()) })
 	s.T().Cleanup(rollback)

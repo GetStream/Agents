@@ -127,12 +127,12 @@ func (s *SlackChannelSuite) TestAnEventOnTheProviderAppRouteOfAnIdNobodyDefinedI
 	s.Require().NoError(err)
 	// Put refuses a client whose connector has no definition, so the row is written as it was
 	// before the definition went: the race the store's cascade makes rare.
-	_, err = s.store.DB().NewRaw(`INSERT INTO connector_oauth_clients (customer_id, connector_id, registration, client_id,
+	_, err = s.store.GlobalDB().NewRaw(`INSERT INTO connector_oauth_clients (customer_id, connector_id, registration, client_id,
 provider_app_id, signing_secret_sealed, signing_kek_version) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		s.customerID(), connector, core.ClientCustomer, "synthetic-client", appID, sealed, s.sealer.CurrentVersion()).Exec(context.Background())
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().NewRaw(`DELETE FROM connector_oauth_clients WHERE customer_id = ? AND connector_id = ?`,
+		_, err := s.store.GlobalDB().NewRaw(`DELETE FROM connector_oauth_clients WHERE customer_id = ? AND connector_id = ?`,
 			s.customerID(), connector).Exec(context.Background())
 		s.Require().NoError(err)
 	})

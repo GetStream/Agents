@@ -62,12 +62,12 @@ func (s *EpisodeSweeperSuite) SetupSuite() {
 func (s *EpisodeSweeperSuite) SetupTest() {
 	// The gate reads every customer's configs, so no earlier test's may have the cards on,
 	// and no earlier episode may be left to sweep. The database is the suite's own.
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx,
+	_, err = s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
 	s.Require().NoError(err)
 	s.settings.Connectors.Enabled = false
 
@@ -118,7 +118,7 @@ func (s *EpisodeSweeperSuite) strayEpisode() {
 // status is the test's episode's status as stored.
 func (s *EpisodeSweeperSuite) status() string {
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", s.episode).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", s.episode).Scan(&status))
 	return status
 }
 
@@ -146,7 +146,7 @@ func (s *EpisodeSweeperSuite) TestAnEpisodeLeftOpenAfterItsConfigTurnedTheCardsO
 	carded := &store.AgentConfig{CustomerID: customer, Name: "was carded", EpisodeCards: true}
 	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, carded))
 	s.idleEpisode(customer, carded.ID)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false WHERE id = ?", carded.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false WHERE id = ?", carded.ID)
 	s.Require().NoError(err)
 
 	started, err := startEpisodeSweeper(s.ctx, s.settings, s.store, s.closer)

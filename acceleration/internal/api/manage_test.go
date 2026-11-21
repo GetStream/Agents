@@ -142,7 +142,7 @@ func (s *ManageSuite) TestTheAuditKeepsAManagementChangeWithTheDecodedNameAndNoA
 	s.Require().NoError(s.store.RecordAuditEntry(s.T().Context(), &entry))
 
 	var kept store.AuditEntry
-	s.Require().NoError(s.store.DB().NewSelect().Model(&kept).Where("id = ?", entry.ID).Scan(s.T().Context()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&kept).Where("id = ?", entry.ID).Scan(s.T().Context()))
 	s.Equal("price_list", kept.ResourceType)
 	s.Equal("manage", kept.Source)
 	s.Empty(kept.CustomerID)

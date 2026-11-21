@@ -1039,7 +1039,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 		var models routing.ModelResolver
 		if configs != nil {
-			models = llmrouter.NewCustomModels(configs, secrets, settings.Models.PrivateEndpoints)
+			models = llmrouter.NewCustomModels(pgStore, secrets, settings.Models.PrivateEndpoints)
 		}
 		thinkers := llmrouter.DefaultRegistry()
 		if settings.MockProviders {
@@ -2065,6 +2065,12 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 		DSN:      settings.Postgres.DSN,
 		ShardDSN: settings.Postgres.ShardDSN,
 		Shards:   settings.Postgres.Shards,
+		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+		ShardRedis: store.Redis{
+			Address:  settings.Redis.Shard.Addr,
+			Username: settings.Redis.Shard.Username,
+			Password: settings.Redis.Shard.Password,
+		},
 	})
 	if err != nil {
 		return nil, err

@@ -49,7 +49,7 @@ func (s *TelnyxChannelSuite) TestAnotherCustomersConfigNamingTheLineNeverAnswers
 		CustomerID: s.data.createApp().app.ID, Name: "forged-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "echo/echo-model",
 	}
 	s.Require().NoError(s.store.CreateAgentConfig(ctx, &forged))
-	_, err := s.store.DB().ExecContext(ctx,
+	_, err := s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE agent_configs SET connectors = (SELECT connectors FROM agent_configs WHERE id = ?) WHERE id = ?", s.config.ID, forged.ID)
 	s.Require().NoError(err)
 
@@ -67,7 +67,7 @@ func (s *TelnyxChannelSuite) TestALineTwoConfigsBindIsAnsweredByTheOldest() {
 		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "counted/counted-model",
 	}
 	s.Require().NoError(s.store.CreateAgentConfig(ctx, &newer))
-	_, err := s.store.DB().ExecContext(ctx,
+	_, err := s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE agent_configs SET connectors = (SELECT connectors FROM agent_configs WHERE id = ?) WHERE id = ?", s.config.ID, newer.ID)
 	s.Require().NoError(err)
 

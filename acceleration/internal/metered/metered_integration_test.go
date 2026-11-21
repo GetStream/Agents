@@ -89,7 +89,7 @@ func (s *MeteredSuite) priced(modality routing.Modality, provider, model string,
 func (s *MeteredSuite) rows() []store.Request {
 	s.recorder.Close()
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.owner.CustomerID).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.owner.CustomerID).
 		Order("started_at", "id").Scan(s.ctx))
 	return rows
 }

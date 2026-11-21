@@ -83,7 +83,7 @@ func (s *Store) NoteCostAnomaly(ctx context.Context, anomaly CostAnomaly) (writt
 		return false, stack.Wrap(errors.New("store: a cost anomaly needs an organization"))
 	}
 	anomaly.CreatedAt, anomaly.ClaimedAt, anomaly.PostedAt = time.Time{}, time.Time{}, nil
-	result, err := s.db.NewInsert().Model(&anomaly).On("CONFLICT DO NOTHING").Exec(ctx)
+	result, err := s.global.NewInsert().Model(&anomaly).On("CONFLICT DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(err)
 	}
@@ -96,11 +96,11 @@ func (s *Store) NoteCostAnomaly(ctx context.Context, anomaly CostAnomaly) (writt
 // it, is posted by the next check.
 func (s *Store) ClaimUnpostedCostAnomalies(ctx context.Context, stale time.Duration, limit int) ([]CostAnomaly, error) {
 	var anomalies []CostAnomaly
-	due := s.db.NewSelect().Model((*CostAnomaly)(nil)).Column("organization_id", "day").
+	due := s.global.NewSelect().Model((*CostAnomaly)(nil)).Column("organization_id", "day").
 		Where("posted_at IS NULL").
 		Where("claimed_at < now() - ? * interval '1 millisecond'", stale.Milliseconds()).
 		OrderExpr("claimed_at").Limit(limit).For("UPDATE SKIP LOCKED")
-	err := s.db.NewUpdate().Model((*CostAnomaly)(nil)).
+	err := s.global.NewUpdate().Model((*CostAnomaly)(nil)).
 		Set("claimed_at = now()").
 		Where("(can.organization_id, can.day) IN (?)", due).
 		Returning("*").
@@ -113,7 +113,7 @@ func (s *Store) ClaimUnpostedCostAnomalies(ctx context.Context, stale time.Durat
 
 // MarkCostAnomalyPosted records that the organization's anomaly of the day was posted.
 func (s *Store) MarkCostAnomalyPosted(ctx context.Context, organization string, day time.Time) error {
-	_, err := s.db.NewUpdate().Model((*CostAnomaly)(nil)).
+	_, err := s.global.NewUpdate().Model((*CostAnomaly)(nil)).
 		Set("posted_at = now()").
 		Where("organization_id = ?", organization).
 		Where("day = ?::date", day.UTC().Format(time.DateOnly)).

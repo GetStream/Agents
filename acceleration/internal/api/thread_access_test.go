@@ -360,7 +360,7 @@ func (s *SlackChannelSuite) heldOnThread() string {
 // unreadableLink leaves a thread channel's channel_threads row one the store cannot read:
 // thread_parts holds a number where a string goes, so ChannelThread fails to scan it.
 func (s *SlackChannelSuite) unreadableLink(channel string) {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE channel_threads SET thread_parts = '{"ts": 1}'::jsonb WHERE channel_id = ?`, channel)
 	s.Require().NoError(err)
 	_, err = s.store.ChannelThread(context.Background(), channel)

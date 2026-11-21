@@ -150,7 +150,7 @@ func (s *RouterSuite) threadTurnIsFree(channel string) {
 // hasThread is whether the test's customer has a thread channel for person yet.
 func (s *telnyxLine) hasThread(person string) bool {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ? AND connector_id = 'telnyx' AND thread_key = ?",
 		s.customerID(), person).Scan(&count))
 	return count > 0
@@ -401,7 +401,7 @@ func (s *LinqChannelSuite) linqTurn(chat, sender string, isGroup any, text strin
 // hasChat is whether the test's customer has a thread channel for a Linq chat yet.
 func (s *LinqChannelSuite) hasChat(chat string) bool {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ? AND connector_id = 'linq' AND thread_key = ?",
 		s.customerID(), chat).Scan(&count))
 	return count > 0
@@ -410,7 +410,7 @@ func (s *LinqChannelSuite) hasChat(chat string) bool {
 // chatPerson is the person the thread of a Linq chat records the chat is with, "" for none.
 func (s *LinqChannelSuite) chatPerson(chat string) string {
 	var person sql.NullString
-	err := s.store.DB().QueryRowContext(context.Background(),
+	err := s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT p.chat_person FROM channel_threads t LEFT JOIN channel_thread_people p ON p.channel_id = t.channel_id"+
 			" WHERE t.customer_id = ? AND t.connector_id = 'linq' AND t.thread_key = ?",
 		s.customerID(), chat).Scan(&person)
@@ -546,13 +546,13 @@ func (s *LinqChannelSuite) TestAChatPersonTheStoreCannotWriteIsWrittenOnTheNextA
 	ctx := context.Background()
 	chat, person := s.utils.uuid(), "+13125550001"
 	body := s.chatSays(s.received(chat, s.line, person, "hello"), false)
-	_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_people RENAME TO channel_thread_people_off")
+	_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_people RENAME TO channel_thread_people_off")
 	s.Require().NoError(err)
 	restored := false
 	restore := func() {
 		if !restored {
 			restored = true
-			_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_people_off RENAME TO channel_thread_people")
+			_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_people_off RENAME TO channel_thread_people")
 			s.Require().NoError(err)
 		}
 	}

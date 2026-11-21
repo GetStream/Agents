@@ -22,7 +22,7 @@ var occurrence atomic.Int64
 // aged stores a task in a state and makes its last change age ago.
 func (s *StoreSuite) aged(id, customer, state string, age time.Duration) {
 	s.task(id, func(task *ScheduledTask) { task.CustomerID, task.State = customer, state })
-	_, err := s.store.db.ExecContext(s.ctx,
+	_, err := s.store.global.ExecContext(s.ctx,
 		"UPDATE scheduled_tasks SET updated_at = now() - make_interval(secs => ?) WHERE customer_id = ? AND id = ?",
 		age.Seconds(), customer, id)
 	s.Require().NoError(err)
@@ -35,7 +35,7 @@ func (s *StoreSuite) ranFor(id, customer, task, trigger, state string, finished 
 	if finished >= 0 {
 		at = time.Now().Add(-finished)
 	}
-	_, err := s.store.db.ExecContext(s.ctx, `
+	_, err := s.store.global.ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, finished_at, created_at)
 VALUES (?, ?, ?, now() - interval '400 days' + make_interval(secs => ?), ?, ?, ?, now() - interval '400 days')`,
 		id, task, customer, float64(occurrence.Add(1)), trigger, state, at)
@@ -44,7 +44,7 @@ VALUES (?, ?, ?, now() - interval '400 days' + make_interval(secs => ?), ?, ?, ?
 
 func (s *StoreSuite) ids(query string) []string {
 	var ids []string
-	s.Require().NoError(s.store.db.NewRaw(query).Scan(s.ctx, &ids))
+	s.Require().NoError(s.store.global.NewRaw(query).Scan(s.ctx, &ids))
 	return ids
 }
 
@@ -132,13 +132,13 @@ func (s *StoreSuite) TestPruneKeepsAnOldCompletedTaskWhileARunOfItIsUnfinishedOr
 // backlog stores a batch and one more of old completed tasks, done-1 on, and of old runs of
 // the active task live, run-1 on, so the prune of each takes two statements.
 func (s *StoreSuite) backlog() {
-	_, err := s.store.db.ExecContext(s.ctx, fmt.Sprintf(`
+	_, err := s.store.global.ExecContext(s.ctx, fmt.Sprintf(`
 INSERT INTO scheduled_tasks (id, customer_id, user_id, title, instructions, start_local, timezone, state, updated_at)
 SELECT 'done-' || n, 'acme', 'sam', 't', 'i', now()::timestamp, 'UTC', 'completed', now() - interval '91 days'
 FROM generate_series(1, %d) AS n`, scheduledTasksPruned+1))
 	s.Require().NoError(err)
 	s.task("live", nil)
-	_, err = s.store.db.ExecContext(s.ctx, fmt.Sprintf(`
+	_, err = s.store.global.ExecContext(s.ctx, fmt.Sprintf(`
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, finished_at)
 SELECT 'run-' || n, 'live', 'acme', now() - make_interval(mins => n), 'manual', 'delivered', now() - interval '91 days'
 FROM generate_series(1, %d) AS n`, scheduledTaskRunsPruned+1))
@@ -162,7 +162,7 @@ func (s *StoreSuite) TestPruneGoesOnUntilNoBatchIsLeft() {
 // transaction that deleted it.
 func (s *StoreSuite) TestPruneDeletesNoMoreThanABatchInOneStatement() {
 	s.backlog()
-	before, err := s.store.db.BeginTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	before, err := s.store.global.BeginTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	s.Require().NoError(err)
 	defer before.Rollback() //nolint:errcheck // read only
 	// A repeatable read transaction takes its snapshot at its first statement.
@@ -248,7 +248,7 @@ func (s *StoreSuite) TestPruneLeavesTheRowsAnotherPruneHoldsAndDoesNotWait() {
 	s.ranFor("held-run", "acme", "held-task", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
 	s.ranFor("free-run", "acme", "held-task", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
 
-	other, err := s.store.db.BeginTx(s.ctx, nil)
+	other, err := s.store.global.BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer other.Rollback() //nolint:errcheck // the test commits or has failed
 	_, err = other.ExecContext(s.ctx, "SELECT 1 FROM scheduled_task_runs WHERE id = 'held-run' FOR UPDATE")
@@ -288,7 +288,7 @@ func (s *StoreSuite) TestPruneReadsItsIndexes() {
 		{"tasks", pruneScheduledTasksSQL, scheduledTasksPruned, "scheduled_tasks_pruned_idx", "(updated_at <", ""},
 	} {
 		var plan []string
-		err := s.store.db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 				return err
 			}

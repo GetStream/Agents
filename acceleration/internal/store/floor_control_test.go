@@ -19,7 +19,7 @@ func (s *StoreSuite) TestAConfigKeepsItsFloorControl() {
 	s.Require().NoError(err)
 	s.True(stored.FloorControl.IsZero())
 	var unset bool
-	s.Require().NoError(s.store.DB().NewSelect().Table("agent_configs").ColumnExpr("floor_control IS NULL").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("agent_configs").ColumnExpr("floor_control IS NULL").
 		Where("id = ?", config.ID).Scan(s.ctx, &unset))
 	s.True(unset, "no choice is stored as NULL")
 
@@ -28,7 +28,7 @@ func (s *StoreSuite) TestAConfigKeepsItsFloorControl() {
 	stored, err = s.store.AgentConfig(s.ctx, "app", config.ID)
 	s.Require().NoError(err)
 	s.Equal(FloorControl{Model: FloorControlFlowController}, stored.FloorControl, "the opt-out reads back as stored")
-	s.Require().NoError(s.store.DB().NewSelect().Table("agent_configs").ColumnExpr("floor_control IS NULL").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("agent_configs").ColumnExpr("floor_control IS NULL").
 		Where("id = ?", config.ID).Scan(s.ctx, &unset))
 	s.False(unset, "and is not NULL, as distinct from no choice")
 

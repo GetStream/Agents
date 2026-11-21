@@ -34,13 +34,13 @@ func load(entries ...pricing.Entry) PriceLoad {
 func (s *StoreSuite) write(name string, effectiveAt time.Time, entries ...PriceEntry) {
 	change := PriceChange{Name: name, Kind: PriceChangeAPI, Reason: "a change", Source: "a test",
 		EffectiveAt: effectiveAt, CreatedBy: "operator"}
-	_, err := s.store.DB().NewInsert().Model(&change).Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewInsert().Model(&change).Exec(s.ctx)
 	s.Require().NoError(err)
 	for i := range entries {
 		entries[i].Change = name
 	}
 	if len(entries) > 0 {
-		_, err = s.store.DB().NewInsert().Model(&entries).Exec(s.ctx)
+		_, err = s.store.GlobalDB().NewInsert().Model(&entries).Exec(s.ctx)
 		s.Require().NoError(err)
 	}
 }
@@ -165,9 +165,9 @@ func (s *StoreSuite) TestALaterSyncAddsARegionTheDatabaseLacks() {
 func (s *StoreSuite) TestAnEntryNamingNoRegionIsRefusedByTheTable() {
 	s.write("20990101000000_no_region", time.Now().Add(time.Hour))
 
-	_, missing := s.store.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, free, effective_at)
+	_, missing := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, free, effective_at)
 VALUES ('20990101000000_no_region', 'llm-openai-a-us', 'llm', 'openai', 'a', true, now())`)
-	_, empty := s.store.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, free, effective_at)
+	_, empty := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, free, effective_at)
 VALUES ('20990101000000_no_region', 'llm-openai-a-us', 'llm', 'openai', 'a', '', true, now())`)
 
 	s.ErrorContains(missing, `null value in column "region"`)
@@ -258,7 +258,7 @@ func (s *StoreSuite) TestAnItemOnlyACancelledChangePricedIsAddedAgain() {
 	_, _, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1)))
 	s.Require().NoError(err)
 	s.write("20990101000000_add_b", time.Now().Add(time.Hour), entryRow(priced("b", 5)))
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_add_b'")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_add_b'")
 	s.Require().NoError(err)
 
 	_, added, _, err := s.store.SyncPrices(s.ctx, load(priced("a", 1), priced("b", 2)))
@@ -309,7 +309,7 @@ func (s *StoreSuite) TestASyncIsAudited() {
 	// audit_log outlives a test, and a change made in the same second by another test has
 	// this one's name, so the newest row is this sync's.
 	var entry AuditEntry
-	s.Require().NoError(s.store.DB().NewSelect().Model(&entry).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&entry).
 		Where("resource_type = ? AND resource_id = ?", AuditResourcePriceList, change.Name).
 		Order("created_at DESC").Limit(1).Scan(s.ctx))
 	s.Empty(entry.CustomerID)
@@ -351,10 +351,10 @@ func (s *StoreSuite) TestAPriceEntryCannotBeChanged() {
 		`UPDATE price_list_entries SET prices = '{"input_tokens": {"usd": 9, "per": 1000000}}'`,
 		"UPDATE price_list_entries SET price_tiers = '[]'", "UPDATE price_list_entries SET sku = 'another'",
 		"UPDATE price_list_entries SET region = 'eu'", "UPDATE price_list_entries SET byok = true"} {
-		_, err := s.store.DB().ExecContext(s.ctx, update)
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, update)
 		s.ErrorContains(err, "price_entries rows are never changed or deleted", update)
 	}
-	_, deleted := s.store.DB().ExecContext(s.ctx, "DELETE FROM price_list_entries")
+	_, deleted := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM price_list_entries")
 	s.ErrorContains(deleted, "price_entries rows are never changed or deleted")
 }
 
@@ -363,9 +363,9 @@ func (s *StoreSuite) TestAPriceEntryCannotBeChanged() {
 func (s *StoreSuite) TestAnEntryWithoutASKUOrAPriceIsRefused() {
 	s.write("20990101000000_old_router", time.Now().Add(time.Hour))
 
-	_, unnamed := s.store.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, modality, provider, model, region, free, effective_at)
+	_, unnamed := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, modality, provider, model, region, free, effective_at)
 VALUES ('20990101000000_old_router', 'llm', 'openai', 'a', 'us', true, now())`)
-	_, unpriced := s.store.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, rates, effective_at)
+	_, unpriced := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, rates, effective_at)
 VALUES ('20990101000000_old_router', 'llm-openai-a-us', 'llm', 'openai', 'a', 'us', '{"input_tokens": {"usd": 1, "per": 1000000}}', now())`)
 
 	s.ErrorContains(unnamed, "price_entries_sku")
@@ -376,12 +376,12 @@ func (s *StoreSuite) TestAnEntryTakesItsChangesTime() {
 	tomorrow := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Microsecond)
 	s.write("20990101000000_tomorrow", tomorrow)
 
-	_, err := s.store.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, effective_at)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, effective_at)
 VALUES ('20990101000000_tomorrow', 'llm-openai-a-us', 'llm', 'openai', 'a', 'us', now() - interval '1 year')`)
 	s.Require().NoError(err)
 
 	var effectiveAt time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT effective_at FROM price_list_entries").Scan(&effectiveAt))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT effective_at FROM price_list_entries").Scan(&effectiveAt))
 	s.True(tomorrow.Equal(effectiveAt), "%s is not %s", effectiveAt, tomorrow)
 }
 
@@ -389,8 +389,8 @@ func (s *StoreSuite) TestAChangeCanBeCancelledOnlyBeforeItTakesEffect() {
 	s.write("20990101000000_later", time.Now().Add(time.Hour))
 	s.write("20990101000000_now", time.Now().Add(-time.Second))
 
-	_, later := s.store.DB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_later'")
-	_, now := s.store.DB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_now'")
+	_, later := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_later'")
+	_, now := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_now'")
 
 	s.NoError(later)
 	s.ErrorContains(now, "a price change can only be cancelled, once, before it takes effect")
@@ -399,10 +399,10 @@ func (s *StoreSuite) TestAChangeCanBeCancelledOnlyBeforeItTakesEffect() {
 func (s *StoreSuite) TestAChangeIsCancelledOnce() {
 	s.write("20990101000000_later", time.Now().Add(time.Hour))
 	cancel := "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_later'"
-	_, err := s.store.DB().ExecContext(s.ctx, cancel)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, cancel)
 	s.Require().NoError(err)
 
-	_, err = s.store.DB().ExecContext(s.ctx, cancel)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, cancel)
 
 	s.ErrorContains(err, "a price change can only be cancelled, once")
 }
@@ -410,8 +410,8 @@ func (s *StoreSuite) TestAChangeIsCancelledOnce() {
 func (s *StoreSuite) TestNothingElseAboutAChangeCanBeUpdated() {
 	s.write("20990101000000_later", time.Now().Add(time.Hour))
 
-	_, reason := s.store.DB().ExecContext(s.ctx, "UPDATE price_changes SET reason = 'rewritten' WHERE name = '20990101000000_later'")
-	_, both := s.store.DB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), source = 'rewritten' WHERE name = '20990101000000_later'")
+	_, reason := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET reason = 'rewritten' WHERE name = '20990101000000_later'")
+	_, both := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), source = 'rewritten' WHERE name = '20990101000000_later'")
 
 	s.ErrorContains(reason, "a price change can only be cancelled")
 	s.ErrorContains(both, "a price change can only be cancelled")
@@ -420,7 +420,7 @@ func (s *StoreSuite) TestNothingElseAboutAChangeCanBeUpdated() {
 func (s *StoreSuite) TestAPriceChangeCannotBeDeleted() {
 	s.write("20990101000000_later", time.Now().Add(time.Hour))
 
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM price_changes")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM price_changes")
 
 	s.ErrorContains(err, "price_changes rows are never deleted")
 }
@@ -473,7 +473,7 @@ func (s *StoreSuite) TestAChangeForTomorrowIsNotInForceToday() {
 func (s *StoreSuite) TestACancelledChangeIsNeverInForce() {
 	s.write("20260101000000_today", time.Now().Add(-time.Hour), entryRow(priced("a", 1)))
 	s.write("20990101000000_later", time.Now().Add(time.Hour), entryRow(priced("a", 2)))
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_later'")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'operator' WHERE name = '20990101000000_later'")
 	s.Require().NoError(err)
 
 	entries, err := s.store.ActivePriceEntries(s.ctx, time.Now().Add(2*time.Hour))

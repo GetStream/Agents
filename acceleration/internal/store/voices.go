@@ -30,7 +30,7 @@ func (s *Store) CreateVoice(ctx context.Context, voice *Voice) error {
 	voice.UpdatedAt = now
 	voice.DeletedAt = nil
 
-	if _, err := s.db.NewInsert().Model(voice).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(voice).Exec(ctx); err != nil {
 		if constraint(err) == "voices_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
@@ -51,7 +51,7 @@ func (s *Store) UpdateVoice(ctx context.Context, voice *Voice) error {
 
 	voice.UpdatedAt = time.Now().UTC()
 
-	result, err := s.db.NewUpdate().Model(voice).
+	result, err := s.global.NewUpdate().Model(voice).
 		Column("name", "description", "updated_at").
 		Where("id = ?", voice.ID).
 		Where("customer_id = ?", voice.CustomerID).
@@ -80,7 +80,7 @@ func (s *Store) DeleteVoice(ctx context.Context, customerID, id string) error {
 		return stack.Wrap(errors.New("store: a customer and a voice id are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*Voice)(nil)).
+	result, err := s.global.NewUpdate().Model((*Voice)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -106,7 +106,7 @@ func (s *Store) Voice(ctx context.Context, customerID, id string) (Voice, error)
 	}
 
 	var voice Voice
-	err := s.db.NewSelect().Model(&voice).
+	err := s.global.NewSelect().Model(&voice).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
@@ -129,7 +129,7 @@ func (s *Store) VoiceNamed(ctx context.Context, customerID, name string) (Voice,
 	}
 
 	var voice Voice
-	err := s.db.NewSelect().Model(&voice).
+	err := s.global.NewSelect().Model(&voice).
 		Where("customer_id = ?", customerID).
 		Where("name = ?", name).
 		Where("deleted_at IS NULL").
@@ -151,7 +151,7 @@ func (s *Store) CustomerVoices(ctx context.Context, customerID string) ([]Voice,
 	}
 
 	var voices []Voice
-	err := s.db.NewSelect().Model(&voices).
+	err := s.global.NewSelect().Model(&voices).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Order("created_at DESC").
@@ -174,7 +174,7 @@ func (s *Store) AddVoiceSample(ctx context.Context, sample *VoiceSample) error {
 	sample.ID = newID()
 	sample.CreatedAt = time.Now().UTC()
 
-	if _, err := s.db.NewInsert().Model(sample).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(sample).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: add voice sample: %w", err))
 	}
 	return nil
@@ -188,7 +188,7 @@ func (s *Store) VoiceSamples(ctx context.Context, voiceID string) ([]VoiceSample
 	}
 
 	var samples []VoiceSample
-	err := s.db.NewSelect().Model(&samples).
+	err := s.global.NewSelect().Model(&samples).
 		Where("voice_id = ?", voiceID).
 		Order("created_at").
 		Scan(ctx)
@@ -221,7 +221,7 @@ func (s *Store) SaveVoiceBinding(ctx context.Context, binding *VoiceBinding) err
 		binding.SyncedAt = &now
 	}
 
-	_, err := s.db.NewInsert().Model(binding).
+	_, err := s.global.NewInsert().Model(binding).
 		On("CONFLICT (voice_id, provider) DO UPDATE").
 		Set("external_id = EXCLUDED.external_id").
 		Set("state = EXCLUDED.state").
@@ -242,7 +242,7 @@ func (s *Store) VoiceBindings(ctx context.Context, voiceID string) ([]VoiceBindi
 	}
 
 	var bindings []VoiceBinding
-	err := s.db.NewSelect().Model(&bindings).
+	err := s.global.NewSelect().Model(&bindings).
 		Where("voice_id = ?", voiceID).
 		Order("provider").
 		Scan(ctx)
@@ -261,7 +261,7 @@ func (s *Store) ReadyVoiceBinding(ctx context.Context, customerID, voiceID, prov
 	}
 
 	var binding VoiceBinding
-	err := s.db.NewSelect().Model(&binding).
+	err := s.global.NewSelect().Model(&binding).
 		Join("JOIN voices AS v ON v.id = vb.voice_id").
 		Where("vb.voice_id = ?", voiceID).
 		Where("vb.provider = ?", provider).

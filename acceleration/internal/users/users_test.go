@@ -72,7 +72,7 @@ func (s *UsersSuite) app() string {
 // recorded is the kind a user was written down as, and whether there is a row at all.
 func (s *UsersSuite) recorded(customerID, userID string) (string, bool) {
 	var kind string
-	err := s.db.DB().QueryRowContext(s.ctx,
+	err := s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT kind FROM users WHERE customer_id = ? AND id = ?", customerID, userID).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
@@ -84,7 +84,7 @@ func (s *UsersSuite) recorded(customerID, userID string) (string, bool) {
 // setKind rewrites a user's kind behind the recorders' backs, so that a later Seen
 // changing it again is evidence that it went to Postgres.
 func (s *UsersSuite) setKind(customerID, userID, kind string) {
-	_, err := s.db.DB().ExecContext(s.ctx,
+	_, err := s.db.GlobalDB().ExecContext(s.ctx,
 		"UPDATE users SET kind = ? WHERE customer_id = ? AND id = ?", kind, customerID, userID)
 	s.Require().NoError(err)
 }
@@ -92,7 +92,7 @@ func (s *UsersSuite) setKind(customerID, userID, kind string) {
 // version is the row's xmin, which changes with every write to it.
 func (s *UsersSuite) version(customerID, userID string) string {
 	var xmin string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT xmin::text FROM users WHERE customer_id = ? AND id = ?", customerID, userID).Scan(&xmin))
 	return xmin
 }
@@ -100,7 +100,7 @@ func (s *UsersSuite) version(customerID, userID string) string {
 // erase removes a user's row behind the recorders' backs, so that a later Seen writing
 // one again is evidence that it went to Postgres.
 func (s *UsersSuite) erase(customerID, userID string) {
-	_, err := s.db.DB().ExecContext(s.ctx,
+	_, err := s.db.GlobalDB().ExecContext(s.ctx,
 		"DELETE FROM users WHERE customer_id = ? AND id = ?", customerID, userID)
 	s.Require().NoError(err)
 }

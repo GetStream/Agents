@@ -38,9 +38,9 @@ func (s *SIPTrunkSuite) SetupSuite() {
 	s.store = opened
 
 	var database string
-	s.Require().NoError(opened.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(opened.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s", database)
-	_, err = opened.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = opened.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 }
@@ -52,7 +52,7 @@ func (s *SIPTrunkSuite) TearDownSuite() {
 }
 
 func (s *SIPTrunkSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE phone_numbers, sip_trunks CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE phone_numbers, sip_trunks CASCADE")
 	s.Require().NoError(err)
 	sealer, err := auth.NewSealer("sip trunk suite")
 	s.Require().NoError(err)
@@ -159,7 +159,7 @@ func (s *SIPTrunkSuite) TestADialRefusesATrunkWithoutAPassword() {
 	trunk := s.create("acme", customerTrunkPassword)
 	held := s.number("acme", trunk.ID, "+15550000204")
 	// What a data move leaves behind.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE sip_trunks SET password_sealed = ''::bytea, password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
@@ -173,7 +173,7 @@ func (s *SIPTrunkSuite) TestADialRefusesAPasswordSealedAtNoKey() {
 	held := s.number("acme", trunk.ID, "+15550000211")
 	// A password set again and then overwritten by a later data move keeps its sealed
 	// bytes, but at version 0 no key opens them.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE sip_trunks SET password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 

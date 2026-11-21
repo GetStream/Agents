@@ -390,7 +390,7 @@ func (s *ConnectionToolsSuite) TestAnErrorThatEchoesTheCredentialIsStoredWithout
 				s.Require().Equal(validationFailed, string(s.validate(id).Status))
 
 				var row string
-				s.Require().NoError(s.store.DB().NewRaw("SELECT error FROM connector_connection_validations WHERE connection_id = ?", id).Scan(s.T().Context(), &row))
+				s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT error FROM connector_connection_validations WHERE connection_id = ?", id).Scan(s.T().Context(), &row))
 				one := s.get(id).LastValidation
 				s.Require().NotNil(one)
 				var page ConnectionPage
@@ -464,7 +464,7 @@ func (s *ConnectionToolsSuite) TestATokenSavedDuringAValidateIsNotStoredFromTheP
 
 	var row, errorText string
 	var revision int
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(ccv)::text, ccv.error, ccv.revision FROM connector_connection_validations AS ccv WHERE ccv.connection_id = ?", id).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(ccv)::text, ccv.error, ccv.revision FROM connector_connection_validations AS ccv WHERE ccv.connection_id = ?", id).
 		Scan(s.T().Context(), &row, &errorText, &revision))
 	// s.False on strings.Contains, not s.NotContains, so a failure never prints the token.
 	s.False(strings.Contains(row, tokenB), "the row holds the token saved during the validate")
@@ -503,7 +503,7 @@ func (s *ConnectionToolsSuite) TestAnAPIKeyEchoedFromItsNamedHeaderIsNotStored()
 	s.Require().Equal(validationFailed, string(s.validate(id).Status))
 
 	var row string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT error FROM connector_connection_validations WHERE connection_id = ?", id).Scan(s.T().Context(), &row))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT error FROM connector_connection_validations WHERE connection_id = ?", id).Scan(s.T().Context(), &row))
 	one := s.get(id).LastValidation
 	s.Require().NotNil(one)
 	var page ConnectionPage

@@ -36,7 +36,7 @@ func (s *EpisodeReadingSuite) cardOfCall(number string, created, began time.Time
 func (s *EpisodeReadingSuite) callEpisode(session string) (time.Time, string) {
 	var started time.Time
 	var omni string
-	err := s.store.DB().QueryRowContext(s.ctx, `SELECT ep.started_at, cm.conversation_id FROM episodes AS ep
+	err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT ep.started_at, cm.conversation_id FROM episodes AS ep
 JOIN contact_map AS cm ON cm.id = ep.contact_id WHERE ep.customer_id = ? AND ep.session_id = ?`,
 		s.customerID, session).Scan(&started, &omni)
 	s.Require().NoError(err)
@@ -46,7 +46,7 @@ JOIN contact_map AS cm ON cm.id = ep.contact_id WHERE ep.customer_id = ? AND ep.
 // postgresNow is Postgres's clock.
 func (s *EpisodeReadingSuite) postgresNow() time.Time {
 	var now time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT statement_timestamp()").Scan(&now))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT statement_timestamp()").Scan(&now))
 	return now
 }
 

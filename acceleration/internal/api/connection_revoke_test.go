@@ -197,7 +197,7 @@ func (s *AuthorizationsSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 		KEKVersion: 1, Status: store.ConnectionEventActive,
 	})
 	s.Require().NoError(err)
-	hold, err := s.store.DB().BeginTx(ctx, nil)
+	hold, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = hold.Rollback() }()
 	var holder int
@@ -215,7 +215,7 @@ func (s *AuthorizationsSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		err := s.store.DB().QueryRowContext(ctx,
+		err := s.store.GlobalDB().QueryRowContext(ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
 		return err == nil && waiting > 0
 	}, 5*time.Second, 10*time.Millisecond, "the delete never reached its MCP event subscriptions")
@@ -268,7 +268,7 @@ func (s *AuthorizationsSuite) TestADetachedWriteGivesUpWhenThePoolIsFull() {
 		}
 	}()
 	for range suiteConnections {
-		conn, err := s.store.DB().DB.Conn(ctx)
+		conn, err := s.store.GlobalDB().DB.Conn(ctx)
 		s.Require().NoError(err)
 		held = append(held, conn)
 	}

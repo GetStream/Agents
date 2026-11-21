@@ -76,7 +76,7 @@ func (s *PolicySuite) TestAPolicyReadThatFailsChangesNothingAboutWhereWorkIsDone
 
 func (s *PolicySuite) TestAPolicyWrittenWithARegionKeepsNoWorkInIt() {
 	// As a policy saved before regions left policies, which a document read now ignores.
-	_, err := s.store.DB().ExecContext(s.ctx, `INSERT INTO policies (scope, scope_id, document, updated_at) VALUES (?, ?, ?::jsonb, now())`,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO policies (scope, scope_id, document, updated_at) VALUES (?, ?, ?::jsonb, now())`,
 		store.ScopeOrganization, s.org, `{"data_policy":{"region":"eu","retention":"30d"}}`)
 	s.Require().NoError(err)
 	built := &builtIn{}

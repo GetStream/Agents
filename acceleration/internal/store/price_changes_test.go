@@ -42,7 +42,7 @@ func accept(PriceListAt, []PriceEntryWrite) error { return nil }
 // auditOf is the audit rows of a change, oldest first.
 func (s *StoreSuite) auditOf(name string) []AuditEntry {
 	var rows []AuditEntry
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("resource_id = ?", name).Order("created_at").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("resource_id = ?", name).Order("created_at").Scan(s.ctx))
 	return rows
 }
 
@@ -216,7 +216,7 @@ func (s *StoreSuite) TestAWriteThatWaitsOutThePriceListsLockIsBusy() {
 	scheduled.EffectiveAt = &tomorrow
 	change, _, _, err := s.store.CreatePriceChange(s.ctx, scheduled, accept)
 	s.Require().NoError(err)
-	held, err := s.store.DB().BeginTx(s.ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // the lock goes with the transaction
 	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")

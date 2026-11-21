@@ -49,13 +49,13 @@ func (s *AgentRoleMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "rolemig")
 	s.exec(db, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", schemaBeforeAgentRole))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", schemaBeforeAgentRole))
 	s.db = db
 }
 
@@ -69,7 +69,7 @@ func (s *AgentRoleMigrationSuite) TestTheNewestLiveTaggedConfigOfEachAppTakesThe
 	s.config("plain", "app-c", `{}`, "2026-10-01", false)
 	s.config("other-app", "app-d", `{"role":"agent_moderator"}`, "2026-10-01", false)
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", agentRoleVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", agentRoleVersion))
 
 	s.Equal(map[string]string{
 		"older": "", "newer": RoleAgentModerator, "draft": "", "deleted": "", "plain": "",
@@ -78,12 +78,12 @@ func (s *AgentRoleMigrationSuite) TestTheNewestLiveTaggedConfigOfEachAppTakesThe
 }
 
 func (s *AgentRoleMigrationSuite) TestTheMigrationComesOffAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", agentRoleVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", agentRoleVersion))
 
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", schemaBeforeAgentRole))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", schemaBeforeAgentRole))
 
 	var columns int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
 WHERE table_name = 'agent_configs' AND column_name = 'role'`).Scan(&columns))
 	s.Zero(columns)
 }
@@ -98,7 +98,7 @@ VALUES ('`+id+`', '`+customer+`', '`+id+`', '`+tags+`', '`+created+`', `+deleted
 }
 
 func (s *AgentRoleMigrationSuite) roles() map[string]string {
-	rows, err := s.db.DB().QueryContext(s.ctx, "SELECT id, role FROM agent_configs")
+	rows, err := s.db.GlobalDB().QueryContext(s.ctx, "SELECT id, role FROM agent_configs")
 	s.Require().NoError(err)
 	defer rows.Close()
 	roles := map[string]string{}
@@ -113,7 +113,7 @@ func (s *AgentRoleMigrationSuite) roles() map[string]string {
 
 func (s *AgentRoleMigrationSuite) exec(db *Store, statements ...string) {
 	for _, statement := range statements {
-		_, err := db.DB().ExecContext(s.ctx, statement)
+		_, err := db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err, statement)
 	}
 }

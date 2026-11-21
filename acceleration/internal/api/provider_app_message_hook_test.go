@@ -251,11 +251,11 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	var episode string
 	var pin int64
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(ctx, "SELECT id, stream_app_pk FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episode, &pin) == nil
+		return s.store.GlobalDB().QueryRowContext(ctx, "SELECT id, stream_app_pk FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episode, &pin) == nil
 	}, settleFor, 10*time.Millisecond)
 	s.Equal(s.appID(), pin, "the episode is pinned to the provider app's app")
 	var cid string
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx,
 		"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'slack' AND address = ?",
 		s.customerID(), config.ID, workspace+":U0000ALICE").Scan(&cid))
 	omni := strings.TrimPrefix(cid, "agent:")
@@ -264,11 +264,11 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	// Idle for two hours, past the closer's hour. Episodes left in progress from earlier runs
 	// are older still and would fill the sweep's batch, so they are put out of its way; the
 	// other suites' episodes are newer than an hour and stay.
-	_, err := s.store.DB().ExecContext(ctx, "UPDATE episodes SET started_at = now() - interval '2 hours' WHERE id = ?", episode)
+	_, err := s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET started_at = now() - interval '2 hours' WHERE id = ?", episode)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx, "UPDATE episode_activity SET last_message_at = now() - interval '2 hours' WHERE episode_id = ?", episode)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episode_activity SET last_message_at = now() - interval '2 hours' WHERE episode_id = ?", episode)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx,
+	_, err = s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended') AND started_at < now() - interval '1 hour' AND id <> ?", episode)
 	s.Require().NoError(err)
 
@@ -309,7 +309,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 	var channel string
 	var pin int64
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(ctx, "SELECT channel_id, stream_app_pk FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&channel, &pin) == nil
+		return s.store.GlobalDB().QueryRowContext(ctx, "SELECT channel_id, stream_app_pk FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&channel, &pin) == nil
 	}, settleFor, 10*time.Millisecond)
 	s.Require().Equal(s.appID(), pin, "the thread is pinned to the provider app's app")
 	// The backend opens its session on the channel the worker made, which the row is linked
@@ -335,7 +335,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 		return false
 	}, settleFor, 10*time.Millisecond, "the person got no reply")
 	var sessions int
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM agent_sessions WHERE customer_id = ?", s.customerID()).Scan(&sessions))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM agent_sessions WHERE customer_id = ?", s.customerID()).Scan(&sessions))
 	s.Equal(1, sessions, "the backend's session answered; the router opened none")
 }
 

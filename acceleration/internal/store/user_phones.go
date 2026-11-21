@@ -178,7 +178,7 @@ func (s *Store) LinkedPhone(ctx context.Context, customerID string, app int64, u
 		Phone string     `bun:"phone"`
 		Since *time.Time `bun:"since"`
 	}
-	err := s.db.NewSelect().Model((*UserPhone)(nil)).
+	err := s.global.NewSelect().Model((*UserPhone)(nil)).
 		Column("up.phone").
 		ColumnExpr(historyBoundary+" AS since").
 		Join(historyJoin).
@@ -201,7 +201,7 @@ func (s *Store) ThreadHistorySince(ctx context.Context, customerID, threadChanne
 	var since []struct {
 		At *time.Time `bun:"since"`
 	}
-	err := s.db.NewRaw(`SELECT `+historyBoundary+` AS since FROM episodes AS ep
+	err := s.global.NewRaw(`SELECT `+historyBoundary+` AS since FROM episodes AS ep
 JOIN contact_map AS cm ON cm.id = ep.contact_id
 JOIN user_phones AS up ON up.customer_id = cm.customer_id AND up.phone = `+reachedAt+`
 	AND up.stream_app_pk = COALESCE(NULLIF(cm.stream_app_pk, ?), 0)
@@ -242,7 +242,7 @@ func (s *Store) UnlinkUserPhone(ctx context.Context, customerID string, app int6
 // and joins of one link take turns: two PUTs at once for one user, or a PUT and a first
 // sighting, each find the link the one before left (joinLinked reads it under the lock).
 func (s *Store) lockLink(ctx context.Context, link UserPhone, fn func(context.Context, bun.Tx) error) error {
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		key := link.CustomerID + "/" + strconv.FormatInt(link.StreamAppPK, 10) + "/" + link.UserID
 		if err := lockUntilCommit(ctx, tx, key, userLinkLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock user phone: %w", err))
@@ -255,7 +255,7 @@ func (s *Store) lockLink(ctx context.Context, link UserPhone, fn func(context.Co
 // address names, a number's in the app the row is pinned to. A row of another kind, or with no
 // link, has none.
 func (s *Store) linkOf(ctx context.Context, entry *ContactMapEntry) (UserPhone, bool, error) {
-	query := s.db.NewSelect().Model((*UserPhone)(nil)).Where("customer_id = ?", entry.CustomerID)
+	query := s.global.NewSelect().Model((*UserPhone)(nil)).Where("customer_id = ?", entry.CustomerID)
 	switch entry.Kind {
 	case ContactStreamUser:
 		app, userID, ok := splitStreamUserAddress(entry.Address)

@@ -48,13 +48,13 @@ func (s *ToolGroupsMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "toolgroupsmig")
 	s.exec(db, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", schemaBeforeToolGroups))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", schemaBeforeToolGroups))
 	s.db = db
 }
 
@@ -62,7 +62,7 @@ func (s *ToolGroupsMigrationSuite) SetupTest() {
 // rather than through the model, which carries columns later migrations add.
 func (s *ToolGroupsMigrationSuite) connectors(id string) string {
 	var connectors string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		`SELECT connectors::text FROM agent_configs WHERE id = ?`, id).Scan(&connectors))
 	return connectors
 }
@@ -72,7 +72,7 @@ func (s *ToolGroupsMigrationSuite) TestAProgressiveConfigsConnectorsAreSummarise
 VALUES ('older', 'app', 'support', true, '7d',
         '[{"name": "linear", "connector_id": "c1"}, {"name": "sentry", "connector_id": "c2", "output_retention": "none"}]')`)
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", toolGroupsVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", toolGroupsVersion))
 
 	s.JSONEq(`[
 		{"name": "linear", "connector_id": "c1", "loading": "summary", "output_retention": "7d"},
@@ -84,11 +84,11 @@ func (s *ToolGroupsMigrationSuite) TestAConfigWithoutTheSettingsIsLeftAsItWas() 
 	s.exec(s.db, `INSERT INTO agent_configs (id, customer_id, name, connectors)
 VALUES ('plain', 'app', 'support', '[{"name": "linear", "connector_id": "c1"}]')`)
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", toolGroupsVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", toolGroupsVersion))
 
 	s.JSONEq(`[{"name": "linear", "connector_id": "c1"}]`, s.connectors("plain"))
 	var groups *string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		`SELECT tool_groups::text FROM agent_configs WHERE id = 'plain'`).Scan(&groups))
 	s.Nil(groups, "a config from before names no function")
 }
@@ -96,23 +96,23 @@ VALUES ('plain', 'app', 'support', '[{"name": "linear", "connector_id": "c1"}]')
 func (s *ToolGroupsMigrationSuite) TestAMigrationThatStoppedHalfwayRunsAgain() {
 	s.exec(s.db, `ALTER TABLE agent_configs ADD COLUMN tool_groups JSONB`)
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", toolGroupsVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", toolGroupsVersion))
 }
 
 func (s *ToolGroupsMigrationSuite) TestTheMigrationComesOffAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", toolGroupsVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", toolGroupsVersion))
 
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", schemaBeforeToolGroups))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", schemaBeforeToolGroups))
 
 	var columns int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
 WHERE table_name = 'agent_configs' AND column_name = 'tool_groups'`).Scan(&columns))
 	s.Zero(columns)
 }
 
 func (s *ToolGroupsMigrationSuite) exec(db *Store, statements ...string) {
 	for _, statement := range statements {
-		_, err := db.DB().ExecContext(s.ctx, statement)
+		_, err := db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err, statement)
 	}
 }

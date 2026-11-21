@@ -71,7 +71,7 @@ const chatInboundColumns = "cd.seq, cd.stream_app, cd.message_id, cd.customer_id
 // already queued under the same app and id, answered or given up within its keep, is not
 // queued again: queued is false.
 func (s *Store) QueueChatInbound(ctx context.Context, delivery ChatInbound) (queued bool, err error) {
-	return queueChatInbound(ctx, s.db, delivery)
+	return queueChatInbound(ctx, s.global, delivery)
 }
 
 // queueChatInbound is QueueChatInbound on db, the store's or a transaction's.
@@ -105,7 +105,7 @@ func (s *Store) QueueFirstChatInbound(ctx context.Context, key string, delivery 
 	if err := s.forgetDeliveries(ctx); err != nil {
 		return false, stack.Wrap(err)
 	}
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		first, err := recordDelivery(ctx, tx, key)
 		if err != nil || !first {
 			return err
@@ -154,7 +154,7 @@ func (s *Store) claimChatInbound(ctx context.Context, query string, now time.Tim
 	if limit < 1 {
 		return claimed, nil
 	}
-	if err := s.db.NewRaw(query, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed); err != nil {
+	if err := s.global.NewRaw(query, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim chat inbound: %w", err))
 	}
 	return claimed, nil
@@ -163,7 +163,7 @@ func (s *Store) claimChatInbound(ctx context.Context, query string, now time.Tim
 // ChatInboundBySeq returns the message queued as seq, in whatever state it is.
 func (s *Store) ChatInboundBySeq(ctx context.Context, seq int64) (ChatInbound, error) {
 	var delivery ChatInbound
-	err := s.db.NewSelect().Model(&delivery).Where("cd.seq = ?", seq).Scan(ctx)
+	err := s.global.NewSelect().Model(&delivery).Where("cd.seq = ?", seq).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChatInbound{}, stack.Wrap(fmt.Errorf("%w: %d", ErrNoChatInbound, seq))
 	}
@@ -177,7 +177,7 @@ func (s *Store) ChatInboundBySeq(ctx context.Context, seq int64) (ChatInbound, e
 // their lease. found is false when no message is queued at all.
 func (s *Store) NextChatInboundAt(ctx context.Context) (next time.Time, found bool, err error) {
 	var at sql.NullTime
-	err = s.db.NewSelect().Model((*ChatInbound)(nil)).
+	err = s.global.NewSelect().Model((*ChatInbound)(nil)).
 		ColumnExpr("min(next_attempt_at)").
 		Where("state = ?", ChatInboundQueued).
 		Scan(ctx, &at)
@@ -196,7 +196,7 @@ func (s *Store) NextChatInboundAt(ctx context.Context) (next time.Time, found bo
 // lease and when it left the queue, so it is still this claim's to finish.
 func (s *Store) FinishChatInbound(ctx context.Context, claimed ChatInbound, at time.Time) (changed bool, err error) {
 	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued, ChatInboundDone},
-		s.db.NewUpdate().Model((*ChatInbound)(nil)).
+		s.global.NewUpdate().Model((*ChatInbound)(nil)).
 			Set("state = ?", ChatInboundDone).
 			Set("attempts = ?", claimed.Attempts).
 			Set("finished_at = COALESCE(finished_at, ?)", at.UTC()))
@@ -205,7 +205,7 @@ func (s *Store) FinishChatInbound(ctx context.Context, claimed ChatInbound, at t
 // FailChatInbound records that a claimed message's last attempt failed and it is given up,
 // at at.
 func (s *Store) FailChatInbound(ctx context.Context, claimed ChatInbound, at time.Time) (changed bool, err error) {
-	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued}, s.db.NewUpdate().Model((*ChatInbound)(nil)).
+	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued}, s.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("state = ?", ChatInboundFailed).
 		Set("attempts = ?", claimed.Attempts+1).
 		Set("finished_at = ?", at.UTC()))
@@ -214,7 +214,7 @@ func (s *Store) FailChatInbound(ctx context.Context, claimed ChatInbound, at tim
 // RetryChatInbound records a failed attempt of a claimed message and when the next one is
 // due.
 func (s *Store) RetryChatInbound(ctx context.Context, claimed ChatInbound, next time.Time) (changed bool, err error) {
-	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued}, s.db.NewUpdate().Model((*ChatInbound)(nil)).
+	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued}, s.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("attempts = ?", claimed.Attempts+1).
 		Set("next_attempt_at = ?", next.UTC()))
 }
@@ -242,7 +242,7 @@ func updateClaimedChatInbound(ctx context.Context, claimed ChatInbound, states [
 // nothing is queued under streamApp and messageID: there is nothing to answer then. The lease
 // is left as it is, for the worker holding it to finish the row (FinishChatInbound).
 func (s *Store) StartChatInboundAnswer(ctx context.Context, streamApp int64, messageID string, at time.Time) (started bool, err error) {
-	result, err := s.db.NewUpdate().Model((*ChatInbound)(nil)).
+	result, err := s.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("state = ?", ChatInboundDone).
 		Set("finished_at = ?", at.UTC()).
 		Where("stream_app = ? AND message_id = ?", streamApp, messageID).
@@ -262,7 +262,7 @@ func (s *Store) StartChatInboundAnswer(ctx context.Context, streamApp int64, mes
 // messageID said, so a later try of it hands that on rather than hearing it again. What was
 // kept first stays.
 func (s *Store) KeepChatInboundHeard(ctx context.Context, streamApp int64, messageID, heard string) error {
-	_, err := s.db.NewUpdate().Model((*ChatInbound)(nil)).
+	_, err := s.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("heard = ?", heard).
 		Where("stream_app = ? AND message_id = ?", streamApp, messageID).
 		Where("heard IS NULL").
@@ -277,7 +277,7 @@ func (s *Store) KeepChatInboundHeard(ctx context.Context, streamApp int64, messa
 // and that nothing then took, such as a dispatch worker that was not connected, so a later try
 // answers it. The lease is left as it is, for the worker holding it to retry the row.
 func (s *Store) ReleaseChatInboundAnswer(ctx context.Context, streamApp int64, messageID string) error {
-	_, err := s.db.NewUpdate().Model((*ChatInbound)(nil)).
+	_, err := s.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("state = ?", ChatInboundQueued).
 		Set("finished_at = NULL").
 		Where("stream_app = ? AND message_id = ?", streamApp, messageID).
@@ -292,7 +292,7 @@ func (s *Store) ReleaseChatInboundAnswer(ctx context.Context, streamApp int64, m
 // PruneChatInbound deletes the rows of answered messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
 func (s *Store) PruneChatInbound(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.db.NewDelete().Model((*ChatInbound)(nil)).
+	result, err := s.global.NewDelete().Model((*ChatInbound)(nil)).
 		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
 			ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC()).
 		Exec(ctx)

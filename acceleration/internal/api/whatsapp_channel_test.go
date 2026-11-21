@@ -546,7 +546,7 @@ func (s *WhatsAppChannelSuite) TestAPhotoStreamChatFailsOnEveryAttemptButTheLast
 	// The last wait is 500 ms: the third failure is recorded, then the fourth try is a wait away.
 	s.Require().Eventually(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = 'queued' AND attempts = 3", s.customerID()).Scan(&count))
 		return count > 0
 	}, settleFor, 5*time.Millisecond, "the third attempt did not fail")
@@ -655,7 +655,7 @@ func (s *WhatsAppChannelSuite) TestAConnectionStillOnRevision2ReadsAPhotoByItsCa
 	s.settled()
 	s.Empty(s.meta.got(), "revision 2 looks no file up")
 	var threads int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ? AND connector_id = 'whatsapp' AND thread_key = ?",
 		s.customerID(), alone).Scan(&threads))
 	s.Zero(threads, "a photo alone is not read on revision 2")
@@ -773,10 +773,10 @@ func (s *WhatsAppChannelSuite) TestAConnectionPinnedToARevisionWithNoChannelBloc
 	s.Require().NotNil(stored.Manifest.Channel)
 	restored := stored
 	stored.Manifest.Channel = nil
-	_, err = s.store.DB().NewUpdate().Model(&stored).Column("manifest").WherePK().Exec(ctx)
+	_, err = s.store.GlobalDB().NewUpdate().Model(&stored).Column("manifest").WherePK().Exec(ctx)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().NewUpdate().Model(&restored).Column("manifest").WherePK().Exec(context.Background())
+		_, err := s.store.GlobalDB().NewUpdate().Model(&restored).Column("manifest").WherePK().Exec(context.Background())
 		s.NoError(err)
 	})
 	person := "16505551234"
@@ -785,7 +785,7 @@ func (s *WhatsAppChannelSuite) TestAConnectionPinnedToARevisionWithNoChannelBloc
 
 	s.settled()
 	var threads int
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx,
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ? AND connector_id = 'whatsapp' AND thread_key = ?",
 		s.customerID(), person).Scan(&threads))
 	s.Zero(threads)
@@ -981,7 +981,7 @@ func (s *WhatsAppChannelSuite) digits() string {
 func (s *WhatsAppChannelSuite) threadChannel(person string) string {
 	var channel string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT channel_id FROM channel_threads WHERE customer_id = ? AND connector_id = 'whatsapp' AND thread_key = ?",
 			s.customerID(), person).Scan(&channel) == nil
 	}, settleFor, 10*time.Millisecond, "no thread channel for %s", person)
@@ -994,7 +994,7 @@ func (s *WhatsAppChannelSuite) omniChannel(number string) string {
 	var cid string
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'phone' AND address = ?",
 			s.customerID(), s.config.ID, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
@@ -1004,7 +1004,7 @@ func (s *WhatsAppChannelSuite) omniChannel(number string) string {
 // liveOptOuts counts the number's WhatsApp keyword opt-outs not revoked.
 func (s *WhatsAppChannelSuite) liveOptOuts(number string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM opt_outs WHERE customer_id = ? AND recipient = ? AND channel = 'whatsapp' AND source = 'keyword' AND revoked_at IS NULL",
 		s.customerID(), number).Scan(&count))
 	return count
@@ -1013,7 +1013,7 @@ func (s *WhatsAppChannelSuite) liveOptOuts(number string) int {
 // episodes counts the test's customer's episode cards.
 func (s *WhatsAppChannelSuite) episodes() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&count))
 	return count
 }
@@ -1022,7 +1022,7 @@ func (s *WhatsAppChannelSuite) episodes() int {
 func (s *WhatsAppChannelSuite) nothingLinked() {
 	s.Never(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&count))
 		return count > 0
 	}, dropped, 20*time.Millisecond)

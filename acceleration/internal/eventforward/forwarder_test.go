@@ -51,9 +51,9 @@ func (s *ForwarderSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.store = db
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.sealer, err = auth.NewSealerWithKeyring(1, map[int]string{1: "test key one"})
@@ -177,13 +177,13 @@ func (s *ForwarderSuite) TestAnAttemptWithinTheProvidersWindowCarriesItsSignatur
 // forwarding after its look at start until a lease (1 min) has passed. The worker before it
 // claimed once each poll: at this suite's 10 ms, about 50 claims in the 500 ms watched here.
 func (s *ForwarderSuite) TestAForwarderWithNothingQueuedSendsNoQuery() {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
 	s.Require().NoError(err)
 	own, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
 	queries := &queryCount{}
-	own.DB().AddQueryHook(queries)
+	own.GlobalDB().AddQueryHook(queries)
 	forwarder, err := New(Options{Store: own, Secrets: s.sealer, Poll: 10 * time.Millisecond})
 	s.Require().NoError(err)
 
@@ -217,7 +217,7 @@ func (s *ForwarderSuite) TestAForwardQueuedBeforeTheForwarderStartedIsSent() {
 // again a lease after its last look and sends it. Here the lease is 200 ms; the bound, 2 s, is
 // far over that and the 10 ms poll, and far under forever, which is what B waited before.
 func (s *ForwarderSuite) TestAnIdleRouterSendsAForwardAnotherRouterLeftQueued() {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
 	s.Require().NoError(err)
 	var hits atomic.Int32
 	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
@@ -235,7 +235,7 @@ func (s *ForwarderSuite) TestAnIdleRouterSendsAForwardAnotherRouterLeftQueued() 
 // The same with a retry queued an hour out: B waits a lease, not the hour, before it looks
 // again and finds what router A left.
 func (s *ForwarderSuite) TestARouterWaitingOnALaterRetryStillSendsAForwardAnotherRouterLeft() {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
 	s.Require().NoError(err)
 	var hits atomic.Int32
 	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
@@ -262,7 +262,7 @@ func (s *ForwarderSuite) TestACustomerWithoutDestinationsQueuesNothing() {
 	s.Require().NoError(forwarder.Forward(s.ctx, Event{CustomerID: "nobody-" + uuid.NewString(), ConnectorID: "slack_bot", Body: []byte(`{}`)}))
 
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
 		"JOIN connector_event_destinations t ON t.id = d.destination_id WHERE t.customer_id LIKE 'nobody-%'").Scan(&rows))
 	s.Zero(rows)
 }
@@ -391,7 +391,7 @@ func (s *ForwarderSuite) routerAfterItsFirstLook(client *http.Client) {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
 	queries := &queryCount{}
-	own.DB().AddQueryHook(queries)
+	own.GlobalDB().AddQueryHook(queries)
 	router, err := New(Options{Store: own, Secrets: s.sealer, HTTP: client, Poll: 10 * time.Millisecond, Lease: 200 * time.Millisecond})
 	s.Require().NoError(err)
 	router.Start()
@@ -401,7 +401,7 @@ func (s *ForwarderSuite) routerAfterItsFirstLook(client *http.Client) {
 
 // dropForwards deletes the forwards of a customer not yet done with.
 func (s *ForwarderSuite) dropForwards(customer string) {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries d USING connector_event_destinations t "+
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries d USING connector_event_destinations t "+
 		"WHERE t.id = d.destination_id AND t.customer_id = ?", customer)
 	s.Require().NoError(err)
 }
@@ -418,7 +418,7 @@ func (q *queryCount) AfterQuery(context.Context, *bun.QueryEvent) { q.Add(1) }
 // pending is how many forwards of a customer are not done with.
 func (s *ForwarderSuite) pending(customer string) int {
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
 		"JOIN connector_event_destinations t ON t.id = d.destination_id WHERE t.customer_id = ?", customer).Scan(&rows))
 	return rows
 }

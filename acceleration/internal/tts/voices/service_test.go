@@ -75,7 +75,7 @@ func (s *ServiceSuite) TearDownSuite() {
 }
 
 func (s *ServiceSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE voices CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE voices CASCADE")
 	s.Require().NoError(err)
 
 	s.status = http.StatusOK

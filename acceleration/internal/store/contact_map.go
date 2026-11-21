@@ -65,7 +65,7 @@ func (s *Store) MapContact(ctx context.Context, entry *ContactMapEntry) (created
 	}
 	// The update is there only so RETURNING hands back the row that won: DO NOTHING returns
 	// none.
-	_, err = s.db.NewInsert().Model(entry).
+	_, err = s.global.NewInsert().Model(entry).
 		On("CONFLICT (customer_id, agent_config_id, kind, address) DO UPDATE").
 		Set("updated_at = EXCLUDED.updated_at").
 		Returning("*").
@@ -93,7 +93,7 @@ func (s *Store) joinPartner(ctx context.Context, entry *ContactMapEntry) error {
 	if err := s.joinLinked(ctx, link); err != nil {
 		return err
 	}
-	if err := s.db.NewSelect().Model(entry).WherePK().Scan(ctx); err != nil {
+	if err := s.global.NewSelect().Model(entry).WherePK().Scan(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: read a joined contact: %w", err))
 	}
 	return nil
@@ -107,7 +107,7 @@ var ErrNoContact = errors.New("store: no contact map row for this person")
 // MapContact it never makes one: reading a person's cards writes nothing.
 func (s *Store) Contact(ctx context.Context, customerID, agentConfigID, kind, address string) (ContactMapEntry, error) {
 	var entry ContactMapEntry
-	err := s.db.NewSelect().Model(&entry).
+	err := s.global.NewSelect().Model(&entry).
 		Where("customer_id = ?", customerID).Where("agent_config_id = ?", agentConfigID).
 		Where("kind = ?", kind).Where("address = ?", address).
 		Scan(ctx)
@@ -127,7 +127,7 @@ func (s *Store) Contact(ctx context.Context, customerID, agentConfigID, kind, ad
 // aside is answered with its number as its address (reachedAt): the thread still reaches it.
 func (s *Store) ThreadContact(ctx context.Context, customerID, agentConfigID, threadChannel string) (ContactMapEntry, error) {
 	var entry ContactMapEntry
-	err := s.db.NewSelect().Model(&entry).
+	err := s.global.NewSelect().Model(&entry).
 		ColumnExpr("cm.*").ColumnExpr(reachedAt+" AS address").
 		Join("JOIN episodes AS ep ON ep.contact_id = cm.id").
 		Where("ep.customer_id = ?", customerID).Where("ep.thread_channel = ?", threadChannel).

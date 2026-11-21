@@ -63,14 +63,14 @@ func (s *ScheduledTasksMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "stmig")
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", stagingVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", stagingVersion))
 	s.db = db
 }
 
@@ -79,21 +79,21 @@ func (s *ScheduledTasksMigrationSuite) SetupTest() {
 func (s *ScheduledTasksMigrationSuite) TestTheMigrationAppliesComesOffAndAppliesAgain() {
 	s.Empty(s.indexes())
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", scheduledTasksVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", scheduledTasksVersion))
 	s.Equal(scheduledTaskIndexes, s.indexes())
 	s.Equal(4, s.addedColumns())
 
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", stagingVersion))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", stagingVersion))
 	s.Empty(s.indexes())
 	s.Zero(s.addedColumns())
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", scheduledTasksVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", scheduledTasksVersion))
 	s.Equal(scheduledTaskIndexes, s.indexes())
 }
 
 // indexes is the names of the migration's indexes that exist, in order.
 func (s *ScheduledTasksMigrationSuite) indexes() []string {
-	rows, err := s.db.DB().QueryContext(s.ctx, `SELECT indexname FROM pg_indexes
+	rows, err := s.db.GlobalDB().QueryContext(s.ctx, `SELECT indexname FROM pg_indexes
 WHERE tablename IN ('scheduled_tasks', 'scheduled_task_runs')
    OR indexname = 'channel_deliveries_from_idx'
 ORDER BY indexname`)
@@ -112,7 +112,7 @@ ORDER BY indexname`)
 // addedColumns counts the columns the migration adds to tables that were there before it.
 func (s *ScheduledTasksMigrationSuite) addedColumns() int {
 	var count int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
 WHERE (table_name, column_name) IN (('users', 'timezone'), ('agent_configs', 'scheduling'),
 	('channel_deliveries', 'from_address'), ('channel_identities', 'thread'))`).Scan(&count))
 	return count
@@ -122,13 +122,13 @@ WHERE (table_name, column_name) IN (('users', 'timezone'), ('agent_configs', 'sc
 const wakeVersion int64 = 20261105130000
 
 func (s *ScheduledTasksMigrationSuite) TestTheWakeIndexAppliesComesOffAndAppliesAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", wakeVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", wakeVersion))
 	s.Contains(s.indexes(), "scheduled_tasks_wake_idx")
 
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", scheduledTasksVersion))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", scheduledTasksVersion))
 	s.Equal(scheduledTaskIndexes, s.indexes())
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", wakeVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", wakeVersion))
 	s.Contains(s.indexes(), "scheduled_tasks_wake_idx")
 }
 
@@ -142,17 +142,17 @@ const (
 // A task made before the migration reads an empty channel_thread after it, and the previous
 // release, which does not name the column, still inserts tasks.
 func (s *ScheduledTasksMigrationSuite) TestTheThreadColumnKeepsTasksOfThePreviousRelease() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", beforeThreadVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", beforeThreadVersion))
 	insert := `INSERT INTO scheduled_tasks (id, customer_id, user_id, title, instructions, start_local, timezone)
 VALUES (?, 'acme', 'alice', 'Stretch', 'Remind them.', '2026-11-06 10:00', 'Europe/Amsterdam')`
-	_, err := s.db.DB().ExecContext(s.ctx, insert, "before")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, insert, "before")
 	s.Require().NoError(err)
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", threadVersion))
-	_, err = s.db.DB().ExecContext(s.ctx, insert, "after")
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", threadVersion))
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, insert, "after")
 	s.Require().NoError(err, "the previous release inserts without channel_thread")
 
-	rows, err := s.db.DB().QueryContext(s.ctx, "SELECT id, channel_thread FROM scheduled_tasks ORDER BY id")
+	rows, err := s.db.GlobalDB().QueryContext(s.ctx, "SELECT id, channel_thread FROM scheduled_tasks ORDER BY id")
 	s.Require().NoError(err)
 	defer rows.Close()
 	threads := map[string]string{}
@@ -174,17 +174,17 @@ const (
 
 func (s *ScheduledTasksMigrationSuite) TestThePruneIndexesApplyComeOffAndApplyAgain() {
 	prune := []string{"scheduled_task_runs_finished_idx", "scheduled_tasks_pruned_idx"}
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", beforePruneIndexesVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", beforePruneIndexesVersion))
 	before := s.indexes()
 	s.NotContains(before, prune[0])
 	s.NotContains(before, prune[1])
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", pruneIndexesVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", pruneIndexesVersion))
 	s.Subset(s.indexes(), prune)
 
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", beforePruneIndexesVersion))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", beforePruneIndexesVersion))
 	s.Equal(before, s.indexes())
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", pruneIndexesVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", pruneIndexesVersion))
 	s.Subset(s.indexes(), prune)
 }

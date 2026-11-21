@@ -149,7 +149,7 @@ func (s *StoreSuite) TestAnyOrganizationsGrantIsUnrevokedWithNoOrganization() {
 
 func (s *StoreSuite) TestAnExpiredGrantCannotBeUnrevoked() {
 	grant := s.revoked("org-1")
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE limit_grants SET created_at = now() - interval '2 hours', "+
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE limit_grants SET created_at = now() - interval '2 hours', "+
 		"expires_at = now() - interval '1 hour' WHERE id = ?", grant.ID)
 	s.Require().NoError(err)
 
@@ -315,7 +315,7 @@ func (s *StoreSuite) TestTheUsesOfAGrantEndedLongAgoArePruned() {
 	ended := func(column string, ago time.Duration) LimitGrant {
 		grant := s.grant(LimitGrant{AmountMicros: 10_000})
 		s.grantRow(s.store, []int64{grant.ID}, 300, true)
-		_, err := s.store.DB().ExecContext(s.ctx, "UPDATE limit_grants SET created_at = now() - make_interval(secs => ?), "+
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE limit_grants SET created_at = now() - make_interval(secs => ?), "+
 			column+" = now() - make_interval(secs => ?) WHERE id = ?", (ago + time.Hour).Seconds(), ago.Seconds(), grant.ID)
 		s.Require().NoError(err)
 		return grant
@@ -325,7 +325,7 @@ func (s *StoreSuite) TestTheUsesOfAGrantEndedLongAgoArePruned() {
 	live := s.grant(LimitGrant{AmountMicros: 10_000})
 	s.grantRow(s.store, []int64{live.ID}, 300, true)
 	uses := func(id int64) (n int) {
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM limit_grant_uses WHERE grant_id = ?", id).Scan(&n))
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM limit_grant_uses WHERE grant_id = ?", id).Scan(&n))
 		return n
 	}
 
@@ -389,7 +389,7 @@ func (s *ShardedStoreSuite) TestAReconcileReadsOnlyTheRowsSinceTheLastLessItsOve
 	}
 	s.Equal(grantReconcilePage+1, s.reconcile(), "the first reads every row, page by page")
 	var shards []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT shard FROM limit_grant_reconciles ORDER BY shard").Scan(s.ctx, &shards))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT shard FROM limit_grant_reconciles ORDER BY shard").Scan(s.ctx, &shards))
 	s.Equal([]string{"here", "there"}, shards, "where it got in each shard is kept")
 
 	now := time.Now().UTC()
@@ -403,7 +403,7 @@ func (s *ShardedStoreSuite) TestAReconcileReadsOnlyTheRowsSinceTheLastLessItsOve
 func (s *ShardedStoreSuite) TestOneRouterReconcilesAtATime() {
 	grant := s.grant(LimitGrant{AmountMicros: 10_000})
 	s.uncounted(s.store, s.base, 70, grant.ID)
-	other, err := s.store.DB().Conn(s.ctx)
+	other, err := s.store.GlobalDB().Conn(s.ctx)
 	s.Require().NoError(err)
 	defer other.Close()
 	_, err = other.ExecContext(s.ctx, "SELECT pg_advisory_lock(hashtextextended('limit_grant_reconciles', 0))")

@@ -54,7 +54,7 @@ func (s *RunnerSuite) SetupSuite() {
 
 func (s *RunnerSuite) SetupTest() {
 	// A claim reaches every running campaign in the database, so each test starts with none.
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, phone_calls CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, phone_calls CASCADE")
 	s.Require().NoError(err)
 
 	// Tuesday 10:00 UTC, inside the default weekday hours.

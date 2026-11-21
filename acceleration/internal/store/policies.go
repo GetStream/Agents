@@ -137,7 +137,7 @@ func (s *Store) SetOrganizationTier(ctx context.Context, organizationID, tier st
 		return errors.New("store: an organization's tier needs an organization and a tier")
 	}
 	seen := &OrganizationTier{OrganizationID: organizationID, Tier: tier, SeenAt: seenAt.UTC()}
-	_, err := s.db.NewInsert().Model(seen).
+	_, err := s.global.NewInsert().Model(seen).
 		On("CONFLICT (organization_id) DO UPDATE").
 		Set("tier = EXCLUDED.tier").
 		Set("seen_at = EXCLUDED.seen_at").
@@ -153,7 +153,7 @@ func (s *Store) SetOrganizationTier(ctx context.Context, organizationID, tier st
 // with any.
 func (s *Store) TierOf(ctx context.Context, organizationID string) (string, error) {
 	var seen OrganizationTier
-	err := s.db.NewSelect().Model(&seen).Where("organization_id = ?", organizationID).Scan(ctx)
+	err := s.global.NewSelect().Model(&seen).Where("organization_id = ?", organizationID).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -170,7 +170,7 @@ func (s *Store) Policy(ctx context.Context, scope PolicyScope, id string) (Polic
 		return PolicyDocument{}, stack.Wrap(errors.New("store: a policy needs a scope id"))
 	}
 	var policy Policy
-	err := s.db.NewSelect().Model(&policy).
+	err := s.global.NewSelect().Model(&policy).
 		Where("scope = ?", scope).
 		Where("scope_id = ?", id).
 		Scan(ctx)
@@ -198,7 +198,7 @@ func (s *Store) SavePolicy(ctx context.Context, scope PolicyScope, id string, do
 		replace = "document = jsonb_strip_nulls(jsonb_build_object('require_own_stream_app', " +
 			"pol.document->'require_own_stream_app')) || EXCLUDED.document"
 	}
-	_, err := s.db.NewInsert().Model(policy).
+	_, err := s.global.NewInsert().Model(policy).
 		On("CONFLICT (scope, scope_id) DO UPDATE").
 		Set(replace).
 		Set("updated_at = EXCLUDED.updated_at").
@@ -214,7 +214,7 @@ func (s *Store) DeletePolicy(ctx context.Context, scope PolicyScope, id string) 
 	if id == "" {
 		return false, stack.Wrap(errors.New("store: a policy needs a scope id"))
 	}
-	result, err := s.db.NewDelete().Model((*Policy)(nil)).
+	result, err := s.global.NewDelete().Model((*Policy)(nil)).
 		Where("scope = ?", scope).
 		Where("scope_id = ?", id).
 		Exec(ctx)
@@ -242,7 +242,7 @@ func (s *Store) UserPolicies(ctx context.Context, appID, after string, limit int
 		limit = UserPolicyLimit
 	}
 	var policies []Policy
-	query := s.db.NewSelect().Model(&policies).
+	query := s.global.NewSelect().Model(&policies).
 		Where("scope = ?", ScopeUser).
 		Where(`(scope_id COLLATE "C") LIKE ? ESCAPE '\'`, likePrefix(UserScopeID(appID, ""))).
 		OrderExpr(`scope_id COLLATE "C"`).
@@ -258,7 +258,7 @@ func (s *Store) UserPolicies(ctx context.Context, appID, after string, limit int
 
 // HasUserPolicies reports whether any user of an app has a policy of their own.
 func (s *Store) HasUserPolicies(ctx context.Context, appID string) (bool, error) {
-	exists, err := s.db.NewSelect().Model((*Policy)(nil)).
+	exists, err := s.global.NewSelect().Model((*Policy)(nil)).
 		Where("scope = ?", ScopeUser).
 		Where(`(scope_id COLLATE "C") LIKE ? ESCAPE '\'`, likePrefix(UserScopeID(appID, ""))).
 		Exists(ctx)
@@ -287,7 +287,7 @@ func (s *Store) AppInOrganization(ctx context.Context, appID, organizationID str
 	if seen != "" {
 		return seen == organizationID, nil
 	}
-	registered, err := s.db.NewSelect().Model((*App)(nil)).
+	registered, err := s.global.NewSelect().Model((*App)(nil)).
 		Where("id = ?", appID).
 		Where("organization_id = ?", organizationID).
 		Exists(ctx)
@@ -303,7 +303,7 @@ func (s *Store) JoinOrganization(ctx context.Context, appID, organizationID stri
 		return errors.New("store: joining an organization needs an app and an organization")
 	}
 	membership := &AppOrganization{AppID: appID, OrganizationID: organizationID, SeenAt: time.Now().UTC()}
-	_, err := s.db.NewInsert().Model(membership).
+	_, err := s.global.NewInsert().Model(membership).
 		On("CONFLICT (app_id) DO UPDATE").
 		Set("organization_id = EXCLUDED.organization_id").
 		Set("seen_at = EXCLUDED.seen_at").
@@ -318,7 +318,7 @@ func (s *Store) JoinOrganization(ctx context.Context, appID, organizationID stri
 // that has never named one.
 func (s *Store) OrganizationOf(ctx context.Context, appID string) (string, error) {
 	var membership AppOrganization
-	err := s.db.NewSelect().Model(&membership).Where("app_id = ?", appID).Scan(ctx)
+	err := s.global.NewSelect().Model(&membership).Where("app_id = ?", appID).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -336,11 +336,11 @@ func (s *Store) KnownApps(ctx context.Context, ids []string) (map[string]bool, e
 		return known, nil
 	}
 	var registered, seen []string
-	if err := s.db.NewSelect().Model((*App)(nil)).Column("id").Where("id IN (?)", bun.In(ids)).
+	if err := s.global.NewSelect().Model((*App)(nil)).Column("id").Where("id IN (?)", bun.In(ids)).
 		Scan(ctx, &registered); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: known apps: %w", err))
 	}
-	if err := s.db.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("app_id IN (?)", bun.In(ids)).
+	if err := s.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("app_id IN (?)", bun.In(ids)).
 		Scan(ctx, &seen); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: known apps: %w", err))
 	}

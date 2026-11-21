@@ -123,7 +123,7 @@ func (s *StoreSuite) TestACardsLinesEndAtTheFirstThingThatEndsIt() {
 	s.Require().NoError(s.store.SaveSession(s.ctx, &AgentSession{ID: "session-closed", CustomerID: "acme-app", CallID: "call-session-closed"}))
 	s.Require().NoError(s.store.CloseSession(s.ctx, "session-closed", s.base.Add(45*time.Minute), ""))
 	ended := s.episodeIn(ann, "agent:thread-ended", 50)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = ? WHERE id = ?", s.base.Add(55*time.Minute), ended.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = ? WHERE id = ?", s.base.Add(55*time.Minute), ended.ID)
 	s.Require().NoError(err)
 	going := s.episodeIn(ann, "agent:thread-going", 60)
 

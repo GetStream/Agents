@@ -61,7 +61,7 @@ func (s *Store) PutProviderKey(ctx context.Context, key *ProviderKey) (ProviderK
 
 	var was ProviderKey
 	var replaced bool
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		err := tx.NewSelect().Model(&was).
 			Where("customer_id = ? AND provider = ? AND region = ?", key.CustomerID, key.Provider, key.Region).
 			For("UPDATE").
@@ -99,7 +99,7 @@ func (s *Store) ProviderKeys(ctx context.Context, customerID string) ([]Provider
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
 	keys := []ProviderKey{}
-	err := s.db.NewSelect().Model(&keys).
+	err := s.global.NewSelect().Model(&keys).
 		Where("customer_id = ?", customerID).
 		Order("provider", "region").
 		Scan(ctx)
@@ -116,7 +116,7 @@ func (s *Store) ProviderKeyPage(ctx context.Context, customerID string, limit in
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
 	var keys []ProviderKey
-	query := s.db.NewSelect().Model(&keys).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&keys).Where("customer_id = ?", customerID)
 	if after != nil {
 		query = query.Where("(provider, region) > (?, ?)", after.Provider, after.Region)
 	}
@@ -134,7 +134,7 @@ func (s *Store) ProviderKeysOf(ctx context.Context, provider string) ([]Provider
 		return nil, stack.Wrap(errors.New("store: provider is required"))
 	}
 	keys := []ProviderKey{}
-	err := s.db.NewSelect().Model(&keys).
+	err := s.global.NewSelect().Model(&keys).
 		Where("provider = ?", provider).
 		Order("customer_id", "region").
 		Scan(ctx)
@@ -151,7 +151,7 @@ func (s *Store) DeleteProviderKey(ctx context.Context, customerID, provider, reg
 		return ProviderKey{}, stack.Wrap(errors.New("store: a customer, a provider and a region are required"))
 	}
 	var deleted ProviderKey
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		err := tx.NewSelect().Model(&deleted).
 			Where("customer_id = ? AND provider = ? AND region = ?", customerID, provider, region).
 			For("UPDATE").

@@ -48,7 +48,7 @@ func (s *Store) NoteLimit(ctx context.Context, notice LimitNotice) (written bool
 			LimitNoCredit, LimitSpendHardLimit, LimitSpendLimit, notice.Kind))
 	}
 	notice.CreatedAt, notice.ClaimedAt, notice.PostedAt = time.Time{}, time.Time{}, nil
-	result, err := s.db.NewInsert().Model(&notice).On("CONFLICT DO NOTHING").Exec(ctx)
+	result, err := s.global.NewInsert().Model(&notice).On("CONFLICT DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(err)
 	}
@@ -61,11 +61,11 @@ func (s *Store) NoteLimit(ctx context.Context, notice LimitNotice) (written bool
 // another to post.
 func (s *Store) ClaimUnpostedLimits(ctx context.Context, stale time.Duration, limit int) ([]LimitNotice, error) {
 	var notices []LimitNotice
-	due := s.db.NewSelect().Model((*LimitNotice)(nil)).Column("organization_id", "kind").
+	due := s.global.NewSelect().Model((*LimitNotice)(nil)).Column("organization_id", "kind").
 		Where("posted_at IS NULL").
 		Where("claimed_at < now() - ? * interval '1 millisecond'", stale.Milliseconds()).
 		OrderExpr("claimed_at").Limit(limit).For("UPDATE SKIP LOCKED")
-	err := s.db.NewUpdate().Model((*LimitNotice)(nil)).
+	err := s.global.NewUpdate().Model((*LimitNotice)(nil)).
 		Set("claimed_at = now()").
 		Where("(ln.organization_id, ln.kind) IN (?)", due).
 		Returning("*").
@@ -78,7 +78,7 @@ func (s *Store) ClaimUnpostedLimits(ctx context.Context, stale time.Duration, li
 
 // MarkLimitPosted records that the organization's notice of the kind was posted.
 func (s *Store) MarkLimitPosted(ctx context.Context, organization, kind string) error {
-	_, err := s.db.NewUpdate().Model((*LimitNotice)(nil)).
+	_, err := s.global.NewUpdate().Model((*LimitNotice)(nil)).
 		Set("posted_at = now()").
 		Where("organization_id = ?", organization).
 		Where("kind = ?", kind).

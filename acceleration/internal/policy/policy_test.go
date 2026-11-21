@@ -484,7 +484,7 @@ func (s *PolicySuite) TestAGrantUntilMidnightIsExpiredAfterIt() {
 // lockGrants holds limit_grants from another session until the test ends, as a long migration
 // or a stuck transaction would.
 func (s *PolicySuite) lockGrants() {
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = locked.Rollback() })
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE limit_grants IN ACCESS EXCLUSIVE MODE")

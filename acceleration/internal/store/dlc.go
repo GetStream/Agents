@@ -40,7 +40,7 @@ func (s *Store) BusinessProfile(ctx context.Context, customerID string) (Busines
 		return BusinessProfile{}, stack.Wrap(ErrNoBusinessProfile)
 	}
 	var profile BusinessProfile
-	err := s.db.NewSelect().Model(&profile).Where("customer_id = ?", customerID).Scan(ctx)
+	err := s.global.NewSelect().Model(&profile).Where("customer_id = ?", customerID).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BusinessProfile{}, stack.Wrap(ErrNoBusinessProfile)
 	}
@@ -61,7 +61,7 @@ func (s *Store) SaveBusinessProfile(ctx context.Context, profile *BusinessProfil
 	if profile.VerificationDocuments == nil {
 		profile.VerificationDocuments = []string{}
 	}
-	_, err := s.db.NewInsert().Model(profile).
+	_, err := s.global.NewInsert().Model(profile).
 		On("CONFLICT (customer_id) DO UPDATE").
 		Set("legal_business_name = EXCLUDED.legal_business_name").
 		Set("brand_name = EXCLUDED.brand_name").
@@ -94,7 +94,7 @@ func (s *Store) SaveBusinessProfile(ctx context.Context, profile *BusinessProfil
 
 // SetBrand records the brand a vendor registered an app as, and where it stands.
 func (s *Store) SetBrand(ctx context.Context, customerID, brandID, status string) error {
-	_, err := s.db.NewUpdate().Model((*BusinessProfile)(nil)).
+	_, err := s.global.NewUpdate().Model((*BusinessProfile)(nil)).
 		Set("vendor_brand_id = ?", brandID).
 		Set("brand_status = ?", status).
 		Set("updated_at = ?", time.Now().UTC()).
@@ -112,7 +112,7 @@ func (s *Store) UseCases(ctx context.Context, customerID string, limit int, afte
 		return nil, stack.Wrap(errors.New("store: a customer is required"))
 	}
 	useCases := []UseCase{}
-	query := s.db.NewSelect().Model(&useCases).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&useCases).Where("customer_id = ?", customerID)
 	if after != nil {
 		query = query.Where("(created_at, id) < (?, ?)", after.At, after.ID)
 	}
@@ -128,7 +128,7 @@ func (s *Store) UseCase(ctx context.Context, customerID, id string) (UseCase, er
 	if customerID == "" || id == "" {
 		return UseCase{}, stack.Wrap(ErrUnknownUseCase)
 	}
-	return s.useCase(ctx, s.db.NewSelect().Where("customer_id = ?", customerID).Where("id = ?", id))
+	return s.useCase(ctx, s.global.NewSelect().Where("customer_id = ?", customerID).Where("id = ?", id))
 }
 
 // UseCaseForNumber returns the use case a number sends as: the one it is assigned to, or
@@ -137,12 +137,12 @@ func (s *Store) UseCaseForNumber(ctx context.Context, customerID, e164 string) (
 	if customerID == "" {
 		return UseCase{}, ErrUnknownUseCase
 	}
-	assigned := s.db.NewSelect().Model((*PhoneNumber)(nil)).
+	assigned := s.global.NewSelect().Model((*PhoneNumber)(nil)).
 		Column("dlc_use_case_id").
 		Where("customer_id = ?", customerID).
 		Where("e164 = ?", e164).
 		Where("released_at IS NULL")
-	return s.useCase(ctx, s.db.NewSelect().
+	return s.useCase(ctx, s.global.NewSelect().
 		Where("customer_id = ?", customerID).
 		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.Where("id IN (?)", assigned).WhereOr("is_default")
@@ -155,7 +155,7 @@ func (s *Store) UseCaseByID(ctx context.Context, id string) (UseCase, error) {
 	if id == "" {
 		return UseCase{}, stack.Wrap(ErrUnknownUseCase)
 	}
-	return s.useCase(ctx, s.db.NewSelect().Where("id = ?", id))
+	return s.useCase(ctx, s.global.NewSelect().Where("id = ?", id))
 }
 
 // UseCaseByCampaign returns the use case a vendor knows by a campaign id.
@@ -163,7 +163,7 @@ func (s *Store) UseCaseByCampaign(ctx context.Context, vendor, campaignID string
 	if vendor == "" || campaignID == "" {
 		return UseCase{}, ErrUnknownUseCase
 	}
-	return s.useCase(ctx, s.db.NewSelect().Where("vendor = ?", vendor).Where("vendor_campaign_id = ?", campaignID))
+	return s.useCase(ctx, s.global.NewSelect().Where("vendor = ?", vendor).Where("vendor_campaign_id = ?", campaignID))
 }
 
 func (s *Store) useCase(ctx context.Context, query *bun.SelectQuery) (UseCase, error) {
@@ -182,7 +182,7 @@ func (s *Store) useCase(ctx context.Context, query *bun.SelectQuery) (UseCase, e
 // first, which is the order Stream reviews them in.
 func (s *Store) UseCasesInStatus(ctx context.Context, status string, limit int, after *CreatedPosition) ([]UseCase, error) {
 	useCases := []UseCase{}
-	query := s.db.NewSelect().Model(&useCases).Where("status = ?", status)
+	query := s.global.NewSelect().Model(&useCases).Where("status = ?", status)
 	if after != nil {
 		query = query.Where("(updated_at, id) > (?, ?)", after.At, after.ID)
 	}
@@ -205,7 +205,7 @@ type RegisteredCampaign struct {
 // statuses, with when it was registered: what a vendor bills a campaign's months for.
 func (s *Store) UseCasesWithCampaigns(ctx context.Context, registered string, statuses ...string) ([]RegisteredCampaign, error) {
 	campaigns := []RegisteredCampaign{}
-	err := s.db.NewSelect().Model(&campaigns).
+	err := s.global.NewSelect().Model(&campaigns).
 		ColumnExpr("uc.*").
 		ColumnExpr(`COALESCE((SELECT min(rl.created_at) FROM dlc_review_logs AS rl
 			WHERE rl.use_case_id = uc.id AND rl.actor = 'vendor' AND rl.notes = ? || uc.vendor_campaign_id || '.'),
@@ -222,7 +222,7 @@ func (s *Store) UseCasesWithCampaigns(ctx context.Context, registered string, st
 
 // HasUseCaseIn reports whether an app holds a use case in any of statuses.
 func (s *Store) HasUseCaseIn(ctx context.Context, customerID string, statuses ...string) (bool, error) {
-	found, err := s.db.NewSelect().Model((*UseCase)(nil)).
+	found, err := s.global.NewSelect().Model((*UseCase)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("status IN (?)", bun.In(statuses)).
 		Exists(ctx)
@@ -244,7 +244,7 @@ func (s *Store) CreateUseCase(ctx context.Context, useCase *UseCase) error {
 	if useCase.MessageSamples == nil {
 		useCase.MessageSamples = []string{}
 	}
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		held, err := tx.NewSelect().Model((*UseCase)(nil)).Where("customer_id = ?", useCase.CustomerID).Exists(ctx)
 		if err != nil {
 			return fmt.Errorf("store: create use case: %w", err)
@@ -269,7 +269,7 @@ func (s *Store) UpdateUseCase(ctx context.Context, useCase *UseCase) error {
 	if useCase.MessageSamples == nil {
 		useCase.MessageSamples = []string{}
 	}
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if useCase.IsDefault {
 			if err := clearDefaultUseCase(ctx, tx, useCase.CustomerID, useCase.ID); err != nil {
 				return err
@@ -308,7 +308,7 @@ func clearDefaultUseCase(ctx context.Context, tx bun.Tx, customerID, keep string
 
 // DeleteUseCase removes a use case, its review log and its number assignments.
 func (s *Store) DeleteUseCase(ctx context.Context, customerID, id string) error {
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		result, err := tx.NewDelete().Model((*UseCase)(nil)).
 			Where("customer_id = ?", customerID).
 			Where("id = ?", id).
@@ -341,7 +341,7 @@ func (s *Store) MoveUseCase(ctx context.Context, useCase *UseCase, from string, 
 	log.UseCaseID, log.CustomerID = useCase.ID, useCase.CustomerID
 	log.FromStatus, log.ToStatus = from, useCase.Status
 	log.CreatedAt = now
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		result, err := tx.NewUpdate().Model(useCase).
 			Column("status", "vendor", "vendor_campaign_id", "vendor_status", "submitted_at", "approved_at", "updated_at").
 			Where("id = ?", useCase.ID).
@@ -363,7 +363,7 @@ func (s *Store) MoveUseCase(ctx context.Context, useCase *UseCase, from string, 
 // ReviewLogs pages through what happened to a use case, oldest first.
 func (s *Store) ReviewLogs(ctx context.Context, customerID, useCaseID string, limit int, after *CreatedPosition) ([]ReviewLog, error) {
 	logs := []ReviewLog{}
-	query := s.db.NewSelect().Model(&logs).
+	query := s.global.NewSelect().Model(&logs).
 		Where("customer_id = ?", customerID).
 		Where("use_case_id = ?", useCaseID)
 	if after != nil {
@@ -379,7 +379,7 @@ func (s *Store) ReviewLogs(ctx context.Context, customerID, useCaseID string, li
 // AssignNumbers makes numbers exactly the ones that send as a use case. A number named
 // leaves whatever use case it sent as before; one no longer named goes back to the default.
 func (s *Store) AssignNumbers(ctx context.Context, customerID, useCaseID string, numbers []string) error {
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewUpdate().Model((*PhoneNumber)(nil)).
 			Set("dlc_use_case_id = NULL").
 			Where("customer_id = ?", customerID).
@@ -410,7 +410,7 @@ func (s *Store) AssignNumbers(ctx context.Context, customerID, useCaseID string,
 // AssignedNumbers returns the numbers assigned to a use case by name, in order.
 func (s *Store) AssignedNumbers(ctx context.Context, customerID, useCaseID string) ([]string, error) {
 	numbers := []string{}
-	err := s.db.NewSelect().Model((*PhoneNumber)(nil)).
+	err := s.global.NewSelect().Model((*PhoneNumber)(nil)).
 		Column("e164").
 		Where("customer_id = ?", customerID).
 		Where("dlc_use_case_id = ?", useCaseID).
@@ -427,7 +427,7 @@ func (s *Store) AssignedNumbers(ctx context.Context, customerID, useCaseID strin
 // the default those assigned to none.
 func (s *Store) UseCaseNumbers(ctx context.Context, useCase UseCase) ([]PhoneNumber, error) {
 	numbers := []PhoneNumber{}
-	query := s.db.NewSelect().Model(&numbers).
+	query := s.global.NewSelect().Model(&numbers).
 		Where("customer_id = ?", useCase.CustomerID).
 		Where("released_at IS NULL")
 	if useCase.IsDefault {
@@ -450,13 +450,13 @@ func (s *Store) OptOut(ctx context.Context, optOut *OptOut) error {
 	}
 	optOut.ID = newID()
 	optOut.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	_, err := s.db.NewInsert().Model(optOut).
+	_, err := s.global.NewInsert().Model(optOut).
 		On("CONFLICT (customer_id, recipient, channel) WHERE revoked_at IS NULL DO NOTHING").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: opt out: %w", err))
 	}
-	err = s.db.NewSelect().Model(optOut).
+	err = s.global.NewSelect().Model(optOut).
 		Where("customer_id = ?", optOut.CustomerID).
 		Where("recipient = ?", optOut.Recipient).
 		Where("channel = ?", optOut.Channel).
@@ -470,7 +470,7 @@ func (s *Store) OptOut(ctx context.Context, optOut *OptOut) error {
 
 // RevokeOptOut lifts one opt-out, keeping the row.
 func (s *Store) RevokeOptOut(ctx context.Context, customerID, id string) error {
-	result, err := s.db.NewUpdate().Model((*OptOut)(nil)).
+	result, err := s.global.NewUpdate().Model((*OptOut)(nil)).
 		Set("revoked_at = ?", time.Now().UTC()).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
@@ -488,7 +488,7 @@ func (s *Store) RevokeOptOut(ctx context.Context, customerID, id string) error {
 // RevokeOptOuts lifts every opt-out a recipient has on a channel and on all of them, as
 // texting START does.
 func (s *Store) RevokeOptOuts(ctx context.Context, customerID, recipient, channel string) error {
-	_, err := s.db.NewUpdate().Model((*OptOut)(nil)).
+	_, err := s.global.NewUpdate().Model((*OptOut)(nil)).
 		Set("revoked_at = ?", time.Now().UTC()).
 		Where("customer_id = ?", customerID).
 		Where("recipient = ?", recipient).
@@ -503,7 +503,7 @@ func (s *Store) RevokeOptOuts(ctx context.Context, customerID, recipient, channe
 
 // OptedOut reports whether a recipient asked not to be reached on a channel, or on any.
 func (s *Store) OptedOut(ctx context.Context, customerID, recipient, channel string) (bool, error) {
-	found, err := s.db.NewSelect().Model((*OptOut)(nil)).
+	found, err := s.global.NewSelect().Model((*OptOut)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("recipient = ?", recipient).
 		Where("channel IN (?)", bun.In([]string{channel, OptOutAll})).
@@ -518,7 +518,7 @@ func (s *Store) OptedOut(ctx context.Context, customerID, recipient, channel str
 // OptOuts pages through an app's live opt-outs, newest first.
 func (s *Store) OptOuts(ctx context.Context, customerID string, limit int, after *CreatedPosition) ([]OptOut, error) {
 	optOuts := []OptOut{}
-	query := s.db.NewSelect().Model(&optOuts).
+	query := s.global.NewSelect().Model(&optOuts).
 		Where("customer_id = ?", customerID).
 		Where("revoked_at IS NULL")
 	if after != nil {
@@ -534,7 +534,7 @@ func (s *Store) OptOuts(ctx context.Context, customerID string, limit int, after
 // SandboxRecipients returns the numbers an app may reach while sandboxed, in order.
 func (s *Store) SandboxRecipients(ctx context.Context, customerID string) ([]string, error) {
 	recipients := []string{}
-	err := s.db.NewSelect().Model((*SandboxRecipient)(nil)).
+	err := s.global.NewSelect().Model((*SandboxRecipient)(nil)).
 		Column("recipient").
 		Where("customer_id = ?", customerID).
 		Order("recipient").
@@ -548,7 +548,7 @@ func (s *Store) SandboxRecipients(ctx context.Context, customerID string) ([]str
 // SetSandboxRecipients replaces the numbers an app may reach while sandboxed.
 func (s *Store) SetSandboxRecipients(ctx context.Context, customerID string, recipients []string) error {
 	now := time.Now().UTC()
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewDelete().Model((*SandboxRecipient)(nil)).Where("customer_id = ?", customerID).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: set sandbox recipients: %w", err)

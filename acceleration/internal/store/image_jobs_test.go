@@ -83,7 +83,7 @@ func (s *StoreSuite) TestTheNextImageJobDueIsToldApartForDrawingAndPosting() {
 	// A router whose draw slots are full waits for a decided job's post, not for a draw it has
 	// no slot for, which would have it ask again every poll.
 	toDraw := s.queuedImageJob()
-	_, err := s.store.DB().NewUpdate().Model((*ImageJob)(nil)).Set("next_attempt_at = ?", time.Now().Add(-time.Minute)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*ImageJob)(nil)).Set("next_attempt_at = ?", time.Now().Add(-time.Minute)).
 		Where("id = ?", toDraw.ID).Exec(s.ctx)
 	s.Require().NoError(err)
 
@@ -112,7 +112,7 @@ func (s *StoreSuite) TestPostedImageJobsAreDeletedAfterADayAndFailedOnesAfter30D
 			ToolCallID: finished.call, RequestKey: "key-" + finished.call, Target: "image-fast", Attribution: json.RawMessage(`{}`), Prompt: "a field"}
 		_, err := s.store.QueueImageJob(s.ctx, &job)
 		s.Require().NoError(err)
-		_, err = s.store.DB().NewUpdate().Model((*ImageJob)(nil)).Set("state = ?", finished.state).
+		_, err = s.store.GlobalDB().NewUpdate().Model((*ImageJob)(nil)).Set("state = ?", finished.state).
 			Set("finished_at = ?", finished.at).Where("id = ?", finished.call).Exec(s.ctx)
 		s.Require().NoError(err)
 	}
@@ -123,6 +123,6 @@ func (s *StoreSuite) TestPostedImageJobsAreDeletedAfterADayAndFailedOnesAfter30D
 	s.Require().NoError(err)
 	s.EqualValues(2, pruned)
 	var left []string
-	s.Require().NoError(s.store.DB().NewSelect().Model((*ImageJob)(nil)).Column("tool_call_id").Order("tool_call_id").Scan(s.ctx, &left))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model((*ImageJob)(nil)).Column("tool_call_id").Order("tool_call_id").Scan(s.ctx, &left))
 	s.Equal([]string{"done-new", "draw-1", "failed-new"}, left, "the queued one and the ones within their keep stay")
 }

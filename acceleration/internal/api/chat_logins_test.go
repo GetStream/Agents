@@ -172,7 +172,7 @@ func (s *ChatLoginsSuite) TestASecondUserCannotUseTheLaunchURL() {
 func (s *ChatLoginsSuite) TestAConnectionThatNeedsReauthorizationAsksForAReconnect() {
 	connector, grant := s.connector()
 	mine := s.connected(s.client, connector)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", store.ConnectionNeedsReauthorization, mine)
 	s.Require().NoError(err)
 	opened := s.client.createSession(s.session(s.config(connector, grant), map[string]string{"crm": mine}))
@@ -384,7 +384,7 @@ func (s *ChatLoginsSuite) TestAReopenedChatUsesTheConnectionTheLoginChose() {
 		"the reopened chat runs the tool on the connection it chose")
 	s.Equal(1, s.connectionsOf(s.client, connector), "no second connection")
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", chosen).Scan(&attempts))
 	s.Equal(1, attempts, "no second consent")
 }
@@ -408,7 +408,7 @@ func (s *ChatLoginsSuite) TestAConsentFinishedWithoutAHandBackIsPickedUpByTheWai
 
 	s.Equal(connectorEchoText, ran["result"])
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", chosen).Scan(&attempts))
 	s.Equal(2, attempts, "the chat's and the backend's, no third")
 }
@@ -438,7 +438,7 @@ func (s *ChatLoginsSuite) TestANewChatUsesTheCallersOneConnectedConnection() {
 
 	s.Equal(1, s.connectionsOf(s.client, connector))
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", mine).Scan(&attempts))
 	s.Equal(1, attempts, "no second consent")
 }
@@ -474,7 +474,7 @@ identity: [team_id, user_id]
 	account := s.connectionOf(s.client, mine).AccountID
 
 	// A connected one would be implied (session.impliedSelection), with no login to ask.
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", store.ConnectionNeedsReauthorization, mine)
 	s.Require().NoError(err)
 	s.provider.SwitchAccount()
@@ -619,7 +619,7 @@ scopes:
 // pinsOf are the schema digests connection's tools are pinned at.
 func (s *ChatLoginsSuite) pinsOf(connection string) []string {
 	var digests []string
-	s.Require().NoError(s.store.DB().NewSelect().Table("connector_tool_pins").Column("schema_digest").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("connector_tool_pins").Column("schema_digest").
 		Where("connection_id = ?", connection).Scan(context.Background(), &digests))
 	return digests
 }
@@ -783,7 +783,7 @@ func (s *ChatLoginsSuite) askAs(user *testClient, id string) CommandReceipt {
 // attemptKind is the kind the consent's attempt was stored with.
 func (s *ChatLoginsSuite) attemptKind(id string) string {
 	var kind string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT kind FROM connector_authorization_attempts WHERE id = ?", id).Scan(&kind))
 	return kind
 }

@@ -598,7 +598,7 @@ sources:
 // accept.
 func (s *ConnectionsSuite) bindFixed(connectionID string) AgentConfig {
 	config := s.data.createAgentConfig()
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE agent_configs SET connectors = ?::jsonb WHERE id = ?",
 		`[{"name": "tracker", "connector_id": "linear", "connection": {"type": "fixed", "connection_id": "`+connectionID+`"}}]`,
 		config.Id)

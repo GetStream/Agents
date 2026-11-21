@@ -957,7 +957,7 @@ func (s *ConnectionToolsSuite) TestAConsentThatFinishesWhileTheToolsAreListedIsR
 	listed := 0
 	s.afterList = func() {
 		listed++
-		_, err := s.store.DB().ExecContext(context.Background(),
+		_, err := s.store.GlobalDB().ExecContext(context.Background(),
 			"UPDATE connector_connections SET connected_at = ? WHERE id = ?", before.Add(time.Hour), id)
 		s.Require().NoError(err)
 	}
@@ -1065,7 +1065,7 @@ func (s *ConnectionToolsSuite) driveShaped(coveredBy, granted string) string {
 		s.importedGrant(s.token, googleDriveReadonly), nil))
 	scopes, err := json.Marshal([]string{granted})
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE connector_connections SET granted_scopes = ?::jsonb WHERE id = ?",
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE connector_connections SET granted_scopes = ?::jsonb WHERE id = ?",
 		string(scopes), created.ID)
 	s.Require().NoError(err)
 	return created.ID

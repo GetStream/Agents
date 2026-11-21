@@ -223,7 +223,7 @@ func (s *Store) ShipLock() *ShipLock {
 // organization's spend for a jump. It is in the shared database, since the check reads every
 // shard: a lock per shard would have a router of each shard post the same notice.
 func (s *Store) CostAnomalyLock() *ShipLock {
-	return &ShipLock{db: s.db, key: "router.cost_anomaly"}
+	return &ShipLock{db: s.global, key: "router.cost_anomaly"}
 }
 
 // shipLockKeepalives has Postgres probe the holder's connection, so a holder whose network

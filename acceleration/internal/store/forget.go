@@ -78,12 +78,12 @@ func (s *Store) UserOrganizations(ctx context.Context, appID string, userIDs ...
 	}
 	var shared []string
 	users := bun.In(userIDs)
-	err = s.db.NewSelect().Model((*AppOrganization)(nil)).Column("organization_id").Where("app_id = ?", appID).
-		Union(s.db.NewSelect().Model((*App)(nil)).Column("organization_id").Where("id = ?", appID)).
-		Union(s.db.NewSelect().Model((*Limit)(nil)).Column("organization_id").
+	err = s.global.NewSelect().Model((*AppOrganization)(nil)).Column("organization_id").Where("app_id = ?", appID).
+		Union(s.global.NewSelect().Model((*App)(nil)).Column("organization_id").Where("id = ?", appID)).
+		Union(s.global.NewSelect().Model((*Limit)(nil)).Column("organization_id").
 			Where("level = ? AND app_id = ? AND user_id IN (?)", LevelUser, appID, users)).
-		Union(s.db.NewSelect().Model((*UsageReset)(nil)).Column("organization_id").Where("app_id = ? AND user_id IN (?)", appID, users)).
-		Union(s.db.NewSelect().Model((*LimitGrant)(nil)).Column("organization_id").Where("app_id = ? AND user_id IN (?)", appID, users)).
+		Union(s.global.NewSelect().Model((*UsageReset)(nil)).Column("organization_id").Where("app_id = ? AND user_id IN (?)", appID, users)).
+		Union(s.global.NewSelect().Model((*LimitGrant)(nil)).Column("organization_id").Where("app_id = ? AND user_id IN (?)", appID, users)).
 		Scan(ctx, &shared)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: user organizations: %w", err))
@@ -102,7 +102,7 @@ func (s *Store) UserOrganizations(ctx context.Context, appID string, userIDs ...
 // CountUserSettings counts the shared database's rows that name an app's end user.
 func (s *Store) CountUserSettings(ctx context.Context, appID, userID string) (UserSettings, error) {
 	var counts UserSettings
-	err := s.db.NewRaw(`SELECT
+	err := s.global.NewRaw(`SELECT
 		(SELECT count(*) FROM policies WHERE scope = ? AND scope_id = ?) AS policies,
 		(SELECT count(*) FROM limits WHERE level = ? AND app_id = ? AND user_id = ?) AS limits,
 		(SELECT count(*) FROM usage_resets WHERE app_id = ? AND user_id = ?) AS resets,
@@ -123,7 +123,7 @@ func (s *Store) CountUserSettings(ctx context.Context, appID, userID string) (Us
 // not the user's.
 func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replacement string, entry *AuditEntry) (UserSettings, error) {
 	var counts UserSettings
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range []struct {
 			count *int64
 			exec  func(context.Context, ...any) (sql.Result, error)

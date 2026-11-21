@@ -267,14 +267,14 @@ func (s *ConnectionTokenSuite) TestAnUnknownConnectionIsNotFound() {
 func (s *ConnectionTokenSuite) TestAnExportWhoseAuditRowCannotBeWrittenIsNotHandedOver() {
 	ctx := context.Background()
 	id := s.keyConnection(appOwned(s.connector(apikey.Name)))
-	_, err := s.store.DB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_token_export() RETURNS trigger AS $$
+	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_token_export() RETURNS trigger AS $$
 		BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql`)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx, `CREATE TRIGGER refuse_token_export BEFORE INSERT ON connector_audit
+	_, err = s.store.GlobalDB().ExecContext(ctx, `CREATE TRIGGER refuse_token_export BEFORE INSERT ON connector_audit
 		FOR EACH ROW WHEN (NEW.connection_id = '`+id+`' AND NEW.action = 'token_export') EXECUTE FUNCTION refuse_token_export()`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(ctx, "DROP TRIGGER refuse_token_export ON connector_audit")
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP TRIGGER refuse_token_export ON connector_audit")
 		s.Require().NoError(err)
 	}()
 

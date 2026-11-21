@@ -130,9 +130,9 @@ func (s *ForgetUserSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -311,7 +311,7 @@ type userRows struct {
 }
 
 func (s *ForgetUserSuite) userRows(app, user string) userRows {
-	shared := s.shards[0].DB()
+	shared := s.shards[0].GlobalDB()
 	var rows userRows
 	policy, err := s.shards[0].Policy(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
 	s.Require().NoError(err)

@@ -381,7 +381,7 @@ func (s *LinqChannelSuite) replyHeld(channel string, handOver func()) (write fun
 // liveIMessageOptOuts counts the person's iMessage opt-outs not revoked.
 func (s *LinqChannelSuite) liveIMessageOptOuts(person string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM opt_outs WHERE customer_id = ? AND recipient = ? AND channel = 'imessage' AND source = 'keyword' AND revoked_at IS NULL",
 		s.customerID(), person).Scan(&count))
 	return count
@@ -463,7 +463,7 @@ func (s *LinqChannelSuite) TestAReplyLinqRefusesIsSentByTheNextHandOff() {
 	s.Require().Eventually(func() bool { return s.linq.refusing() == 0 }, settleFor, 10*time.Millisecond, "Linq refused the reply")
 	s.Require().Eventually(func() bool {
 		var claims int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_messages WHERE channel_id = ? AND kind = ?", channel, store.ClaimReply).Scan(&claims))
 		return claims == 0
 	}, settleFor, 10*time.Millisecond, "a refused reply is not kept as sent")
@@ -538,7 +538,7 @@ func (s *linqLine) deliverSigned(body []byte, at time.Time, secret string) int {
 func (s *linqLine) threadChannel(chat string) string {
 	var channel string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT channel_id FROM channel_threads WHERE customer_id = ? AND connector_id = 'linq' AND thread_key = ?",
 			s.customerID(), chat).Scan(&channel) == nil
 	}, settleFor, 10*time.Millisecond, "no thread channel for chat %s", chat)
@@ -551,7 +551,7 @@ func (s *LinqChannelSuite) omniChannel(number string) string {
 	var cid string
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'phone' AND address = ?",
 			s.customerID(), s.config.ID, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
@@ -562,7 +562,7 @@ func (s *LinqChannelSuite) omniChannel(number string) string {
 func (s *LinqChannelSuite) nothingLinked() {
 	s.Never(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&count))
 		return count > 0
 	}, dropped, 20*time.Millisecond)
@@ -727,9 +727,9 @@ func (s *LinqChannelSuite) TestAnEmailHandleIsAnsweredWithoutACard() {
 	s.Require().Equal(http.StatusOK, s.streamDelivers(channel, 0))
 	s.Equal("Noted.", s.took(1)[0].text)
 	var contacts, episodes int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ?", s.customerID()).Scan(&contacts))
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episodes))
 	s.Zero(contacts)
 	s.Zero(episodes)
@@ -960,13 +960,13 @@ func (s *LinqChannelSuite) TestAMemberTheStoreCannotRecordIsRecordedOnTheNextAtt
 	ctx := context.Background()
 	chat, member := s.utils.uuid(), "+12025550198"
 	body := s.inGroup(chat, member, "STOP")
-	_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_members RENAME TO channel_thread_members_off")
+	_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_members RENAME TO channel_thread_members_off")
 	s.Require().NoError(err)
 	restored := false
 	restore := func() {
 		if !restored {
 			restored = true
-			_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_members_off RENAME TO channel_thread_members")
+			_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_members_off RENAME TO channel_thread_members")
 			s.Require().NoError(err)
 		}
 	}

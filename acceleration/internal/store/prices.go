@@ -178,7 +178,7 @@ const (
 // PricesToLoad is what SyncPrices would write now, writing nothing: whether it would be the
 // database's first load, and the entries it would add.
 func (s *Store) PricesToLoad(ctx context.Context, entries []pricing.Entry) (bool, []pricing.Entry, error) {
-	return pricesToLoad(ctx, s.db, entries)
+	return pricesToLoad(ctx, s.global, entries)
 }
 
 // SyncPrices loads the router's price files into the price list, in one transaction. A
@@ -190,7 +190,7 @@ func (s *Store) PricesToLoad(ctx context.Context, entries []pricing.Entry) (bool
 func (s *Store) SyncPrices(ctx context.Context, load PriceLoad) (PriceChange, []pricing.Entry, bool, error) {
 	var change PriceChange
 	var added []pricing.Entry
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockPrices(ctx, tx); err != nil {
 			return err
 		}
@@ -310,7 +310,7 @@ func (s *Store) ReloadPrices(ctx context.Context, load PriceLoad, dryRun bool) (
 		return PriceReload{}, stack.Wrap(errors.New("store: reload prices: the price files have no entry, so the list would be empty"))
 	}
 	var reload PriceReload
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockPrices(ctx, tx); err != nil {
 			return err
 		}
@@ -412,7 +412,7 @@ func ReleaseName(release string) string {
 // the newest that has taken effect under a change not cancelled, ties going to the later
 // change. An item whose newest entry withdrew it is left out.
 func (s *Store) ActivePriceEntries(ctx context.Context, at time.Time) ([]PriceEntry, error) {
-	return activePriceEntries(ctx, s.db, at)
+	return activePriceEntries(ctx, s.global, at)
 }
 
 func activePriceEntries(ctx context.Context, db bun.IDB, at time.Time) ([]PriceEntry, error) {
@@ -439,7 +439,7 @@ func activePriceEntries(ctx context.Context, db bun.IDB, at time.Time) ([]PriceE
 // NextPriceChangeAt is when the next change not cancelled takes effect after after, and
 // whether one is scheduled, so a list in memory can switch at that moment.
 func (s *Store) NextPriceChangeAt(ctx context.Context, after time.Time) (time.Time, bool, error) {
-	return nextPriceChangeAt(ctx, s.db, after)
+	return nextPriceChangeAt(ctx, s.global, after)
 }
 
 func nextPriceChangeAt(ctx context.Context, db bun.IDB, after time.Time) (time.Time, bool, error) {
@@ -464,7 +464,7 @@ type UpcomingPriceEntry struct {
 // UpcomingPriceEntries is every entry of a change not cancelled that takes effect after after,
 // soonest first.
 func (s *Store) UpcomingPriceEntries(ctx context.Context, after time.Time) ([]UpcomingPriceEntry, error) {
-	return upcomingPriceEntries(ctx, s.db, after)
+	return upcomingPriceEntries(ctx, s.global, after)
 }
 
 func upcomingPriceEntries(ctx context.Context, db bun.IDB, after time.Time) ([]UpcomingPriceEntry, error) {
@@ -501,14 +501,14 @@ func upcomingPriceEntries(ctx context.Context, db bun.IDB, after time.Time) ([]U
 // PriceChange is the change of that name and the entries it wrote, or ErrNoPriceChange.
 func (s *Store) PriceChange(ctx context.Context, name string) (PriceChange, []PriceEntry, error) {
 	var change PriceChange
-	err := s.db.NewSelect().Model(&change).Where("name = ?", name).Scan(ctx)
+	err := s.global.NewSelect().Model(&change).Where("name = ?", name).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PriceChange{}, nil, ErrNoPriceChange
 	}
 	if err != nil {
 		return PriceChange{}, nil, stack.Wrap(fmt.Errorf("store: price change: %w", err))
 	}
-	entries, err := priceEntriesOf(ctx, s.db, name)
+	entries, err := priceEntriesOf(ctx, s.global, name)
 	return change, entries, err
 }
 
@@ -697,7 +697,7 @@ type PriceChangeFilter struct {
 // PriceChangeLimit(filter.Limit).
 func (s *Store) PriceChanges(ctx context.Context, filter PriceChangeFilter) ([]PriceChange, error) {
 	changes := []PriceChange{}
-	query := s.db.NewSelect().Model(&changes)
+	query := s.global.NewSelect().Model(&changes)
 	if filter.Kind != "" {
 		query = query.Where("kind = ?", filter.Kind)
 	}

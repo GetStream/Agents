@@ -56,7 +56,7 @@ func (s *StoreSuite) claimedChat(at time.Time, messageID string) ChatInbound {
 
 // chatRow is the state, attempts and finish time of a message's row in the app 1257545.
 func (s *StoreSuite) chatRow(messageID string) (state string, attempts int, finishedAt *time.Time) {
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT state, attempts, finished_at FROM chat_inbound WHERE stream_app = 1257545 AND message_id = ?",
 		messageID).Scan(&state, &attempts, &finishedAt))
 	return state, attempts, finishedAt
@@ -65,7 +65,7 @@ func (s *StoreSuite) chatRow(messageID string) (state string, attempts int, fini
 // chatRows is how many rows the table holds.
 func (s *StoreSuite) chatRows() int {
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM chat_inbound").Scan(&rows))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM chat_inbound").Scan(&rows))
 	return rows
 }
 
@@ -147,7 +147,7 @@ func (s *StoreSuite) TestAnAnsweredChatMessageIsNotQueuedAgain() {
 // the transaction commits, and a second queue in it is still one row.
 func (s *StoreSuite) TestAChatInboundQueuedInACallersTransactionIsQueuedOnlyWithIt() {
 	rolledBack := errors.New("the caller's next step failed")
-	err := s.store.DB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.store.GlobalDB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		queued, err := queueChatInbound(ctx, tx, s.chatInbound("msg-one"))
 		s.Require().NoError(err)
 		s.Require().True(queued)
@@ -156,7 +156,7 @@ func (s *StoreSuite) TestAChatInboundQueuedInACallersTransactionIsQueuedOnlyWith
 	s.Require().ErrorIs(err, rolledBack)
 	s.Zero(s.chatRows(), "a rolled back transaction queues nothing")
 
-	err = s.store.DB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.store.GlobalDB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		first, err := queueChatInbound(ctx, tx, s.chatInbound("msg-one"))
 		s.Require().NoError(err)
 		second, err := queueChatInbound(ctx, tx, s.chatInbound("msg-one"))
@@ -223,7 +223,7 @@ func (s *StoreSuite) TestAChatInboundThatCouldNotBeQueuedRecordsNoKey() {
 // Once the message webhook is off, the endpoint is what forgets the keys older than a day.
 func (s *StoreSuite) TestQueueingAChatInboundForgetsTheKeysOfADayAgo() {
 	old := s.deliveryKey()
-	_, err := s.store.DB().ExecContext(s.ctx, "INSERT INTO hook_deliveries (key, seen_at) VALUES (?, ?)", old, time.Now().Add(-deliveryKeptFor-time.Hour))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "INSERT INTO hook_deliveries (key, seen_at) VALUES (?, ?)", old, time.Now().Add(-deliveryKeptFor-time.Hour))
 	s.Require().NoError(err)
 	// As a store that has forgotten none yet.
 	s.store.deliveriesPruned.Store(0)
@@ -231,7 +231,7 @@ func (s *StoreSuite) TestQueueingAChatInboundForgetsTheKeysOfADayAgo() {
 	_, err = s.store.QueueFirstChatInbound(s.ctx, s.deliveryKey(), s.chatInbound("msg-one"))
 	s.Require().NoError(err)
 
-	kept, err := s.store.DB().NewSelect().Table("hook_deliveries").Where("key = ?", old).Count(s.ctx)
+	kept, err := s.store.GlobalDB().NewSelect().Table("hook_deliveries").Where("key = ?", old).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(kept, "a key of a day ago is still recorded")
 }
@@ -410,7 +410,7 @@ func (s *StoreSuite) claimChatsWhileAnotherRouterActs(at time.Time, meanwhile fu
 	}()
 	s.Require().Eventually(func() bool {
 		var sleeping int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")
@@ -451,7 +451,7 @@ func (s *StoreSuite) TestARouterDoesNotClaimAChatMessageAnotherAnsweredDuringIts
 func (s *StoreSuite) TestAChatClaimSkipsAMessageAnotherRouterHoldsLocked() {
 	s.queuedChat("msg-one")
 	s.queuedChat("msg-two")
-	held, err := s.store.DB().BeginTx(s.ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // only releases the lock
 	_, err = held.ExecContext(s.ctx, "SELECT 1 FROM chat_inbound WHERE message_id = 'msg-one' FOR UPDATE")
@@ -581,7 +581,7 @@ func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThir
 	s.Require().NoError(err)
 	s.Equal(2, pruned)
 	var kept []string
-	rows, err := s.store.DB().QueryContext(s.ctx, "SELECT message_id FROM chat_inbound ORDER BY message_id")
+	rows, err := s.store.GlobalDB().QueryContext(s.ctx, "SELECT message_id FROM chat_inbound ORDER BY message_id")
 	s.Require().NoError(err)
 	defer rows.Close() //nolint:errcheck // read to the end below
 	for rows.Next() {

@@ -380,7 +380,7 @@ func (s *DataMoveSuite) TestAnExportWaitsForAWriteOpenWhenItStartedToCommit() {
 	}()
 	s.Require().EventuallyWithT(func(c *assert.CollectT) {
 		var capturing bool
-		assert.NoError(c, s.store.DB().QueryRowContext(context.Background(),
+		assert.NoError(c, s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT EXISTS (SELECT 1 FROM data_change_capture WHERE customer_id = ?)", s.customerID()).Scan(&capturing))
 		assert.True(c, capturing, "the export has not started recording")
 	}, settleFor, 10*time.Millisecond)
@@ -431,7 +431,7 @@ func (s *DataMoveSuite) TestAnExportGivesUpOnARepeatableReadWriteThatLookedBefor
 func (s *DataMoveSuite) TestFollowingAnExpiredRecordingGivesUpOnARepeatableReadWriteThatLookedBeforeIt() {
 	s.skipOnARouterWithShards()
 	s.export()
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE data_change_capture SET expires_at = now() - interval '1 minute' WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 	stranger := s.openWriteAt(sql.LevelRepeatableRead, "another-app-"+s.utils.uuid())
@@ -478,7 +478,7 @@ func (s *DataMoveSuite) TestAnExportStartWaitsForARepeatableReadWriteThatEndsWit
 func (s *DataMoveSuite) TestFollowingAnExpiredRecordingWaitsForARepeatableReadWriteThatEndsWithinTheBound() {
 	s.skipOnARouterWithShards()
 	s.export()
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE data_change_capture SET expires_at = now() - interval '1 minute' WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 	looked := s.openWriteAt(sql.LevelRepeatableRead, "another-app-"+s.utils.uuid())
@@ -492,7 +492,7 @@ func (s *DataMoveSuite) TestFollowingAnExpiredRecordingWaitsForARepeatableReadWr
 // expireRecording lets the app's recording expire, as it does when nobody follows the changes for
 // longer than the retention.
 func (s *DataMoveSuite) expireRecording() {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE data_change_capture SET expires_at = now() - interval '1 minute' WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 }
@@ -566,7 +566,7 @@ func (s *DataMoveSuite) refusesToBeTheSource(options store.Options) {
 		s.Contains(refused.Error.Message, "with shards is not supported yet", path)
 	}
 	var capturing bool
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT EXISTS (SELECT 1 FROM data_change_capture WHERE customer_id = ?)", s.customerID()).Scan(&capturing))
 	s.False(capturing, "a refused move started recording the app's changes")
 }
@@ -593,7 +593,7 @@ func (s *DataMoveSuite) openWrite(customerID string) openWrite {
 
 // openWriteAt is openWrite in a transaction at an isolation level.
 func (s *DataMoveSuite) openWriteAt(level sql.IsolationLevel, customerID string) openWrite {
-	tx, err := s.store.DB().BeginTx(context.Background(), &sql.TxOptions{Isolation: level})
+	tx, err := s.store.GlobalDB().BeginTx(context.Background(), &sql.TxOptions{Isolation: level})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = tx.Rollback() })
 	id := "agent-" + s.utils.uuid()

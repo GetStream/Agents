@@ -95,7 +95,7 @@ func (s *Store) QueueImageJob(ctx context.Context, job *ImageJob) (bool, error) 
 	if job.NextAttemptAt.IsZero() {
 		job.NextAttemptAt = job.CreatedAt
 	}
-	result, err := s.db.NewInsert().Model(job).On("CONFLICT (request_key) DO NOTHING").Exec(ctx)
+	result, err := s.global.NewInsert().Model(job).On("CONFLICT (request_key) DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: queue image job: %w", err))
 	}
@@ -122,14 +122,14 @@ func (s *Store) ClaimImageJobs(ctx context.Context, now time.Time, limit int, le
 	if limit < 1 {
 		return claimed, nil
 	}
-	due := s.db.NewSelect().Model((*ImageJob)(nil)).
+	due := s.global.NewSelect().Model((*ImageJob)(nil)).
 		Column("ij.id").
 		Where("ij.state = 'queued' AND ij.next_attempt_at <= ?", now.UTC()).
 		Where("(ij.message <> '') = ?", decided).
 		Order("ij.next_attempt_at", "ij.id").
 		Limit(limit).
 		For("UPDATE OF ij SKIP LOCKED")
-	err := s.db.NewUpdate().With("due", due).Model((*ImageJob)(nil)).
+	err := s.global.NewUpdate().With("due", due).Model((*ImageJob)(nil)).
 		TableExpr("due").
 		Set("next_attempt_at = ?", leaseUntil.UTC()).
 		Set("attempts = ij.attempts + 1").
@@ -145,7 +145,7 @@ func (s *Store) ClaimImageJobs(ctx context.Context, now time.Time, limit int, le
 // ImageJobDrawn is the picture the job keeps as drawn, nil when it keeps none.
 func (s *Store) ImageJobDrawn(ctx context.Context, id string) ([]byte, error) {
 	var drawn []byte
-	err := s.db.NewSelect().Model((*ImageJob)(nil)).Column("drawn").Where("id = ?", id).Scan(ctx, &drawn)
+	err := s.global.NewSelect().Model((*ImageJob)(nil)).Column("drawn").Where("id = ?", id).Scan(ctx, &drawn)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: image job drawn: %w", err))
 	}
@@ -156,7 +156,7 @@ func (s *Store) ImageJobDrawn(ctx context.Context, id string) ([]byte, error) {
 // ClaimImageJobs takes them, and false when none is queued.
 func (s *Store) NextImageJobAt(ctx context.Context, decided bool) (time.Time, bool, error) {
 	var next time.Time
-	err := s.db.NewSelect().Model((*ImageJob)(nil)).ColumnExpr("next_attempt_at").
+	err := s.global.NewSelect().Model((*ImageJob)(nil)).ColumnExpr("next_attempt_at").
 		Where("state = ?", ImageJobQueued).Where("(message <> '') = ?", decided).
 		OrderExpr("next_attempt_at").Limit(1).Scan(ctx, &next)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -236,7 +236,7 @@ func (s *Store) FinishImageJob(ctx context.Context, job ImageJob, state, outcome
 // slow claim and the one that took the job after its lease ran out never both write it.
 func (s *Store) updateImageJob(ctx context.Context, job ImageJob, doing string,
 	set func(*bun.UpdateQuery) *bun.UpdateQuery) (bool, error) {
-	result, err := set(s.db.NewUpdate().Model((*ImageJob)(nil))).
+	result, err := set(s.global.NewUpdate().Model((*ImageJob)(nil))).
 		Where("id = ?", job.ID).Where("state = ?", ImageJobQueued).Where("attempts = ?", job.Attempts).
 		Exec(ctx)
 	if err != nil {
@@ -251,7 +251,7 @@ func (s *Store) updateImageJob(ctx context.Context, job ImageJob, doing string,
 
 // PruneImageJobs deletes the jobs past their keep as of now, and returns how many.
 func (s *Store) PruneImageJobs(ctx context.Context, now time.Time) (int64, error) {
-	result, err := s.db.NewDelete().Model((*ImageJob)(nil)).
+	result, err := s.global.NewDelete().Model((*ImageJob)(nil)).
 		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
 			ImageJobDone, now.Add(-imageJobDoneKeep).UTC(), ImageJobFailed, now.Add(-imageJobFailedKeep).UTC()).
 		Exec(ctx)

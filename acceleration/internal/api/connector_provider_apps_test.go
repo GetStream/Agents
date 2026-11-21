@@ -192,7 +192,7 @@ func (s *ConnectorProviderAppsSuite) TestTheConfigTokenIsSealedAtRestAndNeverInA
 		s.NotContains(string(body), "secret")
 	}
 	var sealed []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT tokens_sealed FROM connector_config_tokens WHERE customer_id = ? AND connector_id = 'slack_bot'", s.customerID()).Scan(&sealed))
 	s.False(bytes.Contains(sealed, []byte("xoxe")), "the tokens are sealed")
 }
@@ -373,7 +373,7 @@ func (s *ConnectorProviderAppsSuite) slackApp(id string) fakeprovider.SlackApp {
 // expireConfigToken makes the configuration token the router keeps for the test's app one
 // that has expired, here and at the fake Slack.
 func (s *ConnectorProviderAppsSuite) expireConfigToken() {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_config_tokens SET expires_at = now() - interval '1 minute' WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 	s.slack.Advance(fakeprovider.ConfigTokenTTL)

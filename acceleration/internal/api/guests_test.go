@@ -517,7 +517,7 @@ func (s *GuestsSuite) TestAClaimDoesNotLetTheAccountIntoAnotherAppsChannel() {
 	foreign := s.transcriptOf(s.talkedAs(otherUser))
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -551,7 +551,7 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -672,7 +672,7 @@ func (s *GuestsSuite) scheduledFor(userID string, kind auth.Kind) string {
 // transcriptOf is the Stream Chat channel the session's words were written to.
 func (s *GuestsSuite) transcriptOf(sessionID string) string {
 	var row store.AgentSession
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
 	channel := transcriptChannel(row)
 	_, kept := s.chat.Channel(channel)
 	s.Require().True(kept, "the session wrote a transcript")
@@ -684,7 +684,7 @@ func (s *GuestsSuite) transcriptOf(sessionID string) string {
 // a name would put the name in its channel, so the row is moved under it afterwards.
 func (s *GuestsSuite) underTheName(name string) string {
 	talked := s.talkedAs(s.data.createAnonymous())
-	_, err := s.store.DB().NewUpdate().Model((*store.AgentSession)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentSession)(nil)).
 		Set("user_id = ?", name).Where("id = ?", talked).Exec(context.Background())
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), name)

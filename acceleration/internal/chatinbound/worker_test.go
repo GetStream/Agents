@@ -47,7 +47,7 @@ func (s *WorkerSuite) SetupSuite() {
 
 func (s *WorkerSuite) SetupTest() {
 	// A row an earlier test left queued would be the next test's worker's to answer.
-	_, err := s.store.DB().NewDelete().Model((*store.ChatInbound)(nil)).Where("TRUE").Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ChatInbound)(nil)).Where("TRUE").Exec(s.ctx)
 	s.Require().NoError(err)
 }
 
@@ -239,7 +239,7 @@ func (s *WorkerSuite) TestAtMostInFlightAnswersRunAtOnce() {
 
 	s.Eventually(func() bool { return count() == inFlight }, 5*time.Second, 10*time.Millisecond)
 	s.Never(func() bool { return count() > inFlight }, 300*time.Millisecond, 10*time.Millisecond)
-	unclaimed, err := s.store.DB().NewSelect().Model((*store.ChatInbound)(nil)).Where("next_attempt_at <= now()").Count(s.ctx)
+	unclaimed, err := s.store.GlobalDB().NewSelect().Model((*store.ChatInbound)(nil)).Where("next_attempt_at <= now()").Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(1, unclaimed)
 	close(release)
@@ -412,7 +412,7 @@ func (s *WorkerSuite) startUntil(stopping context.Context, options Options) *Wor
 
 // finished records a queued delivery answered ago, and returns its message id.
 func (s *WorkerSuite) finished(messageID string, ago time.Duration) string {
-	_, err := s.store.DB().NewUpdate().Model((*store.ChatInbound)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ChatInbound)(nil)).
 		Set("state = ?", store.ChatInboundDone).Set("finished_at = ?", time.Now().Add(-ago)).
 		Where("message_id = ?", messageID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -420,14 +420,14 @@ func (s *WorkerSuite) finished(messageID string, ago time.Duration) string {
 }
 
 func (s *WorkerSuite) exists(messageID string) bool {
-	exists, err := s.store.DB().NewSelect().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exists(s.ctx)
+	exists, err := s.store.GlobalDB().NewSelect().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exists(s.ctx)
 	s.Require().NoError(err)
 	return exists
 }
 
 func (s *WorkerSuite) row(messageID string) store.ChatInbound {
 	var row store.ChatInbound
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
 	return row
 }
 

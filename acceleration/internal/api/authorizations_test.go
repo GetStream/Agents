@@ -352,7 +352,7 @@ func (s *AuthorizationsSuite) TestAProviderErrorCodeThatEchoesTheCallbackIsKeptC
 func (s *AuthorizationsSuite) TestARefusedReconnectOfAConnectionThatNeedsReauthorizationStoresTheReason() {
 	id := s.connection("")
 	s.connect(id)
-	_, err := s.store.DB().ExecContext(s.T().Context(),
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", store.ConnectionNeedsReauthorization, id)
 	s.Require().NoError(err)
 
@@ -435,7 +435,7 @@ func (s *AuthorizationsSuite) TestAConsentWhoseConnectionCannotBeReadIsLogged() 
 	connector := s.get(id).ConnectorID
 	alice := s.browser()
 	callback := s.consent(alice.handOff(s.start(id)))
-	_, err := s.store.DB().NewRaw(`UPDATE connector_connections SET metadata = '"unreadable"'::jsonb WHERE id = ?`, id).Exec(s.T().Context())
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE connector_connections SET metadata = '"unreadable"'::jsonb WHERE id = ?`, id).Exec(s.T().Context())
 	s.Require().NoError(err)
 
 	finished := alice.finish(callback)
@@ -498,7 +498,7 @@ func (s *AuthorizationsSuite) TestAnExpiredConsentIsRefused() {
 	alice := s.browser()
 	started := s.start(id)
 	callback := s.consent(alice.handOff(started))
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_authorization_attempts SET expires_at = now() - interval '1 second' WHERE id = ?", started.ID)
 	s.Require().NoError(err)
 
@@ -564,7 +564,7 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 			"connection": map[string]any{"type": "fixed", "connection_id": id}, "tools": []map[string]any{},
 			"events": []map[string]any{{"event": "issue.created"}}}},
 	}, nil))
-	_, err := s.store.DB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions WHERE connection_id = ?", id)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions WHERE connection_id = ?", id)
 	s.Require().NoError(err)
 
 	reconnect := s.start(id)
@@ -573,7 +573,7 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 
 	s.Require().Equal(s.landing(id, consentConnected), finished.Header.Get("Location"))
 	var held int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connection_event_subscriptions WHERE connection_id = ?", id).Scan(&held))
 	s.Equal(1, held)
 }
@@ -1017,7 +1017,7 @@ func (s *AuthorizationsSuite) TestAForcedConnectorDeleteRevokesItsConnectionsGra
 	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connectors/"+connector+"?force=true", nil, nil))
 
 	var sealed []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT credentials_sealed FROM connector_connections WHERE id = ?", created.ID).Scan(&sealed))
 	s.Empty(sealed)
 	rows := s.connectorAudit(created.ID)
@@ -1025,7 +1025,7 @@ func (s *AuthorizationsSuite) TestAForcedConnectorDeleteRevokesItsConnectionsGra
 	s.Equal(ConnectorAuditAction(store.AuditGrantRevoked), rows[0].Action, "newest first")
 	s.Equal(store.AuditReasonDeleted, rows[0].Reason)
 	var clients int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_oauth_clients WHERE customer_id = ? AND connector_id = ?", s.customerID(), connector).Scan(&clients))
 	s.Zero(clients, "the client secret went with the connector")
 }
@@ -1249,7 +1249,7 @@ func (s *AuthorizationsSuite) TestARotatedSecretIsWhatTheNextRefreshOfEveryConne
 	// not put yet: one row changes, and the provider refuses what each refresh then sends.
 	s.putClient(connector, "rotated-"+s.utils.uuid())
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_oauth_clients WHERE customer_id = ?", s.customerID()).Scan(&rows))
 	s.Equal(1, rows)
 	for _, id := range connections {
@@ -1705,7 +1705,7 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConsentIsRefusedWhenItStarts
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "ROUTER_PUBLIC_URL")
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", created.ID).Scan(&attempts))
 	s.Zero(attempts, "no attempt waits for a callback that could never arrive")
 }

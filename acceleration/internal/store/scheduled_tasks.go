@@ -216,7 +216,7 @@ func (s *Store) CreateScheduledTask(ctx context.Context, task *ScheduledTask, ma
 	task.CreatedAt = now
 	task.UpdatedAt = now
 
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
 			return err
 		}
@@ -303,7 +303,7 @@ func (s *Store) ScheduledTask(ctx context.Context, customerID, id string) (Sched
 		return ScheduledTask{}, stack.Wrap(errors.New("store: a customer and a task id are required"))
 	}
 	var task ScheduledTask
-	err := s.db.NewSelect().Model(&task).
+	err := s.global.NewSelect().Model(&task).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Limit(1).
@@ -323,7 +323,7 @@ func (s *Store) ScheduledTasks(ctx context.Context, customerID string, filter Sc
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
 	var tasks []ScheduledTask
-	query := s.db.NewSelect().Model(&tasks).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID)
 	if filter.Scope.UserID != "" {
 		query = query.Where("user_id = ?", filter.Scope.UserID)
 		if len(filter.Scope.Kinds) > 0 {
@@ -374,7 +374,7 @@ func (s *Store) SaveScheduledTask(ctx context.Context, task *ScheduledTask) erro
 	if len(task.Channels) == 0 {
 		task.Channels = []string{ScheduledTaskDeliveredConversation}
 	}
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if task.State == ScheduledTaskActive {
 			if err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
 				return err
@@ -467,7 +467,7 @@ func (s *Store) DeleteScheduledTask(ctx context.Context, customerID, id string) 
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a task id are required"))
 	}
-	result, err := s.db.NewDelete().Model((*ScheduledTask)(nil)).
+	result, err := s.global.NewDelete().Model((*ScheduledTask)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Exec(ctx)
@@ -491,7 +491,7 @@ func (s *Store) DeleteScheduledTasksForSession(ctx context.Context, customerID, 
 	if customerID == "" || sessionID == "" {
 		return nil
 	}
-	_, err := s.db.NewDelete().Model((*ScheduledTask)(nil)).
+	_, err := s.global.NewDelete().Model((*ScheduledTask)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("session_id = ? OR origin_session_id = ?", sessionID, sessionID).
 		Exec(ctx)
@@ -506,7 +506,7 @@ func (s *Store) DeleteScheduledTasksForSession(ctx context.Context, customerID, 
 // claimed when this runs, and clearing the claim would fence the worker out
 // of finishing the run.
 func (s *Store) SetScheduledTaskSession(ctx context.Context, customerID, taskID, sessionID string) error {
-	_, err := s.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	_, err := s.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("session_id = ?", sessionID).
 		Set("updated_at = now()").
 		Where("customer_id = ?", customerID).
@@ -521,7 +521,7 @@ func (s *Store) SetScheduledTaskSession(ctx context.Context, customerID, taskID,
 // ActiveScheduledTaskCount is how many active tasks a user holds on one agent
 // config, which is what that config's limit counts.
 func (s *Store) ActiveScheduledTaskCount(ctx context.Context, customerID, userID, configID string) (int, error) {
-	count, err := activeScheduledTasks(ctx, s.db, customerID, userID, configID)
+	count, err := activeScheduledTasks(ctx, s.global, customerID, userID, configID)
 	return count, stack.Wrap(err)
 }
 
@@ -559,7 +559,7 @@ func (s *Store) ClaimDueScheduledTasks(ctx context.Context, limit int, lease tim
 		limit = 1
 	}
 	claimed := []ClaimedScheduledTask{}
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		now, err := databaseNow(ctx, tx)
 		if err != nil {
 			return fmt.Errorf("store: claim scheduled tasks: %w", err)
@@ -732,7 +732,7 @@ func heldRun(run ScheduledTaskRun, now time.Time) bool {
 // change that fenced it decides what happens instead.
 func (s *Store) PostponeScheduledTask(ctx context.Context, customerID, taskID, runID, claimID string, until time.Time) (bool, error) {
 	held := false
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		result, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("lease_until = ?", until).
 			Set("updated_at = now()").
@@ -768,7 +768,7 @@ func (s *Store) PostponeScheduledTask(ctx context.Context, customerID, taskID, r
 // RenewScheduledTaskLease extends a claim the worker still holds. False is a
 // claim it no longer holds: an update, pause or delete took it.
 func (s *Store) RenewScheduledTaskLease(ctx context.Context, customerID, taskID, claimID string, lease time.Duration) (bool, error) {
-	result, err := s.db.NewUpdate().Model((*ScheduledTask)(nil)).
+	result, err := s.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", taskID).
@@ -803,7 +803,7 @@ type ScheduledTaskOutcome struct {
 // update or pause: the run is still recorded, the schedule is left alone.
 func (s *Store) FinishScheduledTaskRun(ctx context.Context, customerID, runID, claimID string, outcome ScheduledTaskOutcome) (bool, error) {
 	applied := false
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var run ScheduledTaskRun
 		if err := tx.NewSelect().Model(&run).Where("id = ?", runID).Limit(1).Scan(ctx); err != nil {
 			return fmt.Errorf("store: finish scheduled task run: %w", err)
@@ -874,7 +874,7 @@ func (s *Store) InsertScheduledTaskRun(ctx context.Context, run *ScheduledTaskRu
 	if run.State == "" {
 		run.State = ScheduledTaskRunRunning
 	}
-	_, err := s.db.NewInsert().Model(run).
+	_, err := s.global.NewInsert().Model(run).
 		On("CONFLICT DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -886,7 +886,7 @@ func (s *Store) InsertScheduledTaskRun(ctx context.Context, run *ScheduledTaskRu
 // FinishManualScheduledTaskRun records the outcome of a run made by hand.
 func (s *Store) FinishManualScheduledTaskRun(ctx context.Context, runID, state, deliveredTo, sessionID, failure string) error {
 	now := time.Now().UTC()
-	update := s.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	update := s.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("state = ?", state).
 		Set("delivered_to = ?", deliveredTo).
 		Set("session_id = ?", sessionID).
@@ -909,7 +909,7 @@ func (s *Store) FinishManualScheduledTaskRun(ctx context.Context, runID, state, 
 // occurrence, so the user is not rung again. reason is then the one the run
 // records, such as how that call ended (SetScheduledTaskRunCallReason), if any.
 func (s *Store) TakeScheduledTaskRunCall(ctx context.Context, customerID, runID, sessionID string) (took bool, reason string, err error) {
-	result, err := s.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	result, err := s.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ?", sessionID).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
@@ -926,7 +926,7 @@ func (s *Store) TakeScheduledTaskRunCall(ctx context.Context, customerID, runID,
 	if affected > 0 {
 		return true, "", nil
 	}
-	err = s.db.NewSelect().Model((*ScheduledTaskRun)(nil)).
+	err = s.global.NewSelect().Model((*ScheduledTaskRun)(nil)).
 		ColumnExpr("coalesce(error, '')").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
@@ -941,7 +941,7 @@ func (s *Store) TakeScheduledTaskRunCall(ctx context.Context, customerID, runID,
 // sessionID, which it took, ended under, so a worker that takes the run over
 // records that reason, not only that a call was placed.
 func (s *Store) SetScheduledTaskRunCallReason(ctx context.Context, customerID, runID, sessionID, reason string) error {
-	_, err := s.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err := s.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("error = ?", reason).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
@@ -957,7 +957,7 @@ func (s *Store) SetScheduledTaskRunCallReason(ctx context.Context, customerID, r
 // ReleaseScheduledTaskRunCall gives back a call TakeScheduledTaskRunCall
 // took and could not place, so a later attempt may ring.
 func (s *Store) ReleaseScheduledTaskRunCall(ctx context.Context, customerID, runID, sessionID string) error {
-	_, err := s.db.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+	_, err := s.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ''").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
@@ -976,7 +976,7 @@ func (s *Store) ScheduledTaskRun(ctx context.Context, customerID, taskID, id str
 		return ScheduledTaskRun{}, stack.Wrap(errors.New("store: a customer, a task and a run id are required"))
 	}
 	var run ScheduledTaskRun
-	err := s.db.NewSelect().Model(&run).
+	err := s.global.NewSelect().Model(&run).
 		Where("customer_id = ?", customerID).
 		Where("task_id = ?", taskID).
 		Where("id = ?", id).
@@ -997,7 +997,7 @@ func (s *Store) ScheduledTaskRuns(ctx context.Context, customerID, taskID string
 		return nil, stack.Wrap(errors.New("store: a customer and a task id are required"))
 	}
 	var runs []ScheduledTaskRun
-	query := s.db.NewSelect().Model(&runs).
+	query := s.global.NewSelect().Model(&runs).
 		Where("customer_id = ?", customerID).
 		Where("task_id = ?", taskID)
 	if after != nil {
@@ -1017,7 +1017,7 @@ func (s *Store) LastScheduledTaskRunsAt(ctx context.Context, customerID string, 
 		TaskID     string    `bun:"task_id"`
 		FinishedAt time.Time `bun:"finished_at"`
 	}
-	err := s.db.NewSelect().Model((*ScheduledTaskRun)(nil)).
+	err := s.global.NewSelect().Model((*ScheduledTaskRun)(nil)).
 		Column("task_id").
 		ColumnExpr("max(finished_at) AS finished_at").
 		Where("customer_id = ?", customerID).
@@ -1042,7 +1042,7 @@ func (s *Store) LastScheduledTaskRunsAt(ctx context.Context, customerID string, 
 // and is written as scheduled_tasks_wake_idx indexes it.
 func (s *Store) NextDueScheduledTask(ctx context.Context) (time.Time, bool, error) {
 	var wake time.Time
-	err := s.db.NewSelect().Model((*ScheduledTask)(nil)).
+	err := s.global.NewSelect().Model((*ScheduledTask)(nil)).
 		ColumnExpr("GREATEST(next_run_at, lease_until)").
 		Where("state = ?", ScheduledTaskActive).
 		Where("next_run_at IS NOT NULL").
@@ -1070,7 +1070,7 @@ func (s *Store) SetUserTimezone(ctx context.Context, customerID, userID, kind, z
 		kind = UserKindAuthenticated
 	}
 	user := &User{CustomerID: customerID, ID: userID, Kind: kind, Timezone: zone, CreatedAt: time.Now().UTC()}
-	_, err := s.db.NewInsert().Model(user).
+	_, err := s.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("timezone = EXCLUDED.timezone").
 		Where("u.timezone IS DISTINCT FROM EXCLUDED.timezone").
@@ -1087,7 +1087,7 @@ func (s *Store) UserTimezone(ctx context.Context, customerID, userID string) (st
 		return "", nil
 	}
 	var user User
-	err := s.db.NewSelect().Model(&user).
+	err := s.global.NewSelect().Model(&user).
 		Column("timezone").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", userID).
@@ -1160,7 +1160,7 @@ func (s *Store) PruneScheduledTasks(ctx context.Context) (runs, tasks int64, err
 func (s *Store) pruneInBatches(ctx context.Context, batch int, query string) (int64, error) {
 	var pruned int64
 	for {
-		result, err := s.db.ExecContext(ctx, query, ScheduledTasksKept.Seconds(), batch)
+		result, err := s.global.ExecContext(ctx, query, ScheduledTasksKept.Seconds(), batch)
 		if err != nil {
 			return pruned, err
 		}
@@ -1182,7 +1182,7 @@ func (s *Store) PauseScheduledTasksForConfig(ctx context.Context, customerID, co
 	if configID == "" {
 		return nil
 	}
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var paused []string
 		err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("state = ?", ScheduledTaskPaused).

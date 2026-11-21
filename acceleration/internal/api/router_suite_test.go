@@ -161,14 +161,14 @@ func (s *RouterSuite) BeforeTest(_, _ string) {
 		return
 	}
 	t := s.T()
-	count, err := s.store.DB().NewSelect().Model((*store.ScheduledTask)(nil)).Count(context.Background())
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.ScheduledTask)(nil)).Count(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, count, "a task is left from an earlier test or run")
 	// A database that stalls past the driver's 10s read timeout fails the delete, and the next
 	// test would then fail on this one's tasks; the delete is tried again until it lands.
 	t.Cleanup(func() {
 		require.EventuallyWithT(t, func(c *assert.CollectT) {
-			_, err := s.store.DB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(context.Background())
+			_, err := s.store.GlobalDB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(context.Background())
 			assert.NoError(c, err)
 		}, time.Minute, 100*time.Millisecond, "the tasks were never deleted")
 	})
@@ -584,7 +584,7 @@ func (s *RouterSuite) SetupSuite() {
 	}
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
-	pgStore.DB().SetMaxOpenConns(suiteConnections)
+	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
@@ -595,9 +595,9 @@ func (s *RouterSuite) SetupSuite() {
 		// Only a suite's own database is emptied, never the shared one. A run killed by
 		// -timeout skips its cleanups, and the database outlives it. A queued inbound row it
 		// left is claimed once its lease lapses, before SetupTest has made the channel fakes.
-		_, err := pgStore.DB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(ctx)
+		_, err := pgStore.GlobalDB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(ctx)
 		s.Require().NoError(err)
-		_, err = pgStore.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("true").Exec(ctx)
+		_, err = pgStore.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("true").Exec(ctx)
 		s.Require().NoError(err)
 	}
 
@@ -913,7 +913,7 @@ func (s *RouterSuite) channelBridge(logger *slog.Logger) *channelbridge.Bridge {
 func (s *RouterSuite) writtenByTheInboundWorker(channel string) {
 	var providerID string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = ? AND state = 'done'", channel).Scan(&providerID) == nil
 	}, settleFor, 10*time.Millisecond, "no written row of %s", channel)
 	stored := s.bridged(channel)
@@ -946,7 +946,7 @@ func (s *RouterSuite) settled() {
 // inboundRows is how many of the test customer's queued inbound messages are in state.
 func (s *RouterSuite) inboundRows(state string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = ?", s.customerID(), state).Scan(&count))
 	return count
 }
@@ -956,7 +956,7 @@ func (s *RouterSuite) inboundRows(state string) int {
 func (s *RouterSuite) failedOnce() {
 	s.Require().Eventually(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = 'queued' AND attempts > 0", s.customerID()).Scan(&count))
 		return count > 0
 	}, settleFor, 5*time.Millisecond, "no attempt failed")
@@ -966,7 +966,7 @@ func (s *RouterSuite) failedOnce() {
 // drop. The table is in the suite's own database (database), and when names the test's
 // customer, so no other test's rows meet it.
 func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) {
-	db := s.store.DB()
+	db := s.store.GlobalDB()
 	_, err := db.ExecContext(context.Background(), "CREATE OR REPLACE FUNCTION "+name+"() RETURNS trigger AS $$ BEGIN IF "+when+" THEN "+body+
 		" END IF; RETURN COALESCE(NEW, OLD); END $$ LANGUAGE plpgsql")
 	s.Require().NoError(err)
@@ -1299,7 +1299,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	reasoner, err := llmrouter.New(llmrouter.Options{
 		Config: reasoned, Registry: reasoning, Store: s.store, Live: s.live,
 		Quota: limiter, Gate: gate, Pricer: pricer, Logger: logger,
-		Models: llmrouter.NewCustomModels(s.configs, s.sealer, false),
+		Models: llmrouter.NewCustomModels(s.store, s.sealer, false),
 		Writer: s.shippingWriter(gate, logger),
 	})
 	s.Require().NoError(err)

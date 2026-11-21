@@ -148,7 +148,7 @@ func (s *TelephonyBillingSuite) deliveries(line string) int {
 	account, err := s.store.ChannelAccount(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_deliveries WHERE account_id = ?", account.ID).Scan(&count))
 	return count
 }

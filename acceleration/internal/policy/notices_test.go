@@ -30,7 +30,7 @@ func (s *PolicySuite) streamDestination(appID string) string {
 // notices are the warnings written for the organization, oldest first.
 func (s *PolicySuite) notices(organization string) []store.BalanceNotice {
 	var written []store.BalanceNotice
-	s.Require().NoError(s.store.DB().NewSelect().Model(&written).Where("organization_id = ?", organization).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&written).Where("organization_id = ?", organization).
 		Order("created_at", "granted_micros").Scan(s.ctx))
 	return written
 }
@@ -38,7 +38,7 @@ func (s *PolicySuite) notices(organization string) []store.BalanceNotice {
 // queued is the deliveries queued for the destination, by webhook-id, with their bodies.
 func (s *PolicySuite) queued(destinationID string) map[string]balanceEvent {
 	var deliveries []store.EventDelivery
-	s.Require().NoError(s.store.DB().NewSelect().Model(&deliveries).Where("destination_id = ?", destinationID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destinationID).Scan(s.ctx))
 	bodies := make(map[string]balanceEvent, len(deliveries))
 	for _, delivery := range deliveries {
 		var event balanceEvent
@@ -163,7 +163,7 @@ func (s *PolicySuite) TestABlockedNoticeWriteDoesNotHoldUpTheBalances() {
 	s.warnable(10_000_000, enforcer)
 	// A transaction holding the table makes every warning's write wait, as a Postgres that
 	// does not answer would.
-	blocking, err := s.store.DB().BeginTx(s.ctx, nil)
+	blocking, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = blocking.Rollback() }()
 	_, err = blocking.ExecContext(s.ctx, "LOCK TABLE balance_notices IN ACCESS EXCLUSIVE MODE")

@@ -107,7 +107,7 @@ func (s *Store) ConnectorDefinition(ctx context.Context, customerID, id string, 
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 
-	return connectorDefinition(ctx, s.db, customerID, id, revision)
+	return connectorDefinition(ctx, s.global, customerID, id, revision)
 }
 
 // connectorDefinition is one revision of a definition the customer can see, read on db.
@@ -130,7 +130,7 @@ func connectorDefinition(ctx context.Context, db bun.IDB, customerID, id string,
 
 // LatestConnectorDefinition returns the newest revision of a definition the customer can see.
 func (s *Store) LatestConnectorDefinition(ctx context.Context, customerID, id string) (ConnectorDefinition, error) {
-	return latestVisibleDefinition(ctx, s.db, customerID, id)
+	return latestVisibleDefinition(ctx, s.global, customerID, id)
 }
 
 // Definitions reads the connector definitions a customer can see: a Store, on its pool.
@@ -159,7 +159,7 @@ func (s *Store) LatestBuiltinConnectorDefinition(ctx context.Context, id string)
 	if id == "" {
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: a connector id is required"))
 	}
-	definition, err := latestDefinition(ctx, s.db, ownedBy(BuiltinCustomer), id)
+	definition, err := latestDefinition(ctx, s.global, ownedBy(BuiltinCustomer), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConnectorDefinition{}, stack.Wrap(fmt.Errorf("%w: %s", ErrNoConnectorDefinition, id))
 	}
@@ -211,7 +211,7 @@ func (s *Store) ListConnectorDefinitions(ctx context.Context, customerID string,
 
 	// The newest revision first, then the text matched on it, so an older revision that
 	// matched cannot stand in for a newer one that does not.
-	latest := s.db.NewSelect().Model((*ConnectorDefinition)(nil)).
+	latest := s.global.NewSelect().Model((*ConnectorDefinition)(nil)).
 		DistinctOn("customer_id, id").
 		Apply(visibleTo(customerID)).
 		Order("customer_id", "id", "revision DESC")
@@ -220,7 +220,7 @@ func (s *Store) ListConnectorDefinitions(ctx context.Context, customerID string,
 		latest = latest.Where("(customer_id <> ?, id) > (?, ?)", BuiltinCustomer, after.Custom, after.ID)
 	}
 	var definitions []ConnectorDefinition
-	query := s.db.NewSelect().Model(&definitions).ModelTableExpr("(?) AS cd", latest)
+	query := s.global.NewSelect().Model(&definitions).ModelTableExpr("(?) AS cd", latest)
 	if filter.Text != "" {
 		escaped := likeEscaper.Replace(filter.Text)
 		// Each field on its own, so a query cannot match across the boundary of two.
@@ -246,7 +246,7 @@ func (s *Store) ListConnectorDefinitions(ctx context.Context, customerID string,
 // refuse a duplicate revision anyway; the lock is what turns that into a wait, not an error.
 func (s *Store) saveRevision(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
 	var saved ConnectorDefinition
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+manifest.ID, definitionLockSeed); err != nil {
 			return err
 		}
@@ -305,7 +305,7 @@ func (s *Store) saveRevision(ctx context.Context, customerID string, manifest co
 // that has never seen its revision, cannot make its manifest latest again. Reverting a
 // manifest is a new revision whose content is the old one.
 func (s *Store) seedBuiltin(ctx context.Context, manifest core.Manifest) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, BuiltinCustomer+"/"+manifest.ID, definitionLockSeed); err != nil {
 			return err
 		}
@@ -385,7 +385,7 @@ func markBroken(ctx context.Context, tx bun.Tx, manifest core.Manifest) error {
 // BrokenConnectorRevision is why revision of connector is marked broken, and whether it is.
 func (s *Store) BrokenConnectorRevision(ctx context.Context, connectorID string, revision int) (string, bool, error) {
 	var mark ConnectorBrokenRevision
-	err := s.db.NewSelect().Model(&mark).
+	err := s.global.NewSelect().Model(&mark).
 		Where("connector_id = ?", connectorID).
 		Where("revision = ?", revision).
 		Scan(ctx)
@@ -432,7 +432,7 @@ func (s *Store) ConnectorDefinitionStatuses(ctx context.Context, customerID stri
 		}
 	}
 	var latest []ConnectorDefinition
-	err := s.db.NewSelect().Model(&latest).
+	err := s.global.NewSelect().Model(&latest).
 		DistinctOn("cd.id").Column("id", "revision", "manifest").
 		Apply(visibleTo(customerID)).
 		Where("cd.id IN (?)", bun.In(ids)).
@@ -450,7 +450,7 @@ func (s *Store) ConnectorDefinitionStatuses(ctx context.Context, customerID stri
 		return nil, err
 	}
 	var marks []ConnectorBrokenRevision
-	err = s.db.NewSelect().Model(&marks).Where("connector_id IN (?)", bun.In(ids)).Scan(ctx)
+	err = s.global.NewSelect().Model(&marks).Where("connector_id IN (?)", bun.In(ids)).Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: broken connector revisions: %w", err))
 	}
@@ -500,7 +500,7 @@ func (s *Store) pinnedBehind(ctx context.Context, customerID string, connections
 		return nil, nil
 	}
 	var definitions []ConnectorDefinition
-	err := s.db.NewSelect().Model(&definitions).
+	err := s.global.NewSelect().Model(&definitions).
 		Column("id", "revision", "manifest").
 		Apply(visibleTo(customerID)).
 		Where("cd.id IN (?)", bun.In(ids)).
@@ -570,7 +570,7 @@ func (s *Store) DeleteConnectorDefinition(ctx context.Context, customerID, id st
 		return DeletedConnector{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	var deleted DeletedConnector
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+id, definitionLockSeed); err != nil {
 			return err
 		}
@@ -790,7 +790,7 @@ func (s *Store) PutConnectorConnectionClient(ctx context.Context, client *Connec
 		return stack.Wrap(errors.New("store: a connection client needs a connection and a client id"))
 	}
 	client.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	_, err := s.db.NewInsert().Model(client).
+	_, err := s.global.NewInsert().Model(client).
 		On("CONFLICT (connection_id) DO UPDATE").
 		Set("registration = EXCLUDED.registration, client_id = EXCLUDED.client_id, updated_at = EXCLUDED.updated_at").
 		Exec(ctx)
@@ -808,7 +808,7 @@ func (s *Store) ConnectorConnectionClients(ctx context.Context, connectionIDs []
 		return byConnection, nil
 	}
 	clients := []ConnectorConnectionClient{}
-	if err := s.db.NewSelect().Model(&clients).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
+	if err := s.global.NewSelect().Model(&clients).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connection clients: %w", err))
 	}
 	for _, client := range clients {
@@ -823,7 +823,7 @@ func (s *Store) ConnectorConnectionClients(ctx context.Context, connectionIDs []
 func (s *Store) GrantedConnectorConnectionsOfClient(ctx context.Context, customerID, connectorID string,
 	registration core.ClientRegistrationMethod, clientID string) ([]ConnectorConnection, error) {
 	var connections []ConnectorConnection
-	err := s.db.NewSelect().Model(&connections).
+	err := s.global.NewSelect().Model(&connections).
 		Join("JOIN connector_connection_clients AS ccc ON ccc.connection_id = cc.id").
 		Where("cc.customer_id = ?", customerID).
 		Where("cc.connector_id = ?", connectorID).
@@ -866,7 +866,7 @@ func (s *Store) PutConnectorConnectionValidation(ctx context.Context, validation
 	if validation.ConnectionID == "" || validation.Status == "" || validation.CheckedAt.IsZero() {
 		return stack.Wrap(errors.New("store: a connection validation needs a connection, a status and a time"))
 	}
-	_, err := s.db.NewInsert().Model(validation).
+	_, err := s.global.NewInsert().Model(validation).
 		On("CONFLICT (connection_id) DO UPDATE").
 		Set("revision = EXCLUDED.revision, status = EXCLUDED.status, code = EXCLUDED.code, error = EXCLUDED.error, checked_at = EXCLUDED.checked_at").
 		Where("(ccv.revision, ccv.checked_at) <= (EXCLUDED.revision, EXCLUDED.checked_at)").
@@ -885,7 +885,7 @@ func (s *Store) ConnectorConnectionValidations(ctx context.Context, connectionID
 		return byConnection, nil
 	}
 	validations := []ConnectorConnectionValidation{}
-	if err := s.db.NewSelect().Model(&validations).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
+	if err := s.global.NewSelect().Model(&validations).Where("connection_id IN (?)", bun.In(connectionIDs)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connection validations: %w", err))
 	}
 	for _, validation := range validations {

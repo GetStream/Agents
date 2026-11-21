@@ -26,7 +26,7 @@ func (s *StoreSuite) router() *Store {
 // objsubid 2 (https://www.postgresql.org/docs/current/view-pg-locks.html).
 func (s *StoreSuite) credentialLocks(granted bool) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT count(*) FROM pg_locks
 WHERE locktype = 'advisory' AND classid = ? AND objsubid = 2 AND granted = ?
   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
@@ -332,7 +332,7 @@ func (s *StoreSuite) TestAWriteThatSkippedTheLockCannotBeOverwrittenByTheLockedC
 		func(locked *ConnectorConnection, _ func() error) (bool, error) {
 			// A writer that does not take the lock, which no store method is: only the
 			// revision condition stands between it and the callback.
-			_, err := s.store.DB().ExecContext(s.ctx,
+			_, err := s.store.GlobalDB().ExecContext(s.ctx,
 				"UPDATE connector_connections SET revision = 2 WHERE id = ?", connection.ID)
 			s.Require().NoError(err)
 			locked.Revision++
@@ -405,7 +405,7 @@ func (s *StoreSuite) assertTheWaitEnded(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(false) == 0 }, 2*time.Second, 10*time.Millisecond,
 		"the server stops waiting for the lock on behalf of a caller that gave up")
 	s.Equal(1, s.credentialLocks(true), "the holder keeps the lock")
-	s.Eventually(func() bool { return waiter.DB().Stats().InUse == 0 }, 2*time.Second, 10*time.Millisecond,
+	s.Eventually(func() bool { return waiter.GlobalDB().Stats().InUse == 0 }, 2*time.Second, 10*time.Millisecond,
 		"the waiter's connection goes back")
 }
 
@@ -414,5 +414,5 @@ func (s *StoreSuite) assertTheWaitEnded(waiter *Store) {
 func (s *StoreSuite) assertNothingIsHeld(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(true) == 0 && s.credentialLocks(false) == 0 },
 		2*time.Second, 10*time.Millisecond, "no credential lock is left behind")
-	s.Zero(waiter.DB().Stats().InUse)
+	s.Zero(waiter.GlobalDB().Stats().InUse)
 }

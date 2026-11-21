@@ -23,7 +23,7 @@ func (s *Store) ChannelAccounts(ctx context.Context, customerID string) ([]Chann
 	}
 
 	var accounts []ChannelAccount
-	err := s.db.NewSelect().Model(&accounts).
+	err := s.global.NewSelect().Model(&accounts).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Order("created_at").
@@ -41,7 +41,7 @@ func (s *Store) ChannelAccount(ctx context.Context, customerID, kind, e164 strin
 	}
 
 	var account ChannelAccount
-	err := s.db.NewSelect().Model(&account).
+	err := s.global.NewSelect().Model(&account).
 		Where("customer_id = ?", customerID).
 		Where("kind = ?", kind).
 		Where("e164 = ?", e164).
@@ -64,7 +64,7 @@ func (s *Store) ChannelAccountByToken(ctx context.Context, token string) (Channe
 	}
 
 	var account ChannelAccount
-	err := s.db.NewSelect().Model(&account).
+	err := s.global.NewSelect().Model(&account).
 		Where("token = ?", token).
 		Where("deleted_at IS NULL").
 		Limit(1).
@@ -92,7 +92,7 @@ func (s *Store) SaveChannelAccount(ctx context.Context, account *ChannelAccount)
 	case errors.Is(err, ErrUnknownChannelAccount):
 		account.ID = newID()
 		account.CreatedAt = now
-		if _, err := s.db.NewInsert().Model(account).Exec(ctx); err != nil {
+		if _, err := s.global.NewInsert().Model(account).Exec(ctx); err != nil {
 			return stack.Wrap(fmt.Errorf("store: connect channel account: %w", err))
 		}
 		return nil
@@ -103,7 +103,7 @@ func (s *Store) SaveChannelAccount(ctx context.Context, account *ChannelAccount)
 	account.ID = existing.ID
 	account.Token = existing.Token
 	account.CreatedAt = existing.CreatedAt
-	_, err = s.db.NewUpdate().Model(account).
+	_, err = s.global.NewUpdate().Model(account).
 		Column("account_id", "secrets_sealed", "kek_version", "updated_at").
 		Where("id = ?", account.ID).
 		Where("deleted_at IS NULL").
@@ -117,7 +117,7 @@ func (s *Store) SaveChannelAccount(ctx context.Context, account *ChannelAccount)
 // DeleteChannelAccount disconnects a line, so deliveries to it are refused. The credentials
 // go with it: a line nobody answers on has no use for them.
 func (s *Store) DeleteChannelAccount(ctx context.Context, customerID, kind, e164 string) error {
-	result, err := s.db.NewUpdate().Model((*ChannelAccount)(nil)).
+	result, err := s.global.NewUpdate().Model((*ChannelAccount)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Set("secrets_sealed = NULL").
 		Where("customer_id = ?", customerID).
@@ -149,7 +149,7 @@ func (s *Store) ConfigOnChannel(ctx context.Context, customerID, kind, number st
 	}
 
 	var config AgentConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("customer_id = ?", customerID).
 		Where("channels -> ? ->> 'number' = ?", kind, number).
 		Where("deleted_at IS NULL").
@@ -174,7 +174,7 @@ func (s *Store) ChannelIdentity(ctx context.Context, customerID, configID, kind,
 	}
 
 	var identity ChannelIdentity
-	err := s.db.NewSelect().Model(&identity).
+	err := s.global.NewSelect().Model(&identity).
 		Where("customer_id = ?", customerID).
 		Where("config_id = ?", configID).
 		Where("kind = ?", kind).
@@ -200,7 +200,7 @@ func (s *Store) ChannelIdentityByUser(ctx context.Context, customerID, configID,
 	}
 
 	var identity ChannelIdentity
-	err := s.db.NewSelect().Model(&identity).
+	err := s.global.NewSelect().Model(&identity).
 		Where("customer_id = ?", customerID).
 		Where("config_id = ?", configID).
 		Where("kind = ?", kind).
@@ -230,7 +230,7 @@ func (s *Store) SaveChannelIdentity(ctx context.Context, identity *ChannelIdenti
 		identity.CreatedAt = now
 	}
 
-	_, err := s.db.NewInsert().Model(identity).
+	_, err := s.global.NewInsert().Model(identity).
 		On("CONFLICT (customer_id, config_id, kind, address) DO UPDATE").
 		Set("user_id = EXCLUDED.user_id").
 		Set("conversation_id = EXCLUDED.conversation_id").
@@ -249,7 +249,7 @@ func (s *Store) SaveChannelLink(ctx context.Context, link *ChannelLink) error {
 		return stack.Wrap(errors.New("store: a code, a customer, an agent and a user are required"))
 	}
 	link.CreatedAt = time.Now().UTC()
-	if _, err := s.db.NewInsert().Model(link).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(link).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: save channel link: %w", err))
 	}
 	return nil
@@ -264,7 +264,7 @@ func (s *Store) ClaimChannelLink(ctx context.Context, customerID, code string) (
 
 	now := time.Now().UTC()
 	var link ChannelLink
-	result, err := s.db.NewUpdate().Model(&link).
+	result, err := s.global.NewUpdate().Model(&link).
 		Set("used_at = ?", now).
 		Where("code = ?", code).
 		Where("customer_id = ?", customerID).
@@ -304,7 +304,7 @@ type channelDelivery struct {
 // already taken, which a provider retrying a slow delivery sends.
 func (s *Store) ClaimChannelMessage(ctx context.Context, accountID, messageID, from string) (bool, error) {
 	delivery := channelDelivery{AccountID: accountID, MessageID: messageID, ReceivedAt: time.Now().UTC(), FromAddress: from}
-	result, err := s.db.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
+	result, err := s.global.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, fmt.Errorf("store: claim channel message: %w", err)
 	}
@@ -319,7 +319,7 @@ func (s *Store) ClaimChannelMessage(ctx context.Context, accountID, messageID, f
 // they never have. WhatsApp's window for writing first is counted from it.
 func (s *Store) LastChannelMessageAt(ctx context.Context, accountID, from string) (time.Time, error) {
 	var received time.Time
-	err := s.db.NewSelect().Model((*channelDelivery)(nil)).
+	err := s.global.NewSelect().Model((*channelDelivery)(nil)).
 		Column("received_at").
 		Where("account_id = ? AND from_address = ?", accountID, from).
 		OrderExpr("received_at DESC").

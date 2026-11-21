@@ -88,12 +88,12 @@ func (s *RouterStartSuite) TestAStartingRouterPrunesAndRedactsWhatIsPastItsReten
 	s.T().Cleanup(func() {
 		s.NoError(s.db.DeleteScheduledTask(context.Background(), customer, task.ID))
 	})
-	_, err := s.db.DB().ExecContext(s.ctx, `
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, finished_at)
 VALUES (?, ?, ?, now() - interval '91 days', 'schedule', 'delivered', now() - make_interval(secs => ?))`,
 		uuid.NewString(), task.ID, customer, (store.ScheduledTasksKept + 24*time.Hour).Seconds())
 	s.Require().NoError(err)
-	_, err = s.db.DB().ExecContext(s.ctx, `
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO data_changes (customer_id, table_name, op, key, at)
 VALUES (?, 'agent_configs', 'insert', '{}', now() - make_interval(secs => ?))`,
 		customer, (s.settings.DataMove.Retention + 24*time.Hour).Seconds())
@@ -112,7 +112,7 @@ VALUES (?, 'agent_configs', 'insert', '{}', now() - make_interval(secs => ?))`,
 	}}))
 	left := func(query string) int {
 		var n int
-		s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, query, customer).Scan(&n))
+		s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, query, customer).Scan(&n))
 		return n
 	}
 	const (
@@ -210,12 +210,12 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 	}
 	s.Require().NoError(s.db.InsertPhoneCall(s.ctx, &call))
 	s.T().Cleanup(func() {
-		_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM phone_calls WHERE id = ?", call.ID)
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM phone_calls WHERE id = ?", call.ID)
 		s.NoError(err)
 	})
 	retired := func() bool {
 		var gone bool
-		err := s.db.DB().QueryRowContext(s.ctx, "SELECT token IS NULL FROM phone_calls WHERE id = ?", call.ID).Scan(&gone)
+		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT token IS NULL FROM phone_calls WHERE id = ?", call.ID).Scan(&gone)
 		return err == nil && gone
 	}
 
@@ -251,14 +251,14 @@ func (s *RouterStartSuite) TestAStartingRouterClosesAnIdleEpisode() {
 	s.Require().NoError(err)
 	// The episode's episode_activity row goes with it (ON DELETE CASCADE).
 	s.T().Cleanup(func() {
-		_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM episodes WHERE id = ?", episode.ID)
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM episodes WHERE id = ?", episode.ID)
 		s.NoError(err)
-		_, err = s.db.DB().ExecContext(context.Background(), "DELETE FROM contact_map WHERE id = ?", contact.ID)
+		_, err = s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM contact_map WHERE id = ?", contact.ID)
 		s.NoError(err)
 	})
 	closed := func() bool {
 		var status string
-		err := s.db.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", episode.ID).Scan(&status)
+		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", episode.ID).Scan(&status)
 		return err == nil && status != "in_progress"
 	}
 
@@ -286,7 +286,7 @@ func (s *RouterStartSuite) TestAStartingRouterEndsALegLeftRingingUntilItStops() 
 		s.Require().NoError(err)
 		s.Require().True(opened)
 		s.T().Cleanup(func() {
-			_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM call_legs WHERE id = ?", leg.ID)
+			_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM call_legs WHERE id = ?", leg.ID)
 			s.NoError(err)
 		})
 		return leg.ID
@@ -294,7 +294,7 @@ func (s *RouterStartSuite) TestAStartingRouterEndsALegLeftRingingUntilItStops() 
 	ended := func(id int64) func() bool {
 		return func() bool {
 			var reason string
-			err := s.db.DB().QueryRowContext(s.ctx, "SELECT end_reason FROM call_legs WHERE id = ? AND ended_at IS NOT NULL", id).Scan(&reason)
+			err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT end_reason FROM call_legs WHERE id = ? AND ended_at IS NOT NULL", id).Scan(&reason)
 			return err == nil && reason == store.LegUnanswered
 		}
 	}
@@ -338,7 +338,7 @@ func (s *RouterStartSuite) TestAStartingRouterAsksTheVendorAfterItsCampaignsUnti
 		s.Require().NoError(s.db.CreateUseCase(s.ctx, &useCase))
 		// Its review log goes with it (ON DELETE CASCADE).
 		s.T().Cleanup(func() {
-			_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM dlc_use_cases WHERE id = ?", useCase.ID)
+			_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM dlc_use_cases WHERE id = ?", useCase.ID)
 			s.NoError(err)
 		})
 		return useCase.ID
@@ -346,7 +346,7 @@ func (s *RouterStartSuite) TestAStartingRouterAsksTheVendorAfterItsCampaignsUnti
 	refused := func(id string) func() bool {
 		return func() bool {
 			var status string
-			err := s.db.DB().QueryRowContext(s.ctx, "SELECT status FROM dlc_use_cases WHERE id = ?", id).Scan(&status)
+			err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM dlc_use_cases WHERE id = ?", id).Scan(&status)
 			return err == nil && status == dlc.VendorRejected
 		}
 	}
@@ -582,7 +582,7 @@ func (s *RouterStartSuite) TestARunningRouterCountsAnAppsRequestAndWritesItWhenI
 	s.Require().NoError(stop())
 
 	var requests int64
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT COALESCE(sum(requests), 0) FROM customer_activity WHERE app_id = ? AND area = 'agent_setup' AND client = ?",
 		customer, store.AuditSourceCLI).Scan(&requests))
 	s.Equal(int64(1), requests)

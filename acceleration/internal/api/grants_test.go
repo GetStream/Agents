@@ -187,7 +187,7 @@ func (s *LimitsSuite) TestAnExpiredGrantCannotBeUnrevoked() {
 	s.create(map[string]any{"subject": "organization", "interval": "monthly", "limit_micros": 5})
 	made := s.grant(map[string]any{"subject": "organization", "amount_micros": 5, "expires_at": time.Now().Add(time.Hour), "reason": "x"})
 	s.revoke(made.Id)
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE limit_grants SET created_at = now() - interval '2 hours', "+
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE limit_grants SET created_at = now() - interval '2 hours', "+
 		"expires_at = now() - interval '1 hour' WHERE id = ?", made.Id)
 	s.Require().NoError(err)
 

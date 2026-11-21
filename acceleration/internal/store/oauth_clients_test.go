@@ -74,7 +74,7 @@ func (s *StoreSuite) TestPuttingAnOAuthClientAgainReplacesItsOneRow() {
 	s.True(first.CreatedAt.Equal(found.CreatedAt), "created once")
 	s.True(found.UpdatedAt.After(first.UpdatedAt))
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_oauth_clients").Scan(&rows))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_oauth_clients").Scan(&rows))
 	s.Equal(1, rows)
 }
 
@@ -235,7 +235,7 @@ func (s *StoreSuite) TestTwoRegistrationsRacingForOneAppAndConnectorStoreOneReco
 	}
 	s.Equal(1, won)
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_oauth_clients").Scan(&rows))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_oauth_clients").Scan(&rows))
 	s.Equal(1, rows)
 }
 
@@ -325,7 +325,7 @@ func (s *StoreSuite) TestRecordsWithoutAProviderAppDoNotCollide() {
 	s.oauthClient("globex-app", "acme_chat", nil)
 
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_oauth_clients WHERE provider_app_id = ''").Scan(&rows))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_oauth_clients WHERE provider_app_id = ''").Scan(&rows))
 	s.Equal(2, rows)
 }
 
@@ -350,7 +350,7 @@ func (s *StoreSuite) TestARecordMadeInTheDeploymentsAppHasNoPin() {
 	s.oauthClient("acme-app", "acme_chat", nil)
 
 	var pinned bool
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT stream_app_pk IS NOT NULL FROM connector_oauth_clients WHERE customer_id = 'acme-app'").Scan(&pinned))
 	s.False(pinned, "NULL is the deployment's own app, as on every other pinned table")
 }
@@ -406,7 +406,7 @@ func (s *StoreSuite) TestARecordWithNeitherAClientIDNorASigningSecretIsRefused()
 // The CHECK holds what the store checks for a writer that skips it, such as a later
 // migration's backfill (20261009130000_connector_oauth_clients_provider_app_only.sql).
 func (s *StoreSuite) TestTheTableRefusesARowWithNeitherAClientIDNorASigningSecret() {
-	_, err := s.store.DB().ExecContext(s.ctx, `INSERT INTO connector_oauth_clients
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO connector_oauth_clients
     (customer_id, connector_id, registration, client_id, provider_app_id) VALUES (?, 'acme_line', 'customer', '', ?)`,
 		"acme-"+newID(), "line-"+newID())
 

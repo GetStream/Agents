@@ -29,7 +29,7 @@ func (s *Store) TakeChatChannelTurn(ctx context.Context, app int64, cid, holder 
 	if cid == "" || holder == "" {
 		return false, stack.Wrap(errors.New("store: a channel and a holder are required"))
 	}
-	result, err := s.db.NewInsert().Model(&chatChannelTurn{StreamAppPK: app, CID: cid, TurnHolder: holder, TurnUntil: until.UTC()}).
+	result, err := s.global.NewInsert().Model(&chatChannelTurn{StreamAppPK: app, CID: cid, TurnHolder: holder, TurnUntil: until.UTC()}).
 		On("CONFLICT (stream_app_pk, cid) DO UPDATE").
 		Set("turn_holder = EXCLUDED.turn_holder").
 		Set("turn_until = EXCLUDED.turn_until").
@@ -48,7 +48,7 @@ func (s *Store) TakeChatChannelTurn(ctx context.Context, app int64, cid, holder 
 // ReleaseChatChannelTurn ends holder's lease on a channel's turn, so the next turn need not
 // wait for it to run out. A lease another holder took since is left alone.
 func (s *Store) ReleaseChatChannelTurn(ctx context.Context, app int64, cid, holder string) error {
-	_, err := s.db.NewDelete().Model((*chatChannelTurn)(nil)).
+	_, err := s.global.NewDelete().Model((*chatChannelTurn)(nil)).
 		Where("stream_app_pk = ? AND cid = ? AND turn_holder = ?", app, cid, holder).
 		Exec(ctx)
 	return stack.Wrap(err)

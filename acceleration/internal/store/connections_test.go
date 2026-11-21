@@ -51,7 +51,7 @@ func (s *StoreSuite) attempt(connection ConnectorConnection, state string) Conne
 
 // expire moves an attempt's expiry into the past, which no caller can ask for.
 func (s *StoreSuite) expire(id string) {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE connector_authorization_attempts SET expires_at = now() - interval '1 second' WHERE id = ?", id)
 	s.Require().NoError(err)
 }
@@ -61,7 +61,7 @@ func (s *StoreSuite) expire(id string) {
 func (s *StoreSuite) bind(customerID, bindings string) string {
 	config := &AgentConfig{CustomerID: customerID, Name: "agent-" + newID()}
 	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET connectors = ?::jsonb WHERE id = ?", bindings, config.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET connectors = ?::jsonb WHERE id = ?", bindings, config.ID)
 	s.Require().NoError(err)
 	return config.ID
 }
@@ -74,7 +74,7 @@ func fixedBinding(connectionID string) string {
 // insertRaw writes a connection row the way a writer that skips the store would, such as a
 // data move's import, so only the database's own rules stand in its way.
 func (s *StoreSuite) insertRaw(ownerType, ownerID string) error {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_connections (id, customer_id, connector_id, definition_revision, owner_type, owner_id, auth_scheme)"+
 			" VALUES (?, 'acme-app', 'acme', 1, ?, ?, 'test_key')", newID(), ownerType, ownerID)
 	return err
@@ -115,12 +115,12 @@ func (s *StoreSuite) TestATLSSchemeIsStoredBesideTheAuthScheme() {
 	s.Equal("test_mtls", found.TLSScheme)
 
 	var stored *string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT tls_scheme FROM connector_connections WHERE id = ?", created.ID).Scan(&stored))
 	s.Require().NotNil(stored)
 
 	plain := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT tls_scheme FROM connector_connections WHERE id = ?", plain.ID).Scan(&stored))
 	s.Nil(stored, "no TLS scheme is NULL, not an empty name")
 }
@@ -354,7 +354,7 @@ func (s *StoreSuite) TestAnUnforcedDeleteOfAMissingConnectionIsNotFound() {
 func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt() {
 	connection := s.connection("acme-app", nil)
 	locker := s.router()
-	held, err := locker.DB().BeginTx(s.ctx, nil)
+	held, err := locker.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // after the commit below there is nothing to roll back
 	_, err = held.ExecContext(s.ctx, "LOCK TABLE connector_connections IN SHARE MODE")
@@ -378,7 +378,7 @@ func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt(
 // (https://www.postgresql.org/docs/current/view-pg-locks.html).
 func (s *StoreSuite) waitingForTable(table string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT count(*) FROM pg_locks
 WHERE locktype = 'relation' AND relation = ?::regclass AND NOT granted
   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`, table).Scan(&count))
@@ -390,7 +390,7 @@ WHERE locktype = 'relation' AND relation = ?::regclass AND NOT granted
 // https://www.postgresql.org/docs/current/monitoring-stats.html#WAIT-EVENT-TABLE).
 func (s *StoreSuite) waitingForALock() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&count))
 	return count
 }
@@ -398,7 +398,7 @@ SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wai
 // begin opens a transaction on a router of its own, rolled back when the test ends unless it
 // was committed.
 func (s *StoreSuite) begin() bun.Tx {
-	held, err := s.router().DB().BeginTx(s.ctx, nil)
+	held, err := s.router().GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = held.Rollback() })
 	return held
@@ -527,7 +527,7 @@ func (s *StoreSuite) TestABindInProgressDoesNotHoldUpACredentialSave() {
 func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 	connection := s.connection("acme-app", nil)
 	// The revisioned save that writes credentials is T8's; this is the state it leaves.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE connector_connections SET credentials_sealed = 'sealed credentials', credentials_kek_version = 1, status = ?, expires_at = now() WHERE id = ?",
 		ConnectionConnected, connection.ID)
 	s.Require().NoError(err)
@@ -538,7 +538,7 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 	var version int
 	var status string
 	var expires *time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT credentials_sealed, credentials_kek_version, status, expires_at FROM connector_connections WHERE id = ?",
 		connection.ID).Scan(&sealed, &version, &status, &expires))
 	s.Empty(sealed)
@@ -650,7 +650,7 @@ func (s *StoreSuite) TestTheStateItselfIsNotStored() {
 	s.attempt(s.connection("acme-app", nil), "bearer-state")
 
 	var stored int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_authorization_attempts WHERE to_jsonb(connector_authorization_attempts)::text LIKE '%bearer-state%'").Scan(&stored))
 	s.Zero(stored)
 }
@@ -695,7 +695,7 @@ func (s *StoreSuite) TestCreatingAnAttemptDeletesOnlyTheCustomersExpiredOnes() {
 	fresh := s.attempt(mine, "new")
 
 	var left []string
-	s.Require().NoError(s.store.DB().NewSelect().Table("connector_authorization_attempts").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("connector_authorization_attempts").
 		Column("id").Scan(s.ctx, &left))
 	s.ElementsMatch([]string{open.ID, theirsExpired.ID, fresh.ID}, left,
 		"another customer's expired attempt waits for that customer's next one")
@@ -1181,7 +1181,7 @@ func (s *StoreSuite) TestAUsersGrantedConnectionsAreHerLiveOnesThatHoldCredentia
 // deletedKeepingCredentials marks connection deleted and leaves its credentials, which no
 // delete does: a row a query must leave out for being deleted alone.
 func (s *StoreSuite) deletedKeepingCredentials(connection ConnectorConnection) {
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE connector_connections SET deleted_at = now() WHERE id = ?", connection.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET deleted_at = now() WHERE id = ?", connection.ID)
 	s.Require().NoError(err)
 }
 

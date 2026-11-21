@@ -72,7 +72,7 @@ func (s *Store) AddConnectionEventSubscription(ctx context.Context, sub *Connect
 	if sub.Arguments == nil {
 		sub.Arguments = map[string]any{}
 	}
-	result, err := s.db.NewInsert().Model(sub).
+	result, err := s.global.NewInsert().Model(sub).
 		On("CONFLICT (connection_id, config_id, binding, key) DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -91,7 +91,7 @@ func (s *Store) ConnectionEventSubscriptionByToken(ctx context.Context, token st
 		return ConnectionEventSubscription{}, ErrNoConnectionEventSubscription
 	}
 	var sub ConnectionEventSubscription
-	err := s.db.NewSelect().Model(&sub).Where("token = ?", token).Limit(1).Scan(ctx)
+	err := s.global.NewSelect().Model(&sub).Where("token = ?", token).Limit(1).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConnectionEventSubscription{}, ErrNoConnectionEventSubscription
 	}
@@ -105,7 +105,7 @@ func (s *Store) ConnectionEventSubscriptionByToken(ctx context.Context, token st
 // (its Key) on a connection.
 func (s *Store) ConnectionEventSubscriptionOf(ctx context.Context, connectionID, configID, binding, key string) (ConnectionEventSubscription, error) {
 	var sub ConnectionEventSubscription
-	err := s.db.NewSelect().Model(&sub).
+	err := s.global.NewSelect().Model(&sub).
 		Where("connection_id = ?", connectionID).
 		Where("config_id = ?", configID).
 		Where("binding = ?", binding).
@@ -123,7 +123,7 @@ func (s *Store) ConnectionEventSubscriptionOf(ctx context.Context, connectionID,
 // DueOtherConnectionEventSubscriptions makes due at now every subscription of a connection for
 // an event (its Key) but the one with id.
 func (s *Store) DueOtherConnectionEventSubscriptions(ctx context.Context, connectionID, key, id string, now time.Time) error {
-	_, err := s.db.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
+	_, err := s.global.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
 		Set("next_attempt_at = ?", now.UTC()).
 		Where("connection_id = ?", connectionID).
 		Where("key = ?", key).
@@ -138,7 +138,7 @@ func (s *Store) DueOtherConnectionEventSubscriptions(ctx context.Context, connec
 // DueConnectionEventSubscription makes one subscription due at now, so the next worker to look
 // asks the server for it again, or drops it.
 func (s *Store) DueConnectionEventSubscription(ctx context.Context, id string, now time.Time) error {
-	_, err := s.db.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
+	_, err := s.global.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
 		Set("next_attempt_at = ?", now.UTC()).
 		Where("id = ?", id).
 		Exec(ctx)
@@ -151,7 +151,7 @@ func (s *Store) DueConnectionEventSubscription(ctx context.Context, id string, n
 // DueConnectionEventSubscriptions makes every subscription of a connection due at now, so the
 // next worker to look asks the server for each again, or drops it.
 func (s *Store) DueConnectionEventSubscriptions(ctx context.Context, customerID, connectionID string, now time.Time) error {
-	_, err := s.db.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
+	_, err := s.global.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
 		Set("next_attempt_at = ?", now.UTC()).
 		Where("customer_id = ?", customerID).
 		Where("connection_id = ?", connectionID).
@@ -193,7 +193,7 @@ func (s *Store) claimConnectionEventSubscriptions(ctx context.Context, query str
 	if limit < 1 {
 		return claimed, nil
 	}
-	err := s.db.NewRaw(query, now.UTC(), limit, leaseUntil.UTC(), now.UTC()).Scan(ctx, &claimed)
+	err := s.global.NewRaw(query, now.UTC(), limit, leaseUntil.UTC(), now.UTC()).Scan(ctx, &claimed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim connection event subscriptions: %w", err))
 	}
@@ -204,7 +204,7 @@ func (s *Store) claimConnectionEventSubscriptions(ctx context.Context, query str
 // found is false when none is ever due: there are no subscriptions, or none expires.
 func (s *Store) NextConnectionEventSubscriptionAt(ctx context.Context) (next time.Time, found bool, err error) {
 	var at sql.NullTime
-	if err := s.db.NewSelect().Model((*ConnectionEventSubscription)(nil)).ColumnExpr("min(next_attempt_at)").Scan(ctx, &at); err != nil {
+	if err := s.global.NewSelect().Model((*ConnectionEventSubscription)(nil)).ColumnExpr("min(next_attempt_at)").Scan(ctx, &at); err != nil {
 		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: next connection event subscription: %w", err))
 	}
 	return at.Time, at.Valid, nil
@@ -213,7 +213,7 @@ func (s *Store) NextConnectionEventSubscriptionAt(ctx context.Context) (next tim
 // SaveConnectionEventSubscription writes what asking the server for a subscription came to.
 func (s *Store) SaveConnectionEventSubscription(ctx context.Context, sub *ConnectionEventSubscription) error {
 	sub.UpdatedAt = time.Now().UTC()
-	_, err := s.db.NewUpdate().Model(sub).
+	_, err := s.global.NewUpdate().Model(sub).
 		Column("remote_id", "refresh_before", "status", "error", "next_attempt_at", "failures", "updated_at").
 		Where("id = ?", sub.ID).
 		Exec(ctx)
@@ -226,7 +226,7 @@ func (s *Store) SaveConnectionEventSubscription(ctx context.Context, sub *Connec
 // DeleteConnectionEventSubscription drops a subscription, so deliveries to its token are
 // refused. One already gone is not an error.
 func (s *Store) DeleteConnectionEventSubscription(ctx context.Context, id string) error {
-	_, err := s.db.NewDelete().Model((*ConnectionEventSubscription)(nil)).Where("id = ?", id).Exec(ctx)
+	_, err := s.global.NewDelete().Model((*ConnectionEventSubscription)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete connection event subscription: %w", err))
 	}
@@ -235,7 +235,7 @@ func (s *Store) DeleteConnectionEventSubscription(ctx context.Context, id string
 
 // DeleteConnectionEventSubscriptions drops every subscription of a connection.
 func (s *Store) DeleteConnectionEventSubscriptions(ctx context.Context, customerID, connectionID string) error {
-	_, err := s.db.NewDelete().Model((*ConnectionEventSubscription)(nil)).
+	_, err := s.global.NewDelete().Model((*ConnectionEventSubscription)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("connection_id = ?", connectionID).
 		Exec(ctx)
@@ -258,7 +258,7 @@ type connectionEventDelivery struct {
 // is the first time: a retried delivery of the same event id is not.
 func (s *Store) ClaimConnectionEvent(ctx context.Context, subscriptionID, eventID string) (bool, error) {
 	delivery := connectionEventDelivery{SubscriptionID: subscriptionID, EventID: eventID, ReceivedAt: time.Now().UTC()}
-	result, err := s.db.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
+	result, err := s.global.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: claim connection event: %w", err))
 	}

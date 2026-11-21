@@ -1085,7 +1085,7 @@ func (s *Store) RecordUser(ctx context.Context, user *User) error {
 	// coming back rather than a conflict. A row already here is left alone: a guest who
 	// signed up is claimed rather than overwritten, and overwriting would lose the kind
 	// the claim path reads.
-	_, err := s.db.NewInsert().Model(user).
+	_, err := s.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -1104,7 +1104,7 @@ func (s *Store) RecordAccount(ctx context.Context, customerID, userID string) er
 		CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated,
 		Custom: map[string]any{}, CreatedAt: time.Now().UTC(),
 	}
-	_, err := s.db.NewInsert().Model(user).
+	_, err := s.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("kind = EXCLUDED.kind").
 		Where("u.kind = ?", UserKindGuest).
@@ -1126,7 +1126,7 @@ func (s *Store) SetUserEmail(ctx context.Context, customerID, userID, email stri
 		return nil
 	}
 	user := &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated, Email: email, CreatedAt: time.Now().UTC()}
-	_, err := s.db.NewInsert().Model(user).
+	_, err := s.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("email = EXCLUDED.email").
 		Where("u.email IS DISTINCT FROM EXCLUDED.email").
@@ -1140,7 +1140,7 @@ func (s *Store) SetUserEmail(ctx context.Context, customerID, userID, email stri
 // UserEmail returns the address last recorded for a user, or empty.
 func (s *Store) UserEmail(ctx context.Context, customerID, userID string) (string, error) {
 	var user User
-	err := s.db.NewSelect().Model(&user).
+	err := s.global.NewSelect().Model(&user).
 		Column("email").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", userID).
@@ -1170,7 +1170,7 @@ func (s *Store) Guest(ctx context.Context, customerID, id string) (User, error) 
 	}
 
 	var guest User
-	err := s.db.NewSelect().Model(&guest).
+	err := s.global.NewSelect().Model(&guest).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("kind = ?", UserKindGuest).
@@ -1236,7 +1236,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 
 	if !s.Sharded() && len(s.peers) == 0 {
 		var moved int64
-		err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if err := claimGuest(ctx, tx, customerID, guestID, userID, now, false); err != nil {
 				return err
 			}
@@ -1259,7 +1259,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return moved, nil
 	}
 
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := claimGuest(ctx, tx, customerID, guestID, userID, now, true); err != nil {
 			return err
 		}

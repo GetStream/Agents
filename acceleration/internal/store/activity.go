@@ -70,7 +70,7 @@ func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) erro
 
 	// One transaction, so a failed write wrote nothing and the caller can keep the deltas
 	// for its next try without counting any of them twice.
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for start := 0; start < len(order); start += activityBatch {
 			if err := writeActivity(ctx, tx, folded, order[start:min(start+activityBatch, len(order))]); err != nil {
 				return err
@@ -161,7 +161,7 @@ type ActivityArea struct {
 // and client. The record keeps days, so the day since falls on is read whole.
 func (s *Store) ActivityAreas(ctx context.Context, apps []string, since time.Time) ([]ActivityArea, error) {
 	var areas []ActivityArea
-	err := s.db.NewSelect().
+	err := s.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("area, client, MIN(first_at) AS first_at, MAX(last_at) AS last_at").
 		ColumnExpr("SUM(requests) AS requests, SUM(refused) AS refused").
@@ -182,7 +182,7 @@ func (s *Store) ActivityAreas(ctx context.Context, apps []string, since time.Tim
 // refused, in any of areas.
 func (s *Store) ActivityDays(ctx context.Context, apps []string, since time.Time, areas []string) (int, error) {
 	var days int
-	err := s.db.NewSelect().
+	err := s.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("COUNT(DISTINCT day)").
 		Where("app_id IN (?)", bun.In(apps)).

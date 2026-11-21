@@ -739,7 +739,7 @@ func (s *MeteringSuite) TestALegTheSweepEndedDoesNotCountTowardTheSandboxsMinute
 
 func (s *MeteringSuite) TestALegCarriesItsAppsOrganization() {
 	organization := "org-" + uuid.NewString()
-	_, err := s.store.DB().NewInsert().Model(&store.AppOrganization{
+	_, err := s.store.GlobalDB().NewInsert().Model(&store.AppOrganization{
 		AppID: s.customer, OrganizationID: organization, SeenAt: time.Now().UTC(),
 	}).Exec(s.ctx)
 	s.Require().NoError(err)

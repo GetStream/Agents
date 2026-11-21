@@ -34,7 +34,7 @@ func (s *StoreSuite) contactByNumber(campaign Campaign, number string) Contact {
 }
 
 func (s *StoreSuite) dueAt(contact Contact, at time.Time) {
-	_, err := s.store.DB().NewUpdate().Model((*Contact)(nil)).Set("next_attempt_at = ?", at).Where("id = ?", contact.ID).Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*Contact)(nil)).Set("next_attempt_at = ?", at).Where("id = ?", contact.ID).Exec(s.ctx)
 	s.Require().NoError(err)
 }
 
@@ -475,7 +475,7 @@ func (s *StoreSuite) TestADialWhoseContactAnotherRunnerHoldsIsNotClassified() {
 	held, err := s.store.ClaimClassifications(s.ctx, "a", s.base.Add(time.Minute), 10*time.Minute, 10)
 	s.Require().NoError(err)
 	s.Require().Len(held, 1)
-	_, err = s.store.DB().NewUpdate().Model((*CampaignAttempt)(nil)).Set("classify_after = ?", s.base.Add(time.Minute)).Where("id = ?", attempt.ID).Exec(s.ctx)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*CampaignAttempt)(nil)).Set("classify_after = ?", s.base.Add(time.Minute)).Where("id = ?", attempt.ID).Exec(s.ctx)
 	s.Require().NoError(err)
 
 	taken, err := s.store.ClaimClassifications(s.ctx, "b", s.base.Add(2*time.Minute), time.Minute, 10)

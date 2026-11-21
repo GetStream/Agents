@@ -45,7 +45,7 @@ func (s *StoreSuite) TestAnUnpostedLimitNoticeIsClaimedOnceItsClaimIsStale() {
 	s.Require().NoError(err)
 	s.NotContains(organizations(claimed), organization, "its writer's claim stands")
 
-	_, err = s.store.DB().NewUpdate().Model((*LimitNotice)(nil)).Set("claimed_at = now() - interval '2 hours'").
+	_, err = s.store.GlobalDB().NewUpdate().Model((*LimitNotice)(nil)).Set("claimed_at = now() - interval '2 hours'").
 		Where("organization_id = ?", organization).Exec(s.ctx)
 	s.Require().NoError(err)
 	claimed, err = s.store.ClaimUnpostedLimits(s.ctx, time.Hour, 100)
@@ -62,7 +62,7 @@ func (s *StoreSuite) TestAnUnpostedLimitNoticeIsClaimedOnceItsClaimIsStale() {
 	s.NotContains(organizations(claimed), organization, "claimed again just now")
 
 	s.Require().NoError(s.store.MarkLimitPosted(s.ctx, organization, LimitNoCredit))
-	_, err = s.store.DB().NewUpdate().Model((*LimitNotice)(nil)).Set("claimed_at = now() - interval '2 hours'").
+	_, err = s.store.GlobalDB().NewUpdate().Model((*LimitNotice)(nil)).Set("claimed_at = now() - interval '2 hours'").
 		Where("organization_id = ?", organization).Exec(s.ctx)
 	s.Require().NoError(err)
 	claimed, err = s.store.ClaimUnpostedLimits(s.ctx, time.Hour, 100)

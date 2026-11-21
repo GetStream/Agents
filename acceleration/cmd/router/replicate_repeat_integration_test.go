@@ -67,9 +67,9 @@ func (s *ReplicateRepeatSuite) emptyStore(name string) *store.Store {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { opened.Close() })
 	var database string
-	s.Require().NoError(opened.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(opened.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = opened.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = opened.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 	return opened
@@ -147,7 +147,7 @@ func (s *ReplicateRepeatSuite) copiedBefore() {
 	s.recorded(1)
 	s.recorded(2)
 	s.Require().NoError(s.once("", false))
-	_, err := s.target.DB().ExecContext(s.ctx, "DELETE FROM data_move_cursors")
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, "DELETE FROM data_move_cursors")
 	s.Require().NoError(err)
 	s.tagged(s.target, 2, "edited here")
 }
@@ -160,7 +160,7 @@ func (s *ReplicateRepeatSuite) recorded(digits int) {
 
 // tagged sets the label tag of a number of acme's in a store.
 func (s *ReplicateRepeatSuite) tagged(in *store.Store, digits int, label string) {
-	_, err := in.DB().ExecContext(s.ctx, "UPDATE phone_numbers SET tags = jsonb_build_object('label', ?::text) WHERE e164 = ?",
+	_, err := in.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET tags = jsonb_build_object('label', ?::text) WHERE e164 = ?",
 		label, e164(digits))
 	s.Require().NoError(err)
 }
@@ -170,7 +170,7 @@ func (s *ReplicateRepeatSuite) tagged(in *store.Store, digits int, label string)
 func (s *ReplicateRepeatSuite) label(digits int) string {
 	var label *string
 	var held bool
-	s.Require().NoError(s.target.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.target.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) > 0, max(tags->>'label') FROM phone_numbers WHERE customer_id = 'acme' AND e164 = ?",
 		e164(digits)).Scan(&held, &label))
 	if !held {
@@ -257,7 +257,7 @@ func (s *ReplicateRepeatSuite) TestARepeatOnceForAnAppTheSourceNowHoldsNothingOf
 	s.recorded(1)
 	s.recorded(2)
 	s.Require().NoError(s.once("", false))
-	_, err := s.source.DB().ExecContext(s.ctx, "DELETE FROM phone_numbers WHERE customer_id = 'acme'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM phone_numbers WHERE customer_id = 'acme'")
 	s.Require().NoError(err)
 
 	// The export is empty, so only its last line names the app.
@@ -331,7 +331,7 @@ func (s *ReplicateRepeatSuite) TestFullCopiesEverythingAgainAndSavesTheCursor() 
 func (s *ReplicateRepeatSuite) TestACursorReadLongerAgoThanTheRetentionIsRefused() {
 	s.recorded(1)
 	s.Require().NoError(s.once("acme", false))
-	_, err := s.target.DB().ExecContext(s.ctx, "UPDATE data_move_cursors SET read_at = now() - interval '61 minutes'")
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, "UPDATE data_move_cursors SET read_at = now() - interval '61 minutes'")
 	s.Require().NoError(err)
 	s.tagged(s.target, 1, "edited here")
 
@@ -352,7 +352,7 @@ func (s *ReplicateRepeatSuite) TestACursorTheSourceNoLongerKeepsTheChangesOfName
 	s.tagged(s.source, 1, "pruned")
 	s.tagged(s.source, 1, "kept")
 	// What pruning does to every change but the newest.
-	_, err := s.source.DB().ExecContext(s.ctx, "DELETE FROM data_changes WHERE seq < (SELECT max(seq) FROM data_changes)")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM data_changes WHERE seq < (SELECT max(seq) FROM data_changes)")
 	s.Require().NoError(err)
 
 	s.Require().ErrorContains(s.once("acme", false), "no longer keeps the changes since that cursor: run this again with --full")
@@ -366,11 +366,11 @@ func (s *ReplicateRepeatSuite) TestACursorAtTheSourcesRestartWhoseNextChangeWasP
 	s.recorded(1)
 	s.recorded(2)
 	s.Require().NoError(s.once("acme", false))
-	_, err := s.source.DB().ExecContext(s.ctx, "UPDATE data_change_capture SET expires_at = now() - interval '1 minute'")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_change_capture SET expires_at = now() - interval '1 minute'")
 	s.Require().NoError(err)
 	s.Require().NoError(s.once("acme", true))
 	s.tagged(s.source, 2, "pruned")
-	_, err = s.source.DB().ExecContext(s.ctx, "UPDATE data_changes SET at = now() - interval '30 days'")
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_changes SET at = now() - interval '30 days'")
 	s.Require().NoError(err)
 	s.tagged(s.source, 1, "kept")
 	removed, err := s.source.PruneDataChanges(s.ctx, 7*24*time.Hour)
@@ -385,7 +385,7 @@ func (s *ReplicateRepeatSuite) TestACursorAtTheSourcesRestartWhoseNextChangeWasP
 func (s *ReplicateRepeatSuite) TestARunThatBringsNoChangesStillSavesWhenItReadTheSource() {
 	s.recorded(1)
 	s.Require().NoError(s.once("acme", false))
-	_, err := s.target.DB().ExecContext(s.ctx, "UPDATE data_move_cursors SET read_at = now() - interval '50 minutes'")
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, "UPDATE data_move_cursors SET read_at = now() - interval '50 minutes'")
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.once("acme", false))
@@ -395,7 +395,7 @@ func (s *ReplicateRepeatSuite) TestARunThatBringsNoChangesStillSavesWhenItReadTh
 
 func (s *ReplicateRepeatSuite) TestAnOrganizationsPolicyUnderTheAppsIDIsNotTheAppsData() {
 	// The export carries only app policies, so an organization's under the same id is not a copy.
-	_, err := s.target.DB().ExecContext(s.ctx,
+	_, err := s.target.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO policies (scope, scope_id, updated_at) VALUES ('organization', 'acme', now())")
 	s.Require().NoError(err)
 	s.recorded(1)
@@ -408,7 +408,7 @@ func (s *ReplicateRepeatSuite) TestAnOrganizationsPolicyUnderTheAppsIDIsNotTheAp
 func (s *ReplicateRepeatSuite) TestTheRetentionOfTheDeploymentIsTheOneACursorIsCheckedAgainst() {
 	s.recorded(1)
 	s.Require().NoError(s.once("acme", false))
-	_, err := s.target.DB().ExecContext(s.ctx, "UPDATE data_move_cursors SET read_at = now() - interval '5 minutes'")
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, "UPDATE data_move_cursors SET read_at = now() - interval '5 minutes'")
 	s.Require().NoError(err)
 	s.tagged(s.source, 1, "source again")
 
@@ -427,7 +427,7 @@ func (s *ReplicateRepeatSuite) TestAPageThatFailedToApplyIsBroughtByTheNextRun()
 	s.Require().NoError(s.once("acme", false))
 	// A page of one change, so the second change is a page of its own, which the target refuses.
 	s.pageSize = 1
-	_, err := s.target.DB().ExecContext(s.ctx, `
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, `
 CREATE FUNCTION refuse_poison() RETURNS trigger AS $$
 BEGIN
   IF NEW.tags->>'label' = 'poison' THEN RAISE EXCEPTION 'poison'; END IF;
@@ -441,7 +441,7 @@ CREATE TRIGGER refuse_poison BEFORE INSERT OR UPDATE ON phone_numbers FOR EACH R
 	s.Require().Error(s.once("acme", false))
 
 	s.Equal("fine", s.label(1), "the page before it landed")
-	_, err = s.target.DB().ExecContext(s.ctx, "DROP TRIGGER refuse_poison ON phone_numbers")
+	_, err = s.target.GlobalDB().ExecContext(s.ctx, "DROP TRIGGER refuse_poison ON phone_numbers")
 	s.Require().NoError(err)
 	s.Require().NoError(s.once("acme", false))
 	s.Equal("poison", s.label(2), "the cursor is saved only after a page is applied, so the page that failed comes again")
@@ -467,7 +467,7 @@ func (s *ReplicateRepeatSuite) TestACursorNeverMovesBack() {
 
 func (s *ReplicateRepeatSuite) TestOnlyATableInTheSharedDatabaseMakesAnAppHeld() {
 	// call bridges are kept in the shards, which a pod reads only its own of.
-	_, err := s.target.DB().ExecContext(s.ctx,
+	_, err := s.target.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO call_bridges (token, customer_id, vendor, trunk_uri, call_id, expires_at) VALUES ('t', 'acme', 'telnyx', 'sip:x', 'c', now())")
 	s.Require().NoError(err)
 	table, err := s.target.HoldingTable(s.ctx, "acme")

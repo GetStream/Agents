@@ -186,7 +186,7 @@ func (s *ChatInboundQueueSuite) TestAPeerRefusesADeliveryItsRowDoesNotMatch() {
 func (s *ChatInboundQueueSuite) TestAPeerRefusesADeliveryWhoseRowIsGone() {
 	other, worker, logged := s.otherNodeWithAWorkerLogging()
 	row := s.row(s.queue(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), "")))
-	_, err := s.store.DB().NewDelete().Model((*store.ChatInbound)(nil)).Where("seq = ?", row.Seq).Exec(context.Background())
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ChatInbound)(nil)).Where("seq = ?", row.Seq).Exec(context.Background())
 	s.Require().NoError(err)
 
 	answer, err := s.router.handChatInboundToPeer(context.Background(), other.Listener.Addr().String(), queuedFrom(row))
@@ -910,7 +910,7 @@ func (s *ChatInboundQueueSuite) receives(connection *websocket.Conn, wanted stri
 
 func (s *ChatInboundQueueSuite) row(messageID string) store.ChatInbound {
 	var row store.ChatInbound
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(context.Background()))
 	return row
 }
 

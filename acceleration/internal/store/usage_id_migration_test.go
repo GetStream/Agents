@@ -54,14 +54,14 @@ func (s *UsageIDMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "usagemig")
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", beforeUsageIDVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", beforeUsageIDVersion))
 	s.db = db
 	s.old = s.writeAsTheRouterBefore()
 }
@@ -70,7 +70,7 @@ func (s *UsageIDMigrationSuite) SetupTest() {
 // none of which this migration adds, and returns its id.
 func (s *UsageIDMigrationSuite) writeAsTheRouterBefore() int64 {
 	var id int64
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `INSERT INTO requests
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `INSERT INTO requests
 (modality, customer_id, agent_id, provider, model, started_at, audio_ms, characters, input_tokens,
  cached_input_tokens, output_tokens, images, meters, attributes, cost_micros, output_cost_micros, billable, success)
 VALUES ('stt', 'acme', 'agent', 'deepgram', 'flux', now(), 1000, 0, 0, 0, 0, 0, '{}', '{}', 25, 0, true, true)
@@ -79,13 +79,13 @@ RETURNING id`).Scan(&id))
 }
 
 func (s *UsageIDMigrationSuite) migrate() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", usageIDVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", usageIDVersion))
 }
 
 // usageIDOf is the usage id of the row with that id, empty when it has none.
 func (s *UsageIDMigrationSuite) usageIDOf(id int64) string {
 	var usageID *string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT usage_id::text FROM requests WHERE id = ?", id).Scan(&usageID))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT usage_id::text FROM requests WHERE id = ?", id).Scan(&usageID))
 	if usageID == nil {
 		return ""
 	}
@@ -112,11 +112,11 @@ func (s *UsageIDMigrationSuite) TestTheRouterBeforeStillWritesItsRowsWithAUsageI
 
 func (s *UsageIDMigrationSuite) TestARowFromBeforeKeepsNoUsageIDAndTheTableIsNotRewritten() {
 	var before, after int64
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT pg_relation_filenode('requests')").Scan(&before))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT pg_relation_filenode('requests')").Scan(&before))
 
 	s.migrate()
 
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT pg_relation_filenode('requests')").Scan(&after))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT pg_relation_filenode('requests')").Scan(&after))
 	s.Equal(before, after, "neither the columns nor the default rewrote the table")
 	s.Empty(s.usageIDOf(s.old))
 }
@@ -124,26 +124,26 @@ func (s *UsageIDMigrationSuite) TestARowFromBeforeKeepsNoUsageIDAndTheTableIsNot
 func (s *UsageIDMigrationSuite) TestAnUpdateOfARowFromBeforeMustGiveItAUsageIDOrSkipIt() {
 	s.migrate()
 
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE requests SET to_ship = true WHERE id = ?", s.old)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE requests SET to_ship = true WHERE id = ?", s.old)
 	s.Equal("23514", code(err), "the check holds an updated row to it too: %v", err)
 
-	skipped, err := s.db.DB().ExecContext(s.ctx, "UPDATE requests SET to_ship = true WHERE id = ? AND usage_id IS NOT NULL", s.old)
+	skipped, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE requests SET to_ship = true WHERE id = ? AND usage_id IS NOT NULL", s.old)
 	s.Require().NoError(err)
 	affected, err := skipped.RowsAffected()
 	s.Require().NoError(err)
 	s.Zero(affected)
 
-	_, err = s.db.DB().ExecContext(s.ctx, "UPDATE requests SET usage_id = gen_random_uuid() WHERE id = ?", s.old)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "UPDATE requests SET usage_id = gen_random_uuid() WHERE id = ?", s.old)
 	s.Require().NoError(err)
 	s.NotEmpty(s.usageIDOf(s.old))
 }
 
 func (s *UsageIDMigrationSuite) TestTheMigrationComesOffAndAppliesAgain() {
 	s.migrate()
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", beforeUsageIDVersion))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", beforeUsageIDVersion))
 
 	var added int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
 WHERE table_name = 'requests' AND column_name IN ('usage_id', 'organization_id', 'organization_tier', 'api_key',
 	'user_id', 'usage_categories', 'session_id', 'to_ship', 'shipped_at', 'ship_error')`).Scan(&added))
 	s.Zero(added)
@@ -156,14 +156,14 @@ WHERE table_name = 'requests' AND column_name IN ('usage_id', 'organization_id',
 func (s *UsageIDMigrationSuite) TestTheMigrationGivesUpOnTheTableRatherThanQueueingWritesBehindIt() {
 	// A long read holds the lock the ALTER waits for, and every write after the ALTER would
 	// wait behind it.
-	reader, err := s.db.DB().BeginTx(s.ctx, nil)
+	reader, err := s.db.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer reader.Rollback() //nolint:errcheck // rolled back below unless the test stopped first
 	_, err = reader.ExecContext(s.ctx, "LOCK TABLE requests IN ACCESS SHARE MODE")
 	s.Require().NoError(err)
 
 	started := time.Now()
-	err = goose.UpToContext(s.ctx, s.db.DB().DB, ".", usageIDVersion)
+	err = goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", usageIDVersion)
 
 	s.Require().Error(err)
 	s.Contains(err.Error(), "lock timeout")

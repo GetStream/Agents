@@ -55,7 +55,7 @@ func (s *StoreSuite) TestAThreadEpisodeStartsAtTheTimeItIsGiven() {
 
 	s.Require().NoError(err)
 	var started time.Time
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT started_at FROM episodes WHERE id = ?", episode.ID).Scan(&started))
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT started_at FROM episodes WHERE id = ?", episode.ID).Scan(&started))
 	s.Equal(time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC), started.UTC())
 }
 
@@ -146,7 +146,7 @@ func (s *StoreSuite) TestAThreadWhoseEpisodeEndedOpensANewOne() {
 	first := s.episodeOf(person, "agent:thread-one")
 	_, err := s.store.OpenEpisode(s.ctx, first)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = now() WHERE id = ?", first.ID)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = now() WHERE id = ?", first.ID)
 	s.Require().NoError(err)
 
 	next := s.episodeOf(person, "agent:thread-one")
@@ -190,7 +190,7 @@ func (s *StoreSuite) closeIdle(store *Store, now time.Time) []ClosedEpisode {
 // episodeStatus is an episode's status as stored.
 func (s *StoreSuite) episodeStatus(id string) string {
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", id).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", id).Scan(&status))
 	return status
 }
 
@@ -276,7 +276,7 @@ func (s *StoreSuite) TestTwoSweepersAtOnceCloseEachIdleEpisodeOnce() {
 // that row to it, rather than waiting and closing it a second time.
 func (s *StoreSuite) TestAnEpisodeAnotherRouterIsClosingIsLeftToIt() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
-	closing, err := s.store.DB().BeginTx(s.ctx, nil)
+	closing, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	_, err = closing.ExecContext(s.ctx, "UPDATE episodes SET status = 'ended', ended_at = ? WHERE id = ?", s.base.Add(time.Hour), episode.ID)
 	s.Require().NoError(err)
@@ -480,7 +480,7 @@ func (s *StoreSuite) TestAnEpisodeAMessageIsTouchingIsNotClosed() {
 	person := s.mapped("+15550100")
 	episode := s.threadAt(person, "agent:thread-one", s.base)
 	s.threadAt(person, "agent:thread-one", s.base.Add(time.Minute))
-	touching, err := s.store.DB().BeginTx(s.ctx, nil)
+	touching, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = touching.Rollback() }()
 	now := s.base.Add(2 * time.Hour)
@@ -507,14 +507,14 @@ func (s *StoreSuite) TestAMessageThatLandsAsASweepLocksTheEpisodeKeepsItOpen() {
 	episode := s.threadAt(person, "agent:thread-one", s.base)
 	s.threadAt(person, "agent:thread-one", s.base.Add(time.Minute))
 	now := s.base.Add(2 * time.Hour)
-	sweeping, err := s.store.DB().BeginTx(s.ctx, nil)
+	sweeping, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = sweeping.Rollback() }()
 	var due []string
 	s.Require().NoError(sweeping.NewRaw(idleEpisodesQuery, now.Add(-time.Hour), 50).Scan(s.ctx, &due))
 	s.Require().Equal([]string{episode.ID}, due, "the sweep holds the episode as idle")
 	// The message's touch, committed: it found the row before the sweep locked it.
-	_, err = s.store.DB().ExecContext(s.ctx,
+	_, err = s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episode_activity SET last_message_at = ? WHERE episode_id = ?", now, episode.ID)
 	s.Require().NoError(err)
 
@@ -536,7 +536,7 @@ func (s *StoreSuite) TestAnEpisodeThatAlreadyEndedIsNotClosedAgain() {
 	s.Require().Len(s.closeIdle(s.store, now), 1)
 
 	var closed []ClosedEpisode
-	err := s.store.DB().NewRaw(closeIdleEpisodesQuery, now.Add(time.Minute), bun.In([]string{episode.ID}), now.Add(-time.Hour), now.Add(10*time.Minute)).Scan(s.ctx, &closed)
+	err := s.store.GlobalDB().NewRaw(closeIdleEpisodesQuery, now.Add(time.Minute), bun.In([]string{episode.ID}), now.Add(-time.Hour), now.Add(10*time.Minute)).Scan(s.ctx, &closed)
 
 	s.Require().NoError(err)
 	s.Empty(closed, "an ended episode was closed again")
@@ -565,7 +565,7 @@ func (s *StoreSuite) TestALeaseAnotherRouterIsTakingIsLeftToIt() {
 	closedAt := s.base.Add(time.Hour)
 	s.closeIdle(s.store, closedAt)
 	late := closedAt.Add(6 * time.Minute)
-	taking, err := s.store.DB().BeginTx(s.ctx, nil)
+	taking, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = taking.Rollback() }()
 	_, err = taking.ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = ? WHERE episode_id = ?", late.Add(5*time.Minute), episode.ID)
@@ -622,7 +622,7 @@ func (s *StoreSuite) TestThePreviousReleaseStillReadsTheCards() {
 
 	// accelerate-v0.6.23's store.EpisodeCards, word for word.
 	var cards []previousCard
-	err := s.store.db.NewSelect().Model(&cards).
+	err := s.store.global.NewSelect().Model(&cards).
 		ColumnExpr("ep.*").
 		ColumnExpr("cm.kind AS contact_kind, cm.address AS contact_address").
 		ColumnExpr(`LEAST(ep.ended_at, asn.closed_at, (SELECT min(nx.started_at) FROM episodes AS nx
@@ -648,7 +648,7 @@ func (s *StoreSuite) TestThePreviousReleaseStillReadsTheCards() {
 // included, so it finds them by an index rather than by reading every episode.
 func (s *StoreSuite) TestACallsEpisodesAreFoundByTheirCall() {
 	var plan []string
-	err := s.store.db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
@@ -664,7 +664,7 @@ func (s *StoreSuite) TestACallsEpisodesAreFoundByTheirCall() {
 // joining the whole table.
 func (s *StoreSuite) TestASweepReadsTheLastMessageOfEachOpenEpisodeByItsKey() {
 	var plan []string
-	err := s.store.db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
@@ -680,6 +680,6 @@ func (s *StoreSuite) TestASweepReadsTheLastMessageOfEachOpenEpisodeByItsKey() {
 // episodeRows is how many episodes there are.
 func (s *StoreSuite) episodeRows() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes").Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes").Scan(&count))
 	return count
 }

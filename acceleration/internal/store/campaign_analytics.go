@@ -61,7 +61,7 @@ func (s *Store) CampaignAnalytics(ctx context.Context, campaignID string) (Campa
 		Days:         []DialDay{},
 	}
 
-	err = s.db.NewRaw(`SELECT count(*) FROM campaign_contacts cc
+	err = s.global.NewRaw(`SELECT count(*) FROM campaign_contacts cc
 WHERE cc.campaign_id = ? AND EXISTS (SELECT 1 FROM campaign_attempts ca
 	WHERE ca.contact_id = cc.id AND `+answeredDial+`)`, campaignID).Scan(ctx, &analytics.Connected)
 	if err != nil {
@@ -72,7 +72,7 @@ WHERE cc.campaign_id = ? AND EXISTS (SELECT 1 FROM campaign_attempts ca
 		Outcome string
 		Count   int
 	}
-	err = s.db.NewSelect().Model((*Contact)(nil)).
+	err = s.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.outcome").
 		ColumnExpr("count(*) AS count").
 		Where("cc.campaign_id = ? AND cc.stage = ?", campaignID, ContactCompleted).
@@ -89,7 +89,7 @@ WHERE cc.campaign_id = ? AND EXISTS (SELECT 1 FROM campaign_attempts ca
 		CallOutcome string
 		Count       int
 	}
-	err = s.db.NewSelect().Model((*CampaignAttempt)(nil)).
+	err = s.global.NewSelect().Model((*CampaignAttempt)(nil)).
 		Column("ca.call_outcome").
 		ColumnExpr("count(*) AS count").
 		Where("ca.campaign_id = ? AND ca.call_outcome IS NOT NULL", campaignID).
@@ -102,7 +102,7 @@ WHERE cc.campaign_id = ? AND EXISTS (SELECT 1 FROM campaign_attempts ca
 		analytics.CallOutcomes[row.CallOutcome] = row.Count
 	}
 
-	err = s.db.NewRaw(`SELECT date_trunc('day', started_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS day,
+	err = s.global.NewRaw(`SELECT date_trunc('day', started_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS day,
 	count(*) AS dials, count(*) FILTER (WHERE `+answeredDial+`) AS answered,
 	count(*) FILTER (WHERE result = 'voicemail') AS voicemail
 FROM campaign_attempts WHERE campaign_id = ? AND `+placedDial+` GROUP BY 1 ORDER BY 1`, campaignID).Scan(ctx, &analytics.Days)
@@ -127,7 +127,7 @@ func (s *Store) ContactStages(ctx context.Context, campaignIDs []string) (map[st
 		Stage      string
 		Count      int
 	}
-	err := s.db.NewSelect().Model((*Contact)(nil)).
+	err := s.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.campaign_id").
 		ColumnExpr("CASE WHEN cc.stage = ? THEN ? ELSE cc.stage END AS stage", AwaitingOutcome, InProgress).
 		ColumnExpr("count(*) AS count").
@@ -157,7 +157,7 @@ func (s *Store) CampaignTotals(ctx context.Context, campaignIDs []string) (map[s
 		Dialed     int
 		Converted  int
 	}
-	err := s.db.NewRaw(`SELECT cc.campaign_id,
+	err := s.global.NewRaw(`SELECT cc.campaign_id,
 	count(*) FILTER (WHERE EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id AND `+placedDial+`)) AS dialed,
 	count(*) FILTER (WHERE cc.converted) AS converted
 FROM campaign_contacts cc WHERE cc.campaign_id IN (?) GROUP BY cc.campaign_id`, bun.In(campaignIDs)).Scan(ctx, &rows)
@@ -181,7 +181,7 @@ func (s *Store) AttemptsMade(ctx context.Context, contactIDs []string) (map[stri
 		ContactID string
 		Made      int
 	}
-	err := s.db.NewRaw(`SELECT contact_id, count(DISTINCT (step_id, attempt)) AS made
+	err := s.global.NewRaw(`SELECT contact_id, count(DISTINCT (step_id, attempt)) AS made
 FROM campaign_attempts WHERE contact_id IN (?) AND `+placedDial+`
 GROUP BY contact_id`, bun.In(contactIDs)).Scan(ctx, &rows)
 	if err != nil {

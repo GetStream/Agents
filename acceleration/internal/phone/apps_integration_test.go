@@ -935,7 +935,7 @@ func (s *AppsSuite) TestAnotherFormOfANumberReachesNothingAtTheVendor() {
 	// Another customer's row for the suite's number without its plus, as one could be written
 	// before every write checked the form. The vendor would read it as the suite's number.
 	other, variant := "customer-"+uuid.NewString(), strings.TrimPrefix(s.e164, "+")
-	_, err := s.store.DB().ExecContext(s.ctx, "INSERT INTO phone_numbers (e164, vendor, country, customer_id)"+
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "INSERT INTO phone_numbers (e164, vendor, country, customer_id)"+
 		" VALUES (?, ?, 'US', ?)", variant, s.vendor.vendor, other)
 	s.Require().NoError(err)
 
@@ -1056,7 +1056,7 @@ func (s *AppsSuite) TestASlowCallPlacedRowDoesNotFailTheCallOrLoseItsResourceRow
 	// Holding the customer's log lock makes the call_placed write wait.
 	locked, unlock := make(chan struct{}), make(chan struct{})
 	go func() {
-		_ = s.store.DB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		_ = s.store.GlobalDB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			_, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 731))", s.customer)
 			close(locked)
 			<-unlock
@@ -2473,7 +2473,7 @@ func (s *AppsSuite) TestReleasingANumberLinedSinceItWasReadTakesItOffItsTrunk() 
 func (s *AppsSuite) TestAttachingANumberWhoseTrunkPasswordWasNotKeptGivesItATrunkOfItsOwn() {
 	first, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: s.e164})
 	s.Require().NoError(err)
-	_, err = s.store.DB().NewUpdate().Table("phone_numbers").Set("attached_at = NULL").
+	_, err = s.store.GlobalDB().NewUpdate().Table("phone_numbers").Set("attached_at = NULL").
 		Where("customer_id = ?", s.customer).Where("e164 = ?", s.e164).Exec(s.ctx)
 	s.Require().NoError(err)
 	s.sealed()
@@ -2518,7 +2518,7 @@ func (s *AppsSuite) deploymentWrites() int {
 
 // backdate moves a call's rows back in time, as a call that has been up for hours has.
 func (s *AppsSuite) backdate(callID string, age time.Duration) {
-	_, err := s.store.DB().NewUpdate().Table("call_resources").
+	_, err := s.store.GlobalDB().NewUpdate().Table("call_resources").
 		Set("created_at = ?", time.Now().UTC().Add(-age)).
 		Where("call_id = ?", callID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -2594,10 +2594,10 @@ func (s *AppsSuite) TestASharedCallWhoseCallNeverEndedLosesItsRowButNotItsLine()
 
 func (s *AppsSuite) TestMoreNumbersLiningAtOnceThanThePoolHasConnectionsAllLine() {
 	s.sealed()
-	s.store.DB().SetMaxOpenConns(3)
+	s.store.GlobalDB().SetMaxOpenConns(3)
 	s.T().Cleanup(func() {
-		s.store.DB().SetMaxOpenConns(40)
-		s.store.DB().SetMaxIdleConns(40)
+		s.store.GlobalDB().SetMaxOpenConns(40)
+		s.store.GlobalDB().SetMaxIdleConns(40)
 	})
 	numbers := []string{s.e164}
 	for range 9 {
@@ -2629,7 +2629,7 @@ func (s *AppsSuite) TestMoreNumbersLiningAtOnceThanThePoolHasConnectionsAllLine(
 
 func (s *AppsSuite) TestANumberMarkedAttachedWithNoTrunkIsAttachedAgain() {
 	s.sealed()
-	_, err := s.store.DB().NewUpdate().Table("phone_numbers").Set("attached_at = ?", time.Now().UTC()).
+	_, err := s.store.GlobalDB().NewUpdate().Table("phone_numbers").Set("attached_at = ?", time.Now().UTC()).
 		Where("customer_id = ?", s.customer).Where("e164 = ?", s.e164).Exec(s.ctx)
 	s.Require().NoError(err)
 

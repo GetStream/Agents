@@ -25,7 +25,7 @@ func (s *Store) CreateRouterConfig(ctx context.Context, config *RouterConfig) er
 	config.UpdatedAt = now
 	config.DeletedAt = nil
 
-	if _, err := s.db.NewInsert().Model(config).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(config).Exec(ctx); err != nil {
 		if constraint(err) == "router_configs_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
@@ -46,7 +46,7 @@ func (s *Store) UpdateRouterConfig(ctx context.Context, config *RouterConfig) er
 
 	config.UpdatedAt = time.Now().UTC()
 
-	result, err := s.db.NewUpdate().Model(config).
+	result, err := s.global.NewUpdate().Model(config).
 		Column("name", "stt", "tts", "llm", "sts", "search", "updated_at").
 		Where("id = ?", config.ID).
 		Where("customer_id = ?", config.CustomerID).
@@ -75,7 +75,7 @@ func (s *Store) DeleteRouterConfig(ctx context.Context, customerID, id string) e
 		return stack.Wrap(errors.New("store: a customer and a config id are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*RouterConfig)(nil)).
+	result, err := s.global.NewUpdate().Model((*RouterConfig)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -101,7 +101,7 @@ func (s *Store) RouterConfig(ctx context.Context, customerID, id string) (Router
 	}
 
 	var config RouterConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
@@ -124,7 +124,7 @@ func (s *Store) RouterConfigByName(ctx context.Context, customerID, name string)
 	}
 
 	var config RouterConfig
-	err := s.db.NewSelect().Model(&config).
+	err := s.global.NewSelect().Model(&config).
 		Where("customer_id = ?", customerID).
 		Where("name = ?", name).
 		Where("deleted_at IS NULL").
@@ -146,7 +146,7 @@ func (s *Store) CustomerRouterConfigs(ctx context.Context, customerID string) ([
 	}
 
 	var configs []RouterConfig
-	err := s.db.NewSelect().Model(&configs).
+	err := s.global.NewSelect().Model(&configs).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Order("created_at DESC").

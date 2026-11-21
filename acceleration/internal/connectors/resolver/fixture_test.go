@@ -92,9 +92,9 @@ func database(tb testing.TB) (string, *store.Store) {
 	require.NoError(tb, err)
 	require.NoError(tb, db.Ping(ctx))
 	var name string
-	require.NoError(tb, db.DB().QueryRowContext(ctx, "SELECT current_database()").Scan(&name))
+	require.NoError(tb, db.GlobalDB().QueryRowContext(ctx, "SELECT current_database()").Scan(&name))
 	require.True(tb, strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
-	_, err = db.DB().ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	require.NoError(tb, err)
 	require.NoError(tb, db.Migrate(ctx))
 	return dsn, db
@@ -103,7 +103,7 @@ func database(tb testing.TB) (string, *store.Store) {
 // newFixture empties the connector tables of db and points a definition at a new fake provider.
 func newFixture(tb testing.TB, dsn string, db *store.Store) *fixture {
 	ctx := context.Background()
-	_, err := db.DB().ExecContext(ctx, "TRUNCATE connector_connections, connector_authorization_attempts, connector_definitions, connector_broken_revisions CASCADE")
+	_, err := db.GlobalDB().ExecContext(ctx, "TRUNCATE connector_connections, connector_authorization_attempts, connector_definitions, connector_broken_revisions CASCADE")
 	require.NoError(tb, err)
 	sealer, err := auth.NewSealerWithKeyring(1, map[int]string{1: "resolver test key"})
 	require.NoError(tb, err)

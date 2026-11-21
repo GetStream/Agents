@@ -179,7 +179,7 @@ func (s *SlackChannelSuite) writtenStraightIntoStream(channel string, custom map
 // turns is how many messages of a thread channel had their turn claimed.
 func (s *SlackChannelSuite) turns(channel string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_messages WHERE channel_id = ? AND kind = ?", channel, store.ClaimTurn).Scan(&count))
 	return count
 }

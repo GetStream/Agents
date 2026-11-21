@@ -338,7 +338,7 @@ func (s *SessionConnectorsSuite) TestAForkWhoseConfigCannotBeReadFails() {
 	opened := s.client.createSession(s.session(config, nil))
 	s.storedSelections(opened.Id)
 	s.client.stopSession(opened.Id)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 
@@ -457,7 +457,7 @@ func (s *SessionConnectorsSuite) TestAForkOfAnEndedSessionIsWrittenWhateverItsCo
 func (s *SessionConnectorsSuite) TestAForkNamingAConfigDoesNotReadItsParentsConfig() {
 	config := s.modelledConfig("noted/noted-model", nil)
 	parent := s.endedSession(config)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 	named := s.modelledConfig("counted/counted-model", nil)
@@ -552,7 +552,7 @@ func (s *SessionConnectorsSuite) TestAnIncognitoForkIsRefusedWhateverItsConfig()
 	request := s.session(config, nil)
 	request.Incognito = pointerTo(true)
 	running := s.client.createSession(request)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 
@@ -575,7 +575,7 @@ func (s *SessionConnectorsSuite) TestAThreadsForkIsRefusedWhateverItsConfig() {
 	opened := s.serverClient.createSession(request)
 	s.serverClient.stopSession(opened.Id)
 	s.storedSelections(opened.Id)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 

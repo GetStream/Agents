@@ -180,7 +180,7 @@ func (s *Store) LimitsFor(ctx context.Context, organizationIDs []string) ([]Limi
 	if len(organizationIDs) == 0 {
 		return limits, nil
 	}
-	if err := s.db.NewSelect().Model(&limits).Where("organization_id IN (?)", bun.In(organizationIDs)).Order("id").Scan(ctx); err != nil {
+	if err := s.global.NewSelect().Model(&limits).Where("organization_id IN (?)", bun.In(organizationIDs)).Order("id").Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: limits for: %w", err))
 	}
 	return limits, nil
@@ -188,7 +188,7 @@ func (s *Store) LimitsFor(ctx context.Context, organizationIDs []string) ([]Limi
 
 // Limit is one limit by id, of the organization, or of any when organizationID is empty.
 func (s *Store) Limit(ctx context.Context, organizationID string, id int64) (Limit, error) {
-	return limitOf(ctx, s.db, organizationID, id, false)
+	return limitOf(ctx, s.global, organizationID, id, false)
 }
 
 func limitOf(ctx context.Context, db bun.IDB, organizationID string, id int64, lock bool) (Limit, error) {
@@ -213,7 +213,7 @@ func limitOf(ctx context.Context, db bun.IDB, organizationID string, id int64, l
 // CreateLimit writes a limit and its audit row. A subject that has one at the level and
 // interval already is ErrLimitExists, naming it.
 func (s *Store) CreateLimit(ctx context.Context, limit *Limit, audit LimitAudit) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.NewInsert().Model(limit).Returning("*").Exec(ctx); err != nil {
 			return err
 		}
@@ -222,7 +222,7 @@ func (s *Store) CreateLimit(ctx context.Context, limit *Limit, audit LimitAudit)
 	})
 	if isViolation(err, uniqueViolation) {
 		var existing Limit
-		found := s.db.NewSelect().Model(&existing).
+		found := s.global.NewSelect().Model(&existing).
 			Where("organization_id = ?", limit.OrganizationID).Where("subject = ?", limit.Subject).
 			Where("level = ?", limit.Level).Where("interval = ?", limit.Interval).
 			Where("app_id = ?", limit.AppID).Where("api_key = ?", limit.APIKey).
@@ -250,7 +250,7 @@ type LimitChange struct {
 // records what moved. A change that moves nothing writes nothing.
 func (s *Store) UpdateLimit(ctx context.Context, organizationID string, id int64, change LimitChange, audit LimitAudit) (Limit, error) {
 	var updated Limit
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		before, err := limitOf(ctx, tx, organizationID, id, true)
 		if err != nil {
 			return err
@@ -286,7 +286,7 @@ func (s *Store) UpdateLimit(ctx context.Context, organizationID string, id int64
 // records it, returning what it was.
 func (s *Store) DeleteLimit(ctx context.Context, organizationID string, id int64, audit LimitAudit) (Limit, error) {
 	var deleted Limit
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		before, err := limitOf(ctx, tx, organizationID, id, true)
 		if err != nil {
 			return err
@@ -339,7 +339,7 @@ func (s *Store) ListLimits(ctx context.Context, filter LimitFilter, after int64,
 		return nil, stack.Wrap(errors.New("store: listing limits needs an organization"))
 	}
 	limits := []Limit{}
-	query := s.db.NewSelect().Model(&limits).Where("organization_id = ?", filter.OrganizationID)
+	query := s.global.NewSelect().Model(&limits).Where("organization_id = ?", filter.OrganizationID)
 	for column, value := range map[string]string{
 		"subject": string(filter.Subject), "level": string(filter.Level), "app_id": filter.AppID, "api_key": filter.APIKey,
 		"user_id": filter.UserID, "category": filter.Category, "interval": string(filter.Interval),
@@ -369,7 +369,7 @@ func (s *Store) Resets(ctx context.Context, organizationIDs []string, since time
 	if len(organizationIDs) == 0 {
 		return resets, nil
 	}
-	if err := s.db.NewSelect().Model(&resets).Where("organization_id IN (?)", bun.In(organizationIDs)).
+	if err := s.global.NewSelect().Model(&resets).Where("organization_id IN (?)", bun.In(organizationIDs)).
 		Where("window_start >= ?", since.UTC()).Order("id").Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: resets: %w", err))
 	}
@@ -378,7 +378,7 @@ func (s *Store) Resets(ctx context.Context, organizationIDs []string, since time
 
 // AddResets writes resets, each with its audit row, in one transaction.
 func (s *Store) AddResets(ctx context.Context, resets []UsageReset, audit LimitAudit) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for i := range resets {
 			reset := &resets[i]
 			reset.WindowStart = reset.WindowStart.UTC()
@@ -497,7 +497,7 @@ func (s *Store) SubjectSpendSince(ctx context.Context, ref usage.SubjectRef, sin
 	if ref.Subject == usage.SubjectOrganization || ref.Subject == usage.SubjectCategory {
 		apps = []string{ref.OrganizationID}
 		var members []string
-		if err := s.db.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
+		if err := s.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
 			Where("organization_id = ?", ref.OrganizationID).Scan(ctx, &members); err != nil {
 			return 0, stack.Wrap(fmt.Errorf("store: subject spend since: %w", err))
 		}

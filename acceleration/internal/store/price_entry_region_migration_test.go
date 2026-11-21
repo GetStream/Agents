@@ -50,26 +50,26 @@ func (s *PriceRegionMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "priceregion")
 	s.db = db
 	s.exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", dropPriceMarkup))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", dropPriceMarkup))
 }
 
 func (s *PriceRegionMigrationSuite) exec(statements ...string) {
 	for _, statement := range statements {
-		_, err := s.db.DB().ExecContext(s.ctx, statement)
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err, statement)
 	}
 }
 
 func (s *PriceRegionMigrationSuite) count(query string) int {
 	var n int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, query).Scan(&n), query)
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, query).Scan(&n), query)
 	return n
 }
 
@@ -132,7 +132,7 @@ type migrated struct {
 }
 
 func (s *PriceRegionMigrationSuite) rows() map[string]migrated {
-	rows, err := s.db.DB().QueryContext(s.ctx, "SELECT model, region, byok, sku, prices::text FROM price_list_entries WHERE NOT byok")
+	rows, err := s.db.GlobalDB().QueryContext(s.ctx, "SELECT model, region, byok, sku, prices::text FROM price_list_entries WHERE NOT byok")
 	s.Require().NoError(err)
 	defer rows.Close()
 	found := map[string]migrated{}
@@ -153,7 +153,7 @@ func (s *PriceRegionMigrationSuite) TestTheTableIsRenamedSoARouterBeforeRegionsC
 
 	s.Require().NoError(s.db.Migrate(s.ctx))
 
-	_, err := s.db.DB().ExecContext(s.ctx, "SELECT modality, provider, model, sku FROM price_entries")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "SELECT modality, provider, model, sku FROM price_entries")
 	s.ErrorContains(err, `relation "price_entries" does not exist`)
 	s.Equal(5, s.count("SELECT count(*) FROM price_list_entries"))
 }
@@ -163,7 +163,7 @@ func (s *PriceRegionMigrationSuite) TestTheTableIsRenamedSoARouterBeforeRegionsC
 func (s *PriceRegionMigrationSuite) TestEveryEntryIsAUSEntryWhoseSKUEndsInItsRegion() {
 	s.oldList()
 	before := map[string]string{}
-	rows, err := s.db.DB().QueryContext(s.ctx, "SELECT model, prices::text FROM price_entries")
+	rows, err := s.db.GlobalDB().QueryContext(s.ctx, "SELECT model, prices::text FROM price_entries")
 	s.Require().NoError(err)
 	for rows.Next() {
 		var model, price string
@@ -187,7 +187,7 @@ func (s *PriceRegionMigrationSuite) TestEveryEntryIsAUSEntryWhoseSKUEndsInItsReg
 	s.Equal("llm-openai-gpt-4-1-us", after["gpt-4.1"].SKU)
 	s.Equal("llm-openai-gpt-4-1-2-us", after["gpt-4-1"].SKU)
 	var billed string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT sku FROM requests").Scan(&billed))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT sku FROM requests").Scan(&billed))
 	s.Equal("llm-openai-a", billed, "a request keeps the SKU it was billed under")
 }
 
@@ -202,7 +202,7 @@ func (s *PriceRegionMigrationSuite) TestTheGuardStillRefusesEveryUpdateAndDelete
 		`UPDATE price_list_entries SET prices = '{}' WHERE model = 'a'`,
 		"DELETE FROM price_list_entries WHERE model = 'a'",
 	} {
-		_, err := s.db.DB().ExecContext(s.ctx, statement)
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, statement)
 		s.ErrorContains(err, "price_entries rows are never changed or deleted", statement)
 	}
 }
@@ -213,9 +213,9 @@ func (s *PriceRegionMigrationSuite) TestAnInsertNamingNoRegionIsRefused() {
 	s.oldList()
 	s.Require().NoError(s.db.Migrate(s.ctx))
 
-	_, missing := s.db.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, free, effective_at)
+	_, missing := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, free, effective_at)
 VALUES ('20261101000000_seed', 'llm-openai-b-us', 'llm', 'openai', 'b', true, now())`)
-	_, empty := s.db.DB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, free, effective_at)
+	_, empty := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_list_entries (change, sku, modality, provider, model, region, free, effective_at)
 VALUES ('20261101000000_seed', 'llm-openai-b-us', 'llm', 'openai', 'b', '', true, now())`)
 
 	s.ErrorContains(missing, `null value in column "region"`)
@@ -226,7 +226,7 @@ func (s *PriceRegionMigrationSuite) TestTheItemIndexLeadsWithTheRegionAndBYOKBef
 	s.Require().NoError(s.db.Migrate(s.ctx))
 
 	var definition string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT indexdef FROM pg_indexes WHERE indexname = 'price_list_entries_item_idx'").Scan(&definition))
 	s.Contains(definition, "(modality, provider, model, region, byok, effective_at DESC)")
 	s.Zero(s.count("SELECT count(*) FROM pg_indexes WHERE indexname = 'price_entries_item_idx'"))
@@ -309,7 +309,7 @@ func (s *PriceRegionMigrationSuite) TestADatabaseSeededFromVendorJSONBeforeRegio
 		if when == nil {
 			when = map[string]string{}
 		}
-		_, err := s.db.DB().ExecContext(s.ctx, `INSERT INTO price_entries
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_entries
 (change, sku, modality, provider, model, attributes, free, rates, tiers, prices, price_tiers, effective_at)
 VALUES ('20261101000000_seed', ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?::jsonb, now())`,
 			sku, entry.Modality, entry.Provider, entry.Model, encode(when), entry.Free, encode(orEmpty(entry.Rates)),
@@ -374,17 +374,17 @@ func orNone(tiers []pricing.Tier) []pricing.Tier {
 
 func (s *PriceRegionMigrationSuite) TestTheMigrationComesOffAndAppliesAgain() {
 	s.oldList()
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", priceRegions))
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", dropPriceMarkup))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", priceRegions))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", dropPriceMarkup))
 
 	var sku string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT sku FROM price_entries WHERE model = 'gpt-4-1'").Scan(&sku))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT sku FROM price_entries WHERE model = 'gpt-4-1'").Scan(&sku))
 	s.Equal("llm-openai-gpt-4-1-2", sku, "the region comes off the SKU")
 	s.Zero(s.count(`SELECT count(*) FROM information_schema.columns
 WHERE table_name = 'price_entries' AND column_name IN ('region', 'byok')`))
 	s.Equal(1, s.count("SELECT count(*) FROM pg_indexes WHERE indexname = 'price_entries_item_idx'"))
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", priceRegions))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", priceRegions))
 	s.Equal("llm-openai-gpt-4-1-2-us", s.rows()["gpt-4-1"].SKU)
 }
 
@@ -396,7 +396,7 @@ func (s *PriceRegionMigrationSuite) TestDownRefusesAListWithABYOKEntry() {
 	_, _, _, err := s.db.SyncPrices(s.ctx, PriceLoad{Entries: oldFiles(), Source: "vendor.json", Release: "v2"})
 	s.Require().NoError(err)
 
-	err = goose.DownToContext(s.ctx, s.db.DB().DB, ".", dropPriceMarkup)
+	err = goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", dropPriceMarkup)
 
 	s.ErrorContains(err, "the price list holds byok or non-US entries")
 	s.Equal(9, s.count("SELECT count(*) FROM price_list_entries"), "nothing came off")

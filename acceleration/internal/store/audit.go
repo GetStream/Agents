@@ -160,7 +160,7 @@ func AuditEntryLimit(asked int) int {
 // RecordAuditEntry stores one change, at now. An entry for a deployment's resource, such as
 // the price list, has no customer; every other one needs its customer.
 func (s *Store) RecordAuditEntry(ctx context.Context, entry *AuditEntry) error {
-	return recordAuditEntry(ctx, s.db, entry)
+	return recordAuditEntry(ctx, s.global, entry)
 }
 
 // recordAuditEntry is RecordAuditEntry on db, which may be the transaction the change was
@@ -205,7 +205,7 @@ func (s *Store) AuditEntries(ctx context.Context, customerID string, filter Audi
 		return nil, stack.Wrap(errors.New("store: a customer id is required"))
 	}
 	entries := []AuditEntry{}
-	query := s.db.NewSelect().Model(&entries).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&entries).Where("customer_id = ?", customerID)
 	if filter.ResourceType != "" {
 		query = query.Where("resource_type = ?", filter.ResourceType)
 	}
@@ -259,7 +259,7 @@ func (s *Store) AuditEntryByID(ctx context.Context, customerID, id string) (Audi
 		return AuditEntry{}, false, stack.Wrap(errors.New("store: a customer and an entry id are required"))
 	}
 	var entry AuditEntry
-	err := s.db.NewSelect().Model(&entry).
+	err := s.global.NewSelect().Model(&entry).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Limit(1).

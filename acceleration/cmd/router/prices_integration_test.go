@@ -59,9 +59,9 @@ func (s *PriceSyncSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -146,7 +146,7 @@ func (s *PriceSyncSuite) TestStartupSyncsAndAudits() {
 		}
 	}
 	var audits []store.AuditEntry
-	s.Require().NoError(pgStore.DB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
+	s.Require().NoError(pgStore.GlobalDB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
 	s.Require().Len(audits, 1)
 	s.Equal(seed.Name, audits[0].ResourceID)
 	s.Equal(store.AuditSourceCLI, audits[0].Source)
@@ -382,7 +382,7 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	s.Len(active, len(prices.Vendor().Entries)+2)
 
 	var audits []store.AuditEntry
-	s.Require().NoError(pgStore.DB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).
+	s.Require().NoError(pgStore.GlobalDB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).
 		Order("created_at", "id").Scan(s.ctx))
 	s.Require().Len(audits, 6, "the first seed, three changes, the reload's removal and its seed")
 	removal, seedAudit := audits[4], audits[5]
@@ -439,7 +439,7 @@ func (s *PriceSyncSuite) TestReloadOnAFreshDatabaseSeedsIt() {
 	s.Equal(store.PriceChangeSeed, changes[0].Kind)
 	s.Contains(out.String(), "removed 0 price changes")
 	var audits []store.AuditEntry
-	s.Require().NoError(pgStore.DB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
+	s.Require().NoError(pgStore.GlobalDB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
 	s.Len(audits, 1, "only the seed's: nothing was removed")
 }
 
@@ -468,7 +468,7 @@ func (s *PriceSyncSuite) TestAHeldPricesLockDoesNotKeepTheRouterFromServing() {
 	holder, err := store.Open(s.settings.Postgres.DSN)
 	s.Require().NoError(err)
 	defer holder.Close()
-	held, err := holder.DB().BeginTx(s.ctx, nil)
+	held, err := holder.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
 	s.Require().NoError(err)
@@ -494,7 +494,7 @@ func (s *PriceSyncSuite) TestARouterWhoseFirstLoadLostTheLockGoesReadyRightAfter
 	holder, err := store.Open(s.settings.Postgres.DSN)
 	s.Require().NoError(err)
 	defer holder.Close()
-	held, err := holder.DB().BeginTx(s.ctx, nil)
+	held, err := holder.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
 	s.Require().NoError(err)

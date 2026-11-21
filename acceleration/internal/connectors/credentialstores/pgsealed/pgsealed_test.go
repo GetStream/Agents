@@ -115,9 +115,9 @@ func (s *PGSealedSuite) SetupSuite() {
 	s.Require().NoError(db.Ping(s.ctx))
 
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.Require().NoError(db.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(manifest)}}))
@@ -133,7 +133,7 @@ func (s *PGSealedSuite) TearDownSuite() {
 }
 
 func (s *PGSealedSuite) SetupTest() {
-	_, err := s.db.DB().ExecContext(s.ctx, "TRUNCATE connector_connections, connector_authorization_attempts CASCADE")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "TRUNCATE connector_connections, connector_authorization_attempts CASCADE")
 	s.Require().NoError(err)
 }
 
@@ -573,7 +573,7 @@ func (s *PGSealedSuite) TestABlobFromAnEarlierRevisionDoesNotOpen() {
 		return true, nil
 	}))
 	// Somebody with write access to the table puts the earlier credentials back.
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?", earlier, ref.ConnectionID)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?", earlier, ref.ConnectionID)
 	s.Require().NoError(err)
 
 	s.assertUnreadable(ref)
@@ -583,7 +583,7 @@ func (s *PGSealedSuite) TestABlobFromAnotherConnectionDoesNotOpen() {
 	theirs := s.connected("acme-app", tokens{Access: "theirs", Refresh: "theirs"}, time.Time{})
 	mine := s.connected("acme-app", tokens{Access: "mine", Refresh: "mine"}, time.Time{})
 	s.Equal(s.stored(theirs).Revision, s.stored(mine).Revision, "both at the same revision, so only the id tells them apart")
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?",
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?",
 		s.stored(theirs).CredentialsSealed, mine.ConnectionID)
 	s.Require().NoError(err)
 
@@ -594,7 +594,7 @@ func (s *PGSealedSuite) TestABlobFromAnotherCustomerDoesNotOpen() {
 	theirs := s.connected("other-app", tokens{Access: "theirs", Refresh: "theirs"}, time.Time{})
 	// The row moves to another customer with its id, revision and blob, as an import that
 	// kept the blob would leave it.
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE connector_connections SET customer_id = 'acme-app' WHERE id = ?", theirs.ConnectionID)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET customer_id = 'acme-app' WHERE id = ?", theirs.ConnectionID)
 	s.Require().NoError(err)
 
 	s.assertUnreadable(core.ConnectionRef{CustomerID: "acme-app", ConnectionID: theirs.ConnectionID})

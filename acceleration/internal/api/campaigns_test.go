@@ -336,7 +336,7 @@ func (s *CampaignsSuite) TestResumingBeforeTheStartTimeReturnsToScheduled() {
 	at := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
 		map[string]any{"consent": true, "start_at": at}, nil))
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE campaigns SET state = 'paused' WHERE id = ?", created.Id)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = 'paused' WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
 	resumed := s.move(created.Id, "resume")

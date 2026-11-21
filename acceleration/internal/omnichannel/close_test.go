@@ -73,10 +73,10 @@ func (s *CloserSuite) SetupSuite() {
 func (s *CloserSuite) SetupTest() {
 	// A sweep takes every customer's episodes, so an earlier test's, or an earlier run's,
 	// left open or ended would be swept with this test's. The database is the suite's own.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
 	s.Require().NoError(err)
 	s.chat = chattest.NewServer(s.T())
 	s.apps = streamapp.NewClients(streamapp.NewDeployment(streamapp.DeploymentOptions{
@@ -162,7 +162,7 @@ func (s *CloserSuite) card(opened Opened) map[string]any {
 // status is the episode's status as stored.
 func (s *CloserSuite) status(opened Opened) string {
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", opened.Episode.ID).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", opened.Episode.ID).Scan(&status))
 	return status
 }
 
@@ -384,7 +384,7 @@ func (s *CloserSuite) TestAMessageThatIsNotACardIsNeverUpdatedAsItsAuthor() {
 	s.Require().Len(lines, 1)
 	line, _ := lines[0]["id"].(string)
 	s.Require().NotEmpty(line)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET card_message_id = ? WHERE id = ?", line, opened.Episode.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET card_message_id = ? WHERE id = ?", line, opened.Episode.ID)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.closer.Sweep(s.ctx))

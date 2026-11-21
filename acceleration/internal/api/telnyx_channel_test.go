@@ -148,7 +148,7 @@ func (s *TelnyxChannelSuite) TestAnSMSIsAnsweredFromTheCustomersNumber() {
 	s.Equal(telnyxMessage{from: s.line, to: person, text: "Noted."}, sent.withoutAuthorization())
 	s.True(sent.authorization == "Bearer "+s.apiKey, "sent with the number's API key")
 	var members int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_members WHERE channel_id = ?", channel).Scan(&members))
 	s.Zero(members, "an SMS thread's key is its person, so it records no members (AI-2015)")
 }
@@ -251,7 +251,7 @@ func (s *TelnyxChannelSuite) TestAStopTheStoreKeepsFailingToRecordIsNeverGivenUp
 		"RAISE EXCEPTION 'refused by the test';")
 	attempts := func() int {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT coalesce(max(attempts), 0) FROM channel_thread_inbound WHERE customer_id = ? AND state = 'queued'", s.customerID()).Scan(&count))
 		return count
 	}
@@ -299,7 +299,7 @@ func (s *TelnyxChannelSuite) TestAKeywordIsAnsweredOnceWhenItsRowIsTakenAgain() 
 	}, settleFor, 10*time.Millisecond, "the attempt was recorded")
 	drop()
 
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE channel_thread_inbound SET next_attempt_at = now() WHERE author_id = ? AND state = 'queued'", person)
 	s.Require().NoError(err)
 	// Another router's worker looks at once when it starts; the suite's sleeps until the lease
@@ -429,7 +429,7 @@ func (s *TelnyxChannelSuite) TestAMessageWhoseOptOutCannotBeReadIsGivenUpAndReac
 	person := "+13125550078"
 	ctx := context.Background()
 	s.Require().NoError(s.store.OptOut(ctx, &store.OptOut{CustomerID: s.customerID(), Recipient: person, Channel: "sms", Source: "keyword"}))
-	_, err := s.store.DB().ExecContext(ctx, `BEGIN;
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
 		CREATE FUNCTION telnyx_suite_refuse_read() RETURNS boolean AS $$
 			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
 		ALTER TABLE opt_outs RENAME TO telnyx_suite_opt_outs;
@@ -438,7 +438,7 @@ func (s *TelnyxChannelSuite) TestAMessageWhoseOptOutCannotBeReadIsGivenUpAndReac
 		COMMIT`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(ctx, `BEGIN;
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
 			DROP VIEW opt_outs;
 			ALTER TABLE telnyx_suite_opt_outs RENAME TO opt_outs;
 			DROP FUNCTION telnyx_suite_refuse_read();
@@ -577,7 +577,7 @@ func (s *telnyxLine) deliverSigned(body []byte, at time.Time, key ed25519.Privat
 func (s *telnyxLine) threadChannel(person string) string {
 	var channel string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT channel_id FROM channel_threads WHERE customer_id = ? AND connector_id = 'telnyx' AND thread_key = ?",
 			s.customerID(), person).Scan(&channel) == nil
 	}, settleFor, 10*time.Millisecond, "no thread channel for %s", person)
@@ -590,7 +590,7 @@ func (s *telnyxLine) omniChannel(number string) string {
 	var cid string
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'phone' AND address = ?",
 			s.customerID(), s.config.ID, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
@@ -600,7 +600,7 @@ func (s *telnyxLine) omniChannel(number string) string {
 // liveOptOuts counts the person's SMS opt-outs not revoked.
 func (s *telnyxLine) liveOptOuts(person string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM opt_outs WHERE customer_id = ? AND recipient = ? AND channel = 'sms' AND source = 'keyword' AND revoked_at IS NULL",
 		s.customerID(), person).Scan(&count))
 	return count
@@ -609,7 +609,7 @@ func (s *telnyxLine) liveOptOuts(person string) int {
 // episodes counts the test's customer's episode cards.
 func (s *telnyxLine) episodes() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&count))
 	return count
 }
@@ -618,7 +618,7 @@ func (s *telnyxLine) episodes() int {
 func (s *telnyxLine) nothingLinked() {
 	s.Never(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&count))
 		return count > 0
 	}, dropped, 20*time.Millisecond)

@@ -20,7 +20,7 @@ func (s *StoreSuite) eventDestination(customerID, connectorID, id, forward strin
 // queued are the destinations a delivery id is queued for.
 func (s *StoreSuite) queued(id string) []string {
 	var destinations []string
-	rows, err := s.store.DB().QueryContext(s.ctx, "SELECT destination_id FROM connector_event_deliveries WHERE id = ? ORDER BY destination_id", id)
+	rows, err := s.store.GlobalDB().QueryContext(s.ctx, "SELECT destination_id FROM connector_event_deliveries WHERE id = ? ORDER BY destination_id", id)
 	s.Require().NoError(err)
 	defer rows.Close() //nolint:errcheck // read to the end below
 	for rows.Next() {
@@ -160,7 +160,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachDeliveryOnce() {
 	}()
 	s.Require().Eventually(func() bool {
 		var sleeping int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")

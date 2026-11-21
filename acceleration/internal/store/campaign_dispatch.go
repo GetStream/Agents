@@ -32,7 +32,7 @@ type Claimed struct {
 
 // StartDueCampaigns starts the scheduled campaigns whose start time has come.
 func (s *Store) StartDueCampaigns(ctx context.Context, now time.Time) error {
-	_, err := s.db.NewUpdate().Model((*Campaign)(nil)).
+	_, err := s.global.NewUpdate().Model((*Campaign)(nil)).
 		Set("state = ?", Running).
 		Set("started_at = COALESCE(started_at, ?)", now).
 		Where("state = ?", Scheduled).
@@ -56,7 +56,7 @@ func (s *Store) ClaimDueContacts(ctx context.Context, owner string, now time.Tim
 	}
 
 	var claimed []Claimed
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// Holding the campaign's row is what keeps two runners from both counting the same
 		// free slots: whoever holds it counts and claims, the other skips the campaign this
 		// tick. At most limit campaigns are held, so the rest stay free for other runners.
@@ -140,7 +140,7 @@ func (s *Store) TakeOverExpired(ctx context.Context, owner string, now time.Time
 		return nil, nil
 	}
 
-	expired := s.db.NewSelect().Model((*Contact)(nil)).
+	expired := s.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.id").
 		Where("cc.stage = ? AND cc.leased_until < ?", InProgress, now).
 		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)").
@@ -148,7 +148,7 @@ func (s *Store) TakeOverExpired(ctx context.Context, owner string, now time.Time
 		Limit(limit).
 		For("UPDATE SKIP LOCKED")
 	var contacts []Contact
-	err := s.db.NewUpdate().With("expired", expired).Model((*Contact)(nil)).
+	err := s.global.NewUpdate().With("expired", expired).Model((*Contact)(nil)).
 		TableExpr("expired").
 		Set("leased_by = ?", owner).
 		Set("leased_until = ?", now.Add(lease)).
@@ -162,7 +162,7 @@ func (s *Store) TakeOverExpired(ctx context.Context, owner string, now time.Time
 		return nil, nil
 	}
 
-	campaigns, err := campaignsOf(ctx, s.db, contacts)
+	campaigns, err := campaignsOf(ctx, s.global, contacts)
 	if err != nil {
 		return nil, stack.Wrap(err)
 	}
@@ -216,7 +216,7 @@ func (s *Store) settleContact(ctx context.Context, owner, contactID string, sett
 	// A contact the sequence ended says why in its own reason.
 	stoppable := settle.Stage == Enrolled
 	keepsMark := stoppable || settle.Stage == AwaitingOutcome
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if first != nil {
 			if err := first(ctx, tx); err != nil {
 				return err
@@ -270,7 +270,7 @@ func (s *Store) settleContact(ctx context.Context, owner, contactID string, sett
 	if !errors.Is(err, errUnsettled) {
 		return stack.Wrap(err)
 	}
-	exists, err := s.db.NewSelect().Model((*Contact)(nil)).Where("id = ?", contactID).Exists(ctx)
+	exists, err := s.global.NewSelect().Model((*Contact)(nil)).Where("id = ?", contactID).Exists(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: settle contact: %w", err))
 	}
@@ -323,7 +323,7 @@ func (s *Store) StartDial(ctx context.Context, attempt *CampaignAttempt) error {
 	if attempt.Dial == 0 {
 		attempt.Dial = 1
 	}
-	if _, err := s.db.NewInsert().Model(attempt).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(attempt).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: start dial: %w", err))
 	}
 	return nil
@@ -337,7 +337,7 @@ func (s *Store) EndDial(ctx context.Context, id string, result, callOutcome, cal
 	if classifyAfter != nil {
 		classify = classifyPending
 	}
-	_, err := s.db.NewUpdate().Model((*CampaignAttempt)(nil)).
+	_, err := s.global.NewUpdate().Model((*CampaignAttempt)(nil)).
 		Set("result = ?", result).
 		Set("call_outcome = NULLIF(?, '')", callOutcome).
 		Set("call_id = COALESCE(NULLIF(?, ''), call_id)", callID).
@@ -356,7 +356,7 @@ func (s *Store) EndDial(ctx context.Context, id string, result, callOutcome, cal
 // LatestDial returns a contact's most recent dial, and false when it was never dialed.
 func (s *Store) LatestDial(ctx context.Context, contactID string) (CampaignAttempt, bool, error) {
 	var attempt CampaignAttempt
-	err := s.db.NewSelect().Model(&attempt).
+	err := s.global.NewSelect().Model(&attempt).
 		Where("contact_id = ?", contactID).
 		Order("started_at DESC", "dial DESC").
 		Limit(1).
@@ -392,7 +392,7 @@ func (s *Store) ClaimClassifications(ctx context.Context, owner string, now time
 	}
 
 	var claimed []Classifying
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var attempts []CampaignAttempt
 		err := tx.NewRaw(`WITH due AS (
 	SELECT ca.id FROM campaign_attempts ca
@@ -459,7 +459,7 @@ func (s *Store) PutOffClassification(ctx context.Context, owner, attemptID strin
 		return stack.Wrap(errors.New("store: an owner and a dial id are required"))
 	}
 	var released int64
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		result, err := tx.NewUpdate().Model((*Contact)(nil)).
 			TableExpr("campaign_attempts AS ca").
 			Set("leased_by = ''").
@@ -493,7 +493,7 @@ func (s *Store) PutOffClassification(ctx context.Context, owner, attemptID strin
 // Classified records an answered dial's outcome. A dial deleted with its campaign, or no longer
 // pending because another runner read it or its contact settled, is nothing to record.
 func (s *Store) Classified(ctx context.Context, attemptID, outcome string, converted bool) error {
-	_, err := s.db.NewUpdate().Model((*CampaignAttempt)(nil)).
+	_, err := s.global.NewUpdate().Model((*CampaignAttempt)(nil)).
 		Set("classify_state = ?", classifyDone).
 		Set("classify_after = NULL").
 		Set("outcome = ?", outcome).
@@ -510,7 +510,7 @@ func (s *Store) Classified(ctx context.Context, attemptID, outcome string, conve
 // CompleteCampaigns completes the running campaigns that have nobody left to ring and no call
 // whose outcome is still unknown. An auto-enroll campaign waits for more people instead.
 func (s *Store) CompleteCampaigns(ctx context.Context, now time.Time) error {
-	_, err := s.db.NewUpdate().Model((*Campaign)(nil)).
+	_, err := s.global.NewUpdate().Model((*Campaign)(nil)).
 		Set("state = ?", Completed).
 		Set("finished_at = ?", now).
 		Where("cp.state = ?", Running).

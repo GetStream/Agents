@@ -33,7 +33,7 @@ type dataMoveCursor struct {
 // ever started.
 func (s *Store) MoveCursor(ctx context.Context, customerID, source string) (*MoveCursor, error) {
 	var saved dataMoveCursor
-	err := s.db.NewSelect().Model(&saved).Where("customer_id = ? AND source = ?", customerID, source).Scan(ctx)
+	err := s.global.NewSelect().Model(&saved).Where("customer_id = ? AND source = ?", customerID, source).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -47,7 +47,7 @@ func (s *Store) MoveCursor(ctx context.Context, customerID, source string) (*Mov
 // source was read up to at readAt, or nil for a copy that has started and not finished. A cursor
 // never moves back: of two runs at once, the one that read less cannot undo the other.
 func (s *Store) SaveMoveCursor(ctx context.Context, customerID, source string, cursor *int64, readAt time.Time) error {
-	_, err := s.db.NewInsert().Model(&dataMoveCursor{CustomerID: customerID, Source: source, Cursor: cursor, ReadAt: readAt}).
+	_, err := s.global.NewInsert().Model(&dataMoveCursor{CustomerID: customerID, Source: source, Cursor: cursor, ReadAt: readAt}).
 		On("CONFLICT (customer_id, source) DO UPDATE").
 		Set("cursor = CASE WHEN EXCLUDED.cursor IS NULL THEN NULL ELSE GREATEST(dmc.cursor, EXCLUDED.cursor) END").
 		Set("read_at = CASE WHEN EXCLUDED.cursor IS NULL THEN EXCLUDED.read_at ELSE GREATEST(dmc.read_at, EXCLUDED.read_at) END").
@@ -74,7 +74,7 @@ func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, er
 		}
 		var holds bool
 		query := "SELECT EXISTS (SELECT 1 FROM " + table.name + " WHERE " + where + ")"
-		if err := s.db.QueryRowContext(ctx, query, customerID).Scan(&holds); err != nil {
+		if err := s.global.QueryRowContext(ctx, query, customerID).Scan(&holds); err != nil {
 			return "", fmt.Errorf("store: holds %s: %w", table.name, err)
 		}
 		if holds {

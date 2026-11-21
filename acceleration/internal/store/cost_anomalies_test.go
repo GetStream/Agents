@@ -50,7 +50,7 @@ func (s *StoreSuite) TestDailySpendIsUTCWhateverTheSessionTimeZone() {
 	s.Require().NoError(err)
 	defer la.Close()
 	var zone string
-	s.Require().NoError(la.DB().QueryRowContext(s.ctx, "SHOW timezone").Scan(&zone))
+	s.Require().NoError(la.GlobalDB().QueryRowContext(s.ctx, "SHOW timezone").Scan(&zone))
 	s.Require().Equal("America/Los_Angeles", zone, "the session is not in UTC")
 	s.orgSpend(la, "org-tz", day.Add(3*time.Hour), 300)
 
@@ -102,7 +102,7 @@ func (s *StoreSuite) TestAnUnpostedCostAnomalyIsClaimedOnceItsClaimIsStale() {
 	_, err := s.store.NoteCostAnomaly(s.ctx, s.costAnomaly(organization, day))
 	s.Require().NoError(err)
 	backdate := func() {
-		_, err := s.store.DB().NewUpdate().Model((*CostAnomaly)(nil)).Set("claimed_at = now() - interval '2 hours'").
+		_, err := s.store.GlobalDB().NewUpdate().Model((*CostAnomaly)(nil)).Set("claimed_at = now() - interval '2 hours'").
 			Where("organization_id = ?", organization).Exec(s.ctx)
 		s.Require().NoError(err)
 	}

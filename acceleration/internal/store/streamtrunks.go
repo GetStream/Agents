@@ -69,7 +69,7 @@ const trunkGroupLockSeed = 0
 // StreamTrunk returns one of a customer's Stream trunks by Stream's id.
 func (s *Store) StreamTrunk(ctx context.Context, customerID, id string) (StreamTrunk, error) {
 	var trunk StreamTrunk
-	err := s.db.NewSelect().Model(&trunk).
+	err := s.global.NewSelect().Model(&trunk).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Scan(ctx)
@@ -89,7 +89,7 @@ func (s *Store) InTrunkGroup(ctx context.Context, group TrunkGroup, fn func(ctx 
 		return stack.Wrap(errors.New("store: a trunk group needs a customer and a vendor"))
 	}
 	key := "stream_trunks:" + group.CustomerID + ":" + strconv.FormatInt(group.StreamAppPK, 10) + ":" + group.Vendor
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, key, trunkGroupLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock trunk group: %w", err))
 		}

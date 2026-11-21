@@ -28,7 +28,7 @@ func (s *StoreSuite) inbound(channelID, providerMessageID string, change ...func
 // queue queues message in a transaction of its own, as AcceptChannelInbound does after its claim.
 func (s *StoreSuite) queue(message ChannelInbound) (bool, error) {
 	var queued bool
-	err := s.store.db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var err error
 		queued, err = queueChannelInbound(ctx, tx, message)
 		return err
@@ -69,7 +69,7 @@ func (s *StoreSuite) claimedOne(at time.Time, providerMessageID string) ChannelI
 
 // inboundState is the state and attempts of a message's row.
 func (s *StoreSuite) inboundState(channelID, providerMessageID string) (state string, attempts int) {
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT state, attempts FROM channel_thread_inbound WHERE channel_id = ? AND provider_message_id = ?",
 		channelID, providerMessageID).Scan(&state, &attempts))
 	return state, attempts
@@ -114,7 +114,7 @@ func (s *StoreSuite) TestAnInboundMessagesMediaIsStoredUnderItsOwnKeys() {
 	})
 
 	var media string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT media::text FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&media))
 
 	s.JSONEq(`[{"url": "https://files.example.com/a.png", "mime_type": "image/png"},
@@ -143,7 +143,7 @@ func (s *StoreSuite) TestAnInboundMessagesUploadsAreSavedOnlyUnderTheRowsLease()
 	s.True(saved)
 
 	var media string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT media::text FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&media))
 	s.JSONEq(`[{"url": "", "mime_type": "", "id": "1003383421387256", "id_mime_type": "image/png",
 		"uploaded": "https://cdn.example.com/photo-1.png"}]`, media)
@@ -162,7 +162,7 @@ func (s *StoreSuite) TestAnInboundMessageWithNoMediaAndNoForwardIsClaimedWithNei
 	s.Nil(claimed.Forward)
 	var media int
 	var forwarded bool
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT jsonb_array_length(media), forward IS NOT NULL FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&media, &forwarded))
 	s.Zero(media, "no media is an empty array, not JSON null")
 	s.False(forwarded, "no forward is NULL, not JSON null")
@@ -235,7 +235,7 @@ func (s *StoreSuite) TestAThreadsSecondMessageWaitsUntilItsFirstIsWritten() {
 func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt() {
 	a := s.inboundMessage("thread-one", "1759740000.000100")
 	b := s.inboundMessage("thread-one", "1759740000.000200")
-	tx, err := s.store.DB().BeginTx(s.ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
 	queued, err := queueChannelInbound(s.ctx, tx, a)
@@ -248,7 +248,7 @@ func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database() AND query LIKE '%FROM channel_threads%FOR NO KEY UPDATE%'").Scan(&waiting))
 		return waiting == 1
 	}, 5*time.Second, 10*time.Millisecond, "queueing B waits for A's transaction")
@@ -401,7 +401,7 @@ func (s *StoreSuite) claimWhileAnotherRouterActs(at time.Time, meanwhile func())
 	}()
 	s.Require().Eventually(func() bool {
 		var sleeping int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")
@@ -440,7 +440,7 @@ func (s *StoreSuite) TestARouterDoesNotClaimAnInboundMessageAnotherFinishedDurin
 func (s *StoreSuite) TestAClaimSkipsAnInboundMessageAnotherRouterHoldsLocked() {
 	s.inbound("thread-one", "1759740000.000100")
 	s.inbound("thread-two", "1759740000.000200")
-	held, err := s.store.DB().BeginTx(s.ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // only releases the lock
 	_, err = held.ExecContext(s.ctx, "SELECT 1 FROM channel_thread_inbound WHERE channel_id = 'thread-one' FOR UPDATE")
@@ -522,7 +522,7 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 	s.Require().NoError(err)
 	s.Equal(2, pruned)
 	var kept []string
-	rows, err := s.store.DB().QueryContext(s.ctx, "SELECT provider_message_id FROM channel_thread_inbound ORDER BY provider_message_id")
+	rows, err := s.store.GlobalDB().QueryContext(s.ctx, "SELECT provider_message_id FROM channel_thread_inbound ORDER BY provider_message_id")
 	s.Require().NoError(err)
 	defer rows.Close() //nolint:errcheck // read to the end below
 	for rows.Next() {
@@ -537,7 +537,7 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 func (s *StoreSuite) TestAThreadChannelsInboundMessagesGoWithIt() {
 	s.inbound("thread-one", "1759740000.000100")
 
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM channel_threads WHERE channel_id = 'thread-one'")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM channel_threads WHERE channel_id = 'thread-one'")
 	s.Require().NoError(err)
 
 	s.Empty(s.claim(s.base))
@@ -658,7 +658,7 @@ func (s *StoreSuite) TestTwoMessagesOfADeliveryGivenUpAtOnceForwardItOnce() {
 // inboundClaims are the provider ids of the inbound messages claimed in channelID.
 func (s *StoreSuite) inboundClaims(channelID string) []string {
 	var ids []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT message_id FROM channel_thread_messages WHERE channel_id = ? AND kind = ? ORDER BY message_id",
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT message_id FROM channel_thread_messages WHERE channel_id = ? AND kind = ? ORDER BY message_id",
 		channelID, ClaimInbound).Scan(s.ctx, &ids))
 	return ids
 }
@@ -701,9 +701,9 @@ func (s *StoreSuite) TestTheRepliesThatWaitedAreQueuedAfterTheMessageThatStartsT
 	s.Require().NoError(err)
 	s.Equal([]string{"1759740000.000100", "1759740000.000200", "1759740000.000300"}, s.inboundClaims("thread-one"))
 	var queued []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
 	s.Equal([]string{"1759740000.000100", "1759740000.000300", "1759740000.000200"}, queued)
-	left, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
+	left, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
 	s.Require().NoError(err)
 	s.Empty(left)
 }
@@ -726,9 +726,9 @@ func (s *StoreSuite) TestAWaitingReplyWaitedDoesNotQueueIsDroppedAndTheOthersAre
 	s.True(fresh)
 	s.Equal([]string{"1759740000.000100", "1759740000.000300"}, s.inboundClaims("thread-one"))
 	var queued []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
 	s.Equal([]string{"1759740000.000100", "1759740000.000300"}, queued)
-	left, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
+	left, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
 	s.Require().NoError(err)
 	s.Empty(left, "the dropped reply waits no more")
 }

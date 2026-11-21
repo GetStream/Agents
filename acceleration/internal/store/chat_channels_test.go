@@ -15,7 +15,7 @@ func (s *StoreSuite) answering(customerID string, at time.Time, types ...string)
 		config.ChatChannels = append(config.ChatChannels, ChatChannel{Type: named})
 	}
 	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET created_at = ? WHERE id = ?", at, config.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET created_at = ? WHERE id = ?", at, config.ID)
 	s.Require().NoError(err)
 	return config.ID
 }
@@ -28,7 +28,7 @@ func (s *StoreSuite) TestTheOldestConfigNamingAChannelTypeAnswersInIt() {
 	deleted := s.answering(customer, now.Add(-4*time.Hour), "callouts")
 	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, customer, deleted))
 	copied := s.answering(customer, now.Add(-3*time.Hour), "callouts")
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET tags = ?::jsonb WHERE id = ?", `{"draft_of": "x"}`, copied)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET tags = ?::jsonb WHERE id = ?", `{"draft_of": "x"}`, copied)
 	s.Require().NoError(err)
 	s.answering(other, now.Add(-2*time.Hour), "callouts")
 	s.answering(customer, now.Add(-90*time.Minute), "shifts")
@@ -123,7 +123,7 @@ func (s *StoreSuite) TestAChatChannelTurnWhoseLeaseRanOutCanBeTaken() {
 	cid := "callouts:" + newID()
 	_, err := s.store.TakeChatChannelTurn(s.ctx, 7, cid, "router-a", time.Now().Add(time.Minute))
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE chat_channel_turns SET turn_until = now() - interval '1 second' WHERE cid = ?", cid)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE chat_channel_turns SET turn_until = now() - interval '1 second' WHERE cid = ?", cid)
 	s.Require().NoError(err)
 
 	taken, err := s.store.TakeChatChannelTurn(s.ctx, 7, cid, "router-b", time.Now().Add(time.Minute))

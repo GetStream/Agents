@@ -28,7 +28,7 @@ func thread(channelID, threadKey string) *ChannelThread {
 
 // account gives a connection the account id a consent would.
 func (s *StoreSuite) account(id, accountID string) {
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE connector_connections SET account_id = ? WHERE id = ?", accountID, id)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET account_id = ? WHERE id = ?", accountID, id)
 	s.Require().NoError(err)
 }
 
@@ -226,7 +226,7 @@ func (s *StoreSuite) TestATurnWhoseLeaseRanOutCanBeTaken() {
 	s.Require().NoError(err)
 	_, err = s.store.TakeChannelThreadTurn(s.ctx, "thread-one", "router-a", time.Now().Add(time.Minute))
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE channel_threads SET turn_until = now() - interval '1 second' WHERE channel_id = 'thread-one'")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_threads SET turn_until = now() - interval '1 second' WHERE channel_id = 'thread-one'")
 	s.Require().NoError(err)
 
 	taken, err := s.store.TakeChannelThreadTurn(s.ctx, "thread-one", "router-b", time.Now().Add(time.Minute))
@@ -253,14 +253,14 @@ func (s *StoreSuite) TestAMessageIdOlderThanTheKeepIsForgotten() {
 	s.Require().NoError(err)
 	_, err = s.store.ClaimChannelThreadMessage(s.ctx, "thread-one", ClaimInbound, "old")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE channel_thread_messages SET created_at = ?", time.Now().Add(-channelMessageKeep-time.Minute))
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_messages SET created_at = ?", time.Now().Add(-channelMessageKeep-time.Minute))
 	s.Require().NoError(err)
 
 	_, err = s.store.ClaimChannelThreadMessage(s.ctx, "thread-one", ClaimInbound, "new")
 	s.Require().NoError(err)
 
 	var kept int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM channel_thread_messages").Scan(&kept))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM channel_thread_messages").Scan(&kept))
 	s.Equal(1, kept)
 }
 
@@ -316,7 +316,7 @@ func (s *StoreSuite) TestATestCopyIsNotAmongTheConfigsThatBindAConnection() {
 	bot := s.connection("acme-app", nil)
 	live := s.bind("acme-app", fixedBinding(bot.ID))
 	copied := s.bind("acme-app", fixedBinding(bot.ID))
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET tags = ?::jsonb WHERE id = ?", `{"draft_of": "`+live+`"}`, copied)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET tags = ?::jsonb WHERE id = ?", `{"draft_of": "`+live+`"}`, copied)
 	s.Require().NoError(err)
 
 	configs, err := s.store.AgentConfigsBindingConnection(s.ctx, "acme-app", bot.ID)
@@ -362,12 +362,12 @@ func (s *StoreSuite) TestTheWaitingRepliesOfAThreadAreTakenOnceOldestFirst() {
 	_, err = s.store.WaitChannelThreadMessage(s.ctx, "other-app", waiting("C0000CHAN:1", "1759740000.000500"))
 	s.Require().NoError(err)
 
-	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
+	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
 
 	s.Require().NoError(err)
 	s.Equal([]core.InboundMessage{waiting("C0000CHAN:1", "1759740000.000300"), waiting("C0000CHAN:1", "1759740000.000200")}, taken,
 		"the thread's own replies, in the order they waited, as they were kept")
-	again, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
+	again, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
 	s.Require().NoError(err)
 	s.Empty(again)
 }
@@ -381,7 +381,7 @@ func (s *StoreSuite) TestAReplyDeliveredAgainWaitsOnce() {
 
 	s.Require().NoError(err)
 	s.False(kept)
-	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
+	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
 	s.Require().NoError(err)
 	s.Len(taken, 1)
 }
@@ -398,7 +398,7 @@ func (s *StoreSuite) TestAWaitingReplyTakenBackIsNotTakenByItsThread() {
 	again, err := s.store.UnwaitChannelThreadMessage(s.ctx, "acme-app", reply)
 	s.Require().NoError(err)
 	s.False(again, "taken back once")
-	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
+	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
 	s.Require().NoError(err)
 	s.Empty(taken)
 }
@@ -408,18 +408,18 @@ func (s *StoreSuite) TestAWaitingReplyTakenBackIsNotTakenByItsThread() {
 func (s *StoreSuite) TestAReplyPastItsKeepIsNotTakenAndIsDropped() {
 	_, err := s.store.WaitChannelThreadMessage(s.ctx, "acme-app", waiting("C0000CHAN:1", "1759740000.000200"))
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE channel_thread_waiting SET created_at = ? WHERE customer_id = 'acme-app'",
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_waiting SET created_at = ? WHERE customer_id = 'acme-app'",
 		time.Now().UTC().Add(-channelWaitingKeep-time.Minute))
 	s.Require().NoError(err)
 
-	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
+	taken, err := takeWaitingChannelThreadMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", "C0000CHAN:1")
 	s.Require().NoError(err)
 	s.Empty(taken)
 	_, err = s.store.WaitChannelThreadMessage(s.ctx, "acme-app", waiting("C0000CHAN:2", "1759740000.000300"))
 	s.Require().NoError(err)
 
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM channel_thread_waiting WHERE customer_id = 'acme-app'").Scan(&rows))
 	s.Equal(1, rows, "only the reply kept now")
 }
@@ -456,7 +456,7 @@ func (s *StoreSuite) TestAThreadLinkedAgainKeepsItsChatPerson() {
 // (LinkChannelThread, RETURNING *) and fails on a column it does not know, so the table keeps
 // the columns it had then: a rollback keeps every thread channel working.
 func (s *StoreSuite) TestChannelThreadsKeepsTheColumnsARouterBeforeChatPeopleReads() {
-	rows, err := s.store.DB().QueryContext(s.ctx,
+	rows, err := s.store.GlobalDB().QueryContext(s.ctx,
 		"SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'channel_threads' ORDER BY ordinal_position")
 	s.Require().NoError(err)
 	defer rows.Close()

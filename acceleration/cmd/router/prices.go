@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -452,15 +451,13 @@ func describeTarget(ctx context.Context, pgStore *store.Store, settings config.C
 	if err != nil {
 		return "", err
 	}
-	var database string
-	var server sql.NullString
-	if err := pgStore.DB().QueryRowContext(ctx,
-		"SELECT current_database(), host(inet_server_addr()) || ':' || inet_server_port()").Scan(&database, &server); err != nil {
+	database, server, err := pgStore.Server(ctx)
+	if err != nil {
 		return "", err
 	}
 	answers := "over a unix socket"
-	if server.Valid {
-		answers = "as " + server.String
+	if server != "" {
+		answers = "as " + server
 	}
 	return fmt.Sprintf("database %q at %s (%s), which answers %s\n", database, address, network, answers), nil
 }

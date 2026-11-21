@@ -104,7 +104,7 @@ func (s *Store) OpenEpisode(ctx context.Context, episode *Episode) (opened bool,
 	// Twice at most: a second miss is the thread's episode closed and another opened between
 	// the insert and the touch, twice over.
 	for range 2 {
-		insert := s.db.NewInsert().Model(episode).On("CONFLICT DO NOTHING")
+		insert := s.global.NewInsert().Model(episode).On("CONFLICT DO NOTHING")
 		// bun returns a column a Value sets, so StartedAt is then the start Postgres holds.
 		if !episode.Began.IsZero() {
 			insert = insert.Value("started_at", "statement_timestamp() - make_interval(secs => ?)", time.Since(episode.Began).Seconds())
@@ -121,14 +121,14 @@ func (s *Store) OpenEpisode(ctx context.Context, episode *Episode) (opened bool,
 			return true, nil
 		}
 		if episode.SessionID != "" {
-			err := s.db.NewSelect().Model(episode).Where("customer_id = ?", episode.CustomerID).
+			err := s.global.NewSelect().Model(episode).Where("customer_id = ?", episode.CustomerID).
 				Where("session_id = ?", episode.SessionID).Scan(ctx)
 			if err != nil {
 				return false, stack.Wrap(fmt.Errorf("store: open episode: %w", err))
 			}
 			return false, nil
 		}
-		err = s.db.NewRaw(touchThreadEpisodeQuery, episode.CustomerID, episode.ThreadChannel, at).Scan(ctx, episode)
+		err = s.global.NewRaw(touchThreadEpisodeQuery, episode.CustomerID, episode.ThreadChannel, at).Scan(ctx, episode)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -225,7 +225,7 @@ func (s *Store) CloseIdleEpisodes(ctx context.Context, idleSince, now time.Time,
 	if limit < 1 {
 		return closed, nil
 	}
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var due []string
 		if err := tx.NewRaw(idleEpisodesQuery, idleSince.UTC(), limit).Scan(ctx, &due); err != nil {
 			return err
@@ -263,7 +263,7 @@ func (s *Store) EndCallEpisodes(ctx context.Context, scope AppScope, callID stri
 	if callID == "" {
 		return closed, nil
 	}
-	err := s.db.NewRaw(endCallEpisodesQuery, now.UTC(), callID, scope.clause(), leaseUntil.UTC()).Scan(ctx, &closed)
+	err := s.global.NewRaw(endCallEpisodesQuery, now.UTC(), callID, scope.clause(), leaseUntil.UTC()).Scan(ctx, &closed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: end call episodes: %w", err))
 	}
@@ -302,7 +302,7 @@ func (s *Store) ClaimEpisodeSummaries(ctx context.Context, now time.Time, limit 
 	if limit < 1 {
 		return claimed, nil
 	}
-	err := s.db.NewRaw(claimEpisodeSummariesQuery, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed)
+	err := s.global.NewRaw(claimEpisodeSummariesQuery, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim episode summaries: %w", err))
 	}
@@ -315,11 +315,11 @@ func (s *Store) FinishEpisodeSummary(ctx context.Context, customerID, id, status
 	if status != EpisodeSummarized && status != EpisodeSummaryFailed {
 		return stack.Wrap(fmt.Errorf("store: %q is not a status a summary finishes with", status))
 	}
-	finished := s.db.NewUpdate().Model((*Episode)(nil)).
+	finished := s.global.NewUpdate().Model((*Episode)(nil)).
 		Set("status = ?", status).
 		Where("ep.customer_id = ? AND ep.id = ? AND ep.status = ?", customerID, id, EpisodeEnded).
 		Returning("ep.id")
-	_, err := s.db.NewUpdate().With("finished", finished).
+	_, err := s.global.NewUpdate().With("finished", finished).
 		TableExpr("episode_activity AS act").
 		TableExpr("finished").
 		Set("summary_lease_until = NULL").
@@ -347,7 +347,7 @@ SELECT EXISTS (SELECT 1 FROM agent_configs WHERE (episode_cards OR episode_cards
 // since closes as any other (AI-2771).
 func (s *Store) AnyEpisodeToSweep(ctx context.Context) (bool, error) {
 	var due bool
-	if err := s.db.NewRaw(anyEpisodeToSweepQuery).Scan(ctx, &due); err != nil {
+	if err := s.global.NewRaw(anyEpisodeToSweepQuery).Scan(ctx, &due); err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: any episode to sweep: %w", err))
 	}
 	return due, nil
@@ -396,7 +396,7 @@ func (s *Store) EpisodeCards(ctx context.Context, query CardsQuery) ([]EpisodeCa
 		return nil, stack.Wrap(errors.New("store: a customer, an agent config, an omni-channel and a limit are required"))
 	}
 	var cards []EpisodeCard
-	err := s.db.NewSelect().Model(&cards).
+	err := s.global.NewSelect().Model(&cards).
 		ColumnExpr("ep.*").
 		ColumnExpr("cm.kind AS contact_kind, "+reachedAt+" AS contact_address, cm.agent_config_id").
 		// LEAST ignores NULLs, so Until is nil only when both are.

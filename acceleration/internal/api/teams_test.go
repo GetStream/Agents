@@ -200,7 +200,7 @@ func (s *AgentTeamsSuite) TestAFailedReadAnswersAlikeForAConfigThatExistsAndOneT
 func (s *AgentTeamsSuite) TestAnAppWhoseSettingsCannotBeReadAnswersAlikeForAnUnknownConfig() {
 	dana := s.inTeams()
 	config := s.configOf("")
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 
@@ -273,9 +273,9 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerWithNoPinReadsItsUsers
 	id := streamapp.CustomerOf(suiteStreamApp)
 	settings := store.AppSettings{AgentTeams: new(true)}
 	var app store.App
-	if err := s.store.DB().NewSelect().Model(&app).Where("id = ?", id).Scan(ctx); err == nil {
+	if err := s.store.GlobalDB().NewSelect().Model(&app).Where("id = ?", id).Scan(ctx); err == nil {
 		app.Settings = settings
-		_, err = s.store.DB().NewUpdate().Model(&app).Column("settings").WherePK().Exec(ctx)
+		_, err = s.store.GlobalDB().NewUpdate().Model(&app).Column("settings").WherePK().Exec(ctx)
 		s.Require().NoError(err)
 		s.useApp(s.data.keyed(store.Organization{ID: app.OrganizationID}, app))
 	} else {
@@ -332,7 +332,7 @@ func (s *AgentTeamsSuite) TestWithTheSettingOffTheDeploymentAppsOwnCustomerIsNot
 func (s *AgentTeamsSuite) TestAnAppWhoseSettingsCannotBeReadOpensNothingToAUser() {
 	dana := s.inTeams()
 	config := s.configOf("")
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 
@@ -549,7 +549,7 @@ func (s *AgentTeamsSuite) TestAConfigThatCannotBeReadFailsAReopenOnlyWhenChecked
 		ended := anya.createSession(s.recorded(s.configOf("red")))
 		s.endHere(ended.Id)
 		for _, opened := range []Session{parent, ended} {
-			_, err := s.store.DB().NewRaw(`UPDATE agent_configs SET skills = '"unreadable"'::jsonb WHERE id = ?`,
+			_, err := s.store.GlobalDB().NewRaw(`UPDATE agent_configs SET skills = '"unreadable"'::jsonb WHERE id = ?`,
 				value(opened.ConfigId)).Exec(s.T().Context())
 			s.Require().NoError(err)
 		}

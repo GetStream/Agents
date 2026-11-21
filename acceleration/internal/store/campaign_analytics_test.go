@@ -11,7 +11,7 @@ func (s *StoreSuite) dialed(contact Contact, at time.Time, result, callOutcome s
 }
 
 func (s *StoreSuite) settled(contact Contact, stage, outcome string, converted bool) {
-	_, err := s.store.DB().NewUpdate().Model((*Contact)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*Contact)(nil)).
 		Set("stage = ?", stage).Set("outcome = ?", outcome).Set("converted = ?", converted).
 		Where("id = ?", contact.ID).Exec(s.ctx)
 	s.Require().NoError(err)

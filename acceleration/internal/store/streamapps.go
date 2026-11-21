@@ -37,7 +37,7 @@ type StreamFallbackUse struct {
 func (s *Store) RecordStreamFallbackUses(ctx context.Context, customer string, uses int64, at time.Time) error {
 	at = at.UTC()
 	use := StreamFallbackUse{CustomerID: customer, FirstAt: at, LastAt: at, Uses: uses}
-	_, err := s.db.NewInsert().Model(&use).
+	_, err := s.global.NewInsert().Model(&use).
 		On("CONFLICT (customer_id) DO UPDATE").
 		Set("last_at = GREATEST(sfu.last_at, EXCLUDED.last_at)").
 		Set("uses = sfu.uses + EXCLUDED.uses").
@@ -52,7 +52,7 @@ func (s *Store) RecordStreamFallbackUses(ctx context.Context, customer string, u
 // most recent first.
 func (s *Store) StreamFallbackUses(ctx context.Context, since time.Time) ([]StreamFallbackUse, error) {
 	var uses []StreamFallbackUse
-	err := s.db.NewSelect().Model(&uses).Where("last_at >= ?", since.UTC()).Order("last_at DESC").Scan(ctx)
+	err := s.global.NewSelect().Model(&uses).Where("last_at >= ?", since.UTC()).Order("last_at DESC").Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("store: read stream fallback uses: %w", err)
 	}
@@ -82,7 +82,7 @@ var ErrNoStreamAppToken = errors.New("store: no token is held for this stream ap
 func (s *Store) KeepStreamAppToken(ctx context.Context, token StreamAppToken) (bool, error) {
 	token.ExpiresAt = token.ExpiresAt.UTC()
 	token.UpdatedAt = time.Now().UTC()
-	result, err := s.db.NewInsert().Model(&token).
+	result, err := s.global.NewInsert().Model(&token).
 		On("CONFLICT (stream_app_pk) DO UPDATE").
 		Set("customer_id = EXCLUDED.customer_id").
 		Set("api_key = EXCLUDED.api_key").
@@ -102,7 +102,7 @@ func (s *Store) KeepStreamAppToken(ctx context.Context, token StreamAppToken) (b
 // StreamAppToken is the token held for an app.
 func (s *Store) StreamAppToken(ctx context.Context, app int64) (StreamAppToken, error) {
 	var token StreamAppToken
-	err := s.db.NewSelect().Model(&token).Where("stream_app_pk = ?", app).Scan(ctx)
+	err := s.global.NewSelect().Model(&token).Where("stream_app_pk = ?", app).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StreamAppToken{}, ErrNoStreamAppToken
 	}

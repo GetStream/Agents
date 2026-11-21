@@ -523,10 +523,10 @@ func (s *TelnyxChannelSuite) TestATaskWhoseThreadIsGoneFailsFinally() {
 // removeThread takes the thread channel's link away, as if its thread were gone.
 func (s *RouterSuite) removeThread(channel string) error {
 	ctx := context.Background()
-	if _, err := s.store.DB().ExecContext(ctx, "DELETE FROM channel_thread_messages WHERE channel_id = ?", channel); err != nil {
+	if _, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM channel_thread_messages WHERE channel_id = ?", channel); err != nil {
 		return err
 	}
-	_, err := s.store.DB().ExecContext(ctx, "DELETE FROM channel_threads WHERE channel_id = ?", channel)
+	_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM channel_threads WHERE channel_id = ?", channel)
 	return err
 }
 
@@ -771,7 +771,7 @@ func (s *WhatsAppChannelSuite) TestAWhatsAppThreadTaskSaysItIsDeliveredOnWhatsAp
 // person writing opens the window again.
 func (s *WhatsAppChannelSuite) TestAWhatsAppThreadTaskPastTheWindowIsNotSent() {
 	task, channel := s.scheduledOnWhatsApp("16505551234")
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE channel_threads SET last_inbound_at = now() - interval '25 hours' WHERE channel_id = ?", channel)
 	s.Require().NoError(err)
 

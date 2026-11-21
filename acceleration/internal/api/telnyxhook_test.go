@@ -240,7 +240,7 @@ func (s *TelnyxHookSuite) TestASignedCallCarryingCredentialsRecordsNoUserAndJoin
 	s.NotContains(string(answered), claimed)
 
 	ctx := context.Background()
-	recorded, err := s.store.DB().NewSelect().Model((*store.User)(nil)).
+	recorded, err := s.store.GlobalDB().NewSelect().Model((*store.User)(nil)).
 		Where("customer_id = ?", s.customerID()).
 		Where("id = ?", userID).
 		Count(ctx)

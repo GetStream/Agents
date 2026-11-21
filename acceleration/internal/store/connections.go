@@ -227,7 +227,7 @@ func (s *Store) createConnection(ctx context.Context, registry core.Registry, co
 	if connection.ProviderUnitID != "" {
 		return stack.Wrap(errors.New("store: a provider unit is set on a connection after consent, not with it"))
 	}
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the connection is stored, so a delete of it waits
 		// and then finds the connection (DeleteConnectorDefinition). A built-in is never
 		// deleted, so a revision found here stays.
@@ -282,7 +282,7 @@ func (s *Store) ConnectorConnection(ctx context.Context, customerID, id string) 
 		return ConnectorConnection{}, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	var connection ConnectorConnection
-	err := s.db.NewSelect().Model(&connection).
+	err := s.global.NewSelect().Model(&connection).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Where("deleted_at IS NULL").
@@ -304,7 +304,7 @@ func (s *Store) ConnectorConnectionByProviderUnit(ctx context.Context, connector
 		return ConnectorConnection{}, stack.Wrap(errors.New("store: a connector and a provider unit id are required"))
 	}
 	var connection ConnectorConnection
-	err := s.db.NewSelect().Model(&connection).
+	err := s.global.NewSelect().Model(&connection).
 		Where("connector_id = ?", connectorID).
 		Where("provider_unit_id = ?", providerUnitID).
 		Where("deleted_at IS NULL").
@@ -349,7 +349,7 @@ func (s *Store) SetConnectorConnectionProviderUnit(ctx context.Context, customer
 	if connection.Status != ConnectionConnected {
 		return stack.Wrap(fmt.Errorf("%w: %s is %s", ErrConnectorConnectionNotConnected, id, connection.Status))
 	}
-	result, err := s.db.NewUpdate().Model((*ConnectorConnection)(nil)).
+	result, err := s.global.NewUpdate().Model((*ConnectorConnection)(nil)).
 		Set("provider_unit_id = ?", providerUnitID).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("cc.customer_id = ?", customerID).
@@ -407,7 +407,7 @@ func (s *Store) SetConnectorConnectionTools(ctx context.Context, customerID, id 
 		return stack.Wrap(fmt.Errorf("store: encode connector connection tools: %w", err))
 	}
 	checked := checkedAt.UTC().Truncate(time.Microsecond)
-	result, err := s.db.NewUpdate().Model((*ConnectorConnection)(nil)).
+	result, err := s.global.NewUpdate().Model((*ConnectorConnection)(nil)).
 		Set("cached_tools = ?::jsonb", string(raw)).
 		Set("tools_digest = ?", digest).
 		Set("tools_checked_at = ?", checked).
@@ -444,7 +444,7 @@ func (s *Store) ConnectorConnectionsByOwner(ctx context.Context, customerID stri
 	connections := []ConnectorConnection{}
 	// connector_connections_owner_idx leads with (customer_id, owner_type), so every user's
 	// are read from it too, and sorted after.
-	query := s.db.NewSelect().Model(&connections).
+	query := s.global.NewSelect().Model(&connections).
 		Where("customer_id = ?", customerID).
 		Where("owner_type = ?", filter.OwnerType).
 		Where("deleted_at IS NULL")
@@ -474,7 +474,7 @@ func (s *Store) ConnectorConnectionsByOwner(ctx context.Context, customerID stri
 // so nothing can use it from here on, whether or not a config still binds it. It is the
 // forced delete; DeleteUnboundConnectorConnection is the one that refuses a bound connection.
 func (s *Store) DeleteConnectorConnection(ctx context.Context, customerID, id string) error {
-	affected, err := softDeleteConnection(ctx, s.db, customerID, id, false)
+	affected, err := softDeleteConnection(ctx, s.global, customerID, id, false)
 	if err != nil {
 		return err
 	}
@@ -499,7 +499,7 @@ func (s *Store) DeleteUnboundConnectorConnection(ctx context.Context, customerID
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var locked string
 		err := tx.NewSelect().Model((*ConnectorConnection)(nil)).Column("cc.id").
 			Where("cc.customer_id = ?", customerID).
@@ -590,7 +590,7 @@ type DeletedConnection struct {
 // that holds credentials, oldest first: the grants DeleteUserConnectorConnections drops.
 func (s *Store) GrantedConnectorConnectionsOfUser(ctx context.Context, customerID, userID string) ([]ConnectorConnection, error) {
 	var connections []ConnectorConnection
-	err := s.db.NewSelect().Model(&connections).
+	err := s.global.NewSelect().Model(&connections).
 		Where("cc.customer_id = ?", customerID).
 		Where("cc.owner_type = ?", OwnerUser).
 		Where("cc.owner_id = ?", userID).
@@ -618,7 +618,7 @@ func (s *Store) DeleteUserConnectorConnections(ctx context.Context, customerID, 
 		return nil, stack.Wrap(errors.New("store: a customer and a user id are required"))
 	}
 	var deleted []DeletedConnection
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var rows []struct {
 			ID          string `bun:"id"`
 			ConnectorID string `bun:"connector_id"`
@@ -699,7 +699,7 @@ func (s *Store) ConnectorConnectionUses(ctx context.Context, customerID string, 
 	var rows []ConnectionUse
 	// A row whose connectors is not an array binds nothing, rather than failing the read: the
 	// column is jsonb, and a writer that skips the store can put anything there.
-	err := s.db.NewSelect().
+	err := s.global.NewSelect().
 		TableExpr("agent_configs AS ac").
 		Join("CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(ac.connectors) = 'array' THEN ac.connectors ELSE '[]'::jsonb END) AS binding").
 		ColumnExpr("ac.id AS config_id, ac.name AS config_name").
@@ -727,7 +727,7 @@ func (s *Store) ConnectorConnectionReferenced(ctx context.Context, customerID, i
 		return false, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	var referenced bool
-	err := s.db.NewSelect().Model((*ConnectorConnection)(nil)).
+	err := s.global.NewSelect().Model((*ConnectorConnection)(nil)).
 		ColumnExpr(boundByConfig).
 		Where("cc.customer_id = ? AND cc.id = ? AND cc.deleted_at IS NULL", customerID, id).
 		Scan(ctx, &referenced)
@@ -764,7 +764,7 @@ func (s *Store) CreateConnectorAuthorizationAttempt(ctx context.Context, attempt
 		return err
 	}
 
-	if _, err := s.db.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
+	if _, err := s.global.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
 		Where("customer_id = ?", attempt.CustomerID).
 		Where("expires_at <= now()").
 		Exec(ctx); err != nil {
@@ -772,7 +772,7 @@ func (s *Store) CreateConnectorAuthorizationAttempt(ctx context.Context, attempt
 	}
 	attempt.ConsumedAt = nil
 	attempt.CreatedAt = now
-	if _, err := s.db.NewInsert().Model(attempt).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(attempt).Exec(ctx); err != nil {
 		return fmt.Errorf("store: create authorization attempt: %w", err)
 	}
 	return nil
@@ -806,7 +806,7 @@ func (s *Store) ConsumeConnectorAuthorizationAttempt(ctx context.Context, state 
 		return ConnectorAuthorizationAttempt{}, errors.New("store: an oauth state is required")
 	}
 	var attempt ConnectorAuthorizationAttempt
-	err := s.db.NewUpdate().Model(&attempt).
+	err := s.global.NewUpdate().Model(&attempt).
 		Set("consumed_at = now()").
 		Where("caa.state_hash = ?", AuthorizationStateHash(state)).
 		ApplyQueryBuilder(attemptOpen).
@@ -830,7 +830,7 @@ func (s *Store) HandOffConnectorAuthorizationAttempt(ctx context.Context, id str
 	if id == "" || len(previous) == 0 || len(sealed) == 0 || kekVersion < 1 {
 		return errors.New("store: a handoff needs an attempt id, the blob it read and a new one under a key version of 1 or more")
 	}
-	result, err := s.db.NewUpdate().Model((*ConnectorAuthorizationAttempt)(nil)).
+	result, err := s.global.NewUpdate().Model((*ConnectorAuthorizationAttempt)(nil)).
 		Set("attempt_sealed = ?", sealed).
 		Set("kek_version = ?", kekVersion).
 		Where("caa.id = ?", id).
@@ -869,7 +869,7 @@ func attemptOpen(q bun.QueryBuilder) bun.QueryBuilder {
 // live connection.
 func (s *Store) openAttempt(ctx context.Context, where string, arg any) (ConnectorAuthorizationAttempt, error) {
 	var attempt ConnectorAuthorizationAttempt
-	err := s.db.NewSelect().Model(&attempt).
+	err := s.global.NewSelect().Model(&attempt).
 		Where(where, arg).
 		ApplyQueryBuilder(attemptOpen).
 		Scan(ctx)

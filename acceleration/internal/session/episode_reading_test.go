@@ -308,7 +308,7 @@ func (s *EpisodeReadingSuite) episode(episode omnichannel.Episode) omnichannel.O
 
 // summarize closes an episode with a summary, as T55 will: the card's text and the status.
 func (s *EpisodeReadingSuite) summarize(opened omnichannel.Opened, summary string) {
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET status = ?, ended_at = ? WHERE id = ?",
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = ?, ended_at = ? WHERE id = ?",
 		store.EpisodeSummarized, s.now, opened.Episode.ID)
 	s.Require().NoError(err)
 	_, err = s.chat.Client.Chat().UpdateMessagePartial(s.ctx, opened.Episode.CardMessageID, &getstream.UpdateMessagePartialRequest{
@@ -648,7 +648,7 @@ func (s *EpisodeReadingSuite) contactRows(number string) func() int {
 	db, customer, config := s.store, s.customerID, s.configID
 	return func() int {
 		var count int
-		err := db.DB().QueryRowContext(context.Background(),
+		err := db.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND address = ?",
 			customer, config, number).Scan(&count)
 		if err != nil {
@@ -678,7 +678,7 @@ func (s *EpisodeReadingSuite) callEpisodes(sessions ...string) map[string]string
 }
 
 func callEpisodesIn(db *store.Store, sessions ...string) map[string]string {
-	rows, err := db.DB().QueryContext(context.Background(), "SELECT session_id, thread_channel FROM episodes WHERE session_id IN (?)", bun.In(sessions))
+	rows, err := db.GlobalDB().QueryContext(context.Background(), "SELECT session_id, thread_channel FROM episodes WHERE session_id IN (?)", bun.In(sessions))
 	if err != nil {
 		return nil
 	}

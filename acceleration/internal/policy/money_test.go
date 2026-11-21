@@ -314,7 +314,7 @@ func (s *PolicySuite) TestAnAppLimitIsMeasuredInTheBackground() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
 	reads := &requestReads{}
-	db.DB().AddQueryHook(reads)
+	db.GlobalDB().AddQueryHook(reads)
 	configs, err := appconfig.New(appconfig.Options{Store: db})
 	s.Require().NoError(err)
 	enforcer := s.newEnforcer(configs, nil)
@@ -559,7 +559,7 @@ func (s *PolicySuite) TestJoinWarmsTheDecisionAndTheAccount() {
 		return decided && acct != nil && !acct.read.IsZero()
 	}, 5*time.Second, 5*time.Millisecond, "both are read without a request asking")
 
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer locked.Rollback() //nolint:errcheck // nothing was written
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE policies IN ACCESS EXCLUSIVE MODE")
@@ -1033,7 +1033,7 @@ func (s *PolicySuite) TestAPolicyReadThatFailsAdmitsOnceAndIsNotKept() {
 	configs, err := appconfig.New(appconfig.Options{Store: s.store})
 	s.Require().NoError(err)
 	enforcer := s.newEnforcer(configs, nil)
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer locked.Rollback() //nolint:errcheck // nothing was written
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE policies IN ACCESS EXCLUSIVE MODE")
@@ -1090,7 +1090,7 @@ func (s *PolicySuite) ack(enforcer *reading, ids []uuid.UUID) {
 
 // lockLimits holds the limits table from another session until the test ends.
 func (s *PolicySuite) lockLimits() {
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = locked.Rollback() })
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE limits IN ACCESS EXCLUSIVE MODE")
@@ -1264,7 +1264,7 @@ func (s *PolicySuite) TestAColdStartReadsItsFirstAccountsInBatches() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
 	reads := &limitsReads{}
-	db.DB().AddQueryHook(reads)
+	db.GlobalDB().AddQueryHook(reads)
 	// Policies cached in Redis, as a router has them, so the admissions reach their first read
 	// of money together rather than as each read of its policies lands.
 	configs, err := redisready.Retry(os.Getenv("ROUTER_REDIS_ADDR"), func() (*appconfig.Store, error) {

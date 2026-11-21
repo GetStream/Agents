@@ -152,7 +152,7 @@ func (m ChannelInbound) Message() core.InboundMessage {
 // a failure they wait again, and each waiting message is taken once. A message waited answers
 // with queue false is dropped: taken, and neither claimed nor queued.
 func (s *Store) AcceptChannelInbound(ctx context.Context, message ChannelInbound, waited func(core.InboundMessage) (row ChannelInbound, queue bool, err error)) (fresh bool, err error) {
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		fresh, err = acceptChannelInbound(ctx, tx, message)
 		if err != nil || waited == nil {
 			return err
@@ -300,7 +300,7 @@ func (s *Store) claimChannelInbound(ctx context.Context, query string, now time.
 	if limit < 1 {
 		return claimed, nil
 	}
-	if err := s.db.NewRaw(query, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed); err != nil {
+	if err := s.global.NewRaw(query, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim channel inbound: %w", err))
 	}
 	return claimed, nil
@@ -311,12 +311,12 @@ func (s *Store) claimChannelInbound(ctx context.Context, query string, now time.
 // found is false when no message is queued at all.
 func (s *Store) NextChannelInboundAt(ctx context.Context) (next time.Time, found bool, err error) {
 	var at sql.NullTime
-	head := s.db.NewSelect().Model((*ChannelInbound)(nil)).
+	head := s.global.NewSelect().Model((*ChannelInbound)(nil)).
 		DistinctOn("cti.channel_id").
 		Column("cti.next_attempt_at").
 		Where("cti.state = ?", ChannelInboundQueued).
 		Order("cti.channel_id", "cti.seq")
-	err = s.db.NewSelect().TableExpr("(?) AS head", head).ColumnExpr("min(head.next_attempt_at)").Scan(ctx, &at)
+	err = s.global.NewSelect().TableExpr("(?) AS head", head).ColumnExpr("min(head.next_attempt_at)").Scan(ctx, &at)
 	if err != nil {
 		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: next channel inbound: %w", err))
 	}
@@ -330,7 +330,7 @@ func (s *Store) NextChannelInboundAt(ctx context.Context) (next time.Time, found
 // took since, changes nothing, so it cannot finish or reschedule the other's attempt. changed
 // is false then.
 func (s *Store) FinishChannelInbound(ctx context.Context, claimed ChannelInbound, at time.Time) (changed bool, err error) {
-	return leaveChannelInbound(ctx, s.db, claimed, ChannelInboundDone, at)
+	return leaveChannelInbound(ctx, s.global, claimed, ChannelInboundDone, at)
 }
 
 // FailChannelInbound records that a claimed message's last attempt failed and it is given up,
@@ -342,7 +342,7 @@ func (s *Store) FinishChannelInbound(ctx context.Context, claimed ChannelInbound
 // forwarded once forward returned nil, so a forward that fails, or a router that stops before
 // it, leaves the delivery to the next of its messages given up; forward logs its own error.
 func (s *Store) FailChannelInbound(ctx context.Context, claimed ChannelInbound, at time.Time, forward func(context.Context) error) (changed bool, err error) {
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if claimed.Forward != nil {
 			if err := lockChannelInboundDelivery(ctx, tx, claimed); err != nil {
 				return err
@@ -418,7 +418,7 @@ func leaveChannelInbound(ctx context.Context, db bun.IDB, claimed ChannelInbound
 // attempt marked it, or when the claim's lease is no longer the row's and the worker that took
 // it since answers it.
 func (s *Store) MarkChannelInboundKeywordAnswered(ctx context.Context, claimed ChannelInbound) (changed bool, err error) {
-	return updateClaimedChannelInbound(ctx, claimed, s.db.NewUpdate().Model((*ChannelInbound)(nil)).
+	return updateClaimedChannelInbound(ctx, claimed, s.global.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("keyword_answered = true").
 		Where("NOT keyword_answered"))
 }
@@ -426,7 +426,7 @@ func (s *Store) MarkChannelInboundKeywordAnswered(ctx context.Context, claimed C
 // RetryChannelInbound records a failed attempt of a claimed message and when the next one is
 // due.
 func (s *Store) RetryChannelInbound(ctx context.Context, claimed ChannelInbound, next time.Time) (changed bool, err error) {
-	return updateClaimedChannelInbound(ctx, claimed, s.db.NewUpdate().Model((*ChannelInbound)(nil)).
+	return updateClaimedChannelInbound(ctx, claimed, s.global.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("attempts = ?", claimed.Attempts+1).
 		Set("next_attempt_at = ?", next.UTC()))
 }
@@ -435,7 +435,7 @@ func (s *Store) RetryChannelInbound(ctx context.Context, claimed ChannelInbound,
 // attempt uploaded (core.Media.Uploaded), so the next attempt reads them. changed is false
 // when the claim's lease is no longer the row's: the worker that took it since writes its own.
 func (s *Store) SaveChannelInboundMedia(ctx context.Context, claimed ChannelInbound, media ChannelInboundMedia) (changed bool, err error) {
-	return updateClaimedChannelInbound(ctx, claimed, s.db.NewUpdate().Model((*ChannelInbound)(nil)).
+	return updateClaimedChannelInbound(ctx, claimed, s.global.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("media = ?", media))
 }
 
@@ -458,7 +458,7 @@ func updateClaimedChannelInbound(ctx context.Context, claimed ChannelInbound, up
 // PruneChannelInbound deletes the rows of written messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
 func (s *Store) PruneChannelInbound(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.db.NewDelete().Model((*ChannelInbound)(nil)).
+	result, err := s.global.NewDelete().Model((*ChannelInbound)(nil)).
 		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
 			ChannelInboundDone, now.Add(-channelInboundDoneKeep).UTC(), ChannelInboundFailed, now.Add(-channelInboundFailedKeep).UTC()).
 		Exec(ctx)

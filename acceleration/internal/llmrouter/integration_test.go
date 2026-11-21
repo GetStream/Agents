@@ -131,7 +131,7 @@ func (s *LLMRouterIntegrationSuite) newRouter() *Router {
 // requests reads back the rows recorded for the current customer.
 func (s *LLMRouterIntegrationSuite) requests() []store.Request {
 	var rows []store.Request
-	err := s.store.DB().NewSelect().
+	err := s.store.GlobalDB().NewSelect().
 		Model(&rows).
 		Where("customer_id = ?", s.customerID).
 		Order("id ASC").

@@ -71,7 +71,7 @@ func (s *Store) TakeChannelThreadTurn(ctx context.Context, channelID, holder str
 	if channelID == "" || holder == "" {
 		return false, stack.Wrap(errors.New("store: a channel and a holder are required"))
 	}
-	result, err := s.db.NewUpdate().Model((*ChannelThread)(nil)).
+	result, err := s.global.NewUpdate().Model((*ChannelThread)(nil)).
 		Set("turn_holder = ?", holder).
 		Set("turn_until = ?", until.UTC()).
 		Where("channel_id = ?", channelID).
@@ -90,7 +90,7 @@ func (s *Store) TakeChannelThreadTurn(ctx context.Context, channelID, holder str
 // ReleaseChannelThreadTurn ends holder's lease on a thread channel's turn, so the next turn
 // need not wait for it to run out. A lease another holder took since is left alone.
 func (s *Store) ReleaseChannelThreadTurn(ctx context.Context, channelID, holder string) error {
-	_, err := s.db.NewUpdate().Model((*ChannelThread)(nil)).
+	_, err := s.global.NewUpdate().Model((*ChannelThread)(nil)).
 		Set("turn_holder = NULL").
 		Set("turn_until = NULL").
 		Where("channel_id = ?", channelID).
@@ -138,7 +138,7 @@ type channelThreadStarter struct {
 // ReleaseChannelThreadMessage forgets a claim, so the step that took it can take it again:
 // a reply whose send failed is sent on a later attempt.
 func (s *Store) ReleaseChannelThreadMessage(ctx context.Context, channelID, kind, messageID string) error {
-	_, err := s.db.NewDelete().Model((*channelThreadMessage)(nil)).
+	_, err := s.global.NewDelete().Model((*channelThreadMessage)(nil)).
 		Where("channel_id = ? AND kind = ? AND message_id = ?", channelID, kind, messageID).
 		Exec(ctx)
 	return stack.Wrap(err)
@@ -159,7 +159,7 @@ func (s *Store) LinkChannelThread(ctx context.Context, thread *ChannelThread) (c
 	if thread.ThreadParts == nil {
 		thread.ThreadParts = map[string]string{}
 	}
-	_, err = s.db.NewInsert().Model(thread).
+	_, err = s.global.NewInsert().Model(thread).
 		On("CONFLICT (customer_id, connector_id, provider_unit_id, thread_key) DO UPDATE").
 		Set("connection_id = EXCLUDED.connection_id").
 		Set("last_inbound_at = EXCLUDED.last_inbound_at").
@@ -180,9 +180,9 @@ func (s *Store) SetChannelThreadChatPerson(ctx context.Context, channelID, perso
 	}
 	var err error
 	if person == "" {
-		_, err = s.db.NewDelete().Model((*channelThreadPerson)(nil)).Where("channel_id = ?", channelID).Exec(ctx)
+		_, err = s.global.NewDelete().Model((*channelThreadPerson)(nil)).Where("channel_id = ?", channelID).Exec(ctx)
 	} else {
-		_, err = s.db.NewInsert().Model(&channelThreadPerson{ChannelID: channelID, ChatPerson: person}).
+		_, err = s.global.NewInsert().Model(&channelThreadPerson{ChannelID: channelID, ChatPerson: person}).
 			On("CONFLICT (channel_id) DO UPDATE").
 			Set("chat_person = EXCLUDED.chat_person").
 			Exec(ctx)
@@ -200,7 +200,7 @@ func (s *Store) AddChannelThreadMember(ctx context.Context, channelID, member st
 	if channelID == "" || member == "" {
 		return stack.Wrap(errors.New("store: a channel id and a member are required"))
 	}
-	_, err := s.db.NewInsert().Model(&channelThreadMember{ChannelID: channelID, Member: member}).
+	_, err := s.global.NewInsert().Model(&channelThreadMember{ChannelID: channelID, Member: member}).
 		On("CONFLICT DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -217,7 +217,7 @@ func (s *Store) SetChannelThreadStarter(ctx context.Context, channelID, starter 
 	if channelID == "" || starter == "" {
 		return stack.Wrap(errors.New("store: a channel id and a starter are required"))
 	}
-	_, err := s.db.NewInsert().Model(&channelThreadStarter{ChannelID: channelID, Starter: starter}).
+	_, err := s.global.NewInsert().Model(&channelThreadStarter{ChannelID: channelID, Starter: starter}).
 		On("CONFLICT DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -230,7 +230,7 @@ func (s *Store) SetChannelThreadStarter(ctx context.Context, channelID, starter 
 // (SetChannelThreadStarter), or "" when none is recorded.
 func (s *Store) ChannelThreadStarter(ctx context.Context, channelID string) (string, error) {
 	var starter string
-	err := s.db.NewSelect().Model((*channelThreadStarter)(nil)).
+	err := s.global.NewSelect().Model((*channelThreadStarter)(nil)).
 		Column("starter").
 		Where("channel_id = ?", channelID).
 		Scan(ctx, &starter)
@@ -247,7 +247,7 @@ func (s *Store) ChannelThreadStarter(ctx context.Context, channelID string) (str
 // (AddChannelThreadMember) has a live opt-out of the customer's channel, or of all of them, as
 // OptedOut reads one.
 func (s *Store) ChannelThreadMemberOptedOut(ctx context.Context, customerID, channelID, channel string) (bool, error) {
-	found, err := s.db.NewSelect().Model((*OptOut)(nil)).
+	found, err := s.global.NewSelect().Model((*OptOut)(nil)).
 		Join("JOIN channel_thread_members AS ctm ON ctm.member = oo.recipient").
 		Where("ctm.channel_id = ?", channelID).
 		Where("oo.customer_id = ?", customerID).
@@ -263,7 +263,7 @@ func (s *Store) ChannelThreadMemberOptedOut(ctx context.Context, customerID, cha
 // ChannelThreadLinked is whether an external thread of a customer's provider unit is linked to
 // a thread channel already.
 func (s *Store) ChannelThreadLinked(ctx context.Context, customerID, connectorID, providerUnitID, threadKey string) (bool, error) {
-	linked, err := s.db.NewSelect().Model((*ChannelThread)(nil)).
+	linked, err := s.global.NewSelect().Model((*ChannelThread)(nil)).
 		Where("customer_id = ? AND connector_id = ? AND provider_unit_id = ? AND thread_key = ?",
 			customerID, connectorID, providerUnitID, threadKey).
 		Exists(ctx)
@@ -279,7 +279,7 @@ func (s *Store) ChannelThread(ctx context.Context, channelID string) (ChannelThr
 		return ChannelThread{}, stack.Wrap(errors.New("store: a channel id is required"))
 	}
 	var thread ChannelThread
-	err := s.db.NewSelect().Model(&thread).
+	err := s.global.NewSelect().Model(&thread).
 		ColumnExpr("ct.*").
 		ColumnExpr("ctp.chat_person").
 		Join("LEFT JOIN channel_thread_people AS ctp ON ctp.channel_id = ct.channel_id").
@@ -318,11 +318,11 @@ func (s *Store) WaitChannelThreadMessage(ctx context.Context, customerID string,
 		return false, stack.Wrap(errors.New("store: a customer, a connector, a thread key and a message id are required"))
 	}
 	now := time.Now().UTC()
-	_, err := s.db.NewDelete().Model((*waitingMessage)(nil)).Where("created_at < ?", now.Add(-channelWaitingKeep)).Exec(ctx)
+	_, err := s.global.NewDelete().Model((*waitingMessage)(nil)).Where("created_at < ?", now.Add(-channelWaitingKeep)).Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: wait channel thread message: %w", err))
 	}
-	result, err := s.db.NewInsert().Model(&waitingMessage{
+	result, err := s.global.NewInsert().Model(&waitingMessage{
 		CustomerID: customerID, ConnectorID: message.ConnectorID, ProviderUnitID: message.ProviderUnitID,
 		ThreadKey: message.ThreadKey, ProviderMessageID: message.ProviderMessageID,
 		AuthorID: message.AuthorID, Text: message.Text, Raw: message.Raw, CreatedAt: now,
@@ -340,7 +340,7 @@ func (s *Store) WaitChannelThreadMessage(ctx context.Context, customerID string,
 // UnwaitChannelThreadMessage takes one waiting message back. False is one that is not waiting:
 // the message that linked its thread took it first, or it was never kept.
 func (s *Store) UnwaitChannelThreadMessage(ctx context.Context, customerID string, message core.InboundMessage) (bool, error) {
-	result, err := s.db.NewDelete().Model((*waitingMessage)(nil)).
+	result, err := s.global.NewDelete().Model((*waitingMessage)(nil)).
 		Where("customer_id = ? AND connector_id = ? AND provider_unit_id = ? AND thread_key = ?",
 			customerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey).
 		Where("provider_message_id = ?", message.ProviderMessageID).
@@ -398,7 +398,7 @@ const (
 // kind, by that step's id for it. False is one already taken: delivered or told again. Ids
 // kept longer than channelMessageKeep are dropped first, so the table holds a day of them.
 func (s *Store) ClaimChannelThreadMessage(ctx context.Context, channelID, kind, messageID string) (bool, error) {
-	return claimChannelThreadMessage(ctx, s.db, channelID, kind, messageID)
+	return claimChannelThreadMessage(ctx, s.global, channelID, kind, messageID)
 }
 
 // claimChannelThreadMessage is ClaimChannelThreadMessage on db, the store's or a transaction's.
@@ -435,7 +435,7 @@ func (s *Store) AppConnectionByAccount(ctx context.Context, customerID, connecto
 		return ConnectorConnection{}, stack.Wrap(errors.New("store: a customer, a connector and an account id are required"))
 	}
 	var connection ConnectorConnection
-	err := s.db.NewSelect().Model(&connection).
+	err := s.global.NewSelect().Model(&connection).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID).
 		Where("owner_type = ?", OwnerApp).
@@ -468,7 +468,7 @@ func (s *Store) AgentConfigsBindingConnection(ctx context.Context, customerID, c
 		return nil, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	var configs []AgentConfig
-	err := s.db.NewSelect().Model(&configs).
+	err := s.global.NewSelect().Model(&configs).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
 		Where(notTestCopy).

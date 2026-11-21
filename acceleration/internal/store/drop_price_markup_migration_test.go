@@ -47,14 +47,14 @@ func (s *DropPriceMarkupMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "markupdrop")
 	s.db = db
 	s.exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", beforeStoredPrices))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", beforeStoredPrices))
 	s.exec(
 		`INSERT INTO price_changes (name, kind, reason, source, effective_at, markup_bps, created_by) VALUES
 		 ('20261101000000_seed', 'seed', 'The first price list', 'files', now() - interval '10 days', 2000, 'router v1')`,
@@ -66,14 +66,14 @@ func (s *DropPriceMarkupMigrationSuite) SetupTest() {
 
 func (s *DropPriceMarkupMigrationSuite) exec(statements ...string) {
 	for _, statement := range statements {
-		_, err := s.db.DB().ExecContext(s.ctx, statement)
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err, statement)
 	}
 }
 
 func (s *DropPriceMarkupMigrationSuite) count(query string) int {
 	var n int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, query).Scan(&n), query)
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, query).Scan(&n), query)
 	return n
 }
 
@@ -92,12 +92,12 @@ WHERE conname IN ('price_changes_markup_bps_check', 'price_entries_markup_bps_ch
 func (s *DropPriceMarkupMigrationSuite) scheduled(name string) {
 	change := PriceChange{Name: name, Kind: PriceChangeAPI, Reason: "dearer", Source: "a test",
 		EffectiveAt: time.Now().Add(time.Hour), CreatedBy: "operator"}
-	_, err := s.db.DB().NewInsert().Model(&change).Exec(s.ctx)
+	_, err := s.db.GlobalDB().NewInsert().Model(&change).Exec(s.ctx)
 	s.Require().NoError(err)
 	entry := entryRow(pricing.Entry{Modality: "llm", Provider: "openai", Model: "b", Region: pricing.RegionUS,
 		Rates: map[pricing.Meter]pricing.Rate{pricing.InputTokens: perMillionTokens(1)}})
 	entry.Change = name
-	_, err = s.db.DB().NewInsert().Model(&entry).Exec(s.ctx)
+	_, err = s.db.GlobalDB().NewInsert().Model(&entry).Exec(s.ctx)
 	s.Require().NoError(err)
 }
 
@@ -135,12 +135,12 @@ func (s *DropPriceMarkupMigrationSuite) TestAChangeIsStillCancelledOnceAndNothin
 	s.scheduled("20990101000000_dearer")
 	s.scheduled("20990101000001_other")
 
-	_, reason := s.db.DB().ExecContext(s.ctx, "UPDATE price_changes SET reason = 'rewritten' WHERE name = '20990101000001_other'")
-	_, both := s.db.DB().ExecContext(s.ctx,
+	_, reason := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET reason = 'rewritten' WHERE name = '20990101000001_other'")
+	_, both := s.db.GlobalDB().ExecContext(s.ctx,
 		"UPDATE price_changes SET cancelled_at = now(), source = 'rewritten' WHERE name = '20990101000001_other'")
 	change, _, cancelled, err := s.db.CancelPriceChange(s.ctx, "20990101000000_dearer", "not now", "staff-1", "Staff")
-	_, again := s.db.DB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now() WHERE name = '20990101000000_dearer'")
-	_, entry := s.db.DB().ExecContext(s.ctx, "UPDATE price_list_entries SET rates = '{}' WHERE model = 'a'")
+	_, again := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE price_changes SET cancelled_at = now() WHERE name = '20990101000000_dearer'")
+	_, entry := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE price_list_entries SET rates = '{}' WHERE model = 'a'")
 
 	s.ErrorContains(reason, "a price change can only be cancelled")
 	s.ErrorContains(both, "a price change can only be cancelled")
@@ -152,25 +152,25 @@ func (s *DropPriceMarkupMigrationSuite) TestAChangeIsStillCancelledOnceAndNothin
 }
 
 func (s *DropPriceMarkupMigrationSuite) TestTheMigrationComesOffAndAppliesAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", dropPriceMarkup))
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", storedPrices))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", dropPriceMarkup))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", storedPrices))
 
 	s.Equal(2, s.markupColumns())
 	s.Equal(2, s.markupChecks())
 	s.Zero(s.count("SELECT count(*) FROM price_changes WHERE markup_bps IS NOT NULL"), "the markups do not come back")
-	_, changeOutOfRange := s.db.DB().ExecContext(s.ctx, `INSERT INTO price_changes (name, kind, reason, source, effective_at, markup_bps, created_by)
+	_, changeOutOfRange := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_changes (name, kind, reason, source, effective_at, markup_bps, created_by)
 VALUES ('20990101000001_dear', 'api', 'dear', 'a test', now() + interval '1 hour', 100001, 'operator')`)
-	_, entryOutOfRange := s.db.DB().ExecContext(s.ctx, `INSERT INTO price_entries (change, modality, provider, model, sku, markup_bps, effective_at)
+	_, entryOutOfRange := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO price_entries (change, modality, provider, model, sku, markup_bps, effective_at)
 VALUES ('20261101000000_seed', 'llm', 'openai', 'c', 'llm-openai-c', 100001, now())`)
 	s.ErrorContains(changeOutOfRange, "price_changes_markup_bps_check")
 	s.ErrorContains(entryOutOfRange, "price_entries_markup_bps_check")
 	s.scheduledBeforeRegions("20990101000000_dearer")
-	_, markup := s.db.DB().ExecContext(s.ctx,
+	_, markup := s.db.GlobalDB().ExecContext(s.ctx,
 		"UPDATE price_changes SET cancelled_at = now(), markup_bps = 1000 WHERE name = '20990101000000_dearer'")
 	s.ErrorContains(markup, "a price change can only be cancelled", "the guard compares markup_bps again")
 	s.exec("UPDATE price_changes SET cancelled_at = now(), cancelled_by = 'staff-1', cancel_reason = 'not now' " +
 		"WHERE name = '20990101000000_dearer'")
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", dropPriceMarkup))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", dropPriceMarkup))
 	s.Zero(s.markupColumns())
 }

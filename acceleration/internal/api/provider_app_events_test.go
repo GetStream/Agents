@@ -253,7 +253,7 @@ func (s *SlackChannelSuite) omniChannel(user string) string {
 	var cid string
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'slack' AND address = ?",
 			s.customerID(), s.config.ID, s.workspace+":"+user).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", user)
@@ -369,7 +369,7 @@ func (s *SlackChannelSuite) TestAConnectionPinnedToRevisionThreeStillAnswersACha
 	manifest, err := core.ParseManifest(raw)
 	s.Require().NoError(err)
 	s.Require().Equal(3, manifest.Revision)
-	_, err = s.store.DB().NewInsert().Model(&store.ConnectorDefinition{
+	_, err = s.store.GlobalDB().NewInsert().Model(&store.ConnectorDefinition{
 		CustomerID: store.BuiltinCustomer, ID: manifest.ID, Revision: manifest.Revision, Name: manifest.Name,
 		Category: manifest.Category, Description: manifest.Description, Manifest: manifest, CreatedAt: time.Now().UTC(),
 	}).On("CONFLICT DO NOTHING").Exec(context.Background())
@@ -740,10 +740,10 @@ func (s *SlackChannelSuite) TestAReplyThatWaitedIsWrittenWithItsFiles() {
 	s.Require().NoError(err)
 	definition.Revision, definition.Manifest.Revision = 1000, 1000
 	definition.Manifest.Channel.Messages.Media = &core.MediaRule{URL: "$.event.files[*].url_private", MIMEType: "$.event.files[*].mimetype"}
-	_, err = s.store.DB().NewInsert().Model(&definition).Exec(ctx)
+	_, err = s.store.GlobalDB().NewInsert().Model(&definition).Exec(ctx)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().ExecContext(ctx, "DELETE FROM connector_definitions WHERE customer_id = ? AND id = 'slack_bot' AND revision = 1000", store.BuiltinCustomer)
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM connector_definitions WHERE customer_id = ? AND id = 'slack_bot' AND revision = 1000", store.BuiltinCustomer)
 		s.NoError(err)
 	})
 	credentials, err := pgsealed.New(s.store, s.sealer)
@@ -769,7 +769,7 @@ func (s *SlackChannelSuite) TestAReplyThatWaitedIsWrittenWithItsFiles() {
 func (s *SlackChannelSuite) TestAWaitingReplyTheConnectionDoesNotReadIsDroppedAndTheMentionAnswered() {
 	s.deliver(s.message("U0000BOB", "and the deploy?", "1759740000.000200", "1759740000.000100"), 0)
 	s.Require().Equal(1, s.waiting())
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE channel_thread_waiting SET raw = convert_to('{}', 'UTF8') WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 
@@ -796,10 +796,10 @@ func (s *SlackChannelSuite) TestAWaitingReplyARepinnedRevisionDoesNotReadIsDropp
 	s.Require().NoError(err)
 	definition.Revision, definition.Manifest.Revision = 1001, 1001
 	definition.Manifest.Channel.Messages.SkipIfPresent = append(definition.Manifest.Channel.Messages.SkipIfPresent, "$.event.thread_ts")
-	_, err = s.store.DB().NewInsert().Model(&definition).Exec(ctx)
+	_, err = s.store.GlobalDB().NewInsert().Model(&definition).Exec(ctx)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().ExecContext(ctx, "DELETE FROM connector_definitions WHERE customer_id = ? AND id = 'slack_bot' AND revision = 1001", store.BuiltinCustomer)
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM connector_definitions WHERE customer_id = ? AND id = 'slack_bot' AND revision = 1001", store.BuiltinCustomer)
 		s.NoError(err)
 	})
 	credentials, err := pgsealed.New(s.store, s.sealer)
@@ -827,8 +827,8 @@ func (s *SlackChannelSuite) TestAMentionWhoseWaitingReplyFailsToBeTakenIsRefused
 	s.Require().Equal(1, s.waiting())
 	ctx := context.Background()
 	var raw []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx, "SELECT raw FROM channel_thread_waiting WHERE customer_id = ?", s.customerID()).Scan(&raw))
-	_, err := s.store.DB().ExecContext(ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx, "SELECT raw FROM channel_thread_waiting WHERE customer_id = ?", s.customerID()).Scan(&raw))
+	_, err := s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE channel_thread_waiting SET raw = convert_to('not json', 'UTF8') WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 	mention := s.message("U0000ALICE", "is the build green?", "1759740000.000100", "")
@@ -840,7 +840,7 @@ func (s *SlackChannelSuite) TestAMentionWhoseWaitingReplyFailsToBeTakenIsRefused
 	s.Zero(s.claimed(channel, store.ClaimInbound), "the mention is not claimed")
 	s.Equal(1, s.waiting(), "the reply waits on")
 	s.Never(func() bool { return len(s.chat.Stored(channel)) > 0 }, dropped, 20*time.Millisecond)
-	_, err = s.store.DB().ExecContext(ctx, "UPDATE channel_thread_waiting SET raw = ? WHERE customer_id = ?", raw, s.customerID())
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE channel_thread_waiting SET raw = ? WHERE customer_id = ?", raw, s.customerID())
 	s.Require().NoError(err)
 
 	status, _ = s.deliver(mention, 2)
@@ -979,7 +979,7 @@ func (s *SlackChannelSuite) linkedAsAFailedDeliveryLeftIt(key string) string {
 // waiting is how many replies of the test's customer wait for their thread's link.
 func (s *SlackChannelSuite) waiting() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_waiting WHERE customer_id = ?", s.customerID()).Scan(&count))
 	return count
 }
@@ -987,7 +987,7 @@ func (s *SlackChannelSuite) waiting() int {
 // claimed is how many of a thread channel's messages one step holds claimed.
 func (s *SlackChannelSuite) claimed(channel, kind string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_messages WHERE channel_id = ? AND kind = ?", channel, kind).Scan(&count))
 	return count
 }
@@ -1122,7 +1122,7 @@ func (s *SlackChannelSuite) revokedBot(at time.Time) []byte {
 // bridge linked it.
 func (s *SlackChannelSuite) threadChannel(threadKey string) string {
 	var channel string
-	err := s.store.DB().QueryRowContext(context.Background(),
+	err := s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT channel_id FROM channel_threads WHERE customer_id = ? AND thread_key = ?", s.customerID(), threadKey).Scan(&channel)
 	s.Require().NoError(err, "no thread channel for %s", threadKey)
 	return channel
@@ -1131,7 +1131,7 @@ func (s *SlackChannelSuite) threadChannel(threadKey string) string {
 // threadChannels is how many thread channels the test's customer has.
 func (s *SlackChannelSuite) threadChannels() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&count))
 	return count
 }

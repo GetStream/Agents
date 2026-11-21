@@ -99,7 +99,7 @@ func (s *Store) CreateSIPTrunk(ctx context.Context, trunk *SIPTrunk) error {
 	if trunk.Codecs == nil {
 		trunk.Codecs = []string{}
 	}
-	if _, err := s.db.NewInsert().Model(trunk).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(trunk).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create sip trunk: %w", err))
 	}
 	return nil
@@ -111,7 +111,7 @@ func (s *Store) SIPTrunks(ctx context.Context, customerID string) ([]SIPTrunk, e
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
 	var trunks []SIPTrunk
-	err := s.db.NewSelect().Model(&trunks).
+	err := s.global.NewSelect().Model(&trunks).
 		Where("customer_id = ?", customerID).
 		Order("created_at DESC").
 		Scan(ctx)
@@ -124,7 +124,7 @@ func (s *Store) SIPTrunks(ctx context.Context, customerID string) ([]SIPTrunk, e
 // SIPTrunk returns one of a customer's trunks.
 func (s *Store) SIPTrunk(ctx context.Context, customerID, id string) (SIPTrunk, error) {
 	var trunk SIPTrunk
-	err := s.db.NewSelect().Model(&trunk).
+	err := s.global.NewSelect().Model(&trunk).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Scan(ctx)
@@ -143,7 +143,7 @@ func (s *Store) UpdateSIPTrunk(ctx context.Context, trunk *SIPTrunk) error {
 	if trunk.Codecs == nil {
 		trunk.Codecs = []string{}
 	}
-	result, err := s.db.NewUpdate().Model(trunk).
+	result, err := s.global.NewUpdate().Model(trunk).
 		Column("name", "host", "port", "transport", "username", "password_sealed",
 			"password_kek_version", "late_offer", "codecs", "updated_at").
 		Where("customer_id = ?", trunk.CustomerID).
@@ -159,7 +159,7 @@ func (s *Store) UpdateSIPTrunk(ctx context.Context, trunk *SIPTrunk) error {
 // is what refuses one that has some, so a number added at the same moment cannot be left
 // pointing at nothing.
 func (s *Store) DeleteSIPTrunk(ctx context.Context, customerID, id string) error {
-	result, err := s.db.NewDelete().Model((*SIPTrunk)(nil)).
+	result, err := s.global.NewDelete().Model((*SIPTrunk)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		Exec(ctx)

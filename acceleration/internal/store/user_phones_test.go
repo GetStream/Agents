@@ -32,7 +32,7 @@ func (s *StoreSuite) link(userID, phone string) error {
 // only the rows of the customer's own configs.
 func (s *StoreSuite) agentConfigs() {
 	for _, id := range []string{"agent-one", "agent-two", "agent-three"} {
-		_, err := s.store.db.ExecContext(s.ctx, "INSERT INTO agent_configs (id, customer_id, name) VALUES (?, 'acme-app', ?)", id, id)
+		_, err := s.store.global.ExecContext(s.ctx, "INSERT INTO agent_configs (id, customer_id, name) VALUES (?, 'acme-app', ?)", id, id)
 		s.Require().NoError(err)
 	}
 }
@@ -90,10 +90,10 @@ func (s *StoreSuite) TestALinkPointsTheUsersAndTheNumbersRowsAtTheOlderOmniChann
 	s.Equal("agent:omni-chat-two", s.omniOf(chatTwo))
 	s.Equal("agent:omni-chat-two", s.omniOf(smsTwo))
 	var latest string
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT max(updated_at)::text FROM contact_map").Scan(&latest))
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT max(updated_at)::text FROM contact_map").Scan(&latest))
 	s.Require().NoError(s.link("anya", "+15550100"))
 	var again string
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT max(updated_at)::text FROM contact_map").Scan(&again))
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT max(updated_at)::text FROM contact_map").Scan(&again))
 	s.Equal(latest, again, "the same link again writes no row")
 }
 
@@ -103,9 +103,9 @@ func (s *StoreSuite) TestALinkPointsTheUsersAndTheNumbersRowsAtTheOlderOmniChann
 // where its cards are, or a number's next row that does not join.
 func (s *StoreSuite) TestALinkSetsAsideTheNumbersRowsThatHoldEpisodes() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "INSERT INTO agent_configs (id, customer_id, name) VALUES ('agent-four', 'acme-app', 'agent-four')")
+	_, err := s.store.global.ExecContext(s.ctx, "INSERT INTO agent_configs (id, customer_id, name) VALUES ('agent-four', 'acme-app', 'agent-four')")
 	s.Require().NoError(err)
-	_, err = s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id <> 'agent-four'")
+	_, err = s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id <> 'agent-four'")
 	s.Require().NoError(err)
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 	anyas := s.chatEpisode(chat)
@@ -129,7 +129,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheNumbersRowsThatHoldEpisodes() {
 	_, err = s.store.Contact(s.ctx, "acme-app", "agent-one", ContactPhone, "+15550100")
 	s.ErrorIs(err, ErrNoContact, "the number has no row until it is seen again")
 	var aside ContactMapEntry
-	s.Require().NoError(s.store.db.NewSelect().Model(&aside).Where("id = ?", sms.ID).Scan(s.ctx))
+	s.Require().NoError(s.store.global.NewSelect().Model(&aside).Where("id = ?", sms.ID).Scan(s.ctx))
 	s.Equal("agent:omni-sms", aside.ConversationID, "where its card is")
 	s.Equal(retiredPrefix+sms.ID+":+15550100", aside.Address)
 	s.Equal(1, s.rows("SELECT count(*) FROM episodes WHERE id = '"+carls+"' AND contact_id = '"+sms.ID+"'"), "its episode stays with it")
@@ -147,7 +147,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheNumbersRowsThatHoldEpisodes() {
 // row that holds one is set aside as under on (AI-2856), and the user reads none of it.
 func (s *StoreSuite) TestALinkSetsAsideTheRowsOfAConfigThatRecordsTheCards() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_record = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_record = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
@@ -156,10 +156,10 @@ func (s *StoreSuite) TestALinkSetsAsideTheRowsOfAConfigThatRecordsTheCards() {
 	s.Require().NoError(s.link("anya", "+15550100"))
 
 	var aside ContactMapEntry
-	s.Require().NoError(s.store.db.NewSelect().Model(&aside).Where("id = ?", sms.ID).Scan(s.ctx))
+	s.Require().NoError(s.store.global.NewSelect().Model(&aside).Where("id = ?", sms.ID).Scan(s.ctx))
 	s.Equal(retiredPrefix+sms.ID+":+15550100", aside.Address)
 	s.Equal("agent:omni-sms", aside.ConversationID, "where its card is")
-	_, err = s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err = s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	s.Empty(s.cardsOf(s.omniOf(chat), CardsQuery{}), "turned on, anya reads none of the number's earlier SMS")
 }
@@ -172,7 +172,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheRowsOfAConfigThatRecordsTheCards() {
 // link gives the user name the number (TestALinkWithAllOfTheHistoryReadsWhatTheNumberSaidBeforeIt).
 func (s *StoreSuite) TestASetAsideRowIsStillReachedAtItsNumber() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
 	s.Require().NoError(err)
 	s.made(streamUser("anya", "agent:omni-chat"))
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
@@ -487,7 +487,7 @@ func (s *StoreSuite) TestTwoLinksOfOneUserAtOnceLeaveOnlyTheStoredNumberJoined()
 		wg.Wait()
 
 		var stored string
-		s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT phone FROM user_phones WHERE user_id = ?", user).Scan(&stored))
+		s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT phone FROM user_phones WHERE user_id = ?", user).Scan(&stored))
 		for _, phone := range phones {
 			if phone == stored {
 				s.Equal(s.omniOf(chat), s.omniOf(contact(phone, "")), "user %d, the stored number", i)
@@ -531,7 +531,7 @@ func (s *StoreSuite) TestALinkAndAFirstSightingAtOnceEndOnOneOmniChannel() {
 // episode. Two routers, twenty numbers.
 func (s *StoreSuite) TestALinkAndTheNumbersNextSightingAtOnceJoinNoneOfItsHistory() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
 	s.Require().NoError(err)
 	pools := s.pools(2)
 	for i := range 20 {
@@ -563,7 +563,7 @@ func (s *StoreSuite) TestALinkAndTheNumbersNextSightingAtOnceJoinNoneOfItsHistor
 // rows is the one number a query answers.
 func (s *StoreSuite) rows(query string) int {
 	var n int
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx, query).Scan(&n))
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, query).Scan(&n))
 	return n
 }
 
@@ -582,12 +582,12 @@ func (s *StoreSuite) smsAt(row *ContactMapEntry, at time.Time) string {
 // history row was written for too, and its boundary when the link is bounded at its own time.
 func (s *StoreSuite) linkDated(link *UserPhone) {
 	s.Require().NoError(s.store.LinkUserPhone(s.ctx, link))
-	_, err := s.store.db.ExecContext(s.ctx, `UPDATE user_phone_history AS h
+	_, err := s.store.global.ExecContext(s.ctx, `UPDATE user_phone_history AS h
 SET since = CASE WHEN h.since = up.updated_at THEN ?0 ELSE h.since END, linked_at = ?0 FROM user_phones AS up
 WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND up.user_id = h.user_id
 	AND h.linked_at = up.updated_at AND up.customer_id = ?1 AND up.user_id = ?2`, linkedAt, link.CustomerID, link.UserID)
 	s.Require().NoError(err)
-	_, err = s.store.db.ExecContext(s.ctx, "UPDATE user_phones SET updated_at = ? WHERE customer_id = ? AND user_id = ?",
+	_, err = s.store.global.ExecContext(s.ctx, "UPDATE user_phones SET updated_at = ? WHERE customer_id = ? AND user_id = ?",
 		linkedAt, link.CustomerID, link.UserID)
 	s.Require().NoError(err)
 }
@@ -656,7 +656,7 @@ func (s *StoreSuite) TestTheSameNumberAgainKeepsTheTimeOfTheLink() {
 	s.linkDated(&UserPhone{CustomerID: "acme-app", StreamAppPK: 4242, UserID: "anya", Phone: "+15550100"})
 	linked := func() time.Time {
 		var at time.Time
-		s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT updated_at FROM user_phones WHERE user_id = 'anya'").Scan(&at))
+		s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT updated_at FROM user_phones WHERE user_id = 'anya'").Scan(&at))
 		return at.UTC()
 	}
 

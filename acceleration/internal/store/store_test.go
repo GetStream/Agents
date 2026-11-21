@@ -33,6 +33,10 @@ type StoreSuite struct {
 	ctx context.Context
 	// base is the start of a fixed hour, so bucket boundaries are predictable.
 	base time.Time
+	// queries and roundTrips count what the store sends Postgres and Redis, for countQueries
+	// and countRedis.
+	queries    queryCount
+	roundTrips roundTrips
 }
 
 func TestStoreSuite(t *testing.T) {
@@ -54,11 +58,12 @@ func TestShardedStoreSuite(t *testing.T) {
 func (s *StoreSuite) SetupSuite() {
 	s.ctx = context.Background()
 	s.dsn = s.emptyDatabase("store")
-	store, err := Open(s.dsn)
+	store, err := OpenShards(Options{DSN: s.dsn, Redis: s.redis(), redisHook: &s.roundTrips})
 	s.Require().NoError(err)
 	s.store = store
 	s.Require().NoError(store.Ping(s.ctx))
 	s.Require().NoError(store.Migrate(s.ctx))
+	s.countEveryQuery()
 	s.base = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 }
 
@@ -73,11 +78,12 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	s.Require().NoError(other.Close())
 
 	shards := map[string]string{"here": shard, "there": peer}
-	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shards: shards})
+	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shards: shards, Redis: s.redis(), redisHook: &s.roundTrips})
 	s.Require().NoError(err)
 	s.store = store
 	s.Require().NoError(store.Ping(s.ctx))
 	s.Require().NoError(store.Migrate(s.ctx))
+	s.countEveryQuery()
 	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shards: shards})
 	s.Require().NoError(err)
 	s.base = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
@@ -105,9 +111,9 @@ func (s *StoreSuite) emptyDatabase(name string) string {
 	defer db.Close()
 
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -118,48 +124,35 @@ func (s *StoreSuite) TearDownSuite() {
 	}
 }
 
-// storeTables lists all tables that the store tests write to. The list also includes each table
-// that has a foreign key to a table in the list, because DELETE does not cascade.
-const storeTables = "requests, stats_hourly, stats_daily, stats_tags_hourly, stats_tags_daily, customer_activity," +
-	" turn_stats_hourly, turn_latency_hourly, calls, phone_numbers, sip_trunks," +
-	" voices, agent_sessions, agent_responses, agent_response_items, conversation_documents, agent_branch_switches, agent_branch_messages, users," +
-	" policies, app_organizations, call_resources, stream_trunks, organizations, agent_configs," +
-	" agent_plugin_connections, agent_plugin_clients, data_changes, data_change_capture, connector_definitions, connector_broken_revisions," +
-	" connector_connections, connector_authorization_attempts, connector_oauth_clients," +
-	" connector_config_tokens, channel_threads, channel_thread_messages, channel_thread_waiting, channel_thread_inbound, chat_inbound, image_jobs," +
-	" connector_event_destinations, connector_event_deliveries, contact_map, user_phones, episodes," +
-	" connection_event_subscriptions, connection_event_deliveries," +
-	" connector_invocations, connector_audit, simulations, simulation_runs, simulation_cases," +
-	" campaigns, campaign_contacts, campaign_attempts, scheduled_tasks, scheduled_task_runs, price_list_entries, price_changes," +
-	" limits, usage_resets, limit_grants, limit_grant_reconciles, phone_calls, cost_anomaly_notices," +
-	" voice_samples, voice_bindings, apps, agent_session_tools, limit_grant_uses, episode_activity, connector_tool_pins," +
-	" connector_audit_credentials, connector_connection_clients, connector_invocation_arguments," +
-	" connector_connection_validations, channel_thread_people, channel_thread_members, channel_thread_starters," +
-	" user_phone_history, api_keys"
-
-// emptyStoreTables deletes all rows in storeTables. It uses DELETE, not TRUNCATE. TRUNCATE makes
-// new files for each table and each index. This takes much more time than a DELETE of the few
-// rows that a test writes.
+// emptyTables deletes every row of every table in db, read from the catalogue so a new table
+// needs nothing here. It uses DELETE, not TRUNCATE. TRUNCATE makes new files for each table and
+// each index. This takes much more time than a DELETE of the few rows that a test writes.
 //
 // The replica role stops foreign-key checks and row triggers during the DELETE. This gives the
 // same result as TRUNCATE, which does not run row triggers. Without the replica role, the
 // trigger on price_changes refuses the DELETE.
-var emptyStoreTables = "SET LOCAL session_replication_role = replica; DELETE FROM " +
-	strings.ReplaceAll(storeTables, ", ", "; DELETE FROM ")
+func (s *StoreSuite) emptyTables(db bun.IDB) {
+	var tables []string
+	s.Require().NoError(db.NewRaw(`SELECT tablename FROM pg_tables
+		WHERE schemaname = 'public' AND tablename NOT LIKE 'goose\_%' ORDER BY tablename`).Scan(s.ctx, &tables))
+	statement := "SET LOCAL session_replication_role = replica; DELETE FROM " + strings.Join(tables, "; DELETE FROM ")
+	s.Require().NoError(db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.ExecContext(ctx, statement)
+		return err
+	}))
+}
 
-// SetupTest empties the tables one time in each database. With one database, the shard database
-// and the shared database are the same database.
+// SetupTest empties the tables one time in each database, and the store's keys in Redis. With
+// one database, the shard database and the shared database are the same database.
 func (s *StoreSuite) SetupTest() {
 	databases := s.store.shards()
 	if s.store.Sharded() {
-		databases = append(databases, s.store.db)
+		databases = append(databases, s.store.global)
 	}
 	for _, db := range databases {
-		s.Require().NoError(db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			_, err := tx.ExecContext(ctx, emptyStoreTables)
-			return err
-		}))
+		s.emptyTables(db)
 	}
+	s.forgetRedis()
 }
 
 // record stores a speech-to-text request, defaulting the fields a test does not care about.
@@ -824,7 +817,7 @@ func (s *StoreSuite) TestANumberIsRecordedOnlyInE164Form() {
 func (s *StoreSuite) TestANumberWrittenInAnotherFormIsNotHeld() {
 	// Written straight to the table, the way a row could be before every write checked
 	// the form: the vendor reads it as +15125551234.
-	_, err := s.store.db.ExecContext(s.ctx,
+	_, err := s.store.global.ExecContext(s.ctx,
 		"INSERT INTO phone_numbers (e164, vendor, country, customer_id) VALUES ('15125551234', 'plivo', 'US', 'globex')")
 	s.Require().NoError(err)
 
@@ -871,7 +864,7 @@ func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 		CustomerID: "acme", PurchasedAt: s.base,
 	}))
 	// What an attach looked like before the call was recorded: a trunk and nothing else.
-	_, err := s.store.db.NewUpdate().Model((*PhoneNumber)(nil)).
+	_, err := s.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
 		Set("stream_trunk_id = ?", "trunk-7").
 		Where("e164 = ?", "+15125551234").
 		Exec(s.ctx)
@@ -941,7 +934,7 @@ func (s *StoreSuite) TestAReleasedNumbersTrunkCredentialsAreGone() {
 	s.ErrorIs(err, ErrNoNumber)
 
 	var held PhoneNumber
-	s.Require().NoError(s.store.db.NewSelect().Model(&held).Where("e164 = ?", "+15125551234").Scan(s.ctx))
+	s.Require().NoError(s.store.global.NewSelect().Model(&held).Where("e164 = ?", "+15125551234").Scan(s.ctx))
 	s.Empty(held.BridgeURI)
 	s.Empty(held.BridgeUsername)
 	s.Empty(held.BridgePasswordSealed, "a released number does not keep a password")
@@ -1120,7 +1113,7 @@ func (s *StoreSuite) TestAMovedLogRowNeverShowsTheErrorOfTheRequestHoldingItsNum
 		details["request_id"] = strconv.FormatInt(own.ID, 10)
 		entry := &AgentLog{CustomerID: "moved-logs", AgentID: "agent", Source: "system", Severity: "info",
 			EventType: "provider_request", Message: "llm request completed", OccurredAt: at, IngestedAt: at, Details: details}
-		_, err := s.store.DB().NewInsert().Model(entry).Exec(s.ctx)
+		_, err := s.store.GlobalDB().NewInsert().Model(entry).Exec(s.ctx)
 		s.Require().NoError(err)
 		read, err := s.store.AgentLog(s.ctx, "moved-logs", entry.ID)
 		s.Require().NoError(err)
@@ -1495,11 +1488,11 @@ func (s *StoreSuite) TestMigrateRebuildsAGrantsIndexLeftInvalid() {
 
 func (s *StoreSuite) TestMigrateRebuildsTheContactIndexLeftInvalid() {
 	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('contact_map_conversation')")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('contact_map_conversation')")
 	s.Require().NoError(err)
 	var valid bool
 	read := func() {
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('contact_map_conversation')").Scan(&valid))
 	}
 	read()
@@ -1549,7 +1542,7 @@ func (s *StoreSuite) TestTheGrantReconcileReadsByTheGrantsIndex() {
 
 func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	// The router migrating holds the lock on a connection of its own, as Migrate does.
-	holder, err := s.store.DB().DB.Conn(s.ctx)
+	holder, err := s.store.GlobalDB().DB.Conn(s.ctx)
 	s.Require().NoError(err)
 	defer holder.Close()
 	_, err = holder.ExecContext(s.ctx, "SELECT pg_advisory_lock(hashtextextended('router.migrate', 0))")
@@ -1575,12 +1568,12 @@ func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	// usage migration's on another connection of the pool than the one holding the lock, so
 	// Postgres sees no deadlock to break.
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().ExecContext(s.ctx, "DROP INDEX CONCURRENTLY IF EXISTS requests_lock_wait_idx")
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "DROP INDEX CONCURRENTLY IF EXISTS requests_lock_wait_idx")
 		s.Require().NoError(err)
 	})
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
-	_, err = s.store.DB().ExecContext(ctx, "CREATE INDEX CONCURRENTLY requests_lock_wait_idx ON requests (customer_id)")
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE INDEX CONCURRENTLY requests_lock_wait_idx ON requests (customer_id)")
 	s.Require().NoError(err, "a router waiting for the lock holds no snapshot the build waits on")
 	unlock()
 

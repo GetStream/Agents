@@ -34,7 +34,7 @@ func (s *Store) CreateKnowledgeURL(ctx context.Context, page *KnowledgeURL) erro
 	page.UpdatedAt = now
 	page.DeletedAt = nil
 
-	if _, err := s.db.NewInsert().Model(page).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(page).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create knowledge url: %w", err))
 	}
 	return nil
@@ -50,7 +50,7 @@ func (s *Store) SubscribedKnowledgeURL(
 	}
 
 	var page KnowledgeURL
-	err := s.db.NewSelect().Model(&page).
+	err := s.global.NewSelect().Model(&page).
 		Where("customer_id = ?", customerID).
 		Where("namespace = ?", namespace).
 		Where("url = ?", address).
@@ -76,7 +76,7 @@ func (s *Store) SaveKnowledgeURL(ctx context.Context, page *KnowledgeURL) error 
 
 	page.UpdatedAt = time.Now().UTC()
 
-	result, err := s.db.NewUpdate().Model(page).
+	result, err := s.global.NewUpdate().Model(page).
 		Column("title", "declared_title", "description", "refresh_hours",
 			"state", "error", "passages", "last_indexed_at", "updated_at").
 		Where("id = ?", page.ID).
@@ -103,7 +103,7 @@ func (s *Store) DeleteKnowledgeURL(ctx context.Context, customerID, id string) e
 		return stack.Wrap(errors.New("store: a customer and a knowledge url id are required"))
 	}
 
-	result, err := s.db.NewUpdate().Model((*KnowledgeURL)(nil)).
+	result, err := s.global.NewUpdate().Model((*KnowledgeURL)(nil)).
 		Set("deleted_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -129,7 +129,7 @@ func (s *Store) KnowledgeURL(ctx context.Context, customerID, id string) (Knowle
 	}
 
 	var page KnowledgeURL
-	err := s.db.NewSelect().Model(&page).
+	err := s.global.NewSelect().Model(&page).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL").
@@ -150,7 +150,7 @@ func (s *Store) KnowledgeURL(ctx context.Context, customerID, id string) (Knowle
 // first read is not due: that read is already queued.
 func (s *Store) DueKnowledgeURLs(ctx context.Context, now time.Time, limit int) ([]KnowledgeURL, error) {
 	var pages []KnowledgeURL
-	err := s.db.NewSelect().Model(&pages).
+	err := s.global.NewSelect().Model(&pages).
 		Where("deleted_at IS NULL").
 		Where("refresh_hours > 0").
 		Where("state <> ?", KnowledgeURLPending).
@@ -172,7 +172,7 @@ func (s *Store) CustomerKnowledgeURLs(ctx context.Context, customerID, namespace
 	}
 
 	var pages []KnowledgeURL
-	query := s.db.NewSelect().Model(&pages).
+	query := s.global.NewSelect().Model(&pages).
 		Where("customer_id = ?", customerID).
 		Where("deleted_at IS NULL")
 	if namespace != "" {
@@ -215,7 +215,7 @@ func (s *Store) SaveKnowledgeDocument(ctx context.Context, document *KnowledgeDo
 
 	// Text posted over a file still waiting to be read is the newer of the two, so the row
 	// lets go of the file and the read that finds it gone leaves the row alone.
-	_, err := s.db.NewInsert().Model(document).
+	_, err := s.global.NewInsert().Model(document).
 		On("CONFLICT (customer_id, namespace, source) DO UPDATE").
 		Set("passages = EXCLUDED.passages").
 		Set("text = EXCLUDED.text").
@@ -253,7 +253,7 @@ func (s *Store) PendKnowledgeFile(ctx context.Context, document *KnowledgeDocume
 	document.State = KnowledgeDocumentPending
 	document.Error = ""
 
-	_, err := s.db.NewInsert().Model(document).
+	_, err := s.global.NewInsert().Model(document).
 		On("CONFLICT (customer_id, namespace, source) DO UPDATE").
 		Set("state = EXCLUDED.state").
 		Set("error = EXCLUDED.error").
@@ -273,7 +273,7 @@ func (s *Store) PendKnowledgeFile(ctx context.Context, document *KnowledgeDocume
 // written for its file, under the same condition as FinishKnowledgeFile, so a write that
 // stops part way leaves a row whose delete removes every passage either version wrote.
 func (s *Store) CoverKnowledgeFile(ctx context.Context, customerID, id, objectKey string, passages int) (bool, error) {
-	result, err := s.db.NewUpdate().Model((*KnowledgeDocument)(nil)).
+	result, err := s.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
 		Set("passages = GREATEST(passages, ?)", passages).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
@@ -293,7 +293,7 @@ func (s *Store) FinishKnowledgeFile(ctx context.Context, document *KnowledgeDocu
 	document.State = KnowledgeDocumentIndexed
 	document.Error = ""
 	document.ObjectKey = ""
-	result, err := s.db.NewUpdate().Model(document).
+	result, err := s.global.NewUpdate().Model(document).
 		Column("text", "passages", "pages", "state", "error", "object_key", "updated_at").
 		Where("id = ?", document.ID).
 		Where("customer_id = ?", document.CustomerID).
@@ -309,7 +309,7 @@ func (s *Store) FinishKnowledgeFile(ctx context.Context, document *KnowledgeDocu
 // FinishKnowledgeFile. A last failure marks the document failed and lets go of the file;
 // an earlier one leaves it pending, to be tried again.
 func (s *Store) FailKnowledgeFile(ctx context.Context, customerID, id, objectKey, reason string, last bool) (bool, error) {
-	query := s.db.NewUpdate().Model((*KnowledgeDocument)(nil)).
+	query := s.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
 		Set("error = ?", reason).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
@@ -368,7 +368,7 @@ func (n KnowledgeNamespace) Place() KnowledgePlace {
 // been written to through the router.
 func (s *Store) KnowledgePlace(ctx context.Context, customerID, namespace string) (KnowledgePlace, bool, error) {
 	var kept KnowledgeNamespace
-	err := s.db.NewSelect().Model(&kept).
+	err := s.global.NewSelect().Model(&kept).
 		Where("customer_id = ?", customerID).
 		Where("namespace = ?", namespace).
 		Scan(ctx)
@@ -394,7 +394,7 @@ func (s *Store) ClaimKnowledgePlace(ctx context.Context, customerID, namespace s
 	kept := KnowledgeNamespace{CustomerID: customerID, Namespace: namespace, Region: place.Region, Account: place.Account,
 		CreatedAt: time.Now().UTC()}
 	// A no-op update, so RETURNING answers the row that was already there.
-	_, err := s.db.NewInsert().Model(&kept).
+	_, err := s.global.NewInsert().Model(&kept).
 		On("CONFLICT (customer_id, namespace) DO UPDATE").
 		Set("customer_id = EXCLUDED.customer_id").
 		Returning("region, account").
@@ -407,7 +407,7 @@ func (s *Store) ClaimKnowledgePlace(ctx context.Context, customerID, namespace s
 
 // ForgetKnowledgePlace forgets where a customer's knowledge base is kept, once it is dropped.
 func (s *Store) ForgetKnowledgePlace(ctx context.Context, customerID, namespace string) error {
-	_, err := s.db.NewDelete().Model((*KnowledgeNamespace)(nil)).
+	_, err := s.global.NewDelete().Model((*KnowledgeNamespace)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("namespace = ?", namespace).
 		Exec(ctx)
@@ -422,7 +422,7 @@ func (s *Store) ForgetKnowledgePlace(ctx context.Context, customerID, namespace 
 // deployment's account does not list them.
 func (s *Store) KnowledgeInCustomerAccounts(ctx context.Context) ([]KnowledgeNamespace, error) {
 	kept := []KnowledgeNamespace{}
-	err := s.db.NewSelect().Model(&kept).
+	err := s.global.NewSelect().Model(&kept).
 		Where("account = ?", KnowledgeAccountCustomer).
 		Order("customer_id", "namespace").
 		Scan(ctx)
@@ -439,7 +439,7 @@ func (s *Store) KnowledgeDocument(ctx context.Context, customerID, id string) (K
 	}
 
 	var document KnowledgeDocument
-	err := s.db.NewSelect().Model(&document).
+	err := s.global.NewSelect().Model(&document).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Limit(1).
@@ -479,7 +479,7 @@ func (s *Store) customerKnowledgeDocuments(
 	}
 
 	var documents []KnowledgeDocument
-	query := s.db.NewSelect().Model(&documents).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&documents).Where("customer_id = ?", customerID)
 	if !withText {
 		query = query.ExcludeColumn("text")
 	}
@@ -499,7 +499,7 @@ func (s *Store) DeleteKnowledgeDocument(ctx context.Context, customerID, id stri
 		return stack.Wrap(errors.New("store: a customer and a knowledge document id are required"))
 	}
 
-	result, err := s.db.NewDelete().Model((*KnowledgeDocument)(nil)).
+	result, err := s.global.NewDelete().Model((*KnowledgeDocument)(nil)).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Exec(ctx)
@@ -524,7 +524,7 @@ func (s *Store) DeleteKnowledgeBase(ctx context.Context, customerID, namespace s
 		return 0, 0, stack.Wrap(errors.New("store: a customer and a namespace are required"))
 	}
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		deleted, err := tx.NewDelete().Model((*KnowledgeDocument)(nil)).
 			Where("customer_id = ?", customerID).
 			Where("namespace = ?", namespace).

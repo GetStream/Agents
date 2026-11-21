@@ -96,7 +96,7 @@ func (s *Store) PutConnectorOAuthClient(ctx context.Context, client *ConnectorOA
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	var createdAt time.Time
 	var pin sql.NullInt64
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the client is stored, so a delete of the connector
 		// waits and then deletes it too, or went first and leaves no definition to find
 		// (DeleteConnectorDefinition): no client secret outlives its connector.
@@ -157,7 +157,7 @@ func (s *Store) ConnectorOAuthClient(ctx context.Context, customerID, connectorI
 		return ConnectorOAuthClient{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	var client ConnectorOAuthClient
-	err := s.db.NewSelect().Model(&client).
+	err := s.global.NewSelect().Model(&client).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID).
 		Scan(ctx)
@@ -179,7 +179,7 @@ func (s *Store) ConnectorOAuthClientByProviderApp(ctx context.Context, connector
 		return ConnectorOAuthClient{}, stack.Wrap(errors.New("store: a connector id and a provider app id are required"))
 	}
 	var client ConnectorOAuthClient
-	err := s.db.NewSelect().Model(&client).
+	err := s.global.NewSelect().Model(&client).
 		Where("connector_id = ?", connectorID).
 		Where("provider_app_id = ?", providerAppID).
 		Scan(ctx)
@@ -209,7 +209,7 @@ func (s *Store) rewrapConnectorOAuthClient(ctx context.Context, column, versionC
 	if len(was) == 0 || len(sealed) == 0 || version < 1 {
 		return false, stack.Wrap(errors.New("store: a rewrap replaces one sealed secret with another, under a key version of 1 or more"))
 	}
-	result, err := s.db.NewUpdate().Model((*ConnectorOAuthClient)(nil)).
+	result, err := s.global.NewUpdate().Model((*ConnectorOAuthClient)(nil)).
 		Set("? = ?", bun.Ident(column), sealed).
 		Set("? = ?", bun.Ident(versionColumn), version).
 		Where("customer_id = ?", customerID).
@@ -233,7 +233,7 @@ func (s *Store) DeleteConnectorOAuthClient(ctx context.Context, customerID, conn
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
-	result, err := s.db.NewDelete().Model((*ConnectorOAuthClient)(nil)).
+	result, err := s.global.NewDelete().Model((*ConnectorOAuthClient)(nil)).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID).
 		Where("registration = ?", registration).

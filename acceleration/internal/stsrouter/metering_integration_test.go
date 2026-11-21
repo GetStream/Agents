@@ -173,7 +173,7 @@ func (v *vendorSocket) send(frame string) {
 // rows is what the customer's session stored, in the order it was written.
 func (s *MeteringSuite) rows(customer string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	return rows
 }
 

@@ -31,7 +31,7 @@ func (s *TelnyxChannelSuite) TestKeywordsAreAnsweredWithTheNumbersUseCaseTexts()
 	// One customer at a time holds a number (phone_numbers_held_idx), and every test's line is
 	// the same one.
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().ExecContext(ctx, "DELETE FROM phone_numbers WHERE customer_id = ?", s.customerID())
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM phone_numbers WHERE customer_id = ?", s.customerID())
 		s.NoError(err)
 	})
 	s.Require().NoError(s.store.AssignNumbers(ctx, s.customerID(), assigned.ID, []string{s.line}))
@@ -198,7 +198,7 @@ func (s *TelnyxSandboxSuite) TestAReplyTelnyxRefusesIsNotCountedAgainstTheDailyL
 	// The first reply is over once the bridge let go of its claim, as it does for a refusal. Not
 	// Close, which would stop the bridge's inbound worker for the suite's later tests.
 	s.Require().Eventually(func() bool {
-		count, err := s.store.DB().NewSelect().Table("channel_thread_messages").
+		count, err := s.store.GlobalDB().NewSelect().Table("channel_thread_messages").
 			Where("channel_id = ? AND kind = ?", channel, store.ClaimReply).Count(context.Background())
 		return err == nil && count == 0
 	}, settleFor, 10*time.Millisecond, "the refused reply kept its claim")

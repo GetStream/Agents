@@ -44,7 +44,7 @@ func (s *EpisodeReadingSuite) textFrom(number, thread string, seconds int, text 
 // endEpisode closes an episode as the idle sweeper does an hour after its last message, before
 // its summary.
 func (s *EpisodeReadingSuite) endEpisode(opened omnichannel.Opened) {
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET status = ?, ended_at = ? WHERE id = ?",
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = ?, ended_at = ? WHERE id = ?",
 		store.EpisodeEnded, opened.Episode.StartedAt.Add(time.Hour), opened.Episode.ID)
 	s.Require().NoError(err)
 }
@@ -153,12 +153,12 @@ func (s *EpisodeReadingSuite) linkWith(user, number string, seconds int, history
 	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID,
 		StreamAppPK: suiteDeploymentApp, UserID: user, Phone: number, History: history}))
 	at := s.now.Add(time.Duration(seconds) * time.Second)
-	_, err := s.store.DB().ExecContext(s.ctx, `UPDATE user_phone_history AS h
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `UPDATE user_phone_history AS h
 SET since = CASE WHEN h.since = up.updated_at THEN ?0 ELSE h.since END, linked_at = ?0 FROM user_phones AS up
 WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND up.user_id = h.user_id
 	AND h.linked_at = up.updated_at AND up.customer_id = ?1 AND up.user_id = ?2`, at, s.customerID, user)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE user_phones SET created_at = ?0, updated_at = ?0 WHERE customer_id = ?1 AND user_id = ?2",
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE user_phones SET created_at = ?0, updated_at = ?0 WHERE customer_id = ?1 AND user_id = ?2",
 		at, s.customerID, user)
 	s.Require().NoError(err)
 }

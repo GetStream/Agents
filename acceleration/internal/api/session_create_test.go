@@ -180,7 +180,7 @@ func (s *SessionCreateSuite) TestAnUnchangedTimezoneIsNotWrittenAgain() {
 // write to it, even one that sets a column to what it held.
 func (s *SessionCreateSuite) userRowVersion(user *testClient) string {
 	var version string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT xmin::text FROM users WHERE customer_id = ? AND id = ?", s.customerID(), user.userID).Scan(&version))
 	return version
 }
@@ -877,7 +877,7 @@ func (s *SessionCreateSuite) TestATranscriptReadBeforeItsSessionRowIsWrittenIsTh
 	request.Id = pointerTo(s.utils.uuid())
 	// An uncommitted row under the session's id holds the writer's insert of it until the
 	// rollback: the session writer slowed with nothing in the router changed.
-	held, err := s.store.DB().BeginTx(ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = held.Rollback() }()
 	_, err = held.ExecContext(ctx, "INSERT INTO agent_sessions (id, customer_id, state) VALUES (?, ?, ?)",

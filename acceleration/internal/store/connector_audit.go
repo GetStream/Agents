@@ -145,9 +145,9 @@ func (s *Store) RecordConnectorAudit(ctx context.Context, event *ConnectorAuditE
 	if event.Credential == nil {
 		// One insert needs no transaction: a proxy call, a token export or a delete is most
 		// rows, and the one most often written.
-		_, err = s.db.NewInsert().Model(event).Exec(ctx)
+		_, err = s.global.NewInsert().Model(event).Exec(ctx)
 	} else {
-		err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
 				return err
 			}
@@ -169,7 +169,7 @@ func (s *Store) ConnectorAuditEvents(ctx context.Context, customerID string, fil
 		return nil, stack.Wrap(errors.New("store: a customer id is required"))
 	}
 	events := []ConnectorAuditEvent{}
-	query := s.db.NewSelect().Model(&events).Where("customer_id = ?", customerID)
+	query := s.global.NewSelect().Model(&events).Where("customer_id = ?", customerID)
 	if filter.ConnectionID != "" {
 		query = query.Where("connection_id = ?", filter.ConnectionID)
 	}
@@ -191,7 +191,7 @@ func (s *Store) ConnectorAuditEvents(ctx context.Context, customerID string, fil
 		ids[i] = event.ID
 	}
 	credentials := []ConnectorAuditCredential{}
-	if err := s.db.NewSelect().Model(&credentials).Where("audit_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
+	if err := s.global.NewSelect().Model(&credentials).Where("audit_id IN (?)", bun.In(ids)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector audit credentials: %w", err))
 	}
 	byAudit := make(map[string]*ConnectorAuditCredential, len(credentials))

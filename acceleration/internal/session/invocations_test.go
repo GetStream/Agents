@@ -60,7 +60,7 @@ func (s *InvocationLogSuite) logged(connection string, count int) []store.Connec
 // shapes (connector_invocation_arguments), as text.
 func (s *InvocationLogSuite) stored(connection string) string {
 	var rows string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT coalesce(string_agg(to_jsonb(ci)::text || ' ' || coalesce(to_jsonb(cia)::text, ''), ' '), '') "+
 			"FROM connector_invocations AS ci LEFT JOIN connector_invocation_arguments AS cia ON cia.invocation_id = ci.id "+
 			"WHERE connection_id = ?",
@@ -379,7 +379,7 @@ func (s *InvocationLogSuite) TestTheLogDoesNotHoldUpTheCall() {
 	app := s.connection("", "primary")
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
 	s.Require().NoError(err)
-	held, err := s.store.DB().BeginTx(s.ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = held.Rollback() }()
 	_, err = held.ExecContext(s.ctx, "LOCK TABLE connector_invocations IN ACCESS EXCLUSIVE MODE")
@@ -396,7 +396,7 @@ func (s *InvocationLogSuite) TestTheLogDoesNotHoldUpTheCall() {
 	// waiting on it, so the call came back while its row was blocked, not before it was sent.
 	s.Require().Eventually(func() bool {
 		var waiting int
-		err := s.store.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+		err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
 			WHERE datname = current_database() AND wait_event_type = 'Lock'
 			AND query LIKE 'INSERT INTO "connector_invocations"%'`).Scan(&waiting)
 		return err == nil && waiting > 0

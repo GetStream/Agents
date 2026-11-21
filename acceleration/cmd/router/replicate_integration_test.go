@@ -47,9 +47,9 @@ func (s *ReplicateResumeSuite) SetupSuite() {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 
 	s.store, err = openStore(s.ctx, s.settings)
@@ -63,9 +63,9 @@ func (s *ReplicateResumeSuite) TearDownSuite() {
 }
 
 func (s *ReplicateResumeSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE scheduled_tasks, campaigns, agent_configs CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE scheduled_tasks, campaigns, agent_configs CASCADE")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx,
+	_, err = s.store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-1', 'acme', 'a', 'be brief')")
 	s.Require().NoError(err)
 }
@@ -87,7 +87,7 @@ func (s *ReplicateResumeSuite) importedTask(task store.ScheduledTask, state stri
 	s.Require().NoError(s.store.CreateScheduledTask(s.ctx, &task, 25))
 	var row map[string]any
 	var raw []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT to_jsonb(t) FROM scheduled_tasks t WHERE id = ?", task.ID).Scan(&raw))
 	s.Require().NoError(json.Unmarshal(raw, &row))
 	row["state"] = state
@@ -171,7 +171,7 @@ func (s *ReplicateResumeSuite) importedCampaign(fields string) string {
 	campaign := &store.Campaign{CustomerID: "acme", Name: "Renewals", ConfigID: "config-1", FromNumber: "+15550100"}
 	s.Require().NoError(s.store.CreateCampaign(s.ctx, campaign))
 	var raw []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT to_jsonb(c) || "+fields+" FROM campaigns c WHERE id = ?", campaign.ID).Scan(&raw))
 	s.Require().NoError(s.store.ImportRow(s.ctx, "acme", "campaigns", raw))
 	return campaign.ID
@@ -234,7 +234,7 @@ func (s *ReplicateResumeSuite) TestResumeSaysHowManyTasksItLeftPausedForADeleted
 }
 
 func (s *ReplicateResumeSuite) TestResumeSaysHowManyTasksItLeftPausedForWantOfRoom() {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		`UPDATE agent_configs SET scheduling = '{"max_tasks_per_user": 1}' WHERE id = 'config-1'`)
 	s.Require().NoError(err)
 	next := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
@@ -258,7 +258,7 @@ func (s *ReplicateResumeSuite) TestResumeSaysHowManyTasksItLeftPausedForWantOfRo
 // The repeat's skipped occurrence comes before the limit is counted: the repeat is resumed
 // on the room it has, and the task after it, which has no room left, stays paused.
 func (s *ReplicateResumeSuite) TestResumeCountsTheRoomAfterItSkipsAnOverdueRepeat() {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		`UPDATE agent_configs SET scheduling = '{"max_tasks_per_user": 2}' WHERE id = 'config-1'`)
 	s.Require().NoError(err)
 	next := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
@@ -302,7 +302,7 @@ func (s *ReplicateResumeSuite) TestResumeClosesAOneShotWhoseTimeCameBeforeIt() {
 	}
 	// The prune deletes a completed task by when it last changed, read on the database's clock.
 	var before time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT now()").Scan(&before))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT now()").Scan(&before))
 
 	s.Equal("resumed 0 scheduled tasks\n", s.cutOver())
 
@@ -314,7 +314,7 @@ func (s *ReplicateResumeSuite) TestResumeClosesAOneShotWhoseTimeCameBeforeIt() {
 		s.False(task.MovePaused, id)
 		var state, reason string
 		var scheduledFor, created time.Time
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT state, error, scheduled_for, created_at FROM scheduled_task_runs WHERE task_id = ?", id).
 			Scan(&state, &reason, &scheduledFor, &created), id)
 		s.Equal(store.ScheduledTaskRunMissed, state, id)
@@ -326,14 +326,14 @@ func (s *ReplicateResumeSuite) TestResumeClosesAOneShotWhoseTimeCameBeforeIt() {
 
 	s.Equal("resumed 0 scheduled tasks\n", s.cutOver(), "a second cut-over finds nothing left")
 	var runs int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM scheduled_task_runs WHERE task_id = 'st-once'").Scan(&runs))
 	s.Equal(1, runs)
 }
 
 // sourceRun imports a run the source had started, as the last catch-up read it.
 func (s *ReplicateResumeSuite) sourceRun(id, customerID, taskID, trigger, state string, scheduledFor time.Time) {
-	_, err := s.store.DB().ExecContext(s.ctx, `
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, started_at, attempts)
 VALUES (?, ?, ?, ?, ?, ?, now(), 1)`, id, taskID, customerID, scheduledFor, trigger, state)
 	s.Require().NoError(err)
@@ -342,7 +342,7 @@ VALUES (?, ?, ?, ?, ?, ?, now(), 1)`, id, taskID, customerID, scheduledFor, trig
 // runOf reads a run as the API lists it.
 func (s *ReplicateResumeSuite) runOf(id string) store.ScheduledTaskRun {
 	var run store.ScheduledTaskRun
-	s.Require().NoError(s.store.DB().NewSelect().Model(&run).Where("id = ?", id).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&run).Where("id = ?", id).Scan(s.ctx))
 	return run
 }
 
@@ -367,12 +367,12 @@ func (s *ReplicateResumeSuite) TestResumeSettlesTheRunOfAnOccurrenceTheSourceSta
 			s.importedTask(store.ScheduledTask{ID: "st-source", RRule: c.rrule, StartLocal: start, NextRunAt: &due}, store.ScheduledTaskActive)
 			s.sourceRun("run-source", "acme", "st-source", store.ScheduledTaskTriggerSchedule, store.ScheduledTaskRunRunning, due)
 			var before time.Time
-			s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT now()").Scan(&before))
+			s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT now()").Scan(&before))
 
 			s.cutOver()
 
 			var ids string
-			s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+			s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 				"SELECT string_agg(id, ',') FROM scheduled_task_runs WHERE task_id = 'st-source'").Scan(&ids))
 			s.Equal("run-source", ids, "the source's run of the occurrence is the one on record")
 			run := s.runOf("run-source")
@@ -397,7 +397,7 @@ func (s *ReplicateResumeSuite) TestResumeSettlesTheRunOfAnOccurrenceTheSourceSta
 // flight there, a run of a task the cut-over leaves alone, another customer's and one the
 // source finished keep what the copy brought.
 func (s *ReplicateResumeSuite) TestResumeSettlesNoOtherRun() {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'other', 'a', 'be brief')")
 	s.Require().NoError(err)
 	due := s.overdue("st-daily", "FREQ=DAILY", store.ScheduledTaskActive)
@@ -409,7 +409,7 @@ func (s *ReplicateResumeSuite) TestResumeSettlesNoOtherRun() {
 	// Held past the cut-over, so the worker here takes it over.
 	held := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	s.importedTask(store.ScheduledTask{ID: "st-held", RRule: "FREQ=DAILY", StartLocal: held, NextRunAt: &held}, store.ScheduledTaskActive)
-	_, err = s.store.DB().ExecContext(s.ctx, `
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, state, started_at, postponed_until, attempts)
 VALUES ('run-held', 'st-held', 'acme', ?, 'running', ?, ?, 1)`, held, held, time.Now().UTC().Add(8*time.Hour))
 	s.Require().NoError(err)
@@ -445,7 +445,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesAnOccurrenceTheSourceHeldPastItTo
 			// Due an hour ago, so its run is old enough for the worker to take over.
 			due := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 			s.importedTask(store.ScheduledTask{ID: "st-held", RRule: rrule, StartLocal: due, NextRunAt: &due}, store.ScheduledTaskActive)
-			_, err := s.store.DB().ExecContext(s.ctx, `
+			_, err := s.store.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, state, started_at, postponed_until, attempts)
 VALUES ('run-held', 'st-held', 'acme', ?, 'running', ?, ?, 1)`, due, due, time.Now().UTC().Add(8*time.Hour))
 			s.Require().NoError(err)
@@ -504,7 +504,7 @@ func (s *ReplicateResumeSuite) TestResumeCompletesARepeatWithNoOccurrenceLeft() 
 	s.Nil(task.NextRunAt)
 	s.Empty(s.claimed())
 	var runs int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM scheduled_task_runs WHERE task_id = 'st-last'").Scan(&runs))
 	s.Zero(runs, "a pause skips what a repeat sleeps through")
 }
@@ -537,7 +537,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesAnOverdueTaskTheUserPausedAsItIs(
 func (s *ReplicateResumeSuite) TestResumeLeavesAMovedTaskResumedHereByHandToTheWorker() {
 	due := s.overdue("st-resumed", "FREQ=DAILY", store.ScheduledTaskActive)
 	// Resumed here by hand, keeping the mark the move left.
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active' WHERE id = 'st-resumed'")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active' WHERE id = 'st-resumed'")
 	s.Require().NoError(err)
 
 	s.cutOver()
@@ -548,7 +548,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesAMovedTaskResumedHereByHandToTheW
 }
 
 func (s *ReplicateResumeSuite) TestResumeLeavesAnotherCustomersMoveAlone() {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'other', 'a', 'be brief')")
 	s.Require().NoError(err)
 	due := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
@@ -566,7 +566,7 @@ func (s *ReplicateResumeSuite) TestResumeLeavesAnotherCustomersMoveAlone() {
 // A pause here in flight when the cut-over reads the task is waited for, not written over.
 func (s *ReplicateResumeSuite) TestResumeWaitsForAPauseOfTheTaskInFlight() {
 	due := s.overdue("st-daily", "FREQ=DAILY", store.ScheduledTaskActive)
-	pausing, err := s.store.DB().BeginTx(s.ctx, nil)
+	pausing, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = pausing.Rollback() }()
 	_, err = pausing.ExecContext(s.ctx, "UPDATE scheduled_tasks SET move_paused = false WHERE id = 'st-daily'")
@@ -585,7 +585,7 @@ func (s *ReplicateResumeSuite) TestResumeWaitsForAPauseOfTheTaskInFlight() {
 			finished = true
 		case <-time.After(50 * time.Millisecond):
 			var waiting int
-			s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+			s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 				"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting))
 			if waiting > 0 {
 				s.Require().NoError(pausing.Commit())

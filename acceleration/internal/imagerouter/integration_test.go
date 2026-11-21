@@ -137,7 +137,7 @@ func (s *ImageRouterIntegrationSuite) TestAGenerationDrawnTwiceUnderOneUsageIDIs
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	s.Require().Len(rows, 1, "drawn twice, recorded once")
 	s.Equal(usageID, rows[0].UsageID)
 	s.EqualValues(40_000, rows[0].CostMicros)
@@ -174,7 +174,7 @@ func (s *ImageRouterIntegrationSuite) TestAnImageRowSaysTheSizeItWasDrawnAtWhich
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	s.Equal("1024", rows[0].Attributes[imagegen.AttributeWidth])
 	s.Equal("1792", rows[0].Attributes[imagegen.AttributeHeight])

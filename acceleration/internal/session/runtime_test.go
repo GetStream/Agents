@@ -165,7 +165,7 @@ func (s *RuntimeSuite) runtime(sessionID string) []store.Request {
 // written is the session's runtime rows written so far, oldest first.
 func (s *RuntimeSuite) written(sessionID string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customer).
 		Where("session_id = ?", sessionID).
 		Where("modality = ?", string(routing.Runtime)).

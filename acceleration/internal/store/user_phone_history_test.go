@@ -11,7 +11,7 @@ import (
 // linked to it.
 func (s *StoreSuite) historyStory() (chat *ContactMapEntry, own, sunday, monday string) {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	chat = s.made(streamUser("anya", "agent:omni-chat"))
 	sms := s.made(contact("+15550100", "agent:omni-sms"))
@@ -78,7 +78,7 @@ func (s *StoreSuite) TestTheBoundaryStaysWithNoWordAndMovesWithFalseOrANewNumber
 
 	linked := func() time.Time {
 		var at time.Time
-		s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT updated_at FROM user_phones WHERE user_id = 'anya'").Scan(&at))
+		s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT updated_at FROM user_phones WHERE user_id = 'anya'").Scan(&at))
 		return at
 	}
 	s.linkWith("+15550100", &PhoneHistory{})
@@ -99,16 +99,16 @@ func (s *StoreSuite) TestOnlyABoundaryBeforeTheLinkReadsTheSetAsideRows() {
 
 	aside := func() string {
 		var omni string
-		s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT conversation_id FROM contact_map WHERE address LIKE 'retired:%'").Scan(&omni))
+		s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT conversation_id FROM contact_map WHERE address LIKE 'retired:%'").Scan(&omni))
 		return omni
 	}
 	var setAside string
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT id FROM contact_map WHERE address LIKE 'retired:%'").Scan(&setAside))
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT id FROM contact_map WHERE address LIKE 'retired:%'").Scan(&setAside))
 	later := s.smsAt(&ContactMapEntry{ID: setAside, CustomerID: "acme-app"}, linkedAt.Add(2*time.Hour))
 	s.Equal([]string{own}, s.readFor(chat), "the link's own time, as before (ba2c5e912)")
 	s.linkWith("+15550100", &PhoneHistory{Since: linkedAt.Add(time.Hour)})
 	s.Equal([]string{own}, s.readFor(chat), "a boundary after the link")
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE user_phone_history SET linked_at = linked_at - interval '1 second', since = NULL")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE user_phone_history SET linked_at = linked_at - interval '1 second', since = NULL")
 	s.Require().NoError(err)
 	s.linkWith("+15550100", nil)
 	s.Equal([]string{own}, s.readFor(chat), "a row of another link time")
@@ -126,7 +126,7 @@ func (s *StoreSuite) TestOnlyABoundaryBeforeTheLinkReadsTheSetAsideRows() {
 // anya of app 4242 reads only her app's past of it.
 func (s *StoreSuite) TestASetAsideRowOfAnotherAppIsNotRead() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	chat := s.made(streamUser("anya", "agent:omni-chat"))
 	own := s.chatEpisode(chat)
@@ -147,7 +147,7 @@ func (s *StoreSuite) TestASetAsideRowOfAnotherAppIsNotRead() {
 // never chatted with the agent, and the number's next row reads its past with all of it.
 func (s *StoreSuite) TestALinkWithAllOfTheHistoryIsReadOnTheNumbersNextRow() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true WHERE id = 'agent-one'")
 	s.Require().NoError(err)
 	sunday := s.smsAt(s.made(contact("+15550100", "agent:omni-sms")), linkedAt.Add(-36*time.Hour))
 	s.linkWith("+15550100", &PhoneHistory{All: true})
@@ -194,7 +194,7 @@ func (s *StoreSuite) TestALinkThePreviousReleaseMadeAgainIsFromItsTime() {
 	s.previousRelink("+15550100")
 
 	var linked time.Time
-	s.Require().NoError(s.store.db.QueryRowContext(s.ctx, "SELECT updated_at FROM user_phones WHERE user_id = 'anya'").Scan(&linked))
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT updated_at FROM user_phones WHERE user_id = 'anya'").Scan(&linked))
 	s.Require().NotNil(s.boundary())
 	s.Equal(linked, *s.boundary())
 	s.Equal([]string{own}, s.readFor(chat))
@@ -205,7 +205,7 @@ func (s *StoreSuite) TestALinkThePreviousReleaseMadeAgainIsFromItsTime() {
 // link made again (ThreadHistorySince), as her cards read none of it.
 func (s *StoreSuite) TestAThreadOfALinkThePreviousReleaseMadeAgainIsCutAtItsTime() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
 	s.Require().NoError(err)
 	thread := "messaging:thread-" + newID()
 	row := s.made(contact("+15550100", "agent:omni-"+newID()))
@@ -230,7 +230,7 @@ func (s *StoreSuite) TestAThreadOfALinkThePreviousReleaseMadeAgainIsCutAtItsTime
 // agent: the rows at the omni-channel, less what a linked number said before its link's time.
 func (s *StoreSuite) previousCards(omni string) []string {
 	var found []string
-	s.Require().NoError(s.store.db.NewRaw(`SELECT ep.id FROM episodes AS ep JOIN contact_map AS cm ON cm.id = ep.contact_id
+	s.Require().NoError(s.store.global.NewRaw(`SELECT ep.id FROM episodes AS ep JOIN contact_map AS cm ON cm.id = ep.contact_id
 WHERE ep.customer_id = 'acme-app' AND cm.customer_id = 'acme-app' AND cm.agent_config_id = 'agent-one' AND cm.conversation_id = ?
 	AND NOT EXISTS (SELECT 1 FROM user_phones AS up WHERE up.customer_id = cm.customer_id
 		AND up.stream_app_pk = COALESCE(NULLIF(cm.stream_app_pk, ?), 0) AND up.phone = cm.address
@@ -243,9 +243,9 @@ ORDER BY ep.started_at DESC`, omni, s.store.streamPins().deployment()).Scan(s.ct
 // and its detachLinked, :252): the link deleted, and only the rows at the number detached from
 // her omni-channel.
 func (s *StoreSuite) previousUnlink(phone string) {
-	_, err := s.store.db.ExecContext(s.ctx, "DELETE FROM user_phones WHERE customer_id = 'acme-app' AND stream_app_pk = 4242 AND user_id = 'anya'")
+	_, err := s.store.global.ExecContext(s.ctx, "DELETE FROM user_phones WHERE customer_id = 'acme-app' AND stream_app_pk = 4242 AND user_id = 'anya'")
 	s.Require().NoError(err)
-	_, err = s.store.db.ExecContext(s.ctx, `UPDATE contact_map AS cm
+	_, err = s.store.global.ExecContext(s.ctx, `UPDATE contact_map AS cm
 SET conversation_id = 'agent:omni-' || gen_random_uuid(), updated_at = now()
 FROM contact_map AS su
 WHERE su.customer_id = 'acme-app' AND su.kind = ? AND su.address IN (?)
@@ -257,7 +257,7 @@ WHERE su.customer_id = 'acme-app' AND su.kind = ? AND su.address IN (?)
 // previousRelink is the previous release's upsert of anya's link (ba2c5e912 user_phones.go:64-71):
 // the number, and the link's time when the number is another.
 func (s *StoreSuite) previousRelink(phone string) {
-	_, err := s.store.db.ExecContext(s.ctx, `UPDATE user_phones SET phone = ?,
+	_, err := s.store.global.ExecContext(s.ctx, `UPDATE user_phones SET phone = ?,
 	updated_at = CASE WHEN phone = ? THEN updated_at ELSE statement_timestamp() END
 WHERE customer_id = 'acme-app' AND stream_app_pk = 4242 AND user_id = 'anya'`, phone, phone)
 	s.Require().NoError(err)
@@ -268,7 +268,7 @@ WHERE customer_id = 'acme-app' AND stream_app_pk = 4242 AND user_id = 'anya'`, p
 // none for a link with all of it.
 func (s *StoreSuite) TestAThreadsHistoryIsCutAtItsNumbersLink() {
 	s.agentConfigs()
-	_, err := s.store.db.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = true")
 	s.Require().NoError(err)
 	thread := "messaging:thread-" + newID()
 	open := func(number string) {

@@ -405,7 +405,7 @@ func (s *ScheduledTasksSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
 	s.runReads = &runReads{}
 	if s.store != nil {
-		s.store.DB().AddQueryHook(s.runReads)
+		s.store.GlobalDB().AddQueryHook(s.runReads)
 	}
 }
 
@@ -1035,7 +1035,7 @@ func (s *ScheduledTasksSuite) TestATaskTheAgentResumesDueInSecondsIsDeliveredWit
 	// Paused, its one time seconds away, written straight to the store so
 	// nothing wakes the worker but the resume.
 	soon := time.Now().UTC().Add(5 * time.Second).Truncate(time.Second)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("state = ?", store.ScheduledTaskPaused).Set("start_local = ?", soon).Set("next_run_at = ?", soon).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", tasks[0].ID).
 		Exec(context.Background())
@@ -1193,7 +1193,7 @@ func (s *ScheduledTasksSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 	config := s.agentWithScheduling(nil)
 	created := s.createTask(s.data.createUser(), taskRequest(config))
 	ctx := context.Background()
-	hold, err := s.store.DB().BeginTx(ctx, nil)
+	hold, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = hold.Rollback() }()
 	var holder int
@@ -1211,7 +1211,7 @@ func (s *ScheduledTasksSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		err := s.store.DB().QueryRowContext(ctx,
+		err := s.store.GlobalDB().QueryRowContext(ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
 		return err == nil && waiting > 0
 	}, 5*time.Second, 10*time.Millisecond, "the delete never reached its config's tasks")
@@ -1234,7 +1234,7 @@ func (s *ScheduledTasksSuite) TestThePauseAfterADeleteGivesUpWhenATaskRowStaysLo
 	config := s.agentWithScheduling(nil)
 	created := s.createTask(s.data.createUser(), taskRequest(config))
 	ctx := context.Background()
-	hold, err := s.store.DB().BeginTx(ctx, nil)
+	hold, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = hold.Rollback() }()
 	var holder int
@@ -1250,7 +1250,7 @@ func (s *ScheduledTasksSuite) TestThePauseAfterADeleteGivesUpWhenATaskRowStaysLo
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		err := s.store.DB().QueryRowContext(ctx,
+		err := s.store.GlobalDB().QueryRowContext(ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
 		return err == nil && waiting > 0
 	}, time.Minute, 10*time.Millisecond, "the delete never reached its config's tasks")
@@ -1274,7 +1274,7 @@ func (s *ScheduledTasksSuite) TestThePauseAfterADeleteGivesUpWhenATaskRowStaysLo
 
 	// The read takes the row's lock, so it queues behind a pause that still waits on it:
 	// that pause commits first, and the read sees the task paused.
-	read, err := s.store.DB().BeginTx(ctx, nil)
+	read, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = read.Rollback() }()
 	var state string
@@ -1370,7 +1370,7 @@ func (s *ScheduledTasksSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMis
 // request waits on that write, and returns when the request is done.
 func (s *ScheduledTasksSuite) whileDeleting(config string, request func()) {
 	ctx := context.Background()
-	deleting, err := s.store.DB().BeginTx(ctx, nil)
+	deleting, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = deleting.Rollback() }()
 	_, err = deleting.ExecContext(ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config)
@@ -1384,7 +1384,7 @@ func (s *ScheduledTasksSuite) whileDeleting(config string, request func()) {
 	// The suite's database is its own, so a backend waiting on a lock in it is the request.
 	s.Require().Eventually(func() bool {
 		var waiting int
-		err := s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity"+
+		err := s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity"+
 			" WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting)
 		return err == nil && waiting > 0
 	}, 5*time.Second, 10*time.Millisecond, "the request read the config without waiting for the delete under way")
@@ -1971,7 +1971,7 @@ func (s *ScheduledTasksSuite) TestARescheduleOfACompletedTaskSchedulesNoRun() {
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
 	created := s.createTask(user, taskRequest(config))
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("state = ?", store.ScheduledTaskCompleted).Set("next_run_at = NULL").
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
 		Exec(context.Background())
@@ -2017,7 +2017,7 @@ func (s *ScheduledTasksSuite) TestTheAgentRewordingATaskKeepsCountingFromItsStor
 	start, want := yesterdayAtAnHourAhead()
 	stored, err := time.Parse("2006-01-02T15:04", start)
 	s.Require().NoError(err)
-	_, err = s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("rrule = ?", "FREQ=DAILY;COUNT=3").Set("timezone = ?", "UTC").
 		Set("start_local = ?", stored).Set("next_run_at = ?", want[0]).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
@@ -2055,7 +2055,7 @@ func (s *ScheduledTasksSuite) countingTaskStartedDaysAgo(user *testClient, confi
 	for run := 0; run < count-days; run++ {
 		left = append(left, hour.AddDate(0, 0, run))
 	}
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("rrule = ?", fmt.Sprintf("FREQ=DAILY;COUNT=%d", count)).Set("timezone = ?", "UTC").
 		Set("start_local = ?", start).Set("next_run_at = ?", hour).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
@@ -2174,7 +2174,7 @@ func (s *ScheduledTasksSuite) oneShotDueInDays(user *testClient, config string, 
 	created := s.createTask(user, taskRequest(config))
 	hour := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Hour)
 	due := hour.AddDate(0, 0, days)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("timezone = ?", "UTC").Set("start_local = ?", due).Set("next_run_at = ?", due).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
 		Exec(context.Background())
@@ -2280,7 +2280,7 @@ func (s *ScheduledTasksSuite) TestPauseAndResumeCountsFromNow() {
 // movePaused leaves a task as a data move imports one that was active where it came from:
 // paused, and marked for the cut-over to resume (store.ResumeMovedRows).
 func (s *ScheduledTasksSuite) movePaused(id string) {
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("state = ?", store.ScheduledTaskPaused).Set("move_paused = true").
 		Where("customer_id = ?", s.customerID()).Where("id = ?", id).
 		Exec(context.Background())
@@ -2545,7 +2545,7 @@ func (s *ScheduledTasksSuite) TestARepeatingTaskPausedPastItsLastTimeIsRefusedOn
 	created := s.createTask(user, body)
 	due := s.pausedAt(created.Id, time.Now().Add(-72*time.Hour))
 	until := due.Add(24 * time.Hour)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).Set("until_date = ?", until).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).Set("until_date = ?", until).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
 		Exec(context.Background())
 	s.Require().NoError(err)
@@ -2566,7 +2566,7 @@ func (s *ScheduledTasksSuite) TestAFailedRepeatPastItsLastTimeIsRefusedOnResume(
 	created := s.createTask(user, body)
 	due := s.ranOut(created.Id, store.ScheduledTaskFailed, time.Now().Add(-72*time.Hour), 5)
 	until := due.Add(24 * time.Hour)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).Set("until_date = ?", until).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).Set("until_date = ?", until).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
 		Exec(context.Background())
 	s.Require().NoError(err)
@@ -2675,7 +2675,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotResumeAnActiveOneShotPastItsTime
 	created := s.createTask(user, utcTaskRequest(config))
 	// Due an hour ago and still active: the occurrence is the worker's.
 	past := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("start_local = ?", past).Set("next_run_at = ?", past).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", created.Id).
 		Exec(context.Background())
@@ -2722,7 +2722,7 @@ func (s *ScheduledTasksSuite) refusedAsInThePast(user *testClient, id string) {
 // answers due as stored.
 func (s *ScheduledTasksSuite) ranOut(id, state string, due time.Time, failures int) time.Time {
 	due = due.UTC().Truncate(time.Second)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("state = ?", state).Set("start_local = ?", due).Set("next_run_at = NULL").
 		Set("consecutive_failures = ?", failures).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", id).
@@ -2736,7 +2736,7 @@ func (s *ScheduledTasksSuite) ranOut(id, state string, due time.Time, failures i
 // answers due as stored.
 func (s *ScheduledTasksSuite) pausedAt(id string, due time.Time) time.Time {
 	due = due.UTC().Truncate(time.Second)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("state = ?", store.ScheduledTaskPaused).Set("start_local = ?", due).Set("next_run_at = ?", due).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", id).
 		Exec(context.Background())
@@ -2749,7 +2749,7 @@ func (s *ScheduledTasksSuite) pausedAt(id string, due time.Time) time.Time {
 // second pass of the hour the clocks go back, 01:20Z. It answers that instant.
 func (s *ScheduledTasksSuite) pausedInTheSecondPass(id string) time.Time {
 	due := time.Date(2026, 10, 25, 1, 20, 0, 0, time.UTC)
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("state = ?", store.ScheduledTaskPaused).Set("timezone = ?", "Europe/Berlin").
 		Set("start_local = ?", time.Date(2026, 10, 25, 2, 20, 0, 0, time.UTC)).Set("next_run_at = ?", due).
 		Where("customer_id = ?", s.customerID()).Where("id = ?", id).

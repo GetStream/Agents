@@ -97,7 +97,7 @@ func (s *Store) LiveGrants(ctx context.Context, organizationIDs []string, now ti
 	if len(organizationIDs) == 0 {
 		return grants, nil
 	}
-	query := s.db.NewSelect().Model(&grants).Where("organization_id IN (?)", bun.In(organizationIDs))
+	query := s.global.NewSelect().Model(&grants).Where("organization_id IN (?)", bun.In(organizationIDs))
 	err := whereLive(query, now.UTC()).Order("id").Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: live grants: %w", err))
@@ -110,7 +110,7 @@ func (s *Store) LiveGrants(ctx context.Context, organizationIDs []string, now ti
 // the organization's lock, so two grants made at once cannot both be the twenty-first.
 func (s *Store) AddGrant(ctx context.Context, grant *LimitGrant, audit LimitAudit) error {
 	grant.UsedMicros = 0
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, "limit_grants:"+grant.OrganizationID, 0); err != nil {
 			return err
 		}
@@ -139,7 +139,7 @@ func (s *Store) AddGrant(ctx context.Context, grant *LimitGrant, audit LimitAudi
 
 // Grant is one grant by id, of the organization, or of any when organizationID is empty.
 func (s *Store) Grant(ctx context.Context, organizationID string, id int64) (LimitGrant, error) {
-	return grantOf(ctx, s.db, organizationID, id, false)
+	return grantOf(ctx, s.global, organizationID, id, false)
 }
 
 func grantOf(ctx context.Context, db bun.IDB, organizationID string, id int64, lock bool) (LimitGrant, error) {
@@ -166,7 +166,7 @@ func grantOf(ctx context.Context, db bun.IDB, organizationID string, id int64, l
 // nothing. The grant and what it paid for stay, for the history.
 func (s *Store) RevokeGrant(ctx context.Context, organizationID string, id int64, by, reason string, audit LimitAudit) (LimitGrant, error) {
 	var revoked LimitGrant
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		before, err := grantOf(ctx, tx, organizationID, id, true)
 		if err != nil {
 			return err
@@ -203,7 +203,7 @@ func (s *Store) RevokeGrant(ctx context.Context, organizationID string, id int64
 // hold the organization's lock, as AddGrant's do.
 func (s *Store) UnrevokeGrant(ctx context.Context, organizationID string, id int64, reason string, audit LimitAudit) (LimitGrant, error) {
 	var unrevoked LimitGrant
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// The organization's lock is taken before the row's, as AddGrant takes it before it
 		// writes, and an organization id is never changed.
 		found, err := grantOf(ctx, tx, organizationID, id, false)
@@ -285,7 +285,7 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter, before int64
 		return nil, stack.Wrap(errors.New("store: listing grants needs an organization"))
 	}
 	grants := []LimitGrant{}
-	query := s.db.NewSelect().Model(&grants).Where("organization_id = ?", filter.OrganizationID)
+	query := s.global.NewSelect().Model(&grants).Where("organization_id = ?", filter.OrganizationID)
 	for column, value := range map[string]string{
 		"subject": string(filter.Subject), "app_id": filter.AppID, "api_key": filter.APIKey, "user_id": filter.UserID, "category": filter.Category,
 	} {
@@ -378,7 +378,7 @@ func (s *Store) AddGrantUses(ctx context.Context, uses []GrantUse) (int, error) 
 	added := 0
 	for start := 0; start < len(uses); start += grantUsesChunk {
 		chunk := uses[start:min(start+grantUsesChunk, len(uses))]
-		err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			n, err := addGrantUses(ctx, tx, chunk)
 			added += n
 			return err
@@ -437,7 +437,7 @@ SELECT count(*) FROM counted`, pgdialect.Array(grants), pgdialect.Array(usageIDs
 func (s *Store) PruneGrantUses(ctx context.Context) (int64, error) {
 	var pruned int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
+		result, err := s.global.ExecContext(ctx, `
 DELETE FROM limit_grant_uses WHERE (grant_id, usage_id) IN (
     SELECT u.grant_id, u.usage_id FROM limit_grants g JOIN limit_grant_uses u ON u.grant_id = g.id
     WHERE `+grantEndedBefore+` LIMIT ?)`, GrantUsesKept.Seconds(), grantUsesPruned)
@@ -484,7 +484,7 @@ func (s *Store) GrantUsesCounted(ctx context.Context, usageIDs []uuid.UUID) (map
 		UsageID uuid.UUID `bun:"usage_id"`
 		Grants  int       `bun:"grants"`
 	}
-	err := s.db.NewSelect().Model((*grantUse)(nil)).
+	err := s.global.NewSelect().Model((*grantUse)(nil)).
 		Column("usage_id").
 		ColumnExpr("count(*) AS grants").
 		Where("usage_id = ANY(?::uuid[])", pgdialect.Array(ids)).
@@ -523,7 +523,7 @@ func (s *Store) ReconcileGrantUses(ctx context.Context) (int, error) {
 	if !s.Sharded() {
 		return 0, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.global.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
 	}
@@ -563,7 +563,7 @@ const reconcileGrantsQuery = "SELECT id, started_at, usage_id, cost_micros, limi
 // reconcileShard is ReconcileGrantUses for one shard, read up to now.
 func (s *Store) reconcileShard(ctx context.Context, shard bun.IDB, name string, now time.Time) (int, error) {
 	var mark time.Time
-	err := s.db.NewSelect().Model((*grantReconcile)(nil)).Column("started_at").Where("shard = ?", name).Scan(ctx, &mark)
+	err := s.global.NewSelect().Model((*grantReconcile)(nil)).Column("started_at").Where("shard = ?", name).Scan(ctx, &mark)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("shard %s: %w", name, err)
 	}
@@ -604,7 +604,7 @@ func (s *Store) reconcileShard(ctx context.Context, shard bun.IDB, name string, 
 				reached = last.StartedAt
 			}
 		}
-		_, err = s.db.NewInsert().Model(&grantReconcile{Shard: name, StartedAt: reached}).
+		_, err = s.global.NewInsert().Model(&grantReconcile{Shard: name, StartedAt: reached}).
 			Column("shard", "started_at").
 			On("CONFLICT (shard) DO UPDATE").
 			Set("started_at = GREATEST(lgr.started_at, EXCLUDED.started_at)").

@@ -28,7 +28,7 @@ func (s *StoreSuite) seed(raw string) {
 // revisions is every stored revision of a built-in, oldest first.
 func (s *StoreSuite) revisions(id string) []ConnectorDefinition {
 	var definitions []ConnectorDefinition
-	s.Require().NoError(s.store.DB().NewSelect().Model(&definitions).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&definitions).
 		Where("customer_id = ?", BuiltinCustomer).Where("id = ?", id).
 		Order("revision").Scan(s.ctx))
 	return definitions
@@ -352,11 +352,11 @@ func (s *StoreSuite) TestSeedingABuiltInStoresTheRevisionsItMarksBroken() {
 		}
 	}
 	var stored []ConnectorBrokenRevision
-	s.Require().NoError(s.store.DB().NewSelect().Model(&stored).Order("revision").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&stored).Order("revision").Scan(s.ctx))
 	s.Require().Len(stored, 2)
 	s.Equal(3, stored[0].MarkedBy)
 	s.seed(acmeMarking)
-	marks, err := s.store.DB().NewSelect().Model((*ConnectorBrokenRevision)(nil)).Count(s.ctx)
+	marks, err := s.store.GlobalDB().NewSelect().Model((*ConnectorBrokenRevision)(nil)).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(2, marks, "a restart stores no mark twice")
 }
@@ -384,7 +384,7 @@ func (s *StoreSuite) TestAMarkStaysWhenALaterRevisionDropsItOrGivesAnotherReason
 func (s *StoreSuite) TestARestartRestoresAMarkThatWasMissingFromAnAlreadyStoredRevision() {
 	s.seed(acmeManifest)
 	s.seed(acmeMarking)
-	_, err := s.store.DB().NewDelete().Model((*ConnectorBrokenRevision)(nil)).Where("connector_id = ?", "acme").Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewDelete().Model((*ConnectorBrokenRevision)(nil)).Where("connector_id = ?", "acme").Exec(s.ctx)
 	s.Require().NoError(err)
 	_, broken, err := s.store.BrokenConnectorRevision(s.ctx, "acme", 1)
 	s.Require().NoError(err)
@@ -877,7 +877,7 @@ func (s *StoreSuite) secretsOf(customerID, connectorID string) map[string]int {
 	counts := map[string]int{}
 	for _, table := range []string{"connector_oauth_clients", "connector_config_tokens", "connector_event_destinations"} {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM "+table+" WHERE customer_id = ? AND connector_id = ?", customerID, connectorID).Scan(&count))
 		counts[table] = count
 	}
@@ -921,7 +921,7 @@ func (s *StoreSuite) TestAnUnforcedDeleteOfAUsedDefinitionNamesItsUsersAndChange
 	id := s.crm("acme-app")
 	connection := s.crmConnection("acme-app")
 	user := s.crmConnection("acme-app")
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE connector_connections SET owner_type = 'user', owner_id = 'u1' WHERE id = ?", user.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET owner_type = 'user', owner_id = 'u1' WHERE id = ?", user.ID)
 	s.Require().NoError(err)
 	config := s.boundConfig("acme-app", crmBinding("inbox", ""), crmBinding("crm", connection.ID))
 
@@ -993,12 +993,12 @@ func (s *StoreSuite) TestABindingAloneKeepsAnUnforcedDeleteOff() {
 func (s *StoreSuite) TestAForcedDeleteDeletesItsConnectionsAndLeavesTheBindings() {
 	id := s.crm("acme-app")
 	granted := s.crmConnection("acme-app")
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE connector_connections SET credentials_sealed = 'sealed', credentials_kek_version = 1, status = 'connected' WHERE id = ?", granted.ID)
 	s.Require().NoError(err)
 	pending := s.crmConnection("acme-app")
 	user := s.crmConnection("acme-app")
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE connector_connections SET owner_type = 'user', owner_id = 'u1' WHERE id = ?", user.ID)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET owner_type = 'user', owner_id = 'u1' WHERE id = ?", user.ID)
 	s.Require().NoError(err)
 	config := s.boundConfig("acme-app", crmBinding("crm", granted.ID))
 
@@ -1015,7 +1015,7 @@ func (s *StoreSuite) TestAForcedDeleteDeletesItsConnectionsAndLeavesTheBindings(
 		s.ErrorIs(err, ErrNoConnectorConnection)
 	}
 	var sealed []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT credentials_sealed FROM connector_connections WHERE id = ?", granted.ID).Scan(&sealed))
 	s.Empty(sealed, "the credentials went with the connection")
 	read, err := s.store.AgentConfig(s.ctx, "acme-app", config.ID)

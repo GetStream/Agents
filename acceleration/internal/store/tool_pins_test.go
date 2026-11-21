@@ -16,7 +16,7 @@ func digestOf(c string) string {
 // pinRows is how many pins connection id has, under any grant.
 func (s *StoreSuite) pinRows(id string) int {
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ?", id).Scan(&rows))
 	return rows
 }
@@ -27,7 +27,7 @@ func (s *StoreSuite) TestAToolIsPinnedOncePerGrant() {
 	first, err := s.store.PinConnectorTools(s.ctx, connection.ID, &grant, map[string]string{"search": digestOf("a")})
 	s.Require().NoError(err)
 	var pinnedAt time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT pinned_at FROM connector_tool_pins WHERE connection_id = ?", connection.ID).Scan(&pinnedAt))
 
 	again, err := s.store.PinConnectorTools(s.ctx, connection.ID, &grant, map[string]string{"search": digestOf("b")})
@@ -36,7 +36,7 @@ func (s *StoreSuite) TestAToolIsPinnedOncePerGrant() {
 	s.Equal(map[string]string{"search": digestOf("a")}, first)
 	s.Equal(map[string]string{"search": digestOf("a")}, again, "the first pin stands")
 	var later time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT pinned_at FROM connector_tool_pins WHERE connection_id = ?", connection.ID).Scan(&later))
 	s.True(pinnedAt.Equal(later), "the pin was not written again")
 }
@@ -182,7 +182,7 @@ func (s *StoreSuite) TestAnOffboardedUsersConnectionsTakeTheirToolPinsWithThem()
 
 // consented is connection with a grant that began now, as a consent leaves it, read back.
 func (s *StoreSuite) consented(connection ConnectorConnection) ConnectorConnection {
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE connector_connections SET connected_at = ? WHERE id = ?",
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET connected_at = ? WHERE id = ?",
 		time.Now().UTC().Truncate(time.Microsecond), connection.ID)
 	s.Require().NoError(err)
 	read, err := s.store.ConnectorConnection(s.ctx, connection.CustomerID, connection.ID)
@@ -253,7 +253,7 @@ func (s *StoreSuite) TestAReapprovalAfterTheGrantMovedWritesNothing() {
 	connection := s.consented(s.connection("acme-app", userOwned("alice")))
 	_, err := s.store.PinConnectorTools(s.ctx, connection.ID, connection.ConnectedAt, map[string]string{"search": digestOf("a")})
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE connector_connections SET connected_at = ? WHERE id = ?",
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET connected_at = ? WHERE id = ?",
 		connection.ConnectedAt.Add(time.Minute), connection.ID)
 	s.Require().NoError(err)
 

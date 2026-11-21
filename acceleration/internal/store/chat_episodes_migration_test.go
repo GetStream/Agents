@@ -49,13 +49,13 @@ func (s *ChatEpisodesMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "chatmig")
 	s.exec(db, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", schemaBeforeChatEpisodes))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", schemaBeforeChatEpisodes))
 	s.db = db
 }
 
@@ -64,7 +64,7 @@ func (s *ChatEpisodesMigrationSuite) SetupTest() {
 func (s *ChatEpisodesMigrationSuite) TestTheAppChatsKindAndSourceAreTakenAndNothingElse() {
 	s.Error(s.contact("before", "stream_user"), "the release before this one refuses stream_user")
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", chatEpisodesVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", chatEpisodesVersion))
 
 	s.Require().NoError(s.contact("anya", "stream_user"))
 	s.Require().NoError(s.episode("chat-1", "anya", "chat"))
@@ -77,12 +77,12 @@ func (s *ChatEpisodesMigrationSuite) TestTheAppChatsKindAndSourceAreTakenAndNoth
 func (s *ChatEpisodesMigrationSuite) TestTheMigrationComesOffAgainKeepingTheOtherEpisodes() {
 	s.Require().NoError(s.contact("caller", "phone"))
 	s.Require().NoError(s.episode("sms-1", "caller", "sms"))
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", chatEpisodesVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", chatEpisodesVersion))
 	s.Require().NoError(s.contact("anya", "stream_user"))
 	s.Require().NoError(s.episode("chat-1", "anya", "chat"))
 	s.exec(s.db, "INSERT INTO episode_activity (episode_id, last_message_at) VALUES ('chat-1', now())")
 
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", schemaBeforeChatEpisodes))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", schemaBeforeChatEpisodes))
 
 	s.Equal([]string{"sms-1"}, s.ids("SELECT id FROM episodes ORDER BY id"))
 	s.Equal([]string{"caller"}, s.ids("SELECT id FROM contact_map ORDER BY id"))
@@ -90,27 +90,27 @@ func (s *ChatEpisodesMigrationSuite) TestTheMigrationComesOffAgainKeepingTheOthe
 	s.exec(s.db, "UPDATE episodes SET status = 'ended' WHERE id = 'sms-1'")
 	s.Error(s.contact("again", "stream_user"), "the old CHECK is back")
 	var validated bool
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT bool_and(convalidated) FROM pg_constraint WHERE conname IN ('contact_map_kind_check', 'episodes_source_check')").Scan(&validated))
 	s.True(validated)
 }
 
 func (s *ChatEpisodesMigrationSuite) contact(id, kind string) error {
-	_, err := s.db.DB().ExecContext(s.ctx, `INSERT INTO contact_map
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO contact_map
 (id, customer_id, agent_config_id, kind, address, conversation_id, created_at, updated_at)
 VALUES (?, 'customer-1', 'config-1', ?, ?, 'agent:omni-1', now(), now())`, id, kind, "address-"+id)
 	return err
 }
 
 func (s *ChatEpisodesMigrationSuite) episode(id, contact, source string) error {
-	_, err := s.db.DB().ExecContext(s.ctx, `INSERT INTO episodes
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `INSERT INTO episodes
 (id, customer_id, contact_id, source, thread_channel, card_message_id, status, started_at)
 VALUES (?, 'customer-1', ?, ?, ?, ?, 'in_progress', now())`, id, contact, source, "agent:thread-"+id, "episode-"+id)
 	return err
 }
 
 func (s *ChatEpisodesMigrationSuite) ids(query string) []string {
-	rows, err := s.db.DB().QueryContext(s.ctx, query)
+	rows, err := s.db.GlobalDB().QueryContext(s.ctx, query)
 	s.Require().NoError(err)
 	defer rows.Close()
 	var ids []string
@@ -125,7 +125,7 @@ func (s *ChatEpisodesMigrationSuite) ids(query string) []string {
 
 func (s *ChatEpisodesMigrationSuite) exec(db *Store, statements ...string) {
 	for _, statement := range statements {
-		_, err := db.DB().ExecContext(s.ctx, statement)
+		_, err := db.GlobalDB().ExecContext(s.ctx, statement)
 		s.Require().NoError(err, statement)
 	}
 }

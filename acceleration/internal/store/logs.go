@@ -389,7 +389,7 @@ func (s *Store) RecordAgentLog(ctx context.Context, entry *AgentLog) error {
 		entry.OccurredAt = time.Now().UTC()
 	}
 	entry.IngestedAt = time.Now().UTC()
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, entry.CustomerID, agentLogLockSeed); err != nil {
 			return err
 		}
@@ -399,7 +399,7 @@ func (s *Store) RecordAgentLog(ctx context.Context, entry *AgentLog) error {
 }
 func (s *Store) LogHighWater(ctx context.Context, customer string) (int64, error) {
 	var id int64
-	err := s.db.NewSelect().Table("agent_logs").ColumnExpr("COALESCE(MAX(id),0)").Where("customer_id = ?", customer).Scan(ctx, &id)
+	err := s.global.NewSelect().Table("agent_logs").ColumnExpr("COALESCE(MAX(id),0)").Where("customer_id = ?", customer).Scan(ctx, &id)
 	return id, err
 }
 func (s *Store) AgentLogs(ctx context.Context, f LogFilter) ([]AgentLog, error) {
@@ -407,7 +407,7 @@ func (s *Store) AgentLogs(ctx context.Context, f LogFilter) ([]AgentLog, error) 
 		return nil, errors.New("log customer required")
 	}
 	rows := []AgentLog{}
-	q := s.db.NewSelect().Model(&rows).ExcludeColumn("details").Where("customer_id = ?", f.CustomerID)
+	q := s.global.NewSelect().Model(&rows).ExcludeColumn("details").Where("customer_id = ?", f.CustomerID)
 	if f.ConfigID != "" {
 		q = q.Where("config_id = ?", f.ConfigID)
 	}
@@ -453,7 +453,7 @@ func (s *Store) AgentLog(ctx context.Context, customer string, id int64) (*Agent
 		return nil, sql.ErrNoRows
 	}
 	var row AgentLog
-	err := s.db.NewSelect().Model(&row).Where("customer_id = ? AND id = ?", customer, id).Scan(ctx)
+	err := s.global.NewSelect().Model(&row).Where("customer_id = ? AND id = ?", customer, id).Scan(ctx)
 	if err != nil {
 		return &row, err
 	}
@@ -468,7 +468,7 @@ func (s *Store) AgentLog(ctx context.Context, customer string, id int64) (*Agent
 		requestID, parseErr := strconv.ParseInt(rawID, 10, 64)
 		if parseErr == nil && requestID > 0 {
 			var request Request
-			lookup := s.db.NewSelect().Model(&request).Column("error_code", "error_message").
+			lookup := s.global.NewSelect().Model(&request).Column("error_code", "error_message").
 				Where("customer_id = ? AND id = ?", customer, requestID).
 				Where("started_at = ? AND agent_id = ?", row.OccurredAt, row.AgentID).
 				Scan(ctx)

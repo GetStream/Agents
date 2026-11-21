@@ -126,7 +126,7 @@ func (s *StoreSuite) TestAnotherCustomersTrunkCannotTakeANumber() {
 // delete is held open until the insert waits on it, so the order is fixed.
 func (s *StoreSuite) TestATrunkDeletedWhileANumberIsAddedIsNotFound() {
 	trunk := s.trunk("acme")
-	tx, err := s.router().DB().BeginTx(s.ctx, nil)
+	tx, err := s.router().GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(s.ctx, "DELETE FROM sip_trunks WHERE id = ?", trunk.ID)
@@ -136,7 +136,7 @@ func (s *StoreSuite) TestATrunkDeletedWhileANumberIsAddedIsNotFound() {
 	go func() { added <- s.trunkNumber("acme", trunk.ID, "+15550000109") }()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT count(*) FROM pg_stat_activity
 WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting))
 		return waiting > 0

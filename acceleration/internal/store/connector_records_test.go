@@ -23,7 +23,7 @@ func (s *StoreSuite) invocation(connection ConnectorConnection, offset time.Dura
 
 // granted gives a connection stored credentials, as a consent leaves it.
 func (s *StoreSuite) granted(connection ConnectorConnection) {
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE connector_connections SET credentials_sealed = 'sealed credentials', credentials_kek_version = 1, status = ? WHERE id = ?",
 		ConnectionConnected, connection.ID)
 	s.Require().NoError(err)
@@ -114,7 +114,7 @@ func (s *StoreSuite) TestARouterBeforeTheMigrationStillWritesAndReadsItsRows() {
 		ID: newID(), CustomerID: "acme-app", ConnectionID: connection.ID, ConnectorID: "acme", ConfigID: "config",
 		Binding: "acme", Tool: "search", StartedAt: s.base, LatencyMs: 7, ErrorType: InvocationDenied,
 	}
-	_, err := s.store.DB().NewInsert().Model(old).Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewInsert().Model(old).Exec(s.ctx)
 	s.Require().NoError(err)
 	status := 502
 	s.Require().NoError(s.store.RecordConnectorInvocation(s.ctx, &ConnectorInvocation{
@@ -126,7 +126,7 @@ func (s *StoreSuite) TestARouterBeforeTheMigrationStillWritesAndReadsItsRows() {
 	rows, err := s.store.ConnectorInvocations(s.ctx, "acme-app", connection.ID, 0, nil)
 	s.Require().NoError(err)
 	var read []baseInvocation
-	s.Require().NoError(s.store.DB().NewSelect().Model(&read).Where("connection_id = ?", connection.ID).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&read).Where("connection_id = ?", connection.ID).
 		Order("started_at").Scan(s.ctx))
 
 	s.Require().Len(rows, 2)
@@ -257,13 +257,13 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 		{ID: pending.ID, ConnectorID: "acme", OwnerType: OwnerUser},
 	}, deleted)
 	var left int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_connections WHERE customer_id = 'acme-app' AND owner_id = 'alice'").Scan(&left))
 	s.Zero(left, "the soft deleted row, which still held the owner and account ids, is gone too")
 	var invocations, attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_invocations WHERE connection_id = ?", live.ID).Scan(&invocations))
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", pending.ID).Scan(&attempts))
 	s.Zero(invocations)
 	s.Zero(attempts)
@@ -317,7 +317,7 @@ func (s *StoreSuite) TestAConnectionIsUsedByTheFixedBindingsOfLiveConfigsThatNam
 	config := s.bind("acme-app", fixedBinding(bound.ID))
 	s.bind("acme-app", `[{"name": "acme", "connector_id": "acme", "connection": {"type": "session", "connection_id": "`+unbound.ID+`"}}]`)
 	deleted := s.bind("acme-app", fixedBinding(bound.ID))
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", deleted)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", deleted)
 	s.Require().NoError(err)
 	s.bind("other-app", fixedBinding(bound.ID))
 	s.bind("acme-app", `{"not": "a list"}`)

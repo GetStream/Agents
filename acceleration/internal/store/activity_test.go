@@ -25,7 +25,7 @@ type activityRow struct {
 // activityOf reads the row of app, area and client on the day of s.base.
 func (s *StoreSuite) activityOf(appID, area, client string) activityRow {
 	var row activityRow
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT organization_id, requests, refused, last_refusal_code, last_refusal_at, first_at, last_at
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ? AND day = ?::date`,
 		appID, area, client, s.base.Format(time.DateOnly)).
@@ -36,7 +36,7 @@ FROM customer_activity WHERE app_id = ? AND area = ? AND client = ? AND day = ?:
 // activityRows is how many rows app has.
 func (s *StoreSuite) activityRows(appID string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM customer_activity WHERE app_id = ?", appID).Scan(&count))
 	return count
 }
@@ -159,7 +159,7 @@ func (s *StoreSuite) TestAWriteOfMoreRowsThanOneStatementTakesWritesEveryOne() {
 	s.Require().NoError(s.store.RecordActivity(s.ctx, deltas))
 
 	var rows, requests int64
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*), sum(requests) FROM customer_activity").Scan(&rows, &requests))
 	s.Equal(int64(activityBatch+1), rows)
 	s.Equal(int64(activityBatch+1), requests)

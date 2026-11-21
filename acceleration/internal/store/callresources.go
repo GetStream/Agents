@@ -146,7 +146,7 @@ func (s *Store) CallPin(ctx context.Context, customerID, callType, callID string
 	}
 
 	var pin sql.NullInt64
-	err = s.db.NewSelect().Model((*PhoneNumber)(nil)).Column("stream_app_pk").
+	err = s.global.NewSelect().Model((*PhoneNumber)(nil)).Column("stream_app_pk").
 		Where("customer_id = ?", customerID).
 		Where("stream_call_type = ?", callType).
 		Where("stream_call_id = ?", callID).

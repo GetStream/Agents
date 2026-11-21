@@ -35,7 +35,7 @@ var storageHour = time.Date(2026, 10, 23, 14, 0, 0, 0, time.UTC)
 // organization leaves them.
 func (s *UsageCommandsSuite) deploymentApps(ids ...string) {
 	for _, id := range ids {
-		_, err := s.store.DB().NewInsert().
+		_, err := s.store.GlobalDB().NewInsert().
 			Model(&store.AppOrganization{AppID: id, OrganizationID: "org-" + id, SeenAt: time.Now().UTC()}).Exec(s.ctx)
 		s.Require().NoError(err)
 	}

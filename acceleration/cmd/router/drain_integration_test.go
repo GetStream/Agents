@@ -496,7 +496,7 @@ func (s *DrainSuite) thread(customer string) store.ChannelThread {
 	_, err := s.db.LinkChannelThread(s.ctx, &thread)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.db.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Exec(context.Background())
+		_, err := s.db.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Exec(context.Background())
 		s.NoError(err)
 	})
 	return thread
@@ -517,19 +517,19 @@ func (s *DrainSuite) queueInbound(thread store.ChannelThread, due time.Time) {
 // inbound is thread's queued message as it is now.
 func (s *DrainSuite) inbound(thread store.ChannelThread) store.ChannelInbound {
 	var row store.ChannelInbound
-	s.Require().NoError(s.db.DB().NewSelect().Model(&row).Where("channel_id = ?", thread.ChannelID).Scan(s.ctx))
+	s.Require().NoError(s.db.GlobalDB().NewSelect().Model(&row).Where("channel_id = ?", thread.ChannelID).Scan(s.ctx))
 	return row
 }
 
 // chatInbound is a queued Stream Chat message's row as it is now.
 func (s *DrainSuite) chatInbound(messageID string) store.ChatInbound {
 	var row store.ChatInbound
-	s.Require().NoError(s.db.DB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
+	s.Require().NoError(s.db.GlobalDB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
 	return row
 }
 
 func (s *DrainSuite) deleteChatInbound(messageID string) {
-	_, err := s.db.DB().NewDelete().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exec(context.Background())
+	_, err := s.db.GlobalDB().NewDelete().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exec(context.Background())
 	s.NoError(err)
 }
 

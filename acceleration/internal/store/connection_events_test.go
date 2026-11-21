@@ -25,7 +25,7 @@ func (s *StoreSuite) eventSubscription(customerID, connectionID, configID, key s
 // connectionEventSubscriptions are a customer's connection's subscriptions, oldest first.
 func (s *StoreSuite) connectionEventSubscriptions(customerID, connectionID string) ([]ConnectionEventSubscription, error) {
 	subs := []ConnectionEventSubscription{}
-	err := s.store.DB().NewSelect().Model(&subs).Where("customer_id = ?", customerID).
+	err := s.store.GlobalDB().NewSelect().Model(&subs).Where("customer_id = ?", customerID).
 		Where("connection_id = ?", connectionID).Order("created_at", "id").Scan(s.ctx)
 	return subs, err
 }
@@ -104,7 +104,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 	}()
 	s.Require().Eventually(func() bool {
 		var sleeping int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")
@@ -147,7 +147,7 @@ func (s *StoreSuite) TestAnEventIsClaimedOnceAndGoesWithItsSubscription() {
 	s.True(first)
 	s.False(again)
 	var left int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connection_event_deliveries").Scan(&left))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connection_event_deliveries").Scan(&left))
 	s.Zero(left)
 	_, err = s.store.ConnectionEventSubscriptionByToken(s.ctx, sub.Token)
 	s.ErrorIs(err, ErrNoConnectionEventSubscription)

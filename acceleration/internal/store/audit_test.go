@@ -12,7 +12,7 @@ func (s *StoreSuite) TestAPriceListChangeIsRecordedWithNoCustomer() {
 	s.Require().NoError(s.store.RecordAuditEntry(s.ctx, &entry))
 
 	var kept AuditEntry
-	s.Require().NoError(s.store.DB().NewSelect().Model(&kept).Where("id = ?", entry.ID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&kept).Where("id = ?", entry.ID).Scan(s.ctx))
 	s.Empty(kept.CustomerID)
 	s.Equal(AuditSourceManage, kept.Source)
 	s.Equal("Łukasz", kept.ActorName)

@@ -65,7 +65,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 		callType = "agent"
 	}
 	var held []PhoneNumber
-	if err := s.db.NewSelect().Model(&held).
+	if err := s.global.NewSelect().Model(&held).
 		Where("stream_call_id = ?", callID).Where("stream_call_type = ?", callType).
 		Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 		return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
@@ -75,7 +75,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 		if !named {
 			return PhoneNumber{}, fmt.Errorf("store: no number reaches call %s:%s", callType, callID)
 		}
-		if err := s.db.NewSelect().Model(&held).
+		if err := s.global.NewSelect().Model(&held).
 			Where("e164 = ?", e164).Where("stream_trunk_id IS NOT NULL").
 			Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 			return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
@@ -94,7 +94,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 // in one app: the call is named for the session answering it, so it carries the number.
 func (s *Store) NumberRungInApp(ctx context.Context, scope AppScope, e164 string) (PhoneNumber, error) {
 	var held []PhoneNumber
-	if err := s.db.NewSelect().Model(&held).
+	if err := s.global.NewSelect().Model(&held).
 		Where("e164 = ?", e164).Where("attached_at IS NOT NULL").
 		Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 		return PhoneNumber{}, fmt.Errorf("store: number rung: %w", err)
@@ -152,7 +152,7 @@ func (s *Store) FirstDelivery(ctx context.Context, key string) (bool, error) {
 	if err := s.forgetDeliveries(ctx); err != nil {
 		return false, err
 	}
-	return recordDelivery(ctx, s.db, key)
+	return recordDelivery(ctx, s.global, key)
 }
 
 // hookDelivery is one hook delivery's key, as FirstDelivery records it.
@@ -169,7 +169,7 @@ func (s *Store) forgetDeliveries(ctx context.Context) error {
 	now := time.Now().UTC()
 	if last := s.deliveriesPruned.Load(); now.UnixNano()-last >= int64(deliveriesPrunedEvery) &&
 		s.deliveriesPruned.CompareAndSwap(last, now.UnixNano()) {
-		_, err := s.db.NewDelete().Model((*hookDelivery)(nil)).Where("seen_at < ?", now.Add(-deliveryKeptFor)).Exec(ctx)
+		_, err := s.global.NewDelete().Model((*hookDelivery)(nil)).Where("seen_at < ?", now.Add(-deliveryKeptFor)).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: forget hook deliveries: %w", err)
 		}

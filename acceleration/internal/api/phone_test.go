@@ -1201,7 +1201,7 @@ func (s *PhoneSuite) TestANumberDetachedByAnOlderRouterDoesNotKeepItsConfig() {
 	number := s.attachedForSessions(s.customerID())
 	config := s.config("echo/local-model")
 	s.Require().NoError(s.store.SetNumberAgent(ctx, s.customerID(), number, config))
-	_, err := s.store.DB().NewUpdate().Model((*store.PhoneNumber)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.PhoneNumber)(nil)).
 		Set("attached_at = NULL").Where("e164 = ?", number).Exec(ctx)
 	s.Require().NoError(err)
 

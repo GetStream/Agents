@@ -66,7 +66,7 @@ type priceSource struct {
 func (p priceSource) Active(ctx context.Context, at time.Time) ([]pricing.Entry, time.Time, error) {
 	var entries []pricing.Entry
 	var next time.Time
-	err := p.store.db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+	err := p.store.global.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		rows, err := activePriceEntries(ctx, tx, at)
 		if err != nil {
 			return err
@@ -90,7 +90,7 @@ func (p priceSource) Active(ctx context.Context, at time.Time) ([]pricing.Entry,
 }
 
 func (p priceSource) Upcoming(ctx context.Context, after time.Time) ([]pricing.UpcomingEntry, error) {
-	rows, err := upcomingPriceEntries(ctx, p.store.db, after)
+	rows, err := upcomingPriceEntries(ctx, p.store.global, after)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ type PriceListSnapshot struct {
 // PriceListAt reads the price list in force at at, and what is scheduled after it.
 func (s *Store) PriceListAt(ctx context.Context, at time.Time) (PriceListSnapshot, error) {
 	var list PriceListSnapshot
-	err := s.db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		var err error
 		if list.Entries, err = activePriceEntries(ctx, tx, at); err != nil {
 			return err
@@ -208,7 +208,7 @@ func priceListAt(ctx context.Context, db bun.IDB, asked *time.Time) (PriceListAt
 // nothing: what a preview compares the change with.
 func (s *Store) PriceListBefore(ctx context.Context, asked *time.Time) (PriceListAt, error) {
 	var list PriceListAt
-	err := s.db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		var err error
 		list, err = priceListAt(ctx, tx, asked)
 		return err
@@ -234,7 +234,7 @@ func (s *Store) CreatePriceChange(ctx context.Context, write PriceChangeWrite,
 	var change PriceChange
 	var rows []PriceEntry
 	var replayed bool
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, pricesLockTimeout); err != nil {
 			return err
 		}
@@ -412,7 +412,7 @@ func (s *Store) CancelPriceChange(ctx context.Context, name, reason, actorID, ac
 	var change PriceChange
 	var rows []PriceEntry
 	var cancelled bool
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, pricesLockTimeout); err != nil {
 			return err
 		}

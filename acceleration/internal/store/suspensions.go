@@ -16,7 +16,7 @@ var ErrNotSuspended = errors.New("store: this app's telephony is not suspended")
 // TelephonySuspension returns why an app's telephony is suspended, or ErrNotSuspended.
 func (s *Store) TelephonySuspension(ctx context.Context, customerID string) (TelephonySuspension, error) {
 	var suspension TelephonySuspension
-	err := s.db.NewSelect().Model(&suspension).Where("customer_id = ?", customerID).Scan(ctx)
+	err := s.global.NewSelect().Model(&suspension).Where("customer_id = ?", customerID).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TelephonySuspension{}, stack.Wrap(ErrNotSuspended)
 	}
@@ -33,7 +33,7 @@ func (s *Store) SuspendTelephony(ctx context.Context, suspension *TelephonySuspe
 		return stack.Wrap(errors.New("store: a suspension needs a customer, a reason and who made it"))
 	}
 	suspension.SuspendedAt = time.Now().UTC().Truncate(time.Microsecond)
-	_, err := s.db.NewInsert().Model(suspension).
+	_, err := s.global.NewInsert().Model(suspension).
 		On("CONFLICT (customer_id) DO UPDATE").
 		Set("reason = EXCLUDED.reason").
 		Set("suspended_by = EXCLUDED.suspended_by").
@@ -47,7 +47,7 @@ func (s *Store) SuspendTelephony(ctx context.Context, suspension *TelephonySuspe
 
 // LiftTelephonySuspension lets an app use the phone again, or returns ErrNotSuspended.
 func (s *Store) LiftTelephonySuspension(ctx context.Context, customerID string) error {
-	result, err := s.db.NewDelete().Model((*TelephonySuspension)(nil)).
+	result, err := s.global.NewDelete().Model((*TelephonySuspension)(nil)).
 		Where("customer_id = ?", customerID).
 		Exec(ctx)
 	if err != nil {

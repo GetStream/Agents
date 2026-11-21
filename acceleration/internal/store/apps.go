@@ -24,7 +24,7 @@ func (s *Store) CreateOrganization(ctx context.Context, org *Organization) error
 	org.ID = newID()
 	org.CreatedAt = time.Now().UTC()
 
-	if _, err := s.db.NewInsert().Model(org).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(org).Exec(ctx); err != nil {
 		return fmt.Errorf("store: create organization: %w", err)
 	}
 	return nil
@@ -46,7 +46,7 @@ func (s *Store) CreateApp(ctx context.Context, app *App) error {
 	}
 	app.CreatedAt = time.Now().UTC()
 
-	if _, err := s.db.NewInsert().Model(app).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(app).Exec(ctx); err != nil {
 		return fmt.Errorf("store: create app: %w", err)
 	}
 	return nil
@@ -64,7 +64,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, key *APIKey) error {
 
 	key.CreatedAt = time.Now().UTC()
 
-	if _, err := s.db.NewInsert().Model(key).Exec(ctx); err != nil {
+	if _, err := s.global.NewInsert().Model(key).Exec(ctx); err != nil {
 		return fmt.Errorf("store: create api key: %w", err)
 	}
 	return nil
@@ -96,7 +96,7 @@ func (s *Store) AppSettingsFor(ctx context.Context, appID string) (AppSettings, 
 	}
 
 	var app App
-	err := s.db.NewSelect().Model(&app).
+	err := s.global.NewSelect().Model(&app).
 		Column("settings").
 		Where("id = ?", appID).
 		Limit(1).
@@ -116,7 +116,7 @@ var ErrNoApp = errors.New("store: no such app")
 // AppByID returns one app, or ErrNoApp.
 func (s *Store) AppByID(ctx context.Context, id string) (App, error) {
 	var app App
-	err := s.db.NewSelect().Model(&app).Where("id = ?", id).Limit(1).Scan(ctx)
+	err := s.global.NewSelect().Model(&app).Where("id = ?", id).Limit(1).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return App{}, ErrNoApp
 	}
@@ -131,7 +131,7 @@ func (s *Store) AppByID(ctx context.Context, id string) (App, error) {
 func (s *Store) LiveAPIKey(ctx context.Context, id string) (APIKeyOwner, error) {
 	var owner APIKeyOwner
 
-	err := s.db.NewSelect().Model((*APIKey)(nil)).
+	err := s.global.NewSelect().Model((*APIKey)(nil)).
 		ColumnExpr("k.app_id, k.secret_sealed, k.kek_version, k.expires_at").
 		ColumnExpr("ap.organization_id, ap.settings").
 		Join("JOIN apps AS ap ON ap.id = k.app_id").
@@ -155,7 +155,7 @@ func (s *Store) LiveAPIKey(ctx context.Context, id string) (APIKeyOwner, error) 
 // nobody ever revokes one.
 func (s *Store) TouchAPIKey(ctx context.Context, id string, interval time.Duration) error {
 	now := time.Now().UTC()
-	_, err := s.db.NewUpdate().Model((*APIKey)(nil)).
+	_, err := s.global.NewUpdate().Model((*APIKey)(nil)).
 		Set("last_used_at = ?", now).
 		Where("id = ?", id).
 		Where("last_used_at IS NULL OR last_used_at < ?", now.Add(-interval)).
@@ -170,7 +170,7 @@ func (s *Store) TouchAPIKey(ctx context.Context, id string, interval time.Durati
 // made which call has to outlive the key.
 func (s *Store) RevokeAPIKey(ctx context.Context, id, by string) error {
 	now := time.Now().UTC()
-	result, err := s.db.NewUpdate().Model((*APIKey)(nil)).
+	result, err := s.global.NewUpdate().Model((*APIKey)(nil)).
 		Set("revoked_at = ?", now).
 		Set("revoked_by = ?", by).
 		Where("id = ?", id).
@@ -192,7 +192,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id, by string) error {
 // ListAPIKeys returns an app's keys, revoked ones included, newest first.
 func (s *Store) ListAPIKeys(ctx context.Context, appID string) ([]APIKey, error) {
 	var keys []APIKey
-	err := s.db.NewSelect().Model(&keys).
+	err := s.global.NewSelect().Model(&keys).
 		Where("app_id = ?", appID).
 		Order("created_at DESC").
 		Scan(ctx)

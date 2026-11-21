@@ -96,7 +96,7 @@ func (s *Store) CreateEventDestination(ctx context.Context, destination *EventDe
 	// Truncated to what Postgres keeps, so the cursor a page hands out finds this row again.
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	destination.CreatedAt, destination.UpdatedAt = now, now
-	return stack.Wrap(s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return stack.Wrap(s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, destination.CustomerID+"/"+destination.ConnectorID, eventDestinationLockSeed); err != nil {
 			return err
 		}
@@ -122,7 +122,7 @@ func (s *Store) EventDestinations(ctx context.Context, customerID, connectorID s
 		return nil, stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
 	destinations := []EventDestination{}
-	query := s.db.NewSelect().Model(&destinations).
+	query := s.global.NewSelect().Model(&destinations).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID)
 	if after != nil {
@@ -138,7 +138,7 @@ func (s *Store) EventDestinations(ctx context.Context, customerID, connectorID s
 // DeleteEventDestination removes one of the customer's destinations of the connector, and with
 // it every forward to it not yet sent.
 func (s *Store) DeleteEventDestination(ctx context.Context, customerID, connectorID, id string) error {
-	result, err := s.db.NewDelete().Model((*EventDestination)(nil)).
+	result, err := s.global.NewDelete().Model((*EventDestination)(nil)).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("connector_id = ?", connectorID).
@@ -161,7 +161,7 @@ func (s *Store) RotateEventDestinationSecret(ctx context.Context, customerID, co
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	var destination EventDestination
-	err := s.db.NewUpdate().Model(&destination).
+	err := s.global.NewUpdate().Model(&destination).
 		Set("previous_secret_sealed = secret_sealed").
 		Set("previous_kek_version = kek_version").
 		Set("previous_until = ?", previousUntil.UTC()).
@@ -230,7 +230,7 @@ func (s *Store) QueueEventDeliveries(ctx context.Context, customerID, connectorI
 		until := delivery.ProviderHeadersUntil.UTC()
 		headersUntil = &until
 	}
-	result, err := s.db.NewRaw(`
+	result, err := s.global.NewRaw(`
 INSERT INTO connector_event_deliveries (destination_id, id, headers, body, attempts, next_attempt_at, provider_headers_until)
 SELECT ced.id, ?, ?::jsonb, ?, 0, ?, ?
 FROM connector_event_destinations AS ced
@@ -303,7 +303,7 @@ func (s *Store) claimEventDeliveries(ctx context.Context, query string, now time
 	for destination, count := range sending {
 		busy, counts = append(busy, destination), append(counts, count)
 	}
-	err := s.db.NewRaw(query, pgdialect.Array(busy), pgdialect.Array(counts), now.UTC(), perDestination, now.UTC(), limit,
+	err := s.global.NewRaw(query, pgdialect.Array(busy), pgdialect.Array(counts), now.UTC(), perDestination, now.UTC(), limit,
 		leaseUntil.UTC()).Scan(ctx, &claimed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim event deliveries: %w", err))
@@ -315,7 +315,7 @@ func (s *Store) claimEventDeliveries(ctx context.Context, query string, now time
 // end of their lease. found is false when no delivery is queued at all.
 func (s *Store) NextEventDeliveryAt(ctx context.Context) (next time.Time, found bool, err error) {
 	var at sql.NullTime
-	if err := s.db.NewSelect().Model((*EventDelivery)(nil)).ColumnExpr("min(next_attempt_at)").Scan(ctx, &at); err != nil {
+	if err := s.global.NewSelect().Model((*EventDelivery)(nil)).ColumnExpr("min(next_attempt_at)").Scan(ctx, &at); err != nil {
 		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: next event delivery: %w", err))
 	}
 	return at.Time, at.Valid, nil
@@ -324,7 +324,7 @@ func (s *Store) NextEventDeliveryAt(ctx context.Context) (next time.Time, found 
 // FinishEventDelivery removes a delivery the destination took, refused, or that ran out of
 // retries. One the destination was deleted under is already gone, which is not an error.
 func (s *Store) FinishEventDelivery(ctx context.Context, destinationID, id string) error {
-	_, err := s.db.NewDelete().Model((*EventDelivery)(nil)).
+	_, err := s.global.NewDelete().Model((*EventDelivery)(nil)).
 		Where("destination_id = ?", destinationID).
 		Where("id = ?", id).
 		Exec(ctx)
@@ -334,7 +334,7 @@ func (s *Store) FinishEventDelivery(ctx context.Context, destinationID, id strin
 // RetryEventDelivery records a failed attempt of a delivery, the attempts it has now, and when
 // the next one is due.
 func (s *Store) RetryEventDelivery(ctx context.Context, destinationID, id string, attempts int, at time.Time) error {
-	_, err := s.db.NewUpdate().Model((*EventDelivery)(nil)).
+	_, err := s.global.NewUpdate().Model((*EventDelivery)(nil)).
 		Set("attempts = ?", attempts).
 		Set("next_attempt_at = ?", at.UTC()).
 		Where("destination_id = ?", destinationID).

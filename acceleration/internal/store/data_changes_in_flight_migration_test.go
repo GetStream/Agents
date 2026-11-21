@@ -49,23 +49,23 @@ func (s *DataChangesInFlightMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "inflightmig")
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", schemaBeforeDataChangesInFlight))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", schemaBeforeDataChangesInFlight))
 	s.db = db
 }
 
 func (s *DataChangesInFlightMigrationSuite) TestTheMigrationComesOffAgain() {
 	before := s.trigger()
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", dataChangesInFlightVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", dataChangesInFlightVersion))
 	s.Contains(s.trigger(), "pg_advisory_xact_lock_shared")
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", schemaBeforeDataChangesInFlight))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", schemaBeforeDataChangesInFlight))
 
 	s.Equal(before, s.trigger(), "the function is the one from before")
 }
@@ -73,18 +73,18 @@ func (s *DataChangesInFlightMigrationSuite) TestTheMigrationComesOffAgain() {
 // 20261216100000_data_change_starts.sql changes the same function, and its down puts back this
 // migration's.
 func (s *DataChangesInFlightMigrationSuite) TestTheStartsMigrationComesOffAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", dataChangesInFlightVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", dataChangesInFlightVersion))
 	before := s.trigger()
 
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", dataChangeStartsVersion))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", dataChangeStartsVersion))
 	s.Contains(s.trigger(), "data_change_starts FOR SHARE")
 	var started int64
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT started FROM data_change_starts").Scan(&started))
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", dataChangesInFlightVersion))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT started FROM data_change_starts").Scan(&started))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", dataChangesInFlightVersion))
 
 	s.Equal(before, s.trigger(), "the function is the one from before")
 	var tables int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM information_schema.tables WHERE table_name = 'data_change_starts'").Scan(&tables))
 	s.Zero(tables)
 }
@@ -92,7 +92,7 @@ func (s *DataChangesInFlightMigrationSuite) TestTheStartsMigrationComesOffAgain(
 // trigger is the source of the function that records a change.
 func (s *DataChangesInFlightMigrationSuite) trigger() string {
 	var source string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT prosrc FROM pg_proc WHERE proname = 'record_data_change'").Scan(&source))
 	return source
 }

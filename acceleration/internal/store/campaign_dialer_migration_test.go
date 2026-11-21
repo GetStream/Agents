@@ -49,19 +49,19 @@ func (s *CampaignDialerMigrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(db.Close()) })
 	var name string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&name))
 	s.Require().True(strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
 	s.Require().Contains(name, "dialermig")
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	goose.SetBaseFS(migrations.FS)
 	s.Require().NoError(goose.SetDialect("postgres"))
-	s.Require().NoError(goose.UpToContext(s.ctx, db.DB().DB, ".", beforeCampaignDialer))
+	s.Require().NoError(goose.UpToContext(s.ctx, db.GlobalDB().DB, ".", beforeCampaignDialer))
 	s.db = db
 }
 
 func (s *CampaignDialerMigrationSuite) TestCampaignDialerMigrationKeepsOldCampaignsBehavingAsBefore() {
-	_, err := s.db.DB().ExecContext(s.ctx, `
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `
 		INSERT INTO campaigns (id, customer_id, name, config_id, state) VALUES
 			('live', 'acme', 'may', 'cfg_live', 'running'),
 			('over', 'acme', 'april', 'cfg_over', 'finished');
@@ -77,7 +77,7 @@ func (s *CampaignDialerMigrationSuite) TestCampaignDialerMigrationKeepsOldCampai
 
 	states := map[string]string{}
 	var campaigns []Campaign
-	s.Require().NoError(s.db.DB().NewSelect().Model(&campaigns).Scan(s.ctx))
+	s.Require().NoError(s.db.GlobalDB().NewSelect().Model(&campaigns).Scan(s.ctx))
 	for _, campaign := range campaigns {
 		states[campaign.ID] = campaign.State
 	}
@@ -87,7 +87,7 @@ func (s *CampaignDialerMigrationSuite) TestCampaignDialerMigrationKeepsOldCampai
 	}
 
 	var contacts []Contact
-	s.Require().NoError(s.db.DB().NewSelect().Model(&contacts).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.db.GlobalDB().NewSelect().Model(&contacts).Order("id").Scan(s.ctx))
 	stages := map[string]string{}
 	for _, contact := range contacts {
 		stages[contact.ID] = contact.Stage
@@ -123,12 +123,12 @@ func (s *CampaignDialerMigrationSuite) TestCampaignDialerMigrationKeepsOldCampai
 }
 
 func (s *CampaignDialerMigrationSuite) TestTheMigrationComesOffAndAppliesAgain() {
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", campaignDialer))
-	s.Require().NoError(goose.DownToContext(s.ctx, s.db.DB().DB, ".", beforeCampaignDialer))
-	s.Require().NoError(goose.UpToContext(s.ctx, s.db.DB().DB, ".", campaignDialer))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", campaignDialer))
+	s.Require().NoError(goose.DownToContext(s.ctx, s.db.GlobalDB().DB, ".", beforeCampaignDialer))
+	s.Require().NoError(goose.UpToContext(s.ctx, s.db.GlobalDB().DB, ".", campaignDialer))
 
 	var tables int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'campaign_attempts'`).Scan(&tables))
 	s.Equal(1, tables)
 }

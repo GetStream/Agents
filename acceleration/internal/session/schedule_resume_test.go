@@ -73,7 +73,7 @@ func (s *ScheduleResumeSuite) TestAOneShotResumedInsideTheFallBackHourKeepsTheSe
 // movePaused marks a paused task as a data move imports one that was active where it came
 // from, for the cut-over to resume (store.ResumeMovedRows).
 func (s *ScheduleResumeSuite) movePaused(task store.ScheduledTask) {
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("move_paused = true").
 		Where("customer_id = ?", task.CustomerID).Where("id = ?", task.ID).
 		Exec(s.ctx)

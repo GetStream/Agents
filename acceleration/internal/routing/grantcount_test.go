@@ -60,7 +60,7 @@ func TestAShardedWriterNeverWaitsOnCountingGrants(t *testing.T) {
 	require.NoError(t, db.AddGrant(ctx, &grant, store.LimitAudit{CustomerID: grant.OrganizationID, Source: store.AuditSourceAPI}))
 
 	// The shared database cannot count anything: limit_grants is held by another session.
-	locked, err := db.DB().BeginTx(ctx, nil)
+	locked, err := db.GlobalDB().BeginTx(ctx, nil)
 	require.NoError(t, err)
 	defer locked.Rollback() //nolint:errcheck // nothing was written
 	_, err = locked.ExecContext(ctx, "LOCK TABLE limit_grants IN ACCESS EXCLUSIVE MODE")
