@@ -201,6 +201,93 @@ func (s *ExtractSuite) TestReadingStopsAtTheDeadline() {
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 }
 
+func (s *ExtractSuite) TestReadingEveryFormatStopsAtTheDeadline() {
+	hurried := New(Options{Timeout: time.Nanosecond})
+	defer hurried.Close()
+
+	for _, name := range []string{"handbook.docx", "handbook.odt", "handbook.rtf", "policies.doc", "menu.xlsx"} {
+		_, err := hurried.Extract(context.Background(), name, s.fixture(name))
+
+		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+		_, ok := ReasonOf(err)
+		s.False(ok, "%s: a file stopped at the deadline is not called corrupt", name)
+	}
+}
+
+// paddedJPEG is a JPEG a model could be shown, followed by padding to size bytes. Only its
+// header is read, and the padding compresses a thousand times.
+func (s *ExtractSuite) paddedJPEG(size int, fill byte) []byte {
+	var b bytes.Buffer
+	s.Require().NoError(jpeg.Encode(&b, image.NewRGBA(image.Rect(0, 0, 200, 200)), nil))
+	return append(b.Bytes(), bytes.Repeat([]byte{fill}, size-b.Len())...)
+}
+
+// wordWithPictures is figures.docx with a body that places each of ids in turn, and
+// with the parts given, each named in its relationships by its file name.
+func (s *ExtractSuite) wordWithPictures(ids []string, parts map[string][]byte) []byte {
+	data := s.fixture("figures.docx")
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	s.Require().NoError(err)
+	rels, err := zipFile(archive, "word/_rels/document.xml.rels")
+	s.Require().NoError(err)
+	var added strings.Builder
+	replaced := map[string][]byte{}
+	for name, part := range parts {
+		id := strings.TrimSuffix(name, ".jpeg")
+		added.WriteString(`<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Id="` + id + `" Target="media/` + name + `" />`)
+		replaced["word/media/"+name] = part
+	}
+	replaced["word/_rels/document.xml.rels"] = bytes.Replace(rels, []byte("</Relationships>"), []byte(added.String()+"</Relationships>"), 1)
+	var body strings.Builder
+	body.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Photos.</w:t></w:r>`)
+	for _, id := range ids {
+		body.WriteString(`<w:r><a:blip r:embed="` + id + `"/></w:r>`)
+	}
+	body.WriteString(`</w:p></w:body></w:document>`)
+	replaced["word/document.xml"] = []byte(body.String())
+	return s.rezip(data, replaced)
+}
+
+func (s *ExtractSuite) TestTheKeptPicturesOfADocumentStopAtTheirByteBudget() {
+	parts := map[string][]byte{}
+	var ids []string
+	for n := range 8 {
+		id := "big" + strconv.Itoa(n)
+		parts[id+".jpeg"] = s.paddedJPEG(9<<20, byte(n))
+		ids = append(ids, id)
+	}
+	data := s.wordWithPictures(ids, parts)
+	s.Less(len(data), 1<<20, "eight 9 MiB pictures pack into a small file")
+
+	document, err := s.extractor.Extract(context.Background(), "photos.docx", data)
+
+	s.Require().NoError(err)
+	s.Equal(7, len(document.Pictures), "the eighth would take the pictures past the budget")
+	size := 0
+	for _, picture := range document.Pictures {
+		size += len(picture.Data)
+	}
+	s.LessOrEqual(size, maxKeptBytes)
+}
+
+func (s *ExtractSuite) TestAPictureNamedOverAndOverIsUnpackedOnce() {
+	// Too large to send, so it is never kept, and each time it is named it would be
+	// unpacked again: a body naming it thousands of times would read for minutes.
+	ids := make([]string, 5000)
+	for i := range ids {
+		ids[i] = "huge"
+	}
+	data := s.wordWithPictures(ids, map[string][]byte{"huge.jpeg": s.paddedJPEG(60<<20, 0)})
+	hurried := New(Options{Timeout: 10 * time.Second})
+	defer hurried.Close()
+
+	document, err := hurried.Extract(context.Background(), "named.docx", data)
+
+	s.Require().NoError(err)
+	s.Empty(document.Pictures)
+	s.Contains(document.Pages[0].Text, "Photos.")
+}
+
 func (s *ExtractSuite) TestAWordDocumentKeepsItsHeadingsListsTablesAndPages() {
 	document := s.extract("handbook.docx")
 
