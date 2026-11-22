@@ -108,6 +108,34 @@ func (s *StoreSuite) TestABindingThatFailsAfterBeingReadyIsNoLongerHandedOut() {
 	s.ErrorIs(err, ErrNoVoice, "another customer's voice is not handed out")
 }
 
+func (s *StoreSuite) TestAProvidersVoiceIdIsTheCustomersWhoseVoiceItIs() {
+	owner, other := newID(), newID()
+	voice := Voice{CustomerID: owner, Name: "founder"}
+	s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice))
+	external := "el-" + newID()
+	binding := VoiceBinding{VoiceID: voice.ID, Provider: "elevenlabs", ExternalID: external, State: VoiceReady}
+	s.Require().NoError(s.store.VoiceBindings.Upsert(s.ctx, &binding))
+	s.Require().NoError(s.store.Voices.Delete(s.ctx, owner, voice.ID))
+
+	elsewhere, err := s.store.VoiceBindings.Elsewhere(s.ctx, other, "elevenlabs", external)
+	s.Require().NoError(err)
+	s.True(elsewhere, "a deleted voice stays its customer's")
+	elsewhere, err = s.store.VoiceBindings.Elsewhere(s.ctx, owner, "elevenlabs", external)
+	s.Require().NoError(err)
+	s.False(elsewhere)
+	elsewhere, err = s.store.VoiceBindings.Elsewhere(s.ctx, other, "cartesia", external)
+	s.Require().NoError(err)
+	s.False(elsewhere, "the same id at another provider is another voice")
+
+	mine, err := s.store.VoiceBindings.SelectByCustomer(s.ctx, owner)
+	s.Require().NoError(err)
+	s.Require().Len(mine, 1)
+	s.Equal(external, mine[0].ExternalID)
+	theirs, err := s.store.VoiceBindings.SelectByCustomer(s.ctx, other)
+	s.Require().NoError(err)
+	s.Empty(theirs)
+}
+
 func (s *StoreSuite) TestVoiceBindingQueryBudgets() {
 	voice := Voice{CustomerID: "acme", Name: "founder"}
 	s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice))
@@ -123,6 +151,14 @@ func (s *StoreSuite) TestVoiceBindingQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(bindings, 21)
 	}))
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.VoiceBindings.Elsewhere(s.ctx, "globex", "elevenlabs", "el-1")
+		s.Require().NoError(err)
+	}), "Elsewhere")
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.VoiceBindings.SelectByCustomer(s.ctx, "acme")
+		s.Require().NoError(err)
+	}), "SelectByCustomer")
 	if s.store.cache == nil {
 		s.Equal(1, s.countQueries(func() {
 			_, err := s.store.VoiceBindings.GetReady(s.ctx, "acme", voice.ID, "elevenlabs")

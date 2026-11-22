@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -251,8 +252,12 @@ func (s *Server) listVoiceProviders(ctx context.Context, _ *listVoiceProvidersRe
 }
 
 // listLibraryVoices returns the voices the speech providers themselves offer.
+//
+// The deployment's provider accounts hold every customer's clones, and a provider lists them
+// all as its account's own, so of those only the caller's are listed.
 func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoicesRequest) (*listLibraryVoicesResponse, error) {
-	if _, ok := CustomerFrom(ctx); !ok {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
 		return nil, errMissingCustomer
 	}
 	if s.library == nil {
@@ -270,8 +275,23 @@ func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoic
 		s.logger.Warn("a voice library could not be read", "error", err)
 	}
 
+	var mine map[string]bool
+	if s.store != nil {
+		bindings, err := s.store.VoiceBindings.SelectByCustomer(ctx, customerID)
+		if err != nil {
+			return nil, err
+		}
+		mine = make(map[string]bool, len(bindings))
+		for _, binding := range bindings {
+			mine[binding.Provider+"/"+binding.ExternalID] = true
+		}
+	}
+
 	listed := make([]LibraryVoice, 0, len(found))
 	for _, voice := range found {
+		if voice.Own && mine != nil && !mine[voice.Provider+"/"+voice.ID] {
+			continue
+		}
 		listed = append(listed, LibraryVoice{
 			Provider:    voice.Provider,
 			Id:          voice.ID,
@@ -303,11 +323,21 @@ func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoic
 
 // previewLibraryVoice hands back the sample a provider published for one of its voices.
 func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibraryVoiceRequest) (*previewLibraryVoiceResponse, error) {
-	if _, ok := CustomerFrom(ctx); !ok {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
 		return nil, errMissingCustomer
 	}
 	if s.library == nil {
 		return nil, errNoLibrary
+	}
+	if s.store != nil {
+		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, request.Voice)
+		if err != nil {
+			return nil, err
+		}
+		if elsewhere {
+			return nil, notFound(fmt.Sprintf("voices: %s has no voice %q", request.Provider, request.Voice))
+		}
 	}
 
 	spoken, err := s.library.Preview(ctx, request.Provider, request.Voice)

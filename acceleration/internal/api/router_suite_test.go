@@ -214,6 +214,8 @@ type RouterSuite struct {
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
 	manager *session.Manager
+	// library is the voice libraries the suite's router reads, empty until a test registers one.
+	library *voices.Catalogue
 
 	// appMode runs the suite's Stream through app mode's own source, over the suite's
 	// database and keyring, with the deployment's app as the fallback: behind a gateway,
@@ -560,6 +562,7 @@ func (s *RouterSuite) SetupSuite() {
 		s.T().Skip("ROUTER_POSTGRES_DSN and ROUTER_REDIS_ADDR must be set")
 	}
 	s.forgetPhoneVendors()
+	s.library = voices.NewCatalogue()
 	if s.knowledgeLimits == (ingest.Limits{}) {
 		s.knowledgeLimits = ingest.DefaultLimits
 	}
@@ -764,7 +767,7 @@ func (s *RouterSuite) SetupSuite() {
 		KnowledgeURLs:     s.pages(redisAddr),
 		KnowledgeFiles:    s.knowledgeFiles(redisAddr, knowledgeBase, streams.OCR),
 		Voices:            s.voiceService(),
-		VoiceLibrary:      voices.NewCatalogue(),
+		VoiceLibrary:      s.library,
 		Dispatch:          s.dispatch,
 		Policies:          policies,
 		Documents:         s.documentReader(),

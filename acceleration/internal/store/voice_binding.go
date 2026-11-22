@@ -143,6 +143,43 @@ func (r *VoiceBindings) GetReady(ctx context.Context, customerID, voiceID, provi
 	})
 }
 
+// Elsewhere reports a provider's voice id that another customer's voice was prepared as and
+// none of this customer's was. A deleted voice still counts: the provider may hold the clone yet.
+func (r *VoiceBindings) Elsewhere(ctx context.Context, customerID, provider, externalID string) (bool, error) {
+	if provider == "" || externalID == "" {
+		return false, nil
+	}
+	var elsewhere bool
+	err := r.store.global.NewSelect().Model((*VoiceBinding)(nil)).
+		ColumnExpr("COALESCE(bool_and(v.customer_id <> ?), false)", customerID).
+		Join("JOIN voices AS v ON v.id = vb.voice_id").
+		Where("vb.provider = ? AND vb.external_id = ?", provider, externalID).
+		Scan(ctx, &elsewhere)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: voice binding elsewhere: %w", err))
+	}
+	return elsewhere, nil
+}
+
+// SelectByCustomer returns what every provider made of every voice of a customer, deleted
+// ones included.
+func (r *VoiceBindings) SelectByCustomer(ctx context.Context, customerID string) ([]VoiceBinding, error) {
+	if customerID == "" {
+		return nil, stack.Wrap(errors.New("store: a customer id is required"))
+	}
+	var bindings []VoiceBinding
+	err := r.store.global.NewSelect().Model(&bindings).
+		Join("JOIN voices AS v ON v.id = vb.voice_id").
+		Where("v.customer_id = ?", customerID).
+		Where("vb.external_id <> ''").
+		Order("vb.provider", "vb.external_id").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: customer voice bindings: %w", err))
+	}
+	return bindings, nil
+}
+
 func voiceBindingKey(customerID, voiceID, provider string) string {
 	return cacheKey("voice-binding", customerID, voiceID, provider)
 }

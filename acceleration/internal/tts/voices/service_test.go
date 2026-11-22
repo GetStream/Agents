@@ -258,6 +258,33 @@ func (s *ServiceSuite) TestAProvidersOwnLibraryVoicePassesStraightThrough() {
 	s.Equal("Rachel", resolved, "a name nobody registered here belongs to the provider")
 }
 
+// Every customer's clones sit in the deployment's one provider account, so an id is not
+// a key to a voice that another customer made.
+func (s *ServiceSuite) TestAnotherCustomersPreparedVoiceIsRefusedByItsProviderID() {
+	voice := s.recorded()
+	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil))
+
+	_, err := s.resolver.ResolveVoice(s.ctx, "globex", "elevenlabs", "el-1")
+	s.Require().ErrorIs(err, routing.ErrRequest)
+	s.Contains(err.Error(), "not one of this customer's voices")
+	_, err = s.resolver.ResolveVoice(s.ctx, "", "elevenlabs", "el-1")
+	s.ErrorIs(err, routing.ErrRequest, "a request with no customer is nobody's owner")
+
+	resolved, err := s.resolver.ResolveVoice(s.ctx, "acme", "elevenlabs", "el-1")
+	s.Require().NoError(err)
+	s.Equal("el-1", resolved, "its owner may still name it by the provider's id")
+}
+
+func (s *ServiceSuite) TestADeletedVoiceIsStillRefusedToAnotherCustomer() {
+	voice := s.recorded()
+	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil))
+	s.Require().NoError(s.store.Voices.Delete(s.ctx, "acme", voice.ID))
+
+	_, err := s.resolver.ResolveVoice(s.ctx, "globex", "elevenlabs", "el-1")
+
+	s.ErrorIs(err, routing.ErrRequest, "the provider may hold the clone after the voice is deleted here")
+}
+
 func (s *ServiceSuite) TestANameThatIsNotTheirsIsRefusedWhenTheProviderDoesNotHaveIt() {
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", &findingLister{countingLister: countingLister{voices: []Library{sarah}}})

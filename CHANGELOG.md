@@ -841,6 +841,18 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### A customer can no longer list or speak in another customer's cloned voice
+
+Clones made through `/v1/agents/voices` sit in the deployment's shared provider account, which lists them all as its own. A voice id that another customer's voice was prepared as is now refused, whether it is the session's voice or the `voice_id` of TTS overwrites. The voice library lists only the caller's own clones besides the provider's published voices, previews another customer's clone as not found, and no longer suggests one as the closest voice.
+
+### A link code can no longer be guessed by texting one after another
+
+On a line whose agent identifies people by link code, a number gets 5 wrong codes in 15 minutes and the line 20 from every number together. Past that, a code is answered with "Too many codes did not match" and claims nothing until the window ends.
+
+### A document's pictures and reading time are bounded
+
+A DOCX or ODT keeps at most 64 MiB of pictures, and unpacks each picture part once however often the body names it, with 4x the unzip limit across all of them. Reading a DOCX, ODT, DOC, XLSX or RTF stops at the request's deadline instead of running on after the caller gave up.
+
 ### Connecting one line twice at once no longer fails
 
 Two connects of the same channel line at the same moment could fail one of them on a unique violation. Both now get the same line.

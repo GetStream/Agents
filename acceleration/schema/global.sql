@@ -266,6 +266,14 @@ TABLE channel_deliveries
     CONSTRAINT channel_deliveries_pkey PRIMARY KEY (account_id, message_id)
     CREATE INDEX channel_deliveries_from_idx ON public.channel_deliveries USING btree (account_id, from_address, received_at DESC)
 
+TABLE channel_link_failures
+    account_id text NOT NULL
+    failures integer NOT NULL
+    from_address text NOT NULL
+    window_start timestamp with time zone NOT NULL
+    CONSTRAINT channel_link_failures_pkey PRIMARY KEY (account_id, from_address, window_start)
+    CREATE INDEX channel_link_failures_window_idx ON public.channel_link_failures USING btree (window_start)
+
 TABLE channel_links
     code text NOT NULL
     config_id text NOT NULL
@@ -1360,6 +1368,7 @@ TABLE voice_bindings
     voice_id text NOT NULL
     CONSTRAINT voice_bindings_pkey PRIMARY KEY (id)
     CONSTRAINT voice_bindings_voice_id_fkey FOREIGN KEY (voice_id) REFERENCES voices(id) ON DELETE CASCADE
+    CREATE INDEX voice_bindings_external_idx ON public.voice_bindings USING btree (provider, external_id)
     CREATE UNIQUE INDEX voice_bindings_provider_idx ON public.voice_bindings USING btree (voice_id, provider)
 
 TABLE voice_samples

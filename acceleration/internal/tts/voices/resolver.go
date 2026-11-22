@@ -46,7 +46,7 @@ func (r *Resolver) ResolveVoice(ctx context.Context, customerID, provider, voice
 		if theirs {
 			return "", notTheirs(asked)
 		}
-		return r.passThrough(ctx, provider, voice)
+		return r.passThrough(ctx, customerID, provider, voice)
 	}
 
 	own, err := r.own(ctx, customerID, asked)
@@ -54,7 +54,7 @@ func (r *Resolver) ResolveVoice(ctx context.Context, customerID, provider, voice
 		if theirs {
 			return "", notTheirs(asked)
 		}
-		return r.passThrough(ctx, provider, voice)
+		return r.passThrough(ctx, customerID, provider, voice)
 	}
 	if err != nil {
 		return "", err
@@ -91,9 +91,20 @@ func (r *Resolver) Unvouched(ctx context.Context, customerID, voice string, prov
 }
 
 // passThrough hands a voice that is not the customer's own to the provider as asked, once
-// the provider's library has not said it is missing. A voice the request's overwrites
-// replace is not asked of the provider, so it is not checked.
-func (r *Resolver) passThrough(ctx context.Context, provider, voice string) (string, error) {
+// the provider's library has not said it is missing. The deployment's provider accounts hold
+// every customer's clones, so an id another customer's voice was prepared as is refused
+// rather than spoken in. A voice the request's overwrites replace is not asked of the
+// provider, so it is not checked.
+func (r *Resolver) passThrough(ctx context.Context, customerID, provider, voice string) (string, error) {
+	if r.store != nil {
+		elsewhere, err := r.store.VoiceBindings.Elsewhere(ctx, customerID, provider, voice)
+		if err != nil {
+			return "", err
+		}
+		if elsewhere {
+			return "", routing.Refused(notTheirs(voice))
+		}
+	}
 	if r.library == nil || routing.VoiceOverwritten(ctx) {
 		return voice, nil
 	}
