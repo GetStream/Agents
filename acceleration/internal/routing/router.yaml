@@ -3321,6 +3321,31 @@ llm:
         trains_on_data: "no"
         retention: unspecified
 
+    # Gemini 4 Carbon, Google's strongest reasoning model, paid tier only. It takes Argon's
+    # low, medium and high (minimal and xhigh are a 400), and the provider asks for high as
+    # it does for Argon, though Google default to medium. Artificial Analysis score it 54,
+    # 58 and 60 across those, with a time to first answer token of 7 s, 33 s and 69 s, so it
+    # is for work nobody waits on. The same unified 1M-token context as Argon, and the API
+    # reports 32,768 output tokens a response.
+    #
+    # Caching is implicit only. $2 in, $0.10 cached and $10 out per 1M tokens, flat across
+    # the context, thinking billed as output, are Google's introductory rates through 30
+    # November 2026; from 1 December they double to $4, $0.20 and $20
+    # (aistudio.google.com/docs/pricing, read 2026-11-22). The data terms are the paid
+    # Developer API's, as for Argon above.
+    - provider: gemini
+      model: gemini-4-carbon
+      description: "Google's strongest Gemini 4, for the hardest reasoning. Reads images, thinks longest and is slow to answer."
+      benchmark: { intelligence_index: 60 }
+      context_window: 1048576
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: unspecified
+
     # The load benchmark's stand-in, built only where mock_providers is on. Everything
     # about this entry is chosen to keep it out of the way of real traffic: zxx is the ISO
     # code for "no linguistic content", so no shortcut asking for a language reaches it,
