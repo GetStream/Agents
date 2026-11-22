@@ -27,6 +27,7 @@ type repos struct {
 	ChannelAccounts                *ChannelAccounts
 	ChannelDeliveries              *ChannelDeliveries
 	ChannelInbounds                *ChannelInbounds
+	ChannelLinkFailures            *ChannelLinkFailures
 	ChannelLinks                   *ChannelLinks
 	ChannelThreadMembers           *ChannelThreadMembers
 	ChannelThreadMessages          *ChannelThreadMessages
@@ -129,6 +130,7 @@ func (s *Store) wire() {
 		ChannelAccounts:                &ChannelAccounts{store: s},
 		ChannelDeliveries:              &ChannelDeliveries{store: s},
 		ChannelInbounds:                &ChannelInbounds{store: s},
+		ChannelLinkFailures:            &ChannelLinkFailures{store: s},
 		ChannelLinks:                   &ChannelLinks{store: s},
 		ChannelThreadMembers:           &ChannelThreadMembers{store: s},
 		ChannelThreadMessages:          &ChannelThreadMessages{store: s},

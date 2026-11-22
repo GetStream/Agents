@@ -35,6 +35,15 @@ const settleGap = 2 * time.Second
 // LinkValidFor is how long a code to claim a number is good for.
 const LinkValidFor = 15 * time.Minute
 
+// maxLinkFailures is the most messages claiming no code that one number may text a line in a
+// window of LinkValidFor, and maxLineLinkFailures the most from every number together. Past
+// either, no code is claimed there until the next window: a code is six digits, so without
+// them it could be guessed from one number or from many.
+const (
+	maxLinkFailures     = 5
+	maxLineLinkFailures = 20
+)
+
 // Options configures a Service. Store, Sessions and Secrets are required.
 type Options struct {
 	Store    *store.Store
@@ -499,8 +508,24 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 		UserID:     "phone:" + message.From,
 	}
 	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
+		window := time.Now().UTC().Truncate(LinkValidFor)
+		onLine, fromSender, err := s.store.ChannelLinkFailures.Count(ctx, account.ID, message.From, window)
+		if err != nil {
+			s.logger.Error("could not count the codes texted to a line", "channel", account.Kind, "error", err)
+			return store.ContactMapEntry{}, false
+		}
+		if fromSender >= maxLinkFailures || onLine >= maxLineLinkFailures {
+			s.say(ctx, line, provider, message, Reply{Text: "Too many codes did not match. Try again in a few minutes."},
+				answering(account.CustomerID, ""))
+			return store.ContactMapEntry{}, false
+		}
 		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, strings.TrimSpace(message.Text))
 		if err != nil {
+			if errors.Is(err, store.ErrUnknownChannelLink) {
+				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
+					s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
+				}
+			}
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
 				answering(account.CustomerID, ""))

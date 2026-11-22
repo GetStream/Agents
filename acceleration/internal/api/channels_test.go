@@ -428,6 +428,53 @@ func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	s.ErrorIs(err, store.ErrNoContact)
 }
 
+// A code is six digits, so a number that may text guesses without end finds one.
+func (s *ChannelsSuite) TestANumberThatTextsWrongCodesCannotClaimEvenTheRightOne() {
+	number := s.number()
+	line := s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	guesser, owner := s.writer(), s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	for n := range 5 {
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), "guess "+strconv.Itoa(n)))
+		s.Contains(s.reply(guesser, n+1), "code")
+	}
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), minted.Code))
+
+	s.Contains(s.reply(guesser, 6), "Too many codes")
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+guesser)
+	s.ErrorIs(err, store.ErrNoContact)
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, owner, "msg-"+s.utils.uuid(), minted.Code))
+	s.NotContains(s.reply(owner, 1), "Too many codes", "another number is not held to the guesser's count")
+	_, err = s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+owner)
+	s.NoError(err)
+}
+
+// Guessing from a new number each time is held to a count of the whole line.
+func (s *ChannelsSuite) TestNumbersGuessingCodesOnOneLineTogetherCannotClaimOne() {
+	number := s.number()
+	line := s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	for n := range 20 {
+		guesser := s.writer()
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), "guess "+strconv.Itoa(n)))
+		s.Contains(s.reply(guesser, 1), "code")
+	}
+	last := s.writer()
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, last, "msg-"+s.utils.uuid(), minted.Code))
+
+	s.Contains(s.reply(last, 1), "Too many codes")
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+last)
+	s.ErrorIs(err, store.ErrNoContact)
+}
+
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {
 	number := s.number()
 	s.connect(number)
@@ -625,6 +672,16 @@ func (s *ChannelsSuite) answer(to string) string {
 		return len(written) > 0
 	}, settleFor, 50*time.Millisecond, "the agent wrote nothing back to %s", to)
 	return written[0]
+}
+
+// reply is the nth message the agent wrote back to a number, from 1, once there is one.
+func (s *ChannelsSuite) reply(to string, n int) string {
+	var written []string
+	s.Require().Eventually(func() bool {
+		written = s.meta.to(to)
+		return len(written) >= n
+	}, settleFor, 50*time.Millisecond, "the agent wrote %s fewer than %d messages", to, n)
+	return written[n-1]
 }
 
 // post and get reach a webhook the way a provider does: no credentials, since the token in
