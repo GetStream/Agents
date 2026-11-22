@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"image"
 	"image/jpeg"
@@ -388,6 +389,57 @@ func (s *ExtractSuite) TestALegacyWordDocumentKeepsItsParagraphsListsAndTables()
 	s.Contains(text, "Store Policies\n\nOpening hours are 6am to 10pm.")
 	s.Contains(text, "- Wash hands\n- Wear gloves")
 	s.Contains(text, "| Item | Price |\n| --- | --- |\n| Sandwich | 4.50 |\n| Lemonade | 2.25 |\n\nRefunds are given within 30 days with a receipt.")
+}
+
+func (s *ExtractSuite) TestALegacyWordDocumentReadsItsPiecesInOrderOnce() {
+	word, table := s.wordStream("Opening hours are 6am to 10pm.", []uint32{0, 13, 30})
+
+	text, err := docText(context.Background(), word, table)
+
+	s.Require().NoError(err)
+	s.Equal("Opening hours are 6am to 10pm.", string(text))
+}
+
+// A piece table that goes back to the start a thousand times would hold the text a
+// thousand times over.
+func (s *ExtractSuite) TestALegacyWordDocumentWhosePiecesGoBackIsRefused() {
+	cps := []uint32{0}
+	for range 1000 {
+		cps = append(cps, 30, 0)
+	}
+	word, table := s.wordStream("Opening hours are 6am to 10pm.", cps)
+
+	text, err := docText(context.Background(), word, table)
+
+	s.Require().Error(err)
+	s.Empty(text)
+}
+
+// wordStream is the WordDocument and table streams of a .doc holding text as one-byte
+// characters, its piece table cut at the character positions cps, every piece reading
+// from the start of the text.
+func (s *ExtractSuite) wordStream(text string, cps []uint32) (word, table []byte) {
+	const lw = fibCsw + 4
+	word = make([]byte, lw+4*4+2+(clxIndex+1)*8)
+	binary.LittleEndian.PutUint16(word[fibCsw+2:], 4)
+	binary.LittleEndian.PutUint32(word[lw+12:], uint32(len(text)))
+	textAt := len(word)
+	word = append(word, text...)
+
+	pieces := len(cps) - 1
+	table = []byte{0x02}
+	table = binary.LittleEndian.AppendUint32(table, uint32(12*pieces+4))
+	for _, cp := range cps {
+		table = binary.LittleEndian.AppendUint32(table, cp)
+	}
+	for _, cp := range cps[:pieces] {
+		table = binary.LittleEndian.AppendUint16(table, 0)
+		table = binary.LittleEndian.AppendUint32(table, 0x40000000|uint32(textAt+int(cp))*2)
+		table = binary.LittleEndian.AppendUint16(table, 0)
+	}
+	pair := lw + 4*4 + 2 + clxIndex*8
+	binary.LittleEndian.PutUint32(word[pair+4:], uint32(len(table)))
+	return word, table
 }
 
 func (s *ExtractSuite) TestAWorkbookIsATablePerSheetWithItsValuesAsTheSheetShowsThem() {

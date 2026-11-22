@@ -851,7 +851,7 @@ On a line whose agent identifies people by link code, a number gets 5 wrong code
 
 ### A document's pictures and reading time are bounded
 
-A DOCX or ODT keeps at most 64 MiB of pictures, and unpacks each picture part once however often the body names it, with 4x the unzip limit across all of them. Reading a DOCX, ODT, DOC, XLSX or RTF stops at the request's deadline instead of running on after the caller gave up.
+A DOCX or ODT keeps at most 64 MiB of pictures, and unpacks each picture part once however often the body names it, with 4x the unzip limit across all of them. Reading a DOCX, ODT, DOC, XLSX or RTF stops at the request's deadline instead of running on after the caller gave up. A DOC whose piece table goes back over text it already read is refused as corrupt, instead of holding its text once per piece.
 
 ### Connecting one line twice at once no longer fails
 
