@@ -3138,6 +3138,26 @@ llm:
         trains_on_data: "no"
         retention: unspecified
 
+    # Qwen4-Max, Alibaba's closed 2.4T mixture-of-experts with 71B active, on QwenCloud's
+    # Singapore endpoint, where the key lives: a QwenCloud key works only in its own region.
+    # It thinks by default, at high effort; thinking is off here so the answer comes first.
+    # Singapore prices it at $1.50 per million input, $4.50 output (thinking included) and
+    # $0.075 for a cache hit, with no input-length tiers; an explicit five-minute cache
+    # write is $1.875 (docs.qwencloud.com/developer-guides/getting-started/pricing, read
+    # 2026-11-22). Only implicit caching is used here, so nothing is billed as a write.
+    # QwenCloud keep chat completions in memory only and never train on them.
+    - provider: qwen
+      model: qwen4-max
+      description: "Alibaba's Qwen4-Max, a 2.4T mixture-of-experts with 71B active. Reads images; thinking is off."
+      benchmark: { intelligence_index: 43 }
+      context_window: 1000000
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      data_policy:
+        trains_on_data: "no"
+        retention: none
+
     # NVIDIA's Nemotron 3.5 Super VL, 120B with 12B active and the strongest US open-weight
     # model, 26 on the Artificial Analysis Intelligence Index. It reads images, so it is
     # also somewhere for vlm to fall over to. Together serve NVFP4 weights, which Artificial

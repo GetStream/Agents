@@ -2,6 +2,10 @@
 
 ## Features
 
+### Qwen4-Max is `qwen/qwen4-max`
+
+Alibaba's Qwen4-Max can be routed as `qwen/qwen4-max`, in the `high-quality` tier, with images in, tools and JSON Schema answers. It is reached on QwenCloud's Singapore endpoint with `DASHSCOPE_API_KEY`, the key the qwen realtime models take; `QWEN_BASE_URL` names another region's endpoint for a key made there. Thinking is off unless the model entry sets `thinking: true`, which takes `reasoning_effort` `low`, `high` or `xhigh`. It is $1.50 in, $4.50 out and $0.075 for a cache hit per 1M tokens.
+
 ### Usage alerts are a counter on /metrics
 
 The router and the usage service add to `router_alert_holds_total{alert,level}` at every check of their alerts: 1 when a condition holds, or the number of items a condition of items holds for, and nothing when it does not. It counts whether or not the Sentry limit sends the event, so a monitor outside Sentry can page on `increase(...{level="page"}[5m]) > 0`, including for a condition that holds at one check only. A hold at the last check, on shutdown, or during a drain reaches Sentry only. The Sentry events and their limit are unchanged (AI-3424).
