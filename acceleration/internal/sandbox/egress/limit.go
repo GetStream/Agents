@@ -10,8 +10,8 @@ import (
 // and an idle tunnel lives up to keepAliveTimeout. It is what Chromium lets one profile hold: 256
 // is its soft cap of sockets per pool and the most connections through one proxy its
 // MaxConnectionsPerProxy policy accepts (its default is 128), so a browser or a crawler in the
-// sandbox stays under it (chromium/src net/socket/client_socket_pool_manager.cc,
-// g_socket_soft_cap_per_pool, set_max_sockets_per_proxy_chain).
+// sandbox stays under it (chromium/chromium at commit d839ed9cc2b32740f0136e209e80de640ac58789,
+// net/socket/client_socket_pool_manager.cc: g_socket_soft_cap_per_pool, set_max_sockets_per_proxy_chain).
 const maxTunnels = 256
 
 // sandboxTunnels counts each sandbox's open tunnels by its proxy credential, which is the
