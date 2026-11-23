@@ -2166,6 +2166,13 @@ The routes under `/v1/ops` are Stream staff's: they take the ops key (`ROUTER_AU
 `X-Ops-Key` and no app's credentials. An app's key, even its backend's, is answered 401, and so
 is every call on a deployment with no ops key. They are tagged `Staff` in the spec.
 
+The two activity routes also take the activity key (`ROUTER_AUTH_ACTIVITY_KEY`) in
+`X-Activity-Key`, for a job that reads activity every day. It reaches those two routes and no
+other: on any other route it is answered 401. To rotate it, set the new key in
+`ROUTER_AUTH_ACTIVITY_KEY` and the old one in `ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS`; both work until
+you unset the old one. Unset, there is no activity key and the ops key still reads both routes. The
+router does not start when either activity key is the ops key or the manage key.
+
 | Route | What it is for |
 | ----- | -------------- |
 | `GET /v1/ops/activity` | Every organization's activity by UTC day, by cursor, with how far each got |
@@ -2194,6 +2201,7 @@ definitions of tried, API calls, production and churned:
 ```bash
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
+printf 'X-Activity-Key: %s\n' "$ROUTER_AUTH_ACTIVITY_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
