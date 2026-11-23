@@ -143,8 +143,9 @@ func (s *Store) Guest(ctx context.Context, customerID, id string) (User, error) 
 // somebody else. A task left on the guest follows up for nobody who can still see it.
 //
 // With shards, the guest and the tasks are in the shared database and the sessions in every
-// shard, and no transaction spans them. The guest is claimed with its tasks first, and a claim
-// by the same user again moves whatever sessions a failed one left behind.
+// shard, and no transaction spans them. The guest is claimed with its tasks first. A claim by
+// the same user again moves whatever sessions a failed one left behind, with shards or without,
+// so a caller with steps after this one can finish them on a retry.
 func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID string) (int64, error) {
 	if customerID == "" || guestID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
@@ -186,7 +187,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 	if !s.Sharded() && len(s.peers) == 0 {
 		var moved int64
 		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			if err := claimGuest(ctx, tx, customerID, guestID, userID, now, false); err != nil {
+			if err := claimGuest(ctx, tx, customerID, guestID, userID, now); err != nil {
 				return err
 			}
 			if err := moveTasks(ctx, tx); err != nil {
@@ -209,7 +210,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 	}
 
 	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := claimGuest(ctx, tx, customerID, guestID, userID, now, true); err != nil {
+		if err := claimGuest(ctx, tx, customerID, guestID, userID, now); err != nil {
 			return err
 		}
 		return moveTasks(ctx, tx)
@@ -224,9 +225,9 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 	return moved, nil
 }
 
-// claimGuest marks a guest claimed by userID. sameUserAgain lets a claim userID already made
-// stand rather than fail, for a caller that has more to finish after it.
-func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID string, now time.Time, sameUserAgain bool) error {
+// claimGuest marks a guest claimed by userID. A claim userID already made stands rather than
+// fails, for a caller that has more to finish after it.
+func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID string, now time.Time) error {
 	claimed, err := db.NewUpdate().Model((*User)(nil)).
 		Set("claimed_by = ?", userID).
 		Set("claimed_at = ?", now).
@@ -261,7 +262,7 @@ func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID str
 	if err != nil {
 		return fmt.Errorf("claim guest: %w", err)
 	}
-	if sameUserAgain && existing.ClaimedBy == userID {
+	if existing.ClaimedBy == userID {
 		return nil
 	}
 	return stack.Wrap(fmt.Errorf("%w: %s was already claimed by %s", ErrGuestClaimed, guestID, existing.ClaimedBy))

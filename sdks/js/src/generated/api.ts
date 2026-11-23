@@ -1464,7 +1464,7 @@ export type paths = {
          * Move a guest's conversations onto the account they turned out to be
          * @description For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
          *     Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-         *     A guest already claimed is refused rather than moved again.
+         *     A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
          */
         readonly post: operations["claimGuestUser"];
         readonly delete?: never;

@@ -304,12 +304,11 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNotAGuest, notFound("no such guest"))
 	}
-	if guest.ClaimedBy != "" {
-		// A second claim naming the same account is the same claim arriving twice, which is
-		// not a conflict: a retried request must not read as somebody else's.
-		if guest.ClaimedBy == userID {
-			return &claimGuestUserResponse{Body: ClaimGuestResult{GuestId: guestID, UserId: userID, SessionsMoved: 0}}, nil
-		}
+	// A second claim naming the same account is the same claim arriving twice, which is not a
+	// conflict: a retried request must not read as somebody else's. It runs every step again
+	// rather than answering as done, since the first may have stopped after marking the guest,
+	// before the sessions in a shard moved or the account joined their channels.
+	if guest.ClaimedBy != "" && guest.ClaimedBy != userID {
 		return nil, conflict("that guest was already claimed")
 	}
 
@@ -456,7 +455,8 @@ func (s *Server) registerGuests(api huma.API) {
 			"own backend knows that a given guest is a given account -- it is the thing that just " +
 			"authenticated them. A page allowed to ask this could claim anybody's conversations by " +
 			"guessing a guest id, which is the whole attack.\n" +
-			"A guest already claimed is refused rather than moved again.",
+			"A guest another account already claimed is refused. The same claim sent again finishes " +
+			"whatever the first left undone, and moves nothing twice.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The conversations were moved"},
 			"409": errorResponse("That guest was already claimed"),

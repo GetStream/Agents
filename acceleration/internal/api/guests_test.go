@@ -398,6 +398,21 @@ func (s *GuestsSuite) TestTheSameClaimArrivingTwiceIsNotAConflict() {
 	s.Equal(0, again.SessionsMoved, "the conversations moved the first time")
 }
 
+// A claim that stopped once the guest was marked, before the account joined the channels of
+// the conversations it moved, was answered as done when sent again, and the account never
+// could read them. The store's half is all the first claim got through.
+func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhenSentAgain() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	_, err := s.store.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
+	s.Require().NoError(err)
+	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), account.userID)
+
+	s.claim(guest, account.userID)
+
+	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID, "the account reads what the guest said")
+}
+
 func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	guest := s.recordGuest()
 	s.claim(guest, s.utils.uuid())
