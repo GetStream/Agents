@@ -138,6 +138,32 @@ func (s *MeteringSuite) TestEachSessionLogsWhatTheRowsItStoredCost() {
 	s.Equal([]int64{cost, int64(len(stored))}, []int64{micros, rows}, "the socket counts every row of every session")
 }
 
+// A device-side socket, and an agent's own voice, open a session with no Spent in their context.
+// The session's line still says what its stored rows cost.
+func (s *MeteringSuite) TestASessionOnASocketWithNoSpentLogsItsRowsCost() {
+	logs := capturedTiming(s.T())
+	customer := uuid.NewString()
+	config := s.builtIn("openai/gpt-realtime-2.1")
+	provider := newStubSTS()
+	provider.capabilities, _ = capabilitiesFor(config.Provider, config.Model)
+	recorder := routing.NewRecorder(routing.STS, s.store, s.live, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(provider, config, routing.Owner{CustomerID: customer, AgentID: agentID, Attribution: attributed},
+		recorder, recorder.For(routing.LLM))
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "r1", Generation: 1, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "r1", Generation: 1, TimeToFirstByteMs: 380,
+		Usage: sts.Usage{InputTokens: 120, InputAudioTokens: 100, InputTextTokens: 20, OutputTokens: 60, OutputAudioTokens: 60}})
+	s.closed(session, recorder)
+
+	var cost int64
+	for _, row := range s.rows(customer) {
+		cost += row.CostMicros
+	}
+	s.Positive(cost)
+	lines := timingLines(s.T(), logs, session.id)
+	s.Require().Len(lines, 1)
+	s.Equal(float64(cost), lines[0]["cost_micros"])
+}
+
 // only is the one row that matches.
 func (s *MeteringSuite) only(rows []store.Request, match func(store.Request) bool) store.Request {
 	found := s.all(rows, match)
