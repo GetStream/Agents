@@ -2253,7 +2253,8 @@ func (s *ConverseSuite) TestACallerWhoDoesNotAnswerAQuestionIsCheckedOnSooner() 
 
 	state := s.quiet()
 	state.Asked = true
-	state.LastSpokeAt = time.Now().Add(-answerIdleGap - time.Second)
+	state.ArrivedAt = time.Now().Add(-time.Hour)
+	state.SpeechEndsAt = time.Now().Add(-answerIdleGap - time.Second)
 
 	actions := s.converse.Tick(state)
 	s.Require().Equal([]ActionKind{ActCheckIn}, kinds(actions),
@@ -2342,7 +2343,8 @@ func (s *ConverseSuite) TestACallNobodyHasSpokenOnIsAskedWhetherAnythingElseIsNe
 	s.build(DuplexOptions{Backchannel: true, BackchannelGap: time.Millisecond})
 
 	state := s.quiet()
-	state.LastSpokeAt = time.Now().Add(-time.Hour)
+	state.ArrivedAt = time.Now().Add(-time.Hour)
+	state.SpeechEndsAt = time.Now().Add(-time.Hour)
 
 	actions := s.converse.Tick(state)
 	s.Require().Equal([]ActionKind{ActCheckIn}, kinds(actions))
@@ -2353,7 +2355,8 @@ func (s *ConverseSuite) TestACallThatHasJustGoneQuietIsLeftAlone() {
 	s.build(DuplexOptions{Backchannel: true, BackchannelGap: time.Millisecond})
 
 	state := s.quiet()
-	state.LastSpokeAt = time.Now().Add(-time.Second)
+	state.ArrivedAt = time.Now().Add(-time.Hour)
+	state.SpeechEndsAt = time.Now().Add(-time.Second)
 
 	s.Empty(s.converse.Tick(state), "a pause is somebody thinking, not a call that has died")
 }

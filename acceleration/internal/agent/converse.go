@@ -167,6 +167,11 @@ type floor struct {
 	Composing bool
 	// LastSpokeAt is when the agent last published audio.
 	LastSpokeAt time.Time
+	// SpeechEndsAt is when the last of the agent's published speech has gone out to the
+	// call, after LastSpokeAt while the edge still plays it.
+	SpeechEndsAt time.Time
+	// ArrivedAt is when somebody last came onto the call, zero while nobody has.
+	ArrivedAt time.Time
 	// LastHeardAt is when anyone on the call was last transcribed, or heard in an utterance
 	// the transcriber has not ended (pauseAsker.Hearing).
 	LastHeardAt time.Time
@@ -179,13 +184,11 @@ type floor struct {
 	Unheard unheardReply
 }
 
-// active is when anything last happened on the call, either end of it. It is zero on a
-// call where nobody has spoken and the agent has yet to say a word.
+// active is when anything last happened on the call: somebody arrived or was heard, or the
+// agent's speech finished playing out. A silence starts when the caller has heard the agent
+// out, not when the agent handed its speech over.
 func (f floor) active() time.Time {
-	if f.LastHeardAt.After(f.LastSpokeAt) {
-		return f.LastHeardAt
-	}
-	return f.LastSpokeAt
+	return later(later(f.LastHeardAt, f.SpeechEndsAt), f.ArrivedAt)
 }
 
 // converse holds the judgements a conversation makes.
@@ -1218,6 +1221,10 @@ func (c *converse) overlapRuled(ruling harness.Decided, seen overlapState, state
 // idle invites a caller who has gone quiet back into the conversation, because a silence
 // that nobody breaks is how a call ends by accident rather than because it was over.
 func (c *converse) idle(state floor, participant stt.Participant) []Action {
+	// Nobody has come onto the call, so there is nobody to ask.
+	if state.ArrivedAt.IsZero() {
+		return nil
+	}
 	if !c.duplex.Idle(state.active(), state.Quiet, state.Asked) {
 		return nil
 	}

@@ -175,8 +175,9 @@ func (d *duplex) Presence(participant stt.Participant, lastSpokeAt time.Time, qu
 
 // Idle reports whether a call nobody has said anything on for a while is due a question,
 // so a silence ends in an invitation rather than in the caller wondering whether anyone
-// is still there. A call where nothing has happened at all is not idle yet: the agent has
-// not so much as greeted anyone.
+// is still there. LastActivity is floor.active: zero means nothing has happened to count a
+// silence from, and otherwise the gap runs from somebody arriving or speaking, or from when
+// the agent's speech finished playing out rather than when it was handed to the edge.
 //
 // Like Update, and unlike a murmur, it is not tied to the backchannel option: leaving
 // somebody in silence until they hang up is never what was wanted. Asked says the agent's

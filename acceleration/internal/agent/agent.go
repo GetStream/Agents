@@ -594,6 +594,12 @@ type Agent struct {
 	// overtakes a check-in held for the next voice.
 	talkedAt    time.Time
 	lastSpokeAt time.Time
+	// arrivedAt is when somebody last came onto the call, zero while nobody is on it. An edge
+	// that cannot say who joins (Roster) is one its caller opened, an audio socket or a
+	// simulation, so they arrive as the agent joins it.
+	arrivedAt time.Time
+	// attending is who an edge that says who joins reports on the call now.
+	attending map[string]struct{}
 	// voiceOut is when the agent's voice went out on the edge's track, which is when an echo
 	// of it on the caller's line can be in their audio (withoutEcho).
 	voiceOut voiceOut
@@ -949,6 +955,10 @@ func (a *Agent) Join(ctx context.Context) error {
 			}
 			a.running.Add(1)
 			go a.consumeRoster(roster)
+		} else {
+			a.mu.Lock()
+			a.arrivedAt = time.Now()
+			a.mu.Unlock()
 		}
 	}
 
@@ -1662,6 +1672,11 @@ func (a *Agent) attend(attendance Attendance) {
 	if attendance.Joined {
 		a.carried.attended.Store(true)
 		a.mu.Lock()
+		a.arrivedAt = time.Now()
+		if a.attending == nil {
+			a.attending = map[string]struct{}{}
+		}
+		a.attending[attendance.Participant.ID] = struct{}{}
 		delete(a.departed, attendance.Participant.ID)
 		a.mu.Unlock()
 		a.logger.Debug("a participant joined",
@@ -1676,6 +1691,11 @@ func (a *Agent) attend(attendance Attendance) {
 	a.audioFloor.forget(attendance.Participant.ID)
 	a.mu.Lock()
 	a.departed[attendance.Participant.ID] = time.Time{}
+	delete(a.attending, attendance.Participant.ID)
+	if len(a.attending) == 0 {
+		// Nobody is left to ask whether they are still there.
+		a.arrivedAt = time.Time{}
+	}
 	listener := a.listeners[attendance.Participant.ID]
 	a.mu.Unlock()
 	if listener != nil {
@@ -2045,6 +2065,8 @@ func (a *Agent) floor() floor {
 		Composing:       a.composing,
 		Speaking:        a.speakingTurn,
 		LastSpokeAt:     a.lastSpokeAt,
+		SpeechEndsAt:    a.voiceOut.until,
+		ArrivedAt:       a.arrivedAt,
 		LastHeardAt:     a.lastHeardAt,
 		LastParticipant: a.lastParticipant,
 		Asked:           owesAnAnswer(lastAssistantSaid(a.history)),
@@ -2880,7 +2902,7 @@ func (a *Agent) sayComposed(participant stt.Participant, line, purpose string, a
 // composedFor names what a composed line is for, as a watcher is told it.
 func composedFor(purpose string) string {
 	switch purpose {
-	case idlePurpose:
+	case idlePurpose, answerPurpose:
 		return PurposeCheckIn
 	case updatePurpose, statusPurpose, toolSaidPurpose:
 		return PurposeUpdate
