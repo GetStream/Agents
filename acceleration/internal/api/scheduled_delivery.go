@@ -406,7 +406,7 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 			return "", "", err
 		}
 		delivery.CommandID = replyCommand(found, delivery.CommandID)
-		if err := s.followUpWithin(ctx, found, delivery); err != nil {
+		if err := s.followUpInConversation(ctx, found, delivery); err != nil {
 			return "", "", err
 		}
 		return store.ScheduledTaskDeliveredConversation, found.ID(), nil
@@ -512,6 +512,61 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 			}
 		}
 	}
+}
+
+// followUpInConversation puts the follow-up to found, whose conversation carries the reply, and
+// waits for its turn to end. A turn the organization may not pay for ends with the model's
+// refusal, which leaves the user nothing: the run records the money (turnRefusal), as a text
+// channel's does. Any other end leaves the reply in the conversation as it stands, delivered: a
+// turn that finished or failed for another reason, one still running at scheduledReplyWindow, or a
+// session that ended. A follow-up the conversation already holds runs nothing, so nothing is
+// waited for.
+func (s *Server) followUpInConversation(ctx context.Context, found *session.Session, delivery scheduledDelivery) error {
+	_, _, known := found.FollowUpReply(delivery.CommandID)
+	events, detach := found.Watch()
+	defer detach()
+	if err := s.followUpWithin(ctx, found, delivery); err != nil || known {
+		return err
+	}
+	deadline := time.Now().Add(scheduledReplyWindow)
+	ticker := time.NewTicker(s.replyPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event, open := <-events:
+			if !open {
+				return nil
+			}
+			if refusal := turnRefusal(event); refusal != nil {
+				return refusal
+			}
+			// The conversation records the agent.Error that fails a turn before the session sends
+			// it to watchers (Session.consume), so the turn has failed by now if it was this one.
+			if _, erred := event.(agent.Error); erred {
+				if state, _, _ := found.FollowUpReply(delivery.CommandID); replyEnded(state) {
+					return nil
+				}
+			}
+		case <-ticker.C:
+			// A failed turn is told by its agent.Error, which says whether it was the money.
+			state, _, _ := found.FollowUpReply(delivery.CommandID)
+			if state != "failed" && replyEnded(state) || time.Now().After(deadline) {
+				return nil
+			}
+		}
+	}
+}
+
+// replyEnded reports whether a follow-up's reply in state (Session.FollowUpReply) has finished,
+// however it did.
+func replyEnded(state string) bool {
+	switch state {
+	case "completed", "cancelled", "interrupted", "failed":
+		return true
+	}
+	return false
 }
 
 // turnRefused is the refusal for money that ended a text turn. The turn's reply reads back as

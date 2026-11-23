@@ -439,8 +439,10 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForMoneyInAnOpenSessionIsFinal() {
 	s.True(failure.Final, "spent credit outlasts every retry of the run")
 }
 
-// A turn refused because the organization's money cannot be checked is tried again.
-func (s *TelnyxUnpaidSuite) TestATurnRefusedWhileMoneyCannotBeCheckedIsRetried() {
+// uncheckableAfterOpening is a user who texts the agent's SMS line, and a session they opened on
+// the agent while the organization had credit; the Redis its holds are shared through goes down
+// afterwards, so what costs money is refused because the money cannot be checked.
+func (s *TelnyxUnpaidSuite) uncheckableAfterOpening() (*testClient, Session) {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
 	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
@@ -456,11 +458,87 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedWhileMoneyCannotBeCheckedIsRetried()
 		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
 		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer))
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	return user, opened
+}
+
+// A turn refused because the organization's money cannot be checked is tried again.
+func (s *TelnyxUnpaidSuite) TestATurnRefusedWhileMoneyCannotBeCheckedIsRetried() {
+	user, opened := s.uncheckableAfterOpening()
 
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(s.refusedTurn(user, opened), &failure)
 	s.Equal(codeSpendCheckUnavailable, failure.Reason)
 	s.False(failure.Final, "the check passes again on its own")
+}
+
+// conversationTurn is the follow-up of a task due in the session opened, delivered on the
+// conversation channel, which carries the reply in the session itself.
+func (s *TelnyxUnpaidSuite) conversationTurn(user *testClient, opened Session) error {
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
+		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
+	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+		store.ScheduledTaskDeliveredConversation)
+	return err
+}
+
+// A task delivered in the conversation of a session that is open, whose turn the model refuses for
+// money, did not reach the user: its run fails under the refusal's code, as the API shows it, and is
+// not tried again (AI-3183).
+func (s *TelnyxUnpaidSuite) TestAConversationTaskWhoseTurnIsRefusedForMoneyIsNotRetried() {
+	user, opened := s.spentAfterOpening()
+	task := s.userTask(user, opened.Id, "conversation")
+
+	_, attempts := s.settledByTheWorker(task)
+
+	var page ScheduledTaskRunPage
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+task.ID+"/runs", nil, &page))
+	s.Require().Len(page.Items, 1)
+	s.Equal(store.ScheduledTaskRunFailed, page.Items[0].State)
+	s.Empty(page.Items[0].DeliveredTo)
+	s.Require().NotNil(page.Items[0].Error)
+	s.Equal(codeInsufficientCredits, *page.Items[0].Error)
+	s.Equal(int32(1), attempts, "spent credit outlasts every retry of the run")
+}
+
+// A conversation turn refused because the organization's money cannot be checked is tried again:
+// the check passes again on its own.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedWhileMoneyCannotBeCheckedIsRetried() {
+	user, opened := s.uncheckableAfterOpening()
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(s.conversationTurn(user, opened), &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.False(failure.Final, "the check passes again on its own")
+}
+
+// A task delivered in the conversation of a session that is open, whose turn fails for a reason
+// that is not money, such as the model's provider being down, settles as it always has: delivered,
+// on the first attempt. Only a refusal for money fails the run.
+func (s *TelnyxUnpaidSuite) TestAConversationTaskWhoseTurnFailsNotForMoneyIsDelivered() {
+	s.config.Models.LLM = "failing/failing-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
+	user := s.data.createUser()
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
+	s.Require().Eventually(func() bool {
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+13125550010") == nil
+	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
+	task := s.userTask(user, opened.Id, "conversation")
+
+	run, attempts := s.settledByTheWorker(task)
+
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(store.ScheduledTaskDeliveredConversation, run.DeliveredTo)
+	s.Nil(run.Error)
+	s.Equal(int32(1), attempts)
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	s.Eventually(func() bool {
+		state, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
+		return state == "failed"
+	}, deliveryWait, 20*time.Millisecond, "the task's turn did fail")
 }
 
 // teamed tags the config with a team: a session opened on it after counts under the team.
