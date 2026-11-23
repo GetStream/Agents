@@ -927,6 +927,59 @@ func (s *StoreSuite) TestDeletingAConfigPausesOnlyItsActiveTasks() {
 	s.Equal(ScheduledTaskActive, other.State, "another customer's config of the same id is not this one")
 }
 
+// retryingRuns claims two due tasks between attempts: "failed", whose attempt failed and is
+// recorded, and "called", whose call nobody answered. It returns their runs by task.
+func (s *StoreSuite) retryingRuns() map[string]ScheduledTaskRun {
+	due := s.base.Add(-time.Minute)
+	s.task("failed", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("called", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 2)
+	runs := map[string]ScheduledTaskRun{}
+	for _, claim := range claimed {
+		runs[claim.Task.ID] = claim.Run
+		if claim.Task.ID == "called" {
+			took, _, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", claim.Run.ID, "call-1")
+			s.Require().NoError(err)
+			s.Require().True(took)
+			s.Require().NoError(s.store.ScheduledTaskRuns.SetCallReason(s.ctx, "acme", claim.Run.ID, "call-1", "not_answered"))
+		}
+		s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", claim.Run.ID, claim.LeasedBy, "user_on_call"))
+	}
+	return runs
+}
+
+// settledWithoutTheAttemptsReason checks runs from retryingRuns once a change settled them missed.
+func (s *StoreSuite) settledWithoutTheAttemptsReason(runs map[string]ScheduledTaskRun) {
+	failed, called := s.run(runs["failed"].ID), s.run(runs["called"].ID)
+	s.Equal(ScheduledTaskRunMissed, failed.State)
+	s.Nil(failed.Error, "a missed run did not fail: the attempt's reason goes")
+	s.Equal(ScheduledTaskRunMissed, called.State)
+	s.Require().NotNil(called.Error)
+	s.Equal("not_answered", *called.Error, "how the call ended stays")
+}
+
+func (s *StoreSuite) TestAPausedRunBetweenAttemptsIsMissedWithoutTheAttemptsReason() {
+	runs := s.retryingRuns()
+	for _, id := range []string{"failed", "called"} {
+		task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		task.State = ScheduledTaskPaused
+		s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &task))
+	}
+
+	s.settledWithoutTheAttemptsReason(runs)
+}
+
+func (s *StoreSuite) TestADeletedConfigsRunBetweenAttemptsIsMissedWithoutTheAttemptsReason() {
+	runs := s.retryingRuns()
+
+	s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
+
+	s.settledWithoutTheAttemptsReason(runs)
+}
+
 func (s *StoreSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMissed() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })

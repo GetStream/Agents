@@ -133,6 +133,69 @@ func (s *TelnyxUnpaidSuite) settledByTheWorkerAfter(task store.ScheduledTask, be
 	return settled, attempts.Load()
 }
 
+// takenOver makes task due and has a worker fail its first attempt, then stops that worker while
+// it waits to retry, as a router that crashes or loses its lease leaves the run. between runs
+// next; then the run goes stale and a second worker, retrying at once, takes it over. It returns
+// the settled run and how many attempts the second worker made.
+func (s *TelnyxUnpaidSuite) takenOver(task store.ScheduledTask, between func()) (store.ScheduledTaskRun, int32) {
+	var failed atomic.Int32
+	retries := scheduling.DeliveryRetries
+	scheduling.DeliveryRetries = []time.Duration{time.Hour}
+	lost := scheduling.NewScheduler(s.store, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		deliveredTo, sessionID, err := s.router.DeliverScheduledTask(ctx, claimed)
+		if err != nil {
+			failed.Add(1)
+		}
+		return deliveredTo, sessionID, err
+	}, slog.New(slog.NewTextHandler(s.logged, nil)))
+	scheduling.DeliveryRetries = retries
+	past := time.Now().Add(-time.Minute)
+	task.NextRunAt = &past
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
+	lost.Start(context.Background())
+	lost.Kick()
+	s.Require().Eventually(func() bool {
+		return failed.Load() == 1 && lost.Running() == 1
+	}, deliveryWait, 20*time.Millisecond, "the first attempt failed and the delivery waits to retry")
+	lost.Close()
+	if between != nil {
+		between()
+	}
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
+		Set("started_at = now() - interval '1 hour'").
+		Where("task_id = ?", task.ID).
+		Where("state = ?", store.ScheduledTaskRunRunning).
+		Exec(context.Background())
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+		Set("lease_until = now() - interval '1 second'").
+		Where("customer_id = ?", task.CustomerID).
+		Where("id = ?", task.ID).
+		Exec(context.Background())
+	s.Require().NoError(err)
+
+	s.retryAtOnce()
+	var attempts atomic.Int32
+	worker := scheduling.NewScheduler(s.store, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		attempts.Add(1)
+		return s.router.DeliverScheduledTask(ctx, claimed)
+	}, slog.New(slog.NewTextHandler(s.logged, nil)))
+	worker.Start(context.Background())
+	defer worker.Close()
+	worker.Kick()
+	var settled store.ScheduledTaskRun
+	s.Require().Eventually(func() bool {
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
+		s.Require().NoError(err)
+		if len(runs) != 1 || runs[0].State == store.ScheduledTaskRunRunning {
+			return false
+		}
+		settled = runs[0]
+		return true
+	}, deliveryWait, 20*time.Millisecond, "the task's run never settled")
+	return settled, attempts.Load()
+}
+
 // A task made in a thread of a suspended organization texts nothing and is not tried again: the
 // run says the account is suspended, and the router warns, naming the customer.
 func (s *TelnyxUnpaidSuite) TestAThreadTaskOfASuspendedOrganizationIsNotRetried() {
@@ -660,6 +723,66 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedOnAnotherRouterRunsAgain
 	state, said, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
 	s.Equal("completed", state, "the retry ran the turn again on the router holding the session")
 	s.NotEmpty(said, "the user got a reply")
+}
+
+// A conversation task whose turn is refused because the money cannot be checked, and whose worker
+// stops while it waits to retry, runs its turn again on the worker that takes the run over once the
+// check passes: that worker reads the refusal from the run, and the user gets the reply.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedWhileMoneyCannotBeCheckedRunsAgainForTheWorkerTakingItOver() {
+	user, opened := s.uncheckableAfterOpening()
+	task := s.userTask(user, opened.Id, "conversation")
+
+	run, attempts := s.takenOver(task, s.sharedAgain)
+
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(store.ScheduledTaskDeliveredConversation, run.DeliveredTo)
+	s.Nil(run.Error)
+	s.Equal(int32(1), attempts)
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	refused, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
+	s.Equal("failed", refused, "the first turn was refused")
+	state, said, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.Equal("completed", state, "the worker taking over ran the turn again")
+	s.NotEmpty(said, "the user got a reply")
+}
+
+// A conversation task whose session another router holds, whose turn there is refused because the
+// money cannot be checked and whose worker stops while it waits to retry: the worker taking the run
+// over hands that router the refusal, and the turn runs again there.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedOnAnotherRouterRunsAgainThereForTheWorkerTakingItOver() {
+	other, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	user, opened := s.uncheckableAfterOpeningOn(other)
+	task := s.userTask(user, opened.Id, "conversation")
+
+	run, attempts := s.takenOver(task, s.sharedAgain)
+
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(int32(1), attempts)
+	found, running := sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running, "the session is the other router's")
+	state, said, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.Equal("completed", state, "the turn ran again on the router holding the session")
+	s.NotEmpty(said, "the user got a reply")
+}
+
+// A text task whose turn fails for a reason that is not money, and whose worker stops while it
+// waits to retry, reads that reply back on the worker that takes the run over, as on its own
+// retries: the turn is not run again, and the run fails as a reply that failed.
+func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainByTheWorkerTakingItOver() {
+	user, opened := s.creditedOpening("failing/failing-model")
+	task := s.userTask(user, opened.Id, "sms")
+
+	run, attempts := s.takenOver(task, nil)
+
+	s.Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Require().NotNil(run.Error)
+	s.Equal(scheduling.ReasonReplyFailed, *run.Error)
+	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts)
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	_, _, rerun := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.False(rerun, "a reply that failed not for money is not run again")
 }
 
 // A thread task whose reply failed, retried after a refusal for money, runs its turn again in the

@@ -96,6 +96,83 @@ func (s *StoreSuite) TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingIt
 	s.Equal("not_answered", reason, "the taking over keeps how the call went")
 }
 
+// staleRun ages a claimed run past the stale window and lapses its task's lease, as a worker that
+// died leaves them, and returns the claim that takes the run over.
+func (s *StoreSuite) staleRun(taskID, runID string) ClaimedScheduledTask {
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("started_at = ?", s.base.Add(-time.Hour)).
+		Where("id = ?", runID).Exec(s.ctx)
+	s.Require().NoError(err)
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
+		Set("lease_until = ?", s.base.Add(-time.Minute)).
+		Where("id = ?", taskID).Exec(s.ctx)
+	s.Require().NoError(err)
+	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(reclaimed, 1)
+	s.Require().Equal(runID, reclaimed[0].Run.ID, "taken over under the same run")
+	return reclaimed[0]
+}
+
+func (s *StoreSuite) TestAnAttemptsReasonIsReadByTheWorkerTakingTheRunOver() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	run := claimed[0].Run
+	s.Nil(run.Error, "a new run has no reason")
+	// Only the claim that holds the task, on the customer's own run, records a reason.
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, "a-lost-claim", "user_on_call"))
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "globex", run.ID, claimed[0].LeasedBy, "user_on_call"))
+	s.Nil(s.run(run.ID).Error)
+
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, claimed[0].LeasedBy, "spend_check_unavailable"))
+	reclaimed := s.staleRun("one", run.ID)
+
+	s.Require().NotNil(reclaimed.Run.Error)
+	s.Equal("spend_check_unavailable", *reclaimed.Run.Error, "the worker taking over reads why the last attempt failed")
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, claimed[0].LeasedBy, "user_on_call"))
+	s.Equal("spend_check_unavailable", *s.run(run.ID).Error, "the claim taken over records nothing more")
+}
+
+func (s *StoreSuite) TestAnAttemptsReasonLeavesTheReasonAPlacedCallEndedUnder() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	run := claimed[0].Run
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", run.ID, "call-1")
+	s.Require().NoError(err)
+	s.Require().True(took)
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetCallReason(s.ctx, "acme", run.ID, "call-1", "not_answered"))
+
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, claimed[0].LeasedBy, "channel_unreachable"))
+
+	took, reason, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", run.ID, "call-2")
+	s.Require().NoError(err)
+	s.False(took)
+	s.Equal("not_answered", reason, "how the call ended is the run's reason")
+}
+
+func (s *StoreSuite) TestAFinishedRunTakesNoAttemptsReason() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	run := claimed[0].Run
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("state = ?", ScheduledTaskRunDelivered).
+		Where("id = ?", run.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, claimed[0].LeasedBy, "user_on_call"))
+
+	s.Nil(s.run(run.ID).Error, "a delivered run says nothing failed")
+}
+
 func (s *StoreSuite) TestTheLastRunOfEveryTaskIsReadAtOnce() {
 	for _, id := range []string{"one", "two", "three", "four"} {
 		s.task(id, nil)
@@ -152,6 +229,9 @@ func (s *StoreSuite) TestScheduledTaskRunQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseCall(s.ctx, "acme", run.ID, "call-1"))
 	}), "ReleaseCall")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, "claim-1", "user_on_call"))
+	}), "SetAttemptReason")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.CustomerID, run.ID, ScheduledTaskRunDelivered, "conversation", "session-1", ""))
 	}), "FinishManual")

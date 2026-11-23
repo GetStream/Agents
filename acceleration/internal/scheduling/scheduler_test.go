@@ -993,6 +993,85 @@ func (s *SchedulerSuite) TestADrainStopsARetryWaitAndLeavesTheRunToItsLease() {
 	s.Len(other.callsFor(task.ID), 1)
 }
 
+// lostDuringItsRetryWait has a worker fail task's first attempt with failure, then stops it while
+// it waits to retry, as a router that crashes or loses its lease leaves the run. Before the
+// failure, first runs on the attempt's claim. It returns the deliveries a second worker made once
+// the run went stale and it took the run over.
+func (s *SchedulerSuite) lostDuringItsRetryWait(task store.ScheduledTask, failure error, first func(store.ClaimedScheduledTask)) []store.ClaimedScheduledTask {
+	var attempts atomic.Int32
+	lost := NewScheduler(s.db, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		if claimed.Task.ID != task.ID {
+			return "conversation", claimed.Task.SessionID, nil
+		}
+		attempts.Add(1)
+		if first != nil {
+			first(claimed)
+		}
+		return "", "", failure
+	}, slog.New(slog.DiscardHandler))
+	lost.retries = []time.Duration{time.Hour}
+	lost.Start(s.ctx)
+	s.Require().Eventually(func() bool {
+		return attempts.Load() == 1 && lost.Running() == 1
+	}, 10*time.Second, 10*time.Millisecond, "the first attempt failed and the delivery waits to retry")
+	lost.Close()
+	runs := s.runs(task)
+	s.Require().Len(runs, 1)
+	s.Require().Equal(store.ScheduledTaskRunRunning, runs[0].State, "the run is left to its lease")
+
+	// The run ages past the store's stale-run time and its lease lapses, as the stopped worker
+	// leaves them.
+	_, err := s.db.GlobalDB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
+		Set("started_at = now() - interval '1 hour'").
+		Where("id = ?", runs[0].ID).
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	_, err = s.db.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+		Set("lease_until = now() - interval '1 second'").
+		Where("customer_id = ?", task.CustomerID).
+		Where("id = ?", task.ID).
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	other := &deliverer{}
+	s.started(other.deliver, nil)
+	s.Require().Eventually(func() bool {
+		return s.read(task).State == store.ScheduledTaskCompleted
+	}, 10*time.Second, 10*time.Millisecond, "another worker delivers the occurrence")
+	s.EqualValues(1, attempts.Load(), "the stopped worker made no retry")
+	calls := other.callsFor(task.ID)
+	s.Require().Len(calls, 1)
+	s.Equal(runs[0].ID, calls[0].Run.ID, "under the same run")
+	return calls
+}
+
+func (s *SchedulerSuite) TestAWorkerTakingARunOverReadsTheReasonItsLastAttemptFailedUnder() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+
+	calls := s.lostDuringItsRetryWait(task, &Failure{Reason: ReasonOnACall, Err: errors.New("the user is on a call")}, nil)
+
+	s.Require().NotNil(calls[0].Run.Error, "the delivery is rebuilt with the reason the last attempt failed under")
+	s.Equal(ReasonOnACall, *calls[0].Run.Error)
+	s.Nil(s.runs(task)[0].Error, "a delivered run says nothing failed")
+}
+
+func (s *SchedulerSuite) TestAWorkerTakingARunOverAfterItsCallReadsHowTheCallEnded() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+	// A [phone, whatsapp] task: nobody answered the call, and WhatsApp failed too. It runs on the
+	// worker's goroutine, so it checks without stopping the test there.
+	called := func(claimed store.ClaimedScheduledTask) {
+		call := "call-" + uuid.NewString()
+		took, _, err := s.db.ScheduledTaskRuns.TakeCall(s.ctx, task.CustomerID, claimed.Run.ID, call)
+		s.NoError(err)
+		s.True(took)
+		s.NoError(s.db.ScheduledTaskRuns.SetCallReason(s.ctx, task.CustomerID, claimed.Run.ID, call, ReasonNotAnswered))
+	}
+
+	calls := s.lostDuringItsRetryWait(task, &Failure{Reason: ReasonUnreachable, Err: errors.New("whatsapp: no window")}, called)
+
+	s.Require().NotNil(calls[0].Run.Error)
+	s.Equal(ReasonNotAnswered, *calls[0].Run.Error, "how the call ended is the run's reason, as before")
+}
+
 func (s *SchedulerSuite) TestADrainLetsARetryAttemptInFlightFinish() {
 	due := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	task := s.task(due, nil)
