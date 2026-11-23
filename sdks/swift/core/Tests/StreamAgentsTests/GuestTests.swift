@@ -116,6 +116,7 @@ import Testing
         #expect(guest.id == "guest-1")
         let request = try await server.request()
         #expect(request.headers["stream-auth-type"] == "anonymous")
+        #expect(request.headers["x-stream-client"] == "stream-agents-swift-v\(Backend.version)")
         #expect(request.headers["authorization"] == nil)
         #expect(request.query == "api_key=key")
     }

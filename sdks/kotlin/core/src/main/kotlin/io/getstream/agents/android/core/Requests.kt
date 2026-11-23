@@ -104,7 +104,11 @@ private suspend fun Backend.attempt(
     anonymously: Boolean,
     once: Boolean,
 ): HttpResponse {
-    val headers = if (anonymously) mapOf("Stream-Auth-Type" to "anonymous") else headers()
+    val headers = if (anonymously) {
+        mapOf("Stream-Auth-Type" to "anonymous", Backend.CLIENT_HEADER to Backend.CLIENT)
+    } else {
+        headers()
+    }
     return try {
         http.request(url(*path.toTypedArray(), query = query)) {
             this.method = method

@@ -26,6 +26,13 @@ public struct Backend: Sendable {
     /// Stream's hosted router.
     public static let defaultURL = URL(string: "https://accelerate-us-east4.gcp.stream-io-api.com")!
 
+    /// The release this is: the repository's `v` tag a Swift app depends on. A literal, set by
+    /// each release, since SwiftPM gives a package no way to read its own version.
+    static let version = "0.7.1"
+
+    /// This SDK and its release, as the router reads it: any client named stream-agents- is an SDK.
+    static let client = "stream-agents-swift-v\(version)"
+
     /// Stream's hosted router held to one region, such as us-east4: requests to it are served
     /// there and nowhere else, even when that region is full or down.
     ///
@@ -157,8 +164,11 @@ public struct Backend: Sendable {
     /// and it is said even to a local router, which would otherwise assume a caller with no
     /// proxy in front of it is a backend. The key travels in the query instead, where both
     /// Stream's proxy and the router read it.
+    ///
+    /// `X-Stream-Client` names this SDK and its release, which the router counts its requests
+    /// under.
     func headers() async throws -> [String: String] {
-        var headers = ["Stream-Auth-Type": "jwt"]
+        var headers = ["Stream-Auth-Type": "jwt", "X-Stream-Client": Self.client]
         if customerID.isEmpty {
             guard !apiKey.isEmpty else {
                 throw AgentsError.configuration("pass an apiKey, or a customerID for a local router")
@@ -338,7 +348,8 @@ struct CredentialMiddleware: DefaultAPIClientMiddleware {
         next: (Request) async throws -> (Data, URLResponse)
     ) async throws -> (Data, URLResponse) {
         if request.url.path.hasSuffix("/v1/agents/guests"), backend.anonymous {
-            let answer = try await next(credentialed(request, ["Stream-Auth-Type": "anonymous"]))
+            let answer = try await next(
+                credentialed(request, ["Stream-Auth-Type": "anonymous", "X-Stream-Client": Backend.client]))
             guard (answer.1 as? HTTPURLResponse)?.statusCode != 401 else {
                 throw AgentsError.configuration(anonymousGuestRefused)
             }
