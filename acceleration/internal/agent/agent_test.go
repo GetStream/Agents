@@ -2710,6 +2710,113 @@ func (s *AgentSuite) TestADirectionSplitAcrossTwoDeltasIsStillTakenOut() {
 	s.Equal("Well fine.", responded.Text)
 }
 
+func (s *AgentSuite) TestAStrayTagEndingAReplyIsNeitherReadNorWritten() {
+	// A model that has seen markup writes some of it back, and a voice reads "</>" out
+	// as symbols the caller cannot make sense of.
+	s.join(true)
+	s.model.reply = []string{"Let me check what happened", " </>"}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "what went wrong")
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+
+	s.NotContains(said(s.voice.spoken()), "<")
+	s.Equal("Let me check what happened", strings.TrimSpace(said(s.voice.spoken())))
+	responded, _ := firstOf[Responded](s.reported())
+	s.Equal("Let me check what happened", strings.TrimSpace(responded.Text))
+}
+
+func (s *AgentSuite) TestATagSplitAcrossDeltasIsTakenOutOfWhatAVoiceActs() {
+	// A voice that acts directions is given them, but markup is no direction: it would
+	// read the tag out as any other voice does.
+	s.performing = "You may write stage directions in square brackets."
+	s.join(true)
+	s.model.reply = []string{"[laughs] Tap ", "<", "b>Save</", "b> now."}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "how do I keep it")
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+
+	s.Equal("[laughs] Tap Save now.", said(s.voice.spoken()))
+	responded, _ := firstOf[Responded](s.reported())
+	s.Equal("Tap Save now.", responded.Text)
+}
+
+func (s *AgentSuite) TestAnAngleBracketEndingAReplyIsStillSaidByAVoiceThatActs() {
+	// Held back on the chance it opened a tag, it was only ever text once the reply ended.
+	s.performing = "You may write stage directions in square brackets."
+	s.join(true)
+	s.model.reply = []string{"[laughs] Only if a ", "<b"}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "when does it hold")
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+
+	s.Equal("[laughs] Only if a <b", said(s.voice.spoken()))
+}
+
+func (s *AgentSuite) TestALineSaidWholeKeepsItsDirectionsForAVoiceThatActsThem() {
+	s.performing = "You may write stage directions in square brackets."
+	s.join(true)
+
+	s.Require().NoError(s.agent.Say(s.ctx, "[warmly] Welcome <b>back</b>."))
+
+	s.eventually(func() bool { return len(s.voice.spoken()) == 1 }, "the line never reached the voice")
+	s.Equal("[warmly] Welcome back.", s.voice.spoken()[0].Text)
+}
+
+func (s *AgentSuite) TestAVoicesOwnTagsInAReplyReachIt() {
+	// Cartesia, ElevenLabs and Speechify act SSML, and an operator may prompt for it.
+	s.join(true)
+	s.model.reply = []string{`Your code is <spell>AB</spell>`, `. <break time="500ms"/>Got it?`}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "what is my code")
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+
+	spoken := said(s.voice.spoken())
+	s.Contains(spoken, "<spell>AB</spell>")
+	s.Contains(spoken, `<break time="500ms"/>`)
+}
+
+func (s *AgentSuite) TestAComparisonInAReplyIsStillSpoken() {
+	// An angle bracket that opens no tag is something the model means to say.
+	s.join(true)
+	s.model.reply = []string{"Yes, 3 < 5 and 7 > 2, ", "so I <3 it <"}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "is three less than five")
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+
+	s.Equal("Yes, 3 < 5 and 7 > 2, so I <3 it <", said(s.voice.spoken()))
+	responded, _ := firstOf[Responded](s.reported())
+	s.Equal("Yes, 3 < 5 and 7 > 2, so I <3 it <", responded.Text)
+}
+
+func (s *AgentSuite) TestAReplyThatIsOnlyATagIsNeverSentToTheVoice() {
+	// A voice refuses empty text, and refusing it costs the call its voice.
+	s.join(true)
+	s.model.reply = []string{"</>"}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "hello")
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+
+	s.Empty(s.voice.spoken())
+}
+
 // said is every request's text joined, which is the reply as the voice was given it.
 func said(requests []tts.Request) string {
 	var spoken strings.Builder
@@ -4987,6 +5094,18 @@ func (s *AgentSuite) TestALineThatCannotBeWrittenSaysNothingAndFailsNothing() {
 	s.Empty(s.voice.spoken(), "a line that was never written was said anyway")
 	s.Zero(countOf[Error](s.reported()), "a missing status line failed the turn the caller is waiting on")
 	s.Empty(harness.WithoutNotes(s.agent.History()))
+}
+
+func (s *AgentSuite) TestALineWrittenInHTMLIsSaidWithoutItsTags() {
+	s.join(true)
+	s.model.composes = []string{"<b>Still</b> there?"}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.agent.checkIn(participant, idlePurpose)
+
+	s.eventually(func() bool { return len(s.voice.spoken()) == 1 }, "the line was never said")
+	s.Equal("Still there?", s.voice.spoken()[0].Text)
 }
 
 func (s *AgentSuite) TestALineCarryingASkillTagIsNotReadOut() {
@@ -8136,6 +8255,17 @@ func (s *AgentSuite) TestSayGoesStraightToTheVoice() {
 	s.True(s.voice.spoken()[0].Final)
 }
 
+func (s *AgentSuite) TestALineSaidWholeReachesTheVoiceWithoutItsHTML() {
+	// A greeting, a question or a handover summary goes to the voice in one piece, past
+	// the reply's stripper, and a voice would read its tags out the same.
+	s.join(true)
+
+	s.Require().NoError(s.agent.Say(s.ctx, `<b>Welcome</b> <break time="300ms"/> back.`))
+
+	s.eventually(func() bool { return len(s.voice.spoken()) == 1 }, "the line never reached the voice")
+	s.Equal(`Welcome <break time="300ms"/> back.`, s.voice.spoken()[0].Text)
+}
+
 func (s *AgentSuite) TestWhatIsSaidAsItIsIsReportedAsSaidNotAsAnAnswer() {
 	// A transcript needs the greeting the caller heard, and nothing that treats an answer
 	// as the model's reply to somebody should count it as one.
@@ -8470,6 +8600,18 @@ func (s *AgentSuite) TestAnAnswerInWritingKeepsItsBrackets() {
 		"See [the channel guide](https://getstream.io/chat/docs/) and hold them with useState([]).",
 		responded.Text,
 	)
+}
+
+func (s *AgentSuite) TestAnAnswerInWritingKeepsItsTags() {
+	// Markup is only unreadable to a voice. In writing it is a code sample.
+	s.joinText()
+	s.model.reply = []string{"Wrap it in <b>bold</b>", " or return <></>."}
+
+	s.Require().NoError(s.agent.SimpleResponse(s.ctx, "how do I make it bold"))
+
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply never finished")
+	responded, _ := firstOf[Responded](s.reported())
+	s.Equal("Wrap it in <b>bold</b> or return <></>.", responded.Text)
 }
 
 func (s *AgentSuite) TestAGreetingInWritingIsReportedAsSaid() {

@@ -56,6 +56,22 @@ func (s *AgentSuite) TestAReplacementReplyDoesNotInheritAnInterruptedSentence() 
 	}
 }
 
+func (s *AgentSuite) TestAReplacementReplyDoesNotInheritAnInterruptedTagForAVoiceThatActs() {
+	s.performing = "You may write stage directions in square brackets."
+	s.join(false)
+	s.interruptBeforeCompletion("The old answer was <b")
+
+	second, err := s.agent.RespondTo(s.ctx, "answer the replacement request", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.eventually(func() bool { return s.model.script(second) != nil }, "the replacement never opened")
+	s.model.writes(second, "[laughs] Only the replacement answer.")
+	s.model.finishes(second)
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 },
+		"the replacement never finished")
+
+	s.Equal("[laughs] Only the replacement answer.", said(s.voice.spoken()))
+}
+
 func (s *AgentSuite) TestAFailedReplacementReplyDoesNotReuseInterruptedText() {
 	s.join(false)
 	s.interruptBeforeCompletion("The old answer was ")

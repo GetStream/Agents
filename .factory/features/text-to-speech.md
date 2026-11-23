@@ -54,6 +54,11 @@ Tags are stripped from the transcript and the events either way, so what is stor
 was said rather than how. A provider that does not perform them is sent the stripped text
 too, which is what stops a voice reading stage directions aloud.
 
+HTML is no direction: no voice acts `<b>`, `</b>` or a stray `</>`, so on a call
+`tts.Directions` takes the common HTML tags out of what every voice is sent and out of the
+transcript. Any other tag, a voice's own SSML included, is left as written. A reply in writing
+keeps them.
+
 ## Deployment state
 
 [deploy/s2-pro](../../acceleration/deploy/s2-pro) is written and validated but not pushed.

@@ -1466,6 +1466,13 @@ reading them out. A provider says whether it does, and only then is the model to
 write them. What it writes is stripped before it reaches the transcript or the
 conversation's history, so a direction is heard and never read.
 
+HTML is no direction: on a call, the tags a model writes (`<b>`, `<br>`, `<a href="…">`, the
+nameless `</>` and the rest of the common set) are taken out of what every voice is sent and of
+the transcript, and a block tag such as `<br>` or `</li>` leaves a line break or a space between
+the words around it. A tag of any other name is said as written, so a voice's own SSML
+(`<break>`, `<spell>`, `<emotion>`) still reaches it, and `List<String>` or `<your name>` is
+text. A reply in writing keeps its tags.
+
 Three providers perform them, and they are not interchangeable.
 
 `elevenlabs/eleven_v3_conversational` acts any bracketed direction, over the Text to
