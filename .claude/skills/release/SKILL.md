@@ -69,8 +69,9 @@ SHA=<merge commit of the CHANGELOG PR>
 git merge-base --is-ancestor "$SHA" origin/main
 test -z "$(git tag --points-at "$SHA")"
 git tag vX.Y.Z "$SHA"
-git push origin vX.Y.Z
 ```
+
+Do not push the tag yet: step 4 checks it first.
 
 The tag must start with `v`: `release.yml` runs its jobs only when the tag starts with `v`.
 `0.7.0` had no `v`, so nothing ran (AI-3561). The commit must carry no other tag. The Python
@@ -86,7 +87,8 @@ git worktree add --detach <scratch dir> vX.Y.Z
 git worktree remove <scratch dir>
 ```
 
-It must print `X.Y.Z` exactly. If it does not, stop: do not publish.
+It must print `X.Y.Z` exactly. If it does not, stop: delete the local tag (`git tag -d vX.Y.Z`)
+and do not publish. If it does, push the tag: `git push origin vX.Y.Z`.
 
 ## 5. Publish the GitHub release (ask first)
 
