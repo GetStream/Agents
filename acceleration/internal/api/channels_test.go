@@ -7,10 +7,12 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +21,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -378,6 +383,9 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "Stop"))
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
 	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 2))
+	optedOut, err = s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut, "HELP lifts no opt-out")
 	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once, however often it is delivered")
 }
 
@@ -479,6 +487,61 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
 	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 3))
 	s.Len(s.meta.to(writer), 3, "the START is confirmed once, however often it is delivered")
+}
+
+// A delivery of a STOP racing a slow first one waits for the first to record the opt-out, and
+// both are answered as taken: the person is opted out and confirmed once.
+func (s *ChannelsSuite) TestARedeliveryRacingASlowStopWaitsForIt() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	writer, id := s.writer(), "msg-"+s.utils.uuid()
+	hold, holder := s.holdOptOuts("channels_suite_held_opt_out", false)
+
+	first := s.postLater(line, s.delivery(writer, id, "Stop"))
+	recording := s.waitingOn(holder)
+	second := s.postLater(line, s.delivery(writer, id, "Stop"))
+	s.waitingOn(recording)
+	s.Require().NoError(hold.Rollback())
+
+	s.Equal(http.StatusAccepted, (<-first).status)
+	s.Equal(http.StatusAccepted, (<-second).status, "the redelivery is answered as taken once the first is recorded")
+	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut)
+	s.Contains(s.answer(writer), "unsubscribed")
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
+	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 2))
+	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once")
+}
+
+// A delivery of a STOP racing a slow first one whose write then fails takes the message
+// itself: the first is the provider's to deliver again, the second records the opt-out, and the
+// person is confirmed once.
+func (s *ChannelsSuite) TestARedeliveryRacingAStopThatFailsRecordsIt() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	writer, id := s.writer(), "msg-"+s.utils.uuid()
+	hold, holder := s.holdOptOuts("channels_suite_held_opt_out", true)
+
+	first := s.postLater(line, s.delivery(writer, id, "Stop"))
+	recording := s.waitingOn(holder)
+	second := s.postLater(line, s.delivery(writer, id, "Stop"))
+	s.waitingOn(recording)
+	s.Require().NoError(hold.Rollback())
+
+	failed := <-first
+	s.Equal(http.StatusInternalServerError, failed.status)
+	s.Contains(string(failed.body), "the message could not be recorded; deliver it again")
+	s.Equal(http.StatusAccepted, (<-second).status)
+	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut, "the redelivery recorded the STOP the first could not")
+	s.Contains(s.answer(writer), "unsubscribed")
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
+	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 2))
+	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once")
 }
 
 func (s *ChannelsSuite) TestTextingStartAfterStopIsAnsweredAgain() {
@@ -784,6 +847,89 @@ func digits(id string) string {
 		panic(err)
 	}
 	return fmt.Sprintf("%07d", random%10000000)
+}
+
+// posted is how a webhook answered a delivery: status 0 is one that got no answer.
+type posted struct {
+	status int
+	body   []byte
+}
+
+// postLater posts a delivery to a line's webhook, signed as Meta signs it, and answers how it
+// was answered once it is: for a delivery that waits on the database while the test goes on.
+func (s *ChannelsSuite) postLater(line ChannelAccount, body []byte) <-chan posted {
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+line.WebhookUrl, bytes.NewReader(body))
+	s.Require().NoError(err)
+	request.Header = s.signed(body)
+	request.Header.Set("Content-Type", "application/json")
+	answered := make(chan posted, 1)
+	go func() {
+		response, err := (&http.Client{Timeout: 3 * settleFor}).Do(request)
+		if err != nil {
+			answered <- posted{}
+			return
+		}
+		defer response.Body.Close()
+		read := new(bytes.Buffer)
+		_, _ = read.ReadFrom(response.Body)
+		answered <- posted{status: response.StatusCode, body: read.Bytes()}
+	}()
+	return answered
+}
+
+// holdOptOuts makes the app's opt-out writes wait on the transaction it returns, open on the
+// backend it names, until the test rolls it back, at the latest at the test's end. With
+// refuseFirst, the first write let on is refused. name is the trigger's, apart from those of
+// suites that run at the same time.
+func (s *RouterSuite) holdOptOuts(name string, refuseFirst bool) (bun.Tx, int) {
+	t, ctx := s.T(), context.Background()
+	key := rand.Int64()
+	_, err := s.store.GlobalDB().ExecContext(ctx, fmt.Sprintf(`BEGIN;
+		CREATE SEQUENCE %[1]s_writes;
+		CREATE FUNCTION %[1]s() RETURNS trigger AS $$
+			BEGIN
+				PERFORM pg_advisory_xact_lock(%[2]d);
+				IF %[3]t AND nextval('%[1]s_writes') = 1 THEN RAISE EXCEPTION 'refused by the test'; END IF;
+				RETURN NEW;
+			END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER %[1]s BEFORE INSERT ON opt_outs FOR EACH ROW
+			WHEN (NEW.customer_id = '%[4]s') EXECUTE FUNCTION %[1]s();
+		COMMIT`, name, key, refuseFirst, s.customerID()))
+	s.Require().NoError(err)
+	t.Cleanup(func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, fmt.Sprintf(`BEGIN;
+			DROP TRIGGER %[1]s ON opt_outs;
+			DROP FUNCTION %[1]s();
+			DROP SEQUENCE %[1]s_writes;
+			COMMIT`, name))
+		require.NoError(t, err)
+	})
+	hold, err := s.store.GlobalDB().BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	// Cleanups run last first: the hold ends before the trigger it holds writes in is dropped.
+	t.Cleanup(func() {
+		if err := hold.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			require.NoError(t, err)
+		}
+	})
+	var holder int
+	s.Require().NoError(hold.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&holder))
+	_, err = hold.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", key)
+	s.Require().NoError(err)
+	return hold, holder
+}
+
+// waitingOn waits for the one backend that waits on a lock pid holds, and is it.
+func (s *RouterSuite) waitingOn(pid int) int {
+	var waiting []int
+	s.Require().Eventually(func() bool {
+		waiting = nil
+		err := s.store.GlobalDB().NewRaw("SELECT pid FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", pid).
+			Scan(context.Background(), &waiting)
+		return err == nil && len(waiting) > 0
+	}, settleFor, 10*time.Millisecond, "nothing waits on backend %d", pid)
+	s.Require().Len(waiting, 1)
+	return waiting[0]
 }
 
 // deliver posts one message to a line's webhook, signed as Meta signs it.

@@ -33,15 +33,20 @@ const keywordTimeout = 10 * time.Second
 // the provider delivers it again.
 var errKeywordNotRecorded = errors.New("the message could not be recorded; deliver it again")
 
-// claim takes a message for its line, false when it was taken already, and records the STOP
-// or START it is in the same transaction: a keyword the store could not record leaves the
-// message to be delivered again, and a delivery of it racing this one waits for the outcome.
-// The write is not cut by the provider hanging up on a slow delivery.
+// claim takes a message for its line, false when it was taken already, and bills a message
+// taken. It records the STOP or START it is in the same transaction: a keyword the store
+// could not record leaves the message to be delivered again, and a delivery of it racing this
+// one waits for the outcome. Neither the write nor the bill is cut by the provider hanging up
+// on a slow delivery.
 func (s *Service) claim(ctx context.Context, account store.ChannelAccount, message Message) (bool, error) {
 	word := keywordOf(message.Text)
 	stop, start := slices.Contains(stopWords, word), slices.Contains(startWords, word)
 	if !stop && !start {
-		return s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
+		fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
+		if fresh {
+			s.received(ctx, account, message)
+		}
+		return fresh, err
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keywordTimeout)
 	defer cancel()
@@ -59,6 +64,9 @@ func (s *Service) claim(ctx context.Context, account store.ChannelAccount, messa
 		s.logger.Error("could not record a keyword", "keyword", word, "channel", account.Kind,
 			"customer", account.CustomerID, "error", err)
 		return false, errKeywordNotRecorded
+	}
+	if fresh {
+		s.received(ctx, account, message)
 	}
 	return fresh, nil
 }

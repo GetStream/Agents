@@ -173,7 +173,6 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		if !fresh {
 			continue
 		}
-		s.received(ctx, account, message)
 		// Files with no words are billed, and there is nothing in them for the agent to answer.
 		if message.Text == "" {
 			continue
