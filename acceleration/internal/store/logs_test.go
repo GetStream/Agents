@@ -703,6 +703,18 @@ func TestRedactLogTextAllocatesForAJSONTextAboutWhatTheRulesDo(t *testing.T) {
 	}
 }
 
+// A line that cannot be JSON, as it starts with no brace, bracket or quote, is not copied to be
+// checked as JSON: it costs what the rules cost on it.
+func TestRedactLogTextChecksOnlyALineThatStartsAsJSONForJSON(t *testing.T) {
+	for _, text := range []string{
+		"openai: 429 rate limit reached for max_tokens on model gpt-4o, request id req_abc123",
+		"openai: 401 Incorrect API key provided: sk-abcdefghij1234567890 (request id req_abc123)",
+	} {
+		rules := testing.AllocsPerRun(100, func() { redactCredentialShapes(text) })
+		require.Equal(t, rules, testing.AllocsPerRun(100, func() { RedactLogText(text) }), text)
+	}
+}
+
 // A token is taken out after whatever may stand before it in a logged line: the start of the text,
 // a space, a quote, an ampersand, a JSON escape (\n, \t, \u0026) or a percent escape (%3D,
 // %20, %22), which a word boundary would not see when a letter follows. One row per shape and

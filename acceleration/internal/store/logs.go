@@ -220,7 +220,7 @@ func holdsWord(text string, words []string) bool {
 // redactCredentials is RedactLogText with no check first. A text that is JSON is redacted
 // as JSON (redactJSONText), so it is JSON still; any other text goes through the rules.
 func redactCredentials(text string) string {
-	if json.Valid([]byte(text)) {
+	if startsAsJSON(text) && json.Valid([]byte(text)) {
 		if redacted, ok := redactJSONText(text, false); ok {
 			return redacted
 		}
