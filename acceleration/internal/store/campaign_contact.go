@@ -57,10 +57,9 @@ type Contact struct {
 	Outcome    string     `bun:"outcome,notnull"`
 	Converted  bool       `bun:"converted,notnull"`
 	// CallID is the calls row of the last dial.
-	CallID       string    `bun:"call_id,nullzero"`
-	VendorCallID string    `bun:"vendor_call_id,nullzero"`
-	Reason       string    `bun:"reason,nullzero"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
+	CallID    string    `bun:"call_id,nullzero"`
+	Reason    string    `bun:"reason,nullzero"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
 }
 
 // Validate refuses a contact nobody could be rung at.
@@ -549,8 +548,8 @@ type Settle struct {
 	Outcome       string
 	Converted     bool
 	Reason        string
-	// CallID and VendorCallID are the last dial's; empty keeps the ones already stored.
-	CallID, VendorCallID string
+	// CallID is the last dial's; empty keeps the one already stored.
+	CallID string
 	// LeaseUntil is the lease the owner's claim returned, which every claim and take-over sets
 	// anew. Set, the contact settles only under that same lease: an owner is one process, and a
 	// call that outlives its lease may find the contact taken over, settled and claimed again
@@ -604,7 +603,6 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("outcome = ?", settle.Outcome).
 			Set("converted = ?", settle.Converted).
 			Set("call_id = COALESCE(?, cc.call_id)", nullable(settle.CallID)).
-			Set("vendor_call_id = COALESCE(?, cc.vendor_call_id)", nullable(settle.VendorCallID)).
 			Set("leased_by = ''").
 			Set("lease_until = NULL").
 			Where("cp.id = cc.campaign_id").

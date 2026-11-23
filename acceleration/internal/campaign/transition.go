@@ -60,7 +60,7 @@ func (d Dialed) answered() bool {
 // out or ended unknown writes nothing: the caller dials again at once.
 func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, contact store.Contact, dial int, dialed Dialed, started, now time.Time) (settle store.Settle, dialAgain bool) {
 	step := sequence.First()
-	settle = store.Settle{StepID: step.ID, Attempt: contact.Attempt, CallID: dialed.CallID, VendorCallID: dialed.VendorCallID}
+	settle = store.Settle{StepID: step.ID, Attempt: contact.Attempt, CallID: dialed.CallID}
 	if dial == 2 && (dialed.Result == Deferred || dialed.Result == Paused || dialed.Result == Refused || dialed.Result == NotPlaced || dialed.Result == DialFailed) {
 		// Dial 1 already rang the person, so the attempt is used whatever stopped dial 2.
 		return unanswered(step, hours, zone, contact, started, settle), false
