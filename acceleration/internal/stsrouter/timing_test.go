@@ -222,26 +222,24 @@ func (s *STSRouterSuite) TestAFailureLogsNoCredentialItQuotes() {
 // the session's own, so every frame taken is counted however the two interleave.
 func (s *STSRouterSuite) TestAudioTakenWhileRepliesCompleteIsAllCounted() {
 	session, provider, logs := s.timedSession()
-	var speakers sync.WaitGroup
-	for range 4 {
-		speakers.Go(func() {
-			for range 50 {
-				s.NoError(session.ProcessAudio(heard(20), sts.Participant{}))
-			}
-		})
-	}
+	var caller sync.WaitGroup
+	caller.Go(func() {
+		for range 200 {
+			s.NoError(session.ProcessAudio(heard(20), sts.Participant{}))
+		}
+	})
 	for i := range 50 {
 		id := "r" + string(rune('a'+i%26)) + string(rune('a'+i/26))
 		provider.emitter.Send(sts.ResponseStarted{ResponseID: id, Generation: i + 1, At: time.Now()})
 		provider.emitter.Send(sts.ResponseComplete{ResponseID: id, Generation: i + 1, Usage: sts.Usage{OutputTokens: 1}})
 	}
-	speakers.Wait()
+	caller.Wait()
 	s.Require().NoError(session.Close())
 	s.drain(session)
 
 	lines := timingLines(s.T(), logs, session.id)
 	s.Require().Len(lines, 1)
-	s.Equal(4000.0, lines[0]["audio_ms"], "4 callers × 50 frames × 20 ms")
+	s.Equal(4000.0, lines[0]["audio_ms"], "200 frames of 20 ms")
 	s.Equal(50.0, lines[0]["replies"])
 	s.Equal(50.0, lines[0]["output_tokens"])
 }
