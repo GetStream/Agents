@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -67,11 +66,9 @@ func (v *validation) nonNegative(field string, value float64) *validation {
 	return v.check(value >= 0, field, "is negative")
 }
 
-var e164 = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
-
 // phoneNumber refuses a non-empty value that is not an E.164 number.
 func (v *validation) phoneNumber(field, value string) *validation {
-	return v.check(value == "" || e164.MatchString(value), field, "is not an E.164 number")
+	return v.check(value == "" || IsE164(value), field, "is not an E.164 number")
 }
 
 func (v *validation) done() error {
