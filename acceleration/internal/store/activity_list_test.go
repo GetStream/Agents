@@ -101,7 +101,7 @@ func (s *StoreSuite) TestActivityListGoesOnAfterAPositionWithNoRowLostOrRepeated
 // organization not asked for read.
 func (s *StoreSuite) TestOrganizationAreasSumTheRangeAndTakeTheFirstDayEverAnswered() {
 	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{
-		s.on(-5, "org-a", "app-1", "agent_setup", AuditSourceCLI, 2, 0),
+		s.on(-5, "org-a", "app-1", "agent_setup", AuditSourceCLI, 2, 1),
 		s.on(0, "org-a", "app-1", "agent_setup", AuditSourceCLI, 1, 1),
 		s.on(0, "org-a", "app-1", "conversations", AuditSourceCLI, 3, 1),
 		s.on(1, "org-a", "app-2", "conversations", AuditSourceSDK, 2, 0),

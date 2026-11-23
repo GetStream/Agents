@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -69,7 +70,7 @@ func (s *OpsActivitySuite) walk(from, to time.Time, limit int) []ActivityPage {
 			return pages
 		}
 		s.Require().NotNil(page.NextCursor)
-		s.Require().Less(len(pages), 10000, "the cursor does not move on")
+		s.Require().Less(len(pages), 500, "the cursor does not move on")
 		path = activityPath(from, to, limit) + "&cursor=" + url.QueryEscape(*page.NextCursor)
 	}
 }
@@ -205,6 +206,21 @@ func (s *OpsActivitySuite) TestFromAndToSpanAtMostFourHundredDaysAndToIsNotBefor
 	s.Contains(string(payload), "before from")
 	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, activityPath(from, from.AddDate(0, 0, 399), 1), nil, nil))
 	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, activityPath(from, from, 1), nil, nil))
+}
+
+// Defect: a range with no row answered with a 500, as the organizations of no row are read, or
+// with null lists.
+func (s *OpsActivitySuite) TestARangeWithNoRowIsAnEmptyPage() {
+	future := time.Now().UTC().AddDate(1, 0, rand.IntN(100))
+
+	status, payload := s.staff.call(http.MethodGet, activityPath(future, future, 0), nil)
+
+	s.Require().Equal(http.StatusOK, status, string(payload))
+	var page map[string]json.RawMessage
+	s.Require().NoError(json.Unmarshal(payload, &page))
+	s.JSONEq(`[]`, string(page["items"]))
+	s.JSONEq(`[]`, string(page["organizations"]))
+	s.JSONEq(`false`, string(page["has_more"]))
 }
 
 // Defect: a cursor this list never handed out, or one whose day is no day, answered with a 500
