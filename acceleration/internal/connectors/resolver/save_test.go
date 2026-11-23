@@ -103,7 +103,8 @@ func (s *ResolverSuite) TestARefreshWhoseFirstSaveFailsIsSavedByTheNextAndStaysC
 	s.Empty(stored.LastError)
 	s.Equal(before+1, stored.Revision)
 	s.Require().NotNil(stored.ExpiresAt)
-	s.True(stored.ExpiresAt.Equal(credential.ExpiresAt), "the renewed expiry is stored")
+	// The store keeps microseconds (resolver.go saves the expiry truncated), and Linux clocks have nanoseconds.
+	s.True(stored.ExpiresAt.Equal(credential.ExpiresAt.Truncate(time.Microsecond)), "the renewed expiry is stored")
 	_, rotated := s.f.tokens(ref)
 	s.False(rotated == consented, "the rotated refresh token is stored")
 
