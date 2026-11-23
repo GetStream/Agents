@@ -30,7 +30,7 @@ const inFlight = 16
 // included. One attempt can wait out a call for the API's scheduledWindow
 // (10 min) and then read the agent's answer for scheduledReplyWindow (3 min),
 // so 20 min lets a slow first attempt finish, while an occurrence whose
-// attempts fail at once still gets every DeliveryRetries wait (12.5 min in
+// attempts fail at once still gets every deliveryRetries wait (12.5 min in
 // all). Without it four slow attempts held a slot ~50-90 min, and a router
 // has inFlight slots.
 const occurrenceBudget = 20 * time.Minute
@@ -62,10 +62,10 @@ const (
 // task gives up, pausing itself as failed.
 const maxConsecutiveFailures = 5
 
-// DeliveryRetries are the waits before an occurrence is delivered again after
+// deliveryRetries are the waits before an occurrence is delivered again after
 // a failed attempt. A delivered task survives a router being busy or a call
 // being in progress; a task whose retries run out has failed an occurrence.
-var DeliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+var deliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
 // FinishRetries are the waits before an occurrence's outcome is written again after the write
 // failed, as a database that blinked fails it: a run left running is taken over by another
@@ -226,7 +226,7 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 		now:           time.Now,
 		lease:         scheduledLease,
 		renewEvery:    renewLeaseEvery,
-		retries:       DeliveryRetries,
+		retries:       deliveryRetries,
 		finishRetries: FinishRetries,
 		budget:        occurrenceBudget,
 		kick:          make(chan struct{}, 1),
@@ -234,6 +234,13 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+}
+
+// SetRetries has the worker wait out waits before each next attempt at a failed occurrence, in
+// place of deliveryRetries. Call it before Start. A test sets it on its own worker, never on a
+// value every worker in the process reads.
+func (s *Scheduler) SetRetries(waits []time.Duration) {
+	s.retries = waits
 }
 
 // SetActivity has each occurrence the worker settles counted in record, as area scheduling. Call

@@ -339,6 +339,9 @@ type RouterSuite struct {
 	scheduledMu      sync.Mutex
 	scheduled        []*schedulingModel
 	schedulingScript schedulingScript
+	// retries, when set, are the waits the test's scheduled-task workers retry a failed
+	// occurrence after (newScheduler), in place of the scheduler's own.
+	retries []time.Duration
 
 	// chat is the Stream Chat the conversations are written to and transcripts read from:
 	// the deployment's own app. apps gives a customer an app of its own instead, and

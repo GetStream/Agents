@@ -494,7 +494,7 @@ func (s *ScheduledTasksSuite) runWorker() {
 		s.attempts.Add(1)
 		return s.router.DeliverScheduledTask(ctx, claimed)
 	}
-	worker := scheduling.NewScheduler(s.store, deliver, slog.New(slog.DiscardHandler))
+	worker := s.newScheduler(deliver, slog.New(slog.DiscardHandler))
 	worker.Start(context.Background())
 	s.worker = worker
 	s.router.SetSchedulerKick(worker.Kick)
@@ -2899,9 +2899,9 @@ func (s *ScheduledTasksSuite) pausedInTheSecondPass(id string) time.Time {
 
 // resumingAt has a resume count from now rather than the wall clock.
 func (s *ScheduledTasksSuite) resumingAt(now time.Time) {
-	kept := resumedAt
-	resumedAt = func() time.Time { return now }
-	s.T().Cleanup(func() { resumedAt = kept })
+	kept := s.router.resumedAt
+	s.router.resumedAt = func() time.Time { return now }
+	s.T().Cleanup(func() { s.router.resumedAt = kept })
 }
 
 // utcTaskRequest is taskRequest in UTC, so a task's local start is its instant.
@@ -3538,9 +3538,7 @@ func (s *ScheduledTasksSuite) TestAnUnreachablePhoneFallsBackToWhatsApp() {
 }
 
 func (s *ScheduledTasksSuite) TestAPhoneOnlyTaskFailsWhenNoCallCanBePlaced() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAtOnce()
 
 	user := s.data.createUser()
 	config := s.agentToRing(user)
@@ -3691,9 +3689,9 @@ func (s *ScheduledTasksSuite) TestACallThatOutlastsTheWaitIsUserOnCall() {
 }
 
 func (s *ScheduledTasksSuite) TestACallNobodyPicksUpIsNotAnswered() {
-	window := scheduledPhoneWindow
-	scheduledPhoneWindow = 50 * time.Millisecond
-	s.T().Cleanup(func() { scheduledPhoneWindow = window })
+	window := s.router.phoneWindow
+	s.router.phoneWindow = 50 * time.Millisecond
+	s.T().Cleanup(func() { s.router.phoneWindow = window })
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
 	opened := s.openScheduling(user, config, nil)
@@ -3704,7 +3702,7 @@ func (s *ScheduledTasksSuite) TestACallNobodyPicksUpIsNotAnswered() {
 	s.Equal(scheduling.ReasonNotAnswered, scheduling.ReasonOf(err), "the ring ran out: %v", err)
 	s.True(s.failure(err).Final, "the user is not rung again")
 
-	scheduledPhoneWindow = time.Minute
+	s.router.phoneWindow = time.Minute
 	held := make(chan error, 1)
 	go func() { held <- s.router.holdCall(context.Background(), found, scheduledDelivery{}) }()
 	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
@@ -3724,9 +3722,9 @@ func (s *ScheduledTasksSuite) ownerOf(user *testClient) session.Owner {
 
 func (s *ScheduledTasksSuite) TestAReplyNeverWrittenIsNoReply() {
 	s.retryAtOnce()
-	window := scheduledReplyWindow
-	scheduledReplyWindow = time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	number, writer := s.lineNumber(), s.writerNumber()
 	s.connectWhatsApp(number)
 	config := s.agentOnWhatsApp(number)
@@ -3763,11 +3761,28 @@ func (s *ScheduledTasksSuite) TestAFailureOnEveryChannelIsListedUnderTheFirstCha
 	s.Equal(scheduling.ReasonUnreachable, *s.failedRun(s.tasksOf(user)[0]).Error)
 }
 
-// retryAtOnce has a failed occurrence tried again straight away, twice.
+// retryAtOnce has a failed occurrence tried again straight away, twice, by the workers the test
+// starts next (newScheduler).
 func (s *RouterSuite) retryAtOnce() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAfter(time.Millisecond, time.Millisecond)
+}
+
+// retryAfter has the workers the test starts next retry a failed occurrence after waits. They are
+// the suite's, never the scheduler's own: suites run in parallel, and one that changed a value
+// every worker reads changed the retries of the others' workers mid-test.
+func (s *RouterSuite) retryAfter(waits ...time.Duration) {
+	s.retries = waits
+	s.T().Cleanup(func() { s.retries = nil })
+}
+
+// newScheduler is a scheduled-task worker delivering with deliver, retrying as the test set
+// (retryAfter), else as the scheduler does.
+func (s *RouterSuite) newScheduler(deliver scheduling.DeliverFunc, logger *slog.Logger) *scheduling.Scheduler {
+	worker := scheduling.NewScheduler(s.store, deliver, logger)
+	if s.retries != nil {
+		worker.SetRetries(s.retries)
+	}
+	return worker
 }
 
 // failedRun waits for the task's latest run to fail, and returns it.
@@ -4085,9 +4100,9 @@ func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrence
 
 func (s *ScheduledTasksSuite) TestARetryWaitsForAReplyStillBeingWritten() {
 	s.retryAtOnce()
-	window := scheduledReplyWindow
-	scheduledReplyWindow = 6 * time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = 6 * time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	number, writer := s.lineNumber(), s.writerNumber()
 	s.connectWhatsApp(number)
 	config := s.agentOnWhatsApp(number)

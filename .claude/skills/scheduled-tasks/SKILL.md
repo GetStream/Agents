@@ -207,7 +207,7 @@ Run `error` codes (`internal/scheduling/scheduler.go:105`):
 | `spend_check_unavailable` | The router could not check what the organization has spent, so it refused the step for now (`policy.Transient`). A turn it refused runs once more on the retry, under `st_<run>_r1`: the scheduler hands the next attempt the reason this one failed under (`deliverWithRetries`), a hand-off to the router holding the session carries it (`scheduledHandOff.Earlier`), and `replyCommand` reruns a failed reply after a money code. A conversation rerun refused as well fails the attempt under the same code (`followUpInConversation`), so the run fails once its retries are spent. A reply that failed for any other reason is read back as it was | yes (`unpaid` leaves it retryable) |
 | `task_paused` | On a `missed` run: a one-shot whose time came while it was paused, or an occurrence the cut-over of a move skipped whose run the source had started | — |
 
-A failure is retried after 30 s, 2 min and 10 min (`DeliveryRetries`) only when the failure
+A failure is retried after 30 s, 2 min and 10 min (`deliveryRetries`) only when the failure
 is not final; with several channels, it is final only when every channel's failure is.
 
 Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all but the
