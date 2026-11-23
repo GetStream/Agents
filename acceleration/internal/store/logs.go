@@ -222,6 +222,8 @@ func redactLegacyCredentials(text string) string {
 	text = redactUnlessWord(credentialText, text)
 	text = urlCredential.ReplaceAllString(text, "${1}[redacted]@")
 	text = queryCredential.ReplaceAllString(text, "${1}[redacted]")
+	// The encoded key goes before the vendor phrase: the key class of the phrase stops at the %
+	// of %3D and would leave the value of an encoded key that follows it.
 	text = encodedCredential.ReplaceAllString(text, "${1}${2}[redacted]")
 	text = redactVendorKeyMessage(vendorKeyMessage, text)
 	text = redactVendorKeyMessage(vendorKeyBefore, text)

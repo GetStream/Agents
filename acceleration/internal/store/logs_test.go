@@ -208,6 +208,7 @@ func TestSafeLogTextTakesAnEncodedKeyAndAVendorRefusalOut(t *testing.T) {
 		"base64 key":                             {"Invalid API key Ab" + secret[:10] + "+/" + secret[10:] + "==", "Invalid API key [redacted]"},
 		"base64 key before the verdict":          {"The API key '" + secret[:16] + "+/" + secret[16:] + "=' is invalid", "The API key '[redacted]' is invalid"},
 		"key of 16 before the verdict":           {"API key '" + secret[:16] + "' is invalid for model m", "API key '[redacted]' is invalid for model m"},
+		"key then an encoded key, in this order": {"Invalid API key " + secret[:16] + "-key%3D" + secret, "Invalid API key [redacted]%3D[redacted]"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.want, SafeLogText(tc.in))
