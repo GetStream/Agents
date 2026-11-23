@@ -25,7 +25,8 @@ import (
 // maxResponseBytes is the most of one response body a call reads: the mcp source's cap
 // (mcp.maxResponseBytes, 4 MiB), which AI-3669 reuses («MCP's size caps are reused»), so an API
 // that answers without end cannot exhaust the router's memory. The model reads at most
-// core.MaxResultBytes of it.
+// core.MaxResultBytes of it. A call reads one byte past it, to tell a body the cap cut from one
+// that ends at the cap.
 const maxResponseBytes = 4 << 20
 
 // nonText is what the model reads for a body that is not UTF-8 text, such as an image: the mcp
@@ -109,13 +110,16 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 		return core.Result{}, stack.Wrap(fmt.Errorf("http: %s: %w", call.Name, err))
 	}
 	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	read, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
 		return core.Result{}, stack.Wrap(fmt.Errorf("http: %s: read the answer: %w", call.Name, err))
 	}
+	// A body past the cap is cut at it, back to the start of the rune the cut falls in, so text
+	// cut inside a rune is still text.
+	body := core.CutAtRune(string(read), maxResponseBytes)
 	text := nonText
-	if utf8.Valid(body) {
-		text = string(body)
+	if utf8.ValidString(body) {
+		text = body
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		message := fmt.Sprintf("The API answered %s", response.Status)

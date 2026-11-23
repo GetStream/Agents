@@ -236,6 +236,18 @@ func (s *SourceSuite) TestABodyIsReadOnlyUpToTheCap() {
 	s.True(strings.HasSuffix(text, core.TruncatedMarker))
 }
 
+// R1.2: valid text whose cut at the cap falls inside a rune is still text, cut before that rune.
+func (s *SourceSuite) TestTextTheCapCutsInsideARuneIsStillText() {
+	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/huge-runes"}
+
+	result, err := s.call(s.binding(tool), "get", `{}`)
+
+	s.Require().NoError(err)
+	text := llm.TextOf(result.Parts)
+	s.True(strings.HasPrefix(text, "aaaa"), "not %q", nonText)
+	s.True(strings.HasSuffix(text, core.TruncatedMarker))
+}
+
 // AI-3674, from the AI-3673 review (R1.3): revision 2 turns POST x into a read-only GET. A grant
 // made for one revision's x never opens the other's, so a connection still pinned to revision 1
 // never runs the POST under a grant made for the read-only GET, nor the reverse.
@@ -518,6 +530,9 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 		// 4 MiB, the cap AI-3669 decided, written out so a changed maxResponseBytes fails the test.
 		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20))
 		_, _ = w.Write([]byte{0xff})
+	case "/huge-runes":
+		// The cut at 4 MiB falls inside the first é.
+		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20-1)+"éééé")
 	case "/missing":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "no such item")
