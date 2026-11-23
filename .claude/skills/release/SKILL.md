@@ -30,33 +30,19 @@ tag (`sdks/python/pyproject.toml`, `[tool.hatch.version] source = "vcs"`).
 On a branch from `origin/main`, list what merged since the previous release:
 
 ```bash
-git log <previous tag>..origin/main --oneline | grep -E '\(#[0-9]+\)$'
+git log <previous tag>..origin/main --oneline | grep -E '\(#[0-9]+\)$|Merge pull request #[0-9]+ '
 ```
 
 Do not add `--first-parent`: a PR that reached `main` inside a merge commit (the #2030 accelerate
-merge) is not on the first-parent chain, and the list would miss it (#2053).
+merge) is not on the first-parent chain, and the list would miss it (#2053). The second pattern
+lists a PR merged by a `Merge pull request #N` commit (#2088).
 
 In the root `CHANGELOG.md`:
 
-- Sort the entries by the previous release tag. `# Unreleased` can hold work that is older than
-  that tag: `0.7.0` shipped without a section, so its work is still there. An entry whose PR
-  merged before the previous release tag goes under that release's own heading (`# 0.7.0`, as
-  the tag is written), which you create below `# vX.Y.Z` if it is missing. Only the rest goes
-  under `# vX.Y.Z`. For an entry with a PR number, find the oldest commit whose subject ends
-  `(#N)`. Test it with the command below. It prints `before`, `after`, `none` or `error`. For `none`, and
-  for an entry with no PR number, take the commit that wrote its `###` line
-  (`git blame -l -L <line>,<line> origin/main -- CHANGELOG.md`) and test that commit. On `error`,
-  stop: a git error is never `after`.
-
-  ```bash
-  c=$(git log origin/main --format=%H --fixed-strings --grep='(#2047)' | tail -1)
-  if [ -z "$c" ]; then echo none
-  elif git merge-base --is-ancestor "$c" <previous tag>; then echo before
-  else [ $? -eq 1 ] && echo after || echo error; fi
-  ```
-
-  `before` means the previous release's heading, `after` means `# vX.Y.Z`.
-- Rename the rest of `# Unreleased` to `# vX.Y.Z`, and add a new, empty `# Unreleased` above it.
+- Rename `# Unreleased` to `# vX.Y.Z`, and add a new, empty `# Unreleased` above it. For the first
+  release after `0.7.0` only, add one line under the heading: the section also covers `0.7.0`,
+  which shipped without one. No later release needs the line: since AI-3557, `# Unreleased`
+  holds only breaking-change lines between releases.
 - Keep three sections, in this order: `## Breaking Changes`, `## New Features`, `## Bug Fixes`.
   Merge sections that appear twice or under another name (`## Features`). The `# Unreleased`
   written before AI-3557 has both problems.
