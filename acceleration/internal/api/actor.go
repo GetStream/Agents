@@ -16,8 +16,8 @@ import (
 // unsigned, so what it buys is a name beside a change somebody already had the credential
 // to make, never permission to make it.
 //
-// X-Stream-Client is the client itself (dashboard, cli, sdk), which Stream's own clients
-// already tag themselves with. The other two are the person behind it, which only a client
+// X-Stream-Client is the client itself (dashboard, cli, or an SDK's name and release such as
+// stream-agents-go-v0.3.0), which Stream's own clients already tag themselves with. The other two are the person behind it, which only a client
 // that signs its users in can know: the dashboard has the operator who clicked save, the
 // CLI has whoever ran it, and an SDK syncing on startup has nobody and says nothing.
 const (
@@ -52,7 +52,7 @@ func actorOf(r *http.Request, serverSide bool) Actor {
 	if !serverSide {
 		return actor
 	}
-	actor.Source = store.AuditSource(strings.ToLower(strings.TrimSpace(r.Header.Get(clientHeader))))
+	actor.Source = store.AuditSource(r.Header.Get(clientHeader))
 	actor.ID = trimmedTo(r.Header.Get(actorIDHeader), actorNameLimit)
 	actor.Name = trimmedTo(headerText(r.Header.Get(actorNameHeader)), actorNameLimit)
 	return actor

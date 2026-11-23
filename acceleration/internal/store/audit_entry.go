@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -87,9 +88,20 @@ var auditClients = []string{AuditSourceDashboard, AuditSourceCLI, AuditSourceSDK
 // CHECK as Go can read it.
 var auditSources = []string{AuditSourceDashboard, AuditSourceCLI, AuditSourceSDK, AuditSourceAPI, AuditSourceManage}
 
-// AuditSource reads a client's name into a source, falling back to the API for one that
-// named nothing or named something nobody knows, manage among them.
-func AuditSource(client string) string {
+// sdkClientPrefix starts the name and release an SDK sends as its client, such as
+// stream-agents-go-v0.3.0 or stream-agents-js-v0.8.0-browser: the shape other Stream SDKs send
+// (stream-chat-js-v<version>-<node|browser>), under the product's own name.
+const sdkClientPrefix = "stream-agents-"
+
+// AuditSource reads the client a request names in X-Stream-Client into a source, in any case
+// and with spaces around it. An SDK naming its release is the SDK, as is an older one that
+// sends sdk alone. One that named nothing or something nobody knows, manage among them, is the
+// API.
+func AuditSource(header string) string {
+	client := strings.ToLower(strings.TrimSpace(header))
+	if strings.HasPrefix(client, sdkClientPrefix) {
+		return AuditSourceSDK
+	}
 	if slices.Contains(auditClients, client) {
 		return client
 	}
