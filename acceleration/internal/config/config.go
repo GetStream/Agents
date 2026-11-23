@@ -1047,8 +1047,6 @@ func (c Config) validate() error {
 // team's, so the key is at least 128 random bits in hex, as `openssl rand -hex 16` prints.
 const minActivityKey = 32
 
-// validateUsage refuses a usage service the router could not ship to. A token without a URL is
-// allowed, since unsetting the URL alone is how shipping is stopped; the router warns of it.
 // validateActivityKeys refuses an activity key shorter than minActivityKey, one with a space at
 // either end, and one that is also the ops or the manage key: a job holding it would then reach
 // every path that key does. net/http trims a header's value, so a key that is the ops key and a
@@ -1078,6 +1076,8 @@ func (a Auth) validateActivityKeys() error {
 	return nil
 }
 
+// validateUsage refuses a usage service the router could not ship to. A token without a URL is
+// allowed, since unsetting the URL alone is how shipping is stopped; the router warns of it.
 func (c Config) validateUsage() error {
 	if c.Usage.URL == "" {
 		if c.Usage.RedisURL != "" {
