@@ -329,7 +329,7 @@ func (s *PolicySuite) TestAGrantAdmitsPastASpentLimitUntilItIsUsed() {
 	s.NoError(refused)
 	s.ErrorIs(s.admitted().Spend, ErrBudgetSpent, "the hold uses the grant up at once")
 
-	s.spendAs(store.Request{UsageID: usageID, CustomerID: s.app, CostMicros: 2_000_000, LimitGrants: drawn})
+	s.spendAs(store.Request{UsageID: usageID, CustomerID: s.app, OrganizationID: s.org, CostMicros: 2_000_000, LimitGrants: drawn})
 	s.enforcer.Written([]routing.Acked{{UsageID: usageID, OrganizationID: s.org, CostMicros: 2_000_000}})
 	s.never(func() bool {
 		s.enforcer.money.mu.Lock()

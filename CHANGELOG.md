@@ -876,6 +876,9 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### Only a number on the customer's own trunk moves in an import
 
 `/v1/data/import`, and a change applied after it, writes a `phone_numbers` row only when its vendor is exactly `sip_trunk`; any other row is skipped without an error. A number bought at a vendor stays in the vendor account of the deployment that bought it, and its bills already move with the requests, so the destination neither holds it nor bills its months again. A customer that moves keeps a bought number by buying or porting it at the destination. A number bought here and still held is never updated or deleted by an imported row or a replayed change, whatever id it names. An imported `sip_trunk` number is held to the API's rules (E.164, a vendor, a cost that is not negative), and no imported number keeps its `dlc_use_case_id`, which names a use case of the source.
+### A request counts only toward its own organization's spend grants
+
+A request row's cost is added to a grant it names only when the grant belongs to the row's organization, both as the row is written and when the grant uses are reconciled. An imported request names no grant: it was drawn from the grants of the deployment that recorded it.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

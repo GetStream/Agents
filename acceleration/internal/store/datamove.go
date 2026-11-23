@@ -1481,10 +1481,11 @@ func (t dataTable) identity() string {
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
-	// this one shipped or had refused leaves it alone.
+	// this one shipped or had refused leaves it alone. Nor was it drawn from a grant here,
+	// whose ids are this deployment's own.
 	// Nor is it billed here, and it counts against the importing app's organization alone.
 	if t.name == "requests" {
-		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '')" +
+		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '', 'limit_grants', '{}'::bigint[])" +
 			" || jsonb_build_object('billable', false)" +
 			" || jsonb_build_object('organization_id', ?::text)"
 	}

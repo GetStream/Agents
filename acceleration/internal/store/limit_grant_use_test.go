@@ -8,11 +8,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// grantRow is a request row that names grants, written as the writer writes it.
+// grantRow is a request row that names grants, written as the writer writes it: of the
+// organization of the first grant it names.
 func (s *StoreSuite) grantRow(store *Store, grants []int64, cost int64, billable bool) Request {
 	row := Request{
-		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-1", Provider: "openai", Model: "m",
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-1", OrganizationID: "org-1", Provider: "openai", Model: "m",
 		StartedAt: s.base, CostMicros: cost, Billable: billable, Success: true, LimitGrants: grants,
+	}
+	if len(grants) > 0 {
+		grant, err := s.store.LimitGrants.Get(s.ctx, "", grants[0])
+		s.Require().NoError(err)
+		row.OrganizationID = grant.OrganizationID
 	}
 	s.writeAsTheWriter(store, row)
 	return row
@@ -49,6 +55,20 @@ func (s *StoreSuite) TestAWrittenRowCountsTowardEachGrantItNames() {
 	s.EqualValues(200, s.used(b.ID), "a row naming two counts for both")
 }
 
+func (s *StoreSuite) TestAWrittenRowCountsOnlyTowardItsOwnOrganizationsGrant() {
+	grant := s.grant(LimitGrant{AmountMicros: 10_000})
+	written := func(organization string, cost int64) Request {
+		return Request{
+			UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-2", OrganizationID: organization, Provider: "openai",
+			Model: "m", StartedAt: s.base, CostMicros: cost, Billable: true, Success: true, LimitGrants: []int64{grant.ID},
+		}
+	}
+
+	s.writeAsTheWriter(s.store, written("org-2", 300), written("org-1", 50), written("", 700))
+
+	s.EqualValues(50, s.used(grant.ID), "a row of another organization, or of none, naming the grant counts nothing")
+}
+
 func (s *StoreSuite) TestARowWrittenTwiceCountsOnceTowardItsGrant() {
 	grant := s.grant(LimitGrant{AmountMicros: 10_000})
 	row := s.grantRow(s.store, []int64{grant.ID}, 300, true)
@@ -58,13 +78,13 @@ func (s *StoreSuite) TestARowWrittenTwiceCountsOnceTowardItsGrant() {
 	written, err := s.store.Requests.InsertMany(s.ctx, []Request{again, again})
 	s.Require().NoError(err)
 	s.Empty(written, "the shard has it")
-	counted, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{{GrantID: grant.ID, UsageID: row.UsageID, Micros: 300}})
+	counted, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{{GrantID: grant.ID, OrganizationID: "org-1", UsageID: row.UsageID, Micros: 300}})
 	s.Require().NoError(err)
 	s.Zero(counted, "nor does counting it again")
 
 	s.EqualValues(300, s.used(grant.ID))
 	fresh := Request{
-		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-1", Provider: "openai", Model: "m",
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-1", OrganizationID: "org-1", Provider: "openai", Model: "m",
 		StartedAt: s.base, CostMicros: 50, Billable: true, Success: true, LimitGrants: []int64{grant.ID},
 	}
 	s.writeAsTheWriter(s.store, fresh, fresh)
@@ -75,10 +95,10 @@ func (s *StoreSuite) TestGrantUsesCountedIsHowManyGrantsEachRowCountsToward() {
 	a, b := s.grant(LimitGrant{AmountMicros: 10_000}), s.grant(LimitGrant{AmountMicros: 10_000})
 	both, one, other, unasked := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	_, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{
-		{GrantID: a.ID, UsageID: both, Micros: 10},
-		{GrantID: b.ID, UsageID: both, Micros: 10},
-		{GrantID: a.ID, UsageID: one, Micros: 10},
-		{GrantID: b.ID, UsageID: unasked, Micros: 10},
+		{GrantID: a.ID, OrganizationID: "org-1", UsageID: both, Micros: 10},
+		{GrantID: b.ID, OrganizationID: "org-1", UsageID: both, Micros: 10},
+		{GrantID: a.ID, OrganizationID: "org-1", UsageID: one, Micros: 10},
+		{GrantID: b.ID, OrganizationID: "org-1", UsageID: unasked, Micros: 10},
 	})
 	s.Require().NoError(err)
 
@@ -113,7 +133,7 @@ func (s *StoreSuite) TestTheUsesOfAGrantEndedLongAgoArePruned() {
 	s.Equal(1, uses(recent.ID), "a grant ended inside GrantUsesKept keeps them")
 	s.Equal(1, uses(live.ID))
 	s.EqualValues(300, s.used(expired.ID), "what it paid for stays")
-	counted, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{{GrantID: revoked.ID, UsageID: uuid.Must(uuid.NewV7()), Micros: 5}})
+	counted, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{{GrantID: revoked.ID, OrganizationID: "org-1", UsageID: uuid.Must(uuid.NewV7()), Micros: 5}})
 	s.Require().NoError(err)
 	s.Zero(counted, "nor does it count anything more")
 	s.EqualValues(300, s.used(revoked.ID))
@@ -132,7 +152,7 @@ func (s *ShardedStoreSuite) TestRowsInEveryShardCountTowardTheirGrant() {
 // or stopped before it, leaves it.
 func (s *StoreSuite) uncounted(store *Store, startedAt time.Time, cost int64, grants ...int64) {
 	lost := Request{
-		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-1", Provider: "openai", Model: "m",
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-1", OrganizationID: "org-1", Provider: "openai", Model: "m",
 		StartedAt: startedAt, CostMicros: cost, Billable: true, Success: true, LimitGrants: grants,
 	}
 	s.Require().NoError(prepareRequest(&lost))
@@ -156,6 +176,21 @@ func (s *ShardedStoreSuite) TestAReconcileCountsARowItsWriterDidNot() {
 	s.EqualValues(370, s.used(grant.ID))
 	s.Zero(s.reconcile())
 	s.EqualValues(370, s.used(grant.ID))
+}
+
+func (s *ShardedStoreSuite) TestAReconcileCountsARowOnlyTowardItsOwnOrganizationsGrant() {
+	grant := s.grant(LimitGrant{AmountMicros: 10_000})
+	s.uncounted(s.other, s.base, 70, grant.ID)
+	foreign := Request{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-2", OrganizationID: "org-2", Provider: "openai", Model: "m",
+		StartedAt: s.base, CostMicros: 9_000, Billable: true, Success: true, LimitGrants: []int64{grant.ID},
+	}
+	s.Require().NoError(prepareRequest(&foreign))
+	_, err := s.other.ShardDB().NewInsert().Model(&foreign).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Equal(1, s.reconcile(), "only the row of the grant's own organization")
+	s.EqualValues(70, s.used(grant.ID))
 }
 
 func (s *ShardedStoreSuite) TestAReconcileReadsOnlyTheRowsSinceTheLastLessItsOverlap() {
@@ -212,7 +247,7 @@ func (s *StoreSuite) TestLimitGrantUseQueryBudgets() {
 	first, second := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	s.Equal(4, s.countQueries(func() {
 		counted, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{
-			{GrantID: a.ID, UsageID: first, Micros: 1}, {GrantID: b.ID, UsageID: first, Micros: 1}, {GrantID: a.ID, UsageID: second, Micros: 1},
+			{GrantID: a.ID, OrganizationID: "org-1", UsageID: first, Micros: 1}, {GrantID: b.ID, OrganizationID: "org-1", UsageID: first, Micros: 1}, {GrantID: a.ID, OrganizationID: "org-1", UsageID: second, Micros: 1},
 		})
 		s.Require().NoError(err)
 		s.Equal(3, counted)
