@@ -373,11 +373,14 @@ func (s *TTSRouterSuite) TestRowInterruptedSecondSentenceDoesNotCarryTheFirstsSt
 		s.settled(session)
 		lines := s.synthesisLines(logs)
 		s.Require().Len(lines, 2)
+		var interrupted []map[string]any
 		for _, l := range lines {
 			if l["error_code"] == "interrupted" {
-				s.EqualValues(4, l["characters"])
-				s.NotContains(l, "duration_ms", "the second sentence never started")
+				interrupted = append(interrupted, l)
 			}
 		}
+		s.Require().Len(interrupted, 1, "the second sentence's drop is the one interrupted line")
+		s.EqualValues(4, interrupted[0]["characters"])
+		s.NotContains(interrupted[0], "duration_ms", "the second sentence never started")
 	})
 }
