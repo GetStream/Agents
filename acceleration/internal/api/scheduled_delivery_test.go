@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -69,4 +70,18 @@ func TestAHandOffReadsOnlyTheIdsAPeerChecks(t *testing.T) {
 	require.NoError(t, json.Unmarshal(read, &fields))
 	require.ElementsMatch(t, []string{"customer_id", "task_id", "run_id", "session_id", "user_id", "caller_kind", "earlier"},
 		slices.Collect(maps.Keys(fields)))
+}
+
+// A retry reruns a failed turn after every refusal for money, not only after the check that
+// could not run: a refusal the check could not settle can carry insufficient_credits or
+// spend_limit_reached too (policy's uncheckedWith), and passes again on its own as well. A reason
+// that is not about money reruns nothing.
+func TestEveryMoneyCodeRerunsAFailedTurn(t *testing.T) {
+	for _, code := range []string{codeAccountSuspended, codeInsufficientCredits, codeTopUpRequired,
+		codeSystemLimitReached, codeSpendLimitReached, codeUserLimitReached, codeSpendCheckUnavailable} {
+		require.True(t, moneyCode(code), code)
+	}
+	for _, code := range []string{"", scheduling.ReasonReplyFailed, scheduling.ReasonTierLimit, scheduling.ReasonNoReply} {
+		require.False(t, moneyCode(code), code)
+	}
 }

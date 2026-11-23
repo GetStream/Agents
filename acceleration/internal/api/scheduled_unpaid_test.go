@@ -658,6 +658,33 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedOnAnotherRouterRunsAgain
 	s.NotEmpty(said, "the user got a reply")
 }
 
+// A thread task whose reply failed, retried after a refusal for money, runs its turn again in the
+// thread under the rerun's command id, as the conversation and the text channels do.
+func (s *TelnyxUnpaidSuite) TestAThreadRetryAfterARefusalForMoneyRunsTheTurnAgain() {
+	channel := s.creditedThread("+1347" + digits(s.utils.uuid()))
+	s.config.Models.LLM = "failing/failing-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
+	s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
+	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
+	s.Require().True(running)
+	task := s.threadTask(channel)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
+		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
+	ctx := scheduledOwnerContext(context.Background(), delivery)
+	_, _, err := s.router.deliverOnThread(ctx, delivery, channel)
+	s.Require().Error(err)
+	state, _, _ := found.FollowUpReply("st_run")
+	s.Require().Equal("failed", state)
+
+	// The retry carries the reason the attempt before it failed under, as the scheduler records it.
+	delivery.Earlier = codeSpendCheckUnavailable
+	_, _, err = s.router.deliverOnThread(ctx, delivery, channel)
+
+	s.Equal(scheduling.ReasonReplyFailed, scheduling.ReasonOf(err), "the rerun failed on the model too")
+	_, _, rerun := found.FollowUpReply("st_run" + rerunSuffix)
+	s.True(rerun, "the retry after a refusal for money ran the turn again")
+}
+
 // A text channel's turn refused because the money cannot be checked runs again on the attempt
 // after it, once the check passes, and that attempt carries what the agent said.
 func (s *TelnyxUnpaidSuite) TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAgainOnItsRetry() {
