@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -234,8 +235,8 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 // maxActive already. Two creates or resumes at once would otherwise both count room for one more,
 // so the count is taken under a lock on the user and config held until the transaction ends.
 func refuseOverLimit(ctx context.Context, tx bun.Tx, task *ScheduledTask, maxActive int) error {
-	if err := lockUntilCommit(ctx, tx, task.CustomerID+"/"+task.UserID+"/"+task.ConfigID, scheduledTaskLimitLockSeed); err != nil {
-		return fmt.Errorf("store: lock scheduled task limit: %w", err)
+	if err := lockTaskLimits(ctx, tx, task.CustomerID, []scheduledTaskHolder{{task.UserID, task.ConfigID}}); err != nil {
+		return err
 	}
 	count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
 	if err != nil {
@@ -243,6 +244,25 @@ func refuseOverLimit(ctx context.Context, tx bun.Tx, task *ScheduledTask, maxAct
 	}
 	if count >= maxActive {
 		return ErrTooManyScheduledTasks
+	}
+	return nil
+}
+
+// lockTaskLimits takes the lock each of a customer's users on a config counts their active
+// limit under, held until tx ends. Sorted, so two transactions taking several wait for each
+// other instead of deadlocking.
+func lockTaskLimits(ctx context.Context, tx bun.Tx, customerID string, holders []scheduledTaskHolder) error {
+	keys := make([]string, 0, len(holders))
+	for _, holder := range holders {
+		keys = append(keys, customerID+"/"+holder.user+"/"+holder.config)
+	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
+	// unnest reads the array in order, so the locks are taken in it.
+	if _, err := tx.ExecContext(ctx,
+		"SELECT pg_advisory_xact_lock(hashtextextended(key, ?)) FROM unnest(?::text[]) AS key",
+		scheduledTaskLimitLockSeed, pgdialect.Array(keys)); err != nil {
+		return fmt.Errorf("store: lock scheduled task limit: %w", err)
 	}
 	return nil
 }

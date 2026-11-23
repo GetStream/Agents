@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/big"
@@ -2940,6 +2941,27 @@ func (s *DataMoveSuite) TestTheCutOverResumesTheOldestTaskWhateverItsId() {
 	}
 }
 
+// The older of two tasks takes the one place, though its id sorts last and an edit here wrote
+// its row after the other's.
+func (s *DataMoveSuite) TestTheCutOverResumesTheOldestTaskWhereverItsRowLies() {
+	s.seedScheduledTask("st-b", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-a", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET title = 'Stretch more' WHERE id = 'st-b'")
+	s.Require().NoError(err)
+
+	resumed, _, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+
+	s.Require().NoError(err)
+	s.Equal(int64(1), resumed)
+	s.Equal(int64(1), overLimit)
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-b")
+	s.Equal(ScheduledTaskActive, state, "st-b was made first")
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-a")
+	s.Equal(ScheduledTaskPaused, state)
+}
+
 // The mark kept on a task left over the limit is what lets a second cut-over resume it.
 func (s *DataMoveSuite) TestTheCutOverRunAgainResumesWhatItLeftOnceTheUserHasRoom() {
 	for _, id := range []string{"st-1", "st-2", "st-3"} {
@@ -2992,6 +3014,176 @@ UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'`)
 	s.Zero(overLimit)
 }
 
+// waitingHere counts the destination's backends waiting for a heavyweight lock: a row's, a
+// table's or an advisory one (wait_event_type Lock,
+// https://www.postgresql.org/docs/current/monitoring-stats.html#WAIT-EVENT-TABLE).
+func (s *DataMoveSuite) waitingHere() int {
+	var count int
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&count))
+	return count
+}
+
+// cutOver runs ResumeMovedRows on the destination in the background.
+func (s *DataMoveSuite) cutOver() <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+		done <- err
+	}()
+	return done
+}
+
+// A create counts the room it takes under the limit's lock and holds it until it commits. The
+// cut-over counts under the same lock, so it sees the task made meanwhile and resumes one task,
+// not two.
+func (s *DataMoveSuite) TestTheCutOverCountsTheRoomACreateInProgressTakes() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-2", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(2)
+	creating, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = creating.Rollback() }()
+	next := time.Date(2026, 12, 2, 9, 0, 0, 0, time.UTC)
+	made := &ScheduledTask{
+		ID: "st-here", CustomerID: "moved", ConfigID: "config-1", UserID: "sam", CallerKind: "authenticated",
+		Title: "Hydrate", Instructions: "Remind them to drink.", StartLocal: next, Timezone: "UTC",
+		State: ScheduledTaskActive, NextRunAt: &next, CreatedBy: "api", Channels: []string{ScheduledTaskDeliveredConversation},
+	}
+	s.Require().NoError(refuseOverLimit(s.ctx, creating, made, 2))
+	_, err = creating.NewInsert().Model(made).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the create's lock")
+	s.Require().NoError(creating.Commit())
+
+	s.Require().NoError(<-done)
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(2, held, "the task made here and the oldest moved one")
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-2")
+	s.Equal(ScheduledTaskPaused, state)
+	s.True(s.movePausedOn("st-2"), "still owed its resume")
+}
+
+// A resume of a moved task locks the task's row, then the limit (ScheduledTasks.Update). The
+// cut-over takes them in the same order, so it waits for the resume instead of holding the
+// limit the resume waits for, which Postgres would end by aborting one of the two (40P01). The
+// task the resume took is counted once: the room left still resumes the next.
+func (s *DataMoveSuite) TestTheCutOverWaitsForAResumeOfAMovedTaskAndCountsItOnce() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-2", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(2)
+	resuming, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = resuming.Rollback() }()
+	_, err = refuseDeletedConfig(s.ctx, resuming, "moved", "config-1")
+	s.Require().NoError(err)
+	stored, err := lockScheduledTask(s.ctx, resuming, "moved", "st-1")
+	s.Require().NoError(err)
+	s.Require().Equal(ScheduledTaskPaused, stored)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the resume's row")
+	s.Require().NoError(refuseOverLimit(s.ctx, resuming,
+		&ScheduledTask{CustomerID: "moved", UserID: "sam", ConfigID: "config-1"}, 2))
+	_, err = resuming.ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active' WHERE id = 'st-1'")
+	s.Require().NoError(err)
+	s.Require().NoError(resuming.Commit())
+
+	s.Require().NoError(<-done)
+	for _, id := range []string{"st-1", "st-2"} {
+		state, _, _, _ := s.scheduledTaskOn(s.destination, id)
+		s.Equal(ScheduledTaskActive, state, id)
+	}
+}
+
+// A user's pause of a task the move paused clears its mark while the cut-over waits for the
+// task's row. The cut-over then leaves that task paused and gives its place to the next.
+func (s *DataMoveSuite) TestTheCutOverLeavesATaskPausedByTheUserWhileItWaited() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-2", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	pausing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = pausing.Rollback() }()
+	_, err = lockScheduledTask(s.ctx, pausing, "moved", "st-1")
+	s.Require().NoError(err)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the pause's row")
+	_, err = pausing.ExecContext(s.ctx, "UPDATE scheduled_tasks SET move_paused = false WHERE id = 'st-1'")
+	s.Require().NoError(err)
+	s.Require().NoError(pausing.Commit())
+
+	s.Require().NoError(<-done)
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-1")
+	s.Equal(ScheduledTaskPaused, state, "the user paused it")
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-2")
+	s.Equal(ScheduledTaskActive, state, "the one place is left to it")
+}
+
+// The cut-over and the API's resumes of the same user's tasks at once: every one either goes
+// through or is refused over the limit, none deadlocks, and the user ends with no more than
+// the limit active.
+func (s *DataMoveSuite) TestTheCutOverAndResumesAtOnceKeepTheLimit() {
+	const limit = 3
+	ids := []string{"st-1", "st-2", "st-3", "st-4", "st-5", "st-6"}
+	for _, id := range ids {
+		s.seedScheduledTask(id, "acme", ScheduledTaskActive)
+	}
+	s.move("acme", "moved")
+	s.limitHere(limit)
+	for _, id := range []string{"st-here-1", "st-here-2"} {
+		s.madeHere(id, "sam", "config-1")
+	}
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET state = 'paused' WHERE id IN ('st-here-1', 'st-here-2')")
+	s.Require().NoError(err)
+	resumable := append(slices.Clone(ids), "st-here-1", "st-here-2")
+
+	start := make(chan struct{})
+	errs := make(chan error, len(resumable)+1)
+	var wg sync.WaitGroup
+	for _, id := range resumable {
+		wg.Go(func() {
+			task, err := s.destination.ScheduledTasks.Get(s.ctx, "moved", id)
+			if err != nil {
+				errs <- err
+				return
+			}
+			task.State = ScheduledTaskActive
+			<-start
+			errs <- s.destination.ScheduledTasks.Update(s.ctx, &task)
+		})
+	}
+	wg.Go(func() {
+		<-start
+		_, _, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+		errs <- err
+	})
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err == nil || errors.Is(err, ErrTooManyScheduledTasks) || errors.Is(err, ErrScheduledTaskChanged) {
+			continue
+		}
+		s.Failf("a resume or the cut-over failed", "%v", err)
+	}
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(limit, held)
+}
+
 // queriesSent records the queries a pool sends while on.
 type queriesSent struct {
 	mu      sync.Mutex
@@ -3026,10 +3218,14 @@ func (q *queriesSent) matching(words ...string) int {
 	return matched
 }
 
-// Each user on each config has the room their own limit leaves them, read for all of them at
-// once: one query locks the configs and one counts what every user holds on each, however
-// many users and configs the move brought.
-func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQueryEach() {
+// Each user on each config has the room their own limit leaves them, read for a batch of them
+// at once: per transaction, one query locks the configs and one counts what every user in it
+// holds on each, however many users and configs the batch holds. Four users on configs, two
+// to a transaction, take two of each.
+func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQueryEachPerTransaction() {
+	before := movedHoldersPerTransaction
+	movedHoldersPerTransaction = 2
+	s.T().Cleanup(func() { movedHoldersPerTransaction = before })
 	tasks := map[string][2]string{
 		"st-sam-1-a": {"sam", "config-1"}, "st-sam-1-b": {"sam", "config-1"}, "st-sam-1-c": {"sam", "config-1"},
 		"st-sam-2-a": {"sam", "config-2"}, "st-sam-2-b": {"sam", "config-2"},
@@ -3079,8 +3275,8 @@ func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQuery
 		got, _, _, _ := s.scheduledTaskOn(s.destination, id)
 		s.Equal(state, got, id)
 	}
-	s.Equal(1, sent.matching(`"agent_configs"`, "FOR SHARE"), "one query locks every config")
-	s.Equal(1, sent.matching(`"scheduled_tasks"`, "count("), "one query counts every user on every config")
+	s.Equal(2, sent.matching(`"agent_configs"`, "FOR SHARE"), "one query per transaction locks its configs")
+	s.Equal(2, sent.matching(`"scheduled_tasks"`, "count("), "one query per transaction counts its users")
 
 	sent.mu.Lock()
 	sent.on, sent.queries = true, nil
