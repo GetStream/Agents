@@ -578,23 +578,28 @@ func (s *ShardedStoreSuite) TestALegAnotherShardPlacedCountsAgainstTheLimitHere(
 	s.Require().ErrorIs(s.placeWithin(s.other, organization, 2), ErrCallsAtOnce)
 }
 
-func (s *ShardedStoreSuite) TestRoutersOfTwoShardsPlacingAtOnceKeepToTheLimit() {
+func (s *StoreSuite) TestManyRoutersPlacingAtOnceKeepToTheLimit() {
 	organization := newID()
+	routers := []*Store{s.store}
+	for range 7 {
+		router, err := s.openRouter()
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(router.Close()) })
+		routers = append(routers, router)
+	}
 	var placed atomic.Int64
 	var wg sync.WaitGroup
-	for i := range 30 {
-		on := s.store
-		if i%2 == 1 {
-			on = s.other
+	for _, router := range routers {
+		for range 4 {
+			wg.Go(func() {
+				err := s.placeWithin(router, organization, 3)
+				if err == nil {
+					placed.Add(1)
+					return
+				}
+				s.ErrorIs(err, ErrCallsAtOnce)
+			})
 		}
-		wg.Go(func() {
-			err := s.placeWithin(on, organization, 3)
-			if err == nil {
-				placed.Add(1)
-				return
-			}
-			s.ErrorIs(err, ErrCallsAtOnce)
-		})
 	}
 	wg.Wait()
 
