@@ -2171,7 +2171,8 @@ The two activity routes also take the activity key (`ROUTER_AUTH_ACTIVITY_KEY`) 
 other: on any other route it is answered 401. To rotate it, set the new key in
 `ROUTER_AUTH_ACTIVITY_KEY` and the old one in `ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS`; both work until
 you unset the old one. Unset, there is no activity key and the ops key still reads both routes. The
-router does not start when either activity key is the ops key or the manage key.
+router does not start when either activity key is under 32 bytes, has a space at either end, or is
+the ops key or the manage key. `openssl rand -hex 32` prints a key it takes.
 
 | Route | What it is for |
 | ----- | -------------- |

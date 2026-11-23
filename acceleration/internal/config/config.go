@@ -1043,11 +1043,16 @@ func (c Config) validate() error {
 	return c.validateShard()
 }
 
+// minActivityKey is the shortest activity key taken, in bytes: the job holding it is another
+// team's, so the key is at least 128 random bits in hex, as `openssl rand -hex 16` prints.
+const minActivityKey = 32
+
 // validateUsage refuses a usage service the router could not ship to. A token without a URL is
 // allowed, since unsetting the URL alone is how shipping is stopped; the router warns of it.
-// validateActivityKeys refuses an activity key that is also the ops or the manage key: a job
-// holding it would then reach every path that key does. The error names the settings, never
-// a key.
+// validateActivityKeys refuses an activity key shorter than minActivityKey, one with a space at
+// either end, and one that is also the ops or the manage key: a job holding it would then reach
+// every path that key does. net/http trims a header's value, so a key that is the ops key and a
+// space is the ops key. The error names the settings, never a key.
 func (a Auth) validateActivityKeys() error {
 	for _, activity := range []struct{ setting, key string }{
 		{"auth.activity_key (ROUTER_AUTH_ACTIVITY_KEY)", a.ActivityKey},
@@ -1055,6 +1060,10 @@ func (a Auth) validateActivityKeys() error {
 	} {
 		if activity.key == "" {
 			continue
+		}
+		if len(activity.key) < minActivityKey || strings.TrimSpace(activity.key) != activity.key {
+			return fmt.Errorf("config: %s is at least %d bytes with no space at either end, such as "+
+				"`openssl rand -hex 32` prints", activity.setting, minActivityKey)
 		}
 		for _, staff := range []struct{ setting, key string }{
 			{"auth.ops_key (ROUTER_AUTH_OPS_KEY)", a.OpsKey},

@@ -723,6 +723,15 @@ func (s *ConfigSuite) TestAManageKeyOfItsOwnIsTaken() {
 	s.Equal("the-manage-key", config.Auth.ManageKey)
 }
 
+// The keys the activity key tests set: each at least 32 bytes and starting "the-", so an
+// error can be checked to name no key.
+const (
+	theActivityKey    = "the-activity-key-0123456789abcdef"
+	theOldActivityKey = "the-old-activity-key-0123456789abcdef"
+	theOpsKey         = "the-ops-key-0123456789abcdef0123456789"
+	theManageKey      = "the-manage-key-0123456789abcdef0123"
+)
+
 func (s *ConfigSuite) TestThereIsNoActivityKeyUnlessOneIsSet() {
 	config, _, err := Load("")
 
@@ -733,43 +742,43 @@ func (s *ConfigSuite) TestThereIsNoActivityKeyUnlessOneIsSet() {
 
 func (s *ConfigSuite) TestTheActivityKeysAreReadFromAFileAndExported() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
-	s.Require().NoError(os.WriteFile(path, []byte("auth:\n  ops_key: the-ops-key\n  manage_key: the-manage-key\n"+
-		"  activity_key: the-activity-key\n  activity_key_previous: the-old-activity-key\n"), 0o600))
+	s.Require().NoError(os.WriteFile(path, []byte("auth:\n  ops_key: "+theOpsKey+"\n  manage_key: "+theManageKey+"\n"+
+		"  activity_key: "+theActivityKey+"\n  activity_key_previous: "+theOldActivityKey+"\n"), 0o600))
 
 	config, _, err := Load(path)
 
 	s.Require().NoError(err)
-	s.Equal("the-activity-key", config.Auth.ActivityKey)
-	s.Equal("the-old-activity-key", config.Auth.ActivityKeyPrevious)
-	s.Equal("the-activity-key", os.Getenv("ROUTER_AUTH_ACTIVITY_KEY"))
-	s.Equal("the-old-activity-key", os.Getenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS"))
+	s.Equal(theActivityKey, config.Auth.ActivityKey)
+	s.Equal(theOldActivityKey, config.Auth.ActivityKeyPrevious)
+	s.Equal(theActivityKey, os.Getenv("ROUTER_AUTH_ACTIVITY_KEY"))
+	s.Equal(theOldActivityKey, os.Getenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS"))
 }
 
 func (s *ConfigSuite) TestTheActivityKeysAreReadFromTheirVariables() {
-	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", "the-activity-key")
-	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", "the-old-activity-key")
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theActivityKey)
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", theOldActivityKey)
 
 	config, _, err := Load("")
 
 	s.Require().NoError(err)
-	s.Equal("the-activity-key", config.Auth.ActivityKey)
-	s.Equal("the-old-activity-key", config.Auth.ActivityKeyPrevious)
+	s.Equal(theActivityKey, config.Auth.ActivityKey)
+	s.Equal(theOldActivityKey, config.Auth.ActivityKeyPrevious)
 }
 
 func (s *ConfigSuite) TestAnActivityKeyIsNeverTheOpsOrTheManageKey() {
 	for _, tc := range []struct {
 		activity, previous, setting, same string
 	}{
-		{activity: "the-ops-key", setting: "auth.activity_key (", same: "auth.ops_key"},
-		{activity: "the-manage-key", setting: "auth.activity_key (", same: "auth.manage_key"},
-		{activity: "the-activity-key", previous: "the-ops-key", setting: "auth.activity_key_previous", same: "auth.ops_key"},
-		{activity: "the-activity-key", previous: "the-manage-key", setting: "auth.activity_key_previous", same: "auth.manage_key"},
+		{activity: theOpsKey, setting: "auth.activity_key (", same: "auth.ops_key"},
+		{activity: theManageKey, setting: "auth.activity_key (", same: "auth.manage_key"},
+		{activity: theActivityKey, previous: theOpsKey, setting: "auth.activity_key_previous", same: "auth.ops_key"},
+		{activity: theActivityKey, previous: theManageKey, setting: "auth.activity_key_previous", same: "auth.manage_key"},
 		// A rotation that has not started yet: only the previous key is set.
-		{previous: "the-ops-key", setting: "auth.activity_key_previous", same: "auth.ops_key"},
+		{previous: theOpsKey, setting: "auth.activity_key_previous", same: "auth.ops_key"},
 	} {
 		s.Run(tc.setting+" "+tc.same, func() {
-			s.T().Setenv("ROUTER_AUTH_OPS_KEY", "the-ops-key")
-			s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", "the-manage-key")
+			s.T().Setenv("ROUTER_AUTH_OPS_KEY", theOpsKey)
+			s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", theManageKey)
 			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", tc.activity)
 			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", tc.previous)
 
@@ -782,13 +791,53 @@ func (s *ConfigSuite) TestAnActivityKeyIsNeverTheOpsOrTheManageKey() {
 	}
 }
 
-func (s *ConfigSuite) TestAnActivityKeyIsTakenWithoutAnOpsOrAManageKey() {
-	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", "the-activity-key")
+// Defect: a short activity key, which a guess can reach, or one that is the ops key and a
+// space, which net/http trims back to the ops key, taken.
+func (s *ConfigSuite) TestAnActivityKeyIsLongAndHasNoSpaceAtEitherEnd() {
+	for name, tc := range map[string]struct{ activity, previous, setting string }{
+		"one byte":                   {activity: "a", setting: "auth.activity_key ("},
+		"31 bytes":                   {activity: theActivityKey[:31], setting: "auth.activity_key ("},
+		"a short previous key":       {activity: theActivityKey, previous: "the-old-key", setting: "auth.activity_key_previous"},
+		"the ops key and a space":    {activity: theOpsKey + " ", setting: "auth.activity_key ("},
+		"a space and the key":        {activity: " " + theActivityKey, setting: "auth.activity_key ("},
+		"the ops key and a tab":      {activity: theActivityKey, previous: theOpsKey + "\t", setting: "auth.activity_key_previous"},
+		"the manage key and a space": {previous: theManageKey + " ", setting: "auth.activity_key_previous"},
+	} {
+		s.Run(name, func() {
+			s.T().Setenv("ROUTER_AUTH_OPS_KEY", theOpsKey)
+			s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", theManageKey)
+			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", tc.activity)
+			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", tc.previous)
+
+			_, _, err := Load("")
+
+			s.Require().ErrorContains(err, tc.setting)
+			s.ErrorContains(err, "at least 32 bytes with no space at either end")
+			s.NotContains(err.Error(), "the-", "the error names the setting, never the key")
+		})
+	}
+}
+
+// Defect: the shortest key taken refused, so a 32-byte key from `openssl rand -hex 16` stops
+// the router.
+func (s *ConfigSuite) TestAnActivityKeyOf32BytesIsTaken() {
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theActivityKey[:32])
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", theOldActivityKey[:32])
 
 	config, _, err := Load("")
 
 	s.Require().NoError(err)
-	s.Equal("the-activity-key", config.Auth.ActivityKey)
+	s.Equal(theActivityKey[:32], config.Auth.ActivityKey)
+	s.Equal(theOldActivityKey[:32], config.Auth.ActivityKeyPrevious)
+}
+
+func (s *ConfigSuite) TestAnActivityKeyIsTakenWithoutAnOpsOrAManageKey() {
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theActivityKey)
+
+	config, _, err := Load("")
+
+	s.Require().NoError(err)
+	s.Equal(theActivityKey, config.Auth.ActivityKey)
 }
 
 func (s *ConfigSuite) TestTheInboundKeysAreACommaSeparatedListAndExported() {
