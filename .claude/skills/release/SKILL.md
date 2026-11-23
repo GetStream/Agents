@@ -42,7 +42,9 @@ In the root `CHANGELOG.md`:
 - Rename `# Unreleased` to `# vX.Y.Z`, and add a new, empty `# Unreleased` above it. For the first
   release after `0.7.0` only, add one line under the heading: the section also covers `0.7.0`,
   which shipped without one. No later release needs the line: since AI-3557, `# Unreleased`
-  holds only breaking-change lines between releases.
+  holds only breaking-change lines between releases. For the first release after `0.7.0`, run the
+  listing above from `v0.6.9` (the release before `0.7.0`) instead of `0.7.0`, so 0.7.0's PRs are
+  listed too.
 - Keep three sections, in this order: `## Breaking Changes`, `## New Features`, `## Bug Fixes`.
   Merge sections that appear twice or under another name (`## Features`). The `# Unreleased`
   written before AI-3557 has both problems.
