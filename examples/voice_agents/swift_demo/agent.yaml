@@ -1,2 +1,8 @@
 name: swift_demo
 description: The support agent the iOS demo app talks to.
+# The tools the iOS, Android and Flutter demos declare on their sessions. The router offers a
+# session only the tools a group here names, and refuses one that declares any other.
+tools:
+  - name: support
+    loading: full
+    tools: [lookup_order, issue_refund]
