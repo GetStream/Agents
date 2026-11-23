@@ -74,7 +74,7 @@ Every server SDK's client has a tool registry for the whole app, and one call ru
 
 ### The Dart SDK shows an incognito session
 
-An incognito session has no Stream Chat channel, so `session.chat()` throws and a Flutter app had nothing to show its replies with. `Conversation` now folds the socket's `reasoning_delta`, `tool_started`, `tool_updated` and `tool_ran` into each turn's `steps` (`ReasoningStep`, `ToolCallStep`) and `isDone`, timing a round of reasoning from when the model was asked or went on writing, and an `error` with code `prompt_injection` clears the reply being written of its text and UI. `session.turnMessages` is the conversation in the shape a kept one has in Chat, its steps as the records `AIMessagePart.parseAll` reads, and a call waiting for approval asks the agents' own user. `AgentEventKind` gains `reasoningDelta`, so an exhaustive `switch` over it needs the case. `flutter_demo` has an incognito toggle in the Chat tab's app bar.
+An incognito session has no Stream Chat channel, so a Flutter app had nothing to show its replies with. `Turn` now has `steps` (rounds of thinking and tool calls) and `isDone`, from the socket, and `session.turnMessages` is the conversation in the shape Stream's AI components read, a waiting call's approval card included. `AgentEventKind` gains `reasoningDelta`, so an exhaustive `switch` over it needs the case. `flutter_demo` has an incognito toggle.
 
 ### The Swift SDK shows an incognito session
 

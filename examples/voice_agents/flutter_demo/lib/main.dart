@@ -109,7 +109,6 @@ class _HomePageState extends State<HomePage> {
         index: _tab,
         sizing: StackFit.expand,
         children: [
-          // A new conversation each time incognito is switched.
           ChatView(key: ValueKey(_incognito), incognito: _incognito),
           VoiceView(style: _voiceStyle),
         ],

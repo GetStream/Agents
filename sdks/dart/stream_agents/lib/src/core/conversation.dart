@@ -105,13 +105,10 @@ final class Turn {
   final DateTime at;
   final TurnUI? ui;
 
-  /// What the agent did on its way to the turn's text, in order: each round of the model's
-  /// thinking on a written reply, and each tool it called. Empty on a participant's turn.
+  /// The agent's rounds of thinking and tool calls, in order. Empty on a participant's turn.
   final List<TurnStep> steps;
 
-  /// Whether the agent is done with the turn: it answered with no tools or work left to come,
-  /// or it was interrupted. A turn whose tools are still running is not. Never set on a
-  /// participant's turn.
+  /// Whether the agent answered with nothing left to come, or was cut off.
   final bool isDone;
 
   Turn _withText(String text) => _copy(text: text);
@@ -129,12 +126,16 @@ final class Turn {
     isDone: isDone ?? this.isDone,
   );
 
-  /// This turn with [delta] added to the round of thinking under way, or to a new one when the
-  /// model did something else since: every round is numbered from `r1`, as a kept reply's steps
-  /// are.
+  /// Adds [delta] to the round under way, or starts the next one, numbered from `r1` as a kept
+  /// reply's steps are.
   Turn _think(String delta, DateTime began) {
     if (steps.lastOrNull case final ReasoningStep round when round.isStreaming) {
-      return _copy(steps: [...steps.take(steps.length - 1), round._withText(round.text + delta)]);
+      return _copy(
+        steps: [
+          ...steps.take(steps.length - 1),
+          round._copy(text: round.text + delta),
+        ],
+      );
     }
     final rounds = steps.whereType<ReasoningStep>().length;
     return _copy(
@@ -145,21 +146,23 @@ final class Turn {
     );
   }
 
-  /// This turn with its round of thinking under way completed, or itself when none is.
   Turn _settled(DateTime now) {
     if (steps.lastOrNull case final ReasoningStep round when round.isStreaming) {
-      return _copy(steps: [...steps.take(steps.length - 1), round._completed(now)]);
+      return _copy(
+        steps: [
+          ...steps.take(steps.length - 1),
+          round._copy(isStreaming: false, duration: now.difference(round.at)),
+        ],
+      );
     }
     return this;
   }
 
-  /// This turn with [call] begun, or itself when it already shows that call. A round of
-  /// thinking's id is ours, `r1` and on, so a call the provider gave the same id is another step.
+  /// A provider may give a call a round's id (`r1`), so only calls are compared.
   Turn _called(ToolCallStep call) => steps.any((step) => step is ToolCallStep && step.id == call.id)
       ? this
       : _copy(steps: [...steps, call]);
 
-  /// This turn with its running call [id] changed as [change] says, or itself when it has none.
   Turn _changedCall(String id, ToolCallStep Function(ToolCallStep) change) {
     final index = steps.indexWhere(
       (step) => step is ToolCallStep && step.id == id && step.status == ToolCallStepStatus.running,
@@ -219,20 +222,21 @@ final class ReasoningStep extends TurnStep {
   /// The thinking so far.
   final String text;
 
-  /// When the model began on it: when it was asked, or took the reply up again after writing,
-  /// as a kept reply's step is timed. Not when its first words arrived, which a model that
-  /// sends its thinking in one burst sends only at the end.
+  /// When the model was asked or went on writing, as a kept reply's step is timed, not when its
+  /// first words arrived.
   @override
   final DateTime at;
 
   /// How long the model thought, once it is done.
   final Duration? duration;
 
-  ReasoningStep _withText(String text) =>
-      ReasoningStep(id: id, isStreaming: isStreaming, text: text, at: at, duration: duration);
-
-  ReasoningStep _completed(DateTime now) =>
-      ReasoningStep(id: id, isStreaming: false, text: text, at: at, duration: now.difference(at));
+  ReasoningStep _copy({bool? isStreaming, String? text, Duration? duration}) => ReasoningStep(
+    id: id,
+    isStreaming: isStreaming ?? this.isStreaming,
+    text: text ?? this.text,
+    at: at,
+    duration: duration ?? this.duration,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -269,7 +273,7 @@ final class ToolCallStep extends TurnStep {
   final String name;
   final ToolCallStepStatus status;
 
-  /// What whoever runs it last said about how it is going (`tool_updated`), or the empty string.
+  /// The last `tool_updated` text that is not to be said verbatim, or empty.
   final String summary;
 
   @override
@@ -278,7 +282,7 @@ final class ToolCallStep extends TurnStep {
   /// How long it ran, once it is no longer running.
   final Duration? duration;
 
-  ToolCallStep _with({ToolCallStepStatus? status, String? summary, Duration? duration}) =>
+  ToolCallStep _copy({ToolCallStepStatus? status, String? summary, Duration? duration}) =>
       ToolCallStep(
         id: id,
         name: name,
@@ -389,8 +393,7 @@ final class Conversation {
   /// What each turn's UI block has written so far, unmerged, until the turn's UI is settled.
   final Map<String, _PendingUI> _uiWritten;
 
-  /// When the model last took each agent turn in flight up again, by turn id: when it was asked,
-  /// or went on after writing. A round of thinking is timed from it.
+  /// When each agent turn in flight was asked or went on writing, which times its next round.
   final Map<String, DateTime> _resumedAt;
 
   /// Whatever the caller typed, shown before the router has confirmed hearing it.
@@ -495,7 +498,7 @@ final class Conversation {
         return _amend(
           event.turnId,
           (turn) =>
-              turn._changedCall(_text(event['id']), (call) => call._with(summary: event.text)),
+              turn._changedCall(_text(event['id']), (call) => call._copy(summary: event.text)),
         );
 
       case AgentEventKind.toolRan:
@@ -506,7 +509,7 @@ final class Conversation {
           event.turnId,
           (turn) => turn._changedCall(
             _text(event['tool_call_id']),
-            (call) => call._with(status: status, duration: now.difference(call.at)),
+            (call) => call._copy(status: status, duration: now.difference(call.at)),
           ),
         );
 
@@ -623,8 +626,7 @@ final class Conversation {
     return _with(turns: changed);
   }
 
-  /// Applies [change] to the agent turn [turnId]. A turn this never saw begin is started at
-  /// [startingAt] when the event begins something, and left alone when it is null.
+  /// Changes agent turn [turnId], starting it at [startingAt] if this never saw it begin.
   Conversation _amend(String turnId, Turn Function(Turn) change, {DateTime? startingAt}) {
     final index = turns.lastIndexWhere((turn) => turn.id == turnId && turn.speaker.isAgent);
     if (index == -1) {
@@ -641,7 +643,6 @@ final class Conversation {
     return _with(turns: [...turns]..[index] = changed);
   }
 
-  /// This conversation with the agent turn [turnId] taken up again [at], or done with for null.
   Conversation _resumed(String turnId, DateTime? at) {
     if (at == null) {
       return _resumedAt.containsKey(turnId)
@@ -651,17 +652,14 @@ final class Conversation {
     return _with(resumedAt: {..._resumedAt, turnId: at});
   }
 
-  /// The agent turn [turnId] with nothing more of it to come: its round of thinking and its UI
-  /// settled, and the turn done.
   Conversation _ended(String turnId, DateTime now) =>
       _settleUI(turnId, now)._resumed(turnId, null)._amend(turnId, (turn) {
         final settledTurn = turn._settled(now);
         return settledTurn.isDone ? settledTurn : settledTurn._copy(isDone: true);
       });
 
-  /// The prompt injection screen refused the reply being written. What it streamed before the
-  /// verdict is not the answer, so its text and UI go, as they do from the kept conversation;
-  /// its thinking and tool calls stay.
+  /// What a refused reply streamed is not the answer: its text and UI go, as from a kept
+  /// conversation, and its steps stay.
   Conversation _refused() {
     final index = turns.lastIndexWhere((turn) => turn.speaker.isAgent);
     if (index == -1 || turns[index].isDone) return this;
@@ -764,8 +762,7 @@ final class Conversation {
   );
 
   /// The UI written so far counts, or a delta that shows nothing new would be lost to a holder
-  /// that skips equal values, and the next one would land on stale text. So does when each turn
-  /// was taken up again, which times the next round of thinking.
+  /// that skips equal values, and the next one would land on stale text. So does [_resumedAt].
   @override
   bool operator ==(Object other) =>
       other is Conversation &&

@@ -18,8 +18,7 @@ import 'notice.dart';
 /// writing is that the reply shows its working, with Stream's AI components: the agent's
 /// reasoning as it thinks, each tool call as it runs, and a question when a tool asks first.
 ///
-/// An [incognito] conversation is kept nowhere: it has no channel, is never listed, and is
-/// shown from the session's socket.
+/// An [incognito] conversation keeps no channel and is never listed.
 class ChatView extends StatefulWidget {
   const ChatView({super.key, this.incognito = false});
 

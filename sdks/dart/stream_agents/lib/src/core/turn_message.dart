@@ -1,14 +1,11 @@
 import 'agent_session.dart';
 import 'conversation.dart';
 
-/// A message of a conversation kept in no channel, an incognito session's, in the shape a kept
-/// one has in Stream Chat, so an app shows both alike with Stream's AI components.
+/// A message of an incognito session, which keeps no channel, in the shape a kept one has in
+/// Stream Chat, so Stream's AI components show both alike.
 ///
-/// Each of the person's turns is a message, and the agent's turns between two of them are one
-/// reply, as the router writes a reply whose tools it waited on: their text, the latest UI, and
-/// each round of thinking and each tool call as a step, generating until the agent is done with
-/// it. A call waiting in the session's `approvals` asks its user on its step, as a kept reply's
-/// does.
+/// The agent's turns between two of the person's are one reply, as the router writes a reply
+/// whose tools it waited on.
 final class TurnMessage {
   TurnMessage._({
     required this.id,
@@ -34,25 +31,21 @@ final class TurnMessage {
   /// Whether the agent is still writing it.
   final bool isGenerating;
 
-  /// The reply's steps, in order, as a kept reply's attachments hold them: an `ai_reasoning`
-  /// for each round of thinking, numbered from `r1` across the reply, and an `ai_tool_call` for
-  /// each call. Stream Chat's `AIMessagePart.parseAll` reads them as they are.
+  /// The reply's `ai_reasoning` and `ai_tool_call` steps, in order, as `AIMessagePart.parseAll`
+  /// reads them. Rounds are numbered from `r1` across the reply.
   final List<({String type, Map<String, Object?> payload})> steps;
 
   /// The whole of each round of thinking, by its step's id.
   final Map<String, String> reasoning;
 
-  /// The reply's custom data as a kept one holds it: its UI under `ai_ui`, which
-  /// `AIUIDocument.fromCustomData` reads, or nothing.
+  /// The reply's UI under `ai_ui`, as a kept one holds it, or nothing.
   final Map<String, Object?> customData;
 
   /// The messages of [conversation], oldest first.
   ///
-  /// [approvals] are the calls waiting for the person, each of which asks on its step. [userId]
-  /// is the person the session is with, whom a waiting call asks: the agents' own user, which an
-  /// `AIToolApprover` matches against `target_user_id`, not the session's `userId`, which is the
-  /// name the agent joined the call as. The latest reply is written only while [isConnected],
-  /// whether the session's socket still carries the conversation.
+  /// A call in [approvals] asks [userId] on its step: the person, whom `AIToolApprover` matches,
+  /// not `Session.userId`, the agent's name on the call. Only the latest reply is generating,
+  /// and only while [isConnected].
   static List<TurnMessage> messages(
     Conversation conversation, {
     List<ToolApprovalRequest> approvals = const [],
@@ -69,8 +62,6 @@ final class TurnMessage {
     }
     return [
       for (final (index, turns) in groups.indexed)
-        // Only the latest reply can still be written: one the person asked over is as it was
-        // left.
         _of(
           turns,
           isGenerating: index == groups.length - 1 && isConnected && !turns.last.isDone,
@@ -95,7 +86,6 @@ final class TurnMessage {
     for (final step in turns.expand((turn) => turn.steps)) {
       switch (step) {
         case ReasoningStep():
-          // Numbered across the reply, which a tool's result carries on in a turn of its own.
           final id = 'r${reasoning.length + 1}';
           reasoning[id] = step.text;
           steps.add((
@@ -136,7 +126,6 @@ final class TurnMessage {
     );
   }
 
-  /// The question a waiting call asks, as its step in Stream Chat holds it.
   static Map<String, Object?> _approval(ToolApprovalRequest waiting) => {
     'title': waiting.approval.title,
     if (waiting.approval.message case final message? when message.isNotEmpty) 'message': message,
@@ -146,8 +135,7 @@ final class TurnMessage {
       'decline_title': title,
   };
 
-  /// Equal when it shows the same, its steps, thinking and custom data compared by value, so a
-  /// view can keep a message that did not change.
+  /// Equal when it shows the same, its maps compared by value.
   @override
   bool operator ==(Object other) =>
       other is TurnMessage &&
@@ -165,7 +153,6 @@ final class TurnMessage {
               _sameValue(other.steps[i].payload, steps[i].payload),
       ].every((same) => same);
 
-  /// Leaves out the steps' and custom data's contents, which equality compares by value.
   @override
   int get hashCode => Object.hash(id, isAgentReply, text, at, isGenerating, steps.length);
 
@@ -173,12 +160,12 @@ final class TurnMessage {
   String toString() => 'TurnMessage($id, ${isAgentReply ? 'agent' : 'person'}: $text)';
 }
 
-/// The conversation as messages, for a session kept in no channel.
+/// An incognito session's conversation as messages.
 extension TurnMessages on AgentSession {
-  /// The conversation as messages, for a session kept in no channel, an incognito one, to show
-  /// with Stream's AI components; a kept session's messages are its channel's (`chat()`). Build
-  /// it again whenever [AgentSession.conversation], [AgentSession.approvals] or
-  /// [AgentSession.connection] changes. A waiting call asks the agents' own user.
+  /// The conversation as messages, for a session with no channel.
+  ///
+  /// Read it again when [AgentSession.conversation], [AgentSession.approvals] or
+  /// [AgentSession.connection] changes.
   List<TurnMessage> get turnMessages => TurnMessage.messages(
     conversation.value,
     approvals: approvals.value,
@@ -187,7 +174,6 @@ extension TurnMessages on AgentSession {
   );
 }
 
-/// Whether [a] and [b] hold the same JSON-like value: maps and lists compared entry by entry.
 bool _sameValue(Object? a, Object? b) => switch ((a, b)) {
   (final Map<Object?, Object?> a, final Map<Object?, Object?> b) =>
     a.length == b.length &&

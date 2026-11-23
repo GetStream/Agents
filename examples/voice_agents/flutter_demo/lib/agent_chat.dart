@@ -12,15 +12,14 @@ import 'package:stream_agents/stream_agents.dart';
 /// of reasoning and each tool call) as attachments. The session's socket is what runs this
 /// phone's tools and carries the person's answers to the ones that ask first.
 ///
-/// An incognito session keeps no channel, so it is shown from its socket instead: the
-/// session's `turnMessages`, which are the conversation in the channel's shape.
+/// An incognito session keeps no channel: its messages are its socket's `turnMessages`.
 class AgentChat with AIConversationTransport<AgentMessage> {
   AgentChat._(this.session, stream.Channel? channel)
     : _channel = channel,
       _kept = channel != null;
 
-  /// Opens the session's channel and starts following it, or follows the session's socket
-  /// alone when it keeps no channel, as an incognito one does.
+  /// Opens the session's channel and starts following it, or follows its socket alone when it
+  /// keeps no channel.
   ///
   /// The session is closed if its channel cannot be opened, so it does not run on with
   /// nobody to show it.
@@ -66,7 +65,6 @@ class AgentChat with AIConversationTransport<AgentMessage> {
   final AgentSession session;
   stream.Channel? _channel;
 
-  /// Whether the conversation is kept in a channel, rather than shown from the socket alone.
   final bool _kept;
 
   /// Why the session's socket stopped, or null: tools and approvals stop until a new
@@ -86,30 +84,13 @@ class AgentChat with AIConversationTransport<AgentMessage> {
   var _unanswered = false;
   var _closed = false;
 
-  var _unkeptShown = const <AgentMessage>[];
-
   /// The messages as Stream's AI components show them.
   List<AgentMessage> get listMessages => _kept
       ? listed(_channel?.state?.messages ?? const [], reasoning, shown: _shown)
-      : _unkeptShown = listedTurns(session.turnMessages, shown: _unkeptShown);
-
-  /// The [messages] of a session that keeps no channel as Stream's AI components show them,
-  /// without the replies that ended with nothing written, reusing those in [shown] that did
-  /// not change.
-  static List<AgentMessage> listedTurns(
-    List<TurnMessage> messages, {
-    List<AgentMessage> shown = const [],
-  }) {
-    final known = {for (final message in shown) message.id: message};
-    return [
-      for (final message in messages)
-        if (!message.isUnwrittenReply)
-          if (known[message.id] case final same? when same._turn == message)
-            same
-          else
+      : [
+          for (final message in session.turnMessages)
             AgentMessage.unkept(message),
-    ];
-  }
+        ];
 
   /// The [messages] as Stream's AI components show them, oldest first, without those deleted
   /// and without the replies that ended with nothing written, reusing those in [shown].
@@ -306,14 +287,8 @@ extension AgentReply on stream.Message {
   ]);
 }
 
-/// Whether this is a reply the agent ended without writing anything: no text and no steps.
-extension UnwrittenTurnReply on TurnMessage {
-  bool get isUnwrittenReply =>
-      isAgentReply && !isGenerating && text.isEmpty && steps.isEmpty;
-}
-
-/// A message of the conversation as Stream's AI components show it: one of the channel's, or,
-/// for a session that keeps no channel, one built from its socket.
+/// A message of the conversation as Stream's AI components show it: the channel's, or an
+/// incognito session's.
 class AgentMessage with AIMessage {
   AgentMessage(stream.Message this.message, LiveReasoning this._reasoning)
     : _turn = null,
@@ -325,7 +300,7 @@ class AgentMessage with AIMessage {
       isGenerating = message.isGenerating,
       parts = message.steps;
 
-  /// A message of a session that keeps no channel, an incognito one, from its socket.
+  /// An incognito session's message, from its socket.
   AgentMessage.unkept(TurnMessage this._turn)
     : message = null,
       _reasoning = null,
@@ -374,7 +349,7 @@ class AgentMessage with AIMessage {
   ];
 
   /// A step keeps only the opening of its thinking; the whole of it came with the live
-  /// updates, while the reply was being written. One built from the socket holds all of it.
+  /// updates, while the reply was being written. An incognito one holds all of it.
   @override
   String? reasoningText(AIReasoningPart step) => switch (_turn) {
     final turn? => turn.reasoning[step.id],
