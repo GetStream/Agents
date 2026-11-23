@@ -1512,7 +1512,8 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
 	}), "PauseForConfig")
-	s.Equal(1, s.countQueries(func() {
+	// The transaction, the tasks and their runs locked, and the delete with its changes redacted.
+	s.Equal(5, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1"))
 	}), "DeleteForSession")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")

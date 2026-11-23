@@ -541,20 +541,27 @@ func (r *ScheduledTasks) Delete(ctx context.Context, customerID, id string) erro
 
 // DeleteForSession removes every task that follows up in a
 // session, as deleting that session must: a user who deleted a conversation
-// is not contacted from it again.
+// is not contacted from it again. The changes recorded of those tasks and
+// their runs hold the user's words, so each becomes a delete with no payload,
+// as forgetting the user makes them (deleteTasks).
 func (r *ScheduledTasks) DeleteForSession(ctx context.Context, customerID, sessionID string) error {
 	if customerID == "" || sessionID == "" {
 		return nil
 	}
-	_, err := r.store.global.NewDelete().Model((*ScheduledTask)(nil)).
-		Where("customer_id = ?", customerID).
-		Where("session_id = ? OR origin_session_id = ?", sessionID, sessionID).
-		Exec(ctx)
+	_, err := deleteTasks(ctx, r.store.global, customerID, func(q bun.QueryBuilder) bun.QueryBuilder {
+		return q.Where("session_id = ? OR origin_session_id = ?", sessionID, sessionID)
+	}, sessionTaskChanges, customerID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete scheduled tasks for session: %w", err))
 	}
 	return nil
 }
+
+// sessionTaskChanges picks, as dc, the recorded changes of the tasks deleteTasks deletes and of
+// their runs, by id: a task's changes from before it followed up in the session do not name it.
+const sessionTaskChanges = `dc.customer_id = ? AND (
+	(dc.table_name = 'scheduled_tasks' AND dc.payload->>'id' IN (SELECT id FROM deleted))
+	OR (dc.table_name = 'scheduled_task_runs' AND dc.payload->>'task_id' IN (SELECT id FROM deleted)))`
 
 // SetSession records the session a task follows up in, once its
 // first occurrence has opened one. It touches nothing else: the task may be
