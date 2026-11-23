@@ -84,7 +84,7 @@ func (s *MeteringSuite) TestCharactersAreWhatWasSent() {
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.TTS, s.store, nil, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := newStubTTS()
-	session := newSession(provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(&logs, nil)))
+	session := newSession(context.Background(), provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(&logs, nil)))
 
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Grüß dich, "}))
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Zoë.", Final: true}))
@@ -126,7 +126,7 @@ func (s *MeteringSuite) TestAnUtteranceAVoiceReportsFinishedTwiceIsBilledOnce() 
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.TTS, s.store, nil, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := newStubTTS()
-	session := newSession(provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(context.Background(), provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Hello there.", Final: true}))
 	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})
@@ -148,7 +148,7 @@ func (s *MeteringSuite) TestAnUtteranceAVoiceStartsAgainAfterItSettledIsBilledAg
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.TTS, s.store, nil, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := newStubTTS()
-	session := newSession(provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(context.Background(), provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Hello there.", Final: true}))
 	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})

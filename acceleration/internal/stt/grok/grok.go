@@ -30,6 +30,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -230,7 +231,7 @@ func (s *STT) Start(ctx context.Context) error {
 	}
 
 	s.emitter.Send(stt.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop()
+	goroutine.Go(ctx, s.readLoop)
 	return nil
 }
 

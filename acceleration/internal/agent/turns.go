@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -761,7 +762,7 @@ func buildTurnRecorder(pgStore *store.Store, owner routing.Owner, logger *slog.L
 }
 
 func (r *turnRecorder) start() *turnRecorder {
-	go r.run()
+	goroutine.Go(r.ctx, r.run)
 	return r
 }
 

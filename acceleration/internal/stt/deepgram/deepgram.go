@@ -19,6 +19,7 @@ import (
 	interfacesv2 "github.com/deepgram/deepgram-go-sdk/v3/pkg/client/interfaces/v2"
 	listenv2 "github.com/deepgram/deepgram-go-sdk/v3/pkg/client/listen/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -154,7 +155,7 @@ func (s *STT) Start(ctx context.Context) error {
 	s.client = client
 	s.mu.Unlock()
 	s.pinging.Add(1)
-	go s.keepAlive(client)
+	goroutine.Go(ctx, func() { s.keepAlive(client) })
 	return nil
 }
 
