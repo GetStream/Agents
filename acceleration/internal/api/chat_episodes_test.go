@@ -67,7 +67,7 @@ func (s *ChatEpisodesSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
 	s.wake(&s.RouterSuite)
 	s.configReads = &configReads{}
-	s.store.DB().AddQueryHook(s.configReads)
+	s.store.GlobalDB().AddQueryHook(s.configReads)
 }
 
 func (s *ChatEpisodesSuite) SetupTest() {
@@ -125,8 +125,8 @@ func (s *ChatEpisodesSuite) TestAChatMessageTheWebhookBringsWritesACard() {
 func (s *ChatEpisodesSuite) TestAChatMessageUnderRecordWritesACard() {
 	worker := s.worker()
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "llm-flow", DispatchText: true, EpisodeCardsRecord: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Models: store.AgentModels{LLM: "llm-flow"}, Dispatch: store.AgentDispatch{Text: true}, EpisodeCards: store.AgentEpisodeCards{Record: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	s.Require().Equal(http.StatusOK, s.writes(config.ID, "where is my order?"))
 
@@ -220,7 +220,7 @@ func (s *ChatEpisodesSuite) TestAChatEpisodeStartsWhenItsMessageWasMade() {
 			s.True(s.handedOn(worker), "the message is answered")
 			s.cards(s.omniChannel(), 1)
 			var started time.Time
-			s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+			s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 				"SELECT ep.started_at FROM episodes AS ep JOIN contact_map AS cm ON cm.id = ep.contact_id WHERE cm.address = ?",
 				fmt.Sprintf("%d:%s", suiteStreamApp, s.user)).Scan(&started))
 			if c.made {
@@ -255,9 +255,9 @@ func (s *ChatEpisodesSuite) TestAQueuedMessageTriedAgainOpensNoSecondEpisode() {
 	omni := s.omniChannel()
 	s.cards(omni, 1)
 	var seq int64
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT seq FROM chat_inbound WHERE position(? in body) > 0", []byte(s.channelID)).Scan(&seq))
-	row, err := s.store.ChatInboundBySeq(context.Background(), seq)
+	row, err := s.store.ChatInbounds.Get(context.Background(), seq)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.router.AnswerChatInbound(context.Background(), row))
@@ -378,7 +378,7 @@ func (s *ChatEpisodesSuite) TestAChatASessionAnsweredGoesOnWritingCards() {
 	s.True(s.handedOn(worker), "the second message is answered")
 	s.Require().Eventually(func() bool { return s.lastMessage().After(first) }, settleFor, 10*time.Millisecond,
 		"the second message keeps the episode open")
-	_, err := s.store.DB().ExecContext(ctx, "UPDATE episodes SET status = ?, ended_at = now() WHERE customer_id = ?",
+	_, err := s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET status = ?, ended_at = now() WHERE customer_id = ?",
 		store.EpisodeSummarized, s.customerID())
 	s.Require().NoError(err)
 
@@ -505,7 +505,7 @@ func (s *ChatEpisodesSuite) TestOneUserIDInTwoStreamAppsIsTwoPeople() {
 		s.router.chatEpisode(ctx, hookOrigin{app: app, queued: true}, event, session.FromConfig(config))
 	}
 
-	rows, err := s.store.DB().QueryContext(ctx, `SELECT address, stream_app_pk, conversation_id FROM contact_map
+	rows, err := s.store.GlobalDB().QueryContext(ctx, `SELECT address, stream_app_pk, conversation_id FROM contact_map
 WHERE customer_id = ? AND kind = ? ORDER BY stream_app_pk`, s.customerID(), store.ContactStreamUser)
 	s.Require().NoError(err)
 	defer rows.Close()
@@ -523,7 +523,7 @@ WHERE customer_id = ? AND kind = ? ORDER BY stream_app_pk`, s.customerID(), stor
 	s.Require().Len(omnis, 2)
 	s.NotEqual(omnis[0], omnis[1])
 	var pinned []int64
-	s.Require().NoError(s.store.DB().NewSelect().Table("episodes").Column("stream_app_pk").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("episodes").Column("stream_app_pk").
 		Where("customer_id = ?", s.customerID()).Order("stream_app_pk").Scan(ctx, &pinned))
 	s.Equal([]int64{111, 222}, pinned, "each episode's card is read and closed in its own app")
 }
@@ -665,18 +665,16 @@ func (s *ChatEpisodesSuite) TestAnIdleChatEpisodeIsSummarizedFromTheMessageThatO
 	omni := s.omniChannel()
 	s.cards(omni, 1)
 	var started time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx, "SELECT started_at FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&started))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx, "SELECT started_at FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&started))
 	s.True(started.Equal(created.Truncate(time.Microsecond)), "the episode starts at %s, not when its message was made (%s)", started, created)
 	// Idle for two hours by its last message, past the closer's hour.
-	_, err = s.store.DB().ExecContext(ctx, `INSERT INTO episode_activity (episode_id, last_message_at)
-SELECT id, now() - interval '2 hours' FROM episodes WHERE customer_id = ?
-ON CONFLICT (episode_id) DO UPDATE SET last_message_at = excluded.last_message_at`, s.customerID())
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET last_message_at = now() - interval '2 hours' WHERE customer_id = ?", s.customerID())
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.episodes.Sweep(ctx))
 
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx, "SELECT status FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx, "SELECT status FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&status))
 	s.Equal(store.EpisodeSummarized, status)
 	stored := s.chat.Stored(omni)
 	s.Require().Len(stored, 1, "the card is updated in place")
@@ -983,15 +981,15 @@ func (s *ChatEpisodesSuite) writtenIn(configID, text, channel string, created ti
 func (s *ChatEpisodesSuite) sessionAnswered(config store.AgentConfig) {
 	started := time.Now().UTC().Add(-time.Minute)
 	ended := started.Add(30 * time.Second)
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
-		CallID: s.utils.callID(), AgentID: s.channelID, ConfigID: config.ID, Direction: "inbound", StartedAt: started, EndedAt: &ended}))
+	s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		CallID: s.utils.callID(), AgentID: s.channelID, Direction: "inbound", StartedAt: started, EndedAt: &ended}, config.ID, "")
 }
 
 // config is a text agent of the test's app on the LLM named, with episode cards on or off.
 func (s *ChatEpisodesSuite) config(cards bool, llm string) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: llm, DispatchText: true, EpisodeCards: cards}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Models: store.AgentModels{LLM: llm}, Dispatch: store.AgentDispatch{Text: true}, EpisodeCards: store.AgentEpisodeCards{On: cards}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config
 }
 
@@ -1032,7 +1030,7 @@ func (s *ChatEpisodesSuite) handedTo(messages <-chan dispatch.Message) dispatch.
 func (s *ChatEpisodesSuite) omniChannel() string {
 	var cid string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND kind = ? AND address = ?",
 			s.customerID(), store.ContactStreamUser, fmt.Sprintf("%d:%s", suiteStreamApp, s.user)).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", s.user)
@@ -1061,15 +1059,14 @@ func (s *ChatEpisodesSuite) cardWrites(omni string) int {
 // it has had none since.
 func (s *ChatEpisodesSuite) lastMessage() time.Time {
 	var at time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(), `SELECT COALESCE(act.last_message_at, ep.started_at)
-FROM episodes AS ep LEFT JOIN episode_activity AS act ON act.episode_id = ep.id WHERE ep.customer_id = ?`, s.customerID()).Scan(&at))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), "SELECT COALESCE(last_message_at, started_at) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&at))
 	return at
 }
 
 // episodeCount is how many episodes the test's customer has.
 func (s *ChatEpisodesSuite) episodeCount() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&count))
 	return count
 }
@@ -1077,7 +1074,7 @@ func (s *ChatEpisodesSuite) episodeCount() int {
 // contacts is how many contact map rows the test's customer has.
 func (s *ChatEpisodesSuite) contacts() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ?", s.customerID()).Scan(&count))
 	return count
 }

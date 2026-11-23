@@ -163,7 +163,7 @@ func (s *LimitsSuite) TestAnUnrevokedGrantIsDrawnAgain() {
 	s.Empty(unrevoked.RevokedBy)
 	status, _ := finance.call(http.MethodPost, "/v1/search", SearchRequest{Query: "what is the time"})
 	s.Equal(http.StatusOK, status, "the router that unrevoked it draws on it at once")
-	entries, err := s.store.AuditEntries(context.Background(), s.customerID(), store.AuditEntryFilter{
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.customerID(), store.AuditEntryFilter{
 		ResourceType: store.AuditSpendLimit, ResourceID: "grant:" + strconv.FormatInt(made.Id, 10)})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 3, "made, revoked and unrevoked")
@@ -178,7 +178,7 @@ func (s *LimitsSuite) TestUnrevokingAGrantThatIsNotRevokedChangesNothing() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, grantPath(made.Id, "unrevoke"), map[string]any{"reason": "x"}, &again))
 
 	s.Equal(GrantLive, again.State)
-	entries, err := s.store.AuditEntries(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Len(entries, 2, "the limit and the grant; the unrevoke records nothing")
 }
@@ -187,7 +187,7 @@ func (s *LimitsSuite) TestAnExpiredGrantCannotBeUnrevoked() {
 	s.create(map[string]any{"subject": "organization", "interval": "monthly", "limit_micros": 5})
 	made := s.grant(map[string]any{"subject": "organization", "amount_micros": 5, "expires_at": time.Now().Add(time.Hour), "reason": "x"})
 	s.revoke(made.Id)
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE limit_grants SET created_at = now() - interval '2 hours', "+
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE limit_grants SET created_at = now() - interval '2 hours', "+
 		"expires_at = now() - interval '1 hour' WHERE id = ?", made.Id)
 	s.Require().NoError(err)
 
@@ -237,7 +237,7 @@ func (s *LimitsSuite) TestStaffUnrevokeAnOrganizationsGrantThroughManage() {
 	s.Require().NoError(json.Unmarshal(payload, &unrevoked))
 	s.Equal(GrantLive, unrevoked.State)
 	s.Equal(GrantLive, s.grants("")[0].State, "the customer reads it live")
-	entries, err := s.store.AuditEntries(context.Background(), s.organization(), store.AuditEntryFilter{
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.organization(), store.AuditEntryFilter{
 		ResourceType: store.AuditSpendLimit, ResourceID: "grant:" + strconv.FormatInt(made.Id, 10)})
 	s.Require().NoError(err)
 	s.Require().NotEmpty(entries)
@@ -326,7 +326,7 @@ func (s *LimitsSuite) TestStaffGrantForACustomerThroughManage() {
 	listed := s.grants("")
 	s.Require().Len(listed, 1, "the customer reads staff's grant")
 	s.Contains(listed[0].CreatedBy, "manage:")
-	entries, err := s.store.AuditEntries(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	s.Equal("grant:"+strconv.FormatInt(listed[0].Id, 10), entries[0].ResourceID)

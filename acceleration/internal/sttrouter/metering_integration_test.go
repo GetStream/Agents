@@ -149,7 +149,7 @@ func counted(name, provider, model string, labels map[string]string) float64 {
 // billed is the customer's successful rows, in the order they were written.
 func (s *MeteringSuite) billed(customer string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ? AND success", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ? AND success", customer).Order("id").Scan(s.ctx))
 	return rows
 }
 
@@ -281,7 +281,7 @@ func (s *MeteringSuite) TestATurnTheVendorDidNotMeasureIsBilledForWhatWasStreame
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	s.Require().Len(rows, 2)
 	s.EqualValues(1_500, rows[0].AudioMs, "the audio streamed since the session opened")
 	s.Equal(map[string]string{routing.AttributeUsageEstimated: "true"}, rows[0].Attributes)

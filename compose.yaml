@@ -5,14 +5,14 @@ name: vision-agents
 # publishes the router on another address, such as 0.0.0.0 for a phone on the same network.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:19-alpine
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: model_router
     ports:
       - "127.0.0.1:55432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata19:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d model_router"]
       interval: 5s
@@ -55,7 +55,7 @@ services:
   # The usage service, from the router's image, on a database of its own. The router ships
   # the usage it records here.
   usage-db:
-    image: postgres:16-alpine
+    image: postgres:19-alpine
     environment:
       PGPASSWORD: postgres
     command: >-
@@ -103,4 +103,4 @@ services:
       - router
 
 volumes:
-  pgdata:
+  pgdata19:

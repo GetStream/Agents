@@ -107,7 +107,7 @@ func (s *RecorderSuite) recordedAs(modality Modality, prices pricing.Pricer, con
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	s.Require().Len(rows, len(stats))
 	return rows
 }

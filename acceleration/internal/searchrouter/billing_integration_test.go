@@ -85,7 +85,7 @@ func (s *BillingSuite) routes(factories map[string]search.Provider) *Router {
 func (s *BillingSuite) rows(router *Router) []store.Request {
 	router.Close()
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customer).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customer).
 		Order("started_at", "id").Scan(s.ctx))
 	return rows
 }

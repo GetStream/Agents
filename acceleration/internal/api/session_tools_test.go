@@ -131,10 +131,10 @@ func (s *SessionToolsSuite) TestASessionOpenedWithNoWorkerHostingItsAgentHasNoWo
 
 func (s *SessionToolsSuite) TestASessionTheRouterLetGoOfSaysWhereItsToolsCameFrom() {
 	id := s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: id, CustomerID: s.customerID(), AgentName: "support", AgentID: "support", State: store.SessionClosed,
 	}))
-	s.Require().NoError(s.store.SaveSessionTools(context.Background(), id, []store.ToolDefinition{
+	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), id, []store.ToolDefinition{
 		{Name: "investigate_sdk", Description: "Read SDK source", Source: "worker"},
 		{Name: "lookup_order", Description: "find an order by its number"},
 	}))
@@ -341,10 +341,10 @@ func (s *SessionToolsSuite) toolSources(sessionID string) map[string]string {
 
 func (s *SessionToolsSuite) TestASessionTheRouterLetGoOfListsWhatItWasOffered() {
 	id := s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: id, CustomerID: s.customerID(), AgentName: "support", AgentID: "support", State: store.SessionClosed,
 	}))
-	s.Require().NoError(s.store.SaveSessionTools(context.Background(), id, []store.ToolDefinition{
+	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), id, []store.ToolDefinition{
 		{Name: "lookup_order", Description: "find an order by its number", Parameters: map[string]any{"type": "object"}},
 	}))
 

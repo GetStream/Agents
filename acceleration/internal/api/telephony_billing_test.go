@@ -145,10 +145,10 @@ func (s *TelephonyBillingSuite) spendLimitReached() []byte {
 
 // deliveries is how many messages a line claimed.
 func (s *TelephonyBillingSuite) deliveries(line string) int {
-	account, err := s.store.ChannelAccount(context.Background(), s.customerID(), "sms", line)
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_deliveries WHERE account_id = ?", account.ID).Scan(&count))
 	return count
 }
@@ -512,7 +512,7 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 		pricing.Quantities{pricing.CallSeconds: 60})
 	s.Equal(strconv.FormatInt(minute, 10), leg.Attributes[routing.AttributeFreeCostMicros])
 
-	s.Require().NoError(s.store.CreateUseCase(context.Background(), &store.UseCase{
+	s.Require().NoError(s.store.UseCases.Insert(context.Background(), &store.UseCase{
 		CustomerID: s.customerID(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
 	_, again := s.attached()
@@ -535,12 +535,12 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 func (s *telephonyBilling) smsLine() string {
 	ctx := context.Background()
 	number := "+1555" + digits(s.utils.uuid())
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		CustomerID: s.customerID(), E164: number, Vendor: "telnyx", Country: "US", Capabilities: []string{"sms"},
 	}))
 	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "telnyx-key", Signing: s.public})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SaveChannelAccount(ctx, &store.ChannelAccount{
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(ctx, &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "sms", E164: number, Token: "line-" + s.utils.uuid(),
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
@@ -568,7 +568,7 @@ func (s *telephonyBilling) textIn(line, from, id, text string) int {
 
 // telnyxIn delivers body to a line as Telnyx signs it at at.
 func (s *telephonyBilling) telnyxIn(line string, body []byte, at time.Time) int {
-	account, err := s.store.ChannelAccount(context.Background(), s.customerID(), "sms", line)
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
 	seconds := strconv.FormatInt(at.Unix(), 10)
 	header := http.Header{}
@@ -633,8 +633,8 @@ func (s *telephonyBilling) attachedOn(vendor, country, e164 string) (store.Phone
 		E164: e164, Vendor: vendor, Country: country, CustomerID: s.customerID(),
 		Tags: map[string]string{"line": "support"}, PurchasedAt: time.Now().UTC(),
 	}
-	s.Require().NoError(s.store.RecordNumber(ctx, &number))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), number.E164, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &number))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), number.E164, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID,
 	}))
 	return number, callID

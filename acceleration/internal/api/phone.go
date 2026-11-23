@@ -278,7 +278,7 @@ func (s *Server) attachPhoneNumber(ctx context.Context, request *attachPhoneNumb
 
 	// Attaching never sets the agent, so it is read back for a worker to learn that its
 	// number's calls will not be dispatched to it.
-	held, err := s.store.Number(ctx, customerID, request.E164)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, request.E164)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +298,7 @@ func (s *Server) setPhoneNumberAgent(ctx context.Context, request *setPhoneNumbe
 		return nil, errNoTelephony
 	}
 
-	held, err := s.store.Number(ctx, customerID, request.E164)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, request.E164)
 	if isNumberNotHeld(err) {
 		return nil, notFound(err.Error())
 	}
@@ -321,7 +321,7 @@ func (s *Server) setPhoneNumberAgent(ctx context.Context, request *setPhoneNumbe
 		return nil, invalidRequest("name an agent by config_id or by agent")
 	}
 
-	err = s.store.SetNumberAgent(ctx, customerID, request.E164, config.ID)
+	err = s.store.PhoneNumbers.SetAgent(ctx, customerID, request.E164, config.ID)
 	if isNumberNotHeld(err) {
 		return nil, errNumberNotAttached
 	}
@@ -342,7 +342,7 @@ func (s *Server) removePhoneNumberAgent(ctx context.Context, request *removePhon
 		return nil, errNoTelephony
 	}
 
-	err := s.store.ClearNumberAgent(ctx, customerID, request.E164)
+	err := s.store.PhoneNumbers.ClearAgent(ctx, customerID, request.E164)
 	if isNumberNotHeld(err) {
 		return nil, notFound(err.Error())
 	}
@@ -1010,11 +1010,11 @@ func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id str
 	if s.store == nil {
 		return false, nil
 	}
-	taken, err := s.store.SessionExists(ctx, id)
+	taken, err := s.store.Sessions.Exists(ctx, id)
 	if err != nil || !taken {
 		return false, err
 	}
-	_, err = s.store.StoredSession(ctx, customerID, id)
+	_, err = s.store.Sessions.Get(ctx, customerID, id)
 	return err != nil, nil
 }
 
@@ -1023,7 +1023,7 @@ func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id str
 // session joining the call.
 func (s *Server) callPinApp(ctx context.Context, customerID, callType, callID string) (int64, error) {
 	if s.store != nil {
-		pin, found, err := s.store.CallPin(ctx, customerID, callType, callID)
+		pin, found, err := s.store.CallResources.Pin(ctx, customerID, callType, callID)
 		if err != nil || found {
 			return pin, err
 		}

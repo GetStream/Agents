@@ -1048,6 +1048,13 @@ func (r *Router[P]) startCandidate(ctx context.Context, request Request, candida
 	if err != nil {
 		return zero, err
 	}
+	// The voice overwrites name is handed to the provider as written, and is no more any
+	// customer's to speak in than the request's voice is.
+	if overwritten != "" && r.voices != nil {
+		if _, err := r.voices.ResolveVoice(voiceCtx, request.CustomerID, candidate.Config.Provider, overwritten); err != nil {
+			return zero, err
+		}
+	}
 	// With no top-level voice, a TTS overwrite is the voice spoken: a factory that reads no
 	// overwrites, as Cartesia's does not, would otherwise speak its own default. A top-level
 	// voice stays what is handed over, as it always was, and no other modality reads a

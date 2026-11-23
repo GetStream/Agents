@@ -39,10 +39,20 @@ Run the router in Docker, with the Volt dashboard's override (see the `dashboard
 docker compose -f compose.yaml -f ../volt-dashboard/docs/local-agents/compose.volt.yaml up -d --build router
 ```
 
-That serves the router on `:8080`, with Postgres on `:55432` and Redis on `:56379`, its data
-in the `vision-agents_pgdata` volume. Rerun it after router changes so you never test an old
+That serves the router on `:8080`, with Postgres 19 on `:55432` and Redis on `:56379`, its data
+in the `vision-agents_pgdata19` volume. Rerun it after router changes so you never test an old
 build. Those two ports are also what the standalone `va-pg` and `va-redis` containers use, so
 stop those first if they are running.
+
+Postgres 16 data in the old `vision-agents_pgdata` volume is not read by the 19 image. To keep
+it, dump it with a 16 server and restore it into the new one before starting the router:
+
+```bash
+docker run -d --name va-pg16 -e POSTGRES_PASSWORD=postgres -v vision-agents_pgdata:/var/lib/postgresql/data postgres:16-alpine
+docker exec va-pg16 pg_dumpall -U postgres > /tmp/pg16.sql && docker rm -f va-pg16
+docker compose up -d postgres
+docker compose exec -T postgres psql -U postgres -f - < /tmp/pg16.sql
+```
 
 `.env` must set `ROUTER_DEV_KEK` (single-quoted: compose expands a `$` in it) and
 `ROUTER_PUBLIC_URL=http://localhost:8080`. Without the KEK no connector client secret can be

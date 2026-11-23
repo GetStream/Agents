@@ -18,15 +18,13 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
                \   scheduling.Parse, ResolveZone, CheckMove, SleptThrough
                 \                             /
                  v                           v
-        internal/store/scheduled_tasks.go  (tables: scheduled_tasks, scheduled_task_runs)
-        migrations/20261105120000_scheduled_tasks.sql
-        migrations/20261105130000_scheduled_tasks_wake.sql  (scheduled_tasks_wake_idx)
-        migrations/20261106120000_scheduled_task_thread.sql (channel_thread)
+        internal/store/scheduled_task(_run).go  (tables: scheduled_tasks, scheduled_task_runs)
+        migrations/global/ (scheduled_tasks_wake_idx; schema/global.sql lists both tables)
                  |
-                 |  ClaimDueScheduledTasks (FOR UPDATE SKIP LOCKED, lease, claim_id)
+                 |  ScheduledTasks.Claim (FOR UPDATE SKIP LOCKED, lease, leased_by)
                  v
         internal/scheduling/scheduler.go   Scheduler.run: missed? -> deliver with retries
-                 |                         -> FinishScheduledTaskRun | PostponeScheduledTask
+                 |                         -> ScheduledTasks.Finish | ScheduledTasks.Postpone
                  |  DeliverFunc
                  v
         internal/api/scheduled_delivery.go DeliverScheduledTask
@@ -43,7 +41,7 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
         deliverOnThread (a task made in an SMS, WhatsApp or 1:1 iMessage thread; deliver_to is not read):
           channel_threads row, the task's customer's and user's   else thread_gone
           channelbridge.Bridge.Reachable: connection, opt-out, sandbox gate, WhatsApp 24 h
-          lease the thread's turn (store.TakeChannelThreadTurn)
+          lease the thread's turn (store.ChannelTurns.Take)
           the session on the thread channel, else one opened as answerThread opens it
           Session.FollowUp("st_<run id>" or "_r1"), wait for the reply   -> Bridge.Reply texts it
           delivered_to sms (telnyx) | whatsapp
@@ -58,8 +56,8 @@ One word, one meaning, in code, docs and API alike.
 | task | One agreement with one user: title, instructions, schedule, zone, `deliver_to`, `quiet_hours`, state `active`, `paused`, `completed` or `failed` | `store.ScheduledTask`, table `scheduled_tasks`, API `ScheduledTask` | "Stretch", every weekday at 09:00, Europe/Amsterdam |
 | occurrence | One instant the schedule names | `Schedule.Next`, `Schedule.Upcoming`; the task's `next_run_at` is the next one | Mon 26 Oct 2026 09:00 CET |
 | run | The record of one occurrence that came due, or of one run by hand: `running`, `delivered`, `failed` or `missed`, with `error` a reason code. Its `prompt` is the instructions as they were at the claim | `store.ScheduledTaskRun`, table `scheduled_task_runs`, unique per (`customer_id`, `task_id`, `scheduled_for`) for `trigger = schedule` | run `scheduled_for` 2026-10-26T09:00:00+01:00, `state` `delivered`, `delivered_to` `conversation` |
-| claim, lease | A worker's hold on a task: `claim_id` fences every later write of that worker, `lease_until` says when another worker may take it. Lease 1 min, renewed every 10 s | `ClaimDueScheduledTasks`, `RenewScheduledTaskLease`, `scheduledLease`, `renewLeaseEvery` (`scheduler.go:19`, `:22`) | A pause clears `claim_id`; the next renewal finds no row and stops the delivery |
-| held | An occurrence that came due in quiet hours: the claim stays, the lease moves to the hold's end, the run stays `running` with `postponed_until` | `Postponed`, `PostponeScheduledTask`, `ScheduledTaskRun.PostponedUntil` | Due 23:30 with quiet hours 22:00–07:00: held until 07:00, delivered then |
+| claim, lease | A worker's hold on a task: `leased_by` fences every later write of that worker, `lease_until` says when another worker may take it. Lease 1 min, renewed every 10 s | `ScheduledTasks.Claim`, `ScheduledTasks.Renew`, `scheduledLease`, `renewLeaseEvery` (`scheduler.go:19`, `:22`) | A pause clears `leased_by`; the next renewal finds no row and stops the delivery |
+| held | An occurrence that came due in quiet hours: the claim stays, the lease moves to the hold's end, the run stays `running` with `postponed_until` | `Postponed`, `ScheduledTasks.Postpone`, `ScheduledTaskRun.PostponedUntil` | Due 23:30 with quiet hours 22:00–07:00: held until 07:00, delivered then |
 | missed | A run not delivered because it was too late, the task slept through it, or a pause or edit settled it while it was held or in flight (S4). Not a failure: the failure streak is left as it is | `ScheduledTaskRunMissed`, `Missed`, `Scheduler.missed`, `SleptThrough` | A daily task the router could not reach for 25 h: yesterday's occurrence is `missed`, today's (59 min old) is delivered. With 3 h down, the one occurrence is 3 h old, past the 1 h grace, so it is `missed` and nothing is delivered |
 | reason | The short code a failed or missed run records; the full error goes to the logs only | `Reason*` constants (`scheduler.go:105`), `Failure.Reason` | `user_on_call`, `not_answered`, `task_paused` |
 | final | A failure another attempt would only repeat, or that would ring the user again: not retried | `Failure.Final`, `undeliveredFinally` | `not_answered`, `already_called` |
@@ -82,7 +80,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestSchedulerSuite/TestTwoWorkersDeliverAnOccurrenceOnce`,
   `TestStoreSuite/TestClaimingGivesEachDueTaskToOneWorker`,
   `TestStoreSuite/TestAClaimInsertsOneRunPerOccurrence`.
-- **Every write after a claim goes through its `claim_id`.** A finish, renewal or hold under a
+- **Every write after a claim goes through its `leased_by`.** A finish, renewal or hold under a
   claim a pause, edit or delete took changes nothing on the task.
   `TestStoreSuite/TestAFinishUnderAStolenClaimDoesNotAdvanceTheTask`,
   `TestStoreSuite/TestARenewalExtendsOnlyTheClaimItHolds`,
@@ -208,8 +206,8 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   (`channelbridge.authorUserID`: per customer, line and person), `caller_kind` `server`, and
   `channel_thread` its thread channel. A Linq (iMessage) chat is offered them while its
   latest message says `data.chat.is_group` `false`; its person is that message's sender
-  (`channel_thread_people`), and a group chat, a chat whose message does not say and a
-  thread linked before the table are offered none. A Slack thread is shared and is offered none.
+  (`channel_threads.chat_person`), and a group chat, a chat whose message does not say and a
+  thread linked before the column are offered none. A Slack thread is shared and is offered none.
   `TestTelnyxChannelSuite/TestAPersonTextingTheLineSchedulesATaskThatKeepsTheirThread`,
   `TestTelnyxChannelSuite/TestTwoPeopleOnOneLineNeverReachEachOthersTasks`,
   `TestTelnyxChannelSuite/TestTheSamePersonOnAnotherCustomersLineReachesNoneOfTheTasks`,

@@ -331,7 +331,7 @@ func (s *ConnectorApprovalSuite) TestTheQuestionCarriesTheCallsArguments() {
 // call is not sent (probe on fe5ed52d: it reached the provider).
 func (s *ConnectorApprovalSuite) TestABindingRemovedWhileTheCallWaitsIsNotSent() {
 	d, connection := s.holding("whoami")
-	config, err := s.store.AgentConfig(s.ctx, s.customerID, d.spec.ConfigID)
+	config, err := s.store.AgentConfigs.Get(s.ctx, s.customerID, d.spec.ConfigID)
 	s.Require().NoError(err)
 
 	answer := s.callInBackground(s.ctx, d, "call-1", "crm__whoami", "{}")
@@ -352,7 +352,7 @@ func (s *ConnectorApprovalSuite) TestAConfigDeletedWhileTheCallWaitsIsNotSent() 
 
 	answer := s.callInBackground(s.ctx, d, "call-1", "crm__whoami", "{}")
 	s.Require().Eventually(func() bool { return s.questionOf("call-1") != nil }, 5*time.Second, 10*time.Millisecond)
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, s.customerID, d.spec.ConfigID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, s.customerID, d.spec.ConfigID))
 	s.NoError(d.answerApproval("call-1", "command-1", anyone, true, ""))
 	got := s.answerOf(answer)
 
@@ -502,7 +502,7 @@ func (s *ConnectorApprovalSuite) rows(connection string) []store.ConnectorInvoca
 	var rows []store.ConnectorInvocation
 	s.Require().Eventually(func() bool {
 		var err error
-		rows, err = s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		rows, err = s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 		return err == nil && len(rows) > 0
 	}, 5*time.Second, 20*time.Millisecond)
 	return rows

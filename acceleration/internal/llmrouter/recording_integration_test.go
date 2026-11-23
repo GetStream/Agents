@@ -127,7 +127,7 @@ func (s *RecordingSuite) recordedVia(ctx context.Context, name string, provider 
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	return rows[0], told, stream.Err()
 }
@@ -353,7 +353,7 @@ func (s *RecordingSuite) TestAResponseTheScreenRefusedMidAnswerIsRecordedAsRefus
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	s.ErrorIs(stream.Err(), refusal)
 	s.Equal(routing.ErrorRefused, rows[0].ErrorCode)
@@ -444,7 +444,7 @@ func (s *RecordingSuite) TestAStreamThatFailsMidAnswerStoresWhatItSaidAsItsTimin
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	s.Equal("provider_error", rows[0].ErrorCode)
 	s.Equal("stream reset by peer, [redacted]", rows[0].ErrorMessage)

@@ -193,7 +193,7 @@ func (s *Server) endedPhoneCall(r *http.Request, origin hookOrigin, event callEv
 	}
 	call := endedCall{callType: callType, callID: callID, streamSession: event.SessionID}
 
-	resources, err := s.store.CallResourcesInApp(r.Context(), origin.scope(), callType, callID)
+	resources, err := s.store.CallResources.Select(r.Context(), origin.scope(), callType, callID)
 	if err != nil {
 		s.logger.Warn("could not read an ended call's resources", "session_id", callID, "error", err)
 	}
@@ -279,10 +279,10 @@ func (s *Server) recordCallSites(ctx context.Context, call endedCall, details ma
 		Message:    "Call sites",
 		Details:    details,
 	}
-	if session, err := s.store.StoredSession(ctx, call.customer, call.callID); err == nil {
+	if session, err := s.store.Sessions.Get(ctx, call.customer, call.callID); err == nil {
 		entry.ConfigID, entry.AgentID = session.ConfigID, session.AgentID
 	}
-	if err := s.store.RecordAgentLog(ctx, entry); err != nil {
+	if err := s.store.AgentLogs.Insert(ctx, entry); err != nil {
 		s.logger.Warn("could not record a phone call's sites", "session_id", call.callID, "error", err)
 	}
 }

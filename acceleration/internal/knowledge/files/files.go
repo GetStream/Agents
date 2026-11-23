@@ -228,11 +228,11 @@ func (s *Service) Upload(ctx context.Context, upload Upload) (store.KnowledgeDoc
 		Bytes:       written,
 		ObjectKey:   key,
 	}
-	if err := s.store.PendKnowledgeFile(ctx, &document); err != nil {
+	if err := s.store.KnowledgeDocuments.Pend(ctx, &document); err != nil {
 		return store.KnowledgeDocument{}, errors.Join(err, s.bucket.Delete(context.WithoutCancel(ctx), key))
 	}
 	if err := s.enqueue(ctx, document); err != nil {
-		_, failErr := s.store.FailKnowledgeFile(context.WithoutCancel(ctx), document.CustomerID, document.ID, key,
+		_, failErr := s.store.KnowledgeDocuments.Fail(context.WithoutCancel(ctx), document.CustomerID, document.ID, key,
 			"The file could not be queued to be read. Upload it again.", true)
 		return store.KnowledgeDocument{}, errors.Join(err, failErr, s.bucket.Delete(context.WithoutCancel(ctx), key))
 	}
@@ -393,7 +393,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	}
 	s.logger.Warn("could not read a file into a knowledge base",
 		"source", document.Source, "namespace", document.Namespace, "attempt", retried+1, "last", last, "error", err)
-	if _, failErr := s.store.FailKnowledgeFile(ctx, payload.CustomerID, payload.ID, payload.ObjectKey, reason, last); failErr != nil {
+	if _, failErr := s.store.KnowledgeDocuments.Fail(ctx, payload.CustomerID, payload.ID, payload.ObjectKey, reason, last); failErr != nil {
 		return errors.Join(err, failErr)
 	}
 	if !last {
@@ -405,7 +405,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 
 // waiting is the document, while it still waits for the payload's file.
 func (s *Service) waiting(ctx context.Context, payload readPayload) (store.KnowledgeDocument, error) {
-	document, err := s.store.KnowledgeDocument(ctx, payload.CustomerID, payload.ID)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeDocument) {
 		return store.KnowledgeDocument{}, errOvertaken
 	}
@@ -455,7 +455,7 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	// passages written for it then would bring it back. It is looked for again once
 	// written, since it can go between the look and the write. The look also counts the
 	// passages about to be written, so a write that stops part way is still deleted whole.
-	covered, err := s.store.CoverKnowledgeFile(ctx, payload.CustomerID, payload.ID, payload.ObjectKey, len(passages))
+	covered, err := s.store.KnowledgeDocuments.Cover(ctx, payload.CustomerID, payload.ID, payload.ObjectKey, len(passages))
 	if err != nil {
 		return err
 	}
@@ -467,7 +467,7 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	}
 	current, err := s.waiting(ctx, payload)
 	if errors.Is(err, errOvertaken) {
-		if _, gone := s.store.KnowledgeDocument(ctx, payload.CustomerID, payload.ID); errors.Is(gone, store.ErrNoKnowledgeDocument) {
+		if _, gone := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID); errors.Is(gone, store.ErrNoKnowledgeDocument) {
 			if taken := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, len(passages))); taken != nil {
 				return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", taken)
 			}
@@ -486,7 +486,7 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	document.Text = markdown
 	document.Passages = len(passages)
 	document.Pages = pagesOf(read)
-	finished, err := s.store.FinishKnowledgeFile(ctx, document, payload.ObjectKey)
+	finished, err := s.store.KnowledgeDocuments.Finish(ctx, document, payload.ObjectKey)
 	if err != nil {
 		return err
 	}

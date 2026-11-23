@@ -76,7 +76,7 @@ func (s *CallSuite) meter(config ProviderConfig) Meter {
 func (s *CallSuite) rows(meter Meter) []store.Request {
 	meter.Recorder.Close()
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", meter.Owner.CustomerID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", meter.Owner.CustomerID).Scan(s.ctx))
 	return rows
 }
 

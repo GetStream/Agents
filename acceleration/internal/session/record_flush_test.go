@@ -212,7 +212,7 @@ func (s *RecordFlushSuite) TestAFlushReturnsOnceTheItemsQueuedBeforeItAreWritten
 	s.Require().NoError(s.records.Flush(s.bounded()))
 
 	// Base 4f22418b8: all three, at once.
-	items, err := s.store.SessionItems(s.ctx, s.customer, row.ID, response.ID, 10, nil)
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, row.ID, store.ItemFilter{ResponseID: response.ID, Limit: 10})
 	s.Require().NoError(err)
 	s.Len(items, 3, "the items still batching in the writer are not written")
 }
@@ -294,11 +294,11 @@ func (s *RecordFlushSuite) TestATitleWrittenAfterTheSessionWasDeletedLogsNoError
 	held, release := s.heldRow()
 	records.Opened(held, nil)
 	records.Described(s.customer, row.ID, "Where an order went", "A question about an order.", nil)
-	s.Require().NoError(s.store.DeleteSession(s.ctx, s.customer, row.ID))
+	s.Require().NoError(s.store.Sessions.Delete(s.ctx, s.customer, row.ID))
 	release()
 	s.Require().NoError(records.Flush(s.bounded()))
 
-	_, err := s.store.StoredSession(s.ctx, s.customer, row.ID)
+	_, err := s.store.Sessions.Get(s.ctx, s.customer, row.ID)
 	s.ErrorIs(err, store.ErrNoSession, "the title brought the deleted session back")
 	s.NotContains(logged.String(), "level=ERROR", "a title for a deleted session is an expected drop")
 	s.Contains(logged.String(), "level=DEBUG", "the drop is logged, at debug")
@@ -314,7 +314,7 @@ func (s *RecordFlushSuite) TestATitleForASessionThatIsThereIsStored() {
 	records.Described(s.customer, row.ID, "Where an order went", "A question about an order.", nil)
 	s.Require().NoError(records.Flush(s.bounded()))
 
-	got, err := s.store.StoredSession(s.ctx, s.customer, row.ID)
+	got, err := s.store.Sessions.Get(s.ctx, s.customer, row.ID)
 	s.Require().NoError(err)
 	s.Equal("Where an order went", got.Title)
 	s.NotContains(logged.String(), "level=ERROR")
@@ -373,7 +373,7 @@ func (s *RecordFlushSuite) holdWriter() (release func()) {
 // until the returned release rolls that transaction back, or the test ends.
 func (s *RecordFlushSuite) heldRow() (store.AgentSession, func()) {
 	held := s.row()
-	tx, err := s.store.DB().BeginTx(s.ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	rollback := sync.OnceFunc(func() { s.NoError(tx.Rollback()) })
 	s.T().Cleanup(rollback)
@@ -397,7 +397,7 @@ func (s *RecordFlushSuite) row() store.AgentSession {
 // stored says whether the session's row is in Postgres. It is called from the callers'
 // goroutines, so a failure to read is not stored rather than a failed check.
 func (s *RecordFlushSuite) stored(id string) bool {
-	rows, err := s.store.QuerySessions(s.ctx, s.customer, store.SessionFilter{Limit: 100})
+	rows, err := s.store.Sessions.Select(s.ctx, s.customer, store.SessionFilter{Limit: 100})
 	if err != nil {
 		return false
 	}

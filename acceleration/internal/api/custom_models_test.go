@@ -37,7 +37,7 @@ func (s *CustomModelsSuite) TestAModelIsStoredAndReadBackWithoutItsKey() {
 	s.EqualValues(131072, read.ContextWindow)
 	s.Equal("no", value(read.TrainsOnData))
 
-	stored, err := s.store.CustomModel(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.CustomModels.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.NotContains(string(stored.APIKeySealed), "sk-secret", "the key is sealed at rest")
 }

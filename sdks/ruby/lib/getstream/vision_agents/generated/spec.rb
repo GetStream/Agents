@@ -904,7 +904,7 @@ module GetStream
         }.freeze,
         "listCalls" => {
           method: :get, path: "/v1/agents/calls",
-          path_params: [].freeze, query: %w[running limit agent_id campaign_id from to max_review_score].freeze,
+          path_params: [].freeze, query: %w[running limit agent_id session_id campaign_id from to max_review_score].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
@@ -2034,7 +2034,7 @@ module GetStream
           required: %w[e164 vendor].freeze, open: false
         }.freeze,
         "Call" => {
-          properties: %w[agent_id call_id campaign_id config_id contact_id direction ended_at from_number id instructions llm llm_used mode review_notes review_score skills started_at sts sts_used stt stt_used subagent subagent_used summary tags to_number tts tts_used usage user_id voice voice_used].freeze,
+          properties: %w[agent_id call_id campaign_id contact_id direction ended_at from_number id instructions llm llm_used mode review_notes review_score session_id skills started_at sts sts_used stt stt_used subagent subagent_used summary tags to_number tts tts_used usage voice voice_used].freeze,
           required: %w[agent_id call_id direction id started_at].freeze, open: false
         }.freeze,
         "CallEvent" => {
@@ -2500,6 +2500,10 @@ module GetStream
         "Greeting" => {
           properties: %w[mode text].freeze,
           required: %w[text].freeze, open: false
+        }.freeze,
+        "GuardrailCheck" => {
+          properties: %w[allowed failed held_ms kind latency_ms mode model probability threshold].freeze,
+          required: %w[allowed kind latency_ms mode].freeze, open: false
         }.freeze,
         "GuestUser" => {
           properties: %w[custom expires_at id name refresh_secret token].freeze,
@@ -3210,7 +3214,7 @@ module GetStream
           required: [].freeze, open: false
         }.freeze,
         "TimelineEntry" => {
-          properties: %w[audio_out_ms cadence_ms decision_ms first_audible_frame_ms first_frame_queued_ms floor_checks heard interrupted llm_ttft_ms model_calls model_to_first_text_ms roundtrip_ms said speech_end_to_audible_ms speech_end_to_audio_ms started_at stt_latency_ms text_to_tts_ms tts_to_audio_ms tts_ttfb_ms turn_id].freeze,
+          properties: %w[audio_out_ms cadence_ms decision_ms first_audible_frame_ms first_frame_queued_ms floor_checks guardrail heard interrupted llm_ttft_ms model_calls model_to_first_text_ms roundtrip_ms said speech_end_to_audible_ms speech_end_to_audio_ms started_at stt_latency_ms text_to_tts_ms tts_to_audio_ms tts_ttfb_ms turn_id].freeze,
           required: %w[started_at turn_id].freeze, open: false
         }.freeze,
         "ToolApprovalAnswer" => {
@@ -3222,7 +3226,7 @@ module GetStream
           required: %w[allowed request_id tool_call_id type].freeze, open: false
         }.freeze,
         "ToolCallState" => {
-          properties: %w[approved_at display_title duration_ms error progress rejected_at started_at status tool tool_call_id turn_id type].freeze,
+          properties: %w[approved_at custom display_title duration_ms error progress rejected_at started_at status tool tool_call_id turn_id type].freeze,
           required: %w[type tool_call_id tool turn_id status started_at duration_ms].freeze, open: false
         }.freeze,
         "ToolGroup" => {

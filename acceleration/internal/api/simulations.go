@@ -37,7 +37,7 @@ func (s *Server) listSimulations(ctx context.Context, _ *listSimulationsRequest)
 		return nil, errNoSimulations
 	}
 
-	stored, err := s.store.CustomerSimulations(ctx, customerID)
+	stored, err := s.store.Simulations.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func (s *Server) createSimulation(ctx context.Context, request *createSimulation
 	if failure := simulationComplaint(ctx, s, customerID, simulation); failure != nil {
 		return nil, failure
 	}
-	if err := s.store.CreateSimulation(ctx, &simulation); err != nil {
+	if err := s.store.Simulations.Insert(ctx, &simulation); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 	return &createSimulationResponse{Body: simulationOf(simulation)}, nil
@@ -82,7 +82,7 @@ func (s *Server) getSimulation(ctx context.Context, request *getSimulationReques
 		return nil, errNoSimulations
 	}
 
-	simulation, err := s.store.Simulation(ctx, customerID, request.Id)
+	simulation, err := s.store.Simulations.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownSimulation
 	}
@@ -103,7 +103,7 @@ func (s *Server) updateSimulation(ctx context.Context, request *updateSimulation
 		return nil, invalidRequest("a request body is required")
 	}
 
-	existing, err := s.store.Simulation(ctx, customerID, request.Id)
+	existing, err := s.store.Simulations.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownSimulation
 	}
@@ -113,7 +113,7 @@ func (s *Server) updateSimulation(ctx context.Context, request *updateSimulation
 	if failure := simulationComplaint(ctx, s, customerID, simulation); failure != nil {
 		return nil, failure
 	}
-	if err := s.store.UpdateSimulation(ctx, &simulation); err != nil {
+	if err := s.store.Simulations.Update(ctx, &simulation); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 
@@ -131,7 +131,7 @@ func (s *Server) deleteSimulation(ctx context.Context, request *deleteSimulation
 		return nil, errNoSimulations
 	}
 
-	if err := s.store.DeleteSimulation(ctx, customerID, request.Id); err != nil {
+	if err := s.store.Simulations.Delete(ctx, customerID, request.Id); err != nil {
 		return nil, errUnknownSimulation
 	}
 	return nil, nil
@@ -151,7 +151,7 @@ func (s *Server) runSimulation(ctx context.Context, request *runSimulationReques
 		return nil, errCannotRunSimulations
 	}
 
-	if _, err := s.store.Simulation(ctx, customerID, request.Id); err != nil {
+	if _, err := s.store.Simulations.Get(ctx, customerID, request.Id); err != nil {
 		return nil, errUnknownSimulation
 	}
 	run, err := s.simulations.Start(ctx, customerID, request.Id)
@@ -172,7 +172,6 @@ func (s *Server) listSimulationRuns(ctx context.Context, request *listSimulation
 	}
 
 	filter := store.SimulationRunFilter{
-		CustomerID:   customerID,
 		SimulationID: value(request.SimulationId.ptr()),
 		Limit:        value(request.Limit.ptr()),
 	}
@@ -180,7 +179,7 @@ func (s *Server) listSimulationRuns(ctx context.Context, request *listSimulation
 		filter.State = string(*request.State.ptr())
 	}
 
-	stored, err := s.store.SimulationRuns(ctx, filter)
+	stored, err := s.store.SimulationRuns.Select(ctx, customerID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -204,11 +203,11 @@ func (s *Server) getSimulationRun(ctx context.Context, request *getSimulationRun
 		return nil, errNoSimulations
 	}
 
-	run, err := s.store.SimulationRun(ctx, customerID, request.Id)
+	run, err := s.store.SimulationRuns.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownSimulationRun
 	}
-	cases, err := s.store.SimulationCases(ctx, run.ID)
+	cases, err := s.store.SimulationCases.Select(ctx, run.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +283,7 @@ func simulationComplaint(
 	if err := routing.Tags(simulation.Tags).Validate(); err != nil {
 		return invalidRequest(err.Error())
 	}
-	if _, err := server.store.AgentConfig(ctx, customerID, simulation.ConfigID); err != nil {
+	if _, err := server.store.AgentConfigs.Get(ctx, customerID, simulation.ConfigID); err != nil {
 		return errUnknownConfig
 	}
 	return nil

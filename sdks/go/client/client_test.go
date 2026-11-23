@@ -281,7 +281,8 @@ func newRouter(t *testing.T) *router {
 	})
 
 	// A call's reads answer with what is told apart by the session asked about, so a read of
-	// the wrong session, or of the wrong one of the three, is seen.
+	// the wrong session, or of the wrong one of the three, is seen. session-1's newest call has
+	// an id of its own, so a session id read as a call id is unknown.
 	unknownCall := func(w http.ResponseWriter) {
 		answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{
 			Message: "unknown call", Type: acceleration.ErrorTypeNotFound, Code: "call_not_found",
@@ -301,9 +302,17 @@ func newRouter(t *testing.T) *router {
 			Models:     []acceleration.ModelTokens{{Modality: "llm", Provider: "openai", Model: "gpt-5-mini", InputTokens: 1200}},
 		})
 	})
+	mux.HandleFunc("GET /v1/agents/calls", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		calls := []acceleration.Call{}
+		if r.URL.Query().Get("session_id") == "session-1" {
+			calls = []acceleration.Call{{Id: "call-2", SessionId: ptr("session-1")}, {Id: "call-1", SessionId: ptr("session-1")}}
+		}
+		answer(w, http.StatusOK, calls)
+	})
 	mux.HandleFunc("GET /v1/agents/calls/{id}/timeline", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
-		if r.PathValue("id") != "session-1" {
+		if r.PathValue("id") != "call-2" {
 			unknownCall(w)
 			return
 		}
@@ -314,7 +323,7 @@ func newRouter(t *testing.T) *router {
 	})
 	mux.HandleFunc("GET /v1/agents/calls/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
-		if r.PathValue("id") != "session-1" {
+		if r.PathValue("id") != "call-2" {
 			unknownCall(w)
 			return
 		}
@@ -1214,17 +1223,13 @@ func TestASessionsMetricsOfAnUnknownSessionAreRefused(t *testing.T) {
 	_, timeline := sessions.Timeline(t.Context(), "someone-elses")
 	_, decisions := sessions.Decisions(t.Context(), "someone-elses")
 
-	for read, refusal := range map[string]struct {
-		err  error
-		code string
-	}{
-		"tokens":    {tokens, "session_not_found"},
-		"timeline":  {timeline, "call_not_found"},
-		"decisions": {decisions, "call_not_found"},
-	} {
-		var refused *stream.RouterError
-		if !errors.As(refusal.err, &refused) || refused.Code != refusal.code {
-			t.Errorf("the %s of an unknown session came back as %v, want %s", read, refusal.err, refusal.code)
+	var refused *stream.RouterError
+	if !errors.As(tokens, &refused) || refused.Code != "session_not_found" {
+		t.Errorf("the tokens of an unknown session came back as %v, want session_not_found", tokens)
+	}
+	for read, err := range map[string]error{"timeline": timeline, "decisions": decisions} {
+		if !errors.Is(err, ErrNoCall) {
+			t.Errorf("the %s of an unknown session came back as %v, want ErrNoCall", read, err)
 		}
 	}
 }

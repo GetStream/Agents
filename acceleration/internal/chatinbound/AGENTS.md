@@ -8,7 +8,7 @@ Stream Chat's own delivery of messages to the router. `chatinbound.go` checks a 
 endpoint                                    api.receiveChatInbound
   signature, app served here, message.new, addressed, fresh (app mode)
   one tx: QueueFirstChatInbound
-    hook_deliveries <app>:message:<id>      the webhook's key (deliveryKey)
+    deliveries_seen hook <app>:message:<id> the webhook's key (deliveryKey)
     chat_inbound row
   committed: 200, Kick wakes this router's worker
   key recorded before: 200, nothing queued  the webhook or an earlier delivery answers it

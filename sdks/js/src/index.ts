@@ -44,6 +44,16 @@ export {
 
 export { AgentHandle } from "./handle.js";
 
+export {
+  Connections,
+  type Authorization,
+  type AuthorizationOptions,
+  type Connection,
+  type ConnectionFilter,
+  type ConnectionOptions,
+  type ConnectionUser,
+} from "./connections.js";
+
 export { Memories } from "./memories.js";
 
 export { SimulationRuns, Simulations, type SimulationRunQuery } from "./simulations.js";
@@ -140,6 +150,7 @@ export {
   type Tool,
   type ToolApproval,
   type ToolCallFields,
+  type ToolCallUpdate,
   type ToolConversation,
   type ToolLine,
   type ToolUser,
@@ -158,7 +169,7 @@ export {
 } from "./ui-catalog.js";
 
 export { ConversationState, type AgentState, type ConversationSnapshot } from "./state.js";
-export { ToolCalls, type ToolCallState, type ToolCallStatus } from "./tool-calls.js";
+export { ToolCalls, toolCallTitle, type ToolCallState, type ToolCallStatus } from "./tool-calls.js";
 export {
   Conversation,
   mergeOpenUIStatements,

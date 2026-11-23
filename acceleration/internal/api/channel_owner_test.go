@@ -256,7 +256,7 @@ func (s *SlackChannelSuite) sharedAsBefore() string {
 
 // tagged sets a config's tags in its row.
 func (s *SlackChannelSuite) tagged(configID, tags string) {
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?", tags, configID)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?", tags, configID)
 	s.Require().NoError(err)
 }
 
@@ -276,12 +276,12 @@ func (s *LinqChannelSuite) TestAnIMessageOnALineTwoAgentsSharedIsAnswered() {
 // sharedAsBefore is a second live config binding the line, as a save before AI-1049 could
 // store one: made while the suite's config is tagged a test copy, which the store now needs.
 func (s *LinqChannelSuite) sharedAsBefore() {
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?",
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?",
 		`{"`+store.DraftOfTag+`":"`+s.config.ID+`"}`, s.config.ID)
 	s.Require().NoError(err)
 	newer := store.AgentConfig{CustomerID: s.customerID(), Name: "linq-newer-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "noted/noted-model", Connectors: s.config.Connectors}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &newer))
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = '{}' WHERE id = ?", s.config.ID)
+		Models: store.AgentModels{LLM: "noted/noted-model"}, Connectors: s.config.Connectors}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &newer))
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = '{}' WHERE id = ?", s.config.ID)
 	s.Require().NoError(err)
 }

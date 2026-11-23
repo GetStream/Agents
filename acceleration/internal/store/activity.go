@@ -32,6 +32,22 @@ type ActivityDelta struct {
 	LastAt          time.Time
 }
 
+// Validate refuses a delta that names no row: without an app, an area, a client or a day.
+func (d *ActivityDelta) Validate() error {
+	return validate("activity").
+		required("app_id", d.AppID).
+		required("area", d.Area).
+		required("client", d.Client).
+		check(!d.Day.IsZero(), "day", "is required").
+		done()
+}
+
+// Activities are what each app did in each area of the API, from each client, on each UTC day
+// (customer_activity), in the shared database.
+type Activities struct {
+	store *Store
+}
+
 // activityKey is what one customer_activity row is known by.
 type activityKey struct {
 	appID, area, client, day string
@@ -43,11 +59,16 @@ type activityKey struct {
 // leave room to spare.
 const activityBatch = 1000
 
-// RecordActivity adds deltas to the rows they name, making the ones that are not there yet.
+// Add adds deltas to the rows they name, making the ones that are not there yet.
 // Counts are added, the first and last times widen, and a refusal later than the one the
 // row holds replaces it. Deltas naming the same row are summed first: one statement cannot
 // update a row twice.
-func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) error {
+func (r *Activities) Add(ctx context.Context, deltas []ActivityDelta) error {
+	for i := range deltas {
+		if err := deltas[i].Validate(); err != nil {
+			return stack.Wrap(err)
+		}
+	}
 	folded := make(map[activityKey]*ActivityDelta, len(deltas))
 	order := make([]activityKey, 0, len(deltas))
 	for _, delta := range deltas {
@@ -70,7 +91,7 @@ func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) erro
 
 	// One transaction, so a failed write wrote nothing and the caller can keep the deltas
 	// for its next try without counting any of them twice.
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for start := 0; start < len(order); start += activityBatch {
 			if err := writeActivity(ctx, tx, folded, order[start:min(start+activityBatch, len(order))]); err != nil {
 				return err
@@ -79,7 +100,7 @@ func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) erro
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("store: record activity: %w", err)
+		return stack.Wrap(fmt.Errorf("store: record activity: %w", err))
 	}
 	return nil
 }
@@ -157,11 +178,11 @@ type ActivityArea struct {
 	LastRefusalCode string `bun:"last_refusal_code"`
 }
 
-// ActivityAreas sums the activity of apps, at least one, from the UTC day of since on, by area
+// Areas sums the activity of apps, at least one, from the UTC day of since on, by area
 // and client. The record keeps days, so the day since falls on is read whole.
-func (s *Store) ActivityAreas(ctx context.Context, apps []string, since time.Time) ([]ActivityArea, error) {
+func (r *Activities) Areas(ctx context.Context, apps []string, since time.Time) ([]ActivityArea, error) {
 	var areas []ActivityArea
-	err := s.db.NewSelect().
+	err := r.store.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("area, client, MIN(first_at) AS first_at, MAX(last_at) AS last_at").
 		ColumnExpr("SUM(requests) AS requests, SUM(refused) AS refused").
@@ -178,11 +199,11 @@ func (s *Store) ActivityAreas(ctx context.Context, apps []string, since time.Tim
 	return areas, nil
 }
 
-// ActivityDays is how many UTC days from the day of since on apps had a request answered, not
+// Days is how many UTC days from the day of since on apps had a request answered, not
 // refused, in any of areas.
-func (s *Store) ActivityDays(ctx context.Context, apps []string, since time.Time, areas []string) (int, error) {
+func (r *Activities) Days(ctx context.Context, apps []string, since time.Time, areas []string) (int, error) {
 	var days int
-	err := s.db.NewSelect().
+	err := r.store.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("COUNT(DISTINCT day)").
 		Where("app_id IN (?)", bun.In(apps)).
@@ -194,69 +215,4 @@ func (s *Store) ActivityDays(ctx context.Context, apps []string, since time.Time
 		return 0, stack.Wrap(fmt.Errorf("store: activity days: %w", err))
 	}
 	return days, nil
-}
-
-// MeterUse is what some apps' work of one modality came to. Requests leaves out the sliced
-// time of runtime and sandboxes, which DurationMs measures instead.
-type MeterUse struct {
-	Modality     string `bun:"modality"`
-	Requests     int64  `bun:"requests"`
-	InputTokens  int64  `bun:"input_tokens"`
-	OutputTokens int64  `bun:"output_tokens"`
-	AudioMs      int64  `bun:"audio_ms"`
-	Characters   int64  `bun:"characters"`
-	DurationMs   int64  `bun:"duration_ms"`
-	CostMicros   int64  `bun:"cost_micros"`
-}
-
-// MeterShards names the shards MeterUses reads, this one's first: those in Options.Shards, or
-// this shard alone, named by a digest of its DSN, when that is unset.
-func (s *Store) MeterShards() []string { return slices.Clone(s.shardNames) }
-
-// MeterUses sums the requests apps, at least one, made from since on by modality, over every
-// shard, in the order of their modality.
-func (s *Store) MeterUses(ctx context.Context, apps []string, since time.Time) ([]MeterUse, error) {
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]MeterUse, error) {
-		var used []MeterUse
-		err := db.NewSelect().
-			TableExpr("requests").
-			ColumnExpr("modality").
-			ColumnExpr(requestCount+" AS requests").
-			ColumnExpr("COALESCE(SUM(input_tokens), 0) AS input_tokens").
-			ColumnExpr("COALESCE(SUM(output_tokens), 0) AS output_tokens").
-			ColumnExpr("COALESCE(SUM(audio_ms), 0) AS audio_ms").
-			ColumnExpr("COALESCE(SUM(characters), 0) AS characters").
-			ColumnExpr("COALESCE(SUM(duration_ms), 0)::bigint AS duration_ms").
-			ColumnExpr("COALESCE(SUM(cost_micros), 0) AS cost_micros").
-			Where("customer_id IN (?)", bun.In(apps)).
-			Where("started_at >= ?", since).
-			Group("modality").
-			Scan(ctx, &used)
-		return used, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: meter uses: %w", err))
-	}
-	// Sorted first, so the rows of one modality from every shard are next to each other.
-	var all []MeterUse
-	for _, list := range lists {
-		all = append(all, list...)
-	}
-	slices.SortStableFunc(all, func(a, b MeterUse) int { return cmp.Compare(a.Modality, b.Modality) })
-	var uses []MeterUse
-	for _, used := range all {
-		if last := len(uses) - 1; last >= 0 && uses[last].Modality == used.Modality {
-			held := &uses[last]
-			held.Requests += used.Requests
-			held.InputTokens += used.InputTokens
-			held.OutputTokens += used.OutputTokens
-			held.AudioMs += used.AudioMs
-			held.Characters += used.Characters
-			held.DurationMs += used.DurationMs
-			held.CostMicros += used.CostMicros
-			continue
-		}
-		uses = append(uses, used)
-	}
-	return uses, nil
 }

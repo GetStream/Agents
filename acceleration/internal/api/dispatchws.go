@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // defaultCapacity is how many calls a worker that did not say is assumed to take at once.
@@ -274,8 +275,9 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			Error      string          `json:"error"`
 			// Text and Verbatim say how a running hosted call is going, as a session's
 			// tool_update does.
-			Text     string `json:"text"`
-			Verbatim bool   `json:"verbatim"`
+			Text     string         `json:"text"`
+			Verbatim bool           `json:"verbatim"`
+			Custom   map[string]any `json:"custom"`
 		}
 		_, payload, err := connection.ReadMessage()
 		if err != nil {
@@ -333,7 +335,7 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			}
 
 		case "tool_update":
-			worker.Update(report.ToolCallID, report.Text, report.Verbatim)
+			worker.Update(report.ToolCallID, report.Text, report.Verbatim, report.Custom)
 
 		case "tool_hold":
 			// The conversation may be on another node, so the answer is a round trip that
@@ -458,12 +460,12 @@ func (s *Server) unknownHostedAgent(customerID, agentID string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hostedAgentLookup)
 	defer cancel()
-	_, exists, err := s.configs.AgentConfigByName(ctx, customerID, agentID)
-	if err != nil {
-		s.logger.Warn("could not check the agent a worker hosts tools for", "agent", agentID, "error", err)
+	_, err := s.store.AgentConfigs.GetByName(ctx, customerID, agentID)
+	if err == nil {
 		return ""
 	}
-	if exists {
+	if !errors.Is(err, store.ErrNoAgentConfig) {
+		s.logger.Warn("could not check the agent a worker hosts tools for", "agent", agentID, "error", err)
 		return ""
 	}
 	return "there is no agent called " + agentID + "; check the name, or sync the agent before starting the worker"

@@ -223,7 +223,7 @@ func (s *Server) branchResponse(ctx context.Context, id string, body *CreateResp
 	if body.Text == "" {
 		// The question is asked again as it was.
 		if s.store != nil {
-			if replaced, err := s.store.SessionResponse(ctx, OwnerFrom(ctx).CustomerID, found.ID(), replaces); err == nil {
+			if replaced, err := s.store.Responses.Get(ctx, OwnerFrom(ctx).CustomerID, found.ID(), replaces); err == nil {
 				said = replaced.Said
 			}
 		}
@@ -292,7 +292,8 @@ func (s *Server) listResponses(ctx context.Context, request *listResponsesReques
 		return nil, invalidRequest(err.Error())
 	}
 	limit := store.SessionLimit(value(request.Limit.ptr()))
-	rows, err := s.store.SessionResponses(ctx, OwnerFrom(ctx).CustomerID, found.ID(), limit, after)
+	rows, err := s.store.Responses.Select(ctx, OwnerFrom(ctx).CustomerID, found.ID(),
+		store.ResponseFilter{Limit: limit, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -328,8 +329,8 @@ func (s *Server) listResponseItems(ctx context.Context, request *listResponseIte
 		return nil, invalidRequest(err.Error())
 	}
 	limit := store.ItemLimit(value(request.Limit.ptr()))
-	rows, err := s.store.SessionItems(ctx, OwnerFrom(ctx).CustomerID, found.ID(),
-		value(request.ResponseId.ptr()), limit, after)
+	rows, err := s.store.ResponseItems.Select(ctx, OwnerFrom(ctx).CustomerID, found.ID(),
+		store.ItemFilter{ResponseID: value(request.ResponseId.ptr()), Limit: limit, After: after})
 	if err != nil {
 		return nil, err
 	}

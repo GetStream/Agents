@@ -130,9 +130,9 @@ func (s *ForgetUserSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -148,7 +148,7 @@ func (s *ForgetUserSuite) recorded(shard int, app, user string, cost int64) uuid
 // written writes one billable row of app's user on a shard, not shipped yet.
 func (s *ForgetUserSuite) written(shard int, app, user string, cost int64) uuid.UUID {
 	id := uuid.Must(uuid.NewV7())
-	_, err := s.shards[shard].RecordRequests(s.ctx, []store.Request{{
+	_, err := s.shards[shard].Requests.InsertMany(s.ctx, []store.Request{{
 		UsageID: id, Modality: "llm", CustomerID: app, OrganizationID: s.organization, OrganizationTier: usageservice.DefaultTier,
 		APIKey: "key", UserID: user, Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(),
 		CostMicros: cost, BaseCostMicros: cost, Billable: true, Success: true,
@@ -165,7 +165,7 @@ func (s *ForgetUserSuite) shipped(id uuid.UUID, app, user string, cost int64) {
 // stopped is what a run that stopped after its first call to the usage service left: every
 // shard and the service rewritten to replacement, and nothing after.
 func (s *ForgetUserSuite) stopped(replacement string) {
-	_, err := s.shards[0].RenameUserRequests(s.ctx, s.app, person, replacement)
+	_, err := s.shards[0].Requests.RenameUser(s.ctx, s.app, person, replacement)
 	s.Require().NoError(err)
 	manage, err := usageservice.NewClient(usageservice.ClientOptions{URL: s.service.URL, ManageKey: s.service.ManageKey})
 	s.Require().NoError(err)
@@ -278,25 +278,25 @@ func (s *ForgetUserSuite) settingsOf(app, user string) {
 	shared := s.shards[0]
 	audit := store.LimitAudit{CustomerID: app, Source: store.AuditSourceAPI, ActorID: "staff"}
 	ten := int64(10)
-	s.Require().NoError(shared.SavePolicy(s.ctx, store.ScopeUser, store.UserScopeID(app, user),
-		store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}))
+	s.Require().NoError(shared.Policies.Upsert(s.ctx, &store.Policy{Scope: store.ScopeUser, ScopeID: store.UserScopeID(app, user),
+		Document: store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}}))
 	for _, limit := range []store.Limit{
 		{Subject: usageservice.SubjectUser, Level: store.LevelUser, UserID: user},
 		{Subject: usageservice.SubjectUser, Level: store.LevelApp},
 	} {
 		limit.OrganizationID, limit.AppID, limit.Interval, limit.LimitMicros, limit.UpdatedBy = s.organization, app, usageservice.Daily, 1_000, "staff"
-		s.Require().NoError(shared.CreateLimit(s.ctx, &limit, audit))
+		s.Require().NoError(shared.Limits.Insert(s.ctx, &limit, audit))
 	}
 	start, _ := usageservice.Window(usageservice.Daily, time.Now())
-	s.Require().NoError(shared.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(shared.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		Interval: usageservice.Daily, WindowStart: start, BaselineMicros: 5, Reason: "support", Actor: "staff",
 	}}, audit))
-	s.Require().NoError(shared.AddGrant(s.ctx, &store.LimitGrant{
+	s.Require().NoError(shared.LimitGrants.Insert(s.ctx, &store.LimitGrant{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		AmountMicros: 500, Reason: "support", Actor: "staff",
 	}, audit))
-	s.Require().NoError(shared.CreateCampaign(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.Campaigns.Insert(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
 }
 
 // userRows is what the shared database holds of app's user: their own policy, the limits naming
@@ -311,9 +311,9 @@ type userRows struct {
 }
 
 func (s *ForgetUserSuite) userRows(app, user string) userRows {
-	shared := s.shards[0].DB()
+	shared := s.shards[0].GlobalDB()
 	var rows userRows
-	policy, err := s.shards[0].Policy(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
+	policy, err := s.shards[0].Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
 	s.Require().NoError(err)
 	rows.policy = policy.Quota != nil
 	rows.ownLimits, err = shared.NewSelect().Model((*store.Limit)(nil)).Where("app_id = ?", app).Where("level = ?", store.LevelUser).Count(s.ctx)
@@ -331,10 +331,10 @@ func (s *ForgetUserSuite) userRows(app, user string) userRows {
 func (s *ForgetUserSuite) snapshotted(shard int, app, user string) string {
 	id := "session-" + uuid.NewString()
 	now := time.Now().UTC()
-	s.Require().NoError(s.shards[shard].SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.shards[shard].Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: id, CustomerID: app, AgentName: "docs", UserID: user, CallerKind: "user", CreatedAt: now,
 	}))
-	s.Require().NoError(s.shards[shard].SaveBranchMessages(s.ctx, []store.AgentBranchMessage{{
+	s.Require().NoError(s.shards[shard].BranchMessages.UpsertMany(s.ctx, []store.AgentBranchMessage{{
 		SessionID: id, OriginalMessageID: "m-" + uuid.NewString(), CustomerID: app, ResponseID: "second",
 		SwitchID: "switch", ChatCreatedAt: now, AuthorID: user, Message: map[string]any{"text": "hello from " + user},
 	}}))
@@ -459,7 +459,7 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 
 	replacement := s.forgottenAs(out)
 	s.NotContains(out, person)
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	entry := entries[0]
@@ -499,7 +499,7 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 	s.Equal(int64(len(routers)), s.present(s.routers, routers))
 	s.Equal(int64(1), s.present(s.counters, counters))
 	s.Equal(before, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Empty(entries)
 }
@@ -605,7 +605,7 @@ func (s *ForgetUserSuite) TestARunThatStoppedIsFinishedWithItsReplacement() {
 	s.Zero(s.present(s.counters, counters))
 	s.Equal(userRows{appLimits: 1, resetUsers: []string{replacement}, grantUsers: []string{replacement},
 		campaignUser: []string{replacement}}, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1, "one audit row, for the run that completed")
 	s.Equal(replacement, entries[0].ResourceID)

@@ -178,7 +178,7 @@ func (s *TransportSuite) TestAClientHeldPastADeleteSendsNothing() {
 	ref := s.f.connected()
 	client := s.transports(s.f.srv.Client().Transport).Client(ref, s.f.scheme(s.f.srv.Client()))
 	s.Equal(http.StatusOK, s.call(client))
-	s.Require().NoError(s.f.db.DeleteConnectorConnection(s.f.ctx, ref.CustomerID, ref.ConnectionID))
+	s.Require().NoError(s.f.db.ConnectorConnections.Delete(s.f.ctx, ref.CustomerID, ref.ConnectionID))
 
 	request, err := http.NewRequest(http.MethodPost, s.f.srv.URL+fakeprovider.PathMCP, strings.NewReader(toolCall))
 	s.Require().NoError(err)

@@ -2,6 +2,47 @@
 
 ## Features
 
+### Qwen4-Max is `qwen/qwen4-max`
+
+Alibaba's Qwen4-Max can be routed as `qwen/qwen4-max`, in the `high-quality` tier, with images in, tools and JSON Schema answers. It is reached on QwenCloud's Singapore endpoint with `DASHSCOPE_API_KEY`, the key the qwen realtime models take; `QWEN_BASE_URL` names another region's endpoint for a key made there. Thinking is off unless the model entry sets `thinking: true`, which takes `reasoning_effort` `low`, `high` or `xhigh`. It is $1.50 in, $4.50 out and $0.075 for a cache hit per 1M tokens.
+
+### Usage alerts are a counter on /metrics
+
+The router and the usage service add to `router_alert_holds_total{alert,level}` at every check of their alerts: 1 when a condition holds, or the number of items a condition of items holds for, and nothing when it does not. It counts whether or not the Sentry limit sends the event, so a monitor outside Sentry can page on `increase(...{level="page"}[5m]) > 0`, including for a condition that holds at one check only. A hold at the last check, on shutdown, or during a drain reaches Sentry only. The Sentry events and their limit are unchanged (AI-3424).
+
+### The Python, Go, Ruby and Rust SDKs refuse a user on a device's connections call
+
+A client that holds a user's token (`as_user`, `SetUser`) and names `user_id` on a connections call now fails at once with the SDK's configuration error, the way the JavaScript and PHP SDKs do, instead of sending the call for the router's 403. A device acts only as its own user: name the user from a backend that holds the API secret. A call naming no user, and a client on a router that trusts the customer id, work as before. A Go `Backend` with the API secret and a `UserID` that names another user on a connections call now acts for that user with the app's token, as the other SDKs do, instead of signing a token for its own user that the proxy refused.
+
+### The Rust SDK connects a user's own accounts
+
+`Client::connections()` creates, authorizes, reads, lists and deletes connections: `create(&NewConnection { connector, label, user_id })`, `authorize(id, &AuthorizeOptions { return_url, user_id })` (the consent's launch URL, handoff token and expiry), `get(id, user_id)`, `list(&ConnectionFilter { connector, user_id })` (every page) and `delete(id, user_id)`. A user given goes out as both the owner and `X-Stream-User-Id`; `None` is the app's own connection and leaves the client's own `ClientOptions::user_id` as it is.
+
+### The PHP SDK connects a user's own accounts
+
+`$client->connections` creates, authorizes, reads, lists and deletes connections: `create(new NewConnection('linear', userId: 'ada'))`, `authorize($id, new AuthorizeOptions($returnUrl, userId: 'ada'))` for the launch URL, handoff token and expiry of the consent, `get($id, userId: 'ada')`, `list(new ConnectionFilter(userId: 'ada'))` (every page) and `delete($id, userId: 'ada')`; no `userId` is the app's own connection. `Backend::onBehalfOf` is deprecated in favour of that parameter.
+
+### The .NET SDK connects a user's own accounts
+
+`VisionAgentsClient.Connections` creates, authorizes, reads, lists and deletes connections: `CreateAsync("linear", new NewConnectionOptions { UserId = "alice" })`, `AuthorizeAsync(id, new AuthorizeOptions { ReturnUrl = ..., UserId = ... })` for the consent's launch URL, handoff token and expiry, `GetAsync(id, userId)`, `ListAsync(new ConnectionFilter { ConnectorId = ..., UserId = ... })` reading every page, and `DeleteAsync(id, userId)`; a user given is sent as the owner and as `X-Stream-User-Id`, and none is the app's own connection (#2099).
+
+A `Connections` call that names a user on a client with an API key holding a user's token throws a `ConfigurationException` before any request, rather than the 403 Stream's proxy answers (#2155).
+
+### The JavaScript SDK connects a user's own accounts
+
+`api.connections` creates, authorizes, reads, lists and deletes connections: `create("linear", { userId })`, `authorize(id, { returnUrl, userId })` for the consent's launch URL, handoff token and expiry, `get(id, { userId })`, `list({ connectorId, userId })` and `delete(id, { userId })`; without `userId` they are the app's own. `Backend.actingFor` is deprecated in favour of the `userId` parameter and works as before (#2110).
+
+### The Ruby SDK connects a user's own accounts
+
+`api.connections` creates, authorizes, reads, lists and deletes connections: `create("linear", user_id: "alice")`, then `authorize(id, return_url:, user_id:)` for the launch URL, handoff token and expiry of the consent, and `get(id, user_id:)`, `list(connector:, user_id:)`, `delete(id, user_id:)`; no `user_id` is the app's own connection. `Client#get`, `post`, `put`, `patch`, `delete` and `socket` take an optional `user_id:` sent in `X-Stream-User-Id`, and `Backend#acting_for` is deprecated in its favour (AI-3380, AI-3387).
+
+### The Python SDK connects a user's own accounts
+
+`api.connections` creates, authorizes, reads, lists and deletes connections, each call naming the user as `user_id` (the owner and `X-Stream-User-Id`; none is the app's). `api.agent(name, user_id=...)` and `api.router(config, user_id=...)` run work for a user on the app's credential; `api.for_user` is deprecated and still works.
+
+### A guardrail's every check is on the session timeline, and its classifier question is editable
+
+Every turn a guardrail screens now carries its check as `guardrail` on the session socket's `turn` frame and on the timeline entry: `kind`, `model`, `probability`, `threshold`, `allowed`, `latency_ms`, `held_ms`, `mode`, and `failed` for a check that could not be made and let the turn through. Allowed turns are recorded too, so a threshold can be tuned from what the model made of ordinary turns. A `decision_model` guardrail.md takes `question:`, the question asked of the classifier in place of the default, and the check now reads the turn in light of the recent conversation (the last 6 lines, at most 1,500 characters), which it gets as `conversation` beside `policy` and `message`. A webhook's request carries `conversation` too (AI-3402).
 ### The Kotlin SDK shows an incognito session
 
 An incognito session has no Stream Chat channel, so `chat(context)` throws and an app had nothing to show its replies with. `Conversation` now folds the socket's `reasoning_delta`, `tool_started`, `tool_updated` and `tool_ran` into each turn's `steps` (`TurnStep.Reasoning` and `TurnStep.ToolCall`, in order) and `isDone`, timing a round of reasoning from when the model was asked or went on, not from its first words, and `AgentEvent.Kind` has `ReasoningDelta` and `ToolUpdated`. A tool call whose id is also a round's (`r1`) is a step of its own, and an `error` with code `prompt_injection` clears the reply being written of what it streamed, its text and UI, keeping its steps, as the kept conversation does. `AgentSession.turnMessages`, a `Flow` of `TurnMessage.messages(conversation, approvals, userId, isConnected)`, is the conversation in the shape a kept one has in Chat: one `TurnMessage` per question and reply, its steps as `ai_reasoning` and `ai_tool_call` types and fields for Stream Chat's `AIMessagePart.parts`, rounds numbered `r1`, `r2` across the reply, the whole of each round of thinking, the reply's UI under `ai_ui`, and an approval card (`awaiting_approval`) for the user `setUser` named. Deploy the router from #2090 first: an older one sends no reasoning, and a reply shows only its tool calls. `android_assistant` has an incognito toggle at the top right of a new chat, shown from `turnMessages`, approvals included, and never listed (AND-1984).
@@ -126,6 +167,10 @@ A signed `messaging-profile.spend-limit-reached` on an SMS line's hook adds 1 to
 ### Python: local model plugins take a `revision`, and Vogent's model is pinned
 
 `huggingface.TransformersLLM`, `TransformersVLM` and `TransformersDetectionProcessor` take a `revision` argument (a commit hash, tag or branch) and pass it to every `from_pretrained` call. `moondream.LocalVLM` and `LocalDetectionProcessor` take `revision` too. `vogent.TurnDetection` loads `vogent/Vogent-Turn-80M` at a pinned commit; before, it followed the `main` branch.
+
+### The router reaches Gemini 4 Carbon
+
+`gemini/gemini-4-carbon` is Google's strongest reasoning model, in the high-quality tier beside Gemini 4 Argon, read with `GOOGLE_API_KEY`, paid tier only. It reads images, has a 1M-token context, thinks at `high` unless asked for `low` or `medium`, and costs Google's introductory $2 per million input tokens, $0.10 cached and $10 output, thinking included, through 30 November 2026, then $4, $0.20 and $20. No shortcut prefers it: it is a member of `llm-smart`, `llm-thinking` and the other high-quality groups, ordered by health.
 
 ### The router reaches Gemini 4 Hydrogen
 
@@ -647,6 +692,18 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### A call has an id of its own and names its session
+
+A call's `id` was its session's id; it is now the call's own, and a session starts a new call each time voice is started or stopped on it (an incognito session keeps none). `Call` gains `session_id`, absent once the session is deleted, and loses `config_id` and `user_id`, which are the session's. `GET /v1/agents/calls?session_id=` lists one session's calls, newest first. A read of `/v1/agents/calls/{id}` and its `transcript`, `timeline`, `events` and `tokens` with a session id now answers 404 `call_not_found`: list the session's calls for the call id. A call from before keeps the id it had, its session's. The Go SDK's `Sessions.Timeline` and `Sessions.Decisions` read the session's newest call this way, and fail with `client.ErrNoCall` for a session that has none. The other SDKs and the Volt dashboard still read a session id as a call id.
+
+### Deploying this release needs a short stop
+
+The migrations split into a global set and a shard set, each with its own goose table, and they drop and rename tables and columns a router of the previous release reads. Scale the old routers down, run the migrations, then start the new ones; a rolling deploy fails on the old routers until they are replaced.
+
+### Some agent config checks answer `validation_failed`
+
+An agent config with too many keyterms, an unknown sandbox provider, or sandbox domains, CIDR ranges or setup commands out of bounds is now refused by the store with a 400 `validation_failed` instead of `invalid_request`. A sync checks the config before it writes anything, so a refused config leaves no knowledge half written.
+
 ### A JavaScript backend sends its socket credential as headers
 
 A `Backend` holding the API secret put its token on every socket's URL, as `token` (and `authorization` behind the proxy): a token that speaks for the whole app, written into every access log between the process and the router. Such a backend now sends the same credential as headers on the upgrade, `X-Api-Key` and `Authorization` to a router reached directly and `api_key`, `stream-auth-type: jwt` and `Authorization` behind the proxy, and leaves it out of the URL; the socket still never says it is a backend. `backend.socketHeaders()` answers them, and `Socket.open(backend, url)` and `Socket.dial` send them. A `webSocket` option on such a backend is now called with a second argument, `{ headers }`, as Node's own WebSocket and the `ws` package take it; one that ignores it is refused by the router. A page, which has no secret and whose WebSocket sends no headers, keeps its user's token in the URL as before, and `WebSocketConstructor` is still the browser's `WebSocket`. `WebSocketInit` names the second argument, and the option also takes a `HeaderWebSocketConstructor`, a class that requires it (#2144).
@@ -655,9 +712,14 @@ A `Backend` holding the API secret put its token on every socket's URL, as `toke
 
 An agent handle no longer has tools to host: Go `client.Agent.Tools()`, Python `Agent.register` and `Agent.functions`, JavaScript `AgentHandle.tools`, Rust `AgentRef.tools` and PHP `AgentHandle::$tools` are gone. Register the tools on the client and run them with its `run_dispatch` (see above), and name each one in a tool group of the agents that use it. `Dispatch.host` takes the client in place of an agent in every SDK, and the hosting refusal no longer names an agent: JavaScript's `HostingRefusedError` and PHP's `HostingRefusedException` lose `agentId`, and PHP's `Dispatch::$hosting` is a boolean. A session's own tools stay: Go `SessionOptions.Tools`, Python `SessionOptions(tools=...)`, and the in-process `Agent`'s tools in JavaScript, .NET, Ruby and Go's `agents` package.
 
-### A tool call no longer has update or say
+### A tool call no longer has say
 
-A tool call's update and say are gone from every SDK: Go `tools.Call.Update`/`Say` (and `tools.Line` has only `Hold`), JavaScript `ToolCallContext.update`/`say` (and `ToolLine` has only `hold`), Python `ToolCallContext.update`/`say` (and `ToolLine` has only `hold`), .NET `UpdateAsync`/`SayAsync`, Ruby `update`/`say`, Rust `update`/`say` and PHP `update()`/`say()`. A session's own `say` stays. A tool says nothing while it runs: the agent tells a waiting caller the work is still going, and a tool's `display_title` is what its call shows. The router still takes `tool_update` from an older SDK, so a released app keeps working.
+A tool call's say is gone from every SDK: Go `tools.Call.Say`, JavaScript and Python `ToolCallContext.say`, .NET `SayAsync`, and Ruby, Rust and PHP `say`. A session's own `say` stays. A tool call's update stays in every server SDK, with a title shortcut and a full update that can carry `custom` data: Go `Update(ctx, title)` and `SendUpdate(ctx, tools.Update{Title, Custom})`, JavaScript `update(title)` and `update({ title, custom })`, Python `update(title, custom=...)`, .NET `UpdateAsync(title)` and `UpdateAsync(new ToolCallUpdate(Title, Custom))`, Ruby `update(title, custom: ...)`, Rust `update(title)` and `send_update(ToolCallUpdate { .. })`, and PHP `update($title, custom: ...)`. The title is the call's title while it runs, in place of its `display_title`, and a voice agent tells the caller about it in its own words. `custom` replaces the call's `custom` whole and stays once the call finishes, so an app can draw a card from it; the client SDKs read it as `ToolCallState.custom`. An update with only `custom` leaves the title alone and is not spoken. The router still takes `tool_update` with `verbatim` from an older SDK, so a released app keeps working.
+
+### A greeting in agent.yaml is its text, and is reworded unless it says exact
+
+`greeting: Thanks for calling Acme. How can I help?` is the greeting's text, which the agent rewords on every call. The mapping still works for saying it word for word: `greeting: {text: ..., mode: exact}`. A mapping that names no mode is now a variation too, where it was exact. Go reads both forms; the other SDKs' folder loaders still need a mapping.
+
 ### `agents.DefineSkills` takes the id of the agent config the skills belong to
 
 `agents.DefineSkills(ctx, backend, configID, skills)` stores skills under that config and edits only that config's own skill of each name. Without a config the router refuses a skill, so the old form never worked against it (#2074).
@@ -780,6 +842,49 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 `Folder.load`, and so `Agent.new(folder: "…")`, raise a `ConfigurationError` for a folder whose agent.yaml names `plugins:`, with an error that names the file and points to `connectors:`. An empty or null `plugins` still loads and sends nothing, as before. Folder sync no longer sends `plugins`, and the warning that plugins are deprecated is gone, as is the check that no name is under both `connectors` and `plugins`. Move each plugin to a `connectors:` entry (AI-2528).
 
 ## Bug Fixes
+
+### A customer can no longer list or speak in another customer's cloned voice
+
+Clones made through `/v1/agents/voices` sit in the deployment's shared provider account, which lists them all as its own. A voice id that another customer's voice was prepared as is now refused, whether it is the session's voice or the `voice_id` of TTS overwrites. The voice library lists only the caller's own clones besides the provider's published voices, previews another customer's clone as not found, and no longer suggests one as the closest voice.
+
+### A link code can no longer be guessed by texting one after another
+
+On a line whose agent identifies people by link code, a number gets 5 wrong codes in 15 minutes and the line 20 from every number together. Past that, a code is answered with "Too many codes did not match" and claims nothing until the window ends.
+
+### A document's pictures and reading time are bounded
+
+A DOCX or ODT keeps at most 64 MiB of pictures, and unpacks each picture part once however often the body names it, with 4x the unzip limit across all of them. Reading a DOCX, ODT, DOC, XLSX or RTF stops at the request's deadline instead of running on after the caller gave up. A DOC whose piece table goes back over text it already read is refused as corrupt, instead of holding its text once per piece.
+
+### Connecting one line twice at once no longer fails
+
+Two connects of the same channel line at the same moment could fail one of them on a unique violation. Both now get the same line.
+
+### A POST from a sandbox through a tunnel to an allowed domain no longer fails after a pause
+
+The router's sandbox proxy closed a tunnel to an allowed domain after 90 s with no traffic. That is also how long a Go client keeps a pooled connection, and the proxy's clock starts first. So a POST that a Go client sent on a kept connection near that limit could fail with `EOF`. The proxy now keeps such a tunnel for 4 min, as it keeps a connection to the proxy, so the client closes it first. The sandbox's TLS forwarder waits as long for a silent proxy (#2161, AI-2346).
+
+### A POST through the sandbox proxy no longer fails when the host closes an idle connection
+
+The sandbox egress proxy reused a kept-alive connection for every request. A host that closes idle connections sooner than the router's 90 s (Apache after 5 s by default) could close one just as a POST went out on it: the call failed, and the sandbox got a 502. The proxy now sends a request it cannot safely send twice, such as a POST, on a new HTTP/1.1 connection; HTTP/2 connections and GETs are still shared. Other outbound callers keep their connection pooling (#2160).
+
+### A guardrail is no longer shown a tool's output as the caller's words
+
+The `conversation` a guardrail's check reads (classifier, judge and webhook) left out tool calls but not the result of a call held over an interruption, which reaches the model on the caller's side once it is in: a lookup's JSON reached the next turn's check as a `user:` line. That result, the note that silence declined a call, a summary of the call so far, and the cards of earlier episodes are now left out. In a channel where several people write, each person's line is their name and words (`user: Anya: I'm sick`), not the JSON envelope with their user id, and the same goes for a line of history the caller kept with names (AI-3408).
+### An agent acting on chorus-asr never answers what chorus-asr ruled ignored
+
+With `unified_replies` on, chorus-asr's ruling on a turn was thrown away and the reply model decided from the transcript alone, so turns chorus-asr ignored (background speech, a TV, noise) were still answered. When an agent acts on chorus-asr, its ruling now decides every turn, and `unified_replies` applies only to agents without it.
+
+### A caller who goes on before hearing any of the reply is answered
+
+While a reply was still being written, with none of it heard, chorus-asr was told the agent was talking. It could then rule the caller's next words as said over the agent and let it talk through them, while the router dropped that reply as unheard: both turns went unanswered. A reply nobody has heard no longer counts as the agent talking.
+
+### A request the agent stopped for is answered
+
+When chorus-asr ruled a stop on a caller's whole sentence, such as "Okay. So can you tell me a story about Amsterdam?", the agent stopped and the sentence was set aside as the stop's own words: nobody answered it. The words a stop was ruled on are now put to the reply model, which answers them, or opens with `[ignore]` when they only told the agent to stop.
+
+### The reply model gives chorus-asr's ignores a second opinion
+
+Chorus-asr hears the audio but not the conversation, so with the agent quiet it can take a caller's short answer for background speech. Words chorus-asr ignored on a quiet floor are now put to the reply model, which is told what chorus-asr made of them and opens its reply with `[respond]` or `[ignore]`. A reply that opens with `[respond]` is what the caller hears, so no second request is made; one that opens with `[ignore]` says nothing, as before. The same holds over the agent: real words chorus-asr lets the agent talk through, such as "Can you stop?", are put to the reply model, and its `[respond]` stops the agent, which then answers them. A murmur is not asked about, nor anything said while the reply is still being written. Chorus-asr still decides alone when a turn ends and when to shorten the agent. `unified_replies` is not needed for this, and still applies only to agents without chorus-asr.
 
 ### One `Sync` drops an agent's sandbox and a skill's scripts together
 

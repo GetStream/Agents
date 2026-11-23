@@ -73,7 +73,7 @@ func runFallbacks(ctx context.Context, args []string, settings config.Config, ou
 	}
 	defer pgStore.Close()
 
-	uses, err := pgStore.StreamFallbackUses(ctx, time.Now().Add(-window))
+	uses, err := pgStore.StreamFallbackUses.Select(ctx, time.Now().Add(-window))
 	if err != nil {
 		return err
 	}
@@ -180,13 +180,13 @@ func runRequire(ctx context.Context, args []string, settings config.Config, out 
 	}
 	defer pgStore.Close()
 
-	document, err := pgStore.Policy(ctx, store.ScopeOrganization, *organization)
+	document, err := pgStore.Policies.Get(ctx, store.ScopeOrganization, *organization)
 	if err != nil {
 		return err
 	}
 	required := !*off
 	document.RequireOwnStreamApp = &required
-	if err := pgStore.SavePolicy(ctx, store.ScopeOrganization, *organization, document); err != nil {
+	if err := pgStore.Policies.Upsert(ctx, &store.Policy{Scope: store.ScopeOrganization, ScopeID: *organization, Document: document}); err != nil {
 		return err
 	}
 	if required {

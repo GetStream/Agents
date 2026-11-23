@@ -63,7 +63,7 @@ func New(db *store.Store, sealer *auth.Sealer) (*CredentialStore, error) {
 // restoring the key restores the connection.
 func (b *CredentialStore) Update(ctx context.Context, ref core.ConnectionRef,
 	fn func(state *core.CredentialState, checkpoint func() error) (changed bool, err error)) error {
-	return b.store.WithLockedConnectorConnection(ctx, ref.CustomerID, ref.ConnectionID,
+	return b.store.ConnectorConnections.WithLocked(ctx, ref.CustomerID, ref.ConnectionID,
 		func(connection *store.ConnectorConnection, save func() error) (bool, error) {
 			stored := &locked{connection: connection, loadedStatus: connection.Status, loadedConnectedAt: connection.ConnectedAt}
 			var err error
@@ -92,6 +92,7 @@ func (b *CredentialStore) Update(ctx context.Context, ref core.ConnectionRef,
 			}
 			return false, nil
 		})
+
 }
 
 // locked is the connection as last committed, and the StoredCredentials it holds when they
