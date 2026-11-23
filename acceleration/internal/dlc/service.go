@@ -1,6 +1,7 @@
 package dlc
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -30,8 +31,11 @@ type Service struct {
 	clock     func() time.Time
 	logger    *slog.Logger
 
-	// pollAfter is where the next Poll starts, set when the last pass stopped at its page cap
-	// or at a failed read.
+	// pollPage is how many use cases Poll reads at a time, and pollPages how many pages one
+	// pass reads at most.
+	pollPage, pollPages int
+	// pollMu guards pollAfter, where the next Poll starts: set when the last pass stopped at its
+	// page cap or at a failed read, nil when it read the last page.
 	pollMu    sync.Mutex
 	pollAfter *store.CreatedPosition
 }
@@ -50,8 +54,11 @@ type Options struct {
 	// a use case submitted for review could pay them all (Gate.Book). Nil books nothing.
 	Booker routing.Booker
 	// Now is the clock a campaign's months are counted by. Nil is the wall clock.
-	Now    func() time.Time
-	Logger *slog.Logger
+	Now func() time.Time
+	// PollPage is how many use cases Poll reads at a time, and PollPages how many pages one
+	// pass reads at most. Zero is 200 and 10.
+	PollPage, PollPages int
+	Logger              *slog.Logger
 }
 
 // NewService returns a Service.
@@ -67,7 +74,8 @@ func NewService(options Options) (*Service, error) {
 		hookURL = options.PublicURL + HookPath
 	}
 	return &Service{store: options.Store, registrar: options.Registrar, hookURL: hookURL,
-		recorder: options.Recorder, booker: options.Booker, clock: options.Now, logger: options.Logger}, nil
+		recorder: options.Recorder, booker: options.Booker, clock: options.Now, logger: options.Logger,
+		pollPage: cmp.Or(options.PollPage, pollPageSize), pollPages: cmp.Or(options.PollPages, pollPages)}, nil
 }
 
 // Run checks the use cases a vendor holds every interval until ctx ends, for the reports a
@@ -100,18 +108,18 @@ func (s *Service) Poll(ctx context.Context) {
 	if s.registrar == nil {
 		return
 	}
-	// Poll is exported as well as run by Run's ticker: two passes at once would ask the vendor
-	// twice and overwrite each other's cursor.
+	// Held for the whole pass: Poll is exported as well as run by Run's ticker, and two passes
+	// at once would ask the vendor twice and overwrite each other's cursor.
 	s.pollMu.Lock()
 	defer s.pollMu.Unlock()
-	s.pollAfter = s.poll(ctx, s.pollAfter, pollPages)
+	s.pollAfter = s.poll(ctx, s.pollAfter)
 }
 
-// poll refreshes up to pages pages of the use cases a vendor holds, starting after after, and
-// returns where the next pass starts: nil once it read the last page.
-func (s *Service) poll(ctx context.Context, after *store.CreatedPosition, pages int) *store.CreatedPosition {
-	limit := store.DLCLimit(pollPageSize)
-	for range pages {
+// poll refreshes up to a pass's pages of the use cases a vendor holds, starting after after,
+// and returns where the next pass starts: nil once it read the last page.
+func (s *Service) poll(ctx context.Context, after *store.CreatedPosition) *store.CreatedPosition {
+	limit := store.DLCLimit(s.pollPage)
+	for range s.pollPages {
 		useCases, err := s.store.UseCases.SelectInStatus(ctx, VendorPending, limit, after)
 		if err != nil {
 			s.logger.Error("could not list the use cases a vendor holds", "error", err)
@@ -121,7 +129,15 @@ func (s *Service) poll(ctx context.Context, after *store.CreatedPosition, pages 
 		if !last {
 			useCases = useCases[:limit]
 		}
-		for _, useCase := range useCases {
+		for i, useCase := range useCases {
+			// A stopping router ends the pass here, rather than logging every use case left.
+			if ctx.Err() != nil {
+				if i == 0 {
+					return after
+				}
+				end := useCases[i-1]
+				return &store.CreatedPosition{At: end.UpdatedAt, ID: end.ID}
+			}
 			if err := s.refresh(ctx, useCase, nil); err != nil {
 				s.logger.Error("could not refresh a use case", "use_case", useCase.ID, "error", err)
 			}
@@ -275,7 +291,7 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 
 // Hook takes a vendor's report on a brand or a campaign, verified, and moves whichever use
 // cases it is about. A report on a campaign is counted as its use case's app's phone work. One on
-// a brand is not: the hook reads no app for it, and has every waiting use case registered.
+// a brand is not, and has the brand's app's waiting use cases registered.
 func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) error {
 	if s.registrar == nil {
 		return fmt.Errorf("%w: no registrar is configured", ErrRefused)
@@ -296,9 +312,34 @@ func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) err
 		return s.refresh(ctx, useCase, body)
 	}
 	if brandID != "" {
-		// A brand report is the moment to register what waited on it. The report's request
-		// waits on this, so it reads one page; Run's passes reach the rest.
-		s.poll(ctx, nil, 1)
+		return s.brandReported(ctx, brandID)
+	}
+	return nil
+}
+
+// brandReported refreshes the use cases the vendor holds of the app it registered as brandID,
+// which registers those that waited on the brand. The vendor waits on this, so it asks about
+// that one app's and no other's.
+func (s *Service) brandReported(ctx context.Context, brandID string) error {
+	profile, err := s.store.BusinessProfiles.GetByBrand(ctx, brandID)
+	if errors.Is(err, store.ErrNoBusinessProfile) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// An app holds a handful of use cases; past the first page, Run's passes reach the rest.
+	held, err := s.store.UseCases.Select(ctx, profile.CustomerID, store.DLCLimit(pollPageSize), nil)
+	if err != nil {
+		return err
+	}
+	for _, useCase := range held {
+		if useCase.Status != VendorPending {
+			continue
+		}
+		if err := s.refresh(ctx, useCase, nil); err != nil {
+			s.logger.Error("could not refresh a use case", "use_case", useCase.ID, "error", err)
+		}
 	}
 	return nil
 }

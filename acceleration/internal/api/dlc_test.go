@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +22,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
@@ -104,6 +105,8 @@ type dlcRegistration struct {
 	staff *testClient
 	// logged is what the router logged, at debug and up.
 	logged *lockedLog
+	// holding is whether the test running stored use cases through held.
+	holding bool
 }
 
 func (s *dlcRegistration) SetupSuite() {
@@ -306,41 +309,136 @@ func (s *DLCSuite) TestARejectionThePollerFindsIsCountedOnce() {
 // of the poll's own paging. Catches a poll that reads one page and stops, or a cursor that
 // does not carry it to the next.
 func (s *DLCSuite) TestOnePollReachesAUseCasePastTheFirstPage() {
+	held := s.held(s.customerID(), 250, 54, 229)
+
+	s.registrar10DLC.Poll(context.Background())
+
+	for _, i := range []int{54, 229} {
+		var read UseCase
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+held[i].ID, nil, &read))
+		s.Equal(UseCaseStatus(dlc.Approved), read.Status, "use case %d", i+1)
+	}
+}
+
+// heldSince dates the use cases held stores before any other test's, so a poll reads them first.
+var heldSince = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// held stores n use cases of customerID the vendor holds, a second apart from heldSince on,
+// which the vendor reports as provisioned at the indexes in provisioned and as pending
+// otherwise. Every app's held use cases are polled, so they are deleted when the test ends,
+// and any a killed run left are deleted before the test's first.
+func (s *dlcRegistration) held(customerID string, n int, provisioned ...int) []store.UseCase {
 	ctx := context.Background()
-	since := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	approved := map[int]bool{54: true, 229: true}
-	useCases := make([]store.UseCase, 250)
-	ids := make([]string, len(useCases))
+	forget := func() {
+		_, err := s.store.GlobalDB().NewDelete().Model((*store.UseCase)(nil)).
+			Where("name LIKE 'held %'").Where("updated_at < ?", heldSince.AddDate(1, 0, 0)).Exec(context.Background())
+		s.NoError(err)
+	}
+	if !s.holding {
+		forget()
+		s.holding = true
+		s.T().Cleanup(func() {
+			forget()
+			s.holding = false
+		})
+	}
+	useCases := make([]store.UseCase, n)
 	for i := range useCases {
 		campaign := uuid.NewString()
 		status := "TCR_PENDING"
-		if approved[i] {
+		if slices.Contains(provisioned, i) {
 			status = "MNO_PROVISIONED"
 		}
 		s.registry.set(campaign, status)
-		at := since.Add(time.Duration(i) * time.Second)
-		ids[i] = strings.ReplaceAll(uuid.NewString(), "-", "")
+		at := heldSince.Add(time.Duration(i) * time.Second)
 		useCases[i] = store.UseCase{
-			ID: ids[i], CustomerID: s.customerID(), Name: fmt.Sprintf("held %d", i),
+			ID: strings.ReplaceAll(uuid.NewString(), "-", ""), CustomerID: customerID, Name: fmt.Sprintf("held %d", i),
 			Status: dlc.VendorPending, UseCaseType: "CUSTOMER_CARE", MessageSamples: []string{},
 			Vendor: "telnyx", VendorCampaignID: campaign, VendorStatus: "TCR_PENDING", CreatedAt: at, UpdatedAt: at,
 		}
 	}
 	_, err := s.store.GlobalDB().NewInsert().Model(&useCases).Exec(ctx)
 	s.Require().NoError(err)
-	// Every app's held use cases are polled, and these would sit ahead of the next run's.
-	s.T().Cleanup(func() {
-		_, err := s.store.GlobalDB().NewDelete().Model((*store.UseCase)(nil)).Where("id IN (?)", bun.In(ids)).Exec(context.Background())
-		s.NoError(err)
-	})
+	return useCases
+}
 
-	s.registrar10DLC.Poll(ctx)
+// statusOf is where a use case stands now.
+func (s *dlcRegistration) statusOf(useCase store.UseCase) string {
+	read, err := s.store.UseCases.GetByID(context.Background(), useCase.ID)
+	s.Require().NoError(err)
+	return read.Status
+}
 
-	for i := range approved {
-		var read UseCase
-		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+ids[i], nil, &read))
-		s.Equal(UseCaseStatus(dlc.Approved), read.Status, "use case %d", i+1)
-	}
+// DLCPollSuite pages the poll through the use cases a vendor holds, two at a time and two pages
+// a pass, in a database of its own: a pass that reached the end depends on what else is held.
+type DLCPollSuite struct {
+	dlcRegistration
+}
+
+func TestDLCPollSuite(t *testing.T) {
+	polls := new(DLCPollSuite)
+	polls.database = "dlc_poll"
+	runSuite(t, polls)
+}
+
+// pollingService polls two use cases a page and two pages a pass.
+func (s *DLCPollSuite) pollingService() *dlc.Service {
+	service, err := dlc.NewService(dlc.Options{Store: s.store, Registrar: s.registrar, PollPage: 2, PollPages: 2,
+		Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+	return service
+}
+
+// A pass the page cap cuts short leaves the next to carry on where it stopped, and a pass that
+// reached the end leaves the next to start from the top. Catches a pass that always starts
+// from the top, so the fifth is never asked about, and a cursor kept past the end.
+func (s *DLCPollSuite) TestAPassCutShortIsCarriedOnAndOneThatEndedStartsAgain() {
+	held := s.held(s.customerID(), 5, 4)
+	service := s.pollingService()
+
+	service.Poll(context.Background())
+	s.Equal(dlc.VendorPending, s.statusOf(held[4]), "the first pass reads four")
+
+	service.Poll(context.Background())
+	s.Equal(dlc.Approved, s.statusOf(held[4]), "the second carries on from the fifth")
+
+	s.registry.set(held[0].VendorCampaignID, "MNO_PROVISIONED")
+	service.Poll(context.Background())
+	s.Equal(dlc.Approved, s.statusOf(held[0]), "the third starts from the top")
+}
+
+// A page that cannot be read ends the pass where it was, so the next carries on from there.
+// Catches a failed read that throws the cursor away, which starts the next pass from the top.
+func (s *DLCPollSuite) TestAPageThatCannotBeReadKeepsTheCursor() {
+	held := s.held(s.customerID(), 5, 4)
+	service := s.pollingService()
+	service.Poll(context.Background())
+
+	// Only a read that carries on from a cursor names one.
+	s.failQueries("(updated_at, id) >")
+	service.Poll(context.Background())
+	s.Equal(dlc.VendorPending, s.statusOf(held[4]))
+	s.failing.value.Store(nil)
+
+	service.Poll(context.Background())
+	s.Equal(dlc.Approved, s.statusOf(held[4]))
+}
+
+// A report on a brand registers what waited on it: the use cases the vendor holds of that
+// brand's app, and no other app's. Catches a report that polls every app's, or none.
+func (s *DLCPollSuite) TestABrandReportRefreshesOnlyItsAppsUseCases() {
+	ctx := context.Background()
+	s.completeProfile()
+	brand := uuid.NewString()
+	s.Require().NoError(s.store.BusinessProfiles.SetBrand(ctx, s.customerID(), brand, "VERIFIED"))
+	held := s.held(s.customerID(), 2, 0, 1)
+	other := s.held("customer-"+uuid.NewString(), 1, 0)
+
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"`+brand+`"}`, s.signing))
+
+	s.Equal(dlc.Approved, s.statusOf(held[0]))
+	s.Equal(dlc.Approved, s.statusOf(held[1]))
+	s.Equal(dlc.VendorPending, s.statusOf(other[0]), "another app's is left to the poll")
 }
 
 // Telnyx retries a report and the poller reads the same campaign, so several refreshes can
