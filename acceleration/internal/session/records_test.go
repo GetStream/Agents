@@ -14,6 +14,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -171,6 +172,19 @@ func (s *RecordSuite) TestACheckInFollowsTheTurnBeforeIt() {
 	s.Equal(s.held.responses[0].ID, s.held.responses[1].ParentResponseID,
 		"the check-in follows the question it is about")
 	s.Equal([]string{store.ItemSaid, store.ItemAnswer, store.ItemAnswer}, s.held.kinds())
+}
+
+func (s *RecordSuite) TestACheckInLeavesTheNextQuestionsResponseForIt() {
+	claimed := persistent.Turn{ResponseID: "claimed-1", QuestionResponseID: "claimed-1"}
+	s.session.claim(claimed)
+	s.took(
+		agent.Responded{TurnID: "own-1", Text: "Are you still there?", Purpose: agent.PurposeCheckIn},
+		agent.Responding{TurnID: "turn-1", Prompt: "Yes, sorry."},
+	)
+
+	s.Require().Len(s.held.responses, 2)
+	s.NotEqual("claimed-1", s.held.responses[0].ID, "the check-in was not what was asked")
+	s.Equal("claimed-1", s.held.responses[1].ID)
 }
 
 func (s *RecordSuite) TestAnUpdateWrittenDuringATurnOpensNoResponseOfItsOwn() {

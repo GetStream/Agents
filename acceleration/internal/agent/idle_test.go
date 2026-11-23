@@ -13,10 +13,10 @@ import (
 // loopback and an audio socket are.
 type rosterlessEdge struct{ edge *loopbackEdge }
 
-func (e rosterlessEdge) Join(ctx context.Context) error        { return e.edge.Join(ctx) }
-func (e rosterlessEdge) Audio() <-chan InboundAudio            { return e.edge.Audio() }
+func (e rosterlessEdge) Join(ctx context.Context) error       { return e.edge.Join(ctx) }
+func (e rosterlessEdge) Audio() <-chan InboundAudio           { return e.edge.Audio() }
 func (e rosterlessEdge) PublishAudio(pcm audio.PcmData) error { return e.edge.PublishAudio(pcm) }
-func (e rosterlessEdge) Leave() error                          { return e.edge.Leave() }
+func (e rosterlessEdge) Leave() error                         { return e.edge.Leave() }
 
 // greeted has the agent open the call with a statement, so the silence after it is the
 // longer one (defaultIdleGap).
@@ -86,18 +86,73 @@ func (s *AgentSuite) TestTheSilenceIsCountedFromTheEndOfALongReplyStillPlaying()
 	})
 }
 
-func (s *AgentSuite) TestOnACallThatCannotSayWhoIsInItTheCallerArrivesWithTheirAudio() {
-	// A simulation's caller is on a loopback, which reports nobody arriving: the first of
-	// their audio is how the agent knows they are there.
+func (s *AgentSuite) TestOnACallThatCannotSayWhoIsInItTheCallerIsThereFromTheStart() {
+	// A simulation's loopback and an audio socket report nobody arriving, and are opened by
+	// the caller, who may send audio only while they talk.
 	s.onFakeClock(func() {
 		s.edgeFactory = func(edge *loopbackEdge) Edge { return rosterlessEdge{edge: edge} }
 		s.join(true)
 		s.greeted()
-		s.False(s.checkedIn(time.Minute), "nobody's audio has come in")
-
-		s.speak(stt.Participant{ID: "caller"})
 
 		s.False(s.checkedIn(defaultIdleGap - time.Second))
-		s.True(s.checkedIn(2 * time.Second))
+		s.True(s.checkedIn(2*time.Second), "the caller who opened the call is asked")
+	})
+}
+
+func (s *AgentSuite) TestSomebodyJoiningMidCountdownHasTheWholeSilenceBeforeTheyAreAsked() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.edge.attending <- Attendance{Participant: stt.Participant{ID: "alice"}, Joined: true}
+		s.greeted()
+		s.False(s.checkedIn(defaultIdleGap / 2))
+
+		s.edge.attending <- Attendance{Participant: stt.Participant{ID: "bob"}, Joined: true}
+
+		s.False(s.checkedIn(defaultIdleGap/2+time.Second), "bob has only just arrived")
+		s.True(s.checkedIn(defaultIdleGap / 2))
+	})
+}
+
+func (s *AgentSuite) TestNobodyIsAskedOnceEveryoneHasLeft() {
+	s.onFakeClock(func() {
+		s.join(true)
+		alice, bob := stt.Participant{ID: "alice"}, stt.Participant{ID: "bob"}
+		s.edge.attending <- Attendance{Participant: alice, Joined: true}
+		s.edge.attending <- Attendance{Participant: bob, Joined: true}
+		s.greeted()
+		s.edge.attending <- Attendance{Participant: alice, Joined: false}
+		s.True(s.checkedIn(defaultIdleGap+time.Second), "bob is still on the call")
+
+		s.edge.attending <- Attendance{Participant: bob, Joined: false}
+
+		asked := len(s.model.composeRequests())
+		time.Sleep(5 * time.Minute)
+		synctest.Wait()
+		s.Len(s.model.composeRequests(), asked, "an empty call has nobody to ask")
+	})
+}
+
+func (s *AgentSuite) TestACallerWhoDoesNotAnswerAQuestionIsCheckedOnAsACheckIn() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.model.composes = []string{"Are you still there?"}
+		alice := stt.Participant{ID: "alice"}
+		s.edge.attending <- Attendance{Participant: alice, Joined: true}
+		s.speak(alice)
+		s.says(alice, "I'd like to book a table")
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the question was never answered")
+		replied, _ := firstOf[Responded](s.reported())
+		s.Require().True(owesAnAnswer(replied.Text), "the reply asks the caller something")
+
+		s.True(s.checkedIn(answerIdleGap + time.Second))
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 2 }, "the check-in was never said")
+		var checkIn Responded
+		for _, event := range s.reported() {
+			if said, ok := event.(Responded); ok {
+				checkIn = said
+			}
+		}
+		s.Equal("Are you still there?", checkIn.Text)
+		s.Equal(PurposeCheckIn, checkIn.Purpose, "a watcher and the recorder tell a check-in from an answer by it")
 	})
 }
