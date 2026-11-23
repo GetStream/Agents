@@ -155,6 +155,8 @@ func NewServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("chattest: %v", err)
 	}
+	// Made now, as streamapp does: the SDK makes its video client on first use without a lock.
+	client.Video()
 	return &Server{Client: client, URL: server.URL, Key: key, db: db, t: t}
 }
 
