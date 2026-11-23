@@ -4,6 +4,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -165,6 +166,128 @@ func (s *RouterConfigsSuite) TestOnlyTheAppsOwnBackendMayStoreARouterConfig() {
 		return as.do(http.MethodPost, "/v1/router/configs",
 			map[string]any{"name": "config-" + s.utils.uuid()}, nil)
 	})
+}
+
+// AI-3663: the hash of the file a sync wrote is on every read of the config.
+func (s *RouterConfigsSuite) TestASyncedRouterConfigShowsItsHashOnEveryRead() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.Equal("hash-one", created.SyncHash)
+
+	s.Equal("hash-one", s.readConfig(created.Id).SyncHash)
+	var listed []RouterConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/router/configs", nil, &listed))
+	s.Require().Len(listed, 1)
+	s.Equal("hash-one", listed[0].SyncHash)
+}
+
+func (s *RouterConfigsSuite) TestSyncingTheSameFileAgainWritesNothing() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+
+	replaced := s.replaceConfig(created.Id, s.syncedClinic("hash-one"))
+
+	s.Equal("hash-one", replaced.SyncHash)
+	s.True(created.UpdatedAt.Equal(replaced.UpdatedAt), "answered with the config as it was")
+	s.True(created.UpdatedAt.Equal(s.readConfig(created.Id).UpdatedAt), "and nothing was written")
+}
+
+func (s *RouterConfigsSuite) TestTheSameHashWithOtherContentIsStillWritten() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	changed := s.syncedClinic("hash-one")
+	changed["stt"] = map[string]any{"target": "llm-flow"}
+
+	s.replaceConfig(created.Id, changed)
+
+	read := s.readConfig(created.Id)
+	s.Equal("llm-flow", value(read.Stt.Target), "a body the hash does not describe is not dropped")
+	s.True(read.UpdatedAt.After(created.UpdatedAt))
+}
+
+func (s *RouterConfigsSuite) TestTheSameFileUnderAnotherHashRecordsTheNewHash() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+
+	s.replaceConfig(created.Id, s.syncedClinic("hash-two"))
+
+	s.Equal("hash-two", s.readConfig(created.Id).SyncHash)
+}
+
+// A dashboard or API replace sends no hash, so the next sync of the file sees a hash it did
+// not write, whether the edit changed the content or not.
+func (s *RouterConfigsSuite) TestAReplaceThatIsNoSyncClearsTheHash() {
+	for name, edit := range map[string]map[string]any{
+		"same content":  {"name": "clinic", "stt": map[string]any{"target": "en-low-latency"}},
+		"other content": {"name": "clinic", "stt": map[string]any{"target": "llm-flow"}},
+	} {
+		s.Run(name, func() {
+			s.useApp(s.data.createApp())
+			created := s.createConfig(s.syncedClinic("hash-one"))
+
+			s.Empty(s.replaceConfig(created.Id, edit).SyncHash)
+
+			s.Empty(s.readConfig(created.Id).SyncHash)
+		})
+	}
+}
+
+// The base's behaviour, checked on 89e9e0c5c: a replace without a hash is written each time,
+// even with the same body, and no answer names a sync hash.
+func (s *RouterConfigsSuite) TestAReplaceWithoutAHashIsWrittenEveryTime() {
+	body := map[string]any{"name": "clinic", "stt": map[string]any{"target": "en-low-latency"}}
+	var created map[string]any
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/router/configs", body, &created))
+	s.NotContains(created, "sync_hash")
+	id := created["id"].(string)
+
+	first := s.replaceConfig(id, body)
+	second := s.replaceConfig(id, body)
+
+	s.True(second.UpdatedAt.After(first.UpdatedAt), "the second replace was written too")
+	var read map[string]any
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/router/configs/"+id, nil, &read))
+	s.NotContains(read, "sync_hash")
+}
+
+func (s *RouterConfigsSuite) TestASyncHashThatIsNotPrintableASCIIOrTooLongIsRefused() {
+	s.createConfig(s.syncedClinic(strings.Repeat("f", 128)))
+	for name, hash := range map[string]string{
+		"a space":      "hash one",
+		"a NUL":        "hash\x00",
+		"a non-ASCII":  "hashé",
+		"129 of them":  strings.Repeat("f", 129),
+		"a line break": "hash\n",
+	} {
+		s.Run(name, func() {
+			s.useApp(s.data.createApp())
+			stored := s.createConfig(s.syncedClinic(""))
+
+			created := s.syncedClinic(hash)
+			created["name"] = "other"
+			status, _ := s.serverClient.failure(http.MethodPost, "/v1/router/configs", created)
+			s.Equal(http.StatusBadRequest, status, "a create")
+			status, _ = s.serverClient.failure(http.MethodPut, "/v1/router/configs/"+stored.Id, s.syncedClinic(hash))
+			s.Equal(http.StatusBadRequest, status, "a replace")
+		})
+	}
+}
+
+// syncedClinic is a config as a sync sends it, with hash.
+func (s *RouterConfigsSuite) syncedClinic(hash string) map[string]any {
+	body := map[string]any{"name": "clinic", "stt": map[string]any{"target": "en-low-latency"}}
+	if hash != "" {
+		body["sync_hash"] = hash
+	}
+	return body
+}
+
+func (s *RouterConfigsSuite) replaceConfig(id string, body map[string]any) RouterConfig {
+	var replaced RouterConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/router/configs/"+id, body, &replaced))
+	return replaced
+}
+
+func (s *RouterConfigsSuite) readConfig(id string) RouterConfig {
+	var read RouterConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/router/configs/"+id, nil, &read))
+	return read
 }
 
 // createConfig stores a router config the router must accept.

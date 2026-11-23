@@ -415,6 +415,98 @@ func (s *ConnectorsSuite) TestSendingTheSameConnectorAgainChangesNothingAndAChan
 	s.Equal("Renamed", s.get(id).Name)
 }
 
+// AI-3663: the hash a sync sends is on the revision it stores, or on the newest when that
+// already says the same, and on every read of the connector.
+func (s *ConnectorsSuite) TestASyncedConnectorShowsItsHashOnEveryRead() {
+	id := s.customID()
+	created := s.create(s.synced(s.customConnector(id), "hash-one"))
+	s.Equal("hash-one", created.SyncHash)
+
+	s.Equal("hash-one", s.get(id).SyncHash)
+	listed := s.list(id).Items
+	s.Require().Len(listed, 1)
+	s.Equal("hash-one", listed[0].SyncHash)
+}
+
+func (s *ConnectorsSuite) TestSyncingTheSameFileAgainAddsNoRevision() {
+	id := s.customID()
+	created := s.create(s.synced(s.customConnector(id), "hash-one"))
+
+	again := s.create(s.synced(s.customConnector(id), "hash-one"))
+
+	s.Equal(created, again, "the revision already stored, as it was")
+}
+
+func (s *ConnectorsSuite) TestTheSameDefinitionUnderAnotherHashRecordsTheHashOnTheSameRevision() {
+	id := s.customID()
+	s.create(s.synced(s.customConnector(id), "hash-one"))
+
+	rehashed := s.create(s.synced(s.customConnector(id), "hash-two"))
+
+	s.Equal(1, rehashed.Revision)
+	s.Equal("hash-two", s.get(id).SyncHash, "so the next sync of the same file finds it unchanged")
+}
+
+// A dashboard or API create sends no hash, so the next sync of the file sees a hash it did not
+// write, whether the definition changed or not.
+func (s *ConnectorsSuite) TestACreateThatIsNoSyncClearsTheHash() {
+	id := s.customID()
+	s.create(s.synced(s.customConnector(id), "hash-one"))
+
+	same := s.create(s.customConnector(id))
+	s.Equal(1, same.Revision)
+	s.Empty(same.SyncHash)
+	s.Empty(s.get(id).SyncHash)
+
+	s.create(s.synced(s.customConnector(id), "hash-one"))
+	changed := s.customConnector(id)
+	changed["name"] = "Renamed"
+	edited := s.create(changed)
+	s.Equal(2, edited.Revision)
+	s.Empty(s.get(id).SyncHash)
+
+	resynced := s.create(s.synced(s.customConnector(id), "hash-one"))
+	s.Equal(3, resynced.Revision, "the file differs from the edit, so it is the next revision")
+	s.Equal("hash-one", s.get(id).SyncHash)
+}
+
+// The base's behaviour, checked on 89e9e0c5c: no answer names a sync hash, on a built-in or
+// on a connector created without one.
+func (s *ConnectorsSuite) TestAConnectorNoSyncWroteShowsNoHash() {
+	id := s.customID()
+	var created map[string]any
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/connectors", s.customConnector(id), &created))
+	s.NotContains(created, "sync_hash")
+	for _, read := range []string{id, "github"} {
+		var answered map[string]any
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+read, nil, &answered))
+		s.NotContains(answered, "sync_hash", read)
+	}
+}
+
+func (s *ConnectorsSuite) TestASyncHashThatIsNotPrintableASCIIOrTooLongIsRefused() {
+	s.Equal(strings.Repeat("f", 128), s.create(s.synced(s.customConnector(s.customID()), strings.Repeat("f", 128))).SyncHash)
+	for name, hash := range map[string]string{
+		"a space":      "hash one",
+		"a NUL":        "hash\x00",
+		"a non-ASCII":  "hashé",
+		"129 of them":  strings.Repeat("f", 129),
+		"a line break": "hash\n",
+	} {
+		s.Run(name, func() {
+			status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors",
+				s.synced(s.customConnector(s.customID()), hash))
+			s.Equal(http.StatusBadRequest, status)
+		})
+	}
+}
+
+// synced is body as a sync sends it, with hash.
+func (s *ConnectorsSuite) synced(body map[string]any, hash string) map[string]any {
+	body["sync_hash"] = hash
+	return body
+}
+
 func (s *ConnectorsSuite) TestAnotherAppsCustomConnectorIsNeitherListedNorRead() {
 	id := s.customID()
 	s.create(s.customConnector(id))
