@@ -919,7 +919,7 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 
 ### An imported row is held to what the API holds it to
 
-`POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. A moved voice arrives with its id, name and description and without its samples or bindings, whose audio and clone stay with the deployment that made them: add a recording and prepare it again. An import that names `voice_samples` or `voice_bindings` is refused. An imported request is never billable here and counts against the importing app's organization: the one it was last seen under here, else the one it is registered under, else none.
+`POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. A moved voice arrives with its id, name and description and without its samples or bindings, whose audio and clone stay with the deployment that made them: add a recording and prepare it again. An import line or a replayed change that names `voice_samples` or `voice_bindings` is skipped. An imported request is never billable here and counts against the importing app's organization: the one it was last seen under here, else the one it is registered under, else none.
 
 ### Only a number on the customer's own trunk moves in an import
 
