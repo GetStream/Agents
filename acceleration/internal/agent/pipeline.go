@@ -336,7 +336,8 @@ func (a *Agent) prepare(current, next Settings, native, restart bool) (*prepared
 				return fail(fmt.Errorf("agent: %s cannot answer: %w", next.LLMTarget, err))
 			}
 		}
-		if next.controller() != current.controller() {
+		// A text session has no floor to control, so it never opens a flow controller.
+		if !a.options.Text && next.controller() != current.controller() {
 			if prep.controller, err = a.startLLM(next.controller(), nil); err != nil {
 				return fail(fmt.Errorf("agent: start flow controller: %w", err))
 			}
@@ -617,7 +618,7 @@ func (a *Agent) releasePipeline(keepHarness bool) (*pipeline, []error) {
 }
 
 // openCascade opens the conversation model, the flow controller, the harness and the
-// voice a cascade runs on.
+// voice a cascade runs on. A text cascade opens only the model and the harness.
 func (a *Agent) openCascade(s Settings) (*prepared, error) {
 	// A transcriber opens per participant on each frame until one starts, so a target it
 	// could never start on is refused here, once, rather than on every frame of the call.
@@ -635,22 +636,29 @@ func (a *Agent) openCascade(s Settings) (*prepared, error) {
 	// complete never competes with the reply being streamed to the voice. It routes to a
 	// non-thinking model of its own, since a decision this small has nothing to think about
 	// and thinking would only add latency to every turn the caller waits through.
+	//
+	// A conversation held in writing has no floor: nothing is transcribed, so nothing is
+	// ever put to the flow controller or the judge. Neither is opened for one, or a
+	// deployment whose only model is the caller's own would refuse every text session for
+	// want of a hosted vendor's key it would never use.
 	var judge harness.Judge
-	if a.options.Judge != nil && a.options.JudgeTarget != "" {
-		if judge, err = a.options.Judge.Start(a.ctx, decisionrouter.Request{
-			CustomerID: a.options.CustomerID,
-			AgentID:    a.options.AgentID,
-			CallID:     a.options.CallID,
-			Region:     a.options.Region,
-			Tags:       a.options.Tags,
-			Target:     a.options.JudgeTarget,
-		}); err != nil {
+	if !a.options.Text {
+		if a.options.Judge != nil && a.options.JudgeTarget != "" {
+			if judge, err = a.options.Judge.Start(a.ctx, decisionrouter.Request{
+				CustomerID: a.options.CustomerID,
+				AgentID:    a.options.AgentID,
+				CallID:     a.options.CallID,
+				Region:     a.options.Region,
+				Tags:       a.options.Tags,
+				Target:     a.options.JudgeTarget,
+			}); err != nil {
+				prep.close()
+				return nil, stack.Wrap(fmt.Errorf("agent: start flow judge: %w", err))
+			}
+		} else if prep.controller, err = a.startLLM(s.controller(), nil); err != nil {
 			prep.close()
-			return nil, stack.Wrap(fmt.Errorf("agent: start flow judge: %w", err))
+			return nil, stack.Wrap(fmt.Errorf("agent: start flow controller: %w", err))
 		}
-	} else if prep.controller, err = a.startLLM(s.controller(), nil); err != nil {
-		prep.close()
-		return nil, stack.Wrap(fmt.Errorf("agent: start flow controller: %w", err))
 	}
 	prep.harness, err = harness.New(harness.Options{
 		Text:         a.options.Text,

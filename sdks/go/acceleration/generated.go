@@ -5013,7 +5013,7 @@ type Campaign struct {
 	StoppedAt *time.Time        `json:"stopped_at,omitempty"`
 	Tags      map[string]string `json:"tags"`
 
-	// Type What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+	// Type What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 	Type CampaignType `json:"type"`
 }
 
@@ -5115,7 +5115,7 @@ type CampaignRequest struct {
 	Sequence *CampaignSequence  `json:"sequence,omitempty"`
 	Tags     *map[string]string `json:"tags,omitempty"`
 
-	// Type What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+	// Type What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 	Type *CampaignType `json:"type,omitempty"`
 }
 
@@ -5172,7 +5172,7 @@ type CampaignTimeZone struct {
 // CampaignTimeZoneMode contact reads the hours where each contact is: their time_zone, else their number's, else fallback. fixed reads them in fixed.
 type CampaignTimeZoneMode string
 
-// CampaignType What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+// CampaignType What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 type CampaignType string
 
 // CampaignVoicemail defines model for CampaignVoicemail.
@@ -6179,6 +6179,21 @@ type ContactPage struct {
 // ContactStage Where a contact is: enrolled while waiting to be rung, in_progress while a call to them happens or is being read, completed once the sequence is done with them, rejected when their number was refused before any call, stopped when they were left unrung, failed when a call could not be made.
 type ContactStage string
 
+// ContactUpdateRequest defines model for ContactUpdateRequest.
+type ContactUpdateRequest struct {
+	// Instructions What to say to this person. Empty clears it.
+	Instructions *string `json:"instructions,omitempty"`
+
+	// TimeZone An IANA zone. Empty clears it.
+	TimeZone *string `json:"time_zone,omitempty"`
+
+	// ToNumber With or without a country code.
+	ToNumber *string `json:"to_number,omitempty"`
+
+	// Variables Replace all of the contact's variables. Same rules as on add.
+	Variables *map[string]string `json:"variables,omitempty"`
+}
+
 // ContentPart defines model for ContentPart.
 type ContentPart struct {
 	union json.RawMessage
@@ -6222,13 +6237,13 @@ type CreateResponseRequest struct {
 	// ReasoningEffort How long the model may think before this answer, and the replies that finish it after its tools. One of the efforts the session's model accepts, such as none, minimal, low, medium, high or max; any other is a 400. Omitted keeps the session's.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 
-	// Replaces An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
+	// Replaces An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
 	Replaces *string `json:"replaces,omitempty"`
 
 	// RequestId Generated and sent by the SDKs, one per question, so a retry of the same question is answered once. Required for personal persistent text conversations, and ignored by a session not kept in Stream Chat. With one, images are data URIs, at most 8, uploaded to the conversation's channel and shown on the person's message, a voice note is uploaded and shown there too, and the frames of videos are shown to the model alone. A retry with the same id, text, images and voice note starts no second turn, returns no id and does not fetch its videos again: videos are not part of what a retry is matched on. On a session a dispatch worker opened for a message handed out from a channel, that message is already there: nothing is written or uploaded for it, and a reused id is answered as a duplicate even with other text or images.
 	RequestId *string `json:"request_id,omitempty"`
 
-	// Text What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
+	// Text What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
 	Text string `json:"text"`
 
 	// UiAction What the person did in the generated UI of an earlier reply, such as tapping a place or submitting a form, which the text says in their words: an object naming the reply (message_id), the UI's format and the action (name), with what it carries (payload), of at most 8 KB as JSON. Their message carries it as custom.ai_ui_action, and the model is told it after the text.
@@ -12401,6 +12416,9 @@ type UpdateCampaignJSONRequestBody = CampaignRequest
 // AddCampaignContactsJSONRequestBody defines body for AddCampaignContacts for application/json ContentType.
 type AddCampaignContactsJSONRequestBody = AddContactsRequest
 
+// UpdateCampaignContactJSONRequestBody defines body for UpdateCampaignContact for application/json ContentType.
+type UpdateCampaignContactJSONRequestBody = ContactUpdateRequest
+
 // DuplicateCampaignJSONRequestBody defines body for DuplicateCampaign for application/json ContentType.
 type DuplicateCampaignJSONRequestBody = DuplicateCampaignRequest
 
@@ -13487,7 +13505,7 @@ type ClientInterface interface {
 
 	// AddCampaignContactsWithBody Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type.
@@ -13497,7 +13515,7 @@ type ClientInterface interface {
 
 	// AddCampaignContacts Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type.
@@ -13505,12 +13523,40 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/agents/campaigns/{id}/contacts (the `AddCampaignContacts` operationId).
 	AddCampaignContacts(ctx context.Context, id string, body AddCampaignContactsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteCampaignContact Remove one contact of a draft
+	//
+	// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+	DeleteCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetCampaignContact One contact, with every dial made to them
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with GET /v1/agents/campaigns/{id}/contacts/{contact_id} (the `GetCampaignContact` operationId).
 	GetCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateCampaignContactWithBody Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContactWithBody(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateCampaignContact Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContact(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StopCampaignContact Ring a contact no more
 	//
@@ -13542,7 +13588,7 @@ type ClientInterface interface {
 
 	// LaunchCampaignWithBody Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type.
@@ -13552,7 +13598,7 @@ type ClientInterface interface {
 
 	// LaunchCampaign Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type.
@@ -17055,7 +17101,7 @@ func (c *Client) ListCampaignContacts(ctx context.Context, id string, params *Li
 
 // AddCampaignContactsWithBody Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type.
@@ -17075,7 +17121,7 @@ func (c *Client) AddCampaignContactsWithBody(ctx context.Context, id string, con
 
 // AddCampaignContacts Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type.
@@ -17093,6 +17139,24 @@ func (c *Client) AddCampaignContacts(ctx context.Context, id string, body AddCam
 	return c.Client.Do(req)
 }
 
+// DeleteCampaignContact Remove one contact of a draft
+//
+// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+func (c *Client) DeleteCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteCampaignContactRequest(c.Server, id, contactId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetCampaignContact One contact, with every dial made to them
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
@@ -17100,6 +17164,46 @@ func (c *Client) AddCampaignContacts(ctx context.Context, id string, body AddCam
 // Corresponds with GET /v1/agents/campaigns/{id}/contacts/{contact_id} (the `GetCampaignContact` operationId).
 func (c *Client) GetCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetCampaignContactRequest(c.Server, id, contactId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateCampaignContactWithBody Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *Client) UpdateCampaignContactWithBody(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateCampaignContactRequestWithBody(c.Server, id, contactId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateCampaignContact Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *Client) UpdateCampaignContact(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateCampaignContactRequest(c.Server, id, contactId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -17170,7 +17274,7 @@ func (c *Client) DuplicateCampaign(ctx context.Context, id string, body Duplicat
 
 // LaunchCampaignWithBody Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type.
@@ -17190,7 +17294,7 @@ func (c *Client) LaunchCampaignWithBody(ctx context.Context, id string, contentT
 
 // LaunchCampaign Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type.
@@ -24508,6 +24612,47 @@ func NewAddCampaignContactsRequestWithBody(server string, id string, contentType
 	return req, nil
 }
 
+// NewDeleteCampaignContactRequest constructs an http.Request for the DeleteCampaignContact method
+func NewDeleteCampaignContactRequest(server string, id string, contactId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "contact_id", contactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/agents/campaigns/%s/contacts/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetCampaignContactRequest constructs an http.Request for the GetCampaignContact method
 func NewGetCampaignContactRequest(server string, id string, contactId string) (*http.Request, error) {
 	var err error
@@ -24545,6 +24690,60 @@ func NewGetCampaignContactRequest(server string, id string, contactId string) (*
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUpdateCampaignContactRequest calls the generic UpdateCampaignContact builder with application/json body
+func NewUpdateCampaignContactRequest(server string, id string, contactId string, body UpdateCampaignContactJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateCampaignContactRequestWithBody(server, id, contactId, "application/json", bodyReader)
+}
+
+// NewUpdateCampaignContactRequestWithBody constructs an http.Request for the UpdateCampaignContact method, with any body, and a specified content type
+func NewUpdateCampaignContactRequestWithBody(server string, id string, contactId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "contact_id", contactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/agents/campaigns/%s/contacts/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -36543,7 +36742,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddCampaignContactsWithBodyWithResponse Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -36553,13 +36752,23 @@ type ClientWithResponsesInterface interface {
 
 	// AddCampaignContactsWithResponse Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/agents/campaigns/{id}/contacts (the `AddCampaignContacts` operationId).
 	AddCampaignContactsWithResponse(ctx context.Context, id string, body AddCampaignContactsJSONRequestBody, reqEditors ...RequestEditorFn) (*AddCampaignContactsResponse, error)
+
+	// DeleteCampaignContactWithResponse Remove one contact of a draft
+	//
+	// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+	DeleteCampaignContactWithResponse(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*DeleteCampaignContactResponse, error)
 
 	// GetCampaignContactWithResponse One contact, with every dial made to them
 	//
@@ -36569,6 +36778,26 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /v1/agents/campaigns/{id}/contacts/{contact_id} (the `GetCampaignContact` operationId).
 	GetCampaignContactWithResponse(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*GetCampaignContactResponse, error)
+
+	// UpdateCampaignContactWithBodyWithResponse Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContactWithBodyWithResponse(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error)
+
+	// UpdateCampaignContactWithResponse Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContactWithResponse(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error)
 
 	// StopCampaignContactWithResponse Ring a contact no more
 	//
@@ -36602,7 +36831,7 @@ type ClientWithResponsesInterface interface {
 
 	// LaunchCampaignWithBodyWithResponse Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -36612,7 +36841,7 @@ type ClientWithResponsesInterface interface {
 
 	// LaunchCampaignWithResponse Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -42140,6 +42369,114 @@ func (r AddCampaignContactsResponse) ContentType() string {
 	return ""
 }
 
+// DeleteCampaignContactResponse204Headers the declared response headers of an HTTP 204 response for DeleteCampaignContact
+type DeleteCampaignContactResponse204Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+	XStreamCostEstimated  *string
+	XStreamCostMicros     *int64
+}
+
+// DeleteCampaignContactResponse402Headers the declared response headers of an HTTP 402 response for DeleteCampaignContact
+type DeleteCampaignContactResponse402Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+}
+
+type DeleteCampaignContactResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON402 the response for an HTTP 402 `application/json` response
+	JSON402 *PaymentRequired
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+	// JSON503 the response for an HTTP 503 `application/json` response
+	JSON503 *Unavailable
+	// Headers204 the parsed response headers for an HTTP 204 response
+	Headers204 *DeleteCampaignContactResponse204Headers
+	// Headers402 the parsed response headers for an HTTP 402 response
+	Headers402 *DeleteCampaignContactResponse402Headers
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON400() *BadRequest {
+	return r.JSON400
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON402 returns the response for an HTTP 402 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON402() *PaymentRequired {
+	return r.JSON402
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON403() *Forbidden {
+	return r.JSON403
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON404() *NotFound {
+	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetJSON503 returns the response for an HTTP 503 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON503() *Unavailable {
+	return r.JSON503
+}
+
+// GetBody returns the raw response body bytes
+func (r DeleteCampaignContactResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteCampaignContactResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteCampaignContactResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DeleteCampaignContactResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 // GetCampaignContactResponse200Headers the declared response headers of an HTTP 200 response for GetCampaignContact
 type GetCampaignContactResponse200Headers struct {
 	XStreamBalanceMicros  *int64
@@ -42242,6 +42579,121 @@ func (r GetCampaignContactResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetCampaignContactResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// UpdateCampaignContactResponse200Headers the declared response headers of an HTTP 200 response for UpdateCampaignContact
+type UpdateCampaignContactResponse200Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+	XStreamCostEstimated  *string
+	XStreamCostMicros     *int64
+}
+
+// UpdateCampaignContactResponse402Headers the declared response headers of an HTTP 402 response for UpdateCampaignContact
+type UpdateCampaignContactResponse402Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+}
+
+type UpdateCampaignContactResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Contact
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON402 the response for an HTTP 402 `application/json` response
+	JSON402 *PaymentRequired
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+	// JSON503 the response for an HTTP 503 `application/json` response
+	JSON503 *Unavailable
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *UpdateCampaignContactResponse200Headers
+	// Headers402 the parsed response headers for an HTTP 402 response
+	Headers402 *UpdateCampaignContactResponse402Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON200() *Contact {
+	return r.JSON200
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON400() *BadRequest {
+	return r.JSON400
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON402 returns the response for an HTTP 402 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON402() *PaymentRequired {
+	return r.JSON402
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON403() *Forbidden {
+	return r.JSON403
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON404() *NotFound {
+	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetJSON503 returns the response for an HTTP 503 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON503() *Unavailable {
+	return r.JSON503
+}
+
+// GetBody returns the raw response body bytes
+func (r UpdateCampaignContactResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateCampaignContactResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateCampaignContactResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r UpdateCampaignContactResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -67724,7 +68176,7 @@ func (c *ClientWithResponses) ListCampaignContactsWithResponse(ctx context.Conte
 
 // AddCampaignContactsWithBodyWithResponse Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -67740,7 +68192,7 @@ func (c *ClientWithResponses) AddCampaignContactsWithBodyWithResponse(ctx contex
 
 // AddCampaignContactsWithResponse Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -67752,6 +68204,22 @@ func (c *ClientWithResponses) AddCampaignContactsWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseAddCampaignContactsResponse(rsp)
+}
+
+// DeleteCampaignContactWithResponse Remove one contact of a draft
+//
+// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+func (c *ClientWithResponses) DeleteCampaignContactWithResponse(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*DeleteCampaignContactResponse, error) {
+	rsp, err := c.DeleteCampaignContact(ctx, id, contactId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteCampaignContactResponse(rsp)
 }
 
 // GetCampaignContactWithResponse One contact, with every dial made to them
@@ -67767,6 +68235,38 @@ func (c *ClientWithResponses) GetCampaignContactWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseGetCampaignContactResponse(rsp)
+}
+
+// UpdateCampaignContactWithBodyWithResponse Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *ClientWithResponses) UpdateCampaignContactWithBodyWithResponse(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error) {
+	rsp, err := c.UpdateCampaignContactWithBody(ctx, id, contactId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateCampaignContactResponse(rsp)
+}
+
+// UpdateCampaignContactWithResponse Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *ClientWithResponses) UpdateCampaignContactWithResponse(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error) {
+	rsp, err := c.UpdateCampaignContact(ctx, id, contactId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateCampaignContactResponse(rsp)
 }
 
 // StopCampaignContactWithResponse Ring a contact no more
@@ -67819,7 +68319,7 @@ func (c *ClientWithResponses) DuplicateCampaignWithResponse(ctx context.Context,
 
 // LaunchCampaignWithBodyWithResponse Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -67835,7 +68335,7 @@ func (c *ClientWithResponses) LaunchCampaignWithBodyWithResponse(ctx context.Con
 
 // LaunchCampaignWithResponse Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -75624,6 +76124,135 @@ func ParseAddCampaignContactsResponse(rsp *http.Response) (*AddCampaignContactsR
 	return response, nil
 }
 
+// ParseDeleteCampaignContactResponse parses an HTTP response from a DeleteCampaignContactWithResponse call
+func ParseDeleteCampaignContactResponse(rsp *http.Response) (*DeleteCampaignContactResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteCampaignContactResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 402:
+		var dest PaymentRequired
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON402 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Unavailable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		var headers DeleteCampaignContactResponse204Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Estimated"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Estimated", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostEstimated = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostMicros = &value
+		}
+		response.Headers204 = &headers
+	case rsp.StatusCode == 402:
+		var headers DeleteCampaignContactResponse402Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		response.Headers402 = &headers
+	}
+
+	return response, nil
+}
+
 // ParseGetCampaignContactResponse parses an HTTP response from a GetCampaignContactWithResponse call
 func ParseGetCampaignContactResponse(rsp *http.Response) (*GetCampaignContactResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -75730,6 +76359,139 @@ func ParseGetCampaignContactResponse(rsp *http.Response) (*GetCampaignContactRes
 		response.Headers200 = &headers
 	case rsp.StatusCode == 402:
 		var headers GetCampaignContactResponse402Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		response.Headers402 = &headers
+	}
+
+	return response, nil
+}
+
+// ParseUpdateCampaignContactResponse parses an HTTP response from a UpdateCampaignContactWithResponse call
+func ParseUpdateCampaignContactResponse(rsp *http.Response) (*UpdateCampaignContactResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateCampaignContactResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Contact
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 402:
+		var dest PaymentRequired
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON402 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Unavailable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers UpdateCampaignContactResponse200Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Estimated"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Estimated", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostEstimated = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostMicros = &value
+		}
+		response.Headers200 = &headers
+	case rsp.StatusCode == 402:
+		var headers UpdateCampaignContactResponse402Headers
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
