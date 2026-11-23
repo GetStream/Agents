@@ -445,7 +445,8 @@ func TestRedactLogTextReadsALongLineInTime(t *testing.T) {
 
 // A text with a shape's start and no keyword (a base64 body with eyJ in it) runs only the shaped
 // rules, so it is read much faster than the same text with a keyword, which runs all of them. The
-// bound is a ratio of the two, so it holds on a slow machine.
+// bound is a ratio of the two, so it holds on a slow machine. The gate-off mutant runs at 0.8x, so
+// a 2x bound still fails it; the best of 7 runs keeps a loaded runner's one slow sample from failing it.
 func TestRedactLogTextSkipsTheKeywordRulesForATextWithOnlyAShapeStart(t *testing.T) {
 	if raceDetector {
 		t.Skip("a wall-clock bound does not hold under the race detector")
@@ -455,14 +456,14 @@ func TestRedactLogTextSkipsTheKeywordRulesForATextWithOnlyAShapeStart(t *testing
 	withKeyword := "key " + body
 	fastest := func(text string) time.Duration {
 		best := time.Hour
-		for range 3 {
+		for range 7 {
 			started := time.Now()
 			RedactLogText(text)
 			best = min(best, time.Since(started))
 		}
 		return best
 	}
-	require.Less(t, fastest(shapeOnly)*4, fastest(withKeyword))
+	require.Less(t, fastest(shapeOnly)*2, fastest(withKeyword))
 }
 
 // A connector's error is logged as the router logs it, whole, with the token it echoed taken out
