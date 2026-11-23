@@ -1333,6 +1333,7 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedForMoneyFailsUnderTheMone
 	s.Require().ErrorAs(outcome.err, &failure)
 	s.Equal(codeInsufficientCredits, failure.Reason)
 	s.True(failure.Final, "spent credit outlasts every retry of the run")
+	s.True(refusedTurn(outcome.err), "the walk over the channels ends at the call")
 	s.Empty(outcome.deliveredTo)
 	_, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
 	s.False(live, "the agent hung up")

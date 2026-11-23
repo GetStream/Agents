@@ -1348,7 +1348,7 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 			if refusal := turnRefusal(event); refusal != nil && !answered {
 				return refusal
 			}
-			if reply, ok := event.(agent.Responded); ok && reply.Purpose != agent.PurposeGreeting {
+			if _, ok := event.(agent.Responded); ok {
 				answered = true
 			}
 		case <-limit.C:
