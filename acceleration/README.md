@@ -2220,7 +2220,7 @@ What each organization did with Agents lives in three places:
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
-The router keeps activity for 400 days (`activityKeepDays` in `internal/store/activity_digest.go`).
+The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
 That is 13 months and a margin, so staff can compare a month with the same month a year before.
 GDPR asks that personal data is kept no longer than needed (Art. 5(1)(e)). The router that holds
 the cost anomaly lock deletes the older `customer_activity` and `activity_digests` rows once per

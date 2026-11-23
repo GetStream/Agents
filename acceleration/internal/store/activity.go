@@ -290,6 +290,108 @@ func (r *Activities) Day(ctx context.Context, day time.Time) ([]OrganizationDayA
 	return areas, nil
 }
 
+// ActivityRow is one customer_activity row: what one app of an organization did in one area
+// from one client on one UTC day.
+type ActivityRow struct {
+	OrganizationID string    `bun:"organization_id"`
+	AppID          string    `bun:"app_id"`
+	Day            time.Time `bun:"day"`
+	ActivityArea
+}
+
+// ActivityPosition is where a page of List ended: its last row's whole sort key, which ends
+// with the row's primary key, so no two rows share one.
+type ActivityPosition struct {
+	OrganizationID string `json:"o"`
+	Day            string `json:"d"`
+	AppID          string `json:"a"`
+	Area           string `json:"r"`
+	Client         string `json:"c"`
+}
+
+// List is up to limit rows of the UTC days from from to to, both included, after the position
+// after when it is not nil, by organization, day, app, area and client. Rows that name no
+// organization are left out, as in Day.
+func (r *Activities) List(ctx context.Context, from, to time.Time, after *ActivityPosition, limit int) ([]ActivityRow, error) {
+	query := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("organization_id, app_id, day, area, client, first_at, last_at, requests, refused").
+		ColumnExpr("COALESCE(last_refusal_code, '') AS last_refusal_code").
+		Where("day BETWEEN ?::date AND ?::date", from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly)).
+		Where("organization_id <> ''")
+	if after != nil {
+		query = query.Where("(organization_id, day, app_id, area, client) > (?, ?::date, ?, ?, ?)",
+			after.OrganizationID, after.Day, after.AppID, after.Area, after.Client)
+	}
+	var rows []ActivityRow
+	err := query.Order("organization_id", "day", "app_id", "area", "client").Limit(limit).Scan(ctx, &rows)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: list activity: %w", err))
+	}
+	return rows, nil
+}
+
+// OrganizationArea is what one organization's apps did in one area of the API, every client
+// summed: the requests and refusals of the days read, and the first UTC day ever with a
+// request answered, nil when none was.
+type OrganizationArea struct {
+	OrganizationID string     `bun:"organization_id"`
+	Area           string     `bun:"area"`
+	Requests       int64      `bun:"requests"`
+	Refused        int64      `bun:"refused"`
+	FirstAnswered  *time.Time `bun:"first_answered"`
+}
+
+// OrganizationAreas is, for each of organizations and each area its apps ever made a request
+// in, what Areas and FirstAnswered read for an app list: the counts of the UTC days from from
+// to to, both included, and the first day answered over every day recorded. By organization,
+// then area.
+func (r *Activities) OrganizationAreas(ctx context.Context, organizations []string, from, to time.Time) ([]OrganizationArea, error) {
+	inRange := bun.SafeQuery("day BETWEEN ?::date AND ?::date", from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly))
+	var areas []OrganizationArea
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("organization_id, area").
+		ColumnExpr("COALESCE(SUM(requests) FILTER (WHERE ?), 0) AS requests", inRange).
+		ColumnExpr("COALESCE(SUM(refused) FILTER (WHERE ?), 0) AS refused", inRange).
+		ColumnExpr("MIN(day) FILTER (WHERE requests > refused) AS first_answered").
+		Where("organization_id IN (?)", bun.In(organizations)).
+		Group("organization_id", "area").
+		Order("organization_id", "area").
+		Scan(ctx, &areas)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organization activity areas: %w", err))
+	}
+	return areas, nil
+}
+
+// OrganizationDays is, for each of organizations, how many UTC days from from to to, both
+// included, its apps had a request answered, not refused, in any of areas, as Days counts them
+// for an app list. An organization with none is absent.
+func (r *Activities) OrganizationDays(ctx context.Context, organizations []string, from, to time.Time, areas []string) (map[string]int, error) {
+	var counted []struct {
+		OrganizationID string `bun:"organization_id"`
+		Days           int    `bun:"days"`
+	}
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("organization_id, COUNT(DISTINCT day) AS days").
+		Where("organization_id IN (?)", bun.In(organizations)).
+		Where("day BETWEEN ?::date AND ?::date", from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly)).
+		Where("area IN (?)", bun.In(areas)).
+		Where("requests > refused").
+		Group("organization_id").
+		Scan(ctx, &counted)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organization activity days: %w", err))
+	}
+	days := make(map[string]int, len(counted))
+	for _, row := range counted {
+		days[row.OrganizationID] = row.Days
+	}
+	return days, nil
+}
+
 // FirstAnswer is an organization whose apps had a request of an area answered for the first
 // time on a day.
 type FirstAnswer struct {
@@ -342,22 +444,22 @@ func (r *Activities) ActiveOrganizations(ctx context.Context, day time.Time) (in
 	return active, nil
 }
 
-// activityKeepDays is how many UTC days back from today customer_activity and activity_digests
+// ActivityKeepDays is how many UTC days back from today customer_activity and activity_digests
 // keep rows for: 13 months and a margin, so staff can compare a month with the same month a year
 // before. Rows are kept no longer than that need, as GDPR's storage limitation principle asks
 // (Art. 5(1)(e), https://eur-lex.europa.eu/eli/reg/2016/679/oj).
-const activityKeepDays = 400
+const ActivityKeepDays = 400
 
-// Prune deletes the activity rows of the UTC days more than activityKeepDays before now's, and
+// Prune deletes the activity rows of the UTC days more than ActivityKeepDays before now's, and
 // returns how many it deleted.
 func (r *Activities) Prune(ctx context.Context, now time.Time) (int, error) {
 	return pruneDays(ctx, r.store.global, "customer_activity", now)
 }
 
-// pruneDays deletes the rows of table whose day is more than activityKeepDays before now's UTC
+// pruneDays deletes the rows of table whose day is more than ActivityKeepDays before now's UTC
 // day, and returns how many it deleted.
 func pruneDays(ctx context.Context, db bun.IDB, table string, now time.Time) (int, error) {
-	before := now.UTC().AddDate(0, 0, -activityKeepDays).Format(time.DateOnly)
+	before := now.UTC().AddDate(0, 0, -ActivityKeepDays).Format(time.DateOnly)
 	result, err := db.NewDelete().TableExpr(table).Where("day < ?::date", before).Exec(ctx)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: prune %s: %w", table, err))
