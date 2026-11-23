@@ -221,3 +221,26 @@ func (s *ProxySuite) TestATunnelThatCannotBeTakenOverGivesItsPlaceBack() {
 
 	s.Equal(http.StatusOK, status)
 }
+
+// TestAGrantsTunnelThatSpeaksPlainHTTPGivesBackOnlyItsPlace: a sandbox that sends plain HTTP in a
+// granted tunnel has it closed by the TLS server twice (the 400 to the bare connection, then the
+// server's own close); only its one place comes back.
+func (s *ProxySuite) TestAGrantsTunnelThatSpeaksPlainHTTPGivesBackOnlyItsPlace() {
+	s.capped(2)
+	held, _, _ := s.open("api.github.test:443", s.credential)
+	s.Require().Equal(http.StatusOK, held)
+	for range 2 {
+		status, _, conn := s.open("api.github.test:443", s.credential)
+		s.Require().Equal(http.StatusOK, status)
+		_, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: api.github.test\r\n\r\n")
+		s.Require().NoError(err)
+		s.Require().NoError(conn.SetReadDeadline(time.Now().Add(5 * time.Second)))
+		answer, _ := io.ReadAll(conn)
+		s.Require().Contains(string(answer), "400 Bad Request")
+	}
+	s.opensAgain("api.github.test:443")
+
+	past, _, _ := s.open("api.github.test:443", s.credential)
+
+	s.Equal(http.StatusTooManyRequests, past, "two tunnels are open, the limit")
+}

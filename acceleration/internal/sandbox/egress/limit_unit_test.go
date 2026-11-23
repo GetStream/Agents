@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,4 +51,20 @@ func (s *SandboxTunnelsSuite) TestConcurrentHoldsOfOneSandboxTakeItsLimitAlone()
 
 	s.Equal(int32(10), held.Load())
 	s.Equal(map[string]int{"sandbox": 10}, tunnels.open)
+}
+
+// TestATunnelClosedTwiceGivesBackOnePlace: net/http and crypto/tls may close a tunnel's
+// connection more than once; only its own place comes back.
+func (s *SandboxTunnelsSuite) TestATunnelClosedTwiceGivesBackOnePlace() {
+	tunnels := sandboxTunnels{max: 2, open: map[string]int{}}
+	s.Require().True(tunnels.hold("sandbox"))
+	s.Require().True(tunnels.hold("sandbox"))
+	ours, theirs := net.Pipe()
+	defer theirs.Close()
+	conn := tunnels.held(ours, "sandbox")
+
+	_ = conn.Close()
+	_ = conn.Close()
+
+	s.Equal(map[string]int{"sandbox": 1}, tunnels.open)
 }

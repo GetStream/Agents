@@ -51,6 +51,7 @@ func (s *sandboxTunnels) release(credential string) {
 type heldConn struct {
 	net.Conn
 	release func()
+	once    sync.Once
 }
 
 // held is conn holding one of credential's tunnels, which a hold took.
@@ -58,10 +59,12 @@ func (s *sandboxTunnels) held(conn net.Conn, credential string) net.Conn {
 	return &heldConn{Conn: conn, release: func() { s.release(credential) }}
 }
 
-// Close gives the tunnel back. Each end is closed once: io.Closer leaves a second Close undefined,
-// and a tls.Conn closes what it wraps only on its first.
+// Close gives the tunnel back, once however many times it is called: io.Closer leaves a second
+// Close undefined, and net/http closes the connection of a TLS handshake that failed (the sandbox
+// sent plain HTTP) and then the tls.Conn around it closes it again (net/http server.go, the
+// RecordHeaderError branch; crypto/tls conn.go, Conn.Close).
 func (c *heldConn) Close() error {
 	err := c.Conn.Close()
-	c.release()
+	c.once.Do(c.release)
 	return err
 }
