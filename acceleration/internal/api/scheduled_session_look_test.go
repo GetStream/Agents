@@ -11,11 +11,12 @@ import (
 	"net/http/httptest"
 	"time"
 
+	"github.com/redis/rueidis"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
-	"github.com/redis/rueidis"
 )
 
 // beforeItsLook is how long a delivery that waits scheduledPoll = an hour is watched for answering
@@ -162,8 +163,8 @@ func (s *ScheduledTasksSuite) TestADeliveryGivesUpOnAPeerThatKeepsTheSessionAfte
 }
 
 // A delivery whose peer did not take it, and that cannot read the directory when it looks again,
-// goes on here: the entry it was waiting on cannot be told to be there, as it is not when the first
-// look fails. The router's directory reads through a Redis client of its own, closed once the peer
+// goes on here, as it does when the first look fails, rather than waiting out a peer it cannot see.
+// The router's directory reads through a Redis client of its own, closed once the peer
 // has refused, so the first look is answered and the next is not.
 func (s *ScheduledTasksSuite) TestADeliveryThatCannotReadTheDirectoryWhileWaitingForAPeerGoesOnHere() {
 	s.looksEvery(10 * time.Millisecond)
