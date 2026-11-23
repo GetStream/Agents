@@ -916,7 +916,7 @@ A call allowed from the conversation with its arguments ran at once, and ran aga
 ### Kotlin: a tool's failure and a printed credential keep internal details out
 
 - A tool's failure reaches the model as `StreamAgents.onToolError` says, `agents.onToolError = { call, error -> ... }`, for every session of that client, and as the error's message otherwise, cut to 1,024 characters with an ellipsis, as in JavaScript. The model may repeat it and the conversation keeps it, and an error from a library a tool calls can name an internal host, a table or a value from a record: a hook can pass on only the app's own errors and say something plain for the rest. A hook that throws tells the model only that the tool failed.
-- `StreamCredentials` and `Guest` no longer print their token in `toString()`; it shows as `[redacted]`. The generated `GuestUser` the SDK keeps a guest's store record in still prints its token and refresh secret: it is internal, never handed to the app or logged by the SDK, and the generator has no way to mask a field yet (AND-XXXX).
+- `StreamCredentials` and `Guest` no longer print their token in `toString()`; it shows as `[redacted]`. The generated `GuestUser` the SDK keeps a guest's store record in still prints its token and refresh secret: it is internal, never handed to the app or logged by the SDK, and the generator has no way to mask a field yet (AND-2019).
 
 ### The Go SDK's `Agent.Sync` works for an agent with skills
 
