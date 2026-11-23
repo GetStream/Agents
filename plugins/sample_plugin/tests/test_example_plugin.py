@@ -9,7 +9,7 @@ class TestExamplePlugin:
     def test_regular(self):
         assert True
 
-    # example integration test (run daily on CI)
+    # example integration test (run on CI when a release is published)
     @pytest.mark.integration
     async def test_simple(self):
         assert True

@@ -16,6 +16,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -23,6 +24,10 @@ import (
 // still recorded, so there is no way to tell what happened in between. The answer is to
 // export again rather than to carry on from a number nothing can honour.
 var ErrChangesExpired = errors.New("store: the changes since that cursor are no longer kept")
+
+// ErrNotACustomConnector is an imported connector definition whose manifest the API would
+// have refused for a custom connector (importableDefinition).
+var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
 // dataTable is one table a customer's rows live in.
 //
@@ -93,7 +98,11 @@ func (t dataTable) rollup() bool {
 // moves to pins its tools again on first use. And chat_inbound, Stream
 // Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes. And
 // call_bridges, an answer parked for seconds at this deployment's URL: its key is the token
-// that authenticates the fetch, and it holds the trunk's password in the clear.
+// that authenticates the fetch, and it holds the trunk's password in the clear. And
+// voice_samples and voice_bindings: a sample's audio is in this deployment's bucket and a
+// binding's clone in this deployment's account at the provider, so like a knowledge file's,
+// neither means anything where the customer moves. A voice arrives with its name and
+// description, to be given a recording and prepared again.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -108,8 +117,6 @@ var dataTables = []dataTable{
 	}},
 	{name: "router_configs", customer: "customer_id"},
 	{name: "voices", customer: "customer_id"},
-	{name: "voice_samples", parent: "voices", parentColumn: "voice_id"},
-	{name: "voice_bindings", parent: "voices", parentColumn: "voice_id"},
 	{name: "sip_trunks", customer: "customer_id"},
 	{name: "phone_numbers", customer: "customer_id"},
 	{name: "knowledge_urls", customer: "customer_id"},
@@ -716,7 +723,18 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return err
 	}
 	if table == "phone_numbers" {
-		if err := importableNumber(ctx, db, customerID, row); err != nil {
+		if importable, err := importableNumber(ctx, db, customerID, row); err != nil || !importable {
+			return err
+		}
+	}
+	if table == "connector_definitions" {
+		// The built-in customer owns the built-in definitions every app shares, and an import
+		// never writes them: `router replicate` without --as hands over "" until a row names
+		// a customer.
+		if customerID == BuiltinCustomer {
+			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+		}
+		if row, err = importableDefinition(row); err != nil {
 			return err
 		}
 	}
@@ -778,6 +796,24 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if spec.copied != "" {
 		where = " WHERE NOT " + spec.copiedBefore(shape, columns)
 	}
+	args := []any{string(row), customerID}
+	if table == "requests" {
+		// The organization a request counts against is the app's here, whatever the row says.
+		// It is in the shared database and requests in this shard's, so it is read first. An app
+		// this deployment neither saw nor registered has none here, and its requests keep none.
+		organization, err := s.AppOrganizations.OrganizationOf(ctx, customerID)
+		if err != nil {
+			return err
+		}
+		args = append(args, organization)
+	}
+	read := args
+	if spec.customer == "" {
+		read = args[:1]
+	}
+	if err := validateImported(ctx, db, spec, shape, columns, picked, subject, read); err != nil {
+		return fmt.Errorf("store: import %s: %w", table, err)
+	}
 
 	// A row nobody may update is one whose primary key is all it has, and writing it
 	// again would be the same row. Doing nothing is both the right answer and a legal
@@ -787,7 +823,6 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// it. Primary keys are carried across as they are, so without this an import could
 	// name a row it happened to know the id of and overwrite another customer's.
 	conflict := "DO NOTHING"
-	args := []any{string(row), customerID}
 	if len(assignments) > 0 {
 		conflict = "DO UPDATE SET " + strings.Join(assignments, ", ") + " WHERE " + spec.owned(spec.name)
 		args = append(args, customerID)
@@ -802,6 +837,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// An import writes key version 0 and only a seal here raises it: a row past 0 is one sealed here.
 	if table == "connector_connections" {
 		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
+	}
+	// A number bought here and still held is this deployment's, whatever row names its id.
+	if table == "phone_numbers" {
+		conflict += " AND NOT " + boughtHere("phone_numbers")
 	}
 
 	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
@@ -821,6 +860,68 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	return nil
+}
+
+// validated is a model that refuses a row the API would not store.
+type validated interface{ Validate() error }
+
+// importedModels are the models of the tables an import writes, for those that have a Validate,
+// so an imported row is held to what the API holds the same row to. A phone number is checked
+// by importableNumber instead, which takes one given back in the form it was held in then.
+var importedModels = map[string]func() validated{
+	"agent_configs":          func() validated { return &AgentConfig{} },
+	"skills":                 func() validated { return &Skill{} },
+	"connector_definitions":  func() validated { return &ConnectorDefinition{} },
+	"connector_connections":  func() validated { return &ConnectorConnection{} },
+	"router_configs":         func() validated { return &RouterConfig{} },
+	"voices":                 func() validated { return &Voice{} },
+	"sip_trunks":             func() validated { return &SIPTrunk{} },
+	"knowledge_urls":         func() validated { return &KnowledgeURL{} },
+	"knowledge_documents":    func() validated { return &KnowledgeDocument{} },
+	"campaigns":              func() validated { return &Campaign{} },
+	"campaign_contacts":      func() validated { return &Contact{} },
+	"campaign_attempts":      func() validated { return &CampaignAttempt{} },
+	"simulations":            func() validated { return &Simulation{} },
+	"simulation_runs":        func() validated { return &SimulationRun{} },
+	"simulation_cases":       func() validated { return &SimulationCase{} },
+	"scheduled_tasks":        func() validated { return &ScheduledTask{} },
+	"scheduled_task_runs":    func() validated { return &ScheduledTaskRun{} },
+	"recordings":             func() validated { return &Recording{} },
+	"agent_sessions":         func() validated { return &AgentSession{} },
+	"agent_session_tools":    func() validated { return &agentSessionTools{} },
+	"calls":                  func() validated { return &Call{} },
+	"agent_responses":        func() validated { return &AgentResponse{} },
+	"agent_response_items":   func() validated { return &AgentResponseItem{} },
+	"conversation_documents": func() validated { return &ConversationDocument{} },
+	"agent_branch_switches":  func() validated { return &AgentBranchSwitch{} },
+	"agent_branch_messages":  func() validated { return &AgentBranchMessage{} },
+	"agent_logs":             func() validated { return &AgentLog{} },
+	"requests":               func() validated { return &Request{} },
+	"policies":               func() validated { return &Policy{} },
+}
+
+// validateImported reads the row as the import would write it, with what it forces and fills
+// in, and refuses it when its model's Validate does. A column the import leaves out is read as
+// the row sent it.
+func validateImported(ctx context.Context, db bun.IDB, spec dataTable, shape shape, columns, picked []string, subject string, args []any) error {
+	model, found := importedModels[spec.name]
+	if !found {
+		return nil
+	}
+	read := make([]string, 0, len(shape.columns))
+	for _, column := range shape.columns {
+		expression := "r." + column
+		if i := slices.Index(columns, column); i >= 0 {
+			expression = picked[i]
+		}
+		read = append(read, expression+" AS "+column)
+	}
+	row := model()
+	if err := db.NewRaw(fmt.Sprintf("SELECT %s FROM jsonb_populate_record(NULL::%s, %s) AS r",
+		strings.Join(read, ", "), spec.name, subject), args...).Scan(ctx, row); err != nil {
+		return stack.Wrap(fmt.Errorf("read the row: %w", err))
+	}
+	return row.Validate()
 }
 
 // The gap an import reserves ahead of the ids it writes, at most. Once a row's id comes
@@ -1279,64 +1380,70 @@ func moveRoom(ctx context.Context, tx bun.Tx, customerID string, marked []Schedu
 	return limits, held, nil
 }
 
-// digitsKey is a number as most vendors read the one they are given, as SQL over a text
-// value: its digits. Plivo, DIDWW, Vonage and Bird drop the plus; Twilio, Telnyx and Sinch
-// read it as written, which its digits only widen.
-const digitsKey = `regexp_replace(%s, '[^0-9]', '', 'g')`
-
-// vendorKeys is a number as a vendor that reads it another way does. Bandwidth also drops
-// the 1 of an 11-digit number (bandwidth.digits), so +15551234567 and +5551234567 are one
-// number there.
-var vendorKeys = map[string]string{
-	"bandwidth": `regexp_replace(regexp_replace(%s, '[^0-9]', '', 'g'), '^1([0-9]{10})$', '\1')`,
-}
-
-// importableNumber refuses an imported number the customer would hold in a form other than
-// E.164, or that another customer holds. Every bought number is held in the deployment's one
-// account at its vendor, and releasing it there is what holding it here allows, so a number
-// two customers held would be one either of them could give back. The unique index on what
-// is held compares the text as written, so it sees neither another form of a number nor the
-// same number at another vendor. A number given back is only its bill's history and imports
-// as written; one on the customer's own trunk is in no account here.
-//
-// Two imports of one number into two customers at the same moment can both pass this.
-func importableNumber(ctx context.Context, db bun.IDB, customerID string, row json.RawMessage) error {
+// importableNumber says whether an imported number is written here, and refuses one the API
+// would not store. Only a number on the customer's own trunk moves. A bought one is held in
+// the vendor account of the deployment that bought it, with that one's line, trunk and use
+// case, and its bills move in its requests: written here it would be billed again (Rentals)
+// and given back at this deployment's vendor account. So it is not written, and the customer
+// keeps it by buying or porting it here.
+func importableNumber(ctx context.Context, db bun.IDB, customerID string, row json.RawMessage) (bool, error) {
 	// Read the way the insert reads it, by exact column name: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var e164, vendor sql.NullString
-	var released bool
+	var cost sql.NullInt64
 	if err := db.QueryRowContext(ctx,
-		"SELECT e164, vendor, released_at IS NOT NULL FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
-		string(row)).Scan(&e164, &vendor, &released); err != nil {
-		return fmt.Errorf("store: read an imported number: %w", err)
+		"SELECT e164, vendor, monthly_cost_micros FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
+		string(row)).Scan(&e164, &vendor, &cost); err != nil {
+		return false, fmt.Errorf("store: read an imported number: %w", err)
 	}
-	if released {
-		return nil
+	if vendor.String != sipTrunkVendor {
+		return false, nil
 	}
-	if !IsE164(e164.String) {
-		return stack.Wrap(fmt.Errorf("%w: %q", ErrNotE164, e164.String))
+	number := PhoneNumber{CustomerID: customerID, E164: e164.String, Vendor: vendor.String, MonthlyCostMicros: cost.Int64}
+	if err := number.Validate(); err != nil {
+		return false, stack.Wrap(err)
 	}
-	if vendor.String == "sip_trunk" {
-		return nil
+	return true, nil
+}
+
+// boughtHere is the condition that a number, as the given relation names it, was bought here
+// and is still held: no import writes one (importableNumber), so none may update or delete it.
+func boughtHere(relation string) string {
+	return fmt.Sprintf("(%[1]s.released_at IS NULL AND %[1]s.vendor <> '%[2]s')", relation, sipTrunkVendor)
+}
+
+// importableDefinition refuses an imported definition the API would not have stored, and gives the row the manifest as
+// the API would have stored it, so no field this release does not read arrives for one that does. Every imported
+// definition is a custom one, since the customer is forced onto the row (identity) and importRow refuses an import with
+// no customer, and only the API's rules keep a custom manifest from naming the operator's client or anything else the
+// router would trust a built-in with (core.Manifest.AsCustom).
+func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
+	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
+	// key in another case, which the insert then leaves out.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, fmt.Errorf("store: read an imported connector definition: %w", err)
 	}
-	// Compared as the vendor it would be given back at reads a number, so a number held in
-	// another form, before every write checked the form, is found as well.
-	key, found := vendorKeys[vendor.String]
-	if !found {
-		key = digitsKey
+	var id string
+	if raw, ok := fields["id"]; ok {
+		if err := json.Unmarshal(raw, &id); err != nil {
+			return nil, fmt.Errorf("store: read an imported connector definition's id: %w", err)
+		}
 	}
-	var held bool
-	if err := db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT EXISTS (SELECT 1 FROM phone_numbers
-WHERE customer_id <> ? AND released_at IS NULL AND vendor <> 'sip_trunk' AND %s = %s)`,
-		fmt.Sprintf(key, "e164"), fmt.Sprintf(key, "?::text")),
-		customerID, e164.String).Scan(&held); err != nil {
-		return fmt.Errorf("store: who holds an imported number: %w", err)
+	var manifest core.Manifest
+	if raw, ok := fields["manifest"]; ok {
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return nil, fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err)
+		}
 	}
-	if held {
-		return stack.Wrap(fmt.Errorf("%w: %s", ErrNumberHeldElsewhere, e164.String))
+	custom, err := manifest.AsCustom(id)
+	if err != nil {
+		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 	}
-	return nil
+	if fields["manifest"], err = json.Marshal(custom); err != nil {
+		return nil, stack.Wrap(err)
+	}
+	return json.Marshal(fields)
 }
 
 // identity is what the importing deployment overwrites on every row of this table, which
@@ -1366,16 +1473,20 @@ func (t dataTable) identity() string {
 	}
 	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers
-	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again.
+	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again. Nor with its
+	// use case, which names one of the source's.
 	if t.name == "phone_numbers" {
 		return "jsonb_build_object('customer_id', ?::text, 'stream_trunk_id', NULL, 'stream_route_id', NULL," +
-			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL)"
+			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL, 'dlc_use_case_id', NULL)"
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
 	// this one shipped or had refused leaves it alone.
+	// Nor is it billed here, and it counts against the importing app's organization alone.
 	if t.name == "requests" {
-		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '')"
+		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '')" +
+			" || jsonb_build_object('billable', false)" +
+			" || jsonb_build_object('organization_id', ?::text)"
 	}
 	return fmt.Sprintf("jsonb_build_object('%s', ?::text)", t.customer)
 }
@@ -1639,6 +1750,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		if spec.filter != "" {
 			conditions = append(conditions, spec.filter)
 		}
+	}
+	if spec.name == "phone_numbers" {
+		conditions = append(conditions, "NOT "+boughtHere("t"))
 	}
 	args = append(args, customerID)
 
