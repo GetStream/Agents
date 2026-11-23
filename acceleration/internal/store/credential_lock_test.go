@@ -453,10 +453,12 @@ func (s *StoreSuite) TestCredentialLocksHeldAtOnceFillTheirOwnPoolAndLeaveTheSer
 				})
 		}()
 	}
+	// The lock pool's size, written out so a change to it is a change to this test too.
+	const heldAtOnce = 16
 	s.Require().Eventually(func() bool {
-		return inside.Load() == lockConns && router.locks.Stats().WaitCount == maxConns-lockConns
-	}, 5*time.Second, 10*time.Millisecond, "lockConns locks are held and the lockers past them wait for a lock connection")
-	s.Equal(lockConns, s.credentialLocks(true))
+		return inside.Load() == heldAtOnce && router.locks.Stats().WaitCount == maxConns-heldAtOnce
+	}, 5*time.Second, 10*time.Millisecond, "16 locks are held and the lockers past them wait for a lock connection")
+	s.Equal(heldAtOnce, s.credentialLocks(true))
 
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
