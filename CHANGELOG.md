@@ -871,7 +871,7 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ### A sandbox's proxy credential works only while its run is in flight
 
-Under `code_sandbox.broker: proxy`, each run of code now gets its own proxy credential, and the router deletes it when the run ends. Before, one credential lasted for the sandbox's whole session, and its record expired 31 minutes after the last run started. A credential that code prints and the model repeats is already dead, and no later run uses it again. A background process that an earlier run left in the sandbox loses the proxy when that run ends (AI-3688).
+Under `code_sandbox.broker: proxy`, each run of code now gets its own proxy credential, and the router deletes it when the run ends. Before, one credential lasted for the sandbox's whole session, and its record expired 31 minutes after the last run started. A credential that code prints and the model repeats is already dead, and no later run uses it again. A background process that an earlier run left in the sandbox loses the proxy when that run ends (#2318).
 
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
