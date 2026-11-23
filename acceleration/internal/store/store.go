@@ -45,8 +45,10 @@ type Store struct {
 	shard  *bun.DB
 	peers  []*bun.DB
 	// locks is the shared database again, in a pool of its own that credential and provider
-	// app locks are held on (acquireCredentialLock).
+	// app locks are held on (tryCredentialLock).
 	locks *bun.DB
+	// lockSlots caps how many of locks' connections one customer's locks hold.
+	lockSlots lockSlots
 	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
 	// migration runs on.
 	globalDSN, shardDSN string

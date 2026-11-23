@@ -75,8 +75,9 @@ func (s *ResolverSuite) TestAConnectedConnectionResolvesToACredentialTheProvider
 
 func (s *ResolverSuite) TestRefreshesStalledAtTheTokenEndpointLeaveTheRouterItsServingConnections() {
 	// More refreshes than the router's serving pool has connections: held locks that took
-	// their connections from it would take all of it.
-	const refreshes, serving = 8, 4
+	// their connections from it would take all of it. 4 is as many as one customer's locks
+	// hold at once (lockConnsPerCustomer in internal/store).
+	const refreshes, serving = 4, 2
 	refs := make([]core.ConnectionRef, refreshes)
 	for i := range refs {
 		refs[i] = s.f.connected()

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -54,6 +55,70 @@ const (
 // the shared database; idle ones close after 5 minutes (connect). A choice, not measured.
 const lockConns = 16
 
+// lockConnsPerCustomer is how many lock pool connections one customer's locks, credential and
+// provider app ones together, hold at once; one more of that customer's waits, holding no
+// connection, until one of them is given back or its own context ends. A customer decides
+// how long its refreshes take: a custom connector names its own token endpoint
+// (oauth2code/discovery.go), which may answer each token request just inside
+// connectorHTTPTimeout (10 s, cmd/router/main.go) for as long as retrieveTimeout (30 s,
+// resolver.go) lets a refresh run. Without a cap, one customer's 16 stalled refreshes would
+// fill lockConns, and every other customer's locks would wait until their contexts ended. 4 of
+// 16 leaves 12 to the others while one customer stalls, so it takes 4 customers to fill the
+// pool, and still lets a customer refresh 4 connections at once. A choice, not measured. The
+// count is kept per Store, so per router process, as the pool it divides is: another
+// router's locks are on its own pool and count there.
+const lockConnsPerCustomer = 4
+
+// lockSlots counts the lock pool connections each customer's locks hold or wait for, so that
+// none holds more than lockConnsPerCustomer. A customer's entry lives while one of its locks
+// is held or wanted, so the map holds at most the customers locking at this moment.
+type lockSlots struct {
+	mu        sync.Mutex
+	customers map[string]*customerLockSlots
+}
+
+type customerLockSlots struct {
+	// held has one value per connection the customer's locks hold, up to its capacity,
+	// lockConnsPerCustomer.
+	held chan struct{}
+	// callers is how many of the customer's locks hold a slot or wait for one.
+	callers int
+}
+
+// take waits for one of the customer's slots until ctx ends, and returns what gives it back.
+func (l *lockSlots) take(ctx context.Context, customerID string) (func(), error) {
+	l.mu.Lock()
+	if l.customers == nil {
+		l.customers = map[string]*customerLockSlots{}
+	}
+	slots := l.customers[customerID]
+	if slots == nil {
+		slots = &customerLockSlots{held: make(chan struct{}, lockConnsPerCustomer)}
+		l.customers[customerID] = slots
+	}
+	slots.callers++
+	l.mu.Unlock()
+	select {
+	case slots.held <- struct{}{}:
+		return func() {
+			<-slots.held
+			l.leave(customerID, slots)
+		}, nil
+	case <-ctx.Done():
+		l.leave(customerID, slots)
+		return nil, context.Cause(ctx)
+	}
+}
+
+func (l *lockSlots) leave(customerID string, slots *customerLockSlots) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	slots.callers--
+	if slots.callers == 0 {
+		delete(l.customers, customerID)
+	}
+}
+
 // withCredentialLock runs fn on one lock pool connection that holds the session-level advisory
 // lock on the connection's credential state, and gives the lock and the connection back when
 // fn returns.
@@ -67,20 +132,38 @@ const lockConns = 16
 // released would stay with whoever borrows it next. Statements fn runs on that connection
 // (conn) take no second one; any other statement takes one of the serving pool.
 func (s *Store) withCredentialLock(ctx context.Context, customerID, id string, fn func(bun.Conn) error) error {
-	key := credentialLockKey(customerID, id)
-	conn, err := s.acquireCredentialLock(ctx, credentialLockNamespace, key)
+	conn, unlock, err := s.acquireCredentialLock(ctx, customerID, credentialLockNamespace, credentialLockKey(customerID, id))
 	if err != nil {
 		return err
 	}
-	defer releaseCredentialLock(conn, credentialLockNamespace, key)
+	defer unlock()
 	return fn(conn)
 }
 
-// acquireCredentialLock tries the lock with pg_try_advisory_lock, which "will either obtain the
+// acquireCredentialLock takes one of the customer's lock slots (lockSlots), then the lock
+// (tryCredentialLock), and returns the connection holding it and what unlocks it and gives
+// the slot back. namespace is the first key of the two (credentialLockNamespace,
+// providerAppLockNamespace).
+func (s *Store) acquireCredentialLock(ctx context.Context, customerID string, namespace, key int32) (bun.Conn, func(), error) {
+	leave, err := s.lockSlots.take(ctx, customerID)
+	if err != nil {
+		return bun.Conn{}, nil, fmt.Errorf("store: wait for a customer's credential lock slot: %w", err)
+	}
+	conn, err := s.tryCredentialLock(ctx, namespace, key)
+	if err != nil {
+		leave()
+		return bun.Conn{}, nil, err
+	}
+	return conn, func() {
+		releaseCredentialLock(conn, namespace, key)
+		leave()
+	}, nil
+}
+
+// tryCredentialLock tries the lock with pg_try_advisory_lock, which "will either obtain the
 // lock immediately and return true, or return false without waiting"
 // (https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS),
-// and pauses between tries until it gets it or ctx is done. namespace is the first key of the
-// two (credentialLockNamespace, providerAppLockNamespace). Nothing waits in Postgres, so a
+// and pauses between tries until it gets it or ctx is done. Nothing waits in Postgres, so a
 // caller that gives up leaves no wait queued on the server, and a waiter holds no connection
 // while it pauses. A blocking pg_advisory_lock could not promise that: the driver bounds
 // every read by its ReadTimeout, 10s unless set (newDefaultConfig in
@@ -89,7 +172,7 @@ func (s *Store) withCredentialLock(ctx context.Context, customerID, id string, f
 // of the connection only at the next interaction with the socket"
 // (https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-CLIENT-CONNECTION-CHECK-INTERVAL),
 // so the wait would stay queued. The cost is that waiters are not served in order.
-func (s *Store) acquireCredentialLock(ctx context.Context, namespace, key int32) (bun.Conn, error) {
+func (s *Store) tryCredentialLock(ctx context.Context, namespace, key int32) (bun.Conn, error) {
 	pause := credentialRetryFirst
 	for {
 		conn, err := s.locks.Conn(ctx)

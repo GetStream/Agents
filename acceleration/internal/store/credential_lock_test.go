@@ -427,6 +427,7 @@ func (s *StoreSuite) assertNothingIsHeld(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(true) == 0 && s.credentialLocks(false) == 0 },
 		2*time.Second, 10*time.Millisecond, "no credential lock is left behind")
 	s.Zero(waiter.locks.Stats().InUse)
+	s.Zero(waiter.lockSlots.callersOf("acme-app"), "the waiter gave its customer's lock slot back")
 }
 
 func (s *StoreSuite) TestCredentialLocksHeldAtOnceFillTheirOwnPoolAndLeaveTheServingOneFree() {
@@ -438,13 +439,15 @@ func (s *StoreSuite) TestCredentialLocksHeldAtOnceFillTheirOwnPoolAndLeaveTheSer
 	finished := make(chan error, maxConns)
 	// As many lockers as the serving pool has connections, each reading through the store
 	// inside its lock, as the resolver does: holding their locks on the serving pool, they
-	// would take all of it and wait for one more.
-	for range maxConns {
-		connection := s.connection("acme-app", nil)
+	// would take all of it and wait for one more. Spread over 10 customers, 4 each, so no
+	// customer's cap (lockConnsPerCustomer) holds one back.
+	for i := range maxConns {
+		customerID := fmt.Sprintf("acme-app-%d", i%10)
+		connection := s.connection(customerID, nil)
 		go func() {
-			finished <- router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+			finished <- router.ConnectorConnections.WithLocked(s.ctx, customerID, connection.ID,
 				func(locked *ConnectorConnection, _ func() error) (bool, error) {
-					if _, err := router.ConnectorConnections.Get(s.ctx, "acme-app", locked.ID); err != nil {
+					if _, err := router.ConnectorConnections.Get(s.ctx, customerID, locked.ID); err != nil {
 						return false, err
 					}
 					inside.Add(1)
@@ -495,4 +498,105 @@ func (s *StoreSuite) TestAProviderAppLockIsHeldOnTheLockPool() {
 	}))
 	s.Equal(1, locks, "the provider app lock keeps a lock pool connection")
 	s.Zero(serving, "and no serving one")
+}
+
+// callersOf is how many of the customer's locks hold a lock slot or wait for one.
+func (l *lockSlots) callersOf(customerID string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if slots := l.customers[customerID]; slots != nil {
+		return slots.callers
+	}
+	return 0
+}
+
+// parked starts n locks of the customer's own connections on router, each stalled inside
+// until release is called, as a refresh stalls at a token endpoint the customer runs. inside
+// counts the ones that got in; release returns once every one has.
+func (s *StoreSuite) parked(router *Store, customerID string, n int) (inside *atomic.Int32, release func()) {
+	inside = new(atomic.Int32)
+	stalled := make(chan struct{})
+	finished := make(chan error, n)
+	for range n {
+		connection := s.connection(customerID, nil)
+		go func() {
+			finished <- router.ConnectorConnections.WithLocked(s.ctx, customerID, connection.ID,
+				func(*ConnectorConnection, func() error) (bool, error) {
+					inside.Add(1)
+					<-stalled
+					return false, nil
+				})
+		}()
+	}
+	return inside, sync.OnceFunc(func() {
+		close(stalled)
+		for range n {
+			s.Require().NoError(<-finished)
+		}
+	})
+}
+
+func (s *StoreSuite) TestOneCustomersStalledLocksLeaveTheLockPoolToOtherCustomers() {
+	router := s.router()
+	// As many of one customer's locks as the lock pool has connections, all stalled.
+	inside, release := s.parked(router, "evil-app", lockConns)
+	defer release()
+	// One customer's cap, written out so a change to it is a change to this test too.
+	const perCustomer = 4
+	s.Require().Eventually(func() bool {
+		return inside.Load() == perCustomer && router.lockSlots.callersOf("evil-app") == lockConns
+	}, 5*time.Second, 10*time.Millisecond, "4 of the customer's locks are held and the rest wait for a slot")
+	s.Equal(perCustomer, router.locks.Stats().InUse, "a lock waiting for its customer's slot holds no connection")
+
+	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	defer cancel()
+	other := s.connection("other-app", nil)
+	ran := 0
+	s.Require().NoError(router.ConnectorConnections.WithLocked(ctx, "other-app", other.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { ran++; return false, nil }))
+	s.Require().NoError(router.ConnectorConfigTokens.WithProviderAppLock(ctx, "other-app", "slack",
+		func() error { ran++; return nil }))
+	s.Equal(2, ran, "another customer's credential and provider app locks run")
+
+	short, stop := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer stop()
+	err := router.ConnectorConfigTokens.WithProviderAppLock(short, "evil-app", "slack", func() error {
+		s.Fail("a provider app lock past its customer's cap waits for a slot")
+		return nil
+	})
+	s.ErrorIs(err, context.DeadlineExceeded, "a provider app lock counts against the same cap and gives up with its context")
+
+	release()
+	s.Equal(int32(lockConns), inside.Load(), "every one of the customer's locks ran in its turn")
+	s.Zero(router.lockSlots.callersOf("evil-app"))
+	s.Zero(router.locks.Stats().InUse)
+}
+
+func (s *StoreSuite) TestACustomersLockSlotIsGivenBackHoweverItsLockEnds() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+
+	s.Panics(func() {
+		_ = router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) { panic("callback") })
+	})
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a callback that panics gives its slot back")
+
+	inside, release := s.parked(router, "acme-app", lockConnsPerCustomer)
+	s.Require().Eventually(func() bool { return inside.Load() == lockConnsPerCustomer }, 5*time.Second, 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(s.ctx, 100*time.Millisecond)
+	defer cancel()
+	err := router.ConnectorConnections.WithLocked(ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+	s.ErrorIs(err, context.DeadlineExceeded)
+	release()
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a lock that gave up waiting for a slot leaves none counted")
+
+	closed, err := s.openRouter()
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	err = closed.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+	s.ErrorContains(err, "credential lock connection")
+	s.Zero(closed.lockSlots.callersOf("acme-app"), "a lock that got no connection gives its slot back")
 }

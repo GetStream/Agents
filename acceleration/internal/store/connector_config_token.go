@@ -64,12 +64,11 @@ func (r *ConnectorConfigTokens) WithProviderAppLock(ctx context.Context, custome
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
-	key := credentialLockKey(customerID, connectorID)
-	conn, err := r.store.acquireCredentialLock(ctx, providerAppLockNamespace, key)
+	_, unlock, err := r.store.acquireCredentialLock(ctx, customerID, providerAppLockNamespace, credentialLockKey(customerID, connectorID))
 	if err != nil {
 		return stack.Wrap(err)
 	}
-	defer releaseCredentialLock(conn, providerAppLockNamespace, key)
+	defer unlock()
 	return fn()
 }
 
