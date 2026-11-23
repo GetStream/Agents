@@ -75,7 +75,7 @@ type BrokerContract struct {
 }
 
 func (s *BrokerContract) SetupTest() {
-	s.ctx = context.Background()
+	s.ctx = s.T().Context()
 	s.logs = &bytes.Buffer{}
 	s.logger = slog.New(slog.NewMultiHandler(slog.NewJSONHandler(s.logs, nil), slog.NewTextHandler(s.logs, nil)))
 	s.tokens, s.refused, s.bound, s.issued, s.quoted, s.errs = map[string]sandbox.Token{}, map[string]error{}, map[string]sandbox.Grant{}, nil, nil, nil
@@ -159,7 +159,7 @@ func (s *BrokerContract) bind(_ context.Context, grant sandbox.Grant) (sandbox.G
 
 func (s *BrokerContract) subject(session string) Subject {
 	subject := s.New(s.T(), session, s.resolve, s.bind, s.logger)
-	s.T().Cleanup(func() { _ = subject.Broker.Close(context.Background()) })
+	s.T().Cleanup(func() { _ = subject.Broker.Close(context.WithoutCancel(s.T().Context())) })
 	return subject
 }
 
@@ -536,7 +536,7 @@ func (s *BrokerContract) TestALateGrantGetsATokenOnlyOnceBound() {
 // TestALateGrantWithoutBindRefusesTheSandbox: nothing would ever bind it.
 func (s *BrokerContract) TestALateGrantWithoutBindRefusesTheSandbox() {
 	subject := s.New(s.T(), "session-1", s.resolve, nil, s.logger)
-	s.T().Cleanup(func() { _ = subject.Broker.Close(context.Background()) })
+	s.T().Cleanup(func() { _ = subject.Broker.Close(context.WithoutCancel(s.T().Context())) })
 
 	_, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN"), late("linear", "LINEAR_TOKEN")})
 

@@ -23,6 +23,9 @@ var errNotEstablished = errors.New("call not set up yet")
 // Call is an established outbound call: two dialogs, and whatever one side sends in its
 // dialog is passed on to the other.
 type Call struct {
+	// ctx is the context the call was dialled or resumed in, without its cancellation: what
+	// the other side asks of the call later (a BYE, a re-INVITE, a keepalive) is traced under it.
+	ctx  context.Context
 	legs [2]leg
 	log  *slog.Logger
 	// media is where each side sent its audio from at setup, fixed before Dial returns.
@@ -37,8 +40,8 @@ type Call struct {
 	err         error
 }
 
-func newCall(customer, stream leg, log *slog.Logger) *Call {
-	return &Call{legs: [2]leg{customer, stream}, log: log, done: make(chan struct{})}
+func newCall(ctx context.Context, customer, stream leg, log *slog.Logger) *Call {
+	return &Call{ctx: context.WithoutCancel(ctx), legs: [2]leg{customer, stream}, log: log, done: make(chan struct{})}
 }
 
 // Done is closed when the call has ended.

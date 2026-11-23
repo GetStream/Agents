@@ -34,6 +34,11 @@ var errTooManyScheduledTasks = APIError{Type: ErrorTypeConflict, Code: codeTooMa
 	Message: "the user already has the most active scheduled tasks this agent allows; " +
 		"cancel or pause one first"}
 
+// errScheduledTaskChanged is a write to a task that changed between its read and its save, by a
+// pause, an edit or a delivery: saving the copy read would undo that change.
+var errScheduledTaskChanged = APIError{Type: ErrorTypeConflict, Code: codeTaskChanged,
+	Message: "the scheduled task changed while this request was made; read it again and retry"}
+
 // errUnkeptTaskSession is a create naming a session whose conversation is not kept: an
 // occurrence follows up by reopening the conversation, which an incognito session leaves
 // nothing of.
@@ -397,8 +402,11 @@ func (s *Server) updateScheduledTask(ctx context.Context, request *updateSchedul
 		}
 	}
 	if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
-		if errors.Is(err, store.ErrNoAgentConfig) {
+		switch {
+		case errors.Is(err, store.ErrNoAgentConfig):
 			return nil, errUnknownConfig
+		case errors.Is(err, store.ErrScheduledTaskChanged):
+			return nil, errScheduledTaskChanged
 		}
 		return nil, err
 	}
@@ -506,6 +514,9 @@ func (s *Server) pauseScheduledTask(ctx context.Context, request *pauseScheduled
 	if task.State == store.ScheduledTaskActive || (task.State == store.ScheduledTaskPaused && task.MovePaused) {
 		task.State, task.MovePaused = store.ScheduledTaskPaused, false
 		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
+			if errors.Is(err, store.ErrScheduledTaskChanged) {
+				return nil, errScheduledTaskChanged
+			}
 			return nil, err
 		}
 	}
@@ -545,33 +556,27 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 				return nil, scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 					Message: "that task has no occurrence left; give it a new schedule, then resume it"})
 			}
-			if err := s.store.ScheduledTaskRuns.Insert(ctx, missed); err != nil {
-				return nil, err
-			}
 			task.State, task.NextRunAt = store.ScheduledTaskCompleted, nil
+			task.ConsecutiveFailures, task.MovePaused = 0, false
+			err = s.store.ScheduledTasks.Close(ctx, &task, missed)
 		} else {
-			maxActive := store.DefaultMaxActiveTasks
 			// A deleted config leaves a task nothing to run on; any other failure to read it is not that.
-			config, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID)
-			if errors.Is(err, store.ErrNoAgentConfig) {
+			if _, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
 				return nil, errUnknownConfig
-			}
-			if err == nil {
-				maxActive = config.Scheduling.MaxActive()
-			}
-			active, err := s.store.ScheduledTasks.CountActive(ctx, customerID, task.UserID, task.ConfigID)
-			if err != nil {
-				return nil, err
-			}
-			if active >= maxActive {
-				return nil, errTooManyScheduledTasks
 			}
 			task.State, task.NextRunAt = store.ScheduledTaskActive, &next
+			task.ConsecutiveFailures, task.MovePaused = 0, false
+			// The save counts the user's active tasks against the config's limit.
+			err = s.store.ScheduledTasks.Update(ctx, &task)
 		}
-		task.ConsecutiveFailures, task.MovePaused = 0, false
-		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
-			if errors.Is(err, store.ErrNoAgentConfig) {
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNoAgentConfig):
 				return nil, errUnknownConfig
+			case errors.Is(err, store.ErrScheduledTaskChanged):
+				return nil, errScheduledTaskChanged
+			case errors.Is(err, store.ErrTooManyScheduledTasks):
+				return nil, errTooManyScheduledTasks
 			}
 			return nil, err
 		}
@@ -602,15 +607,14 @@ func (s *Server) runScheduledTask(ctx context.Context, request *runScheduledTask
 	if err := s.store.ScheduledTaskRuns.Insert(ctx, &run); err != nil {
 		return nil, err
 	}
-	go s.deliverManualRun(task, run)
+	go s.deliverManualRun(context.WithoutCancel(ctx), task, run)
 	return &runScheduledTaskResponse{Body: scheduledTaskRunOf(task, run)}, nil
 }
 
 // deliverManualRun delivers a run made by hand and records how it landed: a
 // delivery too late to make, such as a call that would ring long after the
 // run was asked for, is missed, as a scheduled occurrence's is.
-func (s *Server) deliverManualRun(task store.ScheduledTask, run store.ScheduledTaskRun) {
-	ctx := context.Background()
+func (s *Server) deliverManualRun(ctx context.Context, task store.ScheduledTask, run store.ScheduledTaskRun) {
 	deliveredTo, sessionID, err := s.DeliverScheduledTask(ctx, store.ClaimedScheduledTask{Task: task, Run: run})
 	state := store.ScheduledTaskRunDelivered
 	failure := ""
@@ -839,7 +843,10 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 			"a skip when it lands past the following one — and on a one-shot it is the reschedule. An end " +
 			"user's device may change title, schedule, next, deliver_to and quiet_hours; instructions are " +
 			"server-side, and a device sending them is refused with a 403.",
-		Responses:  map[string]*huma.Response{"200": {Description: "The task as it now is"}},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "The task as it now is"},
+			"409": errorResponse("The task changed while the request was made: read it again and retry"),
+		},
 		Errors:     []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 		Extensions: map[string]any{clientAccessibleExtension: true},
 	}, s.updateScheduledTask)
@@ -849,9 +856,12 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 		Path:        "/v1/agents/scheduled-tasks/{id}/pause",
 		Summary:     "Pause a scheduled task",
 		Description: "Nothing comes due while a task is paused; what it slept through is never replayed.",
-		Responses:   map[string]*huma.Response{"200": {Description: "The task, paused"}},
-		Errors:      []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
-		Extensions:  map[string]any{clientAccessibleExtension: true},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "The task, paused"},
+			"409": errorResponse("The task changed while the request was made: read it again and retry"),
+		},
+		Errors:     []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Extensions: map[string]any{clientAccessibleExtension: true},
 	}, s.pauseScheduledTask)
 	huma.Register(api, huma.Operation{
 		OperationID: "resumeScheduledTask",
@@ -867,7 +877,7 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The task, running again"},
 			"400": errorResponse("The task has no occurrence left (schedule_in_past), or the request is malformed"),
-			"409": errorResponse("The task is completed, or the user is at their active-task limit"),
+			"409": errorResponse("The task is completed, the user is at their active-task limit, or the task changed while the request was made"),
 		},
 		Errors:     []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 		Extensions: map[string]any{clientAccessibleExtension: true},

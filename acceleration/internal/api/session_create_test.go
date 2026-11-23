@@ -39,6 +39,17 @@ func (s *SessionCreateSuite) TestASessionIsHeldByTheIdTheDeviceChose() {
 	s.Equal(id, s.client.getSession(id).Id)
 }
 
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *SessionCreateSuite) TestASessionTheDatabaseCannotCheckIsAFailureWithNoDatabaseText() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+
+	status, body := s.client.call(http.MethodPost, "/v1/agents/sessions", textSession(&id))
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
+}
+
 func (s *SessionCreateSuite) TestASessionIsHeldByTheIdTheBackendChose() {
 	id := s.utils.uuid()
 
