@@ -31,6 +31,10 @@ public struct AgentTool: Sendable {
     /// model the tool failed and why.
     public let run: @Sendable ([String: RawJSON]) async throws -> ToolOutput
 
+    /// Runs a typed tool on its arguments as the model wrote them, decoding its type straight
+    /// from that JSON, or nil for a tool that takes them as a dictionary.
+    private(set) var runWritten: (@Sendable (String) async throws -> ToolOutput)?
+
     public enum Executor: String, Sendable {
         case server
         /// A person's device: the call is shown as awaiting it until it answers.
@@ -120,7 +124,8 @@ public struct AgentTool: Sendable {
         self.init(
             name: name, description: description, parameters: parameters, executor: executor,
             displayTitle: displayTitle, approval: approval,
-            run: { (arguments: [String: RawJSON]) in try await run(Self.decode(arguments)) })
+            run: { (arguments: [String: RawJSON]) in try await run(Self.decode(JSONEncoder().encode(arguments))) })
+        runWritten = { try await run(Self.decode(Data($0.utf8))) }
     }
 
     /// A tool whose arguments are decoded into a type of yours, answering in words. Arguments
@@ -147,12 +152,49 @@ public struct AgentTool: Sendable {
             run: { (arguments: Arguments) in ToolOutput(text: try await run(arguments)) })
     }
 
-    private static func decode<Arguments: Decodable>(_ arguments: [String: RawJSON]) throws -> Arguments {
+    /// How deep a typed tool's arguments may nest. Decoding a type that holds itself, such as
+    /// `RawJSON`, recurses once a level, on a thread whose stack holds a few hundred.
+    private static let deepestNesting = 64
+
+    private static func decode<Arguments: Decodable>(_ arguments: Data) throws -> Arguments {
         do {
-            return try JSONDecoder().decode(Arguments.self, from: JSONEncoder().encode(arguments))
+            guard nesting(of: arguments) <= deepestNesting else {
+                throw DecodingError.dataCorrupted(
+                    .init(codingPath: [], debugDescription: "they nest more than \(deepestNesting) levels deep"))
+            }
+            return try JSONDecoder().decode(Arguments.self, from: arguments)
         } catch let error as DecodingError {
             throw ToolArgumentsError(failure: error)
         }
+    }
+
+    /// How many objects and arrays deep `json` goes, counted in one pass with no recursion.
+    private static func nesting(of json: Data) -> Int {
+        var depth = 0
+        var deepest = 0
+        var inString = false
+        var escaped = false
+        for byte in json {
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == UInt8(ascii: "\\") {
+                    escaped = true
+                } else if byte == UInt8(ascii: "\"") {
+                    inString = false
+                }
+                continue
+            }
+            switch byte {
+            case UInt8(ascii: "\""): inString = true
+            case UInt8(ascii: "{"), UInt8(ascii: "["):
+                depth += 1
+                deepest = max(deepest, depth)
+            case UInt8(ascii: "}"), UInt8(ascii: "]"): depth -= 1
+            default: break
+            }
+        }
+        return deepest
     }
 }
 

@@ -846,6 +846,9 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### An SMS reply sets its price aside before it is sent
 
 A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what Telnyx will bill for it, its link and each MMS of up to ten files included, before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).
+### A Swift typed tool no longer crashes the app on deeply nested arguments
+
+An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
