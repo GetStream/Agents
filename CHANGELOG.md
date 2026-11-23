@@ -846,6 +846,9 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### Deleting a user's connections also deletes their MCP event subscriptions
 
 The subscriptions of a deleted user's connections kept their sealed secrets and callback tokens. They now go in the same transaction as the connections.
+### A Swift typed tool no longer crashes the app on deeply nested arguments
+
+An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
