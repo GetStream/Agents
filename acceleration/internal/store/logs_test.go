@@ -595,14 +595,18 @@ func TestRedactLogTextKeepsJSONValidWhenAStringHoldsACredential(t *testing.T) {
 	}
 }
 
-// A JSON text inside a string, as a tool's result is stored, is redacted as JSON too: the key of
-// the credential in it stays, and it reads back as JSON after the string is decoded.
+// A JSON text inside a string, as a tool's result is stored, is redacted as JSON too, white space
+// before it or not: the key of the credential in it stays, and it reads back as JSON after the
+// string is decoded.
 func TestRedactLogTextKeepsJSONInsideAStringValid(t *testing.T) {
 	secret := rand.Text()
 	inner := `{"password":"` + secret + `","list":["` + secret + `"],"api_key":12345,"ok":true}`
 	array, err := json.Marshal(`[{"secret":"` + secret + `"},1]`)
 	require.NoError(t, err)
 	require.Equal(t, `{"o":"[{\"secret\":\"[redacted]\"},1]"}`, RedactLogText(`{"o":`+string(array)+`}`))
+	spaced, err := json.Marshal(" \n\t" + `{"api_key":"` + secret + `"}`)
+	require.NoError(t, err)
+	require.Equal(t, `{"o":" \n\t{\"api_key\":\"[redacted]\"}"}`, RedactLogText(`{"o":`+string(spaced)+`}`))
 	quoted, err := json.Marshal(inner)
 	require.NoError(t, err)
 	got := RedactLogText(`{"output":` + string(quoted) + `,"n":1}`)

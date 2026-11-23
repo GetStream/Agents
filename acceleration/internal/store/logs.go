@@ -375,7 +375,7 @@ func redactJSONText(text string, nested bool) (string, bool) {
 // quotes, so the rules read it once.
 // The string keeps its escapes (\u0026) when the rules, run on it as written, leave the same text.
 func redactJSONString(literal, decoded string, nested bool) (string, bool) {
-	if !nested && decoded != "" && (decoded[0] == '{' || decoded[0] == '[' || decoded[0] == '"') && json.Valid([]byte(decoded)) {
+	if !nested && startsAsJSON(decoded) && json.Valid([]byte(decoded)) {
 		if redacted, ok := redactJSONText(decoded, true); ok {
 			if redacted == decoded {
 				return literal, false
@@ -409,6 +409,13 @@ func redactJSONString(literal, decoded string, nested bool) (string, bool) {
 		return written, true
 	}
 	return jsonString(redacted), true
+}
+
+// startsAsJSON is true for a text that starts, after JSON's white space, as an object, an array or
+// a string does, so it may be JSON.
+func startsAsJSON(text string) bool {
+	text = strings.TrimLeft(text, " \t\r\n")
+	return text != "" && (text[0] == '{' || text[0] == '[' || text[0] == '"')
 }
 
 // skipJSONValue reads the value that comes next from decoder, an object and an array to their
