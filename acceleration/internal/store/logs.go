@@ -106,11 +106,11 @@ var queryCredential = regexp.MustCompile(`(?i)((?:[?&"]|&amp;|\\u0026|%(?:25)*3F
 // api_key, access_token, client_secret and the like, and the compound names are listed whole as
 // well, for one with no separator to start the short name after (apiKey, accessToken,
 // clientSecret, apikey). The name starts after the start of the text or a character that is not a
-// letter or digit (an underscore is one), so monkey%3D1 stays; the boundary is the first group
-// and is kept (see shapeStart). The value is read as queryCredential reads it, whatever its
-// length: a parameter named key is a key. A name with a plain = is the rule of credentialText
-// and queryCredential.
-var encodedCredential = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9]|%[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})((?:key|token|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key)%(?:25)*3D)[^&\s"\x27#\\]+`)
+// letter or digit (an underscore is one), or an encoded character, once or twice encoded
+// (%22, %2522), so monkey%3D1 stays; the boundary is the first group and is kept (see
+// shapeStart). The value is read as queryCredential reads it, whatever its length: a parameter
+// named key is a key. A name with a plain = is the rule of credentialText and queryCredential.
+var encodedCredential = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9]|%(?:25)*[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})((?:key|token|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key)%(?:25)*3D)[^&\s"\x27#\\]+`)
 
 // vendorKeyMessage is a provider's refusal that names the key it was sent, with no = or : to
 // say so: "Invalid API key <32 hex>", "Incorrect API key provided: <key>", invalid_api_key, or
