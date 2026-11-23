@@ -1046,10 +1046,15 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// session behind, and once search has started, so its tool is among the ones stored.
 	// The turns held until now, the greeting's among them, are written after it.
 	if created.records != nil {
+		row := sessionRow(created)
 		created.closers = append(created.closers, func() {
-			m.records.Closed(spec.CustomerID, created.id, time.Now().UTC(), created.kept())
+			m.records.Closed(spec.CustomerID, created.id, row.OpenedAt, time.Now().UTC(), created.kept())
 		})
-		m.records.Opened(sessionRow(created), toolRows(created))
+		if spec.Reopened.IsZero() {
+			m.records.Opened(row, toolRows(created))
+		} else {
+			m.records.CarriedOn(row, toolRows(created))
+		}
 		created.startRecording()
 	}
 
