@@ -1331,7 +1331,6 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 	// left its turn in the conversation under the run's, which would be taken
 	// for this one and leave the agent silent on the call.
 	delivery.CommandID = replyCommand(created, delivery.CommandID+"_call", delivery.Earlier)
-	rerun := strings.HasSuffix(delivery.CommandID, rerunSuffix)
 	if err := s.followUpWithin(ctx, created, delivery); err != nil {
 		return undeliveredFinally(scheduling.ReasonFailed, err)
 	}
@@ -1347,9 +1346,6 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 				return nil
 			}
 			if refusal := turnRefusal(event); refusal != nil && !answered {
-				if rerun {
-					return undeliveredFinally(deliveryReason(refusal), refusal)
-				}
 				return refusal
 			}
 			if reply, ok := event.(agent.Responded); ok && reply.Purpose != agent.PurposeGreeting {

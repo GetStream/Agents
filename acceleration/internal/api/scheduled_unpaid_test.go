@@ -1381,6 +1381,7 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedAgainOnItsRetryFailsTheRu
 	s.Require().ErrorAs(outcome.err, &failure)
 	s.Equal(codeSpendCheckUnavailable, failure.Reason)
 	s.True(failure.Final, "the turn ran again once")
+	s.True(refusedTurn(outcome.err), "the walk over the channels ends at the call")
 	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
 	s.Require().NoError(err)
 	s.Equal(again.spec.ID, kept.SessionID, "the second call is not given back")
