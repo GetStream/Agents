@@ -82,19 +82,26 @@ func (r *VoiceBindings) Upsert(ctx context.Context, binding *VoiceBinding) error
 
 	// The row has no customer of its own, and the key it is cached under names the voice's.
 	var customerID string
-	err := r.store.global.NewInsert().Model(binding).
-		On("CONFLICT (voice_id, provider) DO UPDATE").
-		Set("external_id = EXCLUDED.external_id").
-		Set("state = EXCLUDED.state").
-		Set("error = EXCLUDED.error").
-		Set("updated_at = EXCLUDED.updated_at").
-		Set("synced_at = COALESCE(EXCLUDED.synced_at, vb.synced_at)").
-		Returning("(SELECT v.customer_id FROM voices AS v WHERE v.id = vb.voice_id)").
-		Scan(ctx, &customerID)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewInsert().Model(binding).
+			On("CONFLICT (voice_id, provider) DO UPDATE").
+			Set("external_id = EXCLUDED.external_id").
+			Set("state = EXCLUDED.state").
+			Set("error = EXCLUDED.error").
+			Set("updated_at = EXCLUDED.updated_at").
+			Set("synced_at = COALESCE(EXCLUDED.synced_at, vb.synced_at)").
+			Returning("(SELECT v.customer_id FROM voices AS v WHERE v.id = vb.voice_id)").
+			Scan(ctx, &customerID)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if customerID == "" {
+			return nil
+		}
+		return []string{voiceBindingKey(customerID, binding.VoiceID, binding.Provider)}
+	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save voice binding: %w", err))
 	}
-	r.store.forget(ctx, voiceBindingKey(customerID, binding.VoiceID, binding.Provider))
 	return nil
 }
 

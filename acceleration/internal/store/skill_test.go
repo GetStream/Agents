@@ -91,7 +91,7 @@ func (s *StoreSuite) TestSkillQueryBudgets() {
 	}
 	skill := Skill{CustomerID: "acme-app", ConfigID: config.ID, Name: "refund"}
 
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Skills.Insert(s.ctx, &skill)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.Skills.Insert(s.ctx, &skill)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.Skills.Select(s.ctx, "acme-app", SkillFilter{ConfigID: config.ID})
 		s.Require().NoError(err)
@@ -107,7 +107,7 @@ func (s *StoreSuite) TestSkillQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	skill.Instructions = "ask first"
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Skills.Update(s.ctx, &skill)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.Skills.Update(s.ctx, &skill)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.Skills.GetByNames(s.ctx, "acme-app", config.ID, names)
@@ -123,5 +123,5 @@ func (s *StoreSuite) TestSkillQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.Skills.Delete(s.ctx, "acme-app", skill.ID)) }))
 		return
 	}
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Skills.Delete(s.ctx, "acme-app", skill.ID)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.Skills.Delete(s.ctx, "acme-app", skill.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 }

@@ -3,9 +3,12 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // boundConfig stores a config of the customer's carrying bindings.
@@ -226,6 +229,27 @@ func (s *StoreSuite) expiryOf(key string) time.Duration {
 	return time.Duration(ttl) * time.Millisecond
 }
 
+func (s *StoreSuite) TestADeleteARequestGaveUpOnIsNotCachedAgainByAReadBeforeItCommits() {
+	config := s.boundConfig("acme-app")
+	_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+
+	err = s.readWhileWriting(s.lockingRow("agent_configs", config.ID), func(ctx context.Context) error {
+		return s.store.AgentConfigs.Delete(ctx, "acme-app", config.ID)
+	}, func() {
+		_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
+		s.Require().NoError(err, "the config is not deleted yet")
+		_, err = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", config.Name)
+		s.Require().NoError(err, "the config is not deleted yet")
+	}, bun.Tx.Commit)
+
+	_, getErr := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.ErrorIs(getErr, ErrNoAgentConfig)
+	_, getErr = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", config.Name)
+	s.ErrorIs(getErr, ErrNoAgentConfig)
+	s.NoError(err, "the delete outlives the request that asked for it")
+}
+
 func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	for range 20 {
 		s.boundConfig("acme-app")
@@ -276,5 +300,5 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 }
