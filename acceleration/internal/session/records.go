@@ -561,7 +561,8 @@ func (r *sessionRecorder) writeItems(items []store.AgentResponseItem) {
 			r.logger.Warn("dropped what a turn did: its response was never recorded",
 				"session", own[0].SessionID, "response", response, "items", len(own))
 		case err != nil:
-			r.logger.Error("could not record what a turn did", "response", response, "error", err, "items", len(own))
+			r.logger.Error("could not record what a turn did", "session", own[0].SessionID, "response", response,
+				"error", err, "items", len(own))
 		}
 	}
 }
@@ -579,9 +580,8 @@ func (r *sessionRecorder) attempt(do func(context.Context) error) error {
 		err := do(ctx)
 		cancel()
 		if err == nil || !store.Transient(err) {
-			// Only an answer from the database says it is back: a write refused before it
-			// was sent says nothing either way.
-			if err == nil || store.Answered(err) {
+			// Only a write that succeeded says the database is back.
+			if err == nil {
 				r.failing = false
 			}
 			return err

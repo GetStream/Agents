@@ -34,13 +34,6 @@ func IsForeignKeyViolation(err error) bool {
 	return isViolation(err, foreignKeyViolation)
 }
 
-// Answered reports whether err is Postgres answering a statement, rather than a failure
-// before the statement reached it.
-func Answered(err error) bool {
-	var answer pgdriver.Error
-	return errors.As(err, &answer)
-}
-
 // Transient reports whether err is a failure that may pass if the same statement is sent
 // again: the connection dropped or was refused, the statement timed out on either side, the
 // server is shutting down or full, a write reached a primary a failover demoted (read-only

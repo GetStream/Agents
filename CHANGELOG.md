@@ -927,7 +927,7 @@ A request row's cost is added to a grant it names only when the grant belongs to
 
 ### A dropped database connection no longer loses a conversation's record
 
-The session recorder now tries a write again, for up to 10 seconds and in queue order, when it fails for a reason that can pass: a dropped or refused connection, a timeout on either side, a server shutting down, a write reaching a primary a failover made read-only, or a serialization failure or deadlock. Before, one such failure lost the session or turn row and with it every later row of the conversation. Items of a turn that was never stored no longer stop the items of other turns written in the same batch, in the same session or another. A session or call end that still cannot be stored, or that the full queue dropped, is counted in `router_session_records_lost_total{write}`, as are dropped items.
+The session recorder now tries a write again, for up to 10 seconds and in queue order, when it fails for a reason that can pass: a dropped or refused connection, a timeout on either side, a server shutting down, a write reaching a primary a failover made read-only, or a serialization failure or deadlock. Before, one such failure lost the session or turn row and with it every later row of the conversation. Items of a turn that was never stored no longer stop the items of other turns written in the same batch, in the same session or another. A session or call end that still cannot be stored, or that the full queue dropped, is counted in `router_session_records_lost_total{write}`, as are items dropped because their turn was never stored.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
