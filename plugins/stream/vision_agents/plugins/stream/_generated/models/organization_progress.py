@@ -26,8 +26,8 @@ class OrganizationProgress:
             reached.
         organization_id (str): The organization.
         steps (list[ActivityStepDay]): Every step the organization's apps ever had a request answered in, whenever, not
-            only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists
-            them.
+            only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the
+            organization. For apps that stayed in it, as getOrganizationActivity lists them.
     """
 
     furthest_step: ActivityStep

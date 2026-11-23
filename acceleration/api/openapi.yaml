@@ -395,7 +395,7 @@ components:
           description: Pass as cursor for the next page, with the same from and to. Absent on the last.
           type: string
         organizations:
-          description: Every organization items names, by id. An organization whose items span two pages is on both, the same.
+          description: Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
           items:
             $ref: '#/components/schemas/OrganizationProgress'
           type: array
@@ -7152,12 +7152,12 @@ components:
       properties:
         furthest_step:
           $ref: '#/components/schemas/ActivityStep'
-          description: The furthest step from from to to, as getOrganizationActivity reads it from since.
+          description: The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since.
         organization_id:
           description: The organization.
           type: string
         steps:
-          description: Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them.
+          description: Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
           items:
             $ref: '#/components/schemas/ActivityStepDay'
           type: array
@@ -23486,9 +23486,9 @@ paths:
   /v1/ops/activity:
     get:
       description: |-
-        What every organization's apps did in each area of the API, from each client, on each UTC day from from to to, one item per organization, day, app, area and client, with how far each organization on the page got, as getOrganizationActivity tells it. Send from and to again with cursor for the next page. Rows are kept 400 days. A row of an app whose organization was not known when it was written names none and is left out.
+        What every organization's apps did in each area of the API, from each client, on each UTC day from from to to, one item per organization, day, app, area and client, with how far each organization on the page got, read from the rows that name the organization; for apps that stayed in it, as getOrganizationActivity tells it. Send from and to again with cursor for the next page. Rows are kept 400 days. A row of an app whose organization was not known when it was written names none and is left out. Today's counts keep rising until the UTC day ends: pull with to = yesterday.
 
-        These definitions are the router's, so a dashboard and the activity digest count the same thing:
+        These definitions are the router's; count a dashboard by them:
 
         - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.
         - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. Those are the dashboard's own reads, vendors' hooks and the router's own deliveries.

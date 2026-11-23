@@ -3699,7 +3699,7 @@ type ActivityPage struct {
 	// NextCursor Pass as cursor for the next page, with the same from and to. Absent on the last.
 	NextCursor *string `json:"next_cursor,omitempty"`
 
-	// Organizations Every organization items names, by id. An organization whose items span two pages is on both, the same.
+	// Organizations Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
 	Organizations []OrganizationProgress `json:"organizations"`
 }
 
@@ -8088,7 +8088,7 @@ type OrganizationProgress struct {
 	// OrganizationId The organization.
 	OrganizationId string `json:"organization_id"`
 
-	// Steps Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them.
+	// Steps Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
 	Steps []ActivityStepDay `json:"steps"`
 }
 

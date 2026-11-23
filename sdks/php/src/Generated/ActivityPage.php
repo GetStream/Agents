@@ -15,7 +15,7 @@ final readonly class ActivityPage
         // One item per organization, day, app, area and client, sorted in that order.
         /** @var list<ActivityDay> */
         public array $items,
-        // Every organization items names, by id. An organization whose items span two pages is on both, the same.
+        // Every organization items names, by id. An organization whose items span two pages is on both, the same, unl...
         /** @var list<OrganizationProgress> */
         public array $organizations,
         // Pass as cursor for the next page, with the same from and to. Absent on the last.

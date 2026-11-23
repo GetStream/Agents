@@ -509,7 +509,7 @@ namespace GetStream.VisionAgents.Models
         public string? NextCursor { get; set; } = default!;
 
         /// <summary>
-        /// Every organization items names, by id. An organization whose items span two pages is on both, the same.
+        /// Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("organizations")]
         public System.Collections.Generic.List<OrganizationProgress> Organizations { get; set; } = new System.Collections.Generic.List<OrganizationProgress>();
@@ -10508,7 +10508,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// The furthest step from from to to, as getOrganizationActivity reads it from since.
+        /// The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
         public string FurthestStep { get; set; } = default!;
@@ -10520,7 +10520,7 @@ namespace GetStream.VisionAgents.Models
         public string OrganizationId { get; set; } = default!;
 
         /// <summary>
-        /// Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them.
+        /// Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("steps")]
         public System.Collections.Generic.List<ActivityStepDay> Steps { get; set; } = new System.Collections.Generic.List<ActivityStepDay>();

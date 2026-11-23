@@ -353,7 +353,7 @@ pub struct ActivityPage {
     ///Pass as cursor for the next page, with the same from and to. Absent on the last.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub next_cursor: ::std::option::Option<::std::string::String>,
-    ///Every organization items names, by id. An organization whose items span two pages is on both, the same.
+    ///Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
     pub organizations: ::std::vec::Vec<OrganizationProgress>,
 }
 ///`ActivitySession`
@@ -8871,11 +8871,11 @@ pub struct OrganizationActivity {
 ///`OrganizationProgress`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct OrganizationProgress {
-    ///The furthest step from from to to, as getOrganizationActivity reads it from since.
+    ///The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since.
     pub furthest_step: ActivityStep,
     ///The organization.
     pub organization_id: ::std::string::String,
-    ///Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them.
+    ///Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
     pub steps: ::std::vec::Vec<ActivityStepDay>,
 }
 ///What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.

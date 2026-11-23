@@ -35,14 +35,14 @@ type ActivityDay struct {
 // OrganizationProgress is how far one organization got with Agents.
 type OrganizationProgress struct {
 	OrganizationId string            `json:"organization_id" doc:"The organization."`
-	FurthestStep   ActivityStep      `json:"furthest_step" doc:"The furthest step from from to to, as getOrganizationActivity reads it from since."`
-	Steps          []ActivityStepDay `json:"steps" nullable:"false" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them."`
+	FurthestStep   ActivityStep      `json:"furthest_step" doc:"The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since."`
+	Steps          []ActivityStepDay `json:"steps" nullable:"false" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them."`
 }
 
 // ActivityPage is a page of every organization's activity.
 type ActivityPage struct {
 	Items         []ActivityDay          `json:"items" nullable:"false" doc:"One item per organization, day, app, area and client, sorted in that order."`
-	Organizations []OrganizationProgress `json:"organizations" nullable:"false" doc:"Every organization items names, by id. An organization whose items span two pages is on both, the same."`
+	Organizations []OrganizationProgress `json:"organizations" nullable:"false" doc:"Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads."`
 	HasMore       bool                   `json:"has_more"`
 	NextCursor    *string                `json:"next_cursor,omitempty" doc:"Pass as cursor for the next page, with the same from and to. Absent on the last."`
 }
@@ -143,10 +143,11 @@ func (s *Server) registerActivity(api huma.API) {
 		Summary:     "List every organization's Agents activity by day",
 		Description: "What every organization's apps did in each area of the API, from each client, on each UTC " +
 			"day from from to to, one item per organization, day, app, area and client, with how far each " +
-			"organization on the page got, as getOrganizationActivity tells it. Send from and to again with " +
-			"cursor for the next page. Rows are kept 400 days. A row of an app whose organization was not known " +
-			"when it was written names none and is left out.\n\n" +
-			"These definitions are the router's, so a dashboard and the activity digest count the same thing:\n\n" +
+			"organization on the page got, read from the rows that name the organization; for apps that stayed in it, " +
+			"as getOrganizationActivity tells it. Send from and to again with cursor for the next page. Rows are " +
+			"kept 400 days. A row of an app whose organization was not known when it was written names none and " +
+			"is left out. Today's counts keep rising until the UTC day ends: pull with to = yesterday.\n\n" +
+			"These definitions are the router's; count a dashboard by them:\n\n" +
 			"- Tried: at least one request answered in agent_setup or a later step, a step in steps other than " +
 			"dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.\n" +
 			"- API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in " +

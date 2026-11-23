@@ -11,7 +11,7 @@ use GetStream\VisionAgents\Json;
 final readonly class OrganizationProgress
 {
     public function __construct(
-        // The furthest step from from to to, as getOrganizationActivity reads it from since.
+        // The furthest step from from to to, read from the rows that name the organization. For apps that stayed in i...
         public ActivityStep|string $furthestStep,
         // The organization.
         public string $organizationId,
