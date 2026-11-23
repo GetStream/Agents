@@ -4,6 +4,7 @@ package store
 
 import (
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -135,4 +136,51 @@ func (s *StoreSuite) TestBranchMessageQueryBudgets() {
 func (s *StoreSuite) TestACopyNamingNoCustomerIsNotWritten() {
 	err := s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{SessionID: "one", OriginalMessageID: "invalid"}})
 	s.refusedUnwritten(err, "agent_branch_messages", "original_message_id", "invalid")
+}
+
+func (s *StoreSuite) TestForgettingAUserEmptiesTheChangesRecordedOfTheirCopies() {
+	if s.store.Sharded() {
+		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
+	}
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
+	s.opened("one", "app", s.base, nil)
+	s.opened("two", "app", s.base, func(session *AgentSession) { session.UserID = "rlafleur" })
+	theirs := hidden("m2", "second", "switch", s.base, "kept words")
+	theirs.SessionID = "two"
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "second", "switch", s.base, "forgotten words"), theirs}))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "call-1", SessionID: "one", CustomerID: "app", ConversationID: "agent:one", StartedAt: s.base}))
+	before := seqs(s.recordedFor("app"))
+	s.Require().NotEmpty(s.payloadsNaming("app", "forgotten words"), "the copy's insert was recorded")
+
+	_, err := s.store.BranchMessages.DeleteUser(s.ctx, "app", "jlahey")
+	s.Require().NoError(err)
+
+	s.Empty(s.payloadsNaming("app", "forgotten words"))
+	s.NotEmpty(s.payloadsNaming("app", "kept words"), "another user's copies keep their changes")
+	s.Subset(seqs(s.recordedFor("app")), before, "every change keeps its number")
+	deletes := slices.DeleteFunc(s.recordedOf("app", "agent_branch_messages"), func(change DataChange) bool { return change.Op != ChangeDelete })
+	s.Len(deletes, 2, "the copy's insert, emptied, and its delete, still recorded for the deployment the app is moving to")
+	calls := s.recordedOf("app", "calls")
+	s.Require().Len(calls, 1)
+	s.Contains(string(calls[0].Payload), `"agent:one"`, "a call of the session is no copy")
+}
+
+func (s *StoreSuite) TestForgettingAUserAfterTheirSessionWasDeletedLeavesNoChangeOfItsCopies() {
+	if s.store.Sharded() {
+		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
+	}
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
+	s.opened("one", "app", s.base, nil)
+	s.opened("two", "app", s.base, func(session *AgentSession) { session.UserID = "rlafleur" })
+	other := hidden("m2", "second", "switch", s.base, "kept words")
+	other.SessionID = "two"
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "second", "switch", s.base, "forgotten words"), other}))
+	s.Require().NotEmpty(s.payloadsNaming("app", "forgotten words"), "the copy's insert was recorded")
+
+	s.Require().NoError(s.store.Sessions.Delete(s.ctx, "app", "one"))
+	_, err := s.store.BranchMessages.DeleteUser(s.ctx, "app", "jlahey")
+	s.Require().NoError(err)
+
+	s.Empty(s.payloadsNaming("app", "forgotten words"))
+	s.NotEmpty(s.payloadsNaming("app", "kept words"), "a copy in another session keeps its change")
 }

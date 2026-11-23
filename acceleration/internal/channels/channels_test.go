@@ -19,6 +19,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // recorder stands in for a provider's API: it keeps what was sent to it so a test can read
@@ -633,4 +635,39 @@ func (s *ProviderRegistrySuite) TestALineWithNoSigningSecretVerifiesNothing() {
 		s.Require().Error(err, kind)
 		s.True(errors.Is(err, ErrUnsigned), kind)
 	}
+}
+
+type ServiceSuite struct {
+	suite.Suite
+	service *Service
+	logged  *strings.Builder
+}
+
+func TestServiceSuite(t *testing.T) { suite.Run(t, new(ServiceSuite)) }
+
+func (s *ServiceSuite) SetupTest() {
+	broken, err := store.Open("postgres://router_app:hunter2@127.0.0.1:1/agents_prod?sslmode=disable")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = broken.Close() })
+	s.logged = &strings.Builder{}
+	s.service = &Service{store: broken, logger: slog.New(slog.NewTextHandler(s.logged, nil))}
+}
+
+func (s *ServiceSuite) TestADeliveryTheDatabaseCouldNotPlaceIsTriedAgainWithNothingOfTheDatabase() {
+	answer := s.service.Receive(context.Background(), "line-token", http.Header{}, []byte(`{}`))
+
+	s.Equal(http.StatusInternalServerError, answer.Status, "a 410 would stop the provider delivering to a line that is there")
+	body, err := json.Marshal(answer.Body)
+	s.Require().NoError(err)
+	for _, detail := range []string{"127.0.0.1", "agents_prod", "router_app", "hunter2", "dial", "store:"} {
+		s.NotContains(string(body), detail)
+	}
+	s.Contains(s.logged.String(), "127.0.0.1:1", "what the database said is kept for whoever looks into it")
+}
+
+func (s *ServiceSuite) TestADeliveryToNoLineIsGoneAndSaysSo() {
+	answer := s.service.Receive(context.Background(), "", http.Header{}, []byte(`{}`))
+
+	s.Equal(http.StatusGone, answer.Status)
+	s.Equal(failure("no line is connected at this address"), answer.Body)
 }

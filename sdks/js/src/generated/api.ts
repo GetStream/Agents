@@ -3197,6 +3197,7 @@ export type paths = {
          * @description One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
          *     Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
          *     A router with shards cannot be the source of a move and answers 400 `not_configured`.
+         *     An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
          *     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
          */
         readonly get: operations["exportData"];
@@ -3219,7 +3220,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Write an export, or a batch of changes, into this deployment
-         * @description Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+         * @description Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
          *     An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
          *     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
          */
@@ -4669,6 +4670,43 @@ export type components = {
              */
             readonly voice_minutes: number;
         };
+        readonly ActivityDay: {
+            /** @description The app. */
+            readonly app_id: string;
+            /** @description The area of the API, such as agent_setup or conversations. */
+            readonly area: string;
+            /** @description The client the requests named themselves as: dashboard, cli, sdk or api. */
+            readonly client: string;
+            /**
+             * Format: date
+             * @description The UTC day, YYYY-MM-DD.
+             */
+            readonly day: string;
+            /**
+             * Format: date-time
+             * @description When the first request arrived.
+             */
+            readonly first_at: string;
+            /**
+             * Format: date-time
+             * @description When the last request arrived.
+             */
+            readonly last_at: string;
+            /** @description The error code of the latest refusal, empty when there was none. */
+            readonly last_refusal_code: string;
+            /** @description The organization the app was in when the row was last written. */
+            readonly organization_id: string;
+            /**
+             * Format: int64
+             * @description How many were answered with a status of 400 or more.
+             */
+            readonly refused: number;
+            /**
+             * Format: int64
+             * @description How many requests arrived, refused ones included.
+             */
+            readonly requests: number;
+        };
         readonly ActivityEnding: {
             /** @description Why they ended. Absent for the sessions that ended with no reason kept, as before reasons were. */
             readonly end_reason?: components["schemas"]["SessionEndReason"];
@@ -4746,6 +4784,15 @@ export type components = {
              * @description How many requests. Runtime and sandbox are time, not requests, and read 0.
              */
             readonly requests: number;
+        };
+        readonly ActivityPage: {
+            readonly has_more: boolean;
+            /** @description One item per organization, day, app, area and client, sorted in that order. */
+            readonly items: readonly components["schemas"]["ActivityDay"][];
+            /** @description Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last. */
+            readonly next_cursor?: string;
+            /** @description Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads. */
+            readonly organizations: readonly components["schemas"]["OrganizationProgress"][];
         };
         readonly ActivitySession: {
             /** @description The name of the agent config it was opened with. */
@@ -8614,6 +8661,14 @@ export type components = {
             readonly since: string;
             /** @description Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused. */
             readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
+        };
+        readonly OrganizationProgress: {
+            /** @description The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since. */
+            readonly furthest_step: components["schemas"]["ActivityStep"];
+            /** @description The organization. */
+            readonly organization_id: string;
+            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them. */
+            readonly steps: readonly components["schemas"]["ActivityStepDay"][];
         };
         /**
          * @description What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.
@@ -18301,6 +18356,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Too Many Requests */
+            readonly 429: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -19465,8 +19529,17 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
+            /** @description An export of this app is already running on this router: one runs at a time. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
-            /** @description This deployment has no database to export from, or cannot record changes; or a write that was open when the export started is still open after 30 seconds: try again. */
+            /** @description This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or a write that was open when the export started is still open after 30 seconds: try again. */
             readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -19512,6 +19585,15 @@ export interface operations {
             readonly 403: components["responses"]["Forbidden"];
             /** @description The file carries an export's rows, the app already has data here and `full` is not true. */
             readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description A line of the file is over 64 MiB. */
+            readonly 413: {
                 headers: {
                     readonly [name: string]: unknown;
                 };

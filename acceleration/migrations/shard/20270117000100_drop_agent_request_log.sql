@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- A request's provider_request log row is written by the router (Requests.InsertMany), with
 -- one database or many, rather than by a trigger that only ran with one.

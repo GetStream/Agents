@@ -177,9 +177,19 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 	defer connection.Close()
 	connection.SetReadLimit(maxSocketMessage)
 	out := &socket{connection: connection, started: make(chan struct{})}
+	// The frames say little of a failure that is not the caller's, so the access line says it
+	// all, with the stack it entered on.
+	record := func(err error) {
+		trace := ""
+		if dependencyFailed(err) {
+			trace = stack.Trace(err)
+		}
+		recordFailure(r.Context(), err, trace)
+	}
 
 	opening, err := readStart(connection, modality)
 	if err != nil {
+		record(err)
 		out.failed(err)
 		out.end(err)
 		return
@@ -192,6 +202,11 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 
 	config, err := s.routerOptions(ctx, customerID, opening.ConfigID)
 	if err != nil {
+		record(err)
+		// Anything but a refusal is the database's.
+		if _, refused := errors.AsType[APIError](err); !refused {
+			err = internalError()
+		}
 		out.failed(err)
 		out.end(err)
 		return
@@ -206,6 +221,7 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 		Tags:       tagsSent(&opening.Tags),
 	}
 	if err := request.Tags.Validate(); err != nil {
+		record(err)
 		out.failed(err)
 		out.end(err)
 		return
@@ -235,6 +251,7 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 	}
 	stopWatching()
 	if err != nil {
+		record(err)
 		out.failed(err)
 	}
 	out.frame(frame{"type": "closed"})
@@ -1287,6 +1304,10 @@ func (s *socket) ping() error {
 func (s *socket) failed(err error) {
 	if answer, ok := moneyError(err); ok {
 		s.frame(frame{"type": "error", "error": answer.Message, "code": answer.Code, "error_type": answer.Type})
+		return
+	}
+	if dependencyFailed(err) {
+		s.frame(frame{"type": "error", "error": somethingWentWrong})
 		return
 	}
 	s.frame(frame{"type": "error", "error": store.RedactLogText(err.Error())})

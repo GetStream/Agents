@@ -229,10 +229,25 @@ func (s *StreamsSuite) TestAVendorThatFailsToStartEndsAsAnInternalError() {
 	read, ended := s.ending(s.start("/v1/stt/stream", frame{"target": "down/" + downModel}))
 
 	s.Require().NotEmpty(read)
-	s.Contains(read[0]["error"], "batch: connect failed")
+	s.Equal(somethingWentWrong, read[0]["error"], "the vendor's text names its host")
 	var closed *websocket.CloseError
 	s.Require().ErrorAs(ended, &closed)
 	s.Equal(websocket.CloseInternalServerErr, closed.Code)
+	s.NotContains(closed.Text, "batch: connect failed")
+}
+
+func (s *StreamsSuite) TestAConfigThatCannotBeReadEndsAsAnInternalError() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+
+	read, ended := s.ending(s.start("/v1/stt/stream", frame{"config_id": id}))
+
+	s.Require().NotEmpty(read)
+	s.Equal(somethingWentWrong, read[0]["error"])
+	var closed *websocket.CloseError
+	s.Require().ErrorAs(ended, &closed)
+	s.Equal(websocket.CloseInternalServerErr, closed.Code)
+	s.Equal(somethingWentWrong, closed.Text)
 }
 
 func (s *StreamsSuite) TestATermTheNamedModelDoesNotTakeEndsAsAPolicyViolation() {

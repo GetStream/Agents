@@ -32,3 +32,15 @@ END $$;
 ALTER TABLE agent_configs
     DROP COLUMN IF EXISTS progressive_tools,
     DROP COLUMN IF EXISTS tool_output_retention;
+
+-- +goose Down
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE agent_configs RENAME COLUMN sandbox_provider TO sandbox;
+ALTER TABLE agent_configs RENAME COLUMN episode_cards_on TO episode_cards;
+ALTER TABLE agent_configs RENAME COLUMN channels_lines TO channels;
+ALTER TABLE agent_configs RENAME COLUMN channels_chat TO chat_channels;
+
+ALTER TABLE agent_configs
+    ADD COLUMN progressive_tools boolean DEFAULT false NOT NULL,
+    ADD COLUMN tool_output_retention text DEFAULT ''::text NOT NULL;

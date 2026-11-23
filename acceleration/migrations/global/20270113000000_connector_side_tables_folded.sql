@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- Each of these tables held one row per row of its parent, read with the parent every time it
 -- was read. As columns they cost no second read or write. The client and the last validation

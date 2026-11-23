@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -488,6 +489,33 @@ func (s *TelephonySandboxBillingSuite) SetupSuite() {
 	s.telephonyBilling.SetupSuite()
 }
 
+// A STOP whose provider hung up while it was being recorded is billed as the sandbox bills a
+// text: the hang-up cuts neither the opt-out nor telling whether the sandbox holds the app.
+func (s *TelephonySandboxBillingSuite) TestAStopTheProviderHungUpOnIsBilledAsASandboxedText() {
+	line, person := s.smsLine(), "+13125550004"
+	s.agentOnSMS(line)
+	hold, holder := s.holdOptOuts("telephony_suite_held_opt_out", false)
+	ctx, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+	request := s.telnyxRequest(line, s.telnyxText(line, person, "sms-"+s.utils.uuid(), "STOP"), time.Now()).WithContext(ctx)
+	answered := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			response.Body.Close()
+		}
+		answered <- err
+	}()
+	s.waitingOn(holder)
+	hangUp()
+	s.Require().Error(<-answered, "the provider hung up before the opt-out was stored")
+	s.Require().NoError(hold.Rollback())
+
+	stop := s.phoneRows("sms", 2)[store.Inbound]
+	s.False(stop.Billable, "a sandboxed app's text is given away")
+	s.Equal("true", stop.Attributes[phone.AttributeDLCSandbox])
+}
+
 func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBillable() {
 	line, person := s.smsLine(), "+13125550003"
 	s.agentOnSMS(line)
@@ -557,25 +585,40 @@ func (s *telephonyBilling) agentOnSMS(number string) {
 
 // textIn delivers one text to a line, signed as Telnyx signs it.
 func (s *telephonyBilling) textIn(line, from, id, text string) int {
+	return s.telnyxIn(line, s.telnyxText(line, from, id, text), time.Now())
+}
+
+// telnyxText is the body Telnyx delivers one text to a line in.
+func (s *telephonyBilling) telnyxText(line, from, id, text string) []byte {
 	body, err := json.Marshal(map[string]any{"data": map[string]any{
 		"event_type": "message.received",
 		"payload": map[string]any{"id": id, "text": text, "from": map[string]any{"phone_number": from},
 			"to": []any{map[string]any{"phone_number": line}}},
 	}})
 	s.Require().NoError(err)
-	return s.telnyxIn(line, body, time.Now())
+	return body
 }
 
 // telnyxIn delivers body to a line as Telnyx signs it at at.
 func (s *telephonyBilling) telnyxIn(line string, body []byte, at time.Time) int {
+	response, err := http.DefaultClient.Do(s.telnyxRequest(line, body, at))
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	return response.StatusCode
+}
+
+// telnyxRequest is the delivery of body to a line, as Telnyx signs it at at.
+func (s *telephonyBilling) telnyxRequest(line string, body []byte, at time.Time) *http.Request {
 	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+channels.HookPath+account.Token, bytes.NewReader(body))
+	s.Require().NoError(err)
 	seconds := strconv.FormatInt(at.Unix(), 10)
-	header := http.Header{}
-	header.Set("Telnyx-Timestamp", seconds)
-	header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
+	request.Header.Set("Telnyx-Timestamp", seconds)
+	request.Header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
 		ed25519.Sign(s.signing, append([]byte(seconds+"|"), body...))))
-	return s.hook(channels.HookPath+account.Token, header, body)
+	request.Header.Set("Content-Type", "application/json")
+	return request
 }
 
 // whatsApp connects a WhatsApp line and puts a text agent on it.

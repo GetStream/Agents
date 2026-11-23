@@ -76,6 +76,8 @@ TABLE agent_sessions
     agent_id text NOT NULL DEFAULT ''::text
     agent_name text NOT NULL DEFAULT ''::text
     api_key text NOT NULL DEFAULT ''::text
+    call_id text
+    call_type text
     caller_kind text NOT NULL DEFAULT ''::text
     caller_tools jsonb
     closed_at timestamp with time zone
@@ -235,6 +237,7 @@ TABLE calls
     call_id text NOT NULL
     call_type text NOT NULL DEFAULT ''::text
     campaign_id text
+    config_id text
     contact_id text
     conversation_id text
     customer_id text NOT NULL
@@ -257,12 +260,13 @@ TABLE calls
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     to_number text
     tts text NOT NULL DEFAULT ''::text
+    user_id text NOT NULL DEFAULT ''::text
     voice text NOT NULL DEFAULT ''::text
     CONSTRAINT calls_pkey PRIMARY KEY (id)
     CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
     CREATE INDEX calls_agent_idx ON public.calls USING btree (agent_id, started_at DESC)
-    CREATE INDEX calls_campaign_idx ON public.calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL)
     CREATE INDEX calls_customer_agent_idx ON public.calls USING btree (customer_id, agent_id, started_at DESC)
+    CREATE INDEX calls_customer_campaign_idx ON public.calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL)
     CREATE INDEX calls_customer_idx ON public.calls USING btree (customer_id, started_at DESC)
     CREATE INDEX calls_session_started_idx ON public.calls USING btree (session_id, started_at DESC) WHERE (session_id IS NOT NULL)
     CREATE INDEX calls_tags_idx ON public.calls USING gin (tags)
