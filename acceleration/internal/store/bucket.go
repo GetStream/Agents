@@ -114,8 +114,8 @@ func (r *Buckets) Rollup(ctx context.Context, granularity Granularity, from, to 
 // from and to as its two parameters. Postgres keeps timestamps to the microsecond, so to
 // less one is the window's last instant.
 func wholeBuckets(granularity Granularity, column string) string {
-	return fmt.Sprintf("%[1]s >= date_trunc('%[2]s', ?::timestamptz) AND %[1]s < "+
-		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond') + interval '1 %[2]s'",
+	return fmt.Sprintf("%[1]s >= date_trunc('%[2]s', ?::timestamptz, 'UTC') AND %[1]s < "+
+		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond', 'UTC') + interval '1 %[2]s'",
 		column, granularity.truncateUnit())
 }
 
@@ -135,7 +135,7 @@ SELECT
     customer_id,
     provider,
     model,
-    date_trunc('%[2]s', started_at) AS bucket,
+    date_trunc('%[2]s', started_at, 'UTC') AS bucket,
     COALESCE(SUM(audio_ms), 0),
     COALESCE(SUM(characters), 0),
     COALESCE(SUM(input_tokens), 0),
@@ -205,7 +205,7 @@ SELECT
     customer_id,
     provider,
     model,
-    date_trunc('%[1]s', started_at) AS bucket,
+    date_trunc('%[1]s', started_at, 'UTC') AS bucket,
     COALESCE(SUM(audio_ms), 0) AS audio_ms_total,
     COALESCE(SUM(characters), 0) AS characters_total,
     COALESCE(SUM(input_tokens), 0) AS input_tokens_total,

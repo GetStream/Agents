@@ -2,7 +2,11 @@
 
 package store
 
-import "time"
+import (
+	"time"
+
+	"github.com/uptrace/bun"
+)
 
 func (s *StoreSuite) TestRollupAggregatesRequestsIntoOneBucket() {
 	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
@@ -211,6 +215,58 @@ func (s *StoreSuite) TestDailyRollupOverAnHourRecomputesTheWholeDay() {
 	buckets := s.rolledUp("stats_daily", "acme")
 	s.Require().Len(buckets, 1)
 	s.EqualValues(3000, buckets[0].AudioMsTotal, "the day keeps the request outside the hour asked for")
+}
+
+func (s *StoreSuite) TestADayIsAUTCDayWhateverTheDatabasesTimeZone() {
+	// 03:00 UTC is the evening before in Denver, and 10:00 UTC the same morning.
+	early, late := time.Date(2026, 3, 1, 3, 0, 0, 0, time.UTC), s.base
+	s.record("acme", early, 1000, 100, true)
+	s.record("acme", late, 2000, 100, true)
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(early, 100)))
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(late, 100)))
+	denver := s.inTimeZone("America/Denver")
+	day := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	from, to := day.Add(-24*time.Hour), day.Add(48*time.Hour)
+
+	requests, err := denver.Buckets.Select(s.ctx, "acme", BucketFilter{Modality: "stt", Granularity: Daily, From: from, To: to})
+	s.Require().NoError(err)
+	s.Require().Len(requests, 1)
+	s.Equal(day, requests[0].Bucket.UTC())
+	s.EqualValues(3000, requests[0].AudioMsTotal)
+
+	turns, err := denver.TurnBuckets.Select(s.ctx, "acme", TurnBucketFilter{Granularity: Daily, From: from, To: to})
+	s.Require().NoError(err)
+	s.Require().Len(turns, 1)
+	s.Equal(day, turns[0].Bucket.UTC())
+	s.EqualValues(2, turns[0].TurnCount)
+
+	_, err = denver.Buckets.Rollup(s.ctx, Daily, day.Add(time.Hour), day.Add(2*time.Hour))
+	s.Require().NoError(err)
+	rolled := s.rolledUp("stats_daily", "acme")
+	s.Require().Len(rolled, 1)
+	s.Equal(day, rolled[0].Bucket.UTC())
+	s.EqualValues(3000, rolled[0].AudioMsTotal, "the rollup's day is the UTC day too")
+}
+
+// inTimeZone is another router on the suite's databases whose connections are in zone, as a
+// server whose default is not UTC gives them. The zone is the shard database's until the test
+// ends.
+func (s *StoreSuite) inTimeZone(zone string) *Store {
+	var database string
+	s.Require().NoError(s.store.shard.QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	_, err := s.store.shard.ExecContext(s.ctx, "ALTER DATABASE ? SET timezone = ?", bun.Ident(database), zone)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.store.shard.ExecContext(s.ctx, "ALTER DATABASE ? RESET timezone", bun.Ident(database))
+		s.NoError(err)
+	})
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(router.Close()) })
+	var current string
+	s.Require().NoError(router.shard.QueryRowContext(s.ctx, "SHOW timezone").Scan(&current))
+	s.Require().Equal(zone, current)
+	return router
 }
 
 // rolledUp is what a rollup table holds for a customer, oldest first.
