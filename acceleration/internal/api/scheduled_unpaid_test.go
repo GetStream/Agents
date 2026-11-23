@@ -715,18 +715,16 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAga
 	s.Equal("completed", state)
 }
 
-// A thread task whose turn is refused because the money cannot be checked, and whose rerun is
-// refused too, ends the attempt after under the money, not as a reply that failed (AI-3183).
+// A thread task whose turn is refused for money, and whose rerun is refused too, ends the attempt
+// after under the money, not as a reply that failed (AI-3183).
 func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedTwiceFailsUnderTheMoney() {
-	channel := s.creditedThread("+1347" + digits(s.utils.uuid()))
+	person := "+1347" + digits(s.utils.uuid())
+	s.teamed()
+	channel := s.creditedThread(person)
 	s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
 	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
 	s.Require().True(running)
-	s.sharing.stop()
-	s.Require().Eventually(func() bool {
-		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())))
-	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	s.teamSpent(person)
 	task := s.threadTask(channel)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
 		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
@@ -741,7 +739,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedTwiceFailsUnderTheMoney() {
 		delivery.Earlier = reason
 	}
 
-	s.Equal([]string{codeSpendCheckUnavailable, codeSpendCheckUnavailable, codeSpendCheckUnavailable}, reasons)
+	s.Equal([]string{codeSpendLimitReached, codeSpendLimitReached, codeSpendLimitReached}, reasons)
 	rerun, _, _ := found.FollowUpReply("st_run" + rerunSuffix)
 	s.Equal("failed", rerun, "the retry ran the turn again, and it was refused again")
 }
