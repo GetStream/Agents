@@ -7,6 +7,8 @@
   row before; read that as `session.session`. `chat` and `voice` are now `sessions.create` with
   `startVoice` false and true.
 
+- `AgentEventKind` has `reasoningDelta`: a `switch` over it with no default needs the case.
+
 ✅ Added
 
 - `SessionOptions.watch` - false opens a session with no socket and no tools declared; turns go
@@ -27,10 +29,6 @@
 - `Turn.steps` (`ReasoningStep`, `ToolCallStep`) and `Turn.isDone` - each reply's rounds of
   thinking and tool calls, folded from the socket's `reasoning_delta`, `tool_started`,
   `tool_updated` and `tool_ran`. A reply the prompt injection screen refused loses its text and UI.
-
-🔄 Changed
-
-- `AgentEventKind` has `reasoningDelta`: a `switch` over it with no default needs the case.
 
 ## 0.7.0
 
