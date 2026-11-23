@@ -609,12 +609,15 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 	return nil
 }
 
-// forgetRefusedOrder forgets an order the vendor answered err to, when err is the vendor refusing
-// it: a 4xx, which it did not carry out. Any other failure, a timeout, a dropped connection or a
-// 5xx, may come after the vendor bought or released the number, so the order is left to the
-// sweep, which asks the vendor what it holds.
+// forgetRefusedOrder forgets an order the vendor answered err to, when err shows the vendor did
+// nothing: a 4xx, which it did not carry out, or a refusal before it was asked, by a vendor not
+// implemented or missing a setting, or of an order it cannot take as asked. Any other failure,
+// a timeout, a dropped connection or a 5xx, may come after the vendor bought or released the
+// number, so the order is left to the sweep, which asks the vendor what it holds.
 func (s *Service) forgetRefusedOrder(ctx context.Context, order store.PhoneNumberOrder, err error) {
-	if refused, ok := errors.AsType[*VendorError](err); ok && refused.Status >= 400 && refused.Status < 500 {
+	refused, ok := errors.AsType[*VendorError](err)
+	if ok && refused.Status >= 400 && refused.Status < 500 ||
+		errors.Is(err, ErrNotImplemented) || errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrInvalid) {
 		s.forgetOrder(ctx, order)
 	}
 }

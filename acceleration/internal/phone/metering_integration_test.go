@@ -1017,6 +1017,41 @@ func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber
 	s.Zero(s.orders())
 }
 
+// A purchase from a vendor not implemented, which no vendor was asked about and none can settle,
+// leaves no order for the sweep to log every hour.
+func (s *MeteringSuite) TestAPurchaseFromAVendorNotImplementedLeavesNoOrder() {
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: "bics", E164: aNumber(), Owner: s.owner()})
+	s.Require().ErrorIs(err, ErrNotImplemented)
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	s.Zero(s.orders())
+	s.Zero(s.logs.count("ERROR", "customer="+s.customer))
+}
+
+// A purchase refused before the vendor was asked, for a setting the deployment lacks, leaves
+// no order.
+func (s *MeteringSuite) TestAPurchaseFromAVendorMissingASettingLeavesNoOrder() {
+	s.vendor.err = NotConfigured(errors.New("telnyx: a setting is required to order a number"))
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
+
+	s.Require().ErrorIs(err, ErrNotConfigured)
+	s.Zero(s.orders())
+}
+
+// A purchase refused before the vendor was asked, as one it cannot take, leaves no order.
+func (s *MeteringSuite) TestAPurchaseTheVendorCannotTakeAsAskedLeavesNoOrder() {
+	s.vendor.err = Invalid(errors.New("telnyx: buying a number needs the country it is sold in"))
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
+
+	s.Require().ErrorIs(err, ErrInvalid)
+	s.Zero(s.orders())
+}
+
 // orders counts the customer's orders still to settle.
 func (s *MeteringSuite) orders() int {
 	count, err := s.store.GlobalDB().NewSelect().Model((*store.PhoneNumberOrder)(nil)).
