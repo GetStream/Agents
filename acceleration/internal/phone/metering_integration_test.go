@@ -4,8 +4,10 @@ package phone
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"strings"
@@ -833,6 +835,26 @@ func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 
 	s.Never(func() bool { return len(s.rows(ModelNumber)) > 0 }, time.Second, 50*time.Millisecond,
 		"the month that began ten days ago began before the job was switched on")
+}
+
+func (s *MeteringSuite) TestAMovedCustomersBoughtNumberIsNotBilledAgainHere() {
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	now := time.Now().UTC().Truncate(time.Second)
+	// The month that began three days ago is the source's to bill, which held the number then.
+	row, err := json.Marshal(map[string]any{
+		"id": rand.Int64N(1 << 50), "e164": aNumber(), "vendor": s.vendor.vendor, "country": "US",
+		"capabilities": []string{"voice"}, "monthly_cost_micros": 1_000_000, "customer_id": s.customer,
+		"tags": map[string]string{}, "purchased_at": now.AddDate(0, -1, -3),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "phone_numbers", row))
+	rentals := Rentals{Store: s.store, Recorder: s.recorder, Logger: slog.New(slog.DiscardHandler)}
+
+	_, err = rentals.Bill(s.ctx, now.AddDate(0, 0, -30), time.Now().UTC())
+	s.Require().NoError(err)
+
+	s.Never(func() bool { return len(s.rows(ModelNumber)) > 0 }, time.Second, 50*time.Millisecond,
+		"the destination bills no month of a number it does not hold")
 }
 
 // row waits for the customer's one row of a model and reads it.
