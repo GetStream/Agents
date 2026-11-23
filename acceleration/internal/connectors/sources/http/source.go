@@ -107,10 +107,8 @@ func (s *Source) Open(_ context.Context, b core.ResolvedBinding, grants []core.T
 	set := &Toolset{client: s.callClient(b.HTTP), endpoint: endpoint, headers: rule.Headers,
 		timeout: b.Binding.Timeout, targets: map[string]target{}}
 	for _, tool := range rule.HTTPTools {
-		want, found := granted[tool.Name]
-		if !found {
-			continue
-		}
+		// A tool not granted pins no digest, which no digest matches.
+		want := granted[tool.Name]
 		digest, err := ToolSchemaDigest(tool)
 		if err != nil || digest != want {
 			continue

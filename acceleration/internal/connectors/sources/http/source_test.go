@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -166,7 +167,7 @@ func (s *SourceSuite) TestNoArgumentsAtAllAreAnEmptyObject() {
 
 	s.Require().NoError(err)
 	s.Equal("ok", llm.TextOf(result.Parts))
-	s.Equal("/api/items", s.only().path)
+	s.Equal("/api/items", s.only().uri, "no query, not even an empty one")
 }
 
 // The endpoint and the path are joined as text: the endpoint's own path stays, which resolving
@@ -185,9 +186,9 @@ func (s *SourceSuite) TestTheEndpointsOwnPathIsKeptAndItsTrailingSlashNotDoubled
 // API's words when it said any.
 func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 	for path, want := range map[string]string{
-		"/missing":      "The API answered 404 Not Found: no such item",
-		"/not-modified": "The API answered 304 Not Modified",
-		"/refused":      "The API answered 401 Unauthorized: bad token",
+		"/missing":          "The API answered 404 Not Found: no such item",
+		"/multiple-choices": "The API answered 300 Multiple Choices",
+		"/refused":          "The API answered 401 Unauthorized: bad token",
 	} {
 		tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: path}
 
@@ -197,6 +198,9 @@ func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 		s.Require().ErrorAs(err, &reported, path)
 		s.Equal(want, reported.Message, path)
 	}
+	result, err := s.call(s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/last-2xx"}), "get", `{}`)
+	s.Require().NoError(err, "299 is the last 2xx")
+	s.Equal("ok", llm.TextOf(result.Parts))
 }
 
 func (s *SourceSuite) TestAToolErrorOverTheCapIsCutWithTheMarker() {
@@ -326,6 +330,7 @@ func (s *SourceSuite) TestTheInputSchemaIsTheDeclaredParameters() {
 	set, err := s.source.Open(s.ctx, binding, s.grants(binding, "get_forecast"))
 	s.Require().NoError(err)
 	s.Equal([]llm.Tool{{Name: "crm__get_forecast", Description: "The forecast.", Parameters: want}}, set.Tools())
+	s.Empty(set.Instructions(), "an API says nothing when a session opens")
 }
 
 func (s *SourceSuite) TestABindingNameMustBeSetAndHoldNoSeparator() {
@@ -374,6 +379,30 @@ func (s *SourceSuite) TestAnOpenedToolsetWaitsPastTheConnectionsClientTimeout() 
 	s.Require().NoError(err)
 	s.Equal("late", llm.TextOf(result.Parts))
 	s.Equal(shortTimeout, binding.HTTP.Timeout, "the binding's own client is left as it was")
+}
+
+// A client that already waits longer than callTimeout keeps its own timeout.
+func (s *SourceSuite) TestAClientWaitingLongerThanCallTimeoutKeepsItsTimeout() {
+	for timeout, want := range map[time.Duration]time.Duration{
+		shortTimeout: defaultCallTimeout, defaultCallTimeout: defaultCallTimeout, time.Minute: time.Minute,
+	} {
+		binding := s.provider.binding(s.T(), timeout, echoTool())
+
+		set, err := s.source.Open(s.ctx, binding, s.grants(binding, contracttest.ToolEcho))
+
+		s.Require().NoError(err)
+		s.Equal(want, set.(*Toolset).client.Timeout, timeout)
+	}
+}
+
+func (s *SourceSuite) TestABodyCutShortIsAnErrorNotAnAnswer() {
+	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/cut"}
+
+	_, err := s.call(s.binding(tool), "get", `{}`)
+
+	s.ErrorIs(err, io.ErrUnexpectedEOF)
+	var reported *core.ToolError
+	s.False(errors.As(err, &reported), "the API never finished its answer, so it reported nothing")
 }
 
 func (s *SourceSuite) TestTheBindingsTimeoutBoundsACall() {
@@ -439,7 +468,8 @@ func contractTools() []core.HTTPTool {
 // sent is one request as the provider received it.
 type sent struct {
 	method string
-	// path is as it was sent, escaped.
+	// uri is the request line's target, and path its path as it was sent, escaped.
+	uri    string
 	path   string
 	query  url.Values
 	body   string
@@ -464,7 +494,7 @@ func newProvider(t *testing.T) *provider {
 func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	p.mu.Lock()
-	p.received = append(p.received, sent{method: r.Method, path: r.URL.EscapedPath(), query: r.URL.Query(),
+	p.received = append(p.received, sent{method: r.Method, uri: r.RequestURI, path: r.URL.EscapedPath(), query: r.URL.Query(),
 		body: string(body), header: r.Header.Clone()})
 	p.mu.Unlock()
 	if r.Header.Get("Authorization") != "Bearer token-1" {
@@ -485,13 +515,21 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte{0x89, 'P', 'N', 'G', 0xff, 0xfe})
 	case "/huge":
-		_, _ = io.WriteString(w, strings.Repeat("a", maxResponseBytes))
+		// 4 MiB, the cap AI-3669 decided, written out so a changed maxResponseBytes fails the test.
+		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20))
 		_, _ = w.Write([]byte{0xff})
 	case "/missing":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "no such item")
-	case "/not-modified":
-		w.WriteHeader(http.StatusNotModified)
+	case "/multiple-choices":
+		w.WriteHeader(http.StatusMultipleChoices)
+	case "/last-2xx":
+		w.WriteHeader(299)
+		_, _ = io.WriteString(w, "ok")
+	case "/cut":
+		// Fewer bytes than the length it says: the server then closes the connection.
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, "only ten b")
 	case "/refused":
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, "bad token")
