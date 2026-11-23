@@ -1258,6 +1258,21 @@ func (s *StoreSuite) TestASessionHasEndedOnlyWhenItsCustomersOwnRowSaysSo() {
 	s.False(ends[mine].Ended(), "somebody-else's session is still recording runtime")
 }
 
+// A session with no row is running while it records runtime, which was read by the session's
+// id alone: another customer's runtime under the id came back with the answer.
+func (s *StoreSuite) TestAnotherCustomersRuntimeUnderAnIdSaysNothingOfASessionsEnd() {
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{s.usageRow("somebody-else", func(request *Request) {
+		request.Modality, request.SessionID, request.StartedAt = RuntimeModality, "one", s.base.Add(time.Minute)
+	})})
+	s.Require().NoError(err)
+	mine := SessionKey{"app", "one"}
+
+	ends, err := s.store.Sessions.Ends(s.ctx, []SessionKey{mine}, s.base)
+
+	s.Require().NoError(err)
+	s.Equal(map[SessionKey]SessionEnd{mine: {}}, ends, "app's session has no row and recorded no runtime")
+}
+
 // A session is saved from more than one place at once: its recorder and a reopen, or a retry.
 // The saves that lost the race failed on a unique index their conflict did not name, and were
 // told the id was another customer's.
