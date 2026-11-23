@@ -117,8 +117,9 @@ func staffOperation(operation *huma.Operation) bool {
 
 // requireStaffKey answers a staff operation called without its key with a 401, whatever
 // customer credential came with it: the keys are not interchangeable, and neither is an
-// app's. The activity key reaches only the operations under activitySecurity. An ops operation on a deployment with no ops key is answered the same, since nobody
-// is staff there. A management operation on a deployment with no manage key answers 404
+// app's. The activity key reaches only the operations under activitySecurity. An ops
+// operation on a deployment with no ops key is answered the same, since nobody is staff
+// there. A management operation on a deployment with no manage key answers 404
 // not_configured, as the rest of a feature the deployment lacks does, and one called with
 // the key must name its actor, who is what ActorFrom and managedBy answer from then on.
 func (s *Server) requireStaffKey(api huma.API) func(huma.Context, func(huma.Context)) {
