@@ -166,7 +166,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 	ready := frame{"type": "ready", "worker_id": worker.ID}
 	if err := connection.WriteJSON(ready); err != nil {
 		s.logger.Debug("dispatch socket write failed", "worker", worker.ID, "error", err)
-		return socketEnd{cause: clientGone}
+		return writeEnd(err, gone)
 	}
 
 	ping := time.NewTicker(pingEvery)
@@ -177,13 +177,13 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 		case at := <-pongs:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(frame{"type": "pong", "at": at}); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case reply := <-replies:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(reply); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case call := <-worker.ToolCalls():
@@ -193,7 +193,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 				// returning here leads to.
 				s.logger.Error("could not hand a tool call to a worker",
 					"worker", worker.ID, "tool", call.Name, "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case call := <-worker.Calls():
@@ -203,7 +203,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 				// given to. Losing it is worth an error rather than a debug line.
 				s.logger.Error("could not hand a call to a worker",
 					"worker", worker.ID, "call", call.CallID, "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case message := <-worker.Messages():
@@ -211,13 +211,13 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 			if err := connection.WriteJSON(messageFrame(message)); err != nil {
 				s.logger.Error("could not hand a message to a worker",
 					"worker", worker.ID, "channel", message.ChannelID, "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-s.draining:

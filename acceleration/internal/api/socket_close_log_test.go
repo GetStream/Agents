@@ -389,6 +389,19 @@ func (s *SocketCloseLogSuite) TestADispatchWorkersCloseFrameIsLoggedWithItsCode(
 	s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4004 ")
 }
 
+func (s *SocketCloseLogSuite) TestADispatchWorkersCloseFrameAfterAPingIsLoggedWithItsCode() {
+	// Catches the pong write the reader's answer to the close refuses logged as client_gone:
+	// the writer is handed the ping as the close arrives, so most rounds race it.
+	for range 5 {
+		connection, id := s.worker(nil)
+
+		s.Require().NoError(connection.WriteJSON(frame{"type": "ping", "at": 1}))
+		s.closesWith(connection, 4005)
+
+		s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4005 ")
+	}
+}
+
 func (s *SocketCloseLogSuite) TestADroppedDispatchWorkerIsClientGone() {
 	connection, id := s.worker(nil)
 

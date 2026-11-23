@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -72,6 +73,21 @@ func readEnd(err error) socketEnd {
 		return socketEnd{cause: closedByClient, code: closed.Code}
 	case errors.As(err, &failed) && failed.Timeout():
 		return socketEnd{cause: timedOut}
+	}
+	return socketEnd{cause: clientGone}
+}
+
+// writeEnd is why a socket closed on a write that failed with err. gorilla refuses a write with
+// ErrCloseSent once its reader has sent a close frame (its answer to the caller's close, or 1009
+// for a frame past the read limit), so the reader's end is why: gone carries it, and closeWait
+// bounds the wait for it.
+func writeEnd(err error, gone <-chan error) socketEnd {
+	if errors.Is(err, websocket.ErrCloseSent) {
+		select {
+		case stopped := <-gone:
+			return readEnd(stopped)
+		case <-time.After(closeWait):
+		}
 	}
 	return socketEnd{cause: clientGone}
 }
