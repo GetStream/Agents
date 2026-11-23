@@ -187,7 +187,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 	if !s.Sharded() && len(s.peers) == 0 {
 		var moved int64
 		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			if err := claimGuest(ctx, tx, customerID, guestID, userID, now); err != nil {
+			if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 				return err
 			}
 			if err := moveTasks(ctx, tx); err != nil {
@@ -210,7 +210,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 	}
 
 	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := claimGuest(ctx, tx, customerID, guestID, userID, now); err != nil {
+		if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 			return err
 		}
 		return moveTasks(ctx, tx)
@@ -227,10 +227,9 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 
 // claimGuest marks a guest claimed by userID. A claim userID already made stands rather than
 // fails, for a caller that has more to finish after it.
-func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID string, now time.Time) error {
+func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID string) error {
 	claimed, err := db.NewUpdate().Model((*User)(nil)).
 		Set("claimed_by = ?", userID).
-		Set("claimed_at = ?", now).
 		Where("id = ?", guestID).
 		Where("customer_id = ?", customerID).
 		Where("kind = ?", UserKindGuest).

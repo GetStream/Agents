@@ -483,8 +483,7 @@ type User struct {
 	// ClaimedBy is the real user this guest turned out to be, empty while they are still a
 	// guest. A guest is claimed once: a second claim naming somebody else would move one
 	// person's conversations onto another's account.
-	ClaimedBy string     `bun:"claimed_by,nullzero"`
-	ClaimedAt *time.Time `bun:"claimed_at"`
+	ClaimedBy string `bun:"claimed_by,nullzero"`
 	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (FinishGuestClaim), nil
 	// while a claim that set ClaimedBy has not got that far.
 	ClaimFinishedAt *time.Time `bun:"claim_finished_at"`
