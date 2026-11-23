@@ -4,7 +4,10 @@ package store
 
 import (
 	"crypto/rand"
+	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 )
 
 // clusterAddressVar names a node of a Redis Cluster with more than one shard, which CI does
@@ -56,23 +59,74 @@ func (s *StoreSuite) TestForgetDropsEveryKeyOfOneRedis() {
 	s.forgotten(s.store, names)
 }
 
-// An app's organization is recorded on every start (policy.Enforcer.Join), and on a cluster
-// the replica that recorded it reads the new one next, not the copy it held before.
-func (s *StoreSuite) TestAnAppMovedToAnotherOrganizationIsWhatTheReplicaOnAClusterReadsNext() {
+// An app's organization is recorded on every start (policy.Enforcer.Join), and moving it
+// forgets the app's organization and its policies, two keys in different slots. The replica
+// that recorded the move reads the new organization's policies next, not a copy from before,
+// whichever node holds them. Many writers keep the nodes busy, since a barrier that waits on
+// one key only lets a read through to a stale copy on another node now and then.
+func (s *StoreSuite) TestAnAppMovedToAnotherOrganizationIsWhatTheReplicaOnAClusterReadsPoliciesOf() {
 	replica := s.clusterReplica()
-	app := "app-" + rand.Text()
-	s.Require().NoError(replica.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-first"}))
-	for range 2 {
-		under, err := replica.AppOrganizations.Get(s.ctx, app)
-		s.Require().NoError(err)
-		s.Equal("org-first", under.OrganizationID)
+	var stale atomic.Int64
+	var moves sync.WaitGroup
+	prefix := rand.Text()
+	for writer := range 16 {
+		moves.Add(1)
+		go func() {
+			defer moves.Done()
+			for attempt := range 500 {
+				app := fmt.Sprintf("app-%s-%d-%d", prefix, writer, attempt)
+				if err := replica.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-first"}); err != nil {
+					stale.Add(1)
+				}
+				for range 2 {
+					if _, err := replica.Policies.OfApp(s.ctx, app); err != nil {
+						stale.Add(1)
+					}
+				}
+				if err := replica.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-second"}); err != nil {
+					stale.Add(1)
+				}
+				if now, err := replica.Policies.OfApp(s.ctx, app); err != nil || now.OrganizationID != "org-second" {
+					stale.Add(1)
+				}
+			}
+		}()
 	}
+	moves.Wait()
+	s.Zero(stale.Load(), "reads that failed or answered with the organization from before")
+}
 
-	s.Require().NoError(replica.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-second"}))
-
-	under, err := replica.AppOrganizations.Get(s.ctx, app)
-	s.Require().NoError(err)
-	s.Equal("org-second", under.OrganizationID)
+// The same move, read through the app's organization: the other key the write forgets.
+func (s *StoreSuite) TestAnAppMovedToAnotherOrganizationIsWhatTheReplicaOnAClusterReadsOrganizationOf() {
+	replica := s.clusterReplica()
+	var stale atomic.Int64
+	var moves sync.WaitGroup
+	prefix := rand.Text()
+	for writer := range 16 {
+		moves.Add(1)
+		go func() {
+			defer moves.Done()
+			for attempt := range 500 {
+				app := fmt.Sprintf("app-%s-%d-%d", prefix, writer, attempt)
+				if err := replica.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-first"}); err != nil {
+					stale.Add(1)
+				}
+				for range 2 {
+					if _, err := replica.AppOrganizations.Get(s.ctx, app); err != nil {
+						stale.Add(1)
+					}
+				}
+				if err := replica.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-second"}); err != nil {
+					stale.Add(1)
+				}
+				if now, err := replica.AppOrganizations.Get(s.ctx, app); err != nil || now.OrganizationID != "org-second" {
+					stale.Add(1)
+				}
+			}
+		}()
+	}
+	moves.Wait()
+	s.Zero(stale.Load(), "reads that failed or answered with the organization from before")
 }
 
 // cachedNames stores rows under several cache keys of store's Redis, enough of them that a
