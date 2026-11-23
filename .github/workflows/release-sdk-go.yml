@@ -3,8 +3,8 @@ name: Release Go SDK (verify)
 # A Go module is released by its tag: pushing sdks/go/vX.Y.Z is the release, and the Go module
 # proxy fetches it the first time anybody asks for it. This checks the tagged copy, then asks
 # for it from an empty module outside this repository, as a consumer would. It publishes
-# nothing and creates no GitHub Release: release.yml publishes the Python packages on any
-# published release.
+# nothing and creates no GitHub Release: release.yml publishes the Python packages when a
+# release is published for a tag that starts with `v`.
 on:
   push:
     tags: [ 'sdks/go/v*' ]
