@@ -846,6 +846,20 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
 A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again, and the first retry now runs the turn once more, in the conversation or on a text channel, also when another router holds the session, or in a thread, so the user gets the reply once the money can be checked. A conversation turn refused again on that retry fails the run under `spend_check_unavailable` once its retries are spent, never `delivered`. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
+### The Go SDK syncs an agent's directory to a router it was never synced to
+
+`Agent.Sync` skipped a directory whose `.agent_sync` stamp matched it, whichever router the stamp came from, so a directory synced to a local router and then to the hosted one (`go run ./configure` with another `STREAM_ACCELERATION_URL`) answered the hosted router's old config and sent nothing. A matching stamp is now trusted only when the stored config's `sync_hash` is the same hash, as the JavaScript SDK does.
+### JavaScript: a live UI patch is merged onto the card the router merges it onto
+
+`Conversation` merges an OpenUI patch onto the UI of the latest earlier turn that completed and was not interrupted, whatever its format, as the router does and as Kotlin has since #2089. It used to take the latest OpenUI card it held, so with an A2UI card in between, or after an interrupted reply, the live preview showed a card Stream Chat's copy then replaced. A patch whose base is not OpenUI now shows no UI on its turn, even a preview already merged onto an older card, and Stream Chat's copy is the one that shows.
+
+### The assistant and demo sample apps open sessions with their tools again
+
+The sample apps' agents name their tools in a tool group (`swift_assistant`: the assistants' device tools and `reserve_table`; `swift_demo`: `lookup_order` and `issue_refund`), which the router has required of a session's tools since #2088. Sync them again with `go run ./configure`.
+
+### A hosted tool call in a group channel names the person who wrote
+
+In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.
 
 ### A connection keeps a rotated token when saving it fails once
 
@@ -860,6 +874,14 @@ An `AgentTool` declared with a `Decodable` arguments type decodes it from the ar
 ### A custom connector never gets the deployment's own OAuth client
 
 Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
+
+### An imported row is held to what the API holds it to
+
+`POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. A moved voice arrives with its id, name and description and without its samples or bindings, whose audio and clone stay with the deployment that made them: add a recording and prepare it again. An import that names `voice_samples` or `voice_bindings` is refused. An imported request is never billable here and counts against the importing app's organization: the one it was last seen under here, else the one it is registered under, else none.
+
+### Only a number on the customer's own trunk moves in an import
+
+`/v1/data/import`, and a change applied after it, writes a `phone_numbers` row only when its vendor is exactly `sip_trunk`; any other row is skipped without an error. A number bought at a vendor stays in the vendor account of the deployment that bought it, and its bills already move with the requests, so the destination neither holds it nor bills its months again. A customer that moves keeps a bought number by buying or porting it at the destination. A number bought here and still held is never updated or deleted by an imported row or a replayed change, whatever id it names. An imported `sip_trunk` number is held to the API's rules (E.164, a vendor, a cost that is not negative), and no imported number keeps its `dlc_use_case_id`, which names a use case of the source.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

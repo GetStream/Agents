@@ -83,10 +83,6 @@ const sipTrunkVendor = "sip_trunk"
 // ErrNumberHeld says the customer already holds the number, bought or on a trunk.
 var ErrNumberHeld = errors.New("store: the customer already holds this number")
 
-// ErrNumberHeldElsewhere says another customer holds the number, at any vendor. It does not
-// say so to the customer, who would learn from it which numbers other apps hold.
-var ErrNumberHeldElsewhere = errors.New("store: this number cannot be imported")
-
 // ErrNotE164 says a number is not written in E.164 form, the only form a number is held in.
 var ErrNotE164 = errors.New("store: a number is held in E.164 form, such as +15551234567")
 

@@ -76,21 +76,32 @@ func (r *AppOrganizations) Holds(ctx context.Context, organizationID, appID stri
 	if appID == "" || organizationID == "" {
 		return false, nil
 	}
-	seen, err := r.Get(ctx, appID)
+	owner, err := r.OrganizationOf(ctx, appID)
 	if err != nil {
 		return false, err
 	}
-	if seen.OrganizationID != "" {
-		return seen.OrganizationID == organizationID, nil
-	}
-	registered, err := r.store.global.NewSelect().Model((*App)(nil)).
-		Where("id = ?", appID).
-		Where("organization_id = ?", organizationID).
-		Exists(ctx)
+	return owner == organizationID, nil
+}
+
+// OrganizationOf is the organization an app was last seen under by a request, or, for an app
+// never seen under any, the one it is registered under. It is empty for an app neither names.
+func (r *AppOrganizations) OrganizationOf(ctx context.Context, appID string) (string, error) {
+	seen, err := r.Get(ctx, appID)
 	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: app in organization: %w", err))
+		return "", err
 	}
-	return registered, nil
+	if seen.OrganizationID != "" {
+		return seen.OrganizationID, nil
+	}
+	var registered []string
+	err = r.store.global.NewSelect().Model((*App)(nil)).Column("organization_id").Where("id = ?", appID).Scan(ctx, &registered)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("store: organization of app: %w", err))
+	}
+	if len(registered) == 0 {
+		return "", nil
+	}
+	return registered[0], nil
 }
 
 // Apps is every app of an organization: those requests last named it for, those
