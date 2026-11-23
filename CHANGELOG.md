@@ -2,9 +2,6 @@
 
 ## Features
 
-### An auto-enroll campaign takes contacts after it launched, and a draft's contacts can be changed one at a time
-
-`POST /v1/agents/campaigns` now accepts `type: auto_enroll`. Such a campaign may launch with nobody on it, takes contacts with `POST /v1/agents/campaigns/{id}/contacts` while it is scheduled, running or paused, starts each new one on the first step at the next calling hours (or at `start_at` when that has not come), rejects those who opted out of calls without a call, and runs until it is stopped. A standard campaign is unchanged: its list is fixed at launch, and it completes once it is done with everybody. `PATCH` and `DELETE /v1/agents/campaigns/{id}/contacts/{contact_id}` change or remove one contact of a draft; a field left out of a change keeps its value, a number another contact has is refused with 409 `contact_duplicate`, and once the campaign has launched both answer 409 `campaign_locked`, as a contact is then stopped rather than changed (#2127).
 ### New voice agents default to `sts-fast` and STS providers expose built-in voices
 
 Creating or syncing a new voice agent config without explicit cascade settings (`stt`, `tts`, `llm`, `floor_control`, `guardrail`) now defaults `sts` to `sts-fast` when the region supports it; passing `sts: ""` or any cascade setting explicitly stays on the cascade, and existing cascaded agents remain cascaded on sync or update. `GET /v1/sts/providers` now includes each native speech model's built-in `voices` (`id`, `name`, `description`, `gender`, `default`), defined in `router.yaml` and exposed on the Go SDK's `Provider` type.
