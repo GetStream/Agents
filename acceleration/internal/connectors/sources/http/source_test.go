@@ -447,9 +447,35 @@ func (s *SourceSuite) TestABodyCutShortIsAnErrorNotAnAnswer() {
 	_, err := s.call(s.binding(tool), "get", `{}`)
 
 	s.ErrorIs(err, io.ErrUnexpectedEOF)
+	s.EqualError(err, unreachedSentence, "what the model reads")
+	s.Contains(core.LoggedMessage(err, nil), "unexpected EOF", "what the log line reads")
 	var reported *core.ToolError
 	s.False(errors.As(err, &reported), "the API never finished its answer, so it reported nothing")
 }
+
+// S1.1 of AI-3674: a host the egress policy refuses and one that does not resolve read the same
+// one sentence, with no URL, no argument and nothing of the policy or the resolver; the log line
+// keeps why (core.LoggedMessage).
+func (s *SourceSuite) TestACallThatReachesNoAPIReadsOneSentence() {
+	lookup := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/people/{id}",
+		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}, "email": {Type: "string"}}}
+	transports, err := core.NewTransports(core.TransportsConfig{Resolver: tokenResolver{}, Timeout: requestTimeout})
+	s.Require().NoError(err)
+
+	for _, endpoint := range []string{"https://127.0.0.1:8443/api", "https://no-such-host-ai3674.invalid/api"} {
+		binding := s.binding(lookup)
+		binding.Manifest.Endpoints[Kind] = endpoint
+		binding.HTTP = transports.Client(core.ConnectionRef{CustomerID: "app", ConnectionID: "crm-1"}, bearer.New())
+
+		_, err := s.call(binding, "get", `{"id":"u1","email":"alice@example.com"}`)
+
+		s.EqualError(err, unreachedSentence, endpoint)
+		s.Contains(core.LoggedMessage(err, nil), "egress", endpoint)
+	}
+}
+
+// unreachedSentence is what the model reads of a call to crm__get that got no whole answer.
+const unreachedSentence = "http: crm__get: the API could not be reached, or its answer did not arrive whole"
 
 func (s *SourceSuite) TestTheBindingsTimeoutBoundsACall() {
 	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/slow"}

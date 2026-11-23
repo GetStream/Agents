@@ -107,12 +107,12 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 	}
 	response, err := t.client.Do(request)
 	if err != nil {
-		return core.Result{}, stack.Wrap(fmt.Errorf("http: %s: %w", call.Name, err))
+		return core.Result{}, stack.Wrap(unreached(call.Name, err))
 	}
 	defer func() { _ = response.Body.Close() }()
 	read, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return core.Result{}, stack.Wrap(fmt.Errorf("http: %s: read the answer: %w", call.Name, err))
+		return core.Result{}, stack.Wrap(unreached(call.Name, fmt.Errorf("read the answer: %w", err)))
 	}
 	// A body past the cap is cut at it, back to the start of the rune the cut falls in, so text
 	// cut inside a rune is still text.
@@ -134,6 +134,13 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 		return core.Result{Parts: llm.TextParts(fmt.Sprintf("The API answered %s.", response.Status))}, nil
 	}
 	return core.Result{Parts: llm.TextParts(core.CutResult(text))}, nil
+}
+
+// unreached is a call to name that got no whole answer, for cause: one sentence for every such
+// failure, so the model reads no URL, no argument and nothing of the egress policy
+// (core.UnreachedError).
+func unreached(name string, cause error) error {
+	return &core.UnreachedError{Message: fmt.Sprintf("http: %s: the API could not be reached, or its answer did not arrive whole", name), Err: cause}
 }
 
 // Close does nothing: the connection's client and its pool are core.Transports'.

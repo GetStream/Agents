@@ -27,8 +27,11 @@ Toolset.Call(call)
                (an empty object when every parameter is in the path)
                only declared parameters; numbers as the model wrote them
   headers      sources[].headers, then the connection's transport adds the credential
-  answer       read up to 4 MiB; not UTF-8 -> "not text" sentence
-  2xx          text, cut at 32 KiB + marker (core.CutResult)
+  no answer    not sent, refused by egress, or cut short -> *core.UnreachedError: one sentence
+               "http: <tool>: the API could not be reached, or its answer did not arrive whole";
+               the cause behind Unwrap and on the log line (core.LoggedMessage)
+  answer       read up to 4 MiB, cut back to a whole rune; not UTF-8 -> "not text" sentence
+  2xx          text, cut at 32 KiB + marker (core.CutResult); empty -> "The API answered <status>."
   otherwise    *core.ToolError "The API answered <status>[: <body>]", cut the same way
 ```
 
@@ -40,6 +43,7 @@ Toolset.Call(call)
 - **A tool is offered only when its grant names it and pins the digest it has now.** The digest covers method, path and read_only beside what the model is shown, so a revision that turns a POST into a read-only GET is a new digest, and a connection pinned to one revision never runs a tool under a grant made for the other (AI-3674, from the AI-3673 review). Check: `go test -run 'TestHTTPSourceContract/(TestOnlyTheGranted|TestAnUngranted|TestAToolWhoseSchema)|TestSourceSuite/(TestAGrantForAnotherRevision|TestTheDigestCovers)' ./internal/connectors/sources/http`.
 - **Arguments are checked before anything is sent**, against the schema built from the declared parameters (JSON Schema 2020-12). Check: `go test -run 'TestHTTPSourceContract/TestArguments' ./internal/connectors/sources/http`.
 - **An answer that is not a 2xx is a `*core.ToolError`** naming the status, with the API's words when it said any. Check: `go test -run 'TestHTTPSourceContract/TestAnErrorWithNoText|TestSourceSuite/(TestAnAnswerThatIsNotA2xx|TestAToolErrorOverTheCap)' ./internal/connectors/sources/http`.
+- **A call that got no whole answer reads one sentence.** The model never reads the request's URL, an argument, or what the egress policy or the resolver said, which would tell a private host from one that does not resolve (AI-3674, S1.1). Check: `go test -run 'TestSourceSuite/(TestACallThatReachesNoAPI|TestABodyCutShort)' ./internal/connectors/sources/http`.
 - **Bounded.** One body is read up to 4 MiB (`maxResponseBytes`, the mcp source's cap); one result or tool error is at most `core.MaxResultBytes` (32 KiB), ending with `core.TruncatedMarker`. An opened toolset's client waits at least `callTimeout` (35 s), past the longest `timeout_ms` a binding may ask for (30 s), and `Binding.Timeout` bounds a call when set. Check: `go test -run 'TestHTTPSourceContract/TestAResultOverTheCap|TestSourceSuite/(TestABodyIsRead|TestAnOpenedToolsetWaits|TestTheBindingsTimeout)' ./internal/connectors/sources/http`.
 - **Every hardcoded value says where it comes from**, beside it: `Separator`, `defaultCallTimeout`, `maxResponseBytes`, `nonText`, `bodyMethods`.
 
