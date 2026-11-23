@@ -297,11 +297,6 @@ func newSeen(capacity int) *seen {
 	}
 }
 
-// Get reports whether a user is held, and marks them as the most recently used.
-func (s *seen) Get(app, id string) bool {
-	return s.Holds(app, id, "", time.Time{})
-}
-
 // Value returns what a user is held with, and marks them as the most recently used.
 func (s *seen) Value(app, id string) (string, bool) {
 	s.mu.Lock()
@@ -313,12 +308,6 @@ func (s *seen) Value(app, id string) (string, bool) {
 	}
 	s.order.MoveToFront(element)
 	return element.Value.(seenEntry).value, true
-}
-
-// Add holds a user, evicting the least recently used one across every app when the cache
-// is full.
-func (s *seen) Add(app, id string) {
-	s.Keep(app, id, "", time.Time{})
 }
 
 // Holds reports whether a user is held with value and their hold has not expired by now,
@@ -382,14 +371,6 @@ func (s *seen) Clear() {
 
 	s.order.Init()
 	s.apps = map[string]map[string]*list.Element{}
-}
-
-// Len is how many users are held across every app.
-func (s *seen) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.order.Len()
 }
 
 // evict removes one element and the partition it empties. The caller holds the lock.
