@@ -2416,6 +2416,32 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 	s.Zero(s.definitionsNamed(id))
 }
 
+// customWeather is a manifest the API stores for a custom http connector custom_weather: one
+// read-only GET tool on an API taking a key.
+const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://api.weather.example/v1"},
+	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
+	"method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
+
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionArrivesAsItWasSent() {
+	id, err := s.importDefinition(customWeather)
+
+	s.Require().NoError(err)
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	s.JSONEq(strings.Replace(customWeather, "custom_acme", id, 1), stored)
+}
+
+// TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
+// (core.Manifest.Validate) hold for an import as for the API.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, `"method": "GET"`, `"method": "DELETE"`, 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "a read-only tool must be GET or HEAD")
+	s.Zero(s.definitionsNamed(id))
+}
+
 // TestALaterRevisionOfADefinitionImports: the store numbers revisions, so a manifest's own
 // revision is not one the API's rules set.
 func (s *DataMoveSuite) TestALaterRevisionOfADefinitionImports() {

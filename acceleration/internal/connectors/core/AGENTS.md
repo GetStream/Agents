@@ -55,6 +55,8 @@ A manifest has `sources`, a `channel` block, or both: Linear has only `sources`,
 
 `sensitive: true` marks a connector that reads private data, and `sources[].outbound: false` says a source offers only tools that read, and `sources[].read_only_tools` names the ones that read on a source that also offers tools that write; left out, a tool may write and counts as sending data out. A config binding a sensitive connector is refused beside any binding granting a tool that may send out (`providers/AGENTS.md`, `sensitiveBindingsComplaint`).
 
+A source of kind `http` (`SourceKindHTTP`, `http_tools.go`) lists its own tools in `sources[].http_tools`: each a name, a description, a method, a path under the source's endpoint with `{name}` placeholders, scalar `parameters` and `read_only`. `read_only` is allowed only on GET and HEAD, and it is where an http source says a tool only reads: `read_only_tools` and `outbound: false` are refused on one. A parameter or source header named as a method override (`X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override`, `_method`, in any case) is refused, so a read-only GET cannot be run as a write. A custom connector is an MCP endpoint or an http `base_url` with tools (`CustomManifest`), under the endpoint role `http`. No source runs http tools yet.
+
 | Term | What it is | In code |
 | --- | --- | --- |
 | channel block | How a provider's inbound request is verified, where it keeps each message and each signal, and how a reply goes back | `ChannelRule`, manifest `channel` |
