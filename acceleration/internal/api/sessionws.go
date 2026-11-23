@@ -443,6 +443,20 @@ var errNoResultWaits = errors.New("tool_result reached no call waiting for it: t
 	"answered, cancelled or timed out, or its tool_call_id names none, or a call of a durable command " +
 	"was answered without the request_id and turn_id of its tool_call")
 
+// maxEchoedID is the most of an id tool_result_ignored repeats, the length a request_id may
+// have on the HTTP API.
+const maxEchoedID = 128
+
+// echoedID is id as tool_result_ignored repeats it. Every watcher is sent that frame and it is
+// kept for replay, so a watcher sending ids of a megabyte must not be able to fill the buffer
+// with them; no id the router hands out is longer than this.
+func echoedID(id string) string {
+	if len(id) <= maxEchoedID {
+		return id
+	}
+	return strings.ToValidUTF8(id[:maxEchoedID], "")
+}
+
 // errUnreadableFrame ends a socket on a frame that is not JSON of the shape it reads.
 var errUnreadableFrame = invalidRequest("a frame on this socket is not JSON it can read")
 
@@ -500,7 +514,8 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		// Without a word back, a result naming no call it can settle looks to its sender as
 		// though it was taken, while the model waits out the call's timeout.
 		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, failure) {
-			found.IgnoreToolResult(command.ToolCallID, command.CommandID, command.TurnID, errNoResultWaits)
+			found.IgnoreToolResult(echoedID(command.ToolCallID), echoedID(command.CommandID), echoedID(command.TurnID),
+				errNoResultWaits)
 		}
 
 	case "tool_hold":
