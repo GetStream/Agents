@@ -852,7 +852,10 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 			"a skip when it lands past the following one — and on a one-shot it is the reschedule. An end " +
 			"user's device may change title, schedule, next, deliver_to and quiet_hours; instructions are " +
 			"server-side, and a device sending them is refused with a 403.",
-		Responses:  map[string]*huma.Response{"200": {Description: "The task as it now is"}},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "The task as it now is"},
+			"409": errorResponse("The task changed while the request was made: read it again and retry"),
+		},
 		Errors:     []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 		Extensions: map[string]any{clientAccessibleExtension: true},
 	}, s.updateScheduledTask)
@@ -862,9 +865,12 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 		Path:        "/v1/agents/scheduled-tasks/{id}/pause",
 		Summary:     "Pause a scheduled task",
 		Description: "Nothing comes due while a task is paused; what it slept through is never replayed.",
-		Responses:   map[string]*huma.Response{"200": {Description: "The task, paused"}},
-		Errors:      []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
-		Extensions:  map[string]any{clientAccessibleExtension: true},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "The task, paused"},
+			"409": errorResponse("The task changed while the request was made: read it again and retry"),
+		},
+		Errors:     []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Extensions: map[string]any{clientAccessibleExtension: true},
 	}, s.pauseScheduledTask)
 	huma.Register(api, huma.Operation{
 		OperationID: "resumeScheduledTask",
@@ -880,7 +886,7 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The task, running again"},
 			"400": errorResponse("The task has no occurrence left (schedule_in_past), or the request is malformed"),
-			"409": errorResponse("The task is completed, or the user is at their active-task limit"),
+			"409": errorResponse("The task is completed, the user is at their active-task limit, or the task changed while the request was made"),
 		},
 		Errors:     []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 		Extensions: map[string]any{clientAccessibleExtension: true},

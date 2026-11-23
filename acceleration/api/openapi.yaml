@@ -18642,6 +18642,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         "404":
           $ref: '#/components/responses/NotFound'
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: 'The task changed while the request was made: read it again and retry'
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
@@ -18686,6 +18692,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         "404":
           $ref: '#/components/responses/NotFound'
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: 'The task changed while the request was made: read it again and retry'
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
@@ -18739,7 +18751,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: The task is completed, or the user is at their active-task limit
+          description: The task is completed, the user is at their active-task limit, or the task changed while the request was made
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
