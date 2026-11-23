@@ -95,7 +95,8 @@ type timing struct {
 	tookMs                    float64
 	inputTokens, outputTokens int64
 	replies                   int
-	// firstByteMs is how long the caller waited for the first reply.
+	// firstByteMs is how long the caller waited for the first reply that answered a wait, and
+	// zero while none has: a reply nobody waited for, such as the greeting, reports no wait.
 	firstByteMs float64
 	// errorCode and errorMessage are the session's first failure, of a reply or of its own.
 	errorCode, errorMessage string
@@ -298,10 +299,11 @@ func (s *Session) forward() {
 }
 
 // logTiming writes the session's one "speech-to-speech timing" line once its last row is
-// recorded: what the caller said and the replies, how long the first reply kept the caller
-// waiting, and what every row the session recorded cost, the rows of the models it handed
-// work to included. Its operation is the session's id, which its rows carry too. With no
-// reply, nothing was waited for, so the wait is left out rather than logged as zero.
+// recorded: what the caller said and the replies, how long the first reply a caller waited for
+// kept them waiting, and what every row the session recorded cost, the rows of the models it
+// handed work to included. Its operation is the session's id, which its rows carry too. With
+// no reply that answered a wait, nothing was waited for, so the wait is left out rather than
+// logged as zero.
 func (s *Session) logTiming() {
 	costMicros, _, _ := s.owner.Spent.Total()
 	s.mu.Lock()
@@ -310,7 +312,7 @@ func (s *Session) logTiming() {
 	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, s.config), "operation", s.id,
 		"audio_ms", int64(timed.tookMs), "input_tokens", timed.inputTokens, "output_tokens", timed.outputTokens,
 		"replies", timed.replies)
-	if timed.replies > 0 {
+	if timed.firstByteMs > 0 {
 		logged = append(logged, "ttfb_ms", timed.firstByteMs)
 	}
 	logged = append(logged, "duration_ms", milliseconds(time.Since(s.openedAt)), "cost_micros", costMicros,
@@ -323,14 +325,15 @@ func (s *Session) logTiming() {
 
 func milliseconds(elapsed time.Duration) float64 { return float64(elapsed.Microseconds()) / 1000 }
 
-// answered counts a reply on the session's timing line, which waits for the first.
+// answered counts a reply on the session's timing line, which waits for the first one a caller
+// waited for.
 func (s *Session) answered(complete sts.ResponseComplete) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.timing.replies++
 	s.timing.inputTokens += complete.Usage.InputTokens
 	s.timing.outputTokens += complete.Usage.OutputTokens
-	if s.timing.replies == 1 {
+	if s.timing.firstByteMs == 0 {
 		s.timing.firstByteMs = complete.TimeToFirstByteMs
 	}
 }

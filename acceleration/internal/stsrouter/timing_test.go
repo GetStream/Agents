@@ -142,6 +142,39 @@ func (s *STSRouterSuite) TestASessionWithNoReplyLeavesOutTheWait() {
 	s.Equal(true, lines[0]["success"])
 }
 
+// An agent opens a call with a greeting nobody waited for, which the provider reports with a wait
+// of zero: the wait the line logs is the first reply someone waited for.
+func (s *STSRouterSuite) TestTheWaitIsTheFirstReplyACallerWaitedFor() {
+	session, provider, logs := s.timedSession()
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "greet", Generation: 1, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "greet", Generation: 1, TimeToFirstByteMs: 0})
+	s.Require().NoError(session.ProcessAudio(heard(600), sts.Participant{}))
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "r2", Generation: 2, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "r2", Generation: 2, TimeToFirstByteMs: 420})
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "r3", Generation: 3, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "r3", Generation: 3, TimeToFirstByteMs: 900})
+	s.Require().NoError(session.Close())
+	s.drain(session)
+
+	lines := timingLines(s.T(), logs, session.id)
+	s.Require().Len(lines, 1)
+	s.Equal(420.0, lines[0]["ttfb_ms"])
+	s.Equal(3.0, lines[0]["replies"], "the greeting is still a reply")
+}
+
+func (s *STSRouterSuite) TestASessionWhoseOnlyReplyWasAGreetingLeavesOutTheWait() {
+	session, provider, logs := s.timedSession()
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "greet", Generation: 1, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "greet", Generation: 1, TimeToFirstByteMs: 0})
+	s.Require().NoError(session.Close())
+	s.drain(session)
+
+	lines := timingLines(s.T(), logs, session.id)
+	s.Require().Len(lines, 1)
+	s.NotContains(lines[0], "ttfb_ms", "nobody waited for the greeting")
+	s.Equal(1.0, lines[0]["replies"])
+}
+
 // A provider whose socket dropped ends the session without anyone closing it, and the session
 // still says once how it went.
 func (s *STSRouterSuite) TestASessionTheProviderEndedLogsOneLine() {
