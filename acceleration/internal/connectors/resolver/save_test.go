@@ -264,6 +264,9 @@ func (s *ResolverSuite) TestARevocationBetweenTwoSavesStands() {
 	stored := s.f.stored(ref)
 	s.Equal(store.ConnectionNeedsReauthorization, stored.Status, "the uninstall stands")
 	s.Equal("The provider says its app was uninstalled from the account; reconnect the account", stored.LastError)
+	rows := s.audited(ref, 1)
+	s.Equal(store.AuditGrantRevoked, rows[0].Action, "the grant the uninstall ended")
+	s.Equal(string(core.SignalUninstalled), rows[0].Reason)
 	s.Contains(s.line("could not save a connector credential refresh"), "attempts=2", "a revoked connection is not tried again")
 }
 
