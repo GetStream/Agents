@@ -9,8 +9,9 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// CustomConnector is what a custom MCP connector is made of: the fields an app sends to create
-// one. The rest of its manifest is fixed (CustomManifest).
+// CustomConnector is what a custom connector is made of: the fields an app sends to create one,
+// with an MCP endpoint or an http base URL and tools. The rest of its manifest is fixed
+// (CustomManifest).
 type CustomConnector struct {
 	ID          string
 	Name        string
@@ -18,19 +19,25 @@ type CustomConnector struct {
 	Description string
 	// Endpoint is the MCP server.
 	Endpoint string
+	// BaseURL is the API an http connector's tools call, each at its path under it, and Tools
+	// are those tools. Set, Endpoint is not.
+	BaseURL string
+	Tools   []HTTPTool
 	Schemes  []string
 	Scopes   []string
 	Client   ClientPolicy
 }
 
 // CustomManifest is the manifest a custom connector is stored as, or why it cannot be: one MCP
-// source at Endpoint, and of the client only its registration, auth_method and alg. Which
-// schemes the deployment has and whether Endpoint is public are the caller's to check.
+// source at Endpoint, or one http source at BaseURL with Tools, and of the client only its
+// registration, auth_method and alg. Which schemes the deployment has and whether Endpoint or
+// BaseURL is public are the caller's to check.
 //
 // SourceKindMCP is both the tool source and the endpoint role it runs against, as the built-in
 // manifests write them (internal/connectors/providers/linear.yaml: sources: [{kind: mcp,
-// endpoint: mcp}]). MCP is the only source so far (architecture doc, «Layers and interfaces»,
-// the Source registry's first member).
+// endpoint: mcp}]), and SourceKindHTTP is both for an http connector. Its role is not
+// api_base, which a connection's direct call goes to (proxyBase, internal/api/connection_proxy.go),
+// so an http connector takes no direct call, as an MCP one takes none.
 func CustomManifest(c CustomConnector) (Manifest, error) {
 	// An operator client is the deployment's own, read from the variables a built-in's
 	// client.env names, and the deployment has none registered with an app's own server.
@@ -44,8 +51,8 @@ func CustomManifest(c CustomConnector) (Manifest, error) {
 		return Manifest{}, stack.Wrap(errors.New("client.registration is required with oauth2_code: name how the OAuth client is registered (customer, cimd or dcr)"))
 	}
 	// oauth2_client_credentials gets its token URL from endpoints.token (tokenEndpoint in
-	// internal/connectors/schemes/oauth2cc/scheme.go), and a custom connector sets only the MCP endpoint, so
-	// such a definition could be stored and never connected.
+	// internal/connectors/schemes/oauth2cc/scheme.go), and a custom connector sets only the MCP endpoint or
+	// the http base URL, so such a definition could be stored and never connected.
 	if slices.Contains(c.Schemes, "oauth2_client_credentials") {
 		return Manifest{}, stack.Wrap(errors.New("oauth2_client_credentials is not available for a custom connector: it needs a token endpoint a custom connector cannot set"))
 	}
@@ -62,6 +69,18 @@ func CustomManifest(c CustomConnector) (Manifest, error) {
 		Scopes:      ScopePolicy{List: c.Scopes},
 		Sources:     []SourceRule{{Kind: SourceKindMCP, Endpoint: SourceKindMCP}},
 	}
+	if c.BaseURL != "" || len(c.Tools) > 0 {
+		if c.Endpoint != "" {
+			return Manifest{}, stack.Wrap(errors.New("a custom connector has an MCP endpoint or an http base_url and tools, not both"))
+		}
+		// An http source offers only the tools it lists, so one with none could be stored and
+		// never offer a tool.
+		if len(c.Tools) == 0 {
+			return Manifest{}, stack.Wrap(errors.New("an http custom connector needs at least one tool"))
+		}
+		manifest.Endpoints = map[string]string{SourceKindHTTP: c.BaseURL}
+		manifest.Sources = []SourceRule{{Kind: SourceKindHTTP, Endpoint: SourceKindHTTP, HTTPTools: c.Tools}}
+	}
 	if err := manifest.Validate(); err != nil {
 		return Manifest{}, err
 	}
@@ -73,9 +92,14 @@ func CustomManifest(c CustomConnector) (Manifest, error) {
 // connector cannot set (an operator client, client.env, its own token endpoint, a hook) is
 // refused. For a manifest that did not come through CustomManifest, such as an imported one.
 func (m Manifest) AsCustom(id string) (Manifest, error) {
+	var tools []HTTPTool
+	if source := HTTPSource(m.Sources); source != nil {
+		tools = source.HTTPTools
+	}
 	rebuilt, err := CustomManifest(CustomConnector{
 		ID: id, Name: m.Name, Category: m.Category, Description: m.Description,
-		Endpoint: m.Endpoints[SourceKindMCP], Schemes: m.Schemes, Scopes: m.Scopes.List, Client: m.Client,
+		Endpoint: m.Endpoints[SourceKindMCP], BaseURL: m.Endpoints[SourceKindHTTP], Tools: tools,
+		Schemes: m.Schemes, Scopes: m.Scopes.List, Client: m.Client,
 	})
 	if err != nil {
 		return Manifest{}, err
@@ -93,7 +117,8 @@ func (m Manifest) AsCustom(id string) (Manifest, error) {
 	}
 	if string(want) != string(got) {
 		return Manifest{}, stack.Wrap(errors.New("it is not a manifest a custom connector can have: a custom connector has an id, a name, " +
-			"a category, a description, an MCP endpoint, schemes, scopes and a client's registration, auth_method and alg, and nothing else"))
+			"a category, a description, an MCP endpoint or an http base_url and tools, schemes, scopes and a client's registration, " +
+			"auth_method and alg, and nothing else"))
 	}
 	return rebuilt, nil
 }
