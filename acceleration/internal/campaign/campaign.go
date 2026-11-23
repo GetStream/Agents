@@ -688,7 +688,7 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 	}
 	settle.LeaseUntil = contact.LeaseUntil
 	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner,
-		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome, Converted: settle.Converted}, contact.ID, settle)
+		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome}, contact.ID, settle)
 }
 
 // unanswered settles an answered call nobody spoke on like a dial nobody picked up: the next

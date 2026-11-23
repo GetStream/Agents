@@ -653,7 +653,6 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 type Classification struct {
 	AttemptID string
 	Outcome   string
-	Converted bool
 }
 
 // ClassifyAndSettle records what an answered dial's transcript said and settles its contact, both
@@ -668,7 +667,6 @@ func (r *CampaignContacts) ClassifyAndSettle(ctx context.Context, owner string, 
 			Set("classify_after = NULL").
 			Set("classify_state = ?", classifyDone).
 			Set("outcome = ?", classification.Outcome).
-			Set("converted = ?", classification.Converted).
 			Where("id = ?", classification.AttemptID).
 			Where("classify_state = ?", classifyPending).
 			Exec(ctx)

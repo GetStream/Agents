@@ -314,7 +314,6 @@ func (s *StoreSuite) TestAnAnsweredDialWaitsToBeClassifiedAndIsClaimedOnce() {
 	s.Require().NoError(err)
 	s.Equal("done", latest.ClassifyState)
 	s.Equal("success", latest.Outcome)
-	s.True(latest.Converted)
 	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
 	later, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", classifyAfter.Add(time.Hour), time.Minute, 10)
 	s.Require().NoError(err)
@@ -524,7 +523,6 @@ func (s *StoreSuite) TestALateClassificationChangesNothing() {
 		byID[attempt.ID] = attempt
 	}
 	s.Equal("success", byID[latest.ID].Outcome)
-	s.True(byID[latest.ID].Converted)
 	s.Equal("abandoned", byID[older.ID].ClassifyState)
 	s.Empty(byID[older.ID].Outcome)
 }
@@ -574,7 +572,7 @@ func (s *StoreSuite) TestAClassificationWhoseContactCannotSettleStaysPending() {
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base, time.Minute, 10)
 	s.Require().NoError(err)
 
-	err = s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success", Converted: true},
+	err = s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success"},
 		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true})
 
 	s.ErrorIs(err, ErrNotLeaseHolder)
@@ -593,7 +591,7 @@ func (s *StoreSuite) TestAClassificationAndItsContactSettleTogether() {
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base, time.Minute, 10)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success", Converted: true},
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success"},
 		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
 
 	latest, _, err := s.store.CampaignAttempts.Latest(s.ctx, claimed.Contact.ID)
