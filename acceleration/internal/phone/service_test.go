@@ -1,12 +1,14 @@
 package phone
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -76,4 +78,13 @@ func (s *ServiceSuite) TestEveryVendorOfTheServiceHasItsCallSeriesAtZeroFromTheS
 	for _, vendor := range vendors {
 		s.True(has[vendor], vendor)
 	}
+}
+
+// A call that fails before it is sent, for a reason a second try would meet again, is not
+// marked never dialed: a campaign would retry it every few minutes for ever. Anything else is.
+func (s *ServiceSuite) TestOnlyAFailureThatMayPassIsMarkedNeverDialed() {
+	for _, err := range []error{ErrInvalid, store.ErrNoNumber, ErrNoStream, ErrNoSealerToCall, ErrNotConfigured, ErrSIPTrunksDisabled} {
+		s.True(lasting(stack.Wrap(err)), err.Error())
+	}
+	s.False(lasting(errors.New("store: number: read tcp: i/o timeout")))
 }

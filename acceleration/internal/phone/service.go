@@ -1046,11 +1046,12 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 }
 
 // lasting reports whether a call failed before it was sent for a reason that placing it again
-// would meet again: the request itself, a number the app does not hold, or the router's own
-// setup. Such a failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+// would meet again: the request itself, a number the app does not hold, or the deployment's own
+// setup (credentials, keys, a public URL, SIP trunks). Such a failure is not marked ErrNotDialed, so a campaign does not try it for ever.
 func lasting(err error) bool {
 	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) ||
-		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall)
+		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
+		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled)
 }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
