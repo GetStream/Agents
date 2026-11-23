@@ -156,10 +156,8 @@ func checkHTTPPath(fail func(field, format string, args ...any), field string, t
 	switch {
 	case len(tool.Path) > maxHTTPPath:
 		fail(field, "is over %d bytes", maxHTTPPath)
-		return
 	case !httpPath.MatchString(tool.Path):
 		fail(field, "%q does not start with / or holds a space, a ? or a #", tool.Path)
-		return
 	case slices.ContainsFunc(strings.Split(tool.Path, "/"), isDotSegment):
 		fail(field, "%q has a . or .. segment", tool.Path)
 	case strings.ContainsAny(placeholder.ReplaceAllString(tool.Path, ""), "{}"):
