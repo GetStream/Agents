@@ -1157,6 +1157,21 @@ func (s *TelnyxUnpaidSuite) TestAConversationFollowUpTheSessionRefusesIsNotDeliv
 	s.ErrorContains(err, "there is nothing to answer")
 }
 
+// A text channel's follow-up the session refuses to run fails the attempt with why, not as a
+// reply nobody wrote once the reply window passes (AI-3594 R1.2).
+func (s *TelnyxUnpaidSuite) TestATextFollowUpTheSessionRefusesFailsWithWhy() {
+	window := scheduledReplyWindow
+	scheduledReplyWindow = 2 * time.Second
+	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	user, opened := s.creditedOpening("holding/holding-model")
+	found, delivery := s.followUpIn(user, opened, "sms")
+	delivery.Text = ""
+
+	_, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+
+	s.ErrorContains(err, "there is nothing to answer")
+}
+
 // A conversation turn whose session ends while it runs is delivered, as it always was: nothing
 // more comes from the session to say otherwise.
 func (s *TelnyxUnpaidSuite) TestAConversationTurnWhoseSessionEndsIsDelivered() {
