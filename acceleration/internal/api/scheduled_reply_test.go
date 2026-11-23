@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 )
@@ -35,17 +34,4 @@ func TestAReplyOfTwoTurnsIsJoinedAsTheConversationJoinsThem(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "First.\n\nSecond.", text)
-}
-
-func TestTheFilesCodeHandedBackAreThoseOfARunAndOfSettledWork(t *testing.T) {
-	chart := sandbox.Attachment{Name: "chart.png", MIME: "image/png", URL: "https://cdn.example/chart.png"}
-
-	require.Equal(t, []sandbox.Attachment{chart}, madeBy(agent.ToolRan{Files: []sandbox.Attachment{chart}}))
-	require.Equal(t, []sandbox.Attachment{chart}, madeBy(agent.TaskSettled{Files: []sandbox.Attachment{chart}}))
-	require.Nil(t, madeBy(agent.Responded{Text: "Here is the chart."}))
-}
-
-func TestSettledWorksOwnWordsAreNotCarriedButTheAgentsReplyIs(t *testing.T) {
-	require.Empty(t, spokenOf(agent.TaskSettled{Text: "steps: 9,214"}))
-	require.Equal(t, "You walked 9,214 steps today.", spokenOf(agent.Responded{Text: "You walked 9,214 steps today."}))
 }

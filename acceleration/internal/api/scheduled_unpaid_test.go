@@ -913,6 +913,74 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnOutlivesARefusalReportedForAnot
 	}
 }
 
+// A text channel's reply that waited behind another turn of the session carries only its own
+// words, not the words of the turn it waited for (AI-3594 R1.2).
+func (s *TelnyxUnpaidSuite) TestATextReplyCarriesOnlyItsOwnTurnsWords() {
+	s.saying("Words of the earlier turn.")
+	found, done := s.heldConversationTurn(context.Background())
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: found.Spec().Caller.UserID,
+		CallerKind: "authenticated", TaskID: "task2", RunID: "run2", CommandID: "st_run2", Text: "drink water"}
+	type reply struct {
+		text string
+		err  error
+	}
+	captured := make(chan reply, 1)
+	go func() {
+		text, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+		captured <- reply{text, err}
+	}()
+	s.Never(func() bool { return len(captured) > 0 }, time.Second, 20*time.Millisecond, "the reply did not wait behind the busy turn")
+	s.saying("The scheduled words.")
+	s.holding.answers()
+	s.Require().NoError(<-done)
+
+	select {
+	case got := <-captured:
+		s.Require().NoError(got.err)
+		s.Equal("The scheduled words.", got.text)
+	case <-time.After(deliveryWait):
+		s.Fail("the reply never came")
+	}
+}
+
+// A text channel's reply with no other turn ahead of it is texted as it always was, word for
+// word, and as soon as its turn ends, not at the end of the reply window (AI-3594 R1.2, R1.3).
+func (s *TelnyxUnpaidSuite) TestATextReplyIsTextedAsItWasOnceItsTurnEnds() {
+	user, opened := s.creditedOpening("recites/recites-model")
+	found, delivery := s.followUpIn(user, opened, "sms")
+	type reply struct {
+		text string
+		err  error
+	}
+	captured := make(chan reply, 1)
+	go func() {
+		text, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+		captured <- reply{text, err}
+	}()
+
+	select {
+	case got := <-captured:
+		s.Require().NoError(got.err)
+		s.Equal("user: stretch", got.text, "what the reciting model was handed: the follow-up alone")
+	case <-time.After(deliveryWait):
+		s.Fail("the reply waited out the window though its turn had ended")
+	}
+}
+
+// saying has the holding model answer every turn it begins from now with text, until the test
+// ends.
+func (s *TelnyxUnpaidSuite) saying(text string) {
+	s.holding.mu.Lock()
+	defer s.holding.mu.Unlock()
+	before := s.holding.reply
+	s.holding.reply = text
+	s.T().Cleanup(func() {
+		s.holding.mu.Lock()
+		defer s.holding.mu.Unlock()
+		s.holding.reply = before
+	})
+}
+
 // creditedOpening is a user who texts the agent's SMS line, on model, and a session they opened on
 // the agent while the organization has credit.
 func (s *TelnyxUnpaidSuite) creditedOpening(model string) (*testClient, Session) {

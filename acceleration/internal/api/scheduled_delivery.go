@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -39,11 +38,6 @@ const scheduledPeerPath = "/internal/scheduled-tasks/deliver"
 // lapse, holding a call the task placed. The scheduler retries after it, so
 // a window spent is an attempt, not a lost occurrence.
 const scheduledWindow = 10 * time.Minute
-
-// scheduledReplySettle is how long the agent stays quiet, with nothing left
-// running, before what it said is taken as its answer: a channel's own
-// reading of a turn (channels.settleGap), over the same words.
-var scheduledReplySettle = 2 * time.Second
 
 // scheduledReplyWindow bounds reading an answer for a channel. The lease is
 // renewed while a delivery runs, so a slow turn is waited out; one still
@@ -469,64 +463,23 @@ func (s *Server) waitOutCall(ctx context.Context, found *session.Session, window
 	return nil
 }
 
-// captureReply runs the follow-up in found and reads what the agent
-// answers, and the files its code made, settled the way a channel's replies
-// settle: quiet for the settle gap, with nothing left running. The words are
-// the conversation's own; a channel carries them out, holding no second copy
-// of the turn. A follow-up the conversation already holds is not run again:
-// its words and files are read back.
+// captureReply runs the follow-up in found and reads what the agent answers to it, and the files
+// its code made, once its turn has ended (readBackReply). The words are the conversation's own,
+// of this follow-up alone: another turn the follow-up waited behind (followUpWithin) is not
+// carried. A channel carries them out, holding no second copy of the turn. A follow-up the
+// conversation already holds is not run again: its words and files are read back the same.
 func (s *Server) captureReply(ctx context.Context, found *session.Session, delivery scheduledDelivery) (string, []sandbox.Attachment, error) {
 	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
 	if err := refusedAgain(found, delivery); err != nil {
 		return "", nil, err
 	}
-	if _, _, known := found.FollowUpReply(delivery.CommandID); known {
-		reply, err := s.readBackReply(ctx, found, delivery.CommandID)
-		return reply.Text, reply.Files, err
-	}
-	events, detach := found.Watch()
-	defer detach()
-	if err := s.followUpWithin(ctx, found, delivery); err != nil {
-		return "", nil, err
-	}
-	var said []string
-	var files []sandbox.Attachment
-	active := found.Busy()
-	last := time.Now()
-	deadline := time.Now().Add(scheduledReplyWindow)
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		ended := false
-		select {
-		case <-ctx.Done():
-			return "", nil, ctx.Err()
-		case event, open := <-events:
-			if !open {
-				ended = true
-				break
-			}
-			active, last = true, time.Now()
-			if text := spokenOf(event); text != "" && (len(said) == 0 || said[len(said)-1] != text) {
-				said = append(said, text)
-			}
-			// Merged as the conversation keeps them, so a retry reading them back sends the same.
-			files = conversation.MergeFiles(files, madeBy(event))
-		case <-ticker.C:
-			if found.Busy() {
-				active = true
-			}
-			ended = time.Now().After(deadline) || active && !found.Busy() && time.Since(last) >= scheduledReplySettle
-		}
-		// A turn the organization may not pay for ends with the model's refusal, which no reply
-		// follows: the run records the money, not an agent that said nothing.
-		if refusal := turnRefusal(found, delivery.CommandID); refusal != nil {
-			return "", nil, refusal
-		}
-		if ended {
-			return captured(said, files)
+	if _, _, known := found.FollowUpReply(delivery.CommandID); !known {
+		if err := s.followUpWithin(ctx, found, delivery); err != nil {
+			return "", nil, err
 		}
 	}
+	reply, err := s.readBackReply(ctx, found, delivery.CommandID)
+	return reply.Text, reply.Files, err
 }
 
 // followUpInConversation puts the follow-up to found, whose conversation carries the reply, and
@@ -684,28 +637,6 @@ func captured(said []string, files []sandbox.Attachment) (string, []sandbox.Atta
 		return "", nil, undelivered(scheduling.ReasonNoReply, errors.New("the agent said and made nothing to carry"))
 	}
 	return text, files, nil
-}
-
-// spokenOf is what an event is worth carrying out, if anything: the agent's
-// finished reply. Settled work's own words are not: the agent's next turn
-// tells them, and the conversation keeps only the reply, which a retry reads
-// back.
-func spokenOf(event session.Event) string {
-	if happened, ok := event.(agent.Responded); ok {
-		return happened.Text
-	}
-	return ""
-}
-
-// madeBy is the files an event hands back: what the code a tool or settled work ran made.
-func madeBy(event session.Event) []sandbox.Attachment {
-	switch happened := event.(type) {
-	case agent.ToolRan:
-		return happened.Files
-	case agent.TaskSettled:
-		return happened.Files
-	}
-	return nil
 }
 
 // reachableText says whether a channel would carry the task's words to its
