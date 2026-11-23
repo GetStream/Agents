@@ -90,7 +90,7 @@ func itemsOf(pages []ActivityPage, organization string) []ActivityDay {
 
 // Defect: a page's rows that do not add up to what the organization's own read says for the
 // day: a row of another day, organization or app summed in, or one lost or read twice between
-// pages.
+// pages; or a page not telling every organization its items name.
 func (s *OpsActivitySuite) TestTheRequestsOfEachOrganizationOnADayAddUpToItsOwnRead() {
 	day := daysAgo(60, 20)
 	one, two, three := s.app, s.data.createApp(), s.data.createApp()
@@ -108,6 +108,18 @@ func (s *OpsActivitySuite) TestTheRequestsOfEachOrganizationOnADayAddUpToItsOwnR
 
 	pages := s.walk(day, day, 2)
 
+	for _, page := range pages {
+		var named, told []string
+		for _, item := range page.Items {
+			if len(named) == 0 || named[len(named)-1] != item.OrganizationId {
+				named = append(named, item.OrganizationId)
+			}
+		}
+		for _, progress := range page.Organizations {
+			told = append(told, progress.OrganizationId)
+		}
+		s.Equal(named, told, "a page tells every organization its items name, once")
+	}
 	for organization, requests := range map[string]int64{one.organization.ID: 15, two.organization.ID: 11, three.organization.ID: 3} {
 		var listed int64
 		for _, item := range itemsOf(pages, organization) {

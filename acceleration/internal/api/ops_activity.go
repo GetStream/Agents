@@ -107,10 +107,6 @@ func (s *Server) listActivity(ctx context.Context, request *listActivityRequest)
 // organizationProgress is how far each of organizations, sorted, got: the furthest step from
 // from to to, and every step it ever reached with its first day.
 func (s *Server) organizationProgress(ctx context.Context, organizations []string, from, to time.Time) ([]OrganizationProgress, error) {
-	progress := make([]OrganizationProgress, 0, len(organizations))
-	if len(organizations) == 0 {
-		return progress, nil
-	}
 	areas, err := s.store.Activities.OrganizationAreas(ctx, organizations, from, to)
 	if err != nil {
 		return nil, err
@@ -127,6 +123,7 @@ func (s *Server) organizationProgress(ctx context.Context, organizations []strin
 			firsts[area.OrganizationID] = append(firsts[area.OrganizationID], store.ActivityAreaDay{Area: area.Area, Day: *area.FirstAnswered})
 		}
 	}
+	progress := make([]OrganizationProgress, 0, len(organizations))
 	for _, organization := range organizations {
 		progress = append(progress, OrganizationProgress{
 			OrganizationId: organization, FurthestStep: furthestStep(sums[organization], days[organization]),

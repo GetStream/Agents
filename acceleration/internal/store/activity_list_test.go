@@ -37,6 +37,7 @@ func (s *StoreSuite) listFixture() {
 		s.on(0, "org-a", "app-1", "agent_setup", AuditSourceSDK, 1, 0),
 		s.on(0, "org-a", "app-1", "conversations", AuditSourceCLI, 1, 0),
 		s.on(0, "org-a", "app-1", "agent_setup", AuditSourceCLI, 4, 1),
+		s.on(1, "org-a", "app-1", "workers", AuditSourceSDK, 1, 0),
 		s.on(-1, "org-a", "app-1", "agent_setup", AuditSourceCLI, 1, 0),
 		s.on(2, "org-a", "app-1", "agent_setup", AuditSourceCLI, 1, 0),
 		s.on(0, "", "app-9", "agent_setup", AuditSourceCLI, 1, 0),
@@ -59,6 +60,7 @@ func (s *StoreSuite) TestActivityListIsTheRangesRowsByOrganizationDayAppAreaAndC
 		{"org-a", day, "app-1", "agent_setup", AuditSourceSDK},
 		{"org-a", day, "app-1", "conversations", AuditSourceCLI},
 		{"org-a", day, "app-2", "agent_setup", AuditSourceSDK},
+		{"org-a", next, "app-1", "workers", AuditSourceSDK},
 		{"org-a", next, "app-2", "conversations", AuditSourceSDK},
 		{"org-b", day, "app-3", "agent_setup", AuditSourceCLI},
 	}, listedOf(rows))
@@ -76,24 +78,26 @@ func (s *StoreSuite) TestActivityListGoesOnAfterAPositionWithNoRowLostOrRepeated
 	every, err := s.store.Activities.List(s.ctx, from, to, nil, 100)
 	s.Require().NoError(err)
 
-	var walked []ActivityRow
-	var after *ActivityPosition
-	for range len(every) {
-		rows, err := s.store.Activities.List(s.ctx, from, to, after, 2)
-		s.Require().NoError(err)
-		s.Require().LessOrEqual(len(rows), 2)
-		if len(rows) == 0 {
-			break
+	// A limit of one ends a page between every two rows, so between rows tying on every key but one.
+	for limit := 1; limit <= 3; limit++ {
+		var walked []ActivityRow
+		var after *ActivityPosition
+		for range len(every) + 1 {
+			rows, err := s.store.Activities.List(s.ctx, from, to, after, limit)
+			s.Require().NoError(err)
+			s.Require().LessOrEqual(len(rows), limit)
+			if len(rows) == 0 {
+				break
+			}
+			walked = append(walked, rows...)
+			last := rows[len(rows)-1]
+			after = &ActivityPosition{
+				OrganizationID: last.OrganizationID, Day: last.Day.Format(time.DateOnly), AppID: last.AppID, Area: last.Area, Client: last.Client,
+			}
 		}
-		walked = append(walked, rows...)
-		last := rows[len(rows)-1]
-		after = &ActivityPosition{
-			OrganizationID: last.OrganizationID, Day: last.Day.Format(time.DateOnly), AppID: last.AppID, Area: last.Area, Client: last.Client,
-		}
+		s.Equal(listedOf(every), listedOf(walked), "limit %d", limit)
 	}
-
-	s.Len(every, 6)
-	s.Equal(listedOf(every), listedOf(walked))
+	s.Len(every, 7)
 }
 
 // Defect: the counts of days outside the range summed, the first answered day bounded by the
