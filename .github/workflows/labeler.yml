@@ -10,3 +10,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/labeler@v6
+      id: labeler
+    # area:cross-sdk marks a PR that carries two or more SDK area labels, so the
+    # release notes list it under "Across SDKs" (.github/release.yml). It follows
+    # the PR's labels: added at two, removed below two.
+    - name: Mark cross-SDK pull requests
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        LABELS: ${{ steps.labeler.outputs.all-labels }}
+      run: |
+        sdk_areas=0
+        IFS=, read -ra labels <<< "$LABELS"
+        for label in "${labels[@]}"; do
+          case "$label" in
+            area:python|area:js|area:swift|area:android|area:flutter|area:go|area:dotnet|area:ruby|area:rust|area:php)
+              sdk_areas=$((sdk_areas + 1)) ;;
+          esac
+        done
+        has_cross=false
+        for label in "${labels[@]}"; do
+          [ "$label" = "area:cross-sdk" ] && has_cross=true
+        done
+        if [ "$sdk_areas" -ge 2 ] && [ "$has_cross" = false ]; then
+          gh api --method POST "repos/$REPO/issues/$PR/labels" -f "labels[]=area:cross-sdk" > /dev/null
+        elif [ "$sdk_areas" -lt 2 ] && [ "$has_cross" = true ]; then
+          gh api --method DELETE "repos/$REPO/issues/$PR/labels/area:cross-sdk" > /dev/null
+        fi

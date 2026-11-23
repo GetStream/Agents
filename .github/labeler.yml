@@ -80,3 +80,109 @@ project-info:
       - any-glob-to-any-file: '**/CHANGELOG.md'
       - any-glob-to-any-file: '**/CONTRIBUTING.md'
       - any-glob-to-any-file: '**/SECURITY.md'
+
+# Area labels, one per product area. release.yml groups the release notes by them, and
+# the labeler workflow adds area:cross-sdk to a PR that carries two or more SDK area labels.
+# An SDK's own examples belong to that SDK's area. The clients generated from the router's
+# OpenAPI spec do not count: a router change that only regenerates them stays a router change.
+
+# Router
+area:router:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'acceleration/**'
+          - 'tui/**'
+          - 'performance_benchmark/**'
+          - 'examples/routers/**'
+
+# Python SDK and plugins
+area:python:
+  - changed-files:
+      - all-globs-to-any-file: ['{sdks/python,plugins,tests}/**', '!plugins/*/**/_generated/**']
+      - any-glob-to-any-file:
+          - 'examples/old/**'
+          - 'examples/video_agents/**'
+          - 'examples/text_agents/{analyst,mcp_plugins,travel_support_py}/**'
+          - 'examples/voice_agents/{chat_support,customer_support,drama_voice,recruiter_voice,restaurant_orders,simple_voice_ai}/**'
+
+# JavaScript SDK
+area:js:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/js/**', '!sdks/js/src/generated/**']
+      - any-glob-to-any-file:
+          - 'examples/text_agents/travel_support_js/**'
+          - 'examples/voice_agents/{react_assistant,react_native_assistant,crew_assistant}/**'
+
+# Swift SDK
+area:swift:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/swift/**', '!sdks/swift/**/Generated/**', '!sdks/swift/core/generated.json']
+      - any-glob-to-any-file:
+          - 'Package.swift'
+          - 'examples/voice_agents/{swift_assistant,swift_demo}/**'
+
+# Android (Kotlin SDK)
+area:android:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/kotlin/**', '!sdks/kotlin/**/generated/**']
+      - any-glob-to-any-file: 'examples/voice_agents/{android_assistant,android_demo}/**'
+
+# Flutter (Dart SDK)
+area:flutter:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/dart/**', '!sdks/dart/**/generated/**']
+      - any-glob-to-any-file: 'examples/voice_agents/{flutter_assistant,flutter_demo}/**'
+
+# Go SDK
+area:go:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/go/**', '!sdks/go/acceleration/generated.go']
+
+# .NET SDK
+area:dotnet:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/dotnet/**', '!sdks/dotnet/src/*/Generated/**']
+
+# Ruby SDK
+area:ruby:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/ruby/**', '!sdks/ruby/lib/getstream/*/generated/**']
+
+# Rust SDK
+area:rust:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/rust/**', '!sdks/rust/src/{types,operations}.rs']
+
+# PHP SDK
+area:php:
+  - changed-files:
+      - all-globs-to-any-file: ['sdks/php/**', '!sdks/php/src/Generated/**']
+
+# Any example; release.yml lists a PR here only when no SDK area claimed it first
+area:examples:
+  - changed-files:
+      - any-glob-to-any-file: 'examples/**'
+
+# Agent skills and agent tooling
+area:skills:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.claude/**'
+          - '.agents/**'
+          - '.cursor/**'
+          - '.factory/**'
+          - 'AGENTS.md'
+          - 'CLAUDE.md'
+          - 'skills-lock.json'
+
+# CI
+area:ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**'
+
+# Docs: the docs/ tree and the top-level README (the docs label above matches every *.md)
+area:docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/**'
+          - 'README.md'
