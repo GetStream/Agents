@@ -422,14 +422,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	spec.Attribution.SessionID = spec.ID
 	// Refuse unsupported voice modes before opening a call or persistent resource.
 	if spec.Native() && m.options.STS == nil {
-		return nil, stack.Wrap(errors.New("session: this deployment routes no speech-to-speech model"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: this deployment routes no speech-to-speech model")))
 	}
 	if !spec.Text && !spec.Native() {
 		if m.options.STT == nil {
-			return nil, stack.Wrap(errors.New("session: an stt router is required for voice sessions"))
+			return nil, stack.Wrap(notConfigured(errors.New("session: an stt router is required for voice sessions")))
 		}
 		if m.options.TTS == nil {
-			return nil, stack.Wrap(errors.New("session: a tts router is required for voice sessions"))
+			return nil, stack.Wrap(notConfigured(errors.New("session: a tts router is required for voice sessions")))
 		}
 	}
 
@@ -2054,7 +2054,7 @@ func (m *Manager) box(ctx context.Context, spec Spec, connectors *dispatcher) (s
 		return nil, nil
 	}
 	if spec.Sandbox != daytonaProvider {
-		return nil, stack.Wrap(fmt.Errorf("session: there is no sandbox provider called %q", spec.Sandbox))
+		return nil, stack.Wrap(invalid(fmt.Errorf("session: there is no sandbox provider called %q", spec.Sandbox)))
 	}
 	granted := connectors != nil && len(connectors.grants) > 0
 	slots, err := m.options.SandboxLimits.Sandbox(ctx, owner(spec), policy.SandboxAsk{Config: spec.SandboxOptions, Granted: granted})
@@ -2109,8 +2109,8 @@ func (m *Manager) guardrail(ctx context.Context, spec Spec, stream streamapp.Ide
 	// arrives. Refusing is the honest answer - the alternative is a guardrail that is
 	// configured, reported, and enforcing nothing.
 	if spec.Native() {
-		return nil, stack.Wrap(errors.New(
-			"session: a speech-to-speech agent answers the caller directly, so a guardrail cannot screen its turns"))
+		return nil, stack.Wrap(invalid(errors.New(
+			"session: a speech-to-speech agent answers the caller directly, so a guardrail cannot screen its turns")))
 	}
 
 	policy, err := guardrail.Parse(spec.Guardrail)
@@ -2435,7 +2435,7 @@ func (m *Manager) line(spec Spec) (agent.Telephony, error) {
 		return nil, nil
 	}
 	if m.options.Phone == nil {
-		return nil, stack.Wrap(errors.New("session: this deployment has no telephony, so a number cannot be used"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: this deployment has no telephony, so a number cannot be used")))
 	}
 
 	return m.options.Phone.Line(phone.LineOptions{
@@ -2451,6 +2451,27 @@ func (m *Manager) line(spec Spec) (agent.Telephony, error) {
 
 // ErrSessionExists is a session asked for by an id some session already has.
 var ErrSessionExists = errors.New("session: a session with that id already exists")
+
+// ErrInvalid is a session or a turn asked for in a way it cannot be carried out: the
+// request's own mistake, or its agent config's. Its message says what to change. A failure of
+// the router's own, such as a database that failed, is never one.
+var ErrInvalid = errors.New("session: invalid request")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// ErrNotConfigured is a session that needs something this deployment does not have, such as
+// a speech-to-text router or telephony: the operator's to fix, not the request's.
+var ErrNotConfigured = errors.New("session: not configured")
+
+// notConfigured marks err as ErrNotConfigured without changing its message.
+func notConfigured(err error) error { return marked{err, ErrNotConfigured} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
 
 // ErrAppSettingsUnreadable is an app's settings that could not be read. It is the router's
 // failure, not the caller's request.
@@ -2510,7 +2531,7 @@ func (m *Manager) Conversations() (*persistent.Service, error) {
 		// A conversation is kept in the Stream app its session acts in, so without a way
 		// to say which app that is there is nowhere to keep one.
 		if m.options.Stream == nil {
-			return nil, stack.Wrap(errors.New("Stream Chat credentials are required for persistent conversations"))
+			return nil, stack.Wrap(notConfigured(errors.New("Stream Chat credentials are required for persistent conversations")))
 		}
 		service := persistent.NewForChats(persistent.StreamApps(m.options.Stream))
 		if m.options.Store != nil {

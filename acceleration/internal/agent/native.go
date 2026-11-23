@@ -65,7 +65,7 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 }
 
 // errNativeTakesNoImages is a typed turn with images for a speech-to-speech agent.
-var errNativeTakesNoImages = errors.New("agent: a speech-to-speech agent takes no images on a typed turn")
+var errNativeTakesNoImages = invalid(errors.New("agent: a speech-to-speech agent takes no images on a typed turn"))
 
 // errNotJoined is a typed turn for an agent that has not joined, or has left.
 var errNotJoined = errors.New("agent: not joined")

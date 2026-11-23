@@ -1156,7 +1156,7 @@ func (a *Agent) CheckAsked(asked options.LLM) error {
 		return nil
 	}
 	if a.native() {
-		return errors.New("agent: a speech-to-speech agent takes no reasoning effort or output limit")
+		return invalid(errors.New("agent: a speech-to-speech agent takes no reasoning effort or output limit"))
 	}
 	a.mu.Lock()
 	model := a.llm
@@ -1164,7 +1164,10 @@ func (a *Agent) CheckAsked(asked options.LLM) error {
 	if model == nil {
 		return stack.Wrap(errors.New("agent: not joined"))
 	}
-	return model.Capabilities().Validate(llm.ResponseParams{}.Overwrite(asked))
+	if err := model.Capabilities().Validate(llm.ResponseParams{}.Overwrite(asked)); err != nil {
+		return invalid(err)
+	}
+	return nil
 }
 
 // VideoFramesTool is the caller's tool the agent reads frames of the user's video through.
@@ -1176,6 +1179,19 @@ const visionSkill = "vision"
 // ErrCannotSeeImages is a turn carrying images for an agent with nothing that can look at
 // them: no vision skill, and a conversation model that takes text alone.
 var ErrCannotSeeImages = errors.New("agent: images need a vision skill or a conversation model that accepts images, and this agent has neither")
+
+// ErrInvalid is a turn asked for in a way this agent cannot take: the caller's own mistake. Its
+// message says what to change.
+var ErrInvalid = errors.New("agent: invalid request")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
 
 func (a *Agent) captureVideo(ctx context.Context, request harness.CaptureRequest) ([]llm.ContentPart, error) {
 	if a.options.ToolRunner == nil {

@@ -1659,7 +1659,9 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.store == nil {
 		dependencies["postgres"] = "not configured"
 	} else if err := s.store.Ping(ctx); err != nil {
-		dependencies["postgres"] = err.Error()
+		// Anyone may read the health check, and the error names where the database is.
+		s.logger.Error("the database did not answer the health check", "error", err)
+		dependencies["postgres"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["postgres"] = "ok"
@@ -1668,7 +1670,8 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.live == nil {
 		dependencies["redis"] = "not configured"
 	} else if err := s.live.Ping(ctx); err != nil {
-		dependencies["redis"] = err.Error()
+		s.logger.Error("redis did not answer the health check", "error", err)
+		dependencies["redis"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["redis"] = "ok"
@@ -1903,7 +1906,7 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
 		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	stats := make([]TagStatsBucket, 0, len(buckets))
@@ -2022,7 +2025,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	spend := make([]SpendBucket, 0, len(buckets))

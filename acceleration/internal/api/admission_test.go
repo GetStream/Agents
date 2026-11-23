@@ -901,7 +901,7 @@ func (s *AdmissionSuite) TestAMoneyRefusalIsTheCodeNotTheText() {
 	_, ok = moneyError(nil)
 	s.False(ok)
 	var answer APIError
-	s.Require().True(errors.As(refusedRequest(errors.New("routing: unknown target")), &answer))
+	s.Require().True(errors.As(refusedRequest(routing.Refused(errors.New("routing: unknown target"))), &answer))
 	s.True(strings.HasPrefix(answer.Code, "invalid_request"))
 }
 

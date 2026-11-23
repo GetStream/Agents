@@ -788,7 +788,7 @@ func (s *Session) Respond(ctx context.Context, text string, images []llm.ImagePa
 }
 
 // errNothingToAnswer is a follow-up with no text and no images.
-var errNothingToAnswer = errors.New("there is nothing to answer")
+var errNothingToAnswer = invalid(errors.New("there is nothing to answer"))
 
 // nothingToAnswer is a follow-up with no text and no images, so the model has nothing to be
 // asked, as on the HTTP answer's 400: a respond a worker from before photos were read sends for
@@ -799,7 +799,7 @@ func nothingToAnswer(text string, images []llm.ImagePart) bool {
 }
 
 // errPersonalNeedsCommand is a question to a personal conversation sent without a command ID.
-var errPersonalNeedsCommand = errors.New("personal conversations require a command ID")
+var errPersonalNeedsCommand = invalid(errors.New("personal conversations require a command ID"))
 
 // CheckRespond refuses what Respond, or RespondCommand with command id, would refuse a
 // question with a voice note for before its turn starts, for a caller to learn it before work
@@ -2570,7 +2570,7 @@ func (m *Manager) skills(ctx context.Context, spec Spec) (harness.Skills, error)
 	}
 	for _, skill := range named.Skills {
 		if err := harness.NeedsSandbox(skill.Name, skill.Files, spec.Sandbox != ""); err != nil {
-			return harness.Skills{}, stack.Wrap(fmt.Errorf("session: %w", err))
+			return harness.Skills{}, stack.Wrap(invalid(fmt.Errorf("session: %w", err)))
 		}
 	}
 	return named, nil
@@ -2627,7 +2627,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 			skill, known = builtin.Lookup(name)
 		}
 		if !known {
-			return harness.Skills{}, stack.Wrap(fmt.Errorf("session: there is no skill called %q", name))
+			return harness.Skills{}, stack.Wrap(invalid(fmt.Errorf("session: there is no skill called %q", name)))
 		}
 		resolved.Skills = append(resolved.Skills, skill)
 	}

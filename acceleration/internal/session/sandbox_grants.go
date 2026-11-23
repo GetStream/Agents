@@ -211,11 +211,11 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 		return egress.NewBroker(options)
 	}
 	if m.options.SandboxSecretPrefix == "" {
-		return nil, stack.Wrap(errors.New("session: a connector binding sets sandbox, and this router has no " +
-			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: a connector binding sets sandbox, and this router has no " +
+			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with")))
 	}
 	if m.options.SandboxBroker != metered.SandboxSecretsBroker {
-		return nil, stack.Wrap(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker))
+		return nil, stack.Wrap(notConfigured(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker)))
 	}
 	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
 }
@@ -225,14 +225,14 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 // open network or CIDR ranges would reach nothing but the grants.
 func behindProxy(config sandbox.Config) error {
 	if config.Network && len(config.AllowedDomains) == 0 && len(config.NetworkAllowList) == 0 {
-		return stack.Wrap(errors.New("session: the agent config's sandbox_options.network is true, and this router's " +
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network is true, and this router's " +
 			"code_sandbox.broker is proxy, which sends every request from the sandbox through the egress proxy, and the " +
-			"proxy reaches only connectors' hosts and sandbox_options.allowed_domains: list the domains code needs in sandbox_options.allowed_domains instead"))
+			"proxy reaches only connectors' hosts and sandbox_options.allowed_domains: list the domains code needs in sandbox_options.allowed_domains instead")))
 	}
 	if len(config.NetworkAllowList) > 0 {
-		return stack.Wrap(errors.New("session: the agent config's sandbox_options.network_allow_list is set, and this " +
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network_allow_list is set, and this " +
 			"router's code_sandbox.broker is proxy, which reaches hosts by name only: list the domains code needs in " +
-			"sandbox_options.allowed_domains instead"))
+			"sandbox_options.allowed_domains instead")))
 	}
 	return nil
 }
