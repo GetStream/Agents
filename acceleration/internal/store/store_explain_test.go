@@ -458,11 +458,14 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return store.Sessions.Upsert(ctx, &AgentSession{ID: "seeded-session-7", CustomerID: "customer-7", AgentName: "agent 7",
 				UserID: "user-7", CallerKind: "user", CreatedAt: s.base})
 		}},
+		{name: "Sessions.Supersede", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
+			return store.Sessions.Supersede(ctx, "customer-8", "seeded-session-8", s.base)
+		}},
 		{name: "Sessions.SetToolTimeout", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.SetToolTimeout(ctx, "customer-7", "seeded-session-7", "search", 1000)
 		}},
 		{name: "Sessions.Close", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, "left")
+			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, s.base, "left")
 		}},
 		{name: "Sessions.SawVideo", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.SawVideo(ctx, "customer-7", "seeded-session-7")

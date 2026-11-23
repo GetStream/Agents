@@ -140,6 +140,13 @@ type AgentSession struct {
 	Modality  string    `bun:"modality,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
 	UpdatedAt time.Time `bun:"updated_at,notnull"`
+	// OpenedAt is when the router running the session opened it, first or carried on since.
+	// Zero, stored as NULL, on a row from before it was kept.
+	OpenedAt time.Time `bun:"opened_at,nullzero"`
+	// SupersededAt is when the session was carried on in another shard: when the router that
+	// carried it on opened it. That shard's row says what it is from then on
+	// (Sessions.Supersede), and a list leaves this row out. Nil for a row nothing superseded.
+	SupersededAt *time.Time `bun:"superseded_at"`
 	// ClosedAt is nil while the session is still running.
 	ClosedAt *time.Time `bun:"closed_at"`
 	// EndReason is why it ended (session.EndReason), empty while it runs and for one that
@@ -312,6 +319,10 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		Set("closed_at = NULL").
 		Set("end_reason = ''").
 		Set("updated_at = EXCLUDED.updated_at").
+		Set("opened_at = EXCLUDED.opened_at").
+		// Superseded by a run opened after this write's, the row stays superseded: the write is
+		// a late one, of a run that ended.
+		Set("superseded_at = CASE WHEN ?TableAlias.superseded_at > EXCLUDED.opened_at THEN ?TableAlias.superseded_at END").
 		// A reopened session's tool settings are kept for the kind of caller that opened it (the
 		// row's caller_kind, which a reopen does not change): an end user's device carrying on
 		// its backend's conversation neither clears the backend's tools nor sets its timeout.
@@ -324,6 +335,11 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		// stays not known: NULL OR false is NULL.
 		Set("remembers = ?TableAlias.remembers OR EXCLUDED.remembers").
 		Where("?TableAlias.customer_id = EXCLUDED.customer_id").
+		// A write of a run opened before the one the row holds is late, from a router that held
+		// the session earlier, and changes nothing: the close that router queued next would
+		// otherwise close the run opened since. A write with no time is a router's from before
+		// opened_at was kept.
+		Where("EXCLUDED.opened_at IS NULL OR ?TableAlias.opened_at IS NULL OR ?TableAlias.opened_at <= EXCLUDED.opened_at").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
@@ -333,7 +349,100 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
 	}
 	if written == 0 {
-		return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
+		// Nothing written: the row is another customer's, or this customer's own of a run
+		// opened since, which a late write leaves as it is.
+		own, err := r.store.shard.NewSelect().Model((*AgentSession)(nil)).
+			Where("id = ?", session.ID).
+			Where("customer_id = ?", session.CustomerID).
+			Exists(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		if !own {
+			return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
+		}
+	}
+	return nil
+}
+
+// Supersede makes the row Upsert just wrote in this shard, of a session carried on there that
+// this router opened at opened, the row the session is listed and found by. Its rows opened
+// before, in any shard, are marked superseded, and this one takes from the one opened last
+// what its own run has not seen: when it was pinned, its review score, when it last answered,
+// the modality it reached and whether it remembered. This shard's own row is not among them:
+// it opened at opened, not before.
+//
+// Only a row opened before is superseded, so a late write from a router that held the session
+// earlier never hides the row of the one holding it now. Such a write's own row is superseded
+// instead, by the run opened since.
+//
+// The rows are read, superseded already or not, before any is marked, and every write only
+// moves one way. A call that failed partway, which the recorder retries, ends as one that did
+// not.
+func (r *Sessions) Supersede(ctx context.Context, customerID, id string, opened time.Time) error {
+	if customerID == "" || id == "" || opened.IsZero() {
+		return stack.Wrap(errors.New("store: a customer, a session id and when it opened are required"))
+	}
+	// As Postgres keeps it, so this router's own row compares as opened at opened.
+	opened = opened.Truncate(time.Microsecond)
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
+		var rows []AgentSession
+		err := db.NewSelect().Model(&rows).
+			Column("opened_at", "modality", "last_response_at", "pinned_at", "review_score", "remembers", "updated_at").
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Scan(ctx)
+		return rows, err
+	})
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: supersede session: %w", err))
+	}
+	// The run opened last first. A row from before opened_at was kept reads as opened first.
+	rows := merged(lists, func(a, b AgentSession) int {
+		return cmp.Or(b.OpenedAt.Compare(a.OpenedAt), b.UpdatedAt.Compare(a.UpdatedAt))
+	}, 0)
+	if len(rows) > 0 && rows[0].OpenedAt.After(opened) {
+		since := rows[0].OpenedAt
+		_, err := r.store.shard.NewUpdate().Model((*AgentSession)(nil)).
+			Set("superseded_at = GREATEST(superseded_at, ?)", since).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("opened_at IS NULL OR opened_at < ?", since).
+			Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: supersede session: by a run opened since: %w", err))
+		}
+		return nil
+	}
+	earlier := slices.IndexFunc(rows, func(row AgentSession) bool { return row.OpenedAt.Before(opened) })
+	if earlier < 0 {
+		return nil
+	}
+	from := rows[earlier]
+	_, err = r.store.shard.NewUpdate().Model((*AgentSession)(nil)).
+		// Modality only moves up, and so does remembering: once true it stays true.
+		Set("modality = CASE WHEN ?0 IN (modality, ?2) THEN ?0 WHEN ?1 IN (modality, ?2) THEN ?1 ELSE modality END",
+			ModalityVideo, ModalityVoice, from.Modality).
+		Set("remembers = remembers OR ?", from.Remembers).
+		Set("last_response_at = GREATEST(last_response_at, ?)", from.LastResponseAt).
+		Set("pinned_at = COALESCE(pinned_at, ?)", from.PinnedAt).
+		Set("review_score = COALESCE(review_score, ?)", from.ReviewScore).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: supersede session: take its earlier row's: %w", err))
+	}
+	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
+		return db.NewUpdate().Model((*AgentSession)(nil)).
+			Set("superseded_at = GREATEST(superseded_at, ?)", opened).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("opened_at IS NULL OR opened_at < ?", opened).
+			Exec(ctx)
+	})
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: supersede session: mark its earlier rows: %w", err))
 	}
 	return nil
 }
@@ -363,10 +472,11 @@ func (r *Sessions) SetToolTimeout(ctx context.Context, customerID, id, kind stri
 
 // Close records that a session ended, and why: empty when nothing said. One that already
 // ended keeps the first time and reason: a session is left once, and a second close is the
-// same leaving reported again.
-func (r *Sessions) Close(ctx context.Context, customerID, id string, at time.Time, reason string) error {
-	if customerID == "" || id == "" {
-		return stack.Wrap(errors.New("store: a customer and a session id are required"))
+// same leaving reported again. opened is when the router closing it opened it: a row another
+// router opened again since, carrying the session on, is that router's to close.
+func (r *Sessions) Close(ctx context.Context, customerID, id string, opened, at time.Time, reason string) error {
+	if customerID == "" || id == "" || opened.IsZero() {
+		return stack.Wrap(errors.New("store: a customer, a session id and when it opened are required"))
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()
@@ -380,6 +490,7 @@ func (r *Sessions) Close(ctx context.Context, customerID, id string, at time.Tim
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("closed_at IS NULL").
+		Where("opened_at IS NULL OR opened_at <= ?", opened).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: close session: %w", err))
@@ -499,28 +610,35 @@ func (r *Sessions) Exists(ctx context.Context, id string) (bool, error) {
 	return exists, nil
 }
 
-// Get returns one session a customer ran.
+// Get returns one session a customer ran. A session carried on in another shard has a row in
+// each, and the one not superseded says what it is now. The row in this shard answers unless it
+// is superseded or missing; only then are the other shards read, so a shard that is down fails
+// no read of a session it does not hold. While the shard a session was carried on in is down,
+// its superseded row here answers, as it was when the session left.
 func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession, error) {
 	if customerID == "" || id == "" {
 		return AgentSession{}, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
-	session, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentSession, error) {
-		var session AgentSession
-		err := db.NewSelect().Model(&session).
+	sessions, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
+		var sessions []AgentSession
+		err := db.NewSelect().Model(&sessions).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
-			Limit(1).
 			Scan(ctx)
-		return session, err
+		// Read past a superseded row, to the shard the session was carried on in.
+		if err == nil && (len(sessions) == 0 || sessions[0].SupersededAt != nil) {
+			err = sql.ErrNoRows
+		}
+		return sessions, err
 	})
+	if len(sessions) > 0 {
+		return sessions[0], nil
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return AgentSession{}, unknownStoredSession(id)
 	}
-	if err != nil {
-		return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
-	}
-	return session, nil
+	return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
 }
 
 // ConversationPin is the Stream app a customer's conversation was kept in, read off the
@@ -717,7 +835,8 @@ func pageOfSessions(lists [][]AgentSession, filter SessionFilter) []AgentSession
 // honoured by query and forgotten by search is one a caller uses to read somebody else's
 // conversations.
 func narrowSessions(query *bun.SelectQuery, filter SessionFilter) *bun.SelectQuery {
-	query = query.Limit(SessionLimit(filter.Limit) + 1)
+	// A session carried on in another shard is listed by that shard's row alone.
+	query = query.Limit(SessionLimit(filter.Limit) + 1).Where("superseded_at IS NULL")
 
 	if filter.UserID != "" {
 		query = query.Where("user_id = ?", filter.UserID)
@@ -849,7 +968,7 @@ FROM unnest(?::text[]) AS app(id)
 CROSS JOIN LATERAL (
     SELECT id, customer_id, agent_name, modality, created_at, closed_at, end_reason
     FROM agent_sessions
-    WHERE customer_id = app.id AND created_at >= ?
+    WHERE customer_id = app.id AND created_at >= ? AND superseded_at IS NULL
     ORDER BY created_at DESC, id DESC
     LIMIT ?
 ) AS asn`
