@@ -166,7 +166,7 @@ func documentHandWritten(api huma.API) {
 			"and `name` of the person whose turn asked for it, when the router knows) and " +
 			"`conversation` (`cid` when the conversation is kept, and the session's `custom`). " +
 			"Every watcher sees every `tool_call`, and `run` says whether this one is to run it: " +
-			"only a watcher that runs the tool answers, and a result from any other is dropped. A " +
+			"only a watcher that runs the tool answers, and a result from any other is dropped while the call waits. A " +
 			"watcher says which tools it runs with `tools` when it attaches. Without it, it runs " +
 			"the session's tools when it is on the side that created the session: a backend for a " +
 			"session a backend created, the same person for one a device created. A tool a backend " +
@@ -185,7 +185,9 @@ func documentHandWritten(api huma.API) {
 			"saying why; the socket stays open. Every watcher is sent both. A result sent in the " +
 			"moment its call times out may be taken and lost without either. A result from a watcher " +
 			"that does not run a call still waiting for it is dropped without a word, since the " +
-			"watcher that runs it answers.\n" +
+			"watcher that runs it answers. Once the call waits no longer, a result from any watcher, " +
+			"running it or not, is answered with `tool_result_ignored` like any other. An `id` that " +
+			"is not a string names no call.\n" +
 			"While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) " +
 			"to keep the call going when the caller talks over the agent, which would otherwise " +
 			"cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it " +

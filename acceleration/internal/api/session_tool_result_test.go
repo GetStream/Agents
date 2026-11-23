@@ -157,3 +157,52 @@ func (s *SessionEventsSuite) TestAToolResultIgnoredRepeatsNoMoreThanTheStartOfAL
 	s.Equal(long[:maxEchoedID], ignored["tool_call_id"])
 	s.Equal(long[:maxEchoedID], ignored["turn_id"])
 }
+
+// An id that is not a string is no reason to close the socket: a command that never named a
+// call by id is carried out as it was before.
+func (s *SessionEventsSuite) TestACommandWithAnIDThatIsNotAStringIsStillCarriedOut() {
+	answer := s.utils.uuid()
+	opened := s.inWriting(CreateSessionRequest{
+		Llm: pointerTo("echo/echo-model"), ConfigId: s.data.instructedAgent(answer),
+	})
+	watching := s.watch(opened.Id)
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{"type": "respond", "id": 7, "text": "hello"}))
+
+	s.Contains(s.awaitWithoutError(watching, "responded")["text"], answer)
+}
+
+// A tool_result whose id is not a string names no call, and is answered as one naming none.
+func (s *SessionEventsSuite) TestAToolResultWithAnIDThatIsNotAStringIsAnsweredWithAnError() {
+	opened := s.withATool()
+	watching := s.watch(opened.Id)
+	s.respond(opened.Id)
+	asked := s.await(watching, "tool_call")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{"type": "tool_result", "id": map[string]any{"call": 1}}))
+
+	s.Equal("tool", s.await(watching, "error")["context"])
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_result", "tool_call_id": asked["id"], "output": "it ships tomorrow",
+	}))
+	s.Equal("it ships tomorrow", s.await(watching, "tool_ran")["result"], "the socket stays open")
+}
+
+// A watcher that does not run a call is dropped only while the call waits: once it is
+// answered, its result is answered as any other that reaches nothing.
+func (s *SessionEventsSuite) TestAResultFromAWatcherThatDoesNotRunTheCallIsIgnoredOnceTheCallIsAnswered() {
+	opened, backend, browser := s.backendsToolWatchedByItsUser("")
+	s.respondFor(opened.Id)
+	asked := s.await(browser, "tool_call")
+	s.await(backend, "tool_call")
+	s.Require().NoError(backend.WriteJSON(map[string]any{
+		"type": "tool_result", "tool_call_id": asked["id"], "output": "it ships tomorrow",
+	}))
+	s.await(browser, "tool_ran")
+
+	s.Require().NoError(browser.WriteJSON(map[string]any{
+		"type": "tool_result", "tool_call_id": asked["id"], "output": "run in the browser",
+	}))
+
+	s.Equal(asked["id"], s.await(backend, "tool_result_ignored")["tool_call_id"], "every watcher is sent it")
+}

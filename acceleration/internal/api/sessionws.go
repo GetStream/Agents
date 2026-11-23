@@ -351,9 +351,11 @@ type watcherCommand struct {
 	// ToolCallID names the call a tool_result answers.
 	ToolCallID string `json:"tool_call_id"`
 	// ID is tool_call_id under the name the tool_call frame gives it, which a client
-	// echoing that frame's fields sends. tool_call_id wins when both are sent.
-	ID        string `json:"id"`
-	CommandID string `json:"request_id"`
+	// echoing that frame's fields sends. tool_call_id wins when both are sent. It is read raw
+	// and used only when it is a string: a command that never named a call by id may carry an
+	// id of any shape, and must not close the socket over a field it never read.
+	ID        json.RawMessage `json:"id"`
+	CommandID string          `json:"request_id"`
 	// LegacyCommandID is request_id under its name before v0.6.35, which clients built
 	// against an older SDK (the getstream.io Ask panel among them) still send.
 	LegacyCommandID string `json:"command_id"`
@@ -490,7 +492,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		command.CommandID = command.LegacyCommandID
 	}
 	if command.ToolCallID == "" {
-		command.ToolCallID = command.ID
+		command.ToolCallID = stringID(command.ID)
 	}
 	switch command.Type {
 	case "tool_result":
@@ -624,6 +626,15 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		found.Report(fmt.Errorf("unknown command %q", command.Type), "command")
 	}
 	return true
+}
+
+// stringID is raw as a string, or empty when it is not one.
+func stringID(raw json.RawMessage) string {
+	var id string
+	if json.Unmarshal(raw, &id) != nil {
+		return ""
+	}
+	return id
 }
 
 func resolveTool(found *session.Session, callID, commandID, turnID string, parts []llm.ContentPart, failure string) bool {
