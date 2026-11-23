@@ -32,6 +32,10 @@ const VoiceClone = "voice_clone"
 // line or two: the line is sent to the provider and billed.
 const MaxLine = 500
 
+// prepareFailed is the reason a failed binding records. The provider's own answer can carry
+// its hosts, request ids and bodies, so it goes to the log only.
+const prepareFailed = "the provider could not make a voice from these recordings"
+
 // ErrLineTooLong is a line to hear a voice say that is over MaxLine characters.
 var ErrLineTooLong = errors.New("voices: the line is too long to hear a voice say")
 
@@ -300,7 +304,7 @@ func (s *Service) prepareOne(
 	externalID := made.ExternalID
 	if err != nil {
 		binding.State = store.VoiceFailed
-		binding.Error = err.Error()
+		binding.Error = prepareFailed
 		s.logger.Warn("a provider would not take this voice",
 			"voice", voice.ID, "provider", provider, "error", err)
 	} else {

@@ -86,6 +86,7 @@ func (s *Server) hearVoiceNote(ctx context.Context, spec session.Spec, source, h
 	defer cancel()
 	note, err := voiceNoteAt(ctx, s.imageHTTP, source)
 	if err != nil {
+		recordFailure(ctx, withoutURL(err), "")
 		return conversation.VoiceNote{}, invalidRequest(fmt.Sprintf("the voice note could not be used: %v", err))
 	}
 	if heard != "" {
@@ -101,7 +102,7 @@ func (s *Server) hearVoiceNote(ctx context.Context, spec session.Spec, source, h
 		return conversation.VoiceNote{}, answer
 	}
 	if failure != nil {
-		return conversation.VoiceNote{}, modelFailed(failure)
+		return conversation.VoiceNote{}, modelFailed(ctx, failure)
 	}
 	note.Heard = strings.TrimSpace(transcript.Text)
 	if note.Heard == "" {
