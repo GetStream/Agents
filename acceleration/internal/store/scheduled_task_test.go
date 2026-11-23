@@ -1213,8 +1213,8 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1"))
 	}), "DeleteForSession")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
-	// One batch of runs and one of tasks, with nothing to prune.
-	s.Equal(2, s.countQueries(func() {
+	// The lost runs by hand settled, then one batch of runs and one of tasks, with nothing to prune.
+	s.Equal(3, s.countQueries(func() {
 		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
 		s.Require().NoError(err)
 	}), "Prune")

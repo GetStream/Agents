@@ -195,6 +195,15 @@ func (s *Server) DeliverScheduledTask(ctx context.Context, claimed store.Claimed
 	if task.ChannelThread != "" {
 		return s.deliverOnThread(ctx, delivery, task.ChannelThread)
 	}
+	if delivery.SessionID == "" {
+		// The claim read the task before an earlier attempt at the occurrence opened its session
+		// (openTaskSession records it on the task): a retry follows up in that one.
+		stored, err := s.store.ScheduledTasks.Get(ctx, task.CustomerID, task.ID)
+		if err != nil {
+			return "", "", err
+		}
+		delivery.SessionID = stored.SessionID
+	}
 	if delivery.SessionID != "" {
 		if _, live := s.sessions.Get(delivery.SessionID, delivery.owner()); live {
 			deliveredTo, sessionID, err := s.deliverChainHere(ctx, delivery)
@@ -435,7 +444,20 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 		if err != nil {
 			return "", "", err
 		}
+		// The words go out once per run and channel: an attempt after the one that sent them,
+		// such as a worker taking over a run whose finish was lost, finds them taken.
+		took, err := s.store.ScheduledTaskRuns.TakeText(ctx, delivery.CustomerID, delivery.RunID, channel)
+		if err != nil {
+			return "", "", err
+		}
+		if !took {
+			return channel, found.ID(), nil
+		}
 		if err := s.notifyText(ctx, delivery, channel, text, files); err != nil {
+			// Not sent, so a later attempt may send it.
+			if err := s.store.ScheduledTaskRuns.ReleaseText(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, channel); err != nil {
+				s.logger.Error("could not give back a scheduled task's text", "run", delivery.RunID, "error", err)
+			}
 			return "", "", unpaid(err)
 		}
 		return channel, found.ID(), nil

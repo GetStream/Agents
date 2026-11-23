@@ -36,6 +36,13 @@ const (
 // it goes, so a run this old in running belongs to one that died.
 const scheduledTaskStaleRun = 10 * time.Minute
 
+// scheduledTaskManualRunLost is how long a run made by hand may sit in running before Prune
+// writes it missed. No lease covers it: only the router that took the request finishes it, so
+// one that stopped mid-delivery leaves it running for good, and its task with it. Every wait a
+// delivery makes is bounded (a call rung and held, a reply, a busy conversation), together by
+// hours at most, so a run a day old in running belongs to a router that stopped.
+const scheduledTaskManualRunLost = 24 * time.Hour
+
 // maxScheduledTaskRunAttempts is how many times one occurrence is claimed
 // before it is failed rather than taken over again: the first claim, the one
 // taking it up after a quiet-hours hold, and one after a lost worker. Each
@@ -384,7 +391,7 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 			}
 		}
 		// A run made by hand is left to the delivery that made it, which
-		// always records its outcome.
+		// records its outcome, or to Prune once its router stopped.
 		settle := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").
@@ -939,18 +946,30 @@ WITH batch AS MATERIALIZED (
 DELETE FROM scheduled_tasks AS t USING batch WHERE t.customer_id = batch.customer_id AND t.id = batch.id`
 )
 
+// settleLostManualRunsSQL writes missed the runs made by hand still running a while after they
+// started, before ScheduledTasks.Prune deletes. It reads scheduled_task_runs_finished_idx by its
+// unfinished runs, the few in flight (TestPruneReadsItsIndexes).
+const settleLostManualRunsSQL = `
+UPDATE scheduled_task_runs SET state = 'missed', finished_at = now()
+WHERE finished_at IS NULL AND trigger = 'manual' AND state = 'running'
+AND started_at < now() - make_interval(secs => ?)`
+
 // Prune deletes the runs that finished, and the tasks that completed or failed,
 // more than ScheduledTasksKept ago, in batches until none is left, and says how many of each.
 // A task counts from updated_at, which the finish of its last run sets as the task leaves
 // active, but is kept while a run of it is unfinished or finished within ScheduledTasksKept:
 // a completed task can be run by hand without its row changing. An active or paused task is
-// never deleted, whatever its age; its old runs are.
+// never deleted, whatever its age; its old runs are. A run made by hand still running
+// scheduledTaskManualRunLost after it started is written missed first, so it finishes.
 //
 // SKIP LOCKED keeps two routers pruning at once off each other's rows. The runs batch locks
 // only run rows, and the tasks batch takes the task row before the runs it cascades to, as
 // every writer of both does (lockScheduledTask), so neither can deadlock with
 // ScheduledTasks.Finish.
 func (r *ScheduledTasks) Prune(ctx context.Context) (runs, tasks int64, err error) {
+	if _, err = r.store.global.ExecContext(ctx, settleLostManualRunsSQL, scheduledTaskManualRunLost.Seconds()); err != nil {
+		return 0, 0, stack.Wrap(fmt.Errorf("store: settle lost scheduled task runs: %w", err))
+	}
 	runs, err = r.pruneInBatches(ctx, scheduledTaskRunsPruned, pruneScheduledTaskRunsSQL)
 	if err != nil {
 		return runs, 0, stack.Wrap(fmt.Errorf("store: prune scheduled task runs: %w", err))
@@ -1003,7 +1022,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 			return fmt.Errorf("store: pause scheduled tasks for config: %w", err)
 		}
 		// A run made by hand is left to the delivery that made it, which
-		// always records its outcome.
+		// records its outcome, or to Prune once its router stopped.
 		if _, err := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").

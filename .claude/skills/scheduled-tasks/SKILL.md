@@ -175,7 +175,7 @@ Read the task, then its runs, then the logs, in that order.
 | `next_run_at`, `upcoming` | same | In the task's zone. Wrong hour: the zone (below) |
 | `schedule.timezone` | same | Resolved at create from the call, the session, `users.timezone`, then `default_timezone`. A session opened with a zone moves `users.timezone` (`internal/api/session_create.go:76`) |
 | `quiet_hours` | same | An occurrence due inside them is held to their end: its run stays `running` with nothing sent. A run by hand is never held |
-| The runs | `GET /v1/agents/scheduled-tasks/{id}/runs` | No run at all: the occurrence was never claimed (worker logs). `running` long after `scheduled_for`: held, or a worker is on it |
+| The runs | `GET /v1/agents/scheduled-tasks/{id}/runs` | No run at all: the occurrence was never claimed (worker logs). `running` long after `scheduled_for`: held, or a worker is on it; a run by hand whose router stopped stays `running` until the daily prune writes it `missed`, a day after it started |
 | Run `state` `missed` | same | Too late: a one-shot over 24 h, a repeat over 1 h (`scheduler.go:51`), a call over 15 min (a run by hand too), or with under 11.5 min of the occurrence left. Or `error` `task_paused`: a one-shot resumed after its time, or an occurrence a move's cut-over skipped whose run the source had started |
 | Run `error` | same | See the reason table below |
 | Limit | create answers 409 `too_many_tasks` | The user holds `max_tasks_per_user` active tasks on this config |

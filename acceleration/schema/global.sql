@@ -1121,6 +1121,7 @@ TABLE scheduled_task_runs
     started_at timestamp with time zone
     state text NOT NULL DEFAULT 'running'::text
     task_id text NOT NULL
+    texted text[] NOT NULL DEFAULT '{}'::text[]
     trigger text NOT NULL DEFAULT 'schedule'::text
     CONSTRAINT scheduled_task_runs_customer_id_task_id_fkey FOREIGN KEY (customer_id, task_id) REFERENCES scheduled_tasks(customer_id, id) ON DELETE CASCADE
     CONSTRAINT scheduled_task_runs_pkey PRIMARY KEY (id)

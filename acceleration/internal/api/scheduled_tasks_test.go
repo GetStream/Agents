@@ -3741,6 +3741,115 @@ func (s *ScheduledTasksSuite) TestARetriedOccurrenceTextsTheReplyItAlreadyHas() 
 	s.Equal(1, s.model().turnsOn("<scheduled_task"), "the retry ran no second turn")
 }
 
+// A task with no session gets one at its first occurrence, recorded on the task; the claim's
+// copy of the task predates it, and every retry that read that copy opened another.
+func (s *ScheduledTasksSuite) TestAFirstOccurrenceRetriedTwiceFollowsUpInTheOneSessionItOpened() {
+	s.retryAtOnce()
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	s.sink.fail(writer, 2)
+	now := time.Now()
+	next := now.Add(-time.Minute)
+	task := store.ScheduledTask{
+		CustomerID: s.customerID(), ConfigID: config, UserID: user.userID, APIKey: s.app.key,
+		CallerKind: "authenticated", Title: "Stretch",
+		Instructions: "Remind them to stretch.",
+		StartLocal:   now.UTC(), Timezone: "Europe/Amsterdam",
+		NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "api",
+		Channels: []string{"whatsapp"},
+	}
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
+	s.runWorker()
+
+	run := s.delivered(task)
+	s.Equal(int32(3), s.attempts.Load(), "the occurrence was delivered once and retried twice")
+	s.Equal(s.taskReloaded(task).SessionID, run.SessionID)
+	s.Equal([]string{"Done."}, s.sink.to(writer))
+	s.scheduledMu.Lock()
+	defer s.scheduledMu.Unlock()
+	ran := 0
+	for _, model := range s.scheduled {
+		if model.turnsOn("<scheduled_task") > 0 {
+			ran++
+		}
+	}
+	s.Equal(1, ran, "every attempt followed up in the one session")
+}
+
+// failFinishes has the database refuse the next times writes that finish a run of the test's
+// customer, as one that blinked refuses them, until the test ends or mend.
+func (s *ScheduledTasksSuite) failFinishes(times int) (mend func()) {
+	name := "failing_finish_" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	db := s.store.GlobalDB()
+	_, err := db.ExecContext(context.Background(), "CREATE SEQUENCE "+name)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := db.ExecContext(context.Background(), "DROP SEQUENCE IF EXISTS "+name)
+		s.Require().NoError(err)
+	})
+	// A sequence counts the refusals: it is not rolled back with the write it refuses.
+	return s.trigger(name, "scheduled_task_runs", "UPDATE",
+		"NEW.customer_id = '"+s.customerID()+"' AND NEW.state <> 'running'",
+		fmt.Sprintf("IF nextval('%s') <= %d THEN RAISE EXCEPTION 'the finish fails'; END IF;", name, times))
+}
+
+// A worker whose one write of the outcome failed left the run running, for another worker to
+// take over once it was stale and text the person again.
+func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce() {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.failFinishes(1)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+
+	run := s.delivered(task)
+	s.Equal("whatsapp", run.DeliveredTo)
+	s.Equal(1, run.Attempts, "the worker that texted the run finished it")
+	s.Equal([]string{"Done."}, s.sink.to(writer))
+}
+
+// A run whose text went out and whose outcome was never written, its worker stopped or its
+// database down past the finish's retries, is taken over; the words went out already.
+func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotTextedAgain() {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	mend := s.failFinishes(1000)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+	s.Require().Eventually(func() bool { return len(s.sink.to(writer)) == 1 && s.worker.Running() == 0 },
+		30*time.Second, 50*time.Millisecond, "the worker never texted the run and gave up finishing it")
+	mend()
+	// The run is as old as a stale one, and the claim's lease has run out.
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx,
+		"UPDATE scheduled_task_runs SET started_at = now() - interval '11 minutes' WHERE customer_id = ?", s.customerID())
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx,
+		"UPDATE scheduled_tasks SET lease_until = now() - interval '1 second' WHERE customer_id = ?", s.customerID())
+	s.Require().NoError(err)
+	s.worker.Kick()
+
+	run := s.delivered(task)
+	s.Equal(2, run.Attempts, "another claim took the run over")
+	s.Equal("whatsapp", run.DeliveredTo)
+	s.Equal([]string{"Done."}, s.sink.to(writer), "the person is texted once")
+}
+
 func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrenceIsRetried() {
 	s.retryAtOnce()
 	number, writer := s.lineNumber(), s.writerNumber()
