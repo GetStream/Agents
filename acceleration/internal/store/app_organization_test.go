@@ -133,6 +133,9 @@ func (s *StoreSuite) TestAnAppMovedByACommitThatLandsAfterItGaveUpIsForgottenAga
 	seen, err := s.store.AppOrganizations.Get(s.ctx, app)
 	s.Require().NoError(err)
 	s.Require().Equal("org-before", seen.OrganizationID, "the app has not moved while the COMMIT is held")
+	policies, err := s.store.Policies.OfApp(s.ctx, app)
+	s.Require().NoError(err)
+	s.Require().Equal("org-before", policies.OrganizationID, "nor have its policies")
 	proxy.let()
 	s.Require().Eventually(func() bool {
 		moved, err := s.store.global.NewSelect().Model((*AppOrganization)(nil)).
@@ -144,6 +147,8 @@ func (s *StoreSuite) TestAnAppMovedByACommitThatLandsAfterItGaveUpIsForgottenAga
 	s.Eventually(func() bool {
 		seen, err := s.store.AppOrganizations.Get(s.ctx, app)
 		s.Require().NoError(err)
-		return seen.OrganizationID == "org-after"
-	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped again")
+		policies, err := s.store.Policies.OfApp(s.ctx, app)
+		s.Require().NoError(err)
+		return seen.OrganizationID == "org-after" && policies.OrganizationID == "org-after"
+	}, 5*time.Second, 10*time.Millisecond, "the copies cached before the COMMIT landed are dropped again")
 }

@@ -598,11 +598,17 @@ func (s *StoreSuite) TestEveryCachedWriteARequestGaveUpOnLeavesNoStaleCopy() {
 				seen, err := s.store.AppOrganizations.Get(s.ctx, app)
 				s.Require().NoError(err)
 				s.Require().Equal("org-before", seen.OrganizationID, "the app has not moved yet")
+				policies, err := s.store.Policies.OfApp(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().Equal("org-before", policies.OrganizationID, "the app's policies are not moved yet")
 			}, bun.Tx.Commit)
 			s.Require().NoError(err)
 			seen, err := s.store.AppOrganizations.Get(s.ctx, app)
 			s.Require().NoError(err)
 			s.Equal("org-after", seen.OrganizationID)
+			policies, err := s.store.Policies.OfApp(s.ctx, app)
+			s.Require().NoError(err)
+			s.Equal("org-after", policies.OrganizationID, "the app's policies are read under the new organization")
 		},
 		"ForgetUserSettings": func() {
 			app := "app-" + newID()
