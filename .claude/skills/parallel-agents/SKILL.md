@@ -68,9 +68,10 @@ a mistake that actually happened.
   - A database that ran an earlier build of a PR can hold a version that a later merge lands below.
     Recreate that database.
 - **No shared append files.** An SDK note is a file of its own in `.claude/skills/sdk/notes/`, and
-  `CHANGELOG.md` is written only at a release. A branch from before that rule that still adds to
-  the end of `.claude/skills/sdk/SKILL.md` or to `CHANGELOG.md` moves its note to a file and
-  drops its changelog lines.
+  `CHANGELOG.md` is written only at a release, except one breaking-change line under
+  `# Unreleased`. A branch from before that rule that still adds to the end of
+  `.claude/skills/sdk/SKILL.md` or other lines to `CHANGELOG.md` moves its note to a file and
+  drops those changelog lines.
 - **Conflict markers.** Before every `git rebase --continue`, run `git diff --check` and grep for
   `<<<<<<<`, `=======` and `>>>>>>>`. Markers were committed twice by agents that skipped this.
 - **Generated files.** Do not hand-merge `acceleration/api/openapi.yaml` or the generated clients.
