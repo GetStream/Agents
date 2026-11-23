@@ -843,6 +843,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### The Go SDK syncs an agent's directory to a router it was never synced to
+
+`Agent.Sync` skipped a directory whose `.agent_sync` stamp matched it, whichever router the stamp came from, so a directory synced to a local router and then to the hosted one (`go run ./configure` with another `STREAM_ACCELERATION_URL`) answered the hosted router's old config and sent nothing. A matching stamp is now trusted only when the stored config's `sync_hash` is the same hash, as the JavaScript SDK does.
+
 ### A hosted tool call in a group channel names the person who wrote
 
 In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.

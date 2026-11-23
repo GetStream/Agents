@@ -167,6 +167,11 @@ In .agent_sync store the sync status:
 
 This setup prevents duplicate syncs when they nothing changed.
 
+The stamp says what was last sent, not where. Trust a matching stamp only when the stored config's
+`sync_hash` is that hash too, so a directory synced to a local router and then pointed at a hosted
+one (or another app) is synced there, not skipped. JavaScript and Go do this. Python
+(`plugins/stream`), .NET, Ruby, Rust and PHP need to check theirs.
+
 ## SDK updates
 
 Each SDK has an `.sdk_update_log` file naming the spec and this skill it was last updated against, as git blob ids:
