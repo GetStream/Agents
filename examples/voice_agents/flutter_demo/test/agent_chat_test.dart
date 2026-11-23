@@ -414,6 +414,44 @@ void main() {
       },
     );
 
+    test(
+      'leaves out a reply with no channel that ended with nothing written, as a kept one is',
+      () async {
+        final router = await _Router.start();
+        addTearDown(router.close);
+        final agents = StreamAgents(
+          url: router.url,
+          customerId: 'acme',
+          userId: 'ada',
+        );
+        addTearDown(agents.close);
+        final session = await agents.attach('s1');
+        final chat = closing(AgentChat.unkept(session));
+        final conversation = conversationOf(chat);
+        final socket = await router.socket;
+
+        conversation.send('Read me this page');
+        await _until(() => router.asked == 1);
+        // A model that answered with nothing: no error, no text and no steps.
+        socket
+          ..send('{"type":"responding","turn_id":"t1"}')
+          ..send(
+            '{"pending_work":false,"type":"responded","turn_id":"t1",'
+            '"text":"","time_to_first_token_ms":90}',
+          );
+        await _until(
+          () =>
+              session.turnMessages.last.isAgentReply &&
+              !session.turnMessages.last.isGenerating,
+        );
+
+        expect(
+          [for (final m in chat.listMessages) m.role],
+          [AIMessageRole.user],
+        );
+      },
+    );
+
     test('close disposes the watched channel', () async {
       final channel = channelOf([_question('q0')]);
       final chat = AgentChat.following(session, channel);

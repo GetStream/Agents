@@ -89,7 +89,7 @@ class AgentChat with AIConversationTransport<AgentMessage> {
       ? listed(_channel?.state?.messages ?? const [], reasoning, shown: _shown)
       : [
           for (final message in session.turnMessages)
-            AgentMessage.unkept(message),
+            if (!message.isUnwrittenReply) AgentMessage.unkept(message),
         ];
 
   /// The [messages] as Stream's AI components show them, oldest first, without those deleted
@@ -285,6 +285,13 @@ extension AgentReply on stream.Message {
       if (attachment.rawType case final type?)
         (type: type, payload: {'id': attachment.id, ...attachment.extraData}),
   ]);
+}
+
+extension UnkeptReply on TurnMessage {
+  /// Whether this is a reply the agent ended without writing anything, as
+  /// [AgentReply.isUnwrittenReply] is for a kept one.
+  bool get isUnwrittenReply =>
+      isAgentReply && !isGenerating && text.isEmpty && steps.isEmpty;
 }
 
 /// A message of the conversation as Stream's AI components show it: the channel's, or an

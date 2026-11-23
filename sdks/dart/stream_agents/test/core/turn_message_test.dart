@@ -87,28 +87,39 @@ void main() {
       expect(reply.customData, isEmpty);
     });
 
-    test('only the latest reply is being written, and only while the socket carries it', () {
+    test('the latest reply is being written while the socket carries it', () {
       final writing = play([...toolTurn, ...answerTurn], from: asked);
 
       expect(
         TurnMessage.messages(writing, userId: 'ada', isConnected: true).last.isGenerating,
         isTrue,
       );
-      // Its tools are done but the turn carrying the reply on is not.
+    });
+
+    test('a reply whose tools are done is still being written until its next turn is', () {
       final betweenTurns = play(toolTurn, from: asked);
+
       expect(
         TurnMessage.messages(betweenTurns, userId: 'ada', isConnected: true).last.isGenerating,
         isTrue,
       );
+    });
+
+    test('a reply is not being written once the socket is gone', () {
+      final writing = play([...toolTurn, ...answerTurn], from: asked);
+
       expect(
         TurnMessage.messages(writing, userId: 'ada', isConnected: false).last.isGenerating,
         isFalse,
       );
+    });
 
-      // Asked over mid-thought: the reply before is as it was left.
+    test('a reply asked over mid-thought is left as it was, no longer being written', () {
       final thinking = play([...toolTurn, ...answerTurn.take(2)], from: asked);
       final askedAgain = thinking.said('Never mind.', at: ms(4000));
+
       final messages = TurnMessage.messages(askedAgain, userId: 'ada', isConnected: true);
+
       expect(messages.map((message) => message.isGenerating), [false, false, false]);
       expect(
         messages[1].steps.last.payload['status'],

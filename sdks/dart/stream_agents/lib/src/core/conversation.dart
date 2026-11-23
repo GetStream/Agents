@@ -271,6 +271,8 @@ final class ToolCallStep extends TurnStep {
 
   /// The tool.
   final String name;
+
+  /// Whether it is running, or how it ended.
   final ToolCallStepStatus status;
 
   /// The last `tool_updated` text that is not to be said verbatim, or empty.

@@ -74,7 +74,7 @@ Every server SDK's client has a tool registry for the whole app, and one call ru
 
 ### The Dart SDK shows an incognito session
 
-An incognito session has no Stream Chat channel, so a Flutter app had nothing to show its replies with. `Turn` now has `steps` (rounds of thinking and tool calls) and `isDone`, from the socket, and `session.turnMessages` is the conversation in the shape Stream's AI components read, a waiting call's approval card included. `AgentEventKind` gains `reasoningDelta`, so an exhaustive `switch` over it needs the case. `flutter_demo` has an incognito toggle.
+An incognito session has no Stream Chat channel, so a Flutter app had nothing to show its replies with. `Turn` now has `steps` (rounds of thinking and tool calls) and `isDone`, from the socket, and `session.turnMessages` is the conversation in the shape Stream's AI components read, a waiting call's approval card included. `AgentEventKind` gains `reasoningDelta`, so an exhaustive `switch` over it needs the case. `flutter_demo` has an incognito toggle (#2200).
 
 ### The Swift SDK shows an incognito session
 

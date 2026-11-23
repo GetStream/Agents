@@ -23,6 +23,9 @@ final class TurnMessage {
 
   /// Whether the agent wrote it, rather than the person.
   final bool isAgentReply;
+
+  /// What it says: the person's question, or the reply's text, its turns' text joined by a
+  /// blank line.
   final String text;
 
   /// When its first turn began.

@@ -564,7 +564,7 @@ void main() {
         expect((steps.last as ToolCallStep).duration, const Duration(milliseconds: 8));
       });
 
-      test('a turn is done once it answered with nothing left to come, or was cut off', () {
+      test('a turn is done once it answered with nothing left to come', () {
         final answered = play([
           (0, '{"type":"responding","turn_id":"t1"}'),
           (
@@ -573,8 +573,11 @@ void main() {
                 '"time_to_first_token_ms":90}',
           ),
         ]);
-        expect(answered.turns.single.isDone, isTrue);
 
+        expect(answered.turns.single.isDone, isTrue);
+      });
+
+      test('a turn that answered with work still to come is not done', () {
         final waiting = play([
           (0, '{"type":"responding","turn_id":"t1"}'),
           (
@@ -583,13 +586,17 @@ void main() {
                 '"time_to_first_token_ms":90}',
           ),
         ]);
-        expect(waiting.turns.single.isDone, isFalse);
 
+        expect(waiting.turns.single.isDone, isFalse);
+      });
+
+      test('a turn cut off is done, its thinking ended where it was cut', () {
         final cut = play([
           (0, '{"type":"responding","turn_id":"t1"}'),
           (1, '{"type":"reasoning_delta","turn_id":"t1","text":"Hmm"}'),
           (5, '{"type":"interrupted","turn_id":"t1","participant":null}'),
         ]);
+
         expect(cut.turns.single.isDone, isTrue);
         expect(
           (cut.turns.single.steps.single as ReasoningStep).duration,
@@ -597,28 +604,30 @@ void main() {
         );
       });
 
-      test(
-        'progress for a call or a turn never seen changes nothing; thinking starts the turn',
-        () {
-          final before = play([(0, '{"type":"responding","turn_id":"t1"}')]);
+      test('progress for a call or a turn never seen changes nothing', () {
+        final before = play([(0, '{"type":"responding","turn_id":"t1"}')]);
 
-          for (final json in [
-            '{"type":"tool_updated","id":"nope","turn_id":"t1","text":"Working","verbatim":false}',
-            '{"type":"tool_ran","tool_call_id":"nope","turn_id":"t1","error":""}',
-            '{"type":"tool_ran","tool_call_id":"c1","turn_id":"t9","error":""}',
-            '{"type":"reasoning_delta","turn_id":"t1","text":""}',
-          ]) {
-            expect(identical(before.apply(frame(json)), before), isTrue, reason: json);
-          }
+        for (final json in [
+          '{"type":"tool_updated","id":"nope","turn_id":"t1","text":"Working","verbatim":false}',
+          '{"type":"tool_ran","tool_call_id":"nope","turn_id":"t1","error":""}',
+          '{"type":"tool_ran","tool_call_id":"c1","turn_id":"t9","error":""}',
+          '{"type":"reasoning_delta","turn_id":"t1","text":""}',
+        ]) {
+          expect(identical(before.apply(frame(json)), before), isTrue, reason: json);
+        }
+      });
 
-          final unseen = before.apply(
-            frame('{"type":"reasoning_delta","turn_id":"t2","text":"Next."}'),
-            at: ms(40),
-          );
-          expect(unseen.turns.map((turn) => turn.id), ['t1', 't2']);
-          expect((unseen.turns.last.steps.single as ReasoningStep).at, ms(40));
-        },
-      );
+      test('thinking for a turn never seen starts it', () {
+        final before = play([(0, '{"type":"responding","turn_id":"t1"}')]);
+
+        final unseen = before.apply(
+          frame('{"type":"reasoning_delta","turn_id":"t2","text":"Next."}'),
+          at: ms(40),
+        );
+
+        expect(unseen.turns.map((turn) => turn.id), ['t1', 't2']);
+        expect((unseen.turns.last.steps.single as ReasoningStep).at, ms(40));
+      });
 
       test('a reply the prompt injection screen refused loses its text and UI, not its steps', () {
         final refused = play([

@@ -749,44 +749,50 @@ void main() {
         await chat.close();
       });
 
+      /// A session kept nowhere whose reply waits on the person's answer to a refund.
+      Future<AgentSession> waitingUnkept() async {
+        // The router's session keeps no conversation: sessionJson's conversation_id is empty.
+        final chat = await agents
+            .withUser('ada')
+            .chat(
+              SessionOptions(
+                incognito: true,
+                tools: [
+                  AgentTool(
+                    name: 'issue_refund',
+                    description: 'Refund an order.',
+                    approval: const ToolApproval(
+                      title: 'Refund order A-1042?',
+                      reasonArgument: 'reason',
+                      allowTitle: 'Refund',
+                    ),
+                    run: (arguments) async => 'Refunded',
+                  ),
+                ],
+              ),
+            );
+        final socket = await router.socket();
+
+        // The router's order: the reply is answered as waiting on its tools, which then start.
+        socket
+          ..send('{"type":"responding","turn_id":"t1"}')
+          ..send(
+            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"",'
+            '"time_to_first_token_ms":90}',
+          )
+          ..send(
+            '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund","turn_id":"t1",'
+            '"started_at":"2026-11-19T09:00:00Z"}',
+          )
+          ..send(refundCall);
+        await until(() => chat.approvals.value.isNotEmpty);
+        return chat;
+      }
+
       test(
         'waits on its step of the reply, for the agents\' user, in a conversation kept nowhere',
         () async {
-          // The router's session keeps no conversation: sessionJson's conversation_id is empty.
-          final chat = await agents
-              .withUser('ada')
-              .chat(
-                SessionOptions(
-                  incognito: true,
-                  tools: [
-                    AgentTool(
-                      name: 'issue_refund',
-                      description: 'Refund an order.',
-                      approval: const ToolApproval(
-                        title: 'Refund order A-1042?',
-                        reasonArgument: 'reason',
-                        allowTitle: 'Refund',
-                      ),
-                      run: (arguments) async => 'Refunded',
-                    ),
-                  ],
-                ),
-              );
-          final socket = await router.socket();
-
-          // The router's order: the reply is answered as waiting on its tools, which then start.
-          socket
-            ..send('{"type":"responding","turn_id":"t1"}')
-            ..send(
-              '{"pending_work":true,"type":"responded","turn_id":"t1","text":"",'
-              '"time_to_first_token_ms":90}',
-            )
-            ..send(
-              '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund","turn_id":"t1",'
-              '"started_at":"2026-11-19T09:00:00Z"}',
-            )
-            ..send(refundCall);
-          await until(() => chat.approvals.value.isNotEmpty);
+          final chat = await waitingUnkept();
 
           final step = chat.turnMessages.last.steps.single;
           expect(step.type, 'ai_tool_call');
@@ -803,14 +809,26 @@ void main() {
               'allow_title': 'Refund',
             },
           });
-
-          chat.decide('c1', allowed: true);
-
-          expect(chat.turnMessages.last.steps.single.payload['status'], 'running');
           await chat.close();
-          expect(chat.turnMessages.last.isGenerating, isFalse);
         },
       );
+
+      test('allowed in a conversation kept nowhere, its step runs', () async {
+        final chat = await waitingUnkept();
+
+        chat.decide('c1', allowed: true);
+
+        expect(chat.turnMessages.last.steps.single.payload['status'], 'running');
+        await chat.close();
+      });
+
+      test('closed while its reply waits, the reply is no longer being written', () async {
+        final chat = await waitingUnkept();
+
+        await chat.close();
+
+        expect(chat.turnMessages.last.isGenerating, isFalse);
+      });
 
       test('declined, never runs, tells the model so, and a second answer does nothing', () async {
         final chat = await open();
