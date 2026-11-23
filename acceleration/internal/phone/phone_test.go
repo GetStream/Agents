@@ -617,8 +617,10 @@ type stub struct {
 	ordered  int
 	released []string
 	holds    map[string]bool
-	// releaseErr is what a release answers, the vendor's other answers left to err.
-	releaseErr error
+	// releaseErr is what a release answers, the vendor's other answers left to err. doneErr is
+	// what a purchase or a release answers once the vendor has done it, as an answer lost to a
+	// timeout is.
+	releaseErr, doneErr error
 	// stopped are the numbers this vendor was told to stop sending callers to the trunk.
 	stopped []string
 	// leg is how this vendor's leg reaches Stream: per call unless a test says otherwise.
@@ -653,6 +655,9 @@ func (s *stub) BuyNumber(_ context.Context, order Order) (Number, error) {
 		s.holds = map[string]bool{}
 	}
 	s.holds[order.E164] = true
+	if s.doneErr != nil {
+		return Number{}, s.doneErr
+	}
 	return Number{E164: order.E164, Vendor: s.vendor, VendorID: s.vendorID, Country: "US", MonthlyCostMicros: s.monthly}, nil
 }
 
@@ -662,7 +667,7 @@ func (s *stub) ReleaseNumber(_ context.Context, e164 string) error {
 		return err
 	}
 	delete(s.holds, e164)
-	return nil
+	return s.doneErr
 }
 
 func (s *stub) HoldsNumber(_ context.Context, e164 string) (string, bool, error) {

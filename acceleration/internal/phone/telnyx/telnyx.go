@@ -446,14 +446,15 @@ func (p *Provider) idFor(ctx context.Context, e164 string) (string, error) {
 // purchase or port failed, one given back, and one ported away.
 var notHeld = []string{"purchase-failed", "port-failed", "deleted", "ported-out"}
 
-// HoldsNumber reports whether this account holds a number, its purchase still pending or done,
-// and Telnyx's id for it.
+// HoldsNumber reports whether this account holds a number, its purchase still pending or done.
+// It names no purchase id: a purchase is recorded by its number order's id (BuyNumber), and the
+// numbers Telnyx lists do not name the order that bought them.
 func (p *Provider) HoldsNumber(ctx context.Context, e164 string) (string, bool, error) {
 	number, listed, err := p.listed(ctx, e164)
 	if err != nil || !listed || slices.Contains(notHeld, number.Status) {
 		return "", false, err
 	}
-	return number.ID, true, nil
+	return "", true, nil
 }
 
 // listed is the number as Telnyx lists it among this account's, in whatever status.

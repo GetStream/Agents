@@ -36,6 +36,10 @@ type PhoneNumberOrder struct {
 	Tags              map[string]string `bun:"tags,type:jsonb,nullzero"`
 	// CreatedAt is when the number was bought or released, as its row says.
 	CreatedAt time.Time `bun:"created_at,notnull"`
+	// NextAttemptAt is when the sweep may settle the order, and Attempts how often a sweep
+	// claimed it (phoneNumberOrders).
+	Attempts      int       `bun:"attempts,notnull"`
+	NextAttemptAt time.Time `bun:"next_attempt_at,notnull"`
 }
 
 // Validate refuses an order no vendor could be asked about.
@@ -46,6 +50,7 @@ func (o *PhoneNumberOrder) Validate() error {
 		phoneNumber("e164", o.E164).
 		oneOf("action", o.Action, OrderBuy, OrderRelease).
 		check(!o.CreatedAt.IsZero(), "created_at", "is required").
+		check(!o.NextAttemptAt.IsZero(), "next_attempt_at", "is required").
 		done()
 }
 
@@ -64,6 +69,7 @@ func (r *PhoneNumberOrders) Insert(ctx context.Context, order *PhoneNumberOrder)
 		return stack.Wrap(err)
 	}
 	order.CreatedAt = order.CreatedAt.UTC().Truncate(time.Microsecond)
+	order.NextAttemptAt = order.NextAttemptAt.UTC().Truncate(time.Microsecond)
 	if _, err := r.store.global.NewInsert().Model(order).Returning("id").Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number order: %w", err))
 	}
@@ -78,18 +84,14 @@ func (r *PhoneNumberOrders) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
-// SelectBefore returns at most limit orders made before before, oldest first.
-func (r *PhoneNumberOrders) SelectBefore(ctx context.Context, before time.Time, limit int) ([]PhoneNumberOrder, error) {
-	var orders []PhoneNumberOrder
-	err := r.store.global.NewSelect().Model(&orders).
-		Where("created_at < ?", before.UTC()).
-		Order("created_at", "id").
-		Limit(limit).
-		Scan(ctx)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: number orders: %w", err))
-	}
-	return orders, nil
+// phoneNumberOrders is the queue of orders the sweep settles.
+var phoneNumberOrders = queue{name: "phone number orders", alias: "pno", key: "id"}
+
+// Claim takes up to limit orders due by now, oldest due first, and moves each one's next
+// attempt to leaseUntil: another router's claim skips them, and one the sweep could not settle
+// is tried again behind the orders due before it.
+func (r *PhoneNumberOrders) Claim(ctx context.Context, now, leaseUntil time.Time, limit int) ([]PhoneNumberOrder, error) {
+	return claim[PhoneNumberOrder](ctx, r.store.global, phoneNumberOrders, now, leaseUntil, limit, nil, "pno.*")
 }
 
 // Bought records the number an order bought and forgets the order, as one. It reports false,

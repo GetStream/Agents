@@ -183,7 +183,7 @@ func (s *TelnyxSuite) TestANumberThisAccountHoldsIsFoundByItsNumber() {
 
 	s.Require().NoError(err)
 	s.True(held, "a purchase still pending is the account's number")
-	s.Equal("num-3", id)
+	s.Empty(id, "the number's own id is not the purchase's, which is its order's")
 	s.Equal("+15125551234", s.seen.query.Get("filter[phone_number]"))
 }
 

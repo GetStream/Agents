@@ -991,17 +991,19 @@ TABLE organizations
 
 TABLE phone_number_orders
     action text NOT NULL
+    attempts integer NOT NULL DEFAULT 0
     country text NOT NULL DEFAULT ''::text
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
     e164 text NOT NULL
     id bigint NOT NULL DEFAULT nextval('phone_number_orders_id_seq'::regclass)
     monthly_cost_micros bigint NOT NULL DEFAULT 0
+    next_attempt_at timestamp with time zone NOT NULL
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     vendor text NOT NULL
     CONSTRAINT phone_number_orders_action_check CHECK ((action = ANY (ARRAY['buy'::text, 'release'::text])))
     CONSTRAINT phone_number_orders_pkey PRIMARY KEY (id)
-    CREATE INDEX phone_number_orders_created_idx ON public.phone_number_orders USING btree (created_at)
+    CREATE INDEX phone_number_orders_due_idx ON public.phone_number_orders USING btree (next_attempt_at, id)
 
 TABLE phone_numbers
     attached_at timestamp with time zone

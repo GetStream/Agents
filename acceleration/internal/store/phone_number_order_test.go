@@ -8,7 +8,8 @@ import (
 
 // order keeps a purchase of e164 for a customer.
 func (s *StoreSuite) order(customerID, e164 string) PhoneNumberOrder {
-	order := PhoneNumberOrder{CustomerID: customerID, Vendor: "telnyx", E164: e164, Action: OrderBuy, CreatedAt: s.base}
+	order := PhoneNumberOrder{CustomerID: customerID, Vendor: "telnyx", E164: e164, Action: OrderBuy, CreatedAt: s.base,
+		NextAttemptAt: s.base}
 	s.Require().NoError(s.store.PhoneNumberOrders.Insert(s.ctx, &order))
 	return order
 }
@@ -30,9 +31,7 @@ func (s *StoreSuite) TestAPurchaseSettledTwiceRecordsOneNumber() {
 	held, err := s.store.PhoneNumbers.Select(s.ctx, customerID, PhoneNumberFilter{})
 	s.Require().NoError(err)
 	s.Len(held, 1)
-	left, err := s.store.PhoneNumberOrders.SelectBefore(s.ctx, s.base.Add(time.Hour), 10)
-	s.Require().NoError(err)
-	s.Empty(left)
+	s.Empty(s.claimOrders(s.base.Add(time.Hour)))
 }
 
 // A number a row already holds is not recorded again, and its order is kept.
@@ -46,20 +45,47 @@ func (s *StoreSuite) TestAPurchaseOfANumberARowHoldsRecordsNothing() {
 		&PhoneNumber{CustomerID: order.CustomerID, Vendor: "telnyx", E164: order.E164, PurchasedAt: order.CreatedAt})
 
 	s.ErrorIs(err, ErrNumberRecorded)
-	left, err := s.store.PhoneNumberOrders.SelectBefore(s.ctx, s.base.Add(time.Hour), 10)
+	s.Len(s.claimOrders(s.base.Add(time.Hour)), 1)
+}
+
+// An order one router claimed is not claimed by another until its lease ends, and is then
+// claimed behind the orders due before it.
+func (s *StoreSuite) TestAClaimedOrderWaitsForItsLeaseBehindTheOrdersDueFirst() {
+	stuck := s.order(newID(), "+15125550100")
+
+	s.Equal([]int64{stuck.ID}, s.orderIDs(s.claimOrders(s.base)))
+	s.Empty(s.claimOrders(s.base), "another router's claim skips it")
+	newer := s.order(newID(), "+15125550101")
+	newer.NextAttemptAt = s.base.Add(time.Minute)
+	_, err := s.store.global.NewUpdate().Model(&newer).Column("next_attempt_at").WherePK().Exec(s.ctx)
 	s.Require().NoError(err)
-	s.Len(left, 1)
+
+	first, err := s.store.PhoneNumberOrders.Claim(s.ctx, s.base.Add(time.Hour), s.base.Add(2*time.Hour), 1)
+	s.Require().NoError(err)
+	s.Equal([]int64{newer.ID}, s.orderIDs(first), "the order claimed before is due after the one made since")
+}
+
+// claimOrders claims what is due at now, leased for an hour.
+func (s *StoreSuite) claimOrders(now time.Time) []PhoneNumberOrder {
+	claimed, err := s.store.PhoneNumberOrders.Claim(s.ctx, now, now.Add(time.Hour), 10)
+	s.Require().NoError(err)
+	return claimed
+}
+
+// orderIDs are the ids of orders, in the order a claim took them.
+func (s *StoreSuite) orderIDs(orders []PhoneNumberOrder) []int64 {
+	var ids []int64
+	for _, order := range orders {
+		ids = append(ids, order.ID)
+	}
+	return ids
 }
 
 func (s *StoreSuite) TestPhoneNumberOrderQueryBudgets() {
 	customerID := newID()
 	var order PhoneNumberOrder
 	s.Equal(1, s.countQueries(func() { order = s.order(customerID, "+15125550100") }), "Insert")
-	s.Equal(1, s.countQueries(func() {
-		left, err := s.store.PhoneNumberOrders.SelectBefore(s.ctx, s.base.Add(time.Hour), 10)
-		s.Require().NoError(err)
-		s.Len(left, 1)
-	}), "SelectBefore")
+	s.Equal(1, s.countQueries(func() { s.Len(s.claimOrders(s.base.Add(time.Hour)), 1) }), "Claim")
 	s.Equal(2+2, s.countQueries(func() {
 		bought, err := s.store.PhoneNumberOrders.Bought(s.ctx, order.ID,
 			&PhoneNumber{CustomerID: customerID, Vendor: "telnyx", E164: order.E164, PurchasedAt: order.CreatedAt})

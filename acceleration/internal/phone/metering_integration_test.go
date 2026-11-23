@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -51,6 +52,8 @@ type MeteringSuite struct {
 	deployment *chattest.Server
 	customer   string
 	e164       string
+	// registry is where the service opens s.vendor.
+	registry *Registry
 	// failing fails the queries a test asks it to.
 	failing *failingQueries
 }
@@ -96,6 +99,7 @@ func (s *MeteringSuite) withSandbox(sandbox dlc.Sandbox) {
 	s.Require().NoError(err)
 	registry := NewRegistry(config)
 	registry.Register(s.vendor.vendor, func() (Provider, error) { return s.vendor, nil })
+	s.registry = registry
 	declared, _ := config.Lookup(s.vendor.vendor)
 	for _, name := range declared.Credentials {
 		s.T().Setenv(name, "set")
@@ -860,11 +864,97 @@ func (s *MeteringSuite) TestANumberGivenBackWithoutItsReleaseIsReleasedByTheSwee
 	s.False(numbers[0].ReleasedAt.After(returned), "released as of when the vendor took it back, not when the sweep ran")
 }
 
+// A number the vendor bought, whose answer was lost to a timeout, is recorded by the sweep and
+// its first month billed.
+func (s *MeteringSuite) TestANumberBoughtWhoseAnswerWasLostIsRecordedByTheSweep() {
+	e164 := aNumber()
+	s.vendor.offers = []Available{{E164: e164, MonthlyCostMicros: 1_000_000}}
+	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Message: "no answer", Cause: context.DeadlineExceeded}
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().Error(err)
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().NoError(err, "the vendor holds it, so the customer does")
+	s.Equal(int64(1_000_000), held.MonthlyCostMicros)
+	var months []store.Request
+	for _, row := range s.rowsWhen(ModelNumber, 2) {
+		if row.Success {
+			months = append(months, row)
+		}
+	}
+	s.Require().Len(months, 1, "its first month, beside the purchase's failure")
+	s.Equal(held.PurchasedAt.UTC(), months[0].StartedAt.UTC())
+	s.Zero(s.orders())
+}
+
+// A number the vendor took back, whose answer was a 5xx, is released by the sweep rather than
+// billed every month.
+func (s *MeteringSuite) TestANumberGivenBackWhoseAnswerWasAFailureIsReleasedByTheSweep() {
+	s.vendor.holds = map[string]bool{s.e164: true}
+	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusBadGateway}
+	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err := s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.Zero(s.orders())
+}
+
+// A release that failed at a vendor still holding the number leaves the customer holding it:
+// the sweep releases only what the vendor no longer has.
+func (s *MeteringSuite) TestANumberTheVendorStillHoldsAfterAFailedReleaseStaysHeld() {
+	s.vendor.holds = map[string]bool{s.e164: true}
+	s.vendor.releaseErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusServiceUnavailable}
+	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
+	s.Require().Equal(1, s.orders())
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err := s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.Require().NoError(err)
+	s.Nil(held.ReleasedAt)
+	s.Zero(s.orders())
+}
+
+// An order at a vendor that cannot say what it holds records nothing and is kept for an
+// operator, and the sweeps that follow do not ask about it again until it is due once more.
+func (s *MeteringSuite) TestAnOrderAVendorCannotSettleIsKeptAndNotAskedAboutEverySweep() {
+	e164 := aNumber()
+	s.vendor.offers = []Available{{E164: e164, MonthlyCostMicros: 1_000_000}}
+	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Status: http.StatusGatewayTimeout}
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().Error(err)
+	// The vendor as one that has no NumberFinder.
+	s.registry.Register(s.vendor.vendor, func() (Provider, error) { return struct{ Provider }{s.vendor}, nil })
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err = s.service.SweepOrders(s.ctx)
+	s.Require().NoError(err)
+	_, err = s.service.SweepOrders(s.ctx)
+	s.Require().NoError(err)
+
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.ErrorIs(err, store.ErrNoNumber, "nothing is recorded that the vendor did not confirm")
+	s.Equal(1, s.orders(), "kept for an operator")
+	// Other tests' orders are in the same tables, so only this customer's lines are counted.
+	s.Equal(1, s.logs.count("ERROR", "customer="+s.customer), "asked about once, not every sweep")
+	s.Contains(s.logs.String(), "could not settle a number's purchase or release")
+}
+
 // A purchase the vendor refused, whose order could not be forgotten, leaves no number.
 func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber() {
 	e164 := aNumber()
 	s.failing.fail(`DELETE FROM "phone_number_orders"`, 1)
-	s.vendor.err = errors.New("the vendor refused")
+	s.vendor.err = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Status: http.StatusUnprocessableEntity}
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
 	s.Require().Error(err)
 	s.vendor.err = nil

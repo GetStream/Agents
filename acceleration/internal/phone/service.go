@@ -499,7 +499,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	order := store.PhoneNumberOrder{
 		CustomerID: purchase.Owner.CustomerID, Vendor: purchase.Vendor, E164: purchase.E164, Action: store.OrderBuy,
 		Country: cmp.Or(purchase.Country, Country(purchase.E164)), MonthlyCostMicros: quoted, Tags: purchase.Owner.Tags,
-		CreatedAt: purchasedAt,
+		CreatedAt: purchasedAt, NextAttemptAt: purchasedAt.Add(orderSettles),
 	}
 	if s.store != nil {
 		if err := s.store.PhoneNumberOrders.Insert(ctx, &order); err != nil {
@@ -521,7 +521,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	})
 	if err != nil {
 		booked.Release()
-		s.forgetOrder(ctx, order)
+		s.forgetRefusedOrder(ctx, order, err)
 		return store.PhoneNumber{}, err
 	}
 	if bought.MonthlyCostMicros == 0 {
@@ -545,7 +545,12 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if s.store == nil {
 		return held, nil
 	}
-	if _, err := s.store.PhoneNumberOrders.Bought(ctx, order.ID, &held); err != nil {
+	recorded, err := s.store.PhoneNumberOrders.Bought(ctx, order.ID, &held)
+	if err == nil && !recorded {
+		// A sweep took the order first, and recorded the number or found the vendor without it.
+		err = errors.New("its order was settled by the sweep")
+	}
+	if err != nil {
 		// The number is bought either way, so saying so is more useful than failing and
 		// leaving the caller thinking it was not. Its order is kept for the sweep.
 		// Support finds the number at the vendor by its order, and the log holds no number.
@@ -583,12 +588,12 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 		// Kept before the vendor is asked, so a number given back whose row is not released
 		// below is released by the sweep (SweepOrders), rather than billed every month.
 		order = store.PhoneNumberOrder{CustomerID: held.CustomerID, Vendor: held.Vendor, E164: e164, Action: store.OrderRelease,
-			CreatedAt: releasedAt}
+			CreatedAt: releasedAt, NextAttemptAt: s.now().Add(orderSettles)}
 		if err := s.store.PhoneNumberOrders.Insert(ctx, &order); err != nil {
 			return err
 		}
 		if err := seller.ReleaseNumber(ctx, e164); err != nil {
-			s.forgetOrder(ctx, order)
+			s.forgetRefusedOrder(ctx, order, err)
 			if age := s.now().Sub(held.PurchasedAt); age < NumberSettles && errors.As(err, new(*VendorError)) {
 				return stack.Wrap(fmt.Errorf("%w: %s was bought %s ago: %w", ErrNumberSettling, e164, age.Round(time.Second), err))
 			}
@@ -604,6 +609,16 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 	return nil
 }
 
+// forgetRefusedOrder forgets an order the vendor answered err to, when err is the vendor refusing
+// it: a 4xx, which it did not carry out. Any other failure, a timeout, a dropped connection or a
+// 5xx, may come after the vendor bought or released the number, so the order is left to the
+// sweep, which asks the vendor what it holds.
+func (s *Service) forgetRefusedOrder(ctx context.Context, order store.PhoneNumberOrder, err error) {
+	if refused, ok := errors.AsType[*VendorError](err); ok && refused.Status >= 400 && refused.Status < 500 {
+		s.forgetOrder(ctx, order)
+	}
+}
+
 // forgetOrder forgets an order whose outcome is recorded, or that the vendor refused. One that
 // cannot be forgotten is left to the sweep, which asks the vendor again.
 func (s *Service) forgetOrder(ctx context.Context, order store.PhoneNumberOrder) {
@@ -616,10 +631,12 @@ func (s *Service) forgetOrder(ctx context.Context, order store.PhoneNumberOrder)
 }
 
 // orderSettles is how old an order is before the sweep settles it: far longer than a purchase
-// or a release takes, so one still running is never settled under it. orderSweepBatch bounds
-// how many one sweep settles.
+// or a release takes, so one still running is never settled under it. orderRetry is how long a
+// sweep holds the orders it claimed, and so when one it could not settle is tried again, by any
+// router. orderSweepBatch bounds how many one sweep claims.
 const (
 	orderSettles    = 10 * time.Minute
+	orderRetry      = time.Hour
 	orderSweepBatch = 100
 )
 
@@ -627,12 +644,15 @@ const (
 // by asking each vendor whether it holds the number: one bought and held gets its row, and its
 // first month if the purchase did not bill it; one given back and no longer held is released,
 // as of when it was. Any other order changed nothing and is forgotten. An order whose vendor
-// cannot say is logged for an operator and kept. It reports how many it settled.
+// cannot say is logged for an operator and kept, to be tried again after orderRetry behind the
+// orders due before then. Every router sweeps, and each order is claimed by one of them at a
+// time. It reports how many it settled.
 func (s *Service) SweepOrders(ctx context.Context) (int, error) {
 	if s.store == nil {
 		return 0, nil
 	}
-	orders, err := s.store.PhoneNumberOrders.SelectBefore(ctx, s.now().Add(-orderSettles), orderSweepBatch)
+	now := s.now()
+	orders, err := s.store.PhoneNumberOrders.Claim(ctx, now, now.Add(orderRetry), orderSweepBatch)
 	if err != nil {
 		return 0, err
 	}
@@ -670,7 +690,9 @@ func (s *Service) settleOrder(ctx context.Context, order store.PhoneNumberOrder)
 		if err != nil && !errors.Is(err, store.ErrNoNumber) {
 			return err
 		}
-		if err == nil {
+		// Only the row the order gave back: the number may have been bought again since, or put
+		// on the customer's own trunk.
+		if err == nil && number.Vendor == order.Vendor && !number.PurchasedAt.After(order.CreatedAt) {
 			if err := s.unline(ctx, number, "released a number", order.CreatedAt); err != nil {
 				return err
 			}

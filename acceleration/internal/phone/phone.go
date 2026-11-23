@@ -489,7 +489,8 @@ type InboundStopper interface {
 // NumberFinder is a vendor that can say whether its account holds a number, which settles a
 // purchase or a release whose outcome was not recorded (Service.SweepOrders).
 type NumberFinder interface {
-	// HoldsNumber reports whether the account holds e164, and the vendor's id for it.
+	// HoldsNumber reports whether the account holds e164, and the id its purchase is recorded
+	// by (Number.VendorID), empty when the vendor's listing cannot name it.
 	HoldsNumber(ctx context.Context, e164 string) (string, bool, error)
 }
 
