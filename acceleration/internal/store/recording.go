@@ -32,14 +32,10 @@ type Recording struct {
 	// Provider and Model are what served it, once routing has picked.
 	Provider string `bun:"provider,nullzero"`
 	Model    string `bun:"model,nullzero"`
-	// Source is the recording to transcribe: a URL, or empty when the audio was sent
-	// inline, which is not kept.
-	Source string `bun:"source,nullzero"`
 	// Text is what to say, for a voice job.
 	Text string `bun:"text,nullzero"`
-	// Options are what was asked for. Only the block for this modality is set.
+	// STT is what a transcription was asked for.
 	STT options.STT `bun:"stt,type:jsonb"`
-	TTS options.TTS `bun:"tts,type:jsonb"`
 	// Callback is a URL the finished job is POSTed to. Empty means the caller polls.
 	Callback string            `bun:"callback,nullzero"`
 	Tags     map[string]string `bun:"tags,type:jsonb"`
