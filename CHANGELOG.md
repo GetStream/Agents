@@ -279,7 +279,7 @@ With tracing on, each LLM model call has a `chat <model>` span with `gen_ai.oper
 
 ### The Kotlin SDK is published to Stream's Maven repository
 
-`io.getstream:stream-agents-android-core` is published to `https://stream-io-repo.com` by `publish-sdk-kotlin.yml`, from `release-kotlin-*` branches only, with `version` in `sdks/kotlin/gradle.properties` matching the branch. Each push to `release-kotlin-X.Y.Z-SNAPSHOT` publishes a 7-day snapshot, `X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT`. A pull request from `release-kotlin-X.Y.Z` fails unless the version is newer than the last release and not already published, and merging it publishes that release and tags the commit `sdk-kotlin-vX.Y.Z`. Other merges into `accelerate` publish nothing. No GitHub release is made, so the Python release does not start. The first release is 0.2.0.
+`io.getstream:stream-agents-android-core` is published to `https://stream-io-repo.com` by `publish-sdk-kotlin.yml`, from `release-kotlin-*` branches, with `version` in `sdks/kotlin/gradle.properties` matching the branch. Each push to `release-kotlin-X.Y.Z-SNAPSHOT` publishes a 7-day snapshot, `X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT`. A pull request from `release-kotlin-X.Y.Z` fails unless the version is newer than the last release and not already published, and merging it publishes that release and tags the commit `sdk-kotlin-vX.Y.Z`. Other merges into `main` publish nothing. Each GitHub release of the whole repository, tagged `vX.Y.Z` or `X.Y.Z` on a commit on `main`, publishes Kotlin `X.Y.Z` from that commit and tags it too, unless `X.Y.Z` is not newer than the last Kotlin release or already published; pre-releases and other tags publish nothing. The first release is 0.2.0.
 
 ### Juno on Flutter
 

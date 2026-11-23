@@ -7,7 +7,9 @@ description: Cut a release of the whole repo - write its section of the root CHA
 
 A release is one version of the whole repo: the router, the SDKs, the Python packages and the
 apps. It is a tag `vX.Y.Z` on a `main` commit and a GitHub release for that tag. The GitHub
-release starts `.github/workflows/release.yml`, which publishes the Python packages to PyPI.
+release starts `.github/workflows/release.yml`, which publishes the Python packages to PyPI, and
+`.github/workflows/publish-sdk-kotlin.yml`, which publishes the Kotlin SDK as `X.Y.Z` and tags
+`sdk-kotlin-vX.Y.Z` when `X.Y.Z` is newer than the last `sdk-kotlin-v*` tag.
 Router deploy tags (`accelerate-v*`) and SDK tags (`sdk-js-v*`, `sdk-kotlin-v*`, `sdk-dotnet-v*`,
 `sdk-dart-v*`, `sdks/go/v*`) are not releases here and get no CHANGELOG section.
 
@@ -102,6 +104,8 @@ generated notes by using the `--notes` flag"). The CHANGELOG section is not copi
 - `gh run list -R GetStream/Agents --workflow release.yml --limit 1` must show the new tag with
   `success`.
 - `curl -s https://pypi.org/pypi/vision-agents/json | jq -r .info.version` must print `X.Y.Z`.
+- `gh run list -R GetStream/Agents --workflow publish-sdk-kotlin.yml --event release --limit 1`
+  must show `success`. Its run says whether it published Kotlin `X.Y.Z` or why not.
 
 `release.yml` has never succeeded: of its 41 runs, 34 ended `failure`, 3 `startup_failure`, 3
 `cancelled` and 1 `skipped`. The packages of 0.6.5 to 0.6.9 reached PyPI outside it, and 0.6.9
