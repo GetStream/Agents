@@ -229,6 +229,15 @@ func (t Tags) Validate() error {
 	return nil
 }
 
+// ModelVoice is a built-in voice a native speech model accepts by ID.
+type ModelVoice struct {
+	ID          string `yaml:"id"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Gender      string `yaml:"gender"`
+	Default     bool   `yaml:"default"`
+}
+
 // ProviderConfig declares what one provider and model combination can do.
 type ProviderConfig struct {
 	Provider string `yaml:"provider"`
@@ -242,6 +251,9 @@ type ProviderConfig struct {
 	Description string `yaml:"description"`
 	// Languages are the ISO codes the model handles.
 	Languages []string `yaml:"languages"`
+	// Voices are the built-in voices a native speech model accepts by ID. Empty for
+	// modalities whose voices come from a voice library or that do not speak.
+	Voices []ModelVoice `yaml:"voices"`
 	// Realtime is false for models that only make sense off the live path.
 	Realtime bool `yaml:"realtime"`
 	// Tier is what the model optimises for. It defaults to low-latency, since a model
@@ -683,6 +695,23 @@ func (c ModalityConfig) validate() error {
 		if provider.APIKeyEnv != "" && !envName.MatchString(provider.APIKeyEnv) {
 			return fmt.Errorf("%s declares api_key_env %q: it names an environment variable, such as ANTHROPIC_EU_API_KEY",
 				instanceOf(provider), provider.APIKeyEnv)
+		}
+		voices := make(map[string]struct{}, len(provider.Voices))
+		defaults := 0
+		for _, voice := range provider.Voices {
+			if voice.ID == "" || voice.Name == "" {
+				return fmt.Errorf("%s declares a voice without both id and name", provider.Name())
+			}
+			if _, duplicate := voices[voice.ID]; duplicate {
+				return fmt.Errorf("%s declares voice %q twice", provider.Name(), voice.ID)
+			}
+			voices[voice.ID] = struct{}{}
+			if voice.Default {
+				defaults++
+			}
+		}
+		if defaults > 1 {
+			return fmt.Errorf("%s declares %d default voices, at most one is allowed", provider.Name(), defaults)
 		}
 		if _, duplicate := seen[instanceOf(provider)]; duplicate {
 			return fmt.Errorf("%s is declared twice", instanceOf(provider))
