@@ -110,8 +110,8 @@ Every identifier in a code block exists; the quickstart is the example file verb
 is copied. While 0.x, a minor may break a signature; a patch only fixes.
 
 1. Land the change on `main` by a pull request, with `Version` in `stream/backend.go` set to
-   `X.Y.Z`: it is the `User-Agent` every request sends (`stream-agents-go/X.Y.Z`), and nothing
-   else sets it. `release-sdk-go.yml` fails a tag whose `Version` differs. If the change breaks a
+   `X.Y.Z`: it is the `User-Agent` every request sends (`stream-agents-go/X.Y.Z`) and its
+   `X-Stream-Client` (`stream-agents-go-vX.Y.Z`), and nothing else sets it. `release-sdk-go.yml` fails a tag whose `Version` differs. If the change breaks a
    signature or field, add one line under `# Unreleased` → **Breaking Changes** in the root
    `CHANGELOG.md`. The `Go SDK` steps of the `CI (SDKs)` workflow (`.github/workflows/ci-sdks.yml`)
    check `sdks/go` alone on Go 1.25, as a consumer gets it.
