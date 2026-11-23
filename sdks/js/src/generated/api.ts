@@ -3232,6 +3232,7 @@ export type paths = {
          * Write an export, or a batch of changes, into this deployment
          * @description Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
          *     An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+         *     An app runs one import at a time on a router, and a router runs at most four imports at once.
          *     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
          */
         readonly post: operations["importData"];
@@ -19722,7 +19723,7 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
-            /** @description The file carries an export's rows, the app already has data here and `full` is not true. */
+            /** @description An import of this app is already running on this router: one runs at a time. Or the file carries an export's rows, the app already has data here and `full` is not true. */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -19741,7 +19742,7 @@ export interface operations {
                 };
             };
             readonly 500: components["responses"]["InternalError"];
-            /** @description This deployment has no database to import into. */
+            /** @description This deployment has no database to import into, or this router is running as many imports as it takes at once: try again. */
             readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;

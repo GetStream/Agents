@@ -50,6 +50,8 @@ func (s *DataMoveSuite) SetupTest() {
 	s.T().Cleanup(func() {
 		s.Eventually(func() bool { return len(s.router.exports) == 0 }, letGoWithin, 10*time.Millisecond,
 			"an export of this test is still running")
+		s.Eventually(func() bool { return len(s.router.imports) == 0 }, letGoWithin, 10*time.Millisecond,
+			"an import of this test is still running")
 	})
 	s.useApp(s.data.createApp())
 }
@@ -454,6 +456,100 @@ func (s *DataMoveSuite) lineOf(fields map[string]any) string {
 	encoded, err := json.Marshal(dataLine{Table: "agent_configs", Row: row})
 	s.Require().NoError(err)
 	return string(encoded)
+}
+
+func (s *DataMoveSuite) TestASecondImportOfAnAppIsRefusedWhileOneIsRunning() {
+	s.heldImport()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Require().Equal(http.StatusConflict, status)
+	s.Contains(failure, "an import of this app is already running")
+}
+
+func (s *DataMoveSuite) TestAnImportOverTheRoutersCapIsRefused() {
+	for range maxImports {
+		s.useApp(s.data.createApp())
+		s.heldImport()
+	}
+	s.useApp(s.data.createApp())
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Require().Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, "as many imports as it takes at once")
+}
+
+func (s *DataMoveSuite) TestAnImportThatFailsLetsGoOfItsPlace() {
+	for range maxImports + 1 {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", "not an export at all")
+		s.Require().Equal(http.StatusBadRequest, status)
+	}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusOK, status, failure)
+}
+
+func (s *DataMoveSuite) TestAnImportHungUpOnLetsGoOfItsPlace() {
+	var hangUps []context.CancelFunc
+	for range maxImports {
+		s.useApp(s.data.createApp())
+		hangUps = append(hangUps, s.heldImport())
+	}
+	for _, hangUp := range hangUps {
+		hangUp()
+	}
+
+	// The last app hung up on its own import, so a new one of it needs both its own place and
+	// one of the router's back.
+	s.Eventually(func() bool {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+		return status == http.StatusOK
+	}, letGoWithin, 10*time.Millisecond, "the imports hung up on still hold their places")
+}
+
+func (s *DataMoveSuite) TestAnImportIsServedWhileTheRoutersExportsRun() {
+	s.skipOnARouterWithShards()
+	for range maxExports {
+		s.useApp(s.data.createApp())
+		s.seedRowsTooBigToBuffer()
+		s.Require().Equal(http.StatusOK, s.stalledExport().StatusCode)
+	}
+	s.useApp(s.data.createApp())
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusOK, status, failure)
+}
+
+// emptyImport is an import with no rows, which is written at once.
+const emptyImport = `{"cursor":1}`
+
+// heldImport starts an import of the app whose body never ends, waits until it holds one of
+// the router's places, and returns what hangs up on it.
+func (s *DataMoveSuite) heldImport() context.CancelFunc {
+	held := len(s.router.imports)
+	body, writer := io.Pipe()
+	ctx, hangUp := context.WithCancel(context.Background())
+	s.T().Cleanup(func() {
+		hangUp()
+		_ = writer.Close()
+	})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	transport := &http.Transport{}
+	s.T().Cleanup(transport.CloseIdleConnections)
+	go func() {
+		response, err := (&http.Client{Transport: transport}).Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	s.Eventually(func() bool { return len(s.router.imports) == held+1 }, settleFor, 10*time.Millisecond,
+		"the import never started")
+	return hangUp
 }
 
 // An export holds a connection of the router's pool until its client has read it all.

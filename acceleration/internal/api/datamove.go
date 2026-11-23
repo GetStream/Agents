@@ -53,6 +53,11 @@ const maxExports = 4
 // escaping.
 const maxImportLine = 64 << 20
 
+// maxImports bounds the imports running on one router at once. Each holds a line of up to
+// maxImportLine in memory, and the copy of its row that decoding it makes, so four hold at
+// most about half a GiB; the same four as maxExports.
+const maxImports = 4
+
 // errExportRunning refuses a second export of an app while one is running on this router. Each
 // export holds a connection of this router's pool until its client has read it all.
 var errExportRunning = conflict("an export of this app is already running: wait for it to finish")
@@ -62,6 +67,12 @@ var errExportTooLong = unavailable("the export ran out of time before its first 
 
 // errExportsBusy refuses an export while maxExports are running on this router.
 var errExportsBusy = unavailable("this router is running as many exports as it takes at once: try again later")
+
+// errImportRunning refuses a second import of an app while one is running on this router.
+var errImportRunning = conflict("an import of this app is already running: wait for it to finish")
+
+// errImportsBusy refuses an import while maxImports are running on this router.
+var errImportsBusy = unavailable("this router is running as many imports as it takes at once: try again later")
 
 // errWritesOpen is a capture start, or the export after it, that gave up on a write from before
 // the start (store.ErrWritesOpen).
@@ -186,6 +197,18 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if _, running := s.importing.LoadOrStore(customerID, struct{}{}); running {
+		writeError(w, errImportRunning)
+		return
+	}
+	defer s.importing.Delete(customerID)
+	select {
+	case s.imports <- struct{}{}:
+	default:
+		writeError(w, errImportsBusy)
+		return
+	}
+	defer func() { <-s.imports }()
 
 	// An export carries each row as the source had it when it was read, so writing one over an
 	// app this deployment already holds would undo whatever was done to that row here since.
