@@ -30,8 +30,11 @@ tag (`sdks/python/pyproject.toml`, `[tool.hatch.version] source = "vcs"`).
 On a branch from `origin/main`, list what merged since the previous release:
 
 ```bash
-git log <previous tag>..origin/main --first-parent --oneline
+git log <previous tag>..origin/main --oneline | grep -E '\(#[0-9]+\)$'
 ```
+
+Do not add `--first-parent`: a PR that reached `main` inside a merge commit (the #2030 accelerate
+merge) is not on the first-parent chain, and the list would miss it (#2053).
 
 In the root `CHANGELOG.md`:
 
@@ -39,13 +42,17 @@ In the root `CHANGELOG.md`:
   that tag: `0.7.0` shipped without a section, so its work is still there. An entry whose PR
   merged before the previous release tag goes under that release's own heading (`# 0.7.0`, as
   the tag is written), which you create below `# vX.Y.Z` if it is missing. Only the rest goes
-  under `# vX.Y.Z`. For an entry with a PR number, find its merge commit. For one without, take
-  the commit that wrote its `###` line (`git blame -l -L <line>,<line> origin/main --
-  CHANGELOG.md`). Then test it:
+  under `# vX.Y.Z`. For an entry with a PR number, find the oldest commit whose subject ends
+  `(#N)`. Test it with the command below. It prints `before`, `after`, `none` or `error`. For `none`, and
+  for an entry with no PR number, take the commit that wrote its `###` line
+  (`git blame -l -L <line>,<line> origin/main -- CHANGELOG.md`) and test that commit. On `error`,
+  stop: a git error is never `after`.
 
   ```bash
-  c=$(git log origin/main --first-parent --format=%H --grep='(#2047)' | head -1)
-  git merge-base --is-ancestor "$c" <previous tag> && echo before || echo after
+  c=$(git log origin/main --format=%H --fixed-strings --grep='(#2047)' | tail -1)
+  if [ -z "$c" ]; then echo none
+  elif git merge-base --is-ancestor "$c" <previous tag>; then echo before
+  else [ $? -eq 1 ] && echo after || echo error; fi
   ```
 
   `before` means the previous release's heading, `after` means `# vX.Y.Z`.
