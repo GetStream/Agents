@@ -130,6 +130,20 @@ func (s *ChatLoginsSuite) TestAForkNamingAConfigGoesBackToItsParentsReturnURL() 
 	s.Equal(launchPageFrom(appOrigin), s.launchedFor(connector))
 }
 
+// TestAChatLoginOfADeviceSessionWithAnUnlistedReturnURLGoesBackToTheDashboard: the dropped
+// return_url leaves the consent as one opened without any.
+func (s *ChatLoginsSuite) TestAChatLoginOfADeviceSessionWithAnUnlistedReturnURLGoesBackToTheDashboard() {
+	connector, grant := s.connector()
+	opened := s.client.createSession(s.returningTo(s.session(s.config(connector, grant), nil), appReturnURL))
+	events := s.client.opens("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.ask(opened.Id)
+	asked := s.loginOn(events, "")
+	page, location, body := s.loggedIn(asked)
+
+	s.assertEndsAsOnBase(asked["connection_id"].(string), page, location, body)
+}
+
 // TestADeviceSessionsReturnURLItsAppNoLongerListsIsNotCarriedOn: the device named a listed
 // origin, which the app then took out of its policy. The chat carried on from its row goes
 // back to the dashboard, as one opened without a return_url does.
@@ -267,7 +281,7 @@ func (s *RouterSuite) storedReturnURL(id string) string {
 }
 
 // storedWithoutReturnURL is whether the session's row exists with return_url NULL.
-func (s *ChatLoginsSuite) storedWithoutReturnURL(id string) bool {
+func (s *RouterSuite) storedWithoutReturnURL(id string) bool {
 	var count int
 	err := s.store.ShardDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM agent_sessions WHERE id = ? AND return_url IS NULL", id).Scan(&count)
@@ -295,9 +309,10 @@ func (s *ChatLoginsSuite) fork(id string, request ForkSessionRequest) Session {
 	return forked
 }
 
-// TestADeviceReturnURLOfAnOriginItsAppDoesNotListIsRefusedAndNotCreated: only the listed
-// origin itself is taken, not a host that starts with it, another port or another host.
-func (s *SessionCreateSuite) TestADeviceReturnURLOfAnOriginItsAppDoesNotListIsRefusedAndNotCreated() {
+// TestADeviceReturnURLOfAnOriginItsAppDoesNotListIsDropped: only the listed origin itself is
+// kept, not a host that starts with it, another port or another host. The session is opened
+// all the same, with no return_url.
+func (s *SessionCreateSuite) TestADeviceReturnURLOfAnOriginItsAppDoesNotListIsDropped() {
 	s.devicesMayReturnTo(appOrigin, "com.example.app")
 	for _, returnURL := range []string{
 		"https://elsewhere.example/connectors/done",
@@ -305,31 +320,29 @@ func (s *SessionCreateSuite) TestADeviceReturnURLOfAnOriginItsAppDoesNotListIsRe
 		"https://app.example:8443/connectors/done",
 		"http://localhost:3000/connectors/done",
 	} {
-		id := s.utils.uuid()
-		request := textSession(&id)
+		request := textSession(nil)
 		request.ReturnUrl = pointerTo(returnURL)
 
-		status, message := s.client.failure(http.MethodPost, "/v1/agents/sessions", request)
+		opened := s.client.createSession(request)
 
-		s.Equal(http.StatusForbidden, status, returnURL)
-		s.Equal(errDeviceReturnURL.Message, message, returnURL)
-		s.Equal(http.StatusNotFound, s.client.do(http.MethodGet, "/v1/agents/sessions/"+id, nil, nil), returnURL)
+		s.Eventually(func() bool { return s.storedWithoutReturnURL(opened.Id) }, settleFor, 20*time.Millisecond,
+			"%s: the session is kept without its return_url", returnURL)
 	}
 }
 
-// TestADeviceReturnURLOfANativeSchemeIsTakenOnlyWhenItsAppListsIt: the scheme must be listed
-// itself; an origin or another app's scheme does not admit it.
-func (s *SessionCreateSuite) TestADeviceReturnURLOfANativeSchemeIsTakenOnlyWhenItsAppListsIt() {
+// TestADeviceReturnURLOfANativeSchemeIsKeptOnlyWhenItsAppListsIt: the scheme must be listed
+// itself; an origin or another app's scheme does not keep it.
+func (s *SessionCreateSuite) TestADeviceReturnURLOfANativeSchemeIsKeptOnlyWhenItsAppListsIt() {
 	const native = "com.example.app:/connected"
 	for _, listed := range [][]string{nil, {appOrigin, "com.example.other", "com.example.app.other"}} {
 		s.devicesMayReturnTo(listed...)
 		request := textSession(nil)
 		request.ReturnUrl = pointerTo(native)
 
-		status, message := s.client.failure(http.MethodPost, "/v1/agents/sessions", request)
+		opened := s.client.createSession(request)
 
-		s.Equal(http.StatusForbidden, status, listed)
-		s.Equal(errDeviceReturnURL.Message, message, listed)
+		s.Eventually(func() bool { return s.storedWithoutReturnURL(opened.Id) }, settleFor, 20*time.Millisecond,
+			"listed %v: the session is kept without its return_url", listed)
 	}
 
 	s.devicesMayReturnTo("com.example.app")
@@ -353,27 +366,25 @@ func (s *SessionCreateSuite) TestAServerSideReturnURLNeedsNoEntryInThePolicy() {
 	}
 }
 
-// A start frame is refused the device return_url POST /v1/agents/sessions refuses, with the
-// same message, code and type.
-func (s *SocketSessionSuite) TestASocketSessionWithADeviceReturnURLItsAppDoesNotListIsRefused() {
-	sent := map[string]any{"return_url": "https://elsewhere.example/connectors/done"}
-	_, body := s.client.call(http.MethodPost, "/v1/agents/sessions", sent)
-	var created ErrorResponse
-	s.Require().NoError(json.Unmarshal(body, &created))
-
+// TestASocketSessionWithADeviceReturnURLItsAppDoesNotListIsHeldWithoutIt: the start frame
+// gets its session, as POST /v1/agents/sessions does, with the return_url dropped.
+func (s *SocketSessionSuite) TestASocketSessionWithADeviceReturnURLItsAppDoesNotListIsHeldWithoutIt() {
 	connection := s.client.opens("/v1/agents/socket")
-	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "session": sent}))
-	refused := s.readFrame(connection)
+	defer connection.Close()
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "sample_rate": 24_000,
+		"session": map[string]any{"return_url": "https://elsewhere.example/connectors/done"},
+	}))
 
-	s.Equal("error", refused["type"])
-	s.Equal(errDeviceReturnURL.Message, refused["error"])
-	s.Equal(created.Error.Message, refused["error"])
-	s.Equal(created.Error.Code, refused["code"])
-	s.Equal(string(created.Error.Type), refused["error_type"])
+	answered := s.readFrame(connection)
+
+	s.Require().Equal("session", answered["type"], "the socket answered %v", answered)
+	id := answered["session"].(map[string]any)["id"].(string)
+	s.Eventually(func() bool { return s.storedWithoutReturnURL(id) }, settleFor, 20*time.Millisecond)
 }
 
-// TestASocketSessionWithADeviceReturnURLItsAppListsIsHeld: the start frame is refused only for
-// an unlisted page, not for every device's.
+// TestASocketSessionWithADeviceReturnURLItsAppListsIsHeld: a listed page is kept, not dropped
+// as every device's.
 func (s *SocketSessionSuite) TestASocketSessionWithADeviceReturnURLItsAppListsIsHeld() {
 	s.devicesMayReturnTo(appOrigin)
 	connection := s.client.opens("/v1/agents/socket")

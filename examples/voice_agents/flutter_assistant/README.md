@@ -77,7 +77,7 @@ on iOS, and on Android in an Auth Tab, or a Custom Tab where the browser has non
 handoff token in its fragment. You sign in at Linear, the router stores the grant, and it hands
 the page back to the app's own scheme, `io.getstream.visionagents.flutterassistant:/connected`.
 Every new conversation names that as its session's `return_url`, and the router takes one only in
-reverse domain form (RFC 8252 section 7.1), and from a phone only one the app's policy lists in
+reverse domain form (RFC 8252 section 7.1), and from a phone keeps only one the app's policy lists in
 `device_return_urls`, which swift_assistant's `configure` sets. The call that waited then carries on in the same
 reply, on your own account, and the agent answers with the list. Later conversations use the
 account with no sign-in, as do the iOS and Android apps, which are the same `juno-owner`.

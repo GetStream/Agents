@@ -37,8 +37,8 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	if failure := s.refuseCall(ctx, customerID, *request.Body); failure != nil {
 		return nil, failure
 	}
-	if failure := s.refuseDeviceReturnURL(ctx, customerID, *request.Body); failure != nil {
-		return nil, failure
+	if err := s.dropUnlistedReturnURL(ctx, customerID, request.Body); err != nil {
+		return nil, err
 	}
 
 	// A config is read before the session is created rather than inside it, so a caller
@@ -273,25 +273,23 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	return APIError{}, false
 }
 
-// errDeviceReturnURL refuses a return_url an end user's device named that its app does not list.
-var errDeviceReturnURL = forbidden("return_url is sent server-side unless the app's policy lists its origin " +
-	"or native app scheme in device_return_urls: the launch page takes a consent's handoff from that page")
-
-// refuseDeviceReturnURL refuses a new session's return_url sent by an end user's device whose
-// origin or native app scheme the app's policy does not list in device_return_urls. The launch
-// page takes the handoff from that page, so which pages may is the app's to decide.
-func (s *Server) refuseDeviceReturnURL(ctx context.Context, customerID string, request CreateSessionRequest) error {
+// dropUnlistedReturnURL takes out of a new session's request a return_url an end user's device
+// sent whose origin or native app scheme the app's policy does not list in device_return_urls.
+// The launch page takes the handoff from that page, so which pages may is the app's to decide;
+// the session goes on, and its consents go back to the dashboard, as when none is sent.
+func (s *Server) dropUnlistedReturnURL(ctx context.Context, customerID string, request *CreateSessionRequest) error {
 	returnURL := value(request.ReturnUrl)
 	if returnURL == "" || ServerSideFrom(ctx) {
 		return nil
 	}
 	listed, err := s.devicesMayReturnTo(ctx, customerID, returnURL)
-	if err != nil {
+	if err != nil || listed {
 		return err
 	}
-	if !listed {
-		return errDeviceReturnURL
-	}
+	request.ReturnUrl = nil
+	// The origin or scheme alone: a return_url's path and query are the app's own.
+	s.logger.Info("dropped a device's return_url its app's policy does not list",
+		"customer", customerID, "return_to", returnURLKey(returnURL))
 	return nil
 }
 

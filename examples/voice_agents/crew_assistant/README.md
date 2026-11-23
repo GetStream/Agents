@@ -89,8 +89,8 @@ getstream agents sync ./examples/voice_agents/crew_assistant
 `configure` runs after the sync, every time: it uploads the documents in `knowledge/` the CLI
 skips, and sets the visible tools and the skills (`think`, `recall`, `explain`, `vision`), which
 no file in the folder holds. It also adds the app's sign-in scheme, `io.getstream.expocrewassistant`,
-to the app policy's `device_return_urls`, keeping what is listed there: the router takes a
-session's `return_url` from a phone only when its scheme is listed. A sync over them, which the CLI asks for once `configure` has run
+to the app policy's `device_return_urls`, keeping what is listed there: the router drops a
+session's `return_url` from a phone whose scheme is not listed. A sync over them, which the CLI asks for once `configure` has run
 (`--overwrite`), drops all three, so `configure` puts them back.
 
 The backend listens on `:8097` and connects out to the router to host the tools, so it needs no

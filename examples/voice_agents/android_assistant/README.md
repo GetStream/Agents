@@ -161,8 +161,8 @@ or newer, generated UI replies 7.18.0, and `AIConversationState` 7.19.0: `stream
 - **Sign-ins go back to the app.** Every new conversation names
   `io.getstream.visionagents.androidassistant:/connected` as its session's `return_url`, the
   app's own scheme in the reverse domain form the router asks for, which swift_assistant's
-  `configure` lists in the app's policy (`device_return_urls`), as the router requires of one a
-  phone names. `SignIn.kt` is the browser
+  `configure` lists in the app's policy (`device_return_urls`): the router drops one a phone
+  names that is not listed. `SignIn.kt` is the browser
   half of a connector's sign-in: `authenticate(url)` opens `launch_url#handoff_token=<token>` in
   an Auth Tab (`androidx.browser` 1.10.0) and returns the `…:/connected` URL the router sent it
   back to, with `connection_id` and `status`, or null when the person closed it. Where the

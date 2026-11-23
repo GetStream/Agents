@@ -77,7 +77,7 @@ Connect opens the router's sign-in page in a web authentication sheet, with the 
 in its fragment. You sign in at Linear, the router stores the grant, and it hands the sheet back
 to the app's own scheme, `io.getstream.visionagents.swiftassistant:/connected`. Every new
 conversation names that as its session's `return_url`, and the router takes one only in reverse
-domain form (RFC 8252 section 7.1), and from a phone only one the app's policy lists in
+domain form (RFC 8252 section 7.1), and from a phone keeps only one the app's policy lists in
 `device_return_urls`, which `configure` sets for this app, the Android, Flutter and React Native
 apps and react_assistant's page. The call that waited then carries on in the same reply, on
 your own account, and the agent answers with the list. Later conversations use the account with

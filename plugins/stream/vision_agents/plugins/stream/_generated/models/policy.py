@@ -73,10 +73,11 @@ class Policy:
                 Example: 30d.
             device_return_urls (list[str] | None | Unset): What an end user's device may name as a session's return_url: web
                 origins (https, or http on a loopback host), such as https://app.example, any page of which a device may name,
-                and native apps' own schemes in reverse domain form, such as com.example.app, without the colon. A session an
-                end user's device asks for with a return_url whose origin or scheme is not listed is refused with 403; a server-
-                side caller needs no entry. Only an app's policy has them: an organization's that sets them is refused. Example:
-                ['https://app.example', 'com.example.app'].
+                and native apps' own schemes in reverse domain form, such as com.example.app, without the colon. A return_url an
+                end user's device sends whose origin or scheme is not listed is dropped, and the session's consents go back to
+                the dashboard; a server-side caller needs no entry. Each entry is matched exactly, with no wildcards. Only an
+                app's policy has them: an organization's that sets them is refused. Example: ['https://app.example',
+                'com.example.app'].
     """
 
     allowed_models: list[str] | Unset = UNSET

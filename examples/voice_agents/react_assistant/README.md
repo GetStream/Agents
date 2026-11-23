@@ -153,8 +153,8 @@ npm run build     # types, then the bundle
   is shown (see "A card brings its own tool" above).
 - **Connect Gmail and Linear in the chat.** Every new conversation names
   `http://localhost:5173/connected.html` as its session's `return_url`, an origin
-  swift_assistant's `configure` lists in the app's policy (`device_return_urls`), as the router
-  requires of one a device names. A call that waits for the
+  swift_assistant's `configure` lists in the app's policy (`device_return_urls`), since the router
+  drops one a device names that is not listed. A call that waits for the
   person's account shows Stream's sign-in card on its step. Connect opens the router's sign-in
   page in a popup and hands it the token it asks for (`createPopupAuthorizer`); the provider
   sends the popup back to `connected.html`, which tells the page how it went and closes. The call

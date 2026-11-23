@@ -147,14 +147,9 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		refuseWith(refusedByRouter, errSocketCall)
 		return
 	}
-	if failure := s.refuseDeviceReturnURL(ctx, customerID, start.Session); failure != nil {
-		answer, answered := errors.AsType[APIError](failure)
-		if !answered {
-			s.logger.Error("could not read the app policy of a socket session", "error", failure)
-			refuseWith(serverFailed, internalError())
-			return
-		}
-		refuseWith(refusedByRouter, answer)
+	if err := s.dropUnlistedReturnURL(ctx, customerID, &start.Session); err != nil {
+		s.logger.Error("could not read the app policy of a socket session", "error", err)
+		refuseWith(serverFailed, internalError())
 		return
 	}
 
