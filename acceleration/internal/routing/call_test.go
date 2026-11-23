@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 )
@@ -50,20 +51,6 @@ func (t *hooked) hook(stat Stat, costMicros int64) {
 	t.stats, t.costs = append(t.stats, stat), append(t.costs, costMicros)
 }
 
-// toldMeter is a meter of a model priced at 2 US dollars a million input tokens, whose
-// recorder writes nothing, with a hook that keeps what it is told.
-func toldMeter(t *testing.T) (Meter, *hooked) {
-	config := ProviderConfig{Provider: "vendor", Model: "told", Price: Price{PerMillionInputTokens: 2}}
-	logger := slog.New(slog.DiscardHandler)
-	prices, err := Prices(Config{LLM: {Providers: []ProviderConfig{config}}}, logger)
-	require.NoError(t, err)
-	recorder := NewRecorder(LLM, nil, nil, prices, logger)
-	t.Cleanup(recorder.Close)
-	hook := &hooked{}
-	return Meter{Recorder: recorder, Config: config, Owner: Owner{CustomerID: "acme", CallID: "default:c1"},
-		Code: func(error) string { return "vendor_refused" }, Recorded: hook.hook}, hook
-}
-
 // inputTokens is work that read n input tokens.
 type inputTokens int64
 
@@ -71,89 +58,114 @@ func (n inputTokens) Used() pricing.Quantities {
 	return pricing.Quantities{pricing.InputTokens: int64(n)}
 }
 
-func TestARecordedHookIsToldWhatTheCallUsedAndWhatItsRowCosts(t *testing.T) {
-	meter, hook := toldMeter(t)
+// CallHookSuite calls vendors through Call with a Meter.Recorded hook that keeps what it is told,
+// on a meter of a model priced at 2 US dollars a million input tokens, whose recorder writes
+// nothing.
+type CallHookSuite struct {
+	suite.Suite
+	meter Meter
+	hook  *hooked
+}
+
+func TestCallHookSuite(t *testing.T) {
+	suite.Run(t, new(CallHookSuite))
+}
+
+func (s *CallHookSuite) SetupTest() {
+	config := ProviderConfig{Provider: "vendor", Model: "told", Price: Price{PerMillionInputTokens: 2}}
+	logger := slog.New(slog.DiscardHandler)
+	prices, err := Prices(Config{LLM: {Providers: []ProviderConfig{config}}}, logger)
+	s.Require().NoError(err)
+	recorder := NewRecorder(LLM, nil, nil, prices, logger)
+	s.T().Cleanup(recorder.Close)
+	s.hook = &hooked{}
+	s.meter = Meter{Recorder: recorder, Config: config, Owner: Owner{CustomerID: "acme", CallID: "default:c1"},
+		Code: func(error) string { return "vendor_refused" }, Recorded: s.hook.hook}
+}
+
+func (s *CallHookSuite) TestARecordedHookIsToldWhatTheCallUsedAndWhatItsRowCosts() {
+	meter, hook := s.meter, s.hook
 
 	_, err := Call(context.Background(), meter, func(context.Context) (inputTokens, error) { return 1_000, nil })
 
-	require.NoError(t, err)
-	require.Len(t, hook.stats, 1, "one call is told once")
+	s.Require().NoError(err)
+	s.Len(hook.stats, 1, "one call is told once")
 	stat := hook.stats[0]
-	require.True(t, stat.Success)
-	require.Empty(t, stat.ErrorCode)
-	require.EqualValues(t, 1_000, stat.InputTokens)
-	require.Equal(t, "default:c1", stat.CallID)
-	require.Equal(t, []int64{2_000}, hook.costs, "a thousand tokens at 2 US dollars a million")
+	s.True(stat.Success)
+	s.Empty(stat.ErrorCode)
+	s.EqualValues(1_000, stat.InputTokens)
+	s.Equal("default:c1", stat.CallID)
+	s.Equal([]int64{2_000}, hook.costs, "a thousand tokens at 2 US dollars a million")
 }
 
-func TestARecordedHookIsToldOfAFailureWithItsCodeAndNoCost(t *testing.T) {
-	meter, hook := toldMeter(t)
+func (s *CallHookSuite) TestARecordedHookIsToldOfAFailureWithItsCodeAndNoCost() {
+	meter, hook := s.meter, s.hook
 
 	_, err := Call(context.Background(), meter, func(context.Context) (inputTokens, error) {
 		return 1_000, errors.New("vendor said no")
 	})
 
-	require.Error(t, err)
-	require.Len(t, hook.stats, 1)
-	require.False(t, hook.stats[0].Success)
-	require.Equal(t, "vendor_refused", hook.stats[0].ErrorCode)
-	require.Equal(t, "vendor said no", hook.stats[0].ErrorMessage)
-	require.Zero(t, hook.stats[0].InputTokens, "a failure is recorded without quantities")
-	require.Equal(t, []int64{0}, hook.costs)
+	s.Require().Error(err)
+	s.Len(hook.stats, 1)
+	s.False(hook.stats[0].Success)
+	s.Equal("vendor_refused", hook.stats[0].ErrorCode)
+	s.Equal("vendor said no", hook.stats[0].ErrorMessage)
+	s.Zero(hook.stats[0].InputTokens, "a failure is recorded without quantities")
+	s.Equal([]int64{0}, hook.costs)
 }
 
-func TestARecordedHookIsToldOfAPanicBeforeItCarriesOn(t *testing.T) {
-	meter, hook := toldMeter(t)
+func (s *CallHookSuite) TestARecordedHookIsToldOfAPanicBeforeItCarriesOn() {
+	meter, hook := s.meter, s.hook
 
-	require.PanicsWithValue(t, "vendor fell over", func() {
+	s.PanicsWithValue("vendor fell over", func() {
 		_, _ = Call(context.Background(), meter, func(context.Context) (inputTokens, error) { panic("vendor fell over") })
 	})
 
-	require.Len(t, hook.stats, 1)
-	require.Equal(t, "panic", hook.stats[0].ErrorCode)
+	s.Len(hook.stats, 1)
+	s.Equal("panic", hook.stats[0].ErrorCode)
 }
 
-func TestARecordedHookIsNotToldOfWorkTheMeterOmits(t *testing.T) {
-	meter, hook := toldMeter(t)
+func (s *CallHookSuite) TestARecordedHookIsNotToldOfWorkTheMeterOmits() {
+	meter, hook := s.meter, s.hook
 	meter.Omit = func(used pricing.Quantities) bool { return used[pricing.InputTokens] == 0 }
 
 	_, err := Call(context.Background(), meter, func(context.Context) (inputTokens, error) { return 0, nil })
-	require.NoError(t, err)
+	s.Require().NoError(err)
 	_, err = Call(context.Background(), meter, func(context.Context) (inputTokens, error) { return 5, nil })
-	require.NoError(t, err)
+	s.Require().NoError(err)
 
-	require.Len(t, hook.stats, 1, "only the work with a row is told")
-	require.EqualValues(t, 5, hook.stats[0].InputTokens)
+	s.Len(hook.stats, 1, "only the work with a row is told")
+	s.EqualValues(5, hook.stats[0].InputTokens)
 }
 
-func TestARecordedHookOfAMeterWithNoRecorderIsToldItCostsNothing(t *testing.T) {
+func (s *CallHookSuite) TestARecordedHookOfAMeterWithNoRecorderIsToldItCostsNothing() {
 	hook := &hooked{}
 
 	_, err := Call(context.Background(), Meter{Recorded: hook.hook}, func(context.Context) (inputTokens, error) { return 1_000, nil })
 
-	require.NoError(t, err)
-	require.Len(t, hook.stats, 1, "a router built without a recorder still logs its line")
-	require.Equal(t, []int64{0}, hook.costs)
+	s.Require().NoError(err)
+	s.Len(hook.stats, 1, "a router built without a recorder still logs its line")
+	s.Equal([]int64{0}, hook.costs)
 }
 
-func TestACallWithNoRecordedHookLogsNothing(t *testing.T) {
+func (s *CallHookSuite) TestACallWithNoRecordedHookLogsNothing() {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	previous := slog.Default()
 	slog.SetDefault(logger)
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	meter, _ := toldMeter(t)
+	s.T().Cleanup(func() { slog.SetDefault(previous) })
+	meter := s.meter
 	meter.Recorded = nil
 	recorder := NewRecorder(LLM, nil, nil, meter.Recorder.pricer, logger)
-	t.Cleanup(recorder.Close)
+	s.T().Cleanup(recorder.Close)
 	meter.Recorder = recorder
 
 	_, err := Call(context.Background(), meter, func(context.Context) (inputTokens, error) { return 1_000, nil })
-	require.NoError(t, err)
+	s.Require().NoError(err)
 	_, err = Call(context.Background(), meter, func(context.Context) (inputTokens, error) {
 		return 0, errors.New("vendor said no")
 	})
-	require.Error(t, err)
+	s.Require().Error(err)
 
-	require.Empty(t, logs.String(), "the other callers of Call log no line of their own")
+	s.Empty(logs.String(), "the other callers of Call log no line of their own")
 }
