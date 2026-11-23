@@ -10,11 +10,11 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// SetUserTimezone records the zone a user was explicitly known to be in. The
+// SetTimezone records the zone a user was explicitly known to be in. The
 // row is created when there is none; on an existing row only the zone moves,
 // never the kind the claim path reads, and a zone it already holds is not
 // written again: every session opened with a zone comes through here.
-func (s *Store) SetUserTimezone(ctx context.Context, customerID, userID, kind, zone string) error {
+func (r *Users) SetTimezone(ctx context.Context, customerID, userID, kind, zone string) error {
 	if customerID == "" || userID == "" || zone == "" {
 		return nil
 	}
@@ -22,7 +22,7 @@ func (s *Store) SetUserTimezone(ctx context.Context, customerID, userID, kind, z
 		kind = UserKindAuthenticated
 	}
 	user := &User{CustomerID: customerID, ID: userID, Kind: kind, Timezone: zone, CreatedAt: time.Now().UTC()}
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("timezone = EXCLUDED.timezone").
 		Where("u.timezone IS DISTINCT FROM EXCLUDED.timezone").
@@ -33,13 +33,13 @@ func (s *Store) SetUserTimezone(ctx context.Context, customerID, userID, kind, z
 	return nil
 }
 
-// UserTimezone returns the zone stored for a user, or empty.
-func (s *Store) UserTimezone(ctx context.Context, customerID, userID string) (string, error) {
+// GetTimezone returns the zone stored for a user, or empty.
+func (r *Users) GetTimezone(ctx context.Context, customerID, userID string) (string, error) {
 	if customerID == "" || userID == "" {
 		return "", nil
 	}
 	var user User
-	err := s.global.NewSelect().Model(&user).
+	err := r.store.global.NewSelect().Model(&user).
 		Column("timezone").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", userID).
