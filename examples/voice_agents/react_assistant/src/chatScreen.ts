@@ -33,6 +33,8 @@ export interface ChatScreenDeps {
   approver(chat: AgentChat<LocalMessage>): AIToolApprover;
   /** The call of a session whose voice is on. */
   voiceOf(session: Session): VoiceSession;
+  /** Whether the chat's sessions keep nothing, so there are no earlier versions to branch from. */
+  incognito?: boolean;
 }
 
 export interface ChatScreenSnapshot {
@@ -106,8 +108,9 @@ export class ChatScreen extends Store<ChatScreenSnapshot> {
         workingText: workingLabel,
       }),
       approver: deps.approver(this.chat),
-      // The router keeps the conversation in Stream Chat and can't rewind it.
-      actions: { edit: false, regenerate: false },
+      // The transport branches: a regenerate or an edit asks again beside the earlier version,
+      // which the router keeps. An incognito session keeps nothing to branch from.
+      ...(deps.incognito ? { actions: { edit: false, regenerate: false } } : {}),
     });
     let announced = sessionId !== undefined;
     this.stops.push(
