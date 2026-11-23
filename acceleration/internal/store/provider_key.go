@@ -160,19 +160,16 @@ func (r *ProviderKeys) Select(ctx context.Context, customerID string, filter Pro
 	return keys, nil
 }
 
-// SelectByProvider returns every customer's keys for a provider, for a job that reaches each
-// customer's own account at it, by customer and then region.
-func (r *ProviderKeys) SelectByProvider(ctx context.Context, provider string) ([]ProviderKey, error) {
-	if provider == "" {
-		return nil, stack.Wrap(errors.New("store: provider is required"))
-	}
+// SelectDaytona returns every customer's Daytona keys, for a job that reaches each customer's
+// own account there, by customer and then region.
+func (r *ProviderKeys) SelectDaytona(ctx context.Context) ([]ProviderKey, error) {
 	keys := []ProviderKey{}
 	err := r.store.global.NewSelect().Model(&keys).
-		Where("provider = ?", provider).
+		Where("provider = ?", SandboxDaytona).
 		Order("customer_id", "region").
 		Scan(ctx)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: provider keys of %s: %w", provider, err))
+		return nil, stack.Wrap(fmt.Errorf("store: provider keys of %s: %w", SandboxDaytona, err))
 	}
 	return keys, nil
 }
