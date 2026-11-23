@@ -200,15 +200,17 @@ func (r *Policies) Upsert(ctx context.Context, policy *Policy) error {
 		replace = "document = jsonb_strip_nulls(jsonb_build_object('require_own_stream_app', " +
 			"pol.document->'require_own_stream_app')) || EXCLUDED.document"
 	}
-	_, err := r.store.global.NewInsert().Model(policy).
-		On("CONFLICT (scope, scope_id) DO UPDATE").
-		Set(replace).
-		Set("updated_at = EXCLUDED.updated_at").
-		Exec(ctx)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(policy).
+			On("CONFLICT (scope, scope_id) DO UPDATE").
+			Set(replace).
+			Set("updated_at = EXCLUDED.updated_at").
+			Exec(ctx)
+		return err
+	}, func() []string { return r.keys(ctx, policy.Scope, policy.ScopeID) })
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save policy: %w", err))
 	}
-	r.forget(ctx, policy.Scope, policy.ScopeID)
 	return nil
 }
 
@@ -218,18 +220,21 @@ func (r *Policies) Delete(ctx context.Context, scope PolicyScope, id string) err
 	if id == "" {
 		return stack.Wrap(errors.New("store: a policy needs a scope id"))
 	}
-	result, err := r.store.global.NewDelete().Model((*Policy)(nil)).
-		Where("scope = ?", scope).
-		Where("scope_id = ?", id).
-		Exec(ctx)
+	var deleted int64
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		result, err := tx.NewDelete().Model((*Policy)(nil)).
+			Where("scope = ?", scope).
+			Where("scope_id = ?", id).
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		deleted, err = result.RowsAffected()
+		return err
+	}, func() []string { return r.keys(ctx, scope, id) })
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete policy: %w", err))
 	}
-	deleted, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: delete policy: %w", err))
-	}
-	r.forget(ctx, scope, id)
 	if deleted == 0 {
 		return stack.Wrap(ErrNoPolicy)
 	}
@@ -276,11 +281,16 @@ func (r *Policies) HasUsers(ctx context.Context, appID string) (bool, error) {
 	})
 }
 
-// forget drops what every replica had cached of a scope's document once it was written. An
-// organization's is in the AppPolicies of every app seen under it, listed after the write
-// committed: an app seen under it since drops its own (AppOrganizations.Upsert). A listing that
-// fails is logged, as a deletion that fails is (Store.forget), and the TTL covers it.
+// forget drops what every replica had cached of a scope's document once it was written.
 func (r *Policies) forget(ctx context.Context, scope PolicyScope, id string) {
+	r.store.forget(ctx, r.keys(ctx, scope, id)...)
+}
+
+// keys are what every replica cached of a scope's document. An organization's is in the
+// AppPolicies of every app seen under it, listed after the write committed: an app seen under
+// it since drops its own (AppOrganizations.Upsert). A listing that fails is logged, as a
+// deletion that fails is (Store.forget), and the TTL covers it.
+func (r *Policies) keys(ctx context.Context, scope PolicyScope, id string) []string {
 	keys := policyKeys(scope, id)
 	if scope == ScopeOrganization && r.store.cache != nil {
 		var apps []string
@@ -293,7 +303,7 @@ func (r *Policies) forget(ctx context.Context, scope PolicyScope, id string) {
 			keys = append(keys, appPoliciesKey(app))
 		}
 	}
-	r.store.forget(ctx, keys...)
+	return keys
 }
 
 // policyKeys are the cached values a write of one scope's document changes, but for the

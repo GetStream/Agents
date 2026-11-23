@@ -1,7 +1,7 @@
 package routing
 
 // LoggedCall is what every per-call timing line ("model call timing", "speech synthesis
-// timing", "speech transcription timing") says about whose call it was and what served it,
+// timing", "speech transcription timing", "speech-to-speech timing") says about whose call it was and what served it,
 // under the same names on each so one query filters them all. The lines are logged with no
 // request context, so the app is named here, under the field the request lines name it with
 // (api.NewLogHandler), or it could not be filtered by app. served is what else a modality

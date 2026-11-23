@@ -450,6 +450,27 @@ func (s *ForgetUserSuite) TestForgettingAUserClearsTheirCountersPolicyAndLimits(
 	s.Contains(out, "shared database: 1 policies and 1 limits deleted; 1 resets, 1 grants and 1 campaigns rewritten")
 }
 
+func (s *ForgetUserSuite) TestForgettingAUserDropsTheirPolicyARouterCached() {
+	router, err := store.OpenShards(store.Options{
+		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shards: s.settings.Postgres.Shards,
+		Redis: store.Redis{Address: s.settings.Redis.Addr},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(router.Close()) })
+	s.settingsOf(s.app, person)
+	cached, err := router.Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(s.app, person))
+	s.Require().NoError(err)
+	s.Require().NotNil(cached.Quota)
+
+	s.forget(s.app, person)
+
+	s.Eventually(func() bool {
+		read, err := router.Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(s.app, person))
+		s.Require().NoError(err)
+		return read.Quota == nil
+	}, 5*time.Second, 10*time.Millisecond, "the router still answers the policy the user had")
+}
+
 func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 	s.recorded(0, s.app, person, 100)
 	s.settingsOf(s.app, person)
