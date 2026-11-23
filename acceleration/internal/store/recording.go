@@ -103,6 +103,9 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 
 // Start marks a job as at the provider and records which one took it.
 func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model string) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
+	}
 	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
 		Set("status = ?", RecordingRunning).
 		Set("provider = ?", provider).
@@ -119,6 +122,9 @@ func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model 
 
 // Finish writes the result a job produced, or the reason it produced none.
 func (r *Recordings) Finish(ctx context.Context, customerID, id, provider, model string, result json.RawMessage, failure error) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
+	}
 	now := time.Now().UTC()
 	status := RecordingCompleted
 	reason := ""

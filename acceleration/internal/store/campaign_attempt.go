@@ -85,6 +85,9 @@ func (r *CampaignAttempts) Insert(ctx context.Context, attempt *CampaignAttempt)
 // it placed, empty for none. A classifyAfter marks an answered call whose outcome is to be read
 // from its transcript once it is written. A dial deleted with its campaign is nothing to end.
 func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, result, callOutcome, callID, vendorCallID string, endedAt time.Time, classifyAfter *time.Time) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a dial id are required"))
+	}
 	classify := ""
 	if classifyAfter != nil {
 		classify = classifyPending

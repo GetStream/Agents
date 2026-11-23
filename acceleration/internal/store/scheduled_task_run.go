@@ -110,6 +110,9 @@ func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) e
 
 // FinishManual records the outcome of a run made by hand.
 func (r *ScheduledTaskRuns) FinishManual(ctx context.Context, customerID, runID, state, deliveredTo, sessionID, failure string) error {
+	if customerID == "" || runID == "" {
+		return stack.Wrap(errors.New("store: a customer and a run id are required"))
+	}
 	now := time.Now().UTC()
 	update := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("state = ?", state).

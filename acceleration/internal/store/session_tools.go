@@ -50,15 +50,15 @@ type SessionTools struct {
 // offered before: a reopened session is offered what it has now. A session the customer does
 // not have is ErrNoSession.
 func (r *SessionTools) Upsert(ctx context.Context, customerID, sessionID string, tools []ToolDefinition) error {
+	if customerID == "" {
+		return stack.Wrap(errors.New("store: a customer is required"))
+	}
 	if tools == nil {
 		tools = []ToolDefinition{}
 	}
 	row := &agentSessionTools{SessionID: sessionID, Tools: tools, UpdatedAt: time.Now().UTC()}
 	if err := row.Validate(); err != nil {
 		return stack.Wrap(err)
-	}
-	if customerID == "" {
-		return stack.Wrap(errors.New("store: a customer is required"))
 	}
 	encoded, err := json.Marshal(row.Tools)
 	if err != nil {
