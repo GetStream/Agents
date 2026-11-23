@@ -267,8 +267,9 @@ func (f *Forwarder) Start() {
 	}()
 }
 
-// Close stops the worker and cancels the sends in flight. A send cut short is not counted as
-// an attempt: its lease runs out and a router sends it again.
+// Close stops the worker and cancels the sends in flight. A send cut short keeps the attempt
+// its claim counted, as a router that died mid-send does, since the destination may have had
+// it: its lease runs out and a router sends it again while attempts remain.
 func (f *Forwarder) Close() {
 	f.cancel()
 	f.working.Wait()
@@ -512,7 +513,8 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	err := f.send(ctx, delivery)
 	cancel()
 	if f.ctx.Err() != nil {
-		// Close cut it short: the lease runs out and a router sends it again.
+		// Close cut it short: the attempt its claim counted stays, the lease runs out and a
+		// router sends it again.
 		return
 	}
 	writing, done := context.WithTimeout(context.WithoutCancel(f.ctx), attemptTimeout)
