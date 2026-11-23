@@ -268,6 +268,26 @@ func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID str
 	return stack.Wrap(fmt.Errorf("%w: %s was already claimed by %s", ErrGuestClaimed, guestID, existing.ClaimedBy))
 }
 
+// FinishGuestClaim records that every step of userID's claim of a guest ran, so the same claim
+// sent again has nothing left to do. A guest userID has not claimed is left as it is.
+func (s *Store) FinishGuestClaim(ctx context.Context, customerID, guestID, userID string) error {
+	if customerID == "" || guestID == "" || userID == "" {
+		return stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
+	}
+	_, err := s.global.NewUpdate().Model((*User)(nil)).
+		Set("claim_finished_at = ?", time.Now().UTC()).
+		Where("id = ?", guestID).
+		Where("customer_id = ?", customerID).
+		Where("kind = ?", UserKindGuest).
+		Where("claimed_by = ?", userID).
+		Where("claim_finished_at IS NULL").
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: finish guest claim: %w", err))
+	}
+	return nil
+}
+
 // ErrGuestClaimed is a guest another user has already claimed.
 var ErrGuestClaimed = errors.New("store: guest claimed")
 

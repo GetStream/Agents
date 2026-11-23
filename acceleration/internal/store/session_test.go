@@ -1103,6 +1103,25 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 	}
 }
 
+// A claim marked finished for anybody but the account that claimed the guest would have the
+// guest's own claim skip the steps it still owes, sent again.
+func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
+	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
+	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
+	guest, err := s.store.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(err)
+	s.Require().Nil(guest.ClaimFinishedAt, "finished before the claim, or by another account")
+
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
+
+	guest, err = s.store.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(err)
+	s.NotNil(guest.ClaimFinishedAt)
+}
+
 // sessionIDs is the ids of the sessions, in the order they were found.
 func sessionIDs(sessions []AgentSession) []string {
 	found := make([]string, 0, len(sessions))

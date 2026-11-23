@@ -413,6 +413,24 @@ func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhe
 	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID, "the account reads what the guest said")
 }
 
+// A claim sent again once every step of it ran did them all again: a backend that claims at
+// every sign-in put the account back into the channel of a conversation it had left, with two
+// Stream calls for each of the account's conversations every time.
+func (s *GuestsSuite) TestAFinishedClaimSentAgainLeavesTheChannelsAsTheyAre() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	s.claim(guest, account.userID)
+	channel := s.transcriptOf(talked)
+	s.Require().Contains(s.chat.Members(channel), account.userID)
+	_, err := s.chat.Client.Chat().UpdateChannel(context.Background(), chatlog.ChannelType, channel,
+		&getstream.UpdateChannelRequest{RemoveMembers: []string{account.userID}})
+	s.Require().NoError(err)
+
+	s.claim(guest, account.userID)
+
+	s.NotContains(s.chat.Members(channel), account.userID, "the claim had nothing left to do")
+}
+
 func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	guest := s.recordGuest()
 	s.claim(guest, s.utils.uuid())
