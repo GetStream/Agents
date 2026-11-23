@@ -843,6 +843,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### A connection keeps a rotated token when saving it fails once
+
+When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
+
 ### A Swift typed tool no longer crashes the app on deeply nested arguments
 
 An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
