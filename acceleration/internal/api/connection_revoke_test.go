@@ -344,7 +344,7 @@ func (s *AuthorizationsSuite) TestTheOptInIsReadFromTheConnectionsRevision() {
 func (s *AuthorizationsSuite) revokingConnection(revoke, extra string) string {
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections",
-		appOwned(s.revokingConnector("operator", revoke, extra)), &created))
+		appOwned(s.withFakeClient(s.revokingConnector("customer", revoke, extra))), &created))
 	return created.ID
 }
 

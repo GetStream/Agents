@@ -357,6 +357,24 @@ func (s *ConnectionToolsSuite) TestAValidateThatRenewsTheGrantShowsWhatItFound()
 	s.Equal(validationConnected, string(got.LastValidation.Status))
 }
 
+// TestABuiltInsGrantIsRenewedWithTheOperatorsClient is the control for the operator's client
+// being only a built-in's: a grant imported for a built-in that takes it is issued to it, and
+// the resolver renews it with it.
+func (s *ConnectionToolsSuite) TestABuiltInsGrantIsRenewedWithTheOperatorsClient() {
+	access, refresh := s.codeGrant()
+	id := s.connectionTo(s.builtin(oauth2code.Name, 1, ""))
+	grant := s.importedGrant(access, "chat:write")
+	grant["values"].(map[string]string)[oauth2code.SuppliedRefreshToken] = refresh
+	grant["values"].(map[string]string)[oauth2code.SuppliedExpiresAt] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", grant, nil))
+	refreshes := s.provider.Refreshes()
+
+	s.Equal(validationConnected, string(s.validate(id).Status))
+
+	s.Equal(refreshes+1, s.provider.Refreshes(), "the validate renewed the grant")
+	s.Equal(ConnectionStatus(store.ConnectionConnected), s.get(id).Status)
+}
+
 // TestAnErrorThatEchoesTheCredentialIsStoredWithoutItAndCut (R1.2 of PR #874): go-sdk puts a
 // non-transient error answer's body in the error, and a provider can echo the request's
 // Authorization header in it, padded to megabytes. The last validation keeps neither the token
@@ -640,6 +658,9 @@ func (s *ConnectionToolsSuite) connectorWith(scheme, mcp string) string {
 	s.Require().NoError(err)
 	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	if scheme == oauth2code.Name {
+		s.withFakeClient(connector)
+	}
 	return connector
 }
 

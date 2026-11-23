@@ -325,7 +325,7 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 				ErrNotConnected, state.DefinitionRevision, connection.ConnectorID, reason))
 			return false, nil
 		}
-		manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, state.Metadata)
+		manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, state.Metadata)
 		if err != nil {
 			return false, err
 		}
