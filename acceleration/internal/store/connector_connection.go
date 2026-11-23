@@ -86,10 +86,8 @@ type ConnectorConnection struct {
 	DefinitionRevision int    `bun:"definition_revision,notnull"`
 	OwnerType          string `bun:"owner_type,notnull"`
 	OwnerID            string `bun:"owner_id,notnull"`
-	// AuthScheme and TLSScheme are names in the scheme registry. TLSScheme is empty when the
-	// transport needs no client certificate.
+	// AuthScheme is a name in the scheme registry.
 	AuthScheme string `bun:"auth_scheme,notnull"`
-	TLSScheme  string `bun:"tls_scheme,nullzero"`
 	// Inputs are what the connection was created with; Metadata what consent captured.
 	Inputs        map[string]string `bun:"inputs,type:jsonb,notnull"`
 	Metadata      map[string]string `bun:"metadata,type:jsonb,notnull"`
@@ -190,7 +188,7 @@ type ConnectorConnections struct {
 }
 
 // Insert records a new connection, pending until credentials are saved
-// onto it. Its schemes must be in registry and listed by the definition revision it pins, which
+// onto it. Its scheme must be in registry and listed by the definition revision it pins, which
 // must be one the customer can see. The registry is passed in rather than held by the store, so which
 // schemes exist is decided by whoever built it, and a test can register its own.
 func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registry, connection *ConnectorConnection) error {
@@ -201,9 +199,6 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 	}
 	if _, found := registry.Schemes[connection.AuthScheme]; !found {
 		return stack.Wrap(fmt.Errorf("%w: auth scheme %q", ErrUnregisteredScheme, connection.AuthScheme))
-	}
-	if _, found := registry.Schemes[connection.TLSScheme]; connection.TLSScheme != "" && !found {
-		return stack.Wrap(fmt.Errorf("%w: tls scheme %q", ErrUnregisteredScheme, connection.TLSScheme))
 	}
 	// The stored credentials' AAD binds the connection id, which does not exist until this returns.
 	if len(connection.CredentialsSealed) > 0 {
@@ -228,10 +223,6 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 		if !slices.Contains(definition.Manifest.Schemes, connection.AuthScheme) {
 			return fmt.Errorf("%w: %s revision %d does not list auth scheme %q", ErrSchemeNotAllowed,
 				connection.ConnectorID, connection.DefinitionRevision, connection.AuthScheme)
-		}
-		if connection.TLSScheme != "" && !slices.Contains(definition.Manifest.Schemes, connection.TLSScheme) {
-			return fmt.Errorf("%w: %s revision %d does not list tls scheme %q", ErrSchemeNotAllowed,
-				connection.ConnectorID, connection.DefinitionRevision, connection.TLSScheme)
 		}
 		// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
 		now := time.Now().UTC().Truncate(time.Microsecond)
