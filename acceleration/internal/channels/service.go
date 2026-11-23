@@ -164,7 +164,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		return Answer{Status: http.StatusBadRequest, Body: failure(err.Error())}
 	}
 	for _, message := range delivered {
-		fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
+		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
 			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
 		}
@@ -173,7 +173,6 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		if !fresh {
 			continue
 		}
-		s.received(ctx, account, message)
 		// Files with no words are billed, and there is nothing in them for the agent to answer.
 		if message.Text == "" {
 			continue

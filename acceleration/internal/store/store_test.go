@@ -535,6 +535,22 @@ func (s *StoreSuite) TestMigrateRebuildsTheResponseParentIndexLeftInvalid() {
 	s.True(valid, "dropped and built again")
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
+	s.onShard("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('calls_customer_campaign_idx')")
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('calls_customer_campaign_idx')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+}
+
 // The reconcile reads every shard every few minutes, so it reads only the rows naming a grant,
 // by the partial index, rather than every request.
 func (s *StoreSuite) TestTheGrantReconcileReadsByTheGrantsIndex() {

@@ -373,3 +373,24 @@ func (s *LedgerSuite) TestMigratingAgainChangesNothing() {
 	s.Require().NoError(s.ledger.DB().QueryRowContext(s.ctx, "SELECT max(version_id) FROM goose_db_version").Scan(&version))
 	s.Equal(int64(7), version)
 }
+
+// A migration that waits longer than the serving pool's read timeout, behind another
+// replica's or a long query, still finishes rather than failing while the server runs on.
+func (s *LedgerSuite) TestAMigrationThatWaitsPastTheReadTimeoutFinishes() {
+	held, err := s.ledger.DB().Conn(s.ctx)
+	s.Require().NoError(err)
+	defer held.Close() //nolint:errcheck // a connection the test is done with
+	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_lock(hashtextextended('usage.migrate', 0))")
+	s.Require().NoError(err)
+	unlock := func() {
+		_, _ = held.ExecContext(s.ctx, "SELECT pg_advisory_unlock(hashtextextended('usage.migrate', 0))")
+	}
+	released := time.AfterFunc(11*time.Second, unlock)
+	defer func() {
+		if released.Stop() {
+			unlock()
+		}
+	}()
+
+	s.NoError(s.ledger.Migrate(s.ctx))
+}

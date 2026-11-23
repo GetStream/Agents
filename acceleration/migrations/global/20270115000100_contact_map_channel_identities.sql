@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- channel_identities and contact_map both said who an address is to one agent of a customer.
 -- The channel lines' rows (kind whatsapp, sms or imessage) move into contact_map with thread,
