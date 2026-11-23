@@ -150,8 +150,8 @@ Docker VM disk was full; do not prune shared images or volumes to make room.
 1. `php bin/generate.php ../../acceleration/api/openapi.yaml` and review the diff.
 2. Hand-written resources only change for a new behaviour, not a new field.
 3. Unit tests, PHPStan, then the live suite once.
-4. Write the git blob ids of `acceleration/api/openapi.yaml` and `.claude/skills/sdk/SKILL.md`
-   to `sdks/php/.sdk_update_log`, as the sdk skill's SDK updates section says, so the next
+4. Write the git ids of `acceleration/api/openapi.yaml`, `.claude/skills/sdk/SKILL.md` and
+   `.claude/skills/sdk/notes` to `sdks/php/.sdk_update_log`, as the sdk skill's SDK updates section says, so the next
    update can diff what changed since.
 
 ## Review checklist

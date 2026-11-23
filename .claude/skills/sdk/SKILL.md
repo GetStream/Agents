@@ -169,18 +169,26 @@ This setup prevents duplicate syncs when they nothing changed.
 
 ## SDK updates
 
-Each SDK has an `.sdk_update_log` file naming the spec and this skill it was last updated against, as git blob ids:
+Each SDK has an `.sdk_update_log` file naming the spec, this skill and the notes it was last updated against, as git ids:
 
 ```text
 spec <git blob id of acceleration/api/openapi.yaml>
 skill <git blob id of .claude/skills/sdk/SKILL.md>
+notes <git tree id of .claude/skills/sdk/notes>
 ```
 
-A blob id is the content's own, so it survives a squash merge where a commit SHA from a branch would not.
-What changed since is `git diff <spec> HEAD:acceleration/api/openapi.yaml`, and the same with `skill` for the
-notes below, which is how an update finds the few fields it has to add. After updating an SDK, write the ids
-of what it now matches: `git rev-parse HEAD:acceleration/api/openapi.yaml` and
-`git rev-parse HEAD:.claude/skills/sdk/SKILL.md`, or `git hash-object` on a file not yet committed.
+An id is the content's own, so it survives a squash merge where a commit SHA from a branch would not.
+What changed since is `git diff <spec> HEAD:acceleration/api/openapi.yaml`, the same with `skill` for the
+older notes further down this file, and `git diff <notes> HEAD:.claude/skills/sdk/notes` for the note files
+added or changed since; a log with no `notes` line has every file in `notes/` to read. That is how an update
+finds the few fields it has to add. After updating an SDK, write the ids of what it now matches:
+`git rev-parse HEAD:acceleration/api/openapi.yaml`, `git rev-parse HEAD:.claude/skills/sdk/SKILL.md` and
+`git rev-parse HEAD:.claude/skills/sdk/notes`, or `git hash-object` on a file not yet committed.
+
+A note for the other SDKs is a new file in `notes/`, named `<YYYY-MM-DD>-<ticket or short slug>.md`, never
+a paragraph added to this file: with one file per PR, two open PRs never conflict over their notes. A later
+PR that settles part of a note for some SDKs edits that note's file. The notes further down this file are
+the ones from before `notes/` existed; they stay where they are.
 
 ## Client side SDKs
 
