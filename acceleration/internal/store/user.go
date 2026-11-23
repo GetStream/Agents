@@ -164,7 +164,7 @@ func settles(held, sighting string) bool {
 	return sighting != UserKindAuthenticated || held == UserKindAuthenticated
 }
 
-// Email records the address a backend said a user signs in with (SetUserEmail), and does
+// Email records the address a backend said a user signs in with (SetEmail), and does
 // nothing for the address this process last wrote for them within emailTTL. A backend may
 // say it on every request. A changed address is written at once; one another replica wrote
 // under this one is written again here once emailTTL ends, so a row lags for at most that
@@ -182,7 +182,7 @@ func (r *Users) Email(ctx context.Context, customerID, userID, email string) err
 	lock.Lock()
 	defer lock.Unlock()
 	now := time.Now()
-	if err := r.store.SetUserEmail(ctx, customerID, userID, email); err != nil {
+	if err := r.SetEmail(ctx, customerID, userID, email); err != nil {
 		return err
 	}
 	r.emails.Keep(customerID, userID, email, now.Add(r.emailTTL))

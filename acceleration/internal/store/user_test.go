@@ -75,7 +75,7 @@ func (s *StoreSuite) eraseUser(customerID, userID string) {
 
 // userEmail is the address a user's row holds.
 func (s *StoreSuite) userEmail(customerID, userID string) string {
-	email, err := s.store.UserEmail(s.ctx, customerID, userID)
+	email, err := s.store.Users.GetEmail(s.ctx, customerID, userID)
 	s.Require().NoError(err)
 	return email
 }
@@ -326,7 +326,7 @@ func (s *StoreSuite) TestADeploymentWithNoRedisStillWritesItsUsersDown() {
 func (s *StoreSuite) TestAnEmailIsWrittenAgainOnceItsTTLEnds() {
 	users, app := s.usersWithoutRedis(500*time.Millisecond), s.freshApp()
 	s.Require().NoError(users.Email(s.ctx, app, "jlahey", "jim@fake.example"))
-	s.Require().NoError(s.store.SetUserEmail(s.ctx, app, "jlahey", "behind@fake.example"))
+	s.Require().NoError(s.store.Users.SetEmail(s.ctx, app, "jlahey", "behind@fake.example"))
 
 	s.Require().NoError(users.Email(s.ctx, app, "jlahey", "jim@fake.example"))
 	s.Equal("behind@fake.example", s.userEmail(app, "jlahey"), "an address just written costs no write")

@@ -66,16 +66,16 @@ func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) er
 	return nil
 }
 
-// SetUserEmail records the address a server-side caller said a user signs in with. The row
+// SetEmail records the address a server-side caller said a user signs in with. The row
 // is created when there is none; on an existing row only the email moves, never the kind
 // the claim path reads, and an email it already holds is not written again: a backend may
 // say it on every request.
-func (s *Store) SetUserEmail(ctx context.Context, customerID, userID, email string) error {
+func (r *Users) SetEmail(ctx context.Context, customerID, userID, email string) error {
 	if customerID == "" || userID == "" || email == "" {
 		return nil
 	}
 	user := &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated, Email: email, CreatedAt: time.Now().UTC()}
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("email = EXCLUDED.email").
 		Where("u.email IS DISTINCT FROM EXCLUDED.email").
@@ -86,10 +86,10 @@ func (s *Store) SetUserEmail(ctx context.Context, customerID, userID, email stri
 	return nil
 }
 
-// UserEmail returns the address last recorded for a user, or empty.
-func (s *Store) UserEmail(ctx context.Context, customerID, userID string) (string, error) {
+// GetEmail returns the address last recorded for a user, or empty.
+func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string, error) {
 	var user User
-	err := s.global.NewSelect().Model(&user).
+	err := r.store.global.NewSelect().Model(&user).
 		Column("email").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", userID).
