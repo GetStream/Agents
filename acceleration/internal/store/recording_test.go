@@ -23,7 +23,7 @@ func (s *StoreSuite) TestAFailedRecordingsErrorIsKeptWithoutTheKeyItEchoed() {
 		job := Recording{CustomerID: "acme", Modality: "stt"}
 		s.Require().NoError(s.store.Recordings.Insert(s.ctx, &job))
 
-		s.Require().NoError(s.store.Recordings.Finish(s.ctx, job.ID, "deepgram", "nova", nil, errors.New(failure)))
+		s.Require().NoError(s.store.Recordings.Finish(s.ctx, job.CustomerID, job.ID, "deepgram", "nova", nil, errors.New(failure)))
 
 		found, err := s.store.Recordings.Get(s.ctx, "acme", job.ID)
 		s.Require().NoError(err)
@@ -40,12 +40,39 @@ func (s *StoreSuite) TestRecordingQueryBudgets() {
 	recording := &Recording{CustomerID: "app", Modality: "tts"}
 	s.withinQueryBudgets([]queryBudget{
 		{"Recordings.Insert", 1, 0, func() error { return s.store.Recordings.Insert(s.ctx, recording) }},
-		{"Recordings.Start", 1, 0, func() error { return s.store.Recordings.Start(s.ctx, recording.ID, "stub", "stub-tts") }},
+		{"Recordings.Start", 1, 0, func() error {
+			return s.store.Recordings.Start(s.ctx, recording.CustomerID, recording.ID, "stub", "stub-tts")
+		}},
 		{"Recordings.Finish", 1, 0, func() error {
-			return s.store.Recordings.Finish(s.ctx, recording.ID, "stub", "stub-tts", json.RawMessage(`{}`), nil)
+			return s.store.Recordings.Finish(s.ctx, recording.CustomerID, recording.ID, "stub", "stub-tts", json.RawMessage(`{}`), nil)
 		}},
 		{"Recordings.Get", 1, 0, func() error { _, err := s.store.Recordings.Get(s.ctx, "app", recording.ID); return err }},
 	})
+}
+
+func (s *StoreSuite) TestAnotherCustomersWriteToARecordingIdChangesNothing() {
+	writes := map[string]func(id string) error{
+		"Start": func(id string) error {
+			return s.store.Recordings.Start(s.ctx, "somebody-else", id, "their-stt", "their-model")
+		},
+		"Finish": func(id string) error {
+			return s.store.Recordings.Finish(s.ctx, "somebody-else", id, "their-stt", "their-model", json.RawMessage(`{"text":"theirs"}`), nil)
+		},
+	}
+	for name, write := range writes {
+		s.Run(name, func() {
+			job := Recording{CustomerID: "app", Modality: "stt"}
+			s.Require().NoError(s.store.Recordings.Insert(s.ctx, &job))
+			before, err := s.store.Recordings.Get(s.ctx, "app", job.ID)
+			s.Require().NoError(err)
+
+			s.Require().NoError(write(job.ID))
+
+			after, err := s.store.Recordings.Get(s.ctx, "app", job.ID)
+			s.Require().NoError(err)
+			s.Equal(before, after, "app's recording is as it was")
+		})
+	}
 }
 
 func (s *StoreSuite) TestARecordingOfNoSpeechModalityIsNotWritten() {

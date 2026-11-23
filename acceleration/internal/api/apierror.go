@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -275,6 +276,15 @@ func paymentRequired(code, message string) APIError {
 
 func notFound(message string) APIError {
 	return newAPIError(ErrorTypeNotFound, message)
+}
+
+// unknownOr returns unknown if err wraps missing, the error of the store when it has no such row.
+// It returns all other errors without change, so that the router logs them and sends a 500.
+func unknownOr(err, missing error, unknown APIError) error {
+	if errors.Is(err, missing) {
+		return unknown
+	}
+	return err
 }
 
 func conflict(message string) APIError {

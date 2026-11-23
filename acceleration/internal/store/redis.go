@@ -24,6 +24,11 @@ var tracer = tracing.Tracer("store")
 // deletion that did not land.
 const cacheTTL = time.Hour
 
+// keyCacheTTL is how long a key's owner is cached. It is short because a key revoked where
+// the deletion does not reach, in the database alone or when Redis drops the DEL, has to
+// stop authenticating within a minute rather than an hour.
+const keyCacheTTL = time.Minute
+
 // Redis says where a Redis server is. An empty Address is none.
 type Redis struct {
 	// Address is a host:port, for example localhost:6379.
@@ -108,6 +113,11 @@ func cacheKey(parts ...string) string { return "appcfg:" + strings.Join(parts, "
 // still read as themselves. An error from Redis is not: the row is loaded from Postgres
 // instead, because a cache nobody can reach is a slow deployment and not a broken one.
 func cached[T any](ctx context.Context, s *Store, name string, load func(context.Context) (T, error)) (T, error) {
+	return cachedFor(ctx, s, name, cacheTTL, load)
+}
+
+// cachedFor is cached with a TTL of the caller's own.
+func cachedFor[T any](ctx context.Context, s *Store, name string, ttl time.Duration, load func(context.Context) (T, error)) (T, error) {
 	var value T
 	if s.cache == nil {
 		return load(ctx)
@@ -117,7 +127,7 @@ func cached[T any](ctx context.Context, s *Store, name string, load func(context
 	defer span.End()
 
 	var refused error
-	encoded, err := s.cache.Get(ctx, cacheTTL, name, func(ctx context.Context, _ string) (string, error) {
+	encoded, err := s.cache.Get(ctx, ttl, name, func(ctx context.Context, _ string) (string, error) {
 		loaded, err := load(ctx)
 		if err != nil {
 			refused = err
@@ -152,14 +162,15 @@ type found[T any] struct {
 //
 // A deletion that does not land is logged rather than returned: the write it followed has
 // already happened, and refusing it afterwards would tell the caller their change was
-// rejected when it was not. The TTL is what covers the difference.
+// rejected when it was not. The TTL is what covers the difference. It reports whether the
+// deletion landed, false without Redis, for a caller that tells a person so.
 //
 // The deletion goes out even when the request has been cancelled since the write: rueidis
 // returns the context's error before it sends anything, so neither the DEL nor the PING would
 // reach Redis and every node would keep the old value until the TTL.
-func (s *Store) forget(ctx context.Context, names ...string) {
+func (s *Store) forget(ctx context.Context, names ...string) bool {
 	if s.cache == nil || len(names) == 0 {
-		return
+		return false
 	}
 	ctx = context.WithoutCancel(ctx)
 	client := s.cache.Client()
@@ -172,5 +183,7 @@ func (s *Store) forget(ctx context.Context, names ...string) {
 	replies := client.DoMulti(ctx, client.B().Del().Key(names...).Build(), client.B().Ping().Build())
 	if err := replies[0].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
 		slog.Default().Error("could not drop cached rows", "keys", names, "error", err)
+		return false
 	}
+	return true
 }

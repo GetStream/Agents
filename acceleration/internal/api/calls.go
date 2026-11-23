@@ -99,7 +99,7 @@ func (s *Server) getCall(ctx context.Context, request *getCallRequest) (*getCall
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 	rendered := callOf(call)
 	s.attachUsed(ctx, customerID, call, &rendered)
@@ -141,7 +141,7 @@ func (s *Server) getCallTokens(ctx context.Context, request *getCallTokensReques
 	}
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 	spent, err := s.tokensOf(ctx, customerID, call)
 	if err != nil {
@@ -271,7 +271,7 @@ func (s *Server) createCallToken(ctx context.Context, request *createCallTokenRe
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	var wanted CallTokenRequest
@@ -472,7 +472,7 @@ func (s *Server) getCallTranscript(ctx context.Context, request *getCallTranscri
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	said, err := s.transcriptOf(ctx, customerID, call)
@@ -673,13 +673,17 @@ func (s *Server) getCallEvents(ctx context.Context, request *getCallEventsReques
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
-	stored, err := s.store.CallEvents.Select(
-		ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
-	if err != nil {
-		return nil, err
+	// A session held in writing has no Stream call, so it has no decisions kept under one.
+	var stored []store.CallEvent
+	if call.CallID != "" {
+		stored, err = s.store.CallEvents.Select(
+			ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	decisions := make([]CallEvent, 0, len(stored))
@@ -710,7 +714,7 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	turns, err := s.store.Turns.Select(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)
@@ -721,10 +725,14 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 	if err != nil {
 		return nil, err
 	}
-	// The checks, like the transcript, are worth having but not worth failing over.
-	checks, err := s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
-	if err != nil {
-		s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+	// The checks, like the transcript, are worth having but not worth failing over. A session
+	// held in writing has no Stream call, so it keeps none.
+	var checks []store.CallEvent
+	if call.CallID != "" {
+		checks, err = s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
+		if err != nil {
+			s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+		}
 	}
 
 	// The transcript is worth having but not worth failing over: the timings are the

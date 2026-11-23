@@ -681,7 +681,7 @@ func (s *CampaignContactsSuite) dial(campaignID, contactID string, attempt, dial
 	if result == "" && callOutcome == "" {
 		return
 	}
-	s.Require().NoError(s.store.CampaignAttempts.End(ctx, row.ID, result, callOutcome, s.utils.callID(), "", at.Add(30*time.Second), nil))
+	s.Require().NoError(s.store.CampaignAttempts.End(ctx, s.customerID(), row.ID, result, callOutcome, s.utils.callID(), "", at.Add(30*time.Second), nil))
 	if outcome != "" {
 		_, err := s.store.GlobalDB().NewUpdate().Model((*store.CampaignAttempt)(nil)).
 			Set("outcome = ?", outcome).Where("id = ?", row.ID).Exec(ctx)

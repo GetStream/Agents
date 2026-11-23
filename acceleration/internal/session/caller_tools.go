@@ -103,7 +103,7 @@ func (s *Session) changeTools(ctx context.Context, change func([]harness.Tool) (
 		s.persisted.DescribeTools(toolDisplays(next))
 	}
 	if s.records != nil {
-		s.afterRow(func() { s.records.Offered(s.id, toolRows(s)) })
+		s.afterRow(func() { s.records.Offered(s.spec.CustomerID, s.id, toolRows(s)) })
 	}
 	return nil
 }

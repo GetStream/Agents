@@ -97,12 +97,12 @@ func (t dataTable) rollup() bool {
 // credentials sealed under its own key. And connector_tool_pins: the deployment a connection
 // moves to pins its tools again on first use. And chat_inbound, Stream
 // Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes. And
-// call_bridges, an answer parked for seconds at this deployment's URL: its key is the token
-// that authenticates the fetch, and it holds the trunk's password in the clear. And
-// voice_samples and voice_bindings: a sample's audio is in this deployment's bucket and a
-// binding's clone in this deployment's account at the provider, so like a knowledge file's,
-// neither means anything where the customer moves. A voice arrives with its name and
-// description, to be given a recording and prepared again.
+// call_bridges, an answer parked for seconds at this deployment's URL: its key is the hash of
+// the token that authenticates the fetch, and its trunk password is sealed under this
+// deployment's key. And voice_samples and voice_bindings: a sample's audio is in this
+// deployment's bucket and a binding's clone in this deployment's account at the provider, so
+// like a knowledge file's, neither means anything where the customer moves. A voice arrives
+// with its name and description, to be given a recording and prepared again.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -1481,10 +1481,11 @@ func (t dataTable) identity() string {
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
-	// this one shipped or had refused leaves it alone.
+	// this one shipped or had refused leaves it alone. Nor was it drawn from a grant here,
+	// whose ids are this deployment's own.
 	// Nor is it billed here, and it counts against the importing app's organization alone.
 	if t.name == "requests" {
-		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '')" +
+		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '', 'limit_grants', '{}'::bigint[])" +
 			" || jsonb_build_object('billable', false)" +
 			" || jsonb_build_object('organization_id', ?::text)"
 	}

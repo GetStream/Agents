@@ -262,7 +262,7 @@ func (s *StoreSuite) TestAnAnsweredDialWaitsToBeClassifiedAndIsClaimedOnce() {
 	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &attempt))
 	s.NotEmpty(attempt.ID)
 	classifyAfter := s.base.Add(2 * time.Minute)
-	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, attempt.ID, "", "completed", "call-1", "vendor-1", s.base.Add(time.Minute), &classifyAfter))
+	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, campaign.CustomerID, attempt.ID, "", "completed", "call-1", "vendor-1", s.base.Add(time.Minute), &classifyAfter))
 	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", claimed.Contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1, CallID: "call-1"}))
 
 	latest, found, err := s.store.CampaignAttempts.Latest(s.ctx, claimed.Contact.ID)
@@ -331,7 +331,7 @@ func (s *StoreSuite) TestTheLatestDialIsTheSecondOfADoubleDial() {
 	for dial := 1; dial <= 2; dial++ {
 		attempt := CampaignAttempt{CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 1, Dial: dial, StartedAt: s.base}
 		s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &attempt))
-		s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, attempt.ID, "", "no_answer", fmt.Sprintf("call-%d", dial), "", s.base, nil))
+		s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, campaign.CustomerID, attempt.ID, "", "no_answer", fmt.Sprintf("call-%d", dial), "", s.base, nil))
 	}
 
 	latest, found, err := s.store.CampaignAttempts.Latest(s.ctx, contact.ID)
@@ -343,7 +343,7 @@ func (s *StoreSuite) TestTheLatestDialIsTheSecondOfADoubleDial() {
 }
 
 func (s *StoreSuite) TestEndingADialOfADeletedCampaignIsNothing() {
-	s.NoError(s.store.CampaignAttempts.End(s.ctx, "deleted-attempt", "", "completed", "call-1", "", s.base, nil))
+	s.NoError(s.store.CampaignAttempts.End(s.ctx, "app", "deleted-attempt", "", "completed", "call-1", "", s.base, nil))
 	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, "deleted-attempt", "success", true))
 }
 
@@ -416,7 +416,7 @@ func (s *StoreSuite) TestADialMustSayWhenItStarted() {
 func (s *StoreSuite) answered(owner string, campaign Campaign, contact Contact, startedAt, classifyAfter time.Time) CampaignAttempt {
 	attempt := CampaignAttempt{CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: startedAt}
 	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &attempt))
-	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, attempt.ID, "", "completed", "call-"+attempt.ID, "", startedAt, &classifyAfter))
+	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, campaign.CustomerID, attempt.ID, "", "completed", "call-"+attempt.ID, "", startedAt, &classifyAfter))
 	return attempt
 }
 

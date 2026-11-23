@@ -120,8 +120,12 @@ type Responses struct {
 	store *Store
 }
 
+// ErrIDTaken is a row written under an id another customer's row already has.
+var ErrIDTaken = errors.New("store: the id is another customer's")
+
 // Insert records that the agent began a turn, with the response before it on its path and
-// the question it answers. Writing the same turn again is not an error.
+// the question it answers. Writing the same turn again is not an error; writing one under
+// another customer's response id is ErrIDTaken.
 func (r *Responses) Insert(ctx context.Context, response *AgentResponse) error {
 	if err := response.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -139,20 +143,31 @@ func (r *Responses) Insert(ctx context.Context, response *AgentResponse) error {
 	}
 	response.Said = SafeLogText(response.Said)
 
-	_, err := r.store.shard.NewInsert().Model(response).
-		On("CONFLICT (id) DO NOTHING").
+	// The update sets nothing new: it tells a retry, which matches its own row, from an id
+	// another customer's row has, which matches none.
+	result, err := r.store.shard.NewInsert().Model(response).
+		On("CONFLICT (id) DO UPDATE").
+		Set("id = EXCLUDED.id").
+		Where("ars.customer_id = EXCLUDED.customer_id").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: start response: %w", err))
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: start response: %w", err))
+	}
+	if written == 0 {
+		return stack.Wrap(fmt.Errorf("%w: response %s", ErrIDTaken, response.ID))
 	}
 	return nil
 }
 
 // Finish records how a turn ended and stamps the session's last activity, which is what a
 // most-recently-used ordering of conversations reads.
-func (r *Responses) Finish(ctx context.Context, id, status, failure string, at time.Time) error {
-	if id == "" {
-		return stack.Wrap(errors.New("store: a response id is required"))
+func (r *Responses) Finish(ctx context.Context, customerID, id, status, failure string, at time.Time) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a response id are required"))
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()
@@ -166,6 +181,7 @@ func (r *Responses) Finish(ctx context.Context, id, status, failure string, at t
 		Set("error = ?", SafeLogText(failure)).
 		Set("finished_at = ?", at).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Where("finished_at IS NULL").
 		Exec(ctx)
 	if err != nil {
@@ -179,7 +195,9 @@ func (r *Responses) Finish(ctx context.Context, id, status, failure string, at t
 		Set("updated_at = ?", at).
 		TableExpr("agent_responses AS r").
 		Where("r.id = ?", id).
+		Where("r.customer_id = ?", customerID).
 		Where("asn.id = r.session_id").
+		Where("asn.customer_id = r.customer_id").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: finish response: stamp session: %w", err))

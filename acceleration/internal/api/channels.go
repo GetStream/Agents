@@ -135,6 +135,7 @@ func (s *Server) receiveChannelMessage(w http.ResponseWriter, r *http.Request) {
 // writeChannelAnswer answers a delivery. A challenge is echoed as itself rather than as JSON,
 // because that is what the provider compares against what it sent.
 func writeChannelAnswer(w http.ResponseWriter, answer channels.Answer) {
+	noteAnswered(w, answer.Status)
 	if answer.Text != "" {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(answer.Status)
@@ -162,7 +163,7 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	if config.Channels.Lines.Identity != store.ChannelIdentityLink {
 		return nil, invalidRequest(config.Name + " identifies a sender by their number, " +
@@ -217,7 +218,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 			continue
 		}
 		if err := s.store.ChannelAccounts.Delete(ctx, customerID, account.Kind, account.E164); err != nil {
-			return nil, errUnknownAccount
+			return nil, unknownOr(err, store.ErrUnknownChannelAccount, errUnknownAccount)
 		}
 		return nil, nil
 	}

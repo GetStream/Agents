@@ -245,7 +245,7 @@ func (s *AuthorizationsSuite) TestTheClientOfAConsentWhoseCallerHungUpIsKept() {
 
 	gone, hangUp := context.WithCancel(ctx)
 	hangUp()
-	s.router.recordClient(gone, pending, stored)
+	s.router.recordClient(gone, s.customerID(), pending, stored)
 
 	kept, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), pending)
 	s.Require().NoError(err)
@@ -284,7 +284,7 @@ func (s *AuthorizationsSuite) TestADetachedWriteGivesUpWhenThePoolIsFull() {
 			s.router.auditGrant(gone, connection.CustomerID, connection.ID, connection.ConnectorID, connection.OwnerType,
 				store.AuditGrantRevoked, store.AuditReasonDeleted, 0, "", core.CredentialChange{})
 		},
-		"client": func() { s.router.recordClient(gone, connection.ID, stored) },
+		"client": func() { s.router.recordClient(gone, connection.CustomerID, connection.ID, stored) },
 		"proxy":  func() { s.router.auditProxyCall(gone, connection, "example.com", nil, 1) },
 	}
 	took := make(map[string]time.Duration, len(writes))

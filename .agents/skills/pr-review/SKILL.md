@@ -166,9 +166,11 @@ for an SDK.
   `acceleration/api/legacy.yaml` is a finding.
 - **Client access.** An operation newly marked `x-client-accessible` can be called from an end
   user's device. Review it as a security change: what a user's token can now read or change.
-- **SDKs.** An SDK change lands in Go first, with a note at the bottom of the sdk skill that the other
-  SDKs still need it; the others catch up in their own PRs. A non-Go SDK change is a finding only when
-  the Go change is not on the base yet and the sdk skill has no note for it.
+- **SDKs.** An SDK change lands in Go first, with a new file in `.claude/skills/sdk/notes/` saying what
+  the other SDKs still need; the others catch up in their own PRs. A non-Go SDK change is a finding only
+  when the Go change is not on the base yet and `notes/` has no note for it. A note added to the end of
+  `.claude/skills/sdk/SKILL.md` instead of a file, or any edit to the root `CHANGELOG.md` outside a release PR other than one
+  breaking-change line under `# Unreleased`, is a finding: both made every two open PRs conflict.
 - **Migrations.** A file under `acceleration/migrations/` must apply to existing rows, not only an
   empty database. Flag a lock or rewrite of a large table and a down migration that loses data.
 - **Plugins.** A `plugins/*/pyproject.toml` must keep `packages = ["vision_agents"]` and

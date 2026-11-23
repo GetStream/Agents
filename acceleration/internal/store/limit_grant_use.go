@@ -10,17 +10,31 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
+// grantUsesRefused counts what a grant's owner check turned away, so a grant that pays for
+// less than it admitted shows why.
+var grantUsesRefused = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "usage_grant_uses_refused_total",
+	Help:      "Attempts to count a usage row toward a live grant of neither its organization nor its app, or scoped to another app, that had not counted it before",
+})
+
 // GrantUse is one row counted toward one grant: its billable cost, by its usage id.
+// CustomerID and OrganizationID are the row's: a grant of neither the row's organization nor
+// its app's counts nothing.
 type GrantUse struct {
-	GrantID int64
-	UsageID uuid.UUID
-	Micros  int64
+	GrantID        int64
+	CustomerID     string
+	OrganizationID string
+	UsageID        uuid.UUID
+	Micros         int64
 }
 
 // GrantUsesOf is what the rows written of requests (written names them by usage id) count
@@ -38,7 +52,7 @@ func GrantUsesOf(requests []Request, written []uuid.UUID) []GrantUse {
 		// Only the first of two rows sent with one usage id was written.
 		delete(wrote, request.UsageID)
 		for _, grant := range slices.Compact(slices.Sorted(slices.Values(request.LimitGrants))) {
-			uses = append(uses, GrantUse{GrantID: grant, UsageID: request.UsageID, Micros: request.CostMicros})
+			uses = append(uses, GrantUse{GrantID: grant, CustomerID: request.CustomerID, OrganizationID: request.OrganizationID, UsageID: request.UsageID, Micros: request.CostMicros})
 		}
 	}
 	return uses
@@ -65,8 +79,9 @@ const grantEndedBefore = "least(g.revoked_at, g.expires_at) < now() - make_inter
 
 // InsertMany counts the rows toward their grants in the shared database: each (grant, usage
 // id) once, however often it is sent, added to the grant's used_micros. A grant that is not
-// there, or ended more than GrantUsesKept ago, counts nothing. It says how many it had not
-// counted before.
+// there, is of neither the row's organization nor its app's, is scoped to another app, or ended
+// more than GrantUsesKept ago, counts nothing; one refused on whose it is is counted on
+// /metrics. It says how many it had not counted before.
 func (r *LimitGrantUses) InsertMany(ctx context.Context, uses []GrantUse) (int, error) {
 	added := 0
 	for start := 0; start < len(uses); start += grantUsesChunk {
@@ -90,10 +105,12 @@ func addGrantUses(ctx context.Context, tx bun.Tx, uses []GrantUse) (int, error) 
 		return 0, nil
 	}
 	grants := make([]int64, len(uses))
+	customers := make([]string, len(uses))
+	organizations := make([]string, len(uses))
 	usageIDs := make([]string, len(uses))
 	micros := make([]int64, len(uses))
 	for i, use := range uses {
-		grants[i], usageIDs[i], micros[i] = use.GrantID, use.UsageID.String(), use.Micros
+		grants[i], customers[i], organizations[i], usageIDs[i], micros[i] = use.GrantID, use.CustomerID, use.OrganizationID, use.UsageID.String(), use.Micros
 	}
 	_, err := tx.NewSelect().Model((*LimitGrant)(nil)).
 		Column("lg.id").
@@ -104,14 +121,28 @@ func addGrantUses(ctx context.Context, tx bun.Tx, uses []GrantUse) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	var added int
+	// A grant is the row's organization's, or that of the row's app as the enforcer drew it: the
+	// organization the app was last seen under, or for an app in none the app itself. Either
+	// one serves, since a row is written without its organization when the app could not be
+	// looked up, and the app's membership is recorded in the background after its first grant
+	// may be drawn. A grant scoped to an app is that app's alone.
+	var counts struct {
+		Added   int `bun:"added"`
+		Refused int `bun:"refused"`
+	}
 	err = tx.NewRaw(`
 WITH sent AS (
-    SELECT * FROM unnest(?::bigint[], ?::uuid[], ?::bigint[]) AS s (grant_id, usage_id, micros)
+    SELECT * FROM unnest(?::bigint[], ?::text[], ?::text[], ?::uuid[], ?::bigint[]) AS s (grant_id, customer_id, organization_id, usage_id, micros)
+), granted AS (
+    SELECT s.grant_id, s.usage_id, s.micros,
+        g.organization_id IN (s.organization_id, coalesce(ao.organization_id, s.customer_id)) AND g.app_id IN ('', s.customer_id) AS owned
+    FROM sent s
+    LEFT JOIN app_organizations ao ON ao.app_id = s.customer_id
+    JOIN limit_grants g ON g.id = s.grant_id
+    WHERE NOT coalesce(`+grantEndedBefore+`, false)
 ), counted AS (
     INSERT INTO limit_grant_uses (grant_id, usage_id, micros)
-    SELECT s.grant_id, s.usage_id, s.micros FROM sent s JOIN limit_grants g ON g.id = s.grant_id
-    WHERE NOT coalesce(`+grantEndedBefore+`, false)
+    SELECT grant_id, usage_id, micros FROM granted WHERE owned
     ON CONFLICT DO NOTHING
     RETURNING grant_id, micros
 ), raised AS (
@@ -120,8 +151,16 @@ WITH sent AS (
     WHERE g.id = c.grant_id
     RETURNING 1
 )
-SELECT count(*) FROM counted`, pgdialect.Array(grants), pgdialect.Array(usageIDs), pgdialect.Array(micros), GrantUsesKept.Seconds()).Scan(ctx, &added)
-	return added, err
+SELECT (SELECT count(*) FROM counted) AS added,
+    (SELECT count(*) FROM granted r WHERE NOT r.owned
+        AND NOT EXISTS (SELECT 1 FROM limit_grant_uses u WHERE u.grant_id = r.grant_id AND u.usage_id = r.usage_id)) AS refused`,
+		pgdialect.Array(grants), pgdialect.Array(customers), pgdialect.Array(organizations), pgdialect.Array(usageIDs), pgdialect.Array(micros),
+		GrantUsesKept.Seconds()).Scan(ctx, &counts)
+	if err != nil {
+		return 0, err
+	}
+	grantUsesRefused.Add(float64(counts.Refused))
+	return counts.Added, nil
 }
 
 // Prune forgets which rows counted toward the grants that expired or were revoked
@@ -249,7 +288,7 @@ func (r *LimitGrantUses) Reconcile(ctx context.Context) (int, error) {
 
 // reconcileGrantsQuery is one page of a shard's rows naming a grant, on from (started_at, id),
 // read by requests_limit_grants_started_idx.
-const reconcileGrantsQuery = "SELECT id, started_at, usage_id, cost_micros, limit_grants FROM requests " +
+const reconcileGrantsQuery = "SELECT id, started_at, customer_id, organization_id, usage_id, cost_micros, limit_grants FROM requests " +
 	"WHERE limit_grants <> '{}' AND (started_at, id) > (?, ?) AND billable AND cost_micros > 0 AND usage_id IS NOT NULL " +
 	"ORDER BY started_at, id LIMIT ?"
 
@@ -268,11 +307,13 @@ func (r *LimitGrantUses) reconcileShard(ctx context.Context, shard bun.IDB, name
 	counted := 0
 	for {
 		var rows []struct {
-			ID          int64     `bun:"id"`
-			StartedAt   time.Time `bun:"started_at"`
-			UsageID     uuid.UUID `bun:"usage_id"`
-			CostMicros  int64     `bun:"cost_micros"`
-			LimitGrants []int64   `bun:"limit_grants,array"`
+			ID             int64     `bun:"id"`
+			StartedAt      time.Time `bun:"started_at"`
+			CustomerID     string    `bun:"customer_id"`
+			OrganizationID string    `bun:"organization_id"`
+			UsageID        uuid.UUID `bun:"usage_id"`
+			CostMicros     int64     `bun:"cost_micros"`
+			LimitGrants    []int64   `bun:"limit_grants,array"`
 		}
 		err := shard.NewRaw(reconcileGrantsQuery, after, afterID, grantReconcilePage).Scan(ctx, &rows)
 		if err != nil {
@@ -281,7 +322,7 @@ func (r *LimitGrantUses) reconcileShard(ctx context.Context, shard bun.IDB, name
 		var uses []GrantUse
 		for _, row := range rows {
 			for _, grant := range slices.Compact(slices.Sorted(slices.Values(row.LimitGrants))) {
-				uses = append(uses, GrantUse{GrantID: grant, UsageID: row.UsageID, Micros: row.CostMicros})
+				uses = append(uses, GrantUse{GrantID: grant, CustomerID: row.CustomerID, OrganizationID: row.OrganizationID, UsageID: row.UsageID, Micros: row.CostMicros})
 			}
 		}
 		n, err := r.InsertMany(ctx, uses)
