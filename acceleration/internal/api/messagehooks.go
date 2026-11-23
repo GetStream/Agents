@@ -310,7 +310,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		if strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 			return true
 		}
-		origin.answer(func() { s.answerThread(origin, thread, event) })
+		origin.answer(func() { s.answerThread(context.WithoutCancel(ctx), origin, thread, event) })
 		return true
 	}
 	// Only a linked thread answers a photo sent without text on a thread channel (addressed).
@@ -351,7 +351,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 				owed := s.owing.owe(found.Key())
 				origin.answer(func() {
 					defer owed()
-					s.followUpMessage(origin, found, event)
+					s.followUpMessage(context.WithoutCancel(ctx), origin, found, event)
 				})
 				return true
 			}
@@ -391,7 +391,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 			}
 			// The answer goes back to the channel rather than in a response, so there is
 			// nothing here to wait for.
-			origin.answer(func() { s.answerMessage(origin, found, event) })
+			origin.answer(func() { s.answerMessage(context.WithoutCancel(ctx), origin, found, event) })
 			return true
 		}
 	}
@@ -804,8 +804,8 @@ func (s *Server) assignMessage(ctx context.Context, customerID string, message d
 // (session.Spec.Dispatched), once the reply it may still be writing is done, as a thread's
 // session answers one (answerClaimed): with what its voice recording says and its photos, read
 // once for every try.
-func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) followUpMessage(ctx context.Context, origin hookOrigin, found *session.Session, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	followUpID := "message_" + store.NewID()
 	text, images := s.messagePhotos(ctx, found.SeesImages(), s.heardText(ctx, found.Spec(), origin, event), event)
@@ -828,8 +828,8 @@ func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, even
 // The answer is written rather than spoken. A session on a call has somebody listening to
 // it, and saying a reply to something they never said would interrupt them with an answer
 // to somebody else's question.
-func (s *Server) answerMessage(origin hookOrigin, found *session.Session, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) answerMessage(ctx context.Context, origin hookOrigin, found *session.Session, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 
 	// Ask refuses a speech-to-speech agent, which answers only on the call (Mode), so a

@@ -61,7 +61,7 @@ func (s *PolicySuite) TestAPurchaseWithNoKnownPriceStillNeedsSomeCredit() {
 
 func (s *PolicySuite) TestABookingCountsTheOrganizationsHolds() {
 	enforcer := s.billed()
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	s.read(enforcer.Enforcer, s.org)
 	s.hold(enforcer, 1)

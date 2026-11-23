@@ -1509,7 +1509,7 @@ func (s *ScheduledTasksSuite) TestAnEditOfATaskPausedMeanwhileIsRefusedAndLeaves
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(codeTaskChanged, failure.Error.Code)
+	s.Equal("task_changed", failure.Error.Code)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Equal("Stretch", task.Title)
@@ -1527,7 +1527,7 @@ func (s *ScheduledTasksSuite) TestAPauseOfATaskEditedMeanwhileIsRefusedAndKeepsT
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(codeTaskChanged, failure.Error.Code)
+	s.Equal("task_changed", failure.Error.Code)
 	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
 }
 
@@ -1545,7 +1545,7 @@ func (s *ScheduledTasksSuite) TestAResumeOfATaskEditedMeanwhileIsRefusedAndKeeps
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(codeTaskChanged, failure.Error.Code)
+	s.Equal("task_changed", failure.Error.Code)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Equal("Renamed", task.Title)

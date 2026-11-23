@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -134,7 +135,7 @@ func (t *Transcriber) force() {
 func (t *Transcriber) cutLocked(c pauseCheck, stopped time.Time) {
 	said, force := t.words.end(c.utterance, stopped)
 	t.running.Add(1)
-	go t.settle(c, said, force)
+	goroutine.Go(t.call, func() { t.settle(c, said, force) })
 }
 
 // settle keeps the words of the utterance check c ended, once the transcriber writing them
@@ -173,7 +174,7 @@ func (t *Transcriber) endOnWords(participant stt.Participant, heard int64) {
 	utterance, length, asked := t.utterance+1, time.Duration(heard-t.start)*frame, time.Now()
 	said, force := t.words.end(utterance, asked.Add(-t.quiet))
 	t.running.Add(1)
-	go func() {
+	goroutine.Go(t.call, func() {
 		defer t.running.Done()
 		if force {
 			t.force()
@@ -185,7 +186,7 @@ func (t *Transcriber) endOnWords(participant stt.Participant, heard int64) {
 			return
 		}
 		t.sendWords(participant, utterance, words, length, asked)
-	}()
+	})
 }
 
 // sendWords sends words as the final of utterance, with no check's ruling, the other
@@ -304,7 +305,7 @@ func (t *Transcriber) checked(err error, deadline time.Duration, participant stt
 	t.emitter.Send(stt.Disconnected{Provider: ProviderName, Model: t.model, Reason: stack.Wrap(err).Error(), At: time.Now()})
 	// Asked from a check, itself one of t.running: Close has not begun to wait on it.
 	t.running.Add(1)
-	go t.probe(participant)
+	goroutine.Go(t.call, func() { t.probe(participant) })
 }
 
 // pauseDeadline is how long a check at a pause has for its ruling (harness.HearDeadline): a

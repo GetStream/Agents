@@ -235,6 +235,31 @@ func (s *StoreSuite) TestOpeningAPlacedLegDialsItOnce() {
 	s.False(opened)
 }
 
+// A transfer leg written again, as a write whose answer was lost is, is the one leg: a second
+// ringing leg could be given to a phone of the call and bill the transfer twice.
+func (s *StoreSuite) TestATransferLegWrittenTwiceIsOneLeg() {
+	transfer := CallLeg{CustomerID: "app", StreamAppPK: 7, CallType: "default", CallID: "call", Vendor: "telnyx",
+		VendorCallID: "vendor-1", Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199",
+		DialedAt: s.base}
+	first, again := transfer, transfer
+
+	opened, err := s.store.CallLegs.Open(s.ctx, &first)
+	s.Require().NoError(err)
+	s.True(opened)
+	opened, err = s.store.CallLegs.Open(s.ctx, &again)
+	s.Require().NoError(err)
+	s.False(opened)
+
+	legs, err := s.store.shard.NewSelect().Model((*CallLeg)(nil)).Where("call_id = ?", "call").Count(s.ctx)
+	s.Require().NoError(err)
+	s.Equal(1, legs)
+	other := transfer
+	other.VendorCallID = "vendor-2"
+	opened, err = s.store.CallLegs.Open(s.ctx, &other)
+	s.Require().NoError(err)
+	s.True(opened, "another transfer in the same call is a leg of its own")
+}
+
 func (s *StoreSuite) TestALegNotDialledYetRingsForNobody() {
 	s.placedLeg("one", nil)
 	scope := AppScope{}
