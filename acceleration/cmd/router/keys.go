@@ -86,7 +86,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	sealed, err := sealer.Seal(secret)
+	sealed, err := sealer.SealWithAAD(secret, store.APIKeyAAD(app.ID, key))
 	if err != nil {
 		return err
 	}

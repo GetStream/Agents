@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -46,6 +48,23 @@ func (k *APIKey) Validate() error {
 		check(len(k.Sealed) > 0, "secret_sealed", "is required").
 		done()
 }
+
+// APIKeyAAD binds a sealed key secret to its app and key id, the row it is stored on, so a blob
+// copied onto another key's row, or a row whose app was changed, does not open. Each part is
+// length-prefixed, as pgsealed's credentialsAAD is, so no two pairs give the same bytes. v1
+// changes with the layout.
+func APIKeyAAD(appID, keyID string) []byte {
+	return fmt.Appendf(nil, "accelerate:api-key-secret:v1:%d:%s:%d:%s", len(appID), appID, len(keyID), keyID)
+}
+
+// unboundOpens counts the key secrets that opened only without APIKeyAAD: rows sealed before
+// secrets were bound to their row. Each is sealed again with it on that use, so once this
+// stays at zero the fallback in openSecret can be deleted.
+var unboundOpens = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "api_key_unbound_opens_total",
+	Help:      "API key secrets that opened only without the AAD binding them to their row, each then sealed again with it",
+})
 
 // ErrNoAPIKey says no live key has that id. It is one error for every reason a key might
 // not be usable — unknown, revoked, expired — because a caller that can tell those apart
@@ -206,7 +225,7 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 		if err != nil {
 			return auth.App{}, auth.ErrUnauthenticated
 		}
-		secret, err := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+		secret, err := r.openSecret(ctx, sealer, key, owner)
 		if err != nil {
 			return auth.App{}, fmt.Errorf("unseal key %s: %w", key, err)
 		}
@@ -228,4 +247,46 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 			},
 		}, nil
 	}
+}
+
+// openSecret opens a key's secret with the AAD of its row. A row sealed before secrets were
+// bound to their row has no AAD: it still opens, so no key stops working, and it is sealed
+// again with the AAD, so the unbound form ends for every key still in use.
+func (r *APIKeys) openSecret(ctx context.Context, sealer *auth.Sealer, id string, owner APIKeyOwner) (string, error) {
+	aad := APIKeyAAD(owner.AppID, id)
+	secret, err := sealer.OpenWithAADVersion(owner.Sealed, aad, owner.KEKVersion)
+	if err == nil {
+		return secret, nil
+	}
+	secret, unboundErr := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+	if unboundErr != nil {
+		return "", err
+	}
+	unboundOpens.Inc()
+	r.reseal(ctx, sealer, id, owner.Sealed, secret, aad)
+	return secret, nil
+}
+
+// reseal writes a secret opened without its AAD back sealed with it, under the current key
+// version. It is a chore, not a condition of the request: the old seal still opens, so a
+// failure is logged and the next use tries again. The write applies only while the row holds
+// the blob that was opened, so a secret replaced meanwhile stays as it is.
+func (r *APIKeys) reseal(ctx context.Context, sealer *auth.Sealer, id string, was []byte, secret string, aad []byte) {
+	sealed, err := sealer.SealWithAAD(secret, aad)
+	if err == nil {
+		_, err = r.store.global.NewUpdate().Model((*APIKey)(nil)).
+			Set("secret_sealed = ?", sealed).
+			Set("kek_version = ?", sealer.CurrentVersion()).
+			Where("id = ?", id).
+			Where("secret_sealed = ?", was).
+			Exec(ctx)
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "could not seal an api key's secret again with its row's binding", "key", id, "error", err)
+		return
+	}
+	// The cached owner still holds the unbound blob. Dropped, the next lookup reads the new one
+	// instead of opening the old one and writing again.
+	r.store.forget(ctx, cacheKey("key", id))
+	slog.InfoContext(ctx, "sealed an api key's secret again with its row's binding", "key", id)
 }

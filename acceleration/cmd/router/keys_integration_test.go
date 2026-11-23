@@ -90,7 +90,7 @@ func (s *KeysCLISuite) seedKey(settings config.Config) (*store.Store, auth.Looku
 	s.Require().NoError(db.Apps.Insert(ctx, &app))
 	id, secret, err := auth.NewCredential(auth.Live)
 	s.Require().NoError(err)
-	sealed, err := sealer.Seal(secret)
+	sealed, err := sealer.SealWithAAD(secret, store.APIKeyAAD(app.ID, id))
 	s.Require().NoError(err)
 	s.Require().NoError(db.APIKeys.Insert(ctx, &store.APIKey{
 		ID: id, AppID: app.ID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: sealer.CurrentVersion(), Last4: auth.Last4(secret),
@@ -119,6 +119,10 @@ func (s *KeysCLISuite) TestACreatedKeyRecordsTheVersionItWasSealedWith() {
 	}
 	s.Require().NotEmpty(probe.ID, "keys create stored no key named probe")
 	s.Equal(2, probe.KEKVersion)
+	created, err := auth.NewSealerWithKeyring(2, keys)
+	s.Require().NoError(err)
+	_, err = created.OpenWithAADVersion(probe.Sealed, store.APIKeyAAD(app.ID, probe.ID), probe.KEKVersion)
+	s.NoError(err, "keys create binds the secret to its app and key")
 	rotated, err := auth.NewSealerWithKeyring(3, map[int]string{1: keys[1], 2: keys[2], 3: "third key"})
 	s.Require().NoError(err)
 	_, err = db.APIKeys.Lookup(rotated)(context.Background(), probe.ID)
