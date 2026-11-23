@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'agent_session.dart';
 import 'conversation.dart';
 
@@ -148,15 +146,8 @@ final class TurnMessage {
       'decline_title': title,
   };
 
-  /// What it shows besides its id, text and time, compared as one value: the steps' maps are
-  /// written in a fixed order, so a step that did not change encodes the same.
-  late final String _shown = jsonEncode([
-    for (final step in steps) [step.type, step.payload],
-    reasoning,
-    customData,
-  ]);
-
-  /// Equal when it shows the same, so a view can keep a message that did not change.
+  /// Equal when it shows the same, its steps, thinking and custom data compared by value, so a
+  /// view can keep a message that did not change.
   @override
   bool operator ==(Object other) =>
       other is TurnMessage &&
@@ -165,10 +156,18 @@ final class TurnMessage {
       other.text == text &&
       other.at == at &&
       other.isGenerating == isGenerating &&
-      other._shown == _shown;
+      _sameValue(other.reasoning, reasoning) &&
+      _sameValue(other.customData, customData) &&
+      other.steps.length == steps.length &&
+      [
+        for (var i = 0; i < steps.length; i++)
+          other.steps[i].type == steps[i].type &&
+              _sameValue(other.steps[i].payload, steps[i].payload),
+      ].every((same) => same);
 
+  /// Leaves out the steps' and custom data's contents, which equality compares by value.
   @override
-  int get hashCode => Object.hash(id, isAgentReply, text, at, isGenerating, _shown);
+  int get hashCode => Object.hash(id, isAgentReply, text, at, isGenerating, steps.length);
 
   @override
   String toString() => 'TurnMessage($id, ${isAgentReply ? 'agent' : 'person'}: $text)';
@@ -187,3 +186,16 @@ extension TurnMessages on AgentSession {
     isConnected: isConnected,
   );
 }
+
+/// Whether [a] and [b] hold the same JSON-like value: maps and lists compared entry by entry.
+bool _sameValue(Object? a, Object? b) => switch ((a, b)) {
+  (final Map<Object?, Object?> a, final Map<Object?, Object?> b) =>
+    a.length == b.length &&
+        a.entries.every(
+          (entry) => b.containsKey(entry.key) && _sameValue(entry.value, b[entry.key]),
+        ),
+  (final List<Object?> a, final List<Object?> b) =>
+    a.length == b.length &&
+        [for (var i = 0; i < a.length; i++) _sameValue(a[i], b[i])].every((same) => same),
+  _ => a == b,
+};

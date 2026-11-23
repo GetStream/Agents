@@ -347,10 +347,16 @@ void main() {
 
         conversation.send("I'd like a refund for order A-1042");
         await _until(() => router.asked == 1);
+        // The router's order: the reply is answered as waiting on its tools, which then run, and
+        // their results carry it on in a turn of its own.
         socket
           ..send('{"type":"responding","turn_id":"t1"}')
           ..send(
             '{"type":"reasoning_delta","turn_id":"t1","text":"They were charged twice."}',
+          )
+          ..send(
+            '{"pending_work":true,"type":"responded","turn_id":"t1",'
+            '"text":"","time_to_first_token_ms":90}',
           )
           ..send(
             '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund",'
@@ -393,10 +399,6 @@ void main() {
           ..send(
             '{"type":"tool_ran","tool_call_id":"c1","turn_id":"t1",'
             '"tool":"issue_refund","error":""}',
-          )
-          ..send(
-            '{"pending_work":true,"type":"responded","turn_id":"t1",'
-            '"text":"","time_to_first_token_ms":90}',
           )
           ..send('{"type":"responding","turn_id":"t2"}')
           ..send(

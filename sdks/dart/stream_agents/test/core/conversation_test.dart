@@ -521,10 +521,32 @@ void main() {
         expect(round.duration, const Duration(milliseconds: 900));
       });
 
+      test('UI being written closes the round even when it names no format', () {
+        final carding = play([
+          (0, '{"type":"responding","turn_id":"t1"}'),
+          (300, '{"type":"reasoning_delta","turn_id":"t1","text":"A card fits."}'),
+          (700, '{"type":"ui_delta","turn_id":"t1","delta":"a","format":""}'),
+          // The next round is timed from the UI, not from when the turn was asked.
+          (900, '{"type":"reasoning_delta","turn_id":"t1","text":"Now the total."}'),
+        ]);
+
+        final [first, second] = carding.turns.single.steps.cast<ReasoningStep>();
+        expect(first.isStreaming, isFalse);
+        expect(first.duration, const Duration(milliseconds: 700));
+        expect(second.id, 'r2');
+        expect(second.at, ms(700));
+        expect(carding.turns.single.ui, isNull);
+      });
+
       test('a call shows once, even when started again or sharing an id with a round', () {
         final conversation = play([
           (0, '{"type":"responding","turn_id":"t1"}'),
           (1, '{"type":"reasoning_delta","turn_id":"t1","text":"The weather tool knows."}'),
+          (
+            2,
+            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"",'
+                '"time_to_first_token_ms":90}',
+          ),
           (2, '{"type":"tool_started","tool_call_id":"r1","tool":"weather","turn_id":"t1"}'),
           (3, '{"type":"tool_started","tool_call_id":"r1","tool":"weather","turn_id":"t1"}'),
           (

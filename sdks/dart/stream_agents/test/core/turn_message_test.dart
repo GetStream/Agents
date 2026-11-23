@@ -117,6 +117,40 @@ void main() {
       );
     });
 
+    test('a message built again unchanged is equal, and one whose step or card moved is not', () {
+      final running = play([
+        ...toolTurn.take(4),
+        (
+          1700,
+          '{"type":"ui_completed","turn_id":"t1","format":"openui","mode":"replace",'
+              r'"content":"root = Card([])"}',
+        ),
+      ], from: asked);
+      TurnMessage reply(Conversation conversation) =>
+          TurnMessage.messages(conversation, userId: 'ada', isConnected: true).last;
+
+      // Built twice from the same conversation, with maps that are not the same objects.
+      expect(reply(running), reply(running));
+      expect(reply(running).hashCode, reply(running).hashCode);
+
+      final ran = play([
+        (
+          2000,
+          '{"type":"tool_ran","tool_call_id":"call_1","turn_id":"t1","tool":"weather","error":""}',
+        ),
+      ], from: running);
+      expect(reply(ran), isNot(reply(running)), reason: 'the call completed');
+
+      final recarded = play([
+        (
+          1800,
+          '{"type":"ui_completed","turn_id":"t1","format":"openui","mode":"replace",'
+              r'"content":"root = Card([Text(\"Sunny\")])"}',
+        ),
+      ], from: running);
+      expect(reply(recarded), isNot(reply(running)), reason: 'the card changed');
+    });
+
     test('a reply with UI carries its latest card as a kept one does', () {
       final conversation = play([
         (10, '{"type":"responding","turn_id":"t1"}'),

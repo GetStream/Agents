@@ -774,8 +774,13 @@ void main() {
               );
           final socket = await router.socket();
 
+          // The router's order: the reply is answered as waiting on its tools, which then start.
           socket
             ..send('{"type":"responding","turn_id":"t1"}')
+            ..send(
+              '{"pending_work":true,"type":"responded","turn_id":"t1","text":"",'
+              '"time_to_first_token_ms":90}',
+            )
             ..send(
               '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund","turn_id":"t1",'
               '"started_at":"2026-11-19T09:00:00Z"}',

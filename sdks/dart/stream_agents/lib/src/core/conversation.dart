@@ -513,8 +513,13 @@ final class Conversation {
       case AgentEventKind.uiDelta:
         final delta = _text(event['delta']);
         final format = _text(event['format']);
-        if (delta.isEmpty || format.isEmpty) {
+        if (delta.isEmpty) {
           return this;
+        }
+        // Writing UI ends the round of thinking under way, as writing text does.
+        final went = _amend(event.turnId, (turn) => turn._settled(now))._resumed(event.turnId, now);
+        if (format.isEmpty) {
+          return went;
         }
         final pending = (
           format: format,
@@ -522,11 +527,7 @@ final class Conversation {
           mode: _nonEmptyOr(_text(event['mode']), 'replace'),
           raw: '${_uiWritten[event.turnId]?.raw ?? ''}$delta',
         );
-        // Writing UI ends the round of thinking under way, as writing text does.
-        final written = _amend(
-          event.turnId,
-          (turn) => turn._settled(now),
-        )._resumed(event.turnId, now)._with(uiWritten: {..._uiWritten, event.turnId: pending});
+        final written = went._with(uiWritten: {..._uiWritten, event.turnId: pending});
         // Only the line still being written grew, so no statement finished: nothing shown changes.
         final updated = format == 'openui' && !delta.contains('\n')
             ? written
