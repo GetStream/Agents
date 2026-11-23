@@ -78,8 +78,10 @@ func (p callParticipant) phone() bool {
 // Every outcome short of something that did not come from Stream is a 200. Stream retries a
 // non-2xx, and none of the reasons this cannot place a call — no worker waiting, a call
 // belonging to nobody — get better on a second delivery, while the caller is on the line for
-// the whole of it. The one exception is a phone's join or leave the database could not take:
-// its minutes are lost unless Stream delivers it again, so it is answered 503.
+// the whole of it. There are two exceptions, each answered 503. A phone's join or leave the
+// database could not take: its minutes are lost unless Stream delivers it again. And a call
+// that arrived moments ago which a shard that did not answer may have placed
+// (arrivingCallRetryFor): dispatching it could put a second agent on the call.
 func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.hooksConfigured() {
 		// Refusing is the only safe answer: without the secret there is no way to tell
@@ -151,6 +153,12 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// arrivingCallRetryFor is how long after Stream made a call.session_started a delivery whose
+// call cannot yet be told apart from one the router placed is answered for Stream to deliver
+// again. A caller left ringing rarely holds on past it, so a delivery later than that would
+// put a worker on a call nobody is on. An event whose time cannot be read is not retried.
+const arrivingCallRetryFor = 45 * time.Second
+
 // dispatchArrivingCall works out whose call it is and hands it to one of their workers. A call
 // it refuses is still answered 200, so the refusal's code is noted on w for the activity record.
 // False is a call it could not yet tell what to do with, answered on w for Stream to deliver
@@ -170,10 +178,16 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	placed, err := s.store.CallResources.Select(r.Context(), origin.scope(), callType, callID)
 	if err != nil {
 		// A shard that did not answer may have placed it, and dispatching it would put a second
-		// agent on it. Stream delivers it again, and nothing has been acted on yet.
-		s.logger.Error("could not tell whether the router placed a call", "cid", event.CallCid, "error", err)
-		writeError(w, unavailable("could not tell whose call this is"))
-		return false
+		// agent on it. While the caller may still be ringing, Stream is told to deliver it again,
+		// and nothing has been acted on yet. Past that, a delivery that lands once the shard is
+		// back would send a worker to a call its caller has left, so it is dropped as before.
+		if at := eventTime(event.CreatedAt); !at.IsZero() && time.Since(at) <= arrivingCallRetryFor {
+			s.logger.Warn("could not tell whether the router placed a call, asking for it again", "cid", event.CallCid, "error", err)
+			writeError(w, unavailable("could not tell whose call this is"))
+			return false
+		}
+		s.logger.Error("dropped an arriving call: could not tell whether the router placed it", "cid", event.CallCid, "error", err)
+		return true
 	}
 	if len(placed) > 0 {
 		s.logger.Debug("not dispatching a call the router placed", "cid", event.CallCid)
