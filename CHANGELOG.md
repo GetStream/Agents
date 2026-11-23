@@ -886,6 +886,9 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### A request counts only toward its own organization's spend grants
 
 A request row's cost is added to a grant it names only when the grant belongs to the row's organization or to its app's (the organization the app is in, or the app itself for an app in none), both as the row is written and when the grant uses are reconciled. A grant scoped to an app, or to its key or user, counts only that app's rows. A use refused because the grant is not the row's is counted on `/metrics` as `router_usage_grant_uses_refused_total`. An imported request names no grant: it was drawn from the grants of the deployment that recorded it.
+### An imported request is given a usage id of the importing deployment's
+
+A request row a data import writes no longer keeps the `usage_id` it was sent with: its usage id is made from the importing app and the one sent, the way a row from before usage ids already was. Importing it again, or replaying its change or its delete, still names the same row, and a fixed charge of the app's, such as a month of a number, is billed under its own usage id whatever an import carried.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

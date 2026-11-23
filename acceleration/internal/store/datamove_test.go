@@ -3516,7 +3516,7 @@ func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEve
 	s.Equal(first["usage_id"], again["usage_id"], "importing it again names the same unit of work")
 }
 
-func (s *DataMoveSuite) TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped() {
+func (s *DataMoveSuite) TestAnImportedRequestIsGivenAUsageIDOfItsOwnAndIsNeverShipped() {
 	usageID := uuid.Must(uuid.NewV7())
 	shippedAt := time.Now().UTC().Add(-time.Minute)
 	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
@@ -3524,8 +3524,10 @@ func (s *DataMoveSuite) TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped() 
 		ShippedAt: &shippedAt, ShipError: "missing_api_key"}))
 
 	moved := s.movedRequest(false)
+	again := s.movedRequest(false)
 
-	s.Equal(usageID.String(), moved["usage_id"])
+	s.NotEqual(usageID.String(), moved["usage_id"], "the usage id sent names a unit of work of the source's")
+	s.Equal(moved["usage_id"], again["usage_id"], "importing it again names the same row")
 	s.Equal(false, moved["to_ship"], "the deployment that recorded it bills it")
 	s.Nil(moved["shipped_at"], "what the other deployment's usage service answered stays there")
 	s.Equal("", moved["ship_error"])
@@ -3572,8 +3574,12 @@ func (s *DataMoveSuite) TestAMovedRequestNeverOverwritesTheDestinationsRowWithIt
 	s.Require().Len(rows, 2, "the moved row beside the destination's own, once however often it is imported")
 	s.EqualValues(id, rows[own.UsageID.String()]["id"])
 	s.Equal(true, rows[own.UsageID.String()]["to_ship"], "the destination's own row is left as it was")
-	s.NotEqualValues(id, rows[moved.UsageID.String()]["id"], "the moved row is given an id of the destination's")
-	s.Equal(false, rows[moved.UsageID.String()]["to_ship"])
+	delete(rows, own.UsageID.String())
+	s.NotContains(rows, moved.UsageID.String(), "the moved row is given a usage id of the destination's")
+	for _, row := range rows {
+		s.NotEqualValues(id, row["id"], "the moved row is given an id of the destination's")
+		s.Equal(false, row["to_ship"])
+	}
 }
 
 func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
@@ -3594,7 +3600,7 @@ func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
 
 	rows := s.requestsByUsage()
-	s.NotContains(rows, doomed.UsageID.String())
+	s.Len(rows, 1, "the moved row is deleted")
 	s.Contains(rows, own.UsageID.String(), "the destination's row with the deleted row's id is not the row deleted")
 }
 
