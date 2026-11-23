@@ -280,7 +280,11 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 			if err != nil {
 				return err
 			}
-			env = over(env, own)
+			// Only the code gets them: a command before it needs no proxy. Daytona sends no
+			// env for an empty map, as for none (sdk-go v0.211.2 process.go:234).
+			env = make(map[string]string, len(env)+len(own))
+			maps.Copy(env, s.mount.RunEnv)
+			maps.Copy(env, own)
 		}
 		each := s.mount.EachRun
 		if s.setUp {
@@ -339,17 +343,6 @@ func (s *Sandbox) endRun(ctx context.Context) {
 	if err := s.broker.AfterRun(end); err != nil {
 		s.logger.Warn("the run's credential could not be ended; it lasts until it expires", "error", err)
 	}
-}
-
-// over is env with run's vars over it, env itself when run has none.
-func over(env, run map[string]string) map[string]string {
-	if len(run) == 0 {
-		return env
-	}
-	merged := make(map[string]string, len(env)+len(run))
-	maps.Copy(merged, env)
-	maps.Copy(merged, run)
-	return merged
 }
 
 // download reads a file the code wrote, and no more of it than one byte past the largest a run

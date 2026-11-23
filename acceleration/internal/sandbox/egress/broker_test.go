@@ -645,6 +645,8 @@ func (s *BrokerSuite) TestClosingEndsTheCredentialOfARecordWithAllowedDomains() 
 	s.False(found)
 	_, err := s.rig.sandboxClient(s.T(), mount).Get("https://pypi.test/")
 	s.ErrorContains(err, "Proxy Authentication Required")
+	_, err = s.rig.sandboxClient(s.T(), s.run(broker, prepared)).Get("https://pypi.test/")
+	s.ErrorContains(err, "Proxy Authentication Required", "a run after Close")
 }
 
 // allowing is a broker of session with the allowed domains, and the mount its Prepare gave the

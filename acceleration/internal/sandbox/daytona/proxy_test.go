@@ -182,6 +182,9 @@ func (s *ProxySuite) TestAnHTTPSProxyIsReachedThroughATunnelCheckedBeforeEveryRu
 	for _, ran := range s.platform.executed() {
 		s.Regexp(`^http://sbx:[A-Z2-7]{26}@127\.0\.0\.1:3128$`, ran["envs"].(map[string]any)["HTTPS_PROXY"])
 	}
+	for _, raw := range s.platform.rawCommands {
+		s.NotContains(raw, "sbx:", "the setup and the tunnel's check get no proxy credential")
+	}
 	s.platform.mu.Lock()
 	s.platform.commandExit = 1
 	s.platform.commandOutput = "the TLS tunnel to the proxy did not start: OSError"
@@ -510,6 +513,22 @@ func (s *ProxySuite) TestTheEndOfARunEndsItsProxyCredential() {
 	s.Require().Error(err)
 	s.Len(s.platform.executed(), 2)
 	s.Empty(s.records(), "after a run that failed")
+
+	ctx, cancel := context.WithCancel(s.ctx)
+	stall, arrived, ran := make(chan struct{}), make(chan struct{}, 1), make(chan error, 1)
+	s.platform.mu.Lock()
+	s.platform.stall, s.platform.arrived = stall, arrived
+	s.platform.mu.Unlock()
+	go func() {
+		_, err := box.Run(ctx, "print(3)", nil)
+		ran <- err
+	}()
+	<-arrived
+	s.Require().Len(s.records(), 1)
+	cancel()
+	s.ErrorContains(<-ran, "context canceled")
+	close(stall)
+	s.Empty(s.records(), "after a run its caller gave up on")
 }
 
 // TestARunsEndTheStoreRefusedLeavesItsRecordToExpire: the run answers with its code's result,
