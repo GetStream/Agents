@@ -549,14 +549,26 @@ func (s *DLCSuite) TestAUseCaseNamingANumberTheAppDoesNotHoldIsRefusedNamingIt()
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, stranger+" is not a number this app holds")
 	s.NotContains(failure, "store:")
+	s.Empty(s.useCases(), "a refused create leaves no use case")
+}
+
+// useCases are the app's use cases.
+func (s *dlcRegistration) useCases() []UseCase {
+	var page UseCasePage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases", nil, &page))
+	return page.Items
 }
 
 // Assigning numbers that the database fails is the router's failure: a 500 that says nothing
-// of the database, not a 400 the app could not act on.
+// of the database, not a 400 the app could not act on. The use case is not made without them.
 func (s *DLCSuite) TestAUseCaseWhoseNumbersTheDatabaseFailsIsAnInternalError() {
-	s.failQueries("dlc_use_case_id = NULL")
+	held := store.PhoneNumber{CustomerID: s.customerID(), E164: s.utils.number(), Vendor: "telnyx"}
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &held))
+	request := completeUseCase("support")
+	request.Numbers = []string{held.E164}
+	s.failQueries("SET dlc_use_case_id = '")
 
-	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/use-cases", completeUseCase("support"))
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/use-cases", request)
 
 	s.Equal(http.StatusInternalServerError, status, string(payload))
 	var failure ErrorResponse
@@ -566,6 +578,7 @@ func (s *DLCSuite) TestAUseCaseWhoseNumbersTheDatabaseFailsIsAnInternalError() {
 	for _, internal := range []string{"store:", "dlc:", "deadline", "assign numbers"} {
 		s.NotContains(string(payload), internal)
 	}
+	s.Empty(s.useCases(), "a use case without the numbers it was made with is not left behind")
 }
 
 func (s *DLCSuite) TestOnlyStreamStaffReviewUseCases() {

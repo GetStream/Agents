@@ -157,13 +157,14 @@ func (s *Service) poll(ctx context.Context, after *store.CreatedPosition) *store
 	return after
 }
 
-// Create records a new draft use case and the numbers that send as it.
+// Create records a new draft use case and the numbers that send as it, as one: a use case whose
+// numbers cannot be assigned is not left behind.
 func (s *Service) Create(ctx context.Context, useCase *store.UseCase, numbers []string) error {
-	useCase.Status = Draft
-	if err := s.store.UseCases.Insert(ctx, useCase); err != nil {
+	if err := s.checkNumbers(ctx, useCase.CustomerID, numbers); err != nil {
 		return err
 	}
-	return s.assign(ctx, *useCase, numbers)
+	useCase.Status = Draft
+	return s.store.UseCases.Insert(ctx, useCase, numbers...)
 }
 
 // Update replaces what an app wrote on a use case it may still edit. numbers nil leaves
@@ -181,28 +182,37 @@ func (s *Service) Update(ctx context.Context, useCase *store.UseCase, numbers []
 	return s.assign(ctx, *useCase, numbers)
 }
 
-// assign sends numbers as the use case. A number the app does not hold, or one named twice,
-// is the caller's to correct; a store failure is not.
+// assign sends numbers as the use case.
 func (s *Service) assign(ctx context.Context, useCase store.UseCase, numbers []string) error {
-	if len(numbers) > 0 {
-		held, err := s.store.PhoneNumbers.Select(ctx, useCase.CustomerID, store.PhoneNumberFilter{})
-		if err != nil {
-			return err
-		}
-		holds := make(map[string]bool, len(held))
-		for _, number := range held {
-			holds[number.E164] = true
-		}
-		for i, number := range numbers {
-			if !holds[number] {
-				return stack.Wrap(fmt.Errorf("%w: %s is not a number this app holds", ErrInvalid, number))
-			}
-			if slices.Contains(numbers[:i], number) {
-				return stack.Wrap(fmt.Errorf("%w: %s is named twice", ErrInvalid, number))
-			}
-		}
+	if err := s.checkNumbers(ctx, useCase.CustomerID, numbers); err != nil {
+		return err
 	}
 	return s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers)
+}
+
+// checkNumbers refuses numbers a use case of the app could not send from. A number the app
+// does not hold, or one named twice, is the caller's to correct; a store failure is not.
+func (s *Service) checkNumbers(ctx context.Context, customerID string, numbers []string) error {
+	if len(numbers) == 0 {
+		return nil
+	}
+	held, err := s.store.PhoneNumbers.Select(ctx, customerID, store.PhoneNumberFilter{})
+	if err != nil {
+		return err
+	}
+	holds := make(map[string]bool, len(held))
+	for _, number := range held {
+		holds[number.E164] = true
+	}
+	for i, number := range numbers {
+		if !holds[number] {
+			return stack.Wrap(fmt.Errorf("%w: %s is not a number this app holds", ErrInvalid, number))
+		}
+		if slices.Contains(numbers[:i], number) {
+			return stack.Wrap(fmt.Errorf("%w: %s is named twice", ErrInvalid, number))
+		}
+	}
+	return nil
 }
 
 // Delete removes a use case the vendor does not hold.

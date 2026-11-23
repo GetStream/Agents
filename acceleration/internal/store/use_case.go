@@ -268,9 +268,13 @@ func (r *UseCases) HasIn(ctx context.Context, customerID string, statuses ...str
 	return found, nil
 }
 
-// Insert records a new use case. An app's first one is its default, and a new
-// default takes over from the old one.
-func (r *UseCases) Insert(ctx context.Context, useCase *UseCase) error {
+// errDefaultTaken rolls back a create whose use case would be the app's default when another
+// create made one meanwhile.
+var errDefaultTaken = errors.New("store: another use case became the app's default meanwhile")
+
+// Insert records a new use case and makes numbers the ones that send as it, as one. An app's
+// first one is its default, and a new default takes over from the old one.
+func (r *UseCases) Insert(ctx context.Context, useCase *UseCase, numbers ...string) error {
 	if err := useCase.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -280,22 +284,39 @@ func (r *UseCases) Insert(ctx context.Context, useCase *UseCase) error {
 	if useCase.MessageSamples == nil {
 		useCase.MessageSamples = []string{}
 	}
-	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		held, err := tx.NewSelect().Model((*UseCase)(nil)).Where("customer_id = ?", useCase.CustomerID).Exists(ctx)
-		if err != nil {
-			return fmt.Errorf("store: create use case: %w", err)
-		}
-		useCase.IsDefault = useCase.IsDefault || !held
-		if useCase.IsDefault {
-			if err := clearDefaultUseCase(ctx, tx, useCase.CustomerID, ""); err != nil {
-				return err
+	asked := useCase.IsDefault
+	var err error
+	// Twice at most: two creates at once for an app with no use case both find none, and the
+	// one whose default lands second is made again as what it is then.
+	for range 2 {
+		useCase.IsDefault = asked
+		err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+			held, err := tx.NewSelect().Model((*UseCase)(nil)).Where("customer_id = ?", useCase.CustomerID).Exists(ctx)
+			if err != nil {
+				return fmt.Errorf("store: create use case: %w", err)
 			}
+			useCase.IsDefault = useCase.IsDefault || !held
+			if useCase.IsDefault {
+				if err := clearDefaultUseCase(ctx, tx, useCase.CustomerID, ""); err != nil {
+					return err
+				}
+			}
+			result, err := tx.NewInsert().Model(useCase).On("CONFLICT (customer_id) WHERE is_default DO NOTHING").Exec(ctx)
+			if err != nil {
+				return fmt.Errorf("store: create use case: %w", err)
+			}
+			if inserted, err := result.RowsAffected(); err != nil {
+				return fmt.Errorf("store: create use case: %w", err)
+			} else if inserted == 0 {
+				return errDefaultTaken
+			}
+			return assignNumbers(ctx, tx, useCase.CustomerID, useCase.ID, numbers)
+		})
+		if !errors.Is(err, errDefaultTaken) {
+			return stack.Wrap(err)
 		}
-		if _, err := tx.NewInsert().Model(useCase).Exec(ctx); err != nil {
-			return fmt.Errorf("store: create use case: %w", err)
-		}
-		return nil
-	}))
+	}
+	return stack.Wrap(fmt.Errorf("store: create use case: %w", err))
 }
 
 // Update replaces what an app wrote on a use case. Its status, vendor fields and
@@ -417,23 +438,28 @@ func (r *UseCases) AssignNumbers(ctx context.Context, customerID, useCaseID stri
 		if err != nil {
 			return fmt.Errorf("store: assign numbers: %w", err)
 		}
-		if len(numbers) == 0 {
-			return nil
-		}
-		result, err := tx.NewUpdate().Model((*PhoneNumber)(nil)).
-			Set("dlc_use_case_id = ?", useCaseID).
-			Where("customer_id = ?", customerID).
-			Where("e164 IN (?)", bun.In(numbers)).
-			Where("released_at IS NULL").
-			Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("store: assign numbers: %w", err)
-		}
-		if affected, _ := result.RowsAffected(); int(affected) != len(numbers) {
-			return fmt.Errorf("store: assign numbers: not every number is one %s holds", customerID)
-		}
-		return nil
+		return assignNumbers(ctx, tx, customerID, useCaseID, numbers)
 	}))
+}
+
+// assignNumbers makes numbers send as a use case, in tx.
+func assignNumbers(ctx context.Context, tx bun.Tx, customerID, useCaseID string, numbers []string) error {
+	if len(numbers) == 0 {
+		return nil
+	}
+	result, err := tx.NewUpdate().Model((*PhoneNumber)(nil)).
+		Set("dlc_use_case_id = ?", useCaseID).
+		Where("customer_id = ?", customerID).
+		Where("e164 IN (?)", bun.In(numbers)).
+		Where("released_at IS NULL").
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("store: assign numbers: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); int(affected) != len(numbers) {
+		return fmt.Errorf("store: assign numbers: not every number is one %s holds", customerID)
+	}
+	return nil
 }
 
 // AssignedNumbers returns the numbers assigned to a use case by name, in order.
