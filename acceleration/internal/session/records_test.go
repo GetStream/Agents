@@ -149,6 +149,41 @@ func (s *RecordSuite) TestALineSaidAsWrittenIsAnAnswerOfItsOwn() {
 	s.Equal(store.ResponseCompleted, s.held.finished[0].status)
 }
 
+func (s *RecordSuite) TestACheckInIsAnAnswerOfItsOwn() {
+	s.took(agent.Responded{TurnID: "own-1", Text: "Are you still there?", Purpose: agent.PurposeCheckIn})
+
+	s.Require().Len(s.held.responses, 1)
+	s.Empty(s.held.responses[0].Said, "nobody asked for it")
+	s.Equal([]string{store.ItemAnswer}, s.held.kinds())
+	s.Equal("Are you still there?", s.held.items[0].Text)
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(store.ResponseCompleted, s.held.finished[0].status)
+}
+
+func (s *RecordSuite) TestACheckInFollowsTheTurnBeforeIt() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "Book me a table."},
+		agent.Responded{TurnID: "turn-1", Text: "For how many?"},
+		agent.Responded{TurnID: "own-1", Text: "Are you still there?", Purpose: agent.PurposeCheckIn},
+	)
+
+	s.Require().Len(s.held.responses, 2)
+	s.Equal(s.held.responses[0].ID, s.held.responses[1].ParentResponseID,
+		"the check-in follows the question it is about")
+	s.Equal([]string{store.ItemSaid, store.ItemAnswer, store.ItemAnswer}, s.held.kinds())
+}
+
+func (s *RecordSuite) TestAnUpdateWrittenDuringATurnOpensNoResponseOfItsOwn() {
+	// A text session posts a tool's words as an update while the turn runs, and a response of
+	// its own would take the turn's place as what the next question follows.
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "Book me a table."},
+		agent.Responded{TurnID: "say-1", Text: "Checking the book.", Purpose: agent.PurposeUpdate},
+	)
+
+	s.Len(s.held.responses, 1)
+}
+
 func (s *RecordSuite) TestWhatHappenedBeforeTheRowWasQueuedIsWrittenAfterItInOrder() {
 	joining := &Session{id: "session-1", spec: Spec{CustomerID: "acme"}, records: s.held}
 

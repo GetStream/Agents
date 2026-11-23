@@ -2103,6 +2103,11 @@ func (s *Session) write(event Event) {
 		// A reply followed by tools or delegated work is not the end of the turn, so the
 		// row stays open: the agent will speak again once the work comes back, and both
 		// halves belong to the same response.
+		// A check-in is a response of its own, as a line said as written is: nothing else
+		// opens its turn.
+		if typed.Purpose == agent.PurposeCheckIn {
+			s.openTurn(typed.TurnID, "")
+		}
 		kind := store.ItemAnswer
 		if s.turnBlocked(typed.TurnID) {
 			kind = store.ItemBlocked

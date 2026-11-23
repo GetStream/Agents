@@ -563,6 +563,8 @@ type stubTTS struct {
 	startOnce        sync.Once
 	// silent stops the stub producing audio, so a test can hold a turn open.
 	silent bool
+	// plays is how long each chunk of speech lasts, zero for 10 ms.
+	plays time.Duration
 	// refuses, if set, is what every synthesis fails with.
 	refuses error
 	// synthesizing, if set, is closed when a synthesis is taken, which then waits for
@@ -608,6 +610,10 @@ func (s *stubTTS) Synthesize(request tts.Request) error {
 	}
 	s.said = append(s.said, request)
 	silent, refuses := s.silent, s.refuses
+	samples := 160
+	if s.plays > 0 {
+		samples = int(s.plays * 16_000 / time.Second)
+	}
 	if request.Text != "" {
 		s.active[request.ID] = struct{}{}
 	}
@@ -631,7 +637,7 @@ func (s *stubTTS) Synthesize(request tts.Request) error {
 	if request.Text != "" {
 		s.emitter.Send(tts.AudioChunk{
 			SynthesisID: request.ID,
-			Audio:       audio.PcmData{Samples: make([]int16, 160), SampleRate: 16_000, Channels: 1},
+			Audio:       audio.PcmData{Samples: make([]int16, samples), SampleRate: 16_000, Channels: 1},
 		})
 	}
 	if request.Final {

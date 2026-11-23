@@ -63,6 +63,9 @@ func (a *Agent) heardFrom(participantID string) *hearing {
 	if !ok {
 		tally = &hearing{}
 		a.hearings[participantID] = tally
+		// The first of somebody's audio is their arrival, which is the only one an edge that
+		// cannot say who joins (Roster) has.
+		a.arrivedAt = time.Now()
 	}
 	return tally
 }

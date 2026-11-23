@@ -594,6 +594,9 @@ type Agent struct {
 	// overtakes a check-in held for the next voice.
 	talkedAt    time.Time
 	lastSpokeAt time.Time
+	// arrivedAt is when somebody last came onto the call: the edge said they joined, or the
+	// first of their audio came in on an edge that cannot say. Zero while nobody has.
+	arrivedAt time.Time
 	// voiceOut is when the agent's voice went out on the edge's track, which is when an echo
 	// of it on the caller's line can be in their audio (withoutEcho).
 	voiceOut voiceOut
@@ -1662,6 +1665,7 @@ func (a *Agent) attend(attendance Attendance) {
 	if attendance.Joined {
 		a.carried.attended.Store(true)
 		a.mu.Lock()
+		a.arrivedAt = time.Now()
 		delete(a.departed, attendance.Participant.ID)
 		a.mu.Unlock()
 		a.logger.Debug("a participant joined",
@@ -2045,6 +2049,8 @@ func (a *Agent) floor() floor {
 		Composing:       a.composing,
 		Speaking:        a.speakingTurn,
 		LastSpokeAt:     a.lastSpokeAt,
+		SpeechEndsAt:    a.voiceOut.until,
+		ArrivedAt:       a.arrivedAt,
 		LastHeardAt:     a.lastHeardAt,
 		LastParticipant: a.lastParticipant,
 		Asked:           owesAnAnswer(lastAssistantSaid(a.history)),
