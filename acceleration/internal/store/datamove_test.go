@@ -515,6 +515,16 @@ func (s *DataMoveSuite) TestAnImportedRevokedOptOutDoesNotLiftOneRecordedHere() 
 	s.Equal(here.ID, live[0].ID)
 }
 
+// Defect: an imported opt-out that names no recipient was stored, one the API refuses.
+func (s *DataMoveSuite) TestAnImportedOptOutWithoutARecipientIsRefused() {
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550106", Channel: "sms", Source: "keyword"}))
+
+	err := s.importEdited("opt_outs", "moved", func(row map[string]any) { row["recipient"] = "" })
+
+	s.ErrorContains(err, "recipient")
+	s.Empty(s.exportFrom(s.destination, "moved").of("opt_outs"))
+}
+
 // The columns a move copies are read from the catalog, so the bindings come with the
 // config without being named anywhere.
 func (s *DataMoveSuite) TestAConfigsBindingsMoveWithIt() {

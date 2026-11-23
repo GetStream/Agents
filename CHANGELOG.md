@@ -896,6 +896,7 @@ In a channel an agent config answers through `chat_channels`, a call of a tool y
 ### A connection keeps a rotated token when saving it fails once
 
 When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
+
 ### A moved app keeps who asked not to be reached
 
 `GET /v1/data/export` and `GET /v1/data/changes` now carry the app's opt-outs, so a recipient who texted STOP is still opted out where the app moved to, and a STOP or START at the source after the copy arrives with the other changes. An opt-out already live at the destination for the same recipient and channel is kept, and an imported revoked opt-out lifts only the row it was copied from. A copy taken again after a START and a new STOP at the source keeps the recipient opted out (AI-3489).

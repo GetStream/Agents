@@ -914,6 +914,7 @@ var importedModels = map[string]func() validated{
 	"simulation_cases":       func() validated { return &SimulationCase{} },
 	"scheduled_tasks":        func() validated { return &ScheduledTask{} },
 	"scheduled_task_runs":    func() validated { return &ScheduledTaskRun{} },
+	"opt_outs":               func() validated { return &OptOut{} },
 	"recordings":             func() validated { return &Recording{} },
 	"agent_sessions":         func() validated { return &AgentSession{} },
 	"agent_session_tools":    func() validated { return &agentSessionTools{} },
