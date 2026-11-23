@@ -1,6 +1,6 @@
 # internal/connectors/providers
 
-The built-in connector manifests: one `<id>.yaml` per connector, in the schema `core.ParseManifest` reads (`internal/connectors/core/manifest.go`). `providers.go` embeds them; at every start the router's `openStore` calls `store.SeedConnectorDefinitions` (`internal/store/connectors.go`), which writes each one to `connector_definitions` under the built-in customer.
+The built-in connector manifests: one `<id>.yaml` per connector, in the schema `core.ParseManifest` reads (`internal/connectors/core/manifest.go`). `providers.go` embeds them; at every start the router's `openStore` calls `store.ConnectorDefinitions.Seed` (`internal/store/connectors.go`), which writes each one to `connector_definitions` under the built-in customer.
 
 ## Rules
 
