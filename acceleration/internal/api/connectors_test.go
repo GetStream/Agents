@@ -553,6 +553,26 @@ func (s *ConnectorsSuite) TestAnotherAppMayUseTheSameCustomIdWithoutTouchingThis
 	s.Equal(1, s.get(id).Revision)
 }
 
+// Another app syncing the same custom id and definition, under its own hash and then under
+// none, records each on its own revision only.
+func (s *ConnectorsSuite) TestAnotherAppsSyncOfTheSameCustomIdLeavesThisOnesHash() {
+	id := s.customID()
+	s.create(s.synced(s.customConnector(id), "hash-ours"))
+	stranger := s.data.backendOfAnotherApp()
+
+	var theirs, cleared Connector
+	s.Require().Equal(http.StatusOK, stranger.do(http.MethodPost, "/v1/agents/connectors",
+		s.synced(s.customConnector(id), "hash-theirs"), &theirs))
+	s.Require().Equal(http.StatusOK, stranger.do(http.MethodPost, "/v1/agents/connectors",
+		s.customConnector(id), &cleared))
+
+	s.Equal("hash-theirs", theirs.SyncHash)
+	s.Empty(cleared.SyncHash)
+	ours := s.get(id)
+	s.Equal("hash-ours", ours.SyncHash)
+	s.Equal(1, ours.Revision)
+}
+
 func (s *ConnectorsSuite) TestTheListIsTheBuiltInsThenTheAppsOwnEachById() {
 	second, first := "custom_b"+s.suffix(), "custom_a"+s.suffix()
 	s.create(s.customConnector(second))
