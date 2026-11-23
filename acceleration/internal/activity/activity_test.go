@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -225,6 +226,47 @@ func (s *ActivitySuite) TestAFailedWriteIsWrittenByTheNextOne() {
 
 	s.Require().Eventually(func() bool { return s.requests(other) == 1 && s.requests(stuck) == 1 },
 		settleFor, 10*time.Millisecond, "what the failed write held was not written again")
+}
+
+// Defect: a write whose commit failed written again by the next one, which counts its rows
+// twice when the commit did land and only its answer was lost.
+func (s *ActivitySuite) TestAWriteThatFailedInItsCommitIsNotWrittenAgain() {
+	stuck := s.app()
+	// A deferred constraint that refuses the app's row fails the write in its commit, as a lost
+	// answer to the commit does, after every statement was accepted.
+	trigger := "refuse_" + strings.ToLower(rand.Text())
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `CREATE FUNCTION `+trigger+`() RETURNS trigger LANGUAGE plpgsql AS
+$$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$`)
+	s.Require().NoError(err)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, `CREATE CONSTRAINT TRIGGER `+trigger+` AFTER INSERT OR UPDATE ON customer_activity
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.app_id = '`+stuck+`') EXECUTE FUNCTION `+trigger+`()`)
+	s.Require().NoError(err)
+	dropped := false
+	drop := func() {
+		if dropped {
+			return
+		}
+		dropped = true
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, "DROP TRIGGER "+trigger+" ON customer_activity; DROP FUNCTION "+trigger+"()")
+		s.Require().NoError(err)
+	}
+	s.T().Cleanup(drop)
+
+	err = s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
+		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI, Day: day, Requests: 1, FirstAt: day, LastAt: day,
+	}})
+	s.Require().ErrorIs(err, store.ErrActivityUnsure)
+
+	recorder := s.recorder(time.Hour, 0)
+	recorder.Record(request(stuck))
+	s.Require().False(recorder.write())
+	drop()
+	other := s.app()
+	recorder.Record(request(other))
+
+	s.Require().True(recorder.write())
+	s.EqualValues(1, s.requests(other))
+	s.Zero(s.requests(stuck), "the write that failed in its commit was dropped, not written again")
 }
 
 // Defect: a day cut from the request's own zone, not UTC: 23:30 in UTC-8 on 1 March is counted

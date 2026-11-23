@@ -3,6 +3,7 @@ package store
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -91,21 +92,31 @@ func (r *Activities) Add(ctx context.Context, deltas []ActivityDelta) error {
 			cmp.Compare(a.client, b.client), cmp.Compare(a.day, b.day))
 	})
 
-	// One transaction, so a failed write wrote nothing and the caller can keep the deltas
-	// for its next try without counting any of them twice.
+	// One transaction, so a write that failed before its commit wrote nothing and the caller can
+	// keep the deltas for its next try without counting any of them twice. One that failed in
+	// its commit may have been written, a reply lost on the way back: that is ErrActivityUnsure.
+	committing := false
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for start := 0; start < len(order); start += activityBatch {
 			if err := writeActivity(ctx, tx, folded, order[start:min(start+activityBatch, len(order))]); err != nil {
 				return err
 			}
 		}
+		committing = true
 		return nil
 	})
+	if err != nil && committing {
+		return stack.Wrap(fmt.Errorf("store: record activity: %w: %w", ErrActivityUnsure, err))
+	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record activity: %w", err))
 	}
 	return nil
 }
+
+// ErrActivityUnsure is a write of activity whose commit failed, which may have been written all
+// the same: written again, its counts would be counted twice.
+var ErrActivityUnsure = errors.New("store: the activity may have been recorded")
 
 // activityUpsert is one customer_activity row as writeActivity upserts it.
 type activityUpsert struct {
