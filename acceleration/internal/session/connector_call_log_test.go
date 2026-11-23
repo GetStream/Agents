@@ -457,7 +457,6 @@ func (s *CallLogSuite) TestEachHeaderIsCutToAKiB() {
 	s.True(strings.HasSuffix(line, " retry_after="+wait[:providerMessageBytes]), "the line ends with the cut Retry-After")
 }
 
-// providerHost is the host and port the suite's provider listens on.
 // The agent's own line for a call ("a tool call came back") names the connector and how the
 // call failed from what the dispatcher reports (agent.ReportTool): a call that answered
 // reports its connector alone.
@@ -523,6 +522,7 @@ func (s *CallLogSuite) reported(d *dispatcher, name string) (string, agent.ToolR
 	return llm.TextOf(parts), *report, err
 }
 
+// providerHost is the host and port the suite's provider listens on.
 func (s *CallLogSuite) providerHost() string {
 	return strings.TrimPrefix(s.provider.URL, "https://")
 }
