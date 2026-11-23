@@ -843,6 +843,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### The router starts on a Redis Cluster again
+
+A router whose Redis is a cluster crashed on start, and on any write that changed cached rows in more than one hash slot, such as an app's organization and its policies: the cache sent one `DEL` across slots, which a cluster refuses. It now deletes each key on its own in the same round trip, and the replica that wrote still reads the new row next (AI-3556).
+
 ### A hosted tool call in a group channel names the person who wrote
 
 In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.

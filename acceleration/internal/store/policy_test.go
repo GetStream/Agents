@@ -172,6 +172,18 @@ func (s *StoreSuite) TestAPolicySavedOnAReplicaIsWhatThatReplicaReadsNext() {
 	if s.store.cache == nil {
 		s.T().Skipf("%s not set", redisAddressVar)
 	}
+	s.readsThePolicyItSaved(s.store)
+}
+
+// On a cluster the policy and the app's list of policies sit in different slots, and each
+// node sends its own invalidations.
+func (s *StoreSuite) TestAPolicySavedOnAReplicaOnAClusterIsWhatThatReplicaReadsNext() {
+	s.readsThePolicyItSaved(s.clusterReplica())
+}
+
+// readsThePolicyItSaved saves many policies on store side by side, each read twice before,
+// and fails for every read after a save that fails or answers with the policy from before.
+func (s *StoreSuite) readsThePolicyItSaved(store *Store) {
 	limit := int64(7)
 	var stale atomic.Int64
 	var saves sync.WaitGroup
@@ -181,15 +193,15 @@ func (s *StoreSuite) TestAPolicySavedOnAReplicaIsWhatThatReplicaReadsNext() {
 			for attempt := range 200 {
 				scopeID := fmt.Sprintf("app-%s-%d-%d", prefix, writer, attempt)
 				for range 2 {
-					if _, err := s.store.Policies.Get(s.ctx, ScopeApp, scopeID); err != nil {
+					if _, err := store.Policies.Get(s.ctx, ScopeApp, scopeID); err != nil {
 						stale.Add(1)
 					}
 				}
 				policy := Policy{Scope: ScopeApp, ScopeID: scopeID, Document: PolicyDocument{Quota: &Quota{MessagesPerUserPerDay: &limit}}}
-				if err := s.store.Policies.Upsert(s.ctx, &policy); err != nil {
+				if err := store.Policies.Upsert(s.ctx, &policy); err != nil {
 					stale.Add(1)
 				}
-				if now, err := s.store.Policies.Get(s.ctx, ScopeApp, scopeID); err != nil || now.Quota == nil {
+				if now, err := store.Policies.Get(s.ctx, ScopeApp, scopeID); err != nil || now.Quota == nil {
 					stale.Add(1)
 				}
 			}
