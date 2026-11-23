@@ -1347,6 +1347,7 @@ TABLE user_phones
     CREATE UNIQUE INDEX user_phones_phone ON public.user_phones USING btree (customer_id, stream_app_pk, phone)
 
 TABLE users
+    claim_finished_at timestamp with time zone
     claimed_at timestamp with time zone
     claimed_by text
     created_at timestamp with time zone NOT NULL DEFAULT now()

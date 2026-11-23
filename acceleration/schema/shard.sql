@@ -94,6 +94,7 @@ TABLE agent_sessions
     modality text NOT NULL DEFAULT 'voice'::text
     model_overwrites jsonb NOT NULL DEFAULT '{}'::jsonb
     no_ui boolean
+    opened_at timestamp with time zone
     pinned_at timestamp with time zone
     project text NOT NULL DEFAULT ''::text
     remembers boolean
@@ -103,6 +104,7 @@ TABLE agent_sessions
     searchable tsvector DEFAULT (((setweight(to_tsvector('english'::regconfig, COALESCE(title, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(description, ''::text)), 'B'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(project, ''::text)), 'C'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(agent_name, ''::text)), 'D'::"char"))
     state text NOT NULL
     stream_app_pk bigint
+    superseded_at timestamp with time zone
     team text NOT NULL DEFAULT ''::text
     title text NOT NULL DEFAULT ''::text
     tool_timeout_ms integer

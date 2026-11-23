@@ -123,8 +123,9 @@ func refuseSecondChannelAgent(ctx context.Context, tx bun.Tx, config *AgentConfi
 
 // lockChannelOwner takes the lock a channel connection's owner is decided under
 // (refuseSecondChannelAgent) when the live connection id is a channel connection, and returns
-// its connector and whether it is one. A write that also locks the config's row takes this
-// lock first, as UpdateAgentConfig does, or the two would wait on each other in a cycle.
+// its connector and whether it is one. A write of a stored config locks the config's row
+// before this lock (AgentConfigs.save), and Insert locks no stored row, so two writes never
+// wait on each other in a cycle.
 func lockChannelOwner(ctx context.Context, tx bun.Tx, customerID, id string) (string, bool, error) {
 	var connection ConnectorConnection
 	err := tx.NewSelect().Model(&connection).Column("id", "connector_id", "definition_revision").

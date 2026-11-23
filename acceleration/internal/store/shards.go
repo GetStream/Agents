@@ -53,12 +53,23 @@ func OpenShards(options Options) (*Store, error) {
 	if options.DSN == "" {
 		return nil, errors.New("store: dsn is required")
 	}
-	db := connect(options.DSN, maxConns)
-	s := &Store{global: db, shard: db, locks: connect(options.DSN, lockConns), globalDSN: options.DSN, shardDSN: options.DSN,
+	db, err := connect(options.DSN, maxConns)
+	if err != nil {
+		return nil, err
+	}
+	locks, err := connect(options.DSN, lockConns)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	s := &Store{global: db, shard: db, locks: locks, globalDSN: options.DSN, shardDSN: options.DSN,
 		retries: make(chan struct{}, forgetSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
 	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
-		s.shard = connect(options.ShardDSN, maxConns)
+		shard, err := connect(options.ShardDSN, maxConns)
+		if err != nil {
+			return nil, errors.Join(err, s.Close())
+		}
+		s.shard = shard
 		s.shardDSN = options.ShardDSN
 	}
 	own := cmp.Or(options.ShardDSN, options.DSN)
@@ -70,7 +81,11 @@ func OpenShards(options Options) (*Store, error) {
 			s.globalIsShard = s.globalIsShard || dsn == options.DSN
 		case dsn != "":
 			s.globalIsShard = s.globalIsShard || dsn == options.DSN
-			s.peers = append(s.peers, connect(dsn, peerConns))
+			peer, err := connect(dsn, peerConns)
+			if err != nil {
+				return nil, errors.Join(err, s.Close())
+			}
+			s.peers = append(s.peers, peer)
 			s.shardNames = append(s.shardNames, name)
 		}
 	}

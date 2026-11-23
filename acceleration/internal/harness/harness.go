@@ -285,6 +285,19 @@ type Harness struct {
 	closeOnce sync.Once
 }
 
+// ErrInvalid is skills or tools a harness cannot be built with: the agent config's or the
+// request's own mistake. Its message says what to change.
+var ErrInvalid = errors.New("harness: invalid skills or tools")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
+
 // New validates the options and returns a Harness. It opens nothing: the sessions it is
 // given are already started.
 func New(options Options) (*Harness, error) {
@@ -298,10 +311,10 @@ func New(options Options) (*Harness, error) {
 		options.Logger = slog.Default()
 	}
 	if err := options.Skills.Validate(); err != nil {
-		return nil, err
+		return nil, invalid(err)
 	}
 	if err := options.Tools.Validate(); err != nil {
-		return nil, err
+		return nil, invalid(err)
 	}
 
 	h := &Harness{
@@ -469,7 +482,7 @@ func (h *Harness) Respond(ctx context.Context, turn Turn) (*llm.Stream, error) {
 		return nil, errors.New("harness: no text conversation model")
 	}
 	h.history = WithoutNotes(turn.History)
-	h.charged = chargedAs(context.Background(), ctx)
+	h.charged = context.WithoutCancel(ctx)
 	model := session.Capabilities()
 	instructions, carried, transient := h.prompt(turn, working)
 	// A colleague asks only for what the caller alone can say, so a reply carrying its
@@ -757,11 +770,11 @@ func (h *Harness) DropUnoffered(turnID string, calls []llm.ToolCall) []llm.ToolC
 }
 
 // Decide asks the fast flow controller what to do with an evolving transcript.
-func (h *Harness) Decide(turn FlowTurn) error {
+func (h *Harness) Decide(ctx context.Context, turn FlowTurn) error {
 	if h.flow == nil {
 		return stack.Wrap(errors.New("harness: a flow controller is required"))
 	}
-	return h.flow.Decide(turn)
+	return h.flow.Decide(ctx, turn)
 }
 
 // CancelDecision abandons a flow decision whose transcript changed.

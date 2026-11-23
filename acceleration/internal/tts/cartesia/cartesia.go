@@ -167,6 +167,9 @@ type TTS struct {
 
 	// done stops a reconnect that is waiting, so a socket is not reopened behind Close.
 	done chan struct{}
+	// ctx is Start's, without its cancellation: a reconnect is traced under the session that
+	// started the voice. Set before the first dial.
+	ctx context.Context
 
 	mu       sync.Mutex
 	active   map[string]*utterance
@@ -230,6 +233,7 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("cartesia: already started"))
 	}
 	t.started = true
+	t.ctx = context.WithoutCancel(ctx)
 	t.mu.Unlock()
 
 	if err := t.dial(ctx); err != nil {
@@ -282,7 +286,7 @@ func (t *TTS) redial() {
 	case <-time.After(t.options.reconnect):
 	}
 
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		t.logger.Debug("could not reopen the voice, leaving it to the next utterance",
 			"error", err)
 		return
@@ -486,7 +490,7 @@ func (t *TTS) send(message any) error {
 	// reasons no ping prevents, and the caller is mid-sentence. Redialling costs a
 	// handshake once; not redialling costs the agent its voice for the rest of the call.
 	t.logger.Debug("reconnecting to speak")
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		return stack.Wrap(err)
 	}
 

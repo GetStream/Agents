@@ -408,7 +408,7 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("elevenlabs: already started"))
 	}
 	t.started = true
-	t.session, t.cancel = context.WithCancel(context.Background())
+	t.session, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	session := t.session
 	t.mu.Unlock()
 

@@ -76,13 +76,16 @@ type recordWrite struct {
 	// customerID is whose session the write is to: an id alone may be another customer's.
 	customerID string
 	// session is a session that opened or was renamed, nil otherwise, and tools what its
-	// model is offered.
-	session *store.AgentSession
-	tools   []store.ToolDefinition
+	// model is offered. carriedOn says it was carried on from a row it had.
+	session   *store.AgentSession
+	tools     []store.ToolDefinition
+	carriedOn bool
 	// offered is the session whose model is now offered tools.
 	offered string
-	// closed is the session that ended, closedAt when and endReason why.
+	// closed is the session that ended, opened when the router closing it opened it, closedAt
+	// when it ended and endReason why.
 	closed    string
+	opened    time.Time
 	closedAt  time.Time
 	endReason string
 	// response is a turn that began, nil otherwise.
@@ -146,7 +149,8 @@ type recorder interface {
 type sessionRecords interface {
 	recorder
 	Opened(row store.AgentSession, tools []store.ToolDefinition)
-	Closed(customerID, id string, at time.Time, reason EndReason)
+	CarriedOn(row store.AgentSession, tools []store.ToolDefinition)
+	Closed(customerID, id string, opened, at time.Time, reason EndReason)
 	Close()
 }
 
@@ -202,14 +206,20 @@ func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefin
 	r.queueWrite(recordWrite{session: &row, tools: tools})
 }
 
+// CarriedOn queues the row of a session carried on from a row it had, maybe in another shard,
+// which it supersedes once written.
+func (r *sessionRecorder) CarriedOn(row store.AgentSession, tools []store.ToolDefinition) {
+	r.queueWrite(recordWrite{session: &row, tools: tools, carriedOn: true})
+}
+
 // Offered queues what a session's model is now offered.
 func (r *sessionRecorder) Offered(customerID, id string, tools []store.ToolDefinition) {
 	r.queueWrite(recordWrite{customerID: customerID, offered: id, tools: tools})
 }
 
-// Closed queues the time a session ended.
-func (r *sessionRecorder) Closed(customerID, id string, at time.Time, reason EndReason) {
-	r.queueWrite(recordWrite{customerID: customerID, closed: id, closedAt: at, endReason: string(reason)})
+// Closed queues the time a session this router opened at opened ended.
+func (r *sessionRecorder) Closed(customerID, id string, opened, at time.Time, reason EndReason) {
+	r.queueWrite(recordWrite{customerID: customerID, closed: id, opened: opened, closedAt: at, endReason: string(reason)})
 }
 
 // described is what a session was renamed to.
@@ -434,6 +444,13 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
+		if write.carriedOn {
+			if err := r.attempt(func(ctx context.Context) error {
+				return r.store.Sessions.Supersede(ctx, write.session.CustomerID, write.session.ID, write.session.OpenedAt)
+			}); err != nil {
+				r.logger.Error("could not supersede the rows of a session carried on", "session", write.session.ID, "error", err)
+			}
+		}
 		if err := r.attempt(func(ctx context.Context) error {
 			return r.store.SessionTools.Upsert(ctx, write.session.CustomerID, write.session.ID, write.tools)
 		}); err != nil {
@@ -447,7 +464,7 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.closed != "":
 		if err := r.attempt(func(ctx context.Context) error {
-			return r.store.Sessions.Close(ctx, write.customerID, write.closed, write.closedAt, write.endReason)
+			return r.store.Sessions.Close(ctx, write.customerID, write.closed, write.opened, write.closedAt, write.endReason)
 		}); err != nil {
 			// The row stays open, read as live and counted in every concurrency peak.
 			recordsLost.WithLabelValues(lostSessionEnd).Inc()
@@ -625,6 +642,7 @@ func sessionRow(created *Session) store.AgentSession {
 		State:           store.SessionRunning,
 		Modality:        created.Modality(),
 		CreatedAt:       created.created.UTC(),
+		OpenedAt:        created.began.UTC().Truncate(time.Microsecond),
 	}
 	// Whose the session is comes from the credential rather than from the spec's UserID,
 	// which is who the agent joined the call as. Recording the agent's own id as the owner

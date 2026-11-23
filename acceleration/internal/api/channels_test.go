@@ -835,6 +835,38 @@ func (s *ChannelsSuite) TestAnIdentityThatIsNeitherPhoneNorLinkIsRefused() {
 	s.Equal(http.StatusBadRequest, status)
 }
 
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *ChannelsSuite) TestALineTheDatabaseCannotSaveIsAFailureWithNoDatabaseText() {
+	number := s.number()
+	s.failQueries(number)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/channels", ConnectChannelRequest{
+		Kind:      string(channels.WhatsApp),
+		Number:    number,
+		AccountId: pointerTo(strings.TrimPrefix(number, "+")),
+		Token:     pointerTo("meta-token"),
+		Signing:   pointerTo(appSecret),
+		Challenge: pointerTo(s.challenge()),
+	})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
+}
+
+func (s *ChannelsSuite) TestACodeTheDatabaseCannotSaveIsAFailureWithNoDatabaseText() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	owner := s.utils.uuid()
+	s.failQueries(owner)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: owner})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
+}
+
 // connect hands the router a WhatsApp line's credentials and returns where it will deliver.
 func (s *ChannelsSuite) connect(number string) ChannelAccount {
 	var line ChannelAccount

@@ -131,7 +131,14 @@ func Open(dsn string) (*Store, error) {
 }
 
 // connect opens a pool of at most conns connections.
-func connect(dsn string, conns int) *bun.DB {
+func connect(dsn string, conns int) (_ *bun.DB, err error) {
+	// pgdriver panics on a DSN it cannot parse, and the panic holds the whole DSN, password
+	// included, which would reach the logs past their redaction.
+	defer func() {
+		if recover() != nil {
+			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
+		}
+	}()
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
@@ -145,7 +152,7 @@ func connect(dsn string, conns int) *bun.DB {
 	// A span per query, so a request's trace says which reads it waited on. Queries are
 	// recorded unformatted: the arguments of these are customer ids and api keys.
 	db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithDBName("router")))
-	return db
+	return db, nil
 }
 
 // Server names the shared database and the address its server answers on, as it sees itself.

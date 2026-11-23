@@ -169,6 +169,10 @@ type ToolConversation struct {
 
 // Session is one conversation this process is running on somebody's behalf.
 type Session struct {
+	// ctx is the context of the request that opened the session, without its cancellation:
+	// the work the session starts on its own (a hang-up, a voicemail, its close) is traced
+	// and attributed under it.
+	ctx     context.Context
 	logs    *logRecorder
 	id      string
 	spec    Spec
@@ -788,7 +792,7 @@ func (s *Session) Respond(ctx context.Context, text string, images []llm.ImagePa
 }
 
 // errNothingToAnswer is a follow-up with no text and no images.
-var errNothingToAnswer = errors.New("there is nothing to answer")
+var errNothingToAnswer = invalid(errors.New("there is nothing to answer"))
 
 // nothingToAnswer is a follow-up with no text and no images, so the model has nothing to be
 // asked, as on the HTTP answer's 400: a respond a worker from before photos were read sends for
@@ -799,7 +803,7 @@ func nothingToAnswer(text string, images []llm.ImagePart) bool {
 }
 
 // errPersonalNeedsCommand is a question to a personal conversation sent without a command ID.
-var errPersonalNeedsCommand = errors.New("personal conversations require a command ID")
+var errPersonalNeedsCommand = invalid(errors.New("personal conversations require a command ID"))
 
 // CheckRespond refuses what Respond, or RespondCommand with command id, would refuse a
 // question with a voice note for before its turn starts, for a caller to learn it before work
@@ -1361,7 +1365,7 @@ func (s *Session) Command(id string) (persistent.CommandReceipt, error) {
 	if s.persisted == nil {
 		return persistent.CommandReceipt{}, stack.Wrap(persistent.ErrCommandNotFound)
 	}
-	if err := s.persisted.CheckCaller(context.Background(), s.spec.Caller.UserID); err != nil {
+	if err := s.persisted.CheckCaller(s.ctx, s.spec.Caller.UserID); err != nil {
 		return persistent.CommandReceipt{}, err
 	}
 	return s.persisted.Command(id)
@@ -1376,7 +1380,7 @@ func (s *Session) InterruptCommand(id string) (persistent.CommandReceipt, error)
 	if s.persisted == nil {
 		return persistent.CommandReceipt{}, stack.Wrap(persistent.ErrCommandNotFound)
 	}
-	if err := s.persisted.CheckCaller(context.Background(), s.spec.Caller.UserID); err != nil {
+	if err := s.persisted.CheckCaller(s.ctx, s.spec.Caller.UserID); err != nil {
 		return persistent.CommandReceipt{}, stack.Wrap(err)
 	}
 	receipt, err := s.persisted.Command(id)
@@ -1932,7 +1936,7 @@ func (s *Session) close() error {
 
 	// Hanging up mid-sentence is rude, and leaving is what throws away the audio that has
 	// not been heard yet, so the last utterance is given a moment to land first.
-	finishing, cancel := context.WithTimeout(context.Background(), finishWithin)
+	finishing, cancel := context.WithTimeout(s.ctx, finishWithin)
 	if err := s.current().Finish(finishing); err != nil {
 		s.logger.Debug("the agent was still talking when the session ended", "error", err)
 	}
@@ -2570,7 +2574,7 @@ func (m *Manager) skills(ctx context.Context, spec Spec) (harness.Skills, error)
 	}
 	for _, skill := range named.Skills {
 		if err := harness.NeedsSandbox(skill.Name, skill.Files, spec.Sandbox != ""); err != nil {
-			return harness.Skills{}, stack.Wrap(fmt.Errorf("session: %w", err))
+			return harness.Skills{}, stack.Wrap(invalid(fmt.Errorf("session: %w", err)))
 		}
 	}
 	return named, nil
@@ -2627,7 +2631,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 			skill, known = builtin.Lookup(name)
 		}
 		if !known {
-			return harness.Skills{}, stack.Wrap(fmt.Errorf("session: there is no skill called %q", name))
+			return harness.Skills{}, stack.Wrap(invalid(fmt.Errorf("session: there is no skill called %q", name)))
 		}
 		resolved.Skills = append(resolved.Skills, skill)
 	}

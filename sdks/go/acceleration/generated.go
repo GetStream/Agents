@@ -4028,8 +4028,11 @@ type AgentConfigPatch struct {
 	Tts   *string      `json:"tts,omitempty"`
 
 	// UiInstructions What teaches the agent's model to answer with UI. An empty string removes them.
-	UiInstructions *string       `json:"ui_instructions,omitempty"`
-	Video          *SessionVideo `json:"video,omitempty"`
+	UiInstructions *string `json:"ui_instructions,omitempty"`
+
+	// UpdatedAt The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+	UpdatedAt *time.Time    `json:"updated_at,omitempty"`
+	Video     *SessionVideo `json:"video,omitempty"`
 
 	// VisibleTools Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search.
 	VisibleTools *[]string `json:"visible_tools,omitempty"`
@@ -14316,7 +14319,7 @@ type ClientInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -14327,7 +14330,7 @@ type ClientInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -18742,7 +18745,7 @@ func (c *Client) CreateGuestUser(ctx context.Context, body CreateGuestUserJSONRe
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes any type of body and a specified content type.
 //
@@ -18763,7 +18766,7 @@ func (c *Client) ClaimGuestUserWithBody(ctx context.Context, contentType string,
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -37629,7 +37632,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -37640,7 +37643,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -69575,7 +69578,7 @@ func (c *ClientWithResponses) CreateGuestUserWithResponse(ctx context.Context, b
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -69592,7 +69595,7 @@ func (c *ClientWithResponses) ClaimGuestUserWithBodyWithResponse(ctx context.Con
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

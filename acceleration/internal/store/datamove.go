@@ -15,6 +15,7 @@ import (
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -28,6 +29,46 @@ var ErrChangesExpired = errors.New("store: the changes since that cursor are no 
 // ErrNotACustomConnector is an imported connector definition whose manifest the API would
 // have refused for a custom connector (importableDefinition).
 var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
+
+// ErrInvalidImport is an export that cannot be written as it is: a table no export carries, a
+// row that does not read, or a row the database refuses for what it holds. Its message names
+// the table and nothing of the database. A database that failed is never one.
+var ErrInvalidImport = errors.New("store: the export cannot be imported")
+
+// invalidImport marks err as ErrInvalidImport without changing its message.
+func invalidImport(err error) error { return marked{err, ErrInvalidImport} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
+
+// refusedRow is a row of table that Postgres refused for what it holds, as an ErrInvalidImport
+// that says why in words of its own: Postgres's name a constraint and its columns. It is nil
+// for any other error, such as a database that did not answer.
+func refusedRow(table string, err error) error {
+	var refused pgdriver.Error
+	if !errors.As(err, &refused) {
+		return nil
+	}
+	var reason string
+	switch code := refused.Field('C'); {
+	case code == uniqueViolation:
+		reason = "a row holds a value, such as a name, that another row here already holds"
+	case code == foreignKeyViolation:
+		reason = "a row names a row that neither the export nor this app holds"
+	case strings.HasPrefix(code, "23"):
+		reason = "a row breaks a rule of its table"
+	case strings.HasPrefix(code, "22"):
+		reason = "a row holds a value its column cannot take"
+	default:
+		return nil
+	}
+	// The Postgres error stays in the chain for errors.As, but not in the text: it names the
+	// constraint and the values that broke it.
+	return stack.Wrap(invalidImport(marked{fmt.Errorf("store: import %s: %s", table, reason), err}))
+}
 
 // dataTable is one table a customer's rows live in.
 //
@@ -751,7 +792,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	}
 	spec, found := dataTableByName(table)
 	if !found {
-		return fmt.Errorf("store: %q is not a table an export carries", table)
+		return invalidImport(fmt.Errorf("store: %q is not a table an export carries", table))
 	}
 	row, err := s.importPin(ctx, customerID, table, row)
 	if err != nil {
@@ -883,6 +924,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		read = args[:1]
 	}
 	if err := validateImported(ctx, db, spec, shape, columns, picked, subject, read); err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 
@@ -944,6 +988,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 
 	result, err := db.ExecContext(ctx, query, args...)
 	if err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	*stale = append(*stale, cachedKeys(customerID, table, was)...)
@@ -1218,7 +1265,7 @@ FROM %s`, sequence.name)
 func pauseImported(row json.RawMessage, active []string, paused string, claimed bool) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	moved := slices.ContainsFunc(active, func(state string) bool { return string(fields["state"]) == `"`+state+`"` })
 	if moved {
@@ -1237,7 +1284,7 @@ func pauseImported(row json.RawMessage, active []string, paused string, claimed 
 func renameImported(row json.RawMessage, renames map[string]string) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	for old, renamed := range renames {
 		value, found := fields[old]
@@ -1260,7 +1307,7 @@ func renameImported(row json.RawMessage, renames map[string]string) (json.RawMes
 func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	until := json.RawMessage("null")
 	switch string(fields["stage"]) {
@@ -1284,7 +1331,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 func endImportedAttempt(row json.RawMessage, now time.Time) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	stamp, err := json.Marshal(now)
 	if err != nil {
@@ -1561,6 +1608,9 @@ func importableNumber(ctx context.Context, db bun.IDB, customerID string, row js
 	if err := db.QueryRowContext(ctx,
 		"SELECT e164, vendor, monthly_cost_micros FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
 		string(row)).Scan(&e164, &vendor, &cost); err != nil {
+		if refused := refusedRow("phone_numbers", err); refused != nil {
+			return false, refused
+		}
 		return false, fmt.Errorf("store: read an imported number: %w", err)
 	}
 	if vendor.String != sipTrunkVendor {
@@ -1589,18 +1639,18 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	// key in another case, which the insert then leaves out.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported connector definition: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported connector definition: %w", err))
 	}
 	var id string
 	if raw, ok := fields["id"]; ok {
 		if err := json.Unmarshal(raw, &id); err != nil {
-			return nil, fmt.Errorf("store: read an imported connector definition's id: %w", err)
+			return nil, invalidImport(fmt.Errorf("store: read an imported connector definition's id: %w", err))
 		}
 	}
 	var manifest core.Manifest
 	if raw, ok := fields["manifest"]; ok {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
-			return nil, fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err)
+			return nil, invalidImport(fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err))
 		}
 	}
 	custom, err := manifest.AsCustom(id)
@@ -1917,7 +1967,7 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	}
 	spec, found := dataTableByName(change.Table)
 	if !found {
-		return fmt.Errorf("store: %q is not a table an export carries", change.Table)
+		return invalidImport(fmt.Errorf("store: %q is not a table an export carries", change.Table))
 	}
 	shape, err := s.shapeOf(ctx, change.Table)
 	if err != nil {
@@ -1969,6 +2019,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	if !cachedByID(change.Table) {
 		result, err := db.ExecContext(ctx, query, args...)
 		if err != nil {
+			if refused := refusedRow(change.Table, err); refused != nil {
+				return refused
+			}
 			return fmt.Errorf("store: delete %s: %w", change.Table, err)
 		}
 		deleted, err := result.RowsAffected()
@@ -1982,6 +2035,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	}
 	rows, err := db.QueryContext(ctx, query+" RETURNING to_jsonb(t)", args...)
 	if err != nil {
+		if refused := refusedRow(change.Table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: delete %s: %w", change.Table, err)
 	}
 	defer rows.Close()
@@ -1993,6 +2049,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		*stale = append(*stale, cachedKeys(customerID, change.Table, row)...)
 	}
 	if err := rows.Err(); err != nil {
+		if refused := refusedRow(change.Table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: delete %s: %w", change.Table, err)
 	}
 	return nil

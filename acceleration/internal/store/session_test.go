@@ -463,8 +463,8 @@ func (s *StoreSuite) TestSearchHonoursTheSameFiltersAsQuery() {
 func (s *StoreSuite) TestClosingASessionKeepsTheFirstTime() {
 	s.opened("one", "app", s.base, nil)
 	first := s.base.Add(time.Hour)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", first, ""))
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", first.Add(time.Hour), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, first, ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, first.Add(time.Hour), ""))
 
 	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
@@ -475,8 +475,8 @@ func (s *StoreSuite) TestClosingASessionKeepsTheFirstTime() {
 
 func (s *StoreSuite) TestClosingASessionKeepsTheFirstReason() {
 	s.opened("one", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base.Add(time.Hour), "transferred"))
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base.Add(2*time.Hour), "hangup"))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, s.base.Add(time.Hour), "transferred"))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, s.base.Add(2*time.Hour), "hangup"))
 
 	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
@@ -485,7 +485,7 @@ func (s *StoreSuite) TestClosingASessionKeepsTheFirstReason() {
 
 func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.opened("one", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base.Add(time.Hour), "agent_hangup"))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, s.base.Add(time.Hour), "agent_hangup"))
 
 	s.opened("one", "app", s.base.Add(2*time.Hour), nil)
 
@@ -495,9 +495,50 @@ func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.Empty(found.EndReason, "a reopened session shows why its last run ended")
 }
 
+func (s *StoreSuite) TestACloseFromTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
+	first, again := s.base, s.base.Add(time.Hour)
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = first })
+	// Another router carries it on before the close of the first is written.
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = again })
+
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", first, first.Add(time.Minute), "left"))
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Nil(found.ClosedAt, "the run that carried it on has not ended")
+	s.Equal(SessionRunning, found.State)
+
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", again, again.Add(time.Minute), "left"))
+	found, err = s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.NotNil(found.ClosedAt, "the router running it closes it")
+}
+
+func (s *StoreSuite) TestACloseThatDoesNotSayWhenItsRunOpenedIsRefused() {
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = s.base })
+
+	err := s.store.Sessions.Close(s.ctx, "app", "one", time.Time{}, s.base.Add(time.Hour), "left")
+
+	s.Error(err, "it would close no row opened since opened_at was kept, and say nothing")
+}
+
+func (s *StoreSuite) TestALateReopenAndItsCloseLeaveTheRunOpenedSinceOpen() {
+	late, again := s.base.Add(time.Hour), s.base.Add(2*time.Hour)
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = s.base })
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = again })
+	// The router that reopened it before then, its writes held up behind a slow one.
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt, session.Title = late, "late" })
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", late, late.Add(time.Minute), "left"))
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Nil(found.ClosedAt, "the run carried on since has not ended")
+	s.True(found.OpenedAt.Equal(again), "the row went back to the run before")
+	s.Empty(found.Title)
+}
+
 func (s *StoreSuite) TestDescribingASessionLongAfterItEnded() {
 	s.opened("one", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base.Add(time.Hour), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, s.base.Add(time.Hour), ""))
 
 	err := s.store.Sessions.Describe(s.ctx, "app", "one", "Named later", "by a person", map[string]any{"pinned": true})
 	s.Require().NoError(err)
@@ -1103,6 +1144,25 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 	}
 }
 
+// A claim marked finished for anybody but the account that claimed the guest would have the
+// guest's own claim skip the steps it still owes, sent again.
+func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
+	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
+	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
+	guest, err := s.store.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(err)
+	s.Require().Nil(guest.ClaimFinishedAt, "finished before the claim, or by another account")
+
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
+
+	guest, err = s.store.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(err)
+	s.NotNil(guest.ClaimFinishedAt)
+}
+
 // sessionIDs is the ids of the sessions, in the order they were found.
 func sessionIDs(sessions []AgentSession) []string {
 	found := make([]string, 0, len(sessions))
@@ -1135,7 +1195,7 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		s.opened(fmt.Sprintf("seeded-%02d", i), "app", at.Add(time.Duration(i)*time.Second), nil)
 	}
 	row := &AgentSession{ID: "budgeted", CustomerID: "app", AgentID: "agent", ConversationID: "conversation",
-		State: SessionRunning, CreatedAt: at.Add(time.Minute)}
+		State: SessionRunning, CreatedAt: at.Add(time.Minute), OpenedAt: at.Add(time.Minute)}
 	tools := []ToolDefinition{{Name: "lookup", Description: "Looks it up."}}
 	pages := func(listed []AgentSession, err error) error {
 		s.Len(listed, 11, "a page and the row that says there is another")
@@ -1143,6 +1203,7 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 	}
 	s.withinQueryBudgets([]queryBudget{
 		{"Upsert", 1, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		{"Supersede", 0, 1, func() error { return s.store.Sessions.Supersede(s.ctx, "app", row.ID, row.OpenedAt) }},
 		{"SetToolTimeout", 1, 0, func() error { return s.store.Sessions.SetToolTimeout(s.ctx, row.CustomerID, row.ID, "http", 900) }},
 		{"SawVideo", 1, 0, func() error { return s.store.Sessions.SawVideo(s.ctx, row.CustomerID, row.ID) }},
 		{"Voiced", 1, 0, func() error { return s.store.Sessions.Voiced(s.ctx, row.CustomerID, row.ID) }},
@@ -1167,7 +1228,7 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		}},
 		{"Ends", 1, 0, func() error { _, err := s.store.Sessions.Ends(s.ctx, []string{row.ID, "seeded-01"}, at); return err }},
 		{"Close", 1, 0, func() error {
-			return s.store.Sessions.Close(s.ctx, row.CustomerID, row.ID, at.Add(2*time.Minute), "hangup")
+			return s.store.Sessions.Close(s.ctx, row.CustomerID, row.ID, row.OpenedAt, at.Add(2*time.Minute), "hangup")
 		}},
 		{"SessionTools.Upsert", 1, 0, func() error { return s.store.SessionTools.Upsert(s.ctx, row.CustomerID, row.ID, tools) }},
 		{"SessionTools.Get", 1, 0, func() error { _, err := s.store.SessionTools.Get(s.ctx, row.ID); return err }},
@@ -1198,7 +1259,7 @@ func (s *StoreSuite) TestAnotherCustomersWriteToASessionIdChangesNothing() {
 	writes := map[string]func() error{
 		"SetToolTimeout": func() error { return s.store.Sessions.SetToolTimeout(s.ctx, "somebody-else", "one", "user", 5_000) },
 		"Close": func() error {
-			return s.store.Sessions.Close(s.ctx, "somebody-else", "one", s.base.Add(time.Hour), "hangup")
+			return s.store.Sessions.Close(s.ctx, "somebody-else", "one", s.base, s.base.Add(time.Hour), "hangup")
 		},
 		"SawVideo": func() error { return s.store.Sessions.SawVideo(s.ctx, "somebody-else", "one") },
 		"Voiced":   func() error { return s.store.Sessions.Voiced(s.ctx, "somebody-else", "one") },
