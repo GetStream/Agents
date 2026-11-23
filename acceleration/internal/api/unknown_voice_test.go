@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -93,6 +94,22 @@ func (s *UnknownVoiceSuite) TestARecordingInAVoiceTheProviderDoesNotHaveFailsNam
 
 	s.Equal(RecordingStatusFailed, spoken.Status)
 	s.Contains(value(spoken.Error), suggestion)
+}
+
+func (s *UnknownVoiceSuite) TestARecordingJobInAVoiceTheProviderDoesNotHaveFailsNamingTheClosest() {
+	var accepted Speech
+	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost, "/v1/tts/recordings",
+		map[string]any{"text": "hello", "options": map[string]any{"voice": unknownVoice}}, &accepted))
+
+	var finished Speech
+	s.Require().Eventually(func() bool {
+		finished = Speech{}
+		s.serverClient.do(http.MethodGet, "/v1/tts/recordings/"+accepted.Id, nil, &finished)
+		return finished.Status != RecordingStatusQueued && finished.Status != RecordingStatusRunning
+	}, settleFor, 25*time.Millisecond, "the job never finished")
+
+	s.Equal(RecordingStatusFailed, finished.Status)
+	s.Contains(value(finished.Error), suggestion, "a queued job's refusal is the caller's to correct, as an inline one's is")
 }
 
 // speak opens a text-to-speech socket asking for a voice.

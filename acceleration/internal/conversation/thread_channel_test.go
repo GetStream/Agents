@@ -2,6 +2,8 @@ package conversation_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -337,6 +339,38 @@ func (s *ThreadChannelSuite) TestAThreadChannelARequestNamesHasNoHistoryToRead()
 	s.Contains(historyErr.Error(), "invalid conversation channel")
 	s.Require().Error(contextErr)
 	s.Contains(contextErr.Error(), "invalid conversation channel")
+}
+
+// A channel Chat does not have is refused as a thread channel is, so a request learns
+// nothing from telling the two apart, and nothing of Chat's words reaches it.
+func (s *ThreadChannelSuite) TestAChannelChatDoesNotHaveIsRefusedAsAThreadChannelIs() {
+	unknown := "agent:" + conversation.ThreadChannelPrefix + uuid.NewString()
+
+	_, threadErr := s.service.HistoryForCaller(context.Background(), "customer", "", s.cid, "", "")
+	_, unknownErr := s.service.HistoryForCaller(context.Background(), "customer", "", unknown, "", "")
+	_, commandErr := s.service.CommandForCaller(context.Background(), "customer", "", unknown, "", "command-1")
+
+	thread, ok := errors.AsType[conversation.RefusedRead](threadErr)
+	s.Require().True(ok, threadErr)
+	refused, ok := errors.AsType[conversation.RefusedRead](unknownErr)
+	s.Require().True(ok, unknownErr)
+	s.Equal(thread, refused)
+	s.ErrorIs(commandErr, conversation.ErrCommandNotFound)
+}
+
+// Chat failing the read is no refusal: the caller is not told the conversation is not theirs,
+// nor that a command of theirs does not exist.
+func (s *ThreadChannelSuite) TestChatFailingAReadIsNoRefusal() {
+	s.chat.Fail(http.MethodPost, "/query")
+
+	_, historyErr := s.service.HistoryForCaller(context.Background(), "customer", "", s.cid, "", "")
+	_, commandErr := s.service.CommandForCaller(context.Background(), "customer", "", s.cid, "", "command-1")
+
+	s.Require().Error(historyErr)
+	_, refused := errors.AsType[conversation.RefusedRead](historyErr)
+	s.False(refused, historyErr)
+	s.Require().Error(commandErr)
+	s.NotErrorIs(commandErr, conversation.ErrCommandNotFound)
 }
 
 // A command in a thread channel is no command a request can look up, as at baseline.

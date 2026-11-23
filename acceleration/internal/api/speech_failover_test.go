@@ -73,7 +73,8 @@ func (s *SpeechFailoverSuite) TestASpeechJobIsRecordedByTheNextModelWhenTheFirst
 }
 
 // The control below takes its expected values from 1c5fa58db, the base: a pinned model
-// has no next candidate, so the job fails as it always has.
+// has no next candidate, so the job fails as it always has. The vendor's answer is no longer
+// the reason it gives, since a vendor's body is not the caller's to read.
 func (s *SpeechFailoverSuite) TestASpeechJobPinnedToAModelThatFailsStillFailsAsBefore() {
 	var accepted Speech
 	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost, "/v1/tts/recordings",
@@ -82,7 +83,8 @@ func (s *SpeechFailoverSuite) TestASpeechJobPinnedToAModelThatFailsStillFailsAsB
 	finished := s.finished(accepted.Id)
 
 	s.Equal(RecordingStatusFailed, finished.Status)
-	s.Equal("down: record: 503 Service Unavailable: overloaded", value(finished.Error))
+	s.Equal(store.RecordingFailure, value(finished.Error))
+	s.NotContains(value(finished.Error), "overloaded", "the vendor's body")
 	s.Equal("down", value(finished.Provider))
 	s.Equal(s.down["pinned"][len("down/"):], value(finished.Model))
 }

@@ -3106,6 +3106,19 @@ impl Client {
         self.send(Method::POST, "/v1/ocr", None::<&()>, Some(body), "readPage")
             .await
     }
+    /// List every organization's Agents activity by day
+    ///
+    /// `GET /v1/ops/activity` (`listActivity`).
+    pub async fn list_activity(&self, query: &ListActivityQuery) -> Result<types::ActivityPage> {
+        self.send(
+            Method::GET,
+            "/v1/ops/activity",
+            Some(query),
+            None::<&()>,
+            "listActivity",
+        )
+        .await
+    }
     /// Make Stream's own app a customer's provider app
     ///
     /// `PUT /v1/ops/customers/{customer_id}/connectors/{id}/provider-app` (`setOperatorProviderApp`).
@@ -4943,6 +4956,28 @@ pub struct ManageListTeamsQuery {
     pub app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
+}
+/// The query string `listActivity` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ListActivityQuery {
+    /// The first UTC day read, YYYY-MM-DD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Narrow to the rows that name this organization. Empty is no filter. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// Narrow to this app's rows. Empty is no filter. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Up to 1000. Omitted is 500.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 /// The query string `getOrganizationActivity` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

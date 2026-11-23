@@ -293,7 +293,11 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			return
 		default:
 			a.fail(ErrPlaybackFull, "sts")
-			go a.Close()
+			go func() {
+				if err := a.Close(); err != nil {
+					a.logger.Error("could not leave after the playback fell behind", "error", err)
+				}
+			}()
 			return
 		}
 	}

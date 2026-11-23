@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- A run's router holds it until lease_until, as a queue row is held, so the column is named
 -- as the queue's is. A router of the release before reads held_until and fails until it is
@@ -15,3 +16,9 @@ BEGIN
 END $$;
 -- +goose StatementEnd
 ALTER INDEX IF EXISTS simulation_runs_held_idx RENAME TO simulation_runs_lease_idx;
+
+-- +goose Down
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE simulation_runs RENAME COLUMN lease_until TO held_until;
+ALTER INDEX IF EXISTS simulation_runs_lease_idx RENAME TO simulation_runs_held_idx;

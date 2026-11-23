@@ -1,7 +1,10 @@
 package store
 
 import (
+	"io/fs"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -58,4 +61,33 @@ func TestADroppedTableIsNoLongerTheSets(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, shard, "phone_calls")
 	require.Contains(t, shard, "call_legs")
+}
+
+// A migration that waits behind a long query for a table's lock holds every write queued behind
+// it, so each one run in a transaction after the baseline sets a lock timeout before it takes a
+// lock: as its first statement.
+func TestEveryTransactionalMigrationAfterTheBaselineSetsALockTimeout(t *testing.T) {
+	for _, set := range []migrationSet{globalSet, shardSet} {
+		files, err := fs.Glob(set.files, "*.sql")
+		require.NoError(t, err)
+		for _, name := range files {
+			if strings.HasPrefix(name, strconv.FormatInt(baseline, 10)) {
+				continue
+			}
+			raw, err := fs.ReadFile(set.files, name)
+			require.NoError(t, err)
+			if strings.Contains(string(raw), "-- +goose NO TRANSACTION") {
+				continue
+			}
+			up, _, _ := strings.Cut(string(raw), "-- +goose Down")
+			var first string
+			for _, line := range strings.Split(up, "\n") {
+				if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "--") {
+					first = line
+					break
+				}
+			}
+			require.True(t, strings.HasPrefix(first, "SET LOCAL lock_timeout"), "%s/%s starts with %q", set.name, name, first)
+		}
+	}
 }

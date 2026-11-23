@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- hook_deliveries and connection_event_deliveries only made a second insert of one delivery
 -- fail. One table does that for both, a scope apart, and one pruner forgets both after a day.
