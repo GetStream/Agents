@@ -32,7 +32,7 @@ import (
 )
 
 // maxConns is how many Postgres connections one router's serving pool holds at most: every
-// query but those of a credential lock's own connection (lockConns).
+// query but those on the connection a credential or provider app lock is held on (lockConns).
 const maxConns = 40
 
 // Store reads and writes router statistics.

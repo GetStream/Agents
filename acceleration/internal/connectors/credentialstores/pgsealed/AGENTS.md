@@ -6,7 +6,7 @@ The `core.CredentialStore` that keeps a connection's credential state in Postgre
 
 ```
 Update(ref, fn)
-  1. lock     pg_try_advisory_lock(839, key(customer, id)) on a pool connection, kept if it
+  1. lock     pg_try_advisory_lock(839, key(customer, id)) on a lock pool connection, kept if it
               got the lock; otherwise the connection goes back, pause 5ms doubling to 100ms, retry
               until ctx is done
   2. load     the live row, on that connection
@@ -20,7 +20,7 @@ Update(ref, fn)
               detached from ctx (2s), commits at once: the lock is session-level, so it stays held
   6. final    changed -> one more CAS like 5 with fn's state
               unchanged but credentials under an older key -> CAS like 5 with the state as stored
-  7. unlock   pg_advisory_unlock, then the connection goes back to the pool
+  7. unlock   pg_advisory_unlock, then the connection goes back to the lock pool
 ```
 
 Nothing waits inside Postgres at 1, so a caller that gives up just stops trying: no wait stays queued on the server and no connection is held while it pauses. A blocking `pg_advisory_lock` cannot promise that, because pgdriver bounds every read by its `ReadTimeout` (10s by default, `newDefaultConfig` in `uptrace/bun/driver/pgdriver` v1.2.18) or the ctx deadline, drops the socket when it passes, and the server "will detect the loss of the connection only at the next interaction with the socket" ([client_connection_check_interval](https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-CLIENT-CONNECTION-CHECK-INTERVAL)). The cost of trying is that waiters are not served in order. Writes at 5 and 6 run detached from ctx for the same driver reason: a passed deadline is a passed socket deadline, which would drop tokens a provider already rotated.
