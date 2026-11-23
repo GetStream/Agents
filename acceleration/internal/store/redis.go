@@ -170,10 +170,10 @@ func (s *Store) forget(ctx context.Context, names ...string) {
 	// a read made as soon as the DEL returns can still be answered by the old copy. The
 	// client sends these commands over the connection it read the node's copies on, and reads
 	// its replies in order, so once a command after the DEL is answered, the invalidation has
-	// been applied. That command is an EXISTS of the same key, which goes to the node that holds
-	// it, where a keyless PING could go to another node of a cluster. A follower that fails
-	// needs nothing more: a broken connection drops every local copy it held, and any other
-	// failure is the one the TTL covers.
+	// been applied. That command is an EXISTS of the same key, so that on a cluster it goes
+	// to the node that holds the key, as a keyless PING would not. An EXISTS that fails needs
+	// nothing more: a broken connection drops every local copy it held, and any other failure
+	// is the one the TTL covers.
 	commands := make(rueidis.Commands, 0, 2*len(names))
 	for _, name := range names {
 		commands = append(commands, client.B().Del().Key(name).Build(), client.B().Exists().Key(name).Build())
