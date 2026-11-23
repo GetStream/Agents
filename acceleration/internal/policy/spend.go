@@ -214,8 +214,8 @@ func (m *money) unread(acct *account, key string, owner routing.Owner, now time.
 
 // queueFirst adds an account to the batch of first reads gathering now, under m.mu, and starts
 // one when none is. A batch gathers for firstWindow and at most firstBatches are read at once,
-// so a cold start that sees thousands of accounts makes a few calls of each kind (LimitsFor,
-// Resets, the service's windows) rather than a call of each per account.
+// so a cold start that sees thousands of accounts makes a few calls of each kind (store.Limits.SelectOf,
+// store.UsageResets.Select, the service's windows) rather than a call of each per account.
 func (m *money) queueFirst(db *store.Store, key string) {
 	if m.firstQueue == nil {
 		m.firstQueue = map[string]bool{}
