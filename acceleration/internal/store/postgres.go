@@ -1,10 +1,15 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
+	"syscall"
 
 	"github.com/uptrace/bun/driver/pgdriver"
 
@@ -21,6 +26,32 @@ const (
 func isViolation(err error, code string) bool {
 	var refused pgdriver.Error
 	return errors.As(err, &refused) && refused.Field('C') == code
+}
+
+// IsForeignKeyViolation reports whether err is Postgres refusing a row whose parent row is
+// missing.
+func IsForeignKeyViolation(err error) bool {
+	return isViolation(err, foreignKeyViolation)
+}
+
+// Transient reports whether err is a failure that may pass if the same statement is sent
+// again: the connection dropped or was refused, the statement timed out, the server is
+// shutting down or full, or Postgres gave up on a serialization or a deadlock. A closed
+// pool, a violated constraint and a bad statement are not.
+func Transient(err error) bool {
+	var refused pgdriver.Error
+	if errors.As(err, &refused) {
+		switch code := refused.Field('C'); code {
+		case "40001", "40P01", "53300", "57P01", "57P02", "57P03":
+			return true
+		default:
+			return strings.HasPrefix(code, "08")
+		}
+	}
+	var network net.Error
+	return errors.As(err, &network) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
 // oneRow turns an update or delete that matched nothing into missing.

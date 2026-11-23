@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -364,6 +365,80 @@ func (s *RecordFlushSuite) TestATitleTheStoreCouldNotWriteStillLogsAnError() {
 
 	s.Contains(logged.String(), "level=ERROR")
 	s.Contains(logged.String(), "could not record the session's title")
+}
+
+func (s *RecordFlushSuite) TestASessionWriteCutOffByADroppedConnectionIsStoredWithWhatFollowsIt() {
+	held, release := s.heldRow()
+	response := store.AgentResponse{ID: rand.Text(), SessionID: held.ID, CustomerID: s.customer, Said: "Where is my order?"}
+	s.records.Opened(held, nil)
+	s.records.Responding(response)
+	s.records.Item(store.AgentResponseItem{ResponseID: response.ID, Ordinal: 0, SessionID: held.ID,
+		Kind: store.ItemSaid, Text: "Where is my order?", At: time.Now().UTC()})
+
+	// The writer's session insert waits on the held row's lock; its connection is cut there,
+	// mid-statement, as a failover cuts it.
+	var writer int
+	s.Require().Eventually(func() bool {
+		err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT pid FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%agent_sessions%'`).Scan(&writer)
+		return err == nil
+	}, settleFor, 5*time.Millisecond, "the writer never waited on the held row")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "SELECT pg_terminate_backend(?)", writer)
+	s.Require().NoError(err)
+	release()
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	s.True(s.stored(held.ID), "the session is not stored")
+	got, err := s.store.Responses.Get(s.ctx, s.customer, held.ID, response.ID)
+	s.Require().NoError(err, "the turn is not stored")
+	s.Equal(held.ID, got.SessionID)
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, held.ID, store.ItemFilter{ResponseID: response.ID, Limit: 10})
+	s.Require().NoError(err)
+	s.Len(items, 1, "the turn's item is not stored")
+}
+
+func (s *RecordFlushSuite) TestAnItemWhoseResponseIsMissingDoesNotStopAnotherSessionsItems() {
+	kept, orphaned := s.row(), s.row()
+	s.records.Opened(kept, nil)
+	s.records.Opened(orphaned, nil)
+	response := store.AgentResponse{ID: rand.Text(), SessionID: kept.ID, CustomerID: s.customer, Said: "Where is my order?"}
+	s.records.Responding(response)
+	lost := testutil.ToFloat64(recordsLost.WithLabelValues(lostItems))
+
+	// Back to back, so both go in one batch.
+	s.records.Item(store.AgentResponseItem{ResponseID: response.ID, Ordinal: 0, SessionID: kept.ID,
+		Kind: store.ItemSaid, Text: "It ships today.", At: time.Now().UTC()})
+	s.records.Item(store.AgentResponseItem{ResponseID: rand.Text(), Ordinal: 0, SessionID: orphaned.ID,
+		Kind: store.ItemSaid, Text: "Thanks.", At: time.Now().UTC()})
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, kept.ID, store.ItemFilter{ResponseID: response.ID, Limit: 10})
+	s.Require().NoError(err)
+	s.Len(items, 1, "the item of a session whose turn is stored was lost with the other session's")
+	s.InDelta(lost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostItems)), 0, "the dropped item is not counted")
+}
+
+func (s *RecordFlushSuite) TestEndsThatCannotBeStoredAreCountedOnceTheRetriesRunOut() {
+	// Nothing listens on port 1, so every try is refused, the way a database that stays
+	// down refuses it.
+	down, err := store.Open("postgres://postgres:postgres@127.0.0.1:1/router?sslmode=disable")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(down.Close()) })
+	records := s.recorderLogging(down, &syncBuffer{})
+	sessionsLost := testutil.ToFloat64(recordsLost.WithLabelValues(lostSessionEnd))
+	callsLost := testutil.ToFloat64(recordsLost.WithLabelValues(lostCallEnd))
+
+	start := time.Now()
+	records.Closed(s.customer, rand.Text(), time.Now().UTC(), TimeoutHangup)
+	(&callRecorder{records: records}).Ended(s.customer, rand.Text(), time.Now().UTC())
+	s.Require().NoError(records.Flush(s.bounded()))
+
+	// One budget in all: once a write ran out of retries, the next is tried once.
+	s.Less(time.Since(start), recordRetryFor*3/2, "the writer retried each write for a budget of its own")
+	s.InDelta(sessionsLost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostSessionEnd)), 0,
+		"the session end that was never stored is not counted")
+	s.InDelta(callsLost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostCallEnd)), 0,
+		"the call end that was never stored is not counted")
 }
 
 // recorderLogging is a writer over db that logs everything, even debug lines, into logged.
