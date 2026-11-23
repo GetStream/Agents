@@ -2321,6 +2321,37 @@ sts:
       model: gemini-3.8-live
       description: "Google's default live voice, and what Fast conversational prefers. About a second to first audio, sees images, and a slow tool no longer holds the conversation."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Zephyr, name: Zephyr, description: "Bright", gender: female }
+        - { id: Puck, name: Puck, description: "Upbeat", gender: male }
+        - { id: Charon, name: Charon, description: "Informative", gender: male }
+        - { id: Kore, name: Kore, description: "Firm", gender: female }
+        - { id: Fenrir, name: Fenrir, description: "Excitable", gender: male }
+        - { id: Leda, name: Leda, description: "Youthful", gender: female }
+        - { id: Orus, name: Orus, description: "Firm", gender: male }
+        - { id: Aoede, name: Aoede, description: "Breezy", gender: female }
+        - { id: Callirrhoe, name: Callirrhoe, description: "Easy-going", gender: female }
+        - { id: Autonoe, name: Autonoe, description: "Bright", gender: female }
+        - { id: Enceladus, name: Enceladus, description: "Breathy", gender: male }
+        - { id: Iapetus, name: Iapetus, description: "Clear", gender: male }
+        - { id: Umbriel, name: Umbriel, description: "Easy-going", gender: male }
+        - { id: Algieba, name: Algieba, description: "Smooth", gender: male }
+        - { id: Despina, name: Despina, description: "Smooth", gender: female }
+        - { id: Erinome, name: Erinome, description: "Clear", gender: female }
+        - { id: Algenib, name: Algenib, description: "Gravelly", gender: male }
+        - { id: Rasalgethi, name: Rasalgethi, description: "Informative", gender: male }
+        - { id: Laomedeia, name: Laomedeia, description: "Upbeat", gender: female }
+        - { id: Achernar, name: Achernar, description: "Soft", gender: female }
+        - { id: Alnilam, name: Alnilam, description: "Firm", gender: male }
+        - { id: Schedar, name: Schedar, description: "Even", gender: male }
+        - { id: Gacrux, name: Gacrux, description: "Mature", gender: female }
+        - { id: Pulcherrima, name: Pulcherrima, description: "Forward", gender: female }
+        - { id: Achird, name: Achird, description: "Friendly", gender: male }
+        - { id: Zubenelgenubi, name: Zubenelgenubi, description: "Casual", gender: male }
+        - { id: Vindemiatrix, name: Vindemiatrix, description: "Gentle", gender: female }
+        - { id: Sadachbia, name: Sadachbia, description: "Lively", gender: male }
+        - { id: Sadaltager, name: Sadaltager, description: "Knowledgeable", gender: male }
+        - { id: Sulafat, name: Sulafat, description: "Warm", gender: female }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2341,6 +2372,37 @@ sts:
       model: gemini-3.8-live-extended-thinking
       description: "Near the top of the Artificial Analysis speech-to-speech board. Thinks in the background and talks while a tool runs. Sees images."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Zephyr, name: Zephyr, description: "Bright", gender: female }
+        - { id: Puck, name: Puck, description: "Upbeat", gender: male }
+        - { id: Charon, name: Charon, description: "Informative", gender: male }
+        - { id: Kore, name: Kore, description: "Firm", gender: female }
+        - { id: Fenrir, name: Fenrir, description: "Excitable", gender: male }
+        - { id: Leda, name: Leda, description: "Youthful", gender: female }
+        - { id: Orus, name: Orus, description: "Firm", gender: male }
+        - { id: Aoede, name: Aoede, description: "Breezy", gender: female }
+        - { id: Callirrhoe, name: Callirrhoe, description: "Easy-going", gender: female }
+        - { id: Autonoe, name: Autonoe, description: "Bright", gender: female }
+        - { id: Enceladus, name: Enceladus, description: "Breathy", gender: male }
+        - { id: Iapetus, name: Iapetus, description: "Clear", gender: male }
+        - { id: Umbriel, name: Umbriel, description: "Easy-going", gender: male }
+        - { id: Algieba, name: Algieba, description: "Smooth", gender: male }
+        - { id: Despina, name: Despina, description: "Smooth", gender: female }
+        - { id: Erinome, name: Erinome, description: "Clear", gender: female }
+        - { id: Algenib, name: Algenib, description: "Gravelly", gender: male }
+        - { id: Rasalgethi, name: Rasalgethi, description: "Informative", gender: male }
+        - { id: Laomedeia, name: Laomedeia, description: "Upbeat", gender: female }
+        - { id: Achernar, name: Achernar, description: "Soft", gender: female }
+        - { id: Alnilam, name: Alnilam, description: "Firm", gender: male }
+        - { id: Schedar, name: Schedar, description: "Even", gender: male }
+        - { id: Gacrux, name: Gacrux, description: "Mature", gender: female }
+        - { id: Pulcherrima, name: Pulcherrima, description: "Forward", gender: female }
+        - { id: Achird, name: Achird, description: "Friendly", gender: male }
+        - { id: Zubenelgenubi, name: Zubenelgenubi, description: "Casual", gender: male }
+        - { id: Vindemiatrix, name: Vindemiatrix, description: "Gentle", gender: female }
+        - { id: Sadachbia, name: Sadachbia, description: "Lively", gender: male }
+        - { id: Sadaltager, name: Sadaltager, description: "Knowledgeable", gender: male }
+        - { id: Sulafat, name: Sulafat, description: "Warm", gender: female }
       realtime: true
       tier: high-quality
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2360,6 +2422,37 @@ sts:
       model: gemini-3.1-flash-live-preview
       description: "The previous Gemini live voice, now a legacy preview. Under a second to first audio. Tools run synchronously, so a slow tool holds the conversation."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Zephyr, name: Zephyr, description: "Bright", gender: female }
+        - { id: Puck, name: Puck, description: "Upbeat", gender: male }
+        - { id: Charon, name: Charon, description: "Informative", gender: male }
+        - { id: Kore, name: Kore, description: "Firm", gender: female }
+        - { id: Fenrir, name: Fenrir, description: "Excitable", gender: male }
+        - { id: Leda, name: Leda, description: "Youthful", gender: female }
+        - { id: Orus, name: Orus, description: "Firm", gender: male }
+        - { id: Aoede, name: Aoede, description: "Breezy", gender: female }
+        - { id: Callirrhoe, name: Callirrhoe, description: "Easy-going", gender: female }
+        - { id: Autonoe, name: Autonoe, description: "Bright", gender: female }
+        - { id: Enceladus, name: Enceladus, description: "Breathy", gender: male }
+        - { id: Iapetus, name: Iapetus, description: "Clear", gender: male }
+        - { id: Umbriel, name: Umbriel, description: "Easy-going", gender: male }
+        - { id: Algieba, name: Algieba, description: "Smooth", gender: male }
+        - { id: Despina, name: Despina, description: "Smooth", gender: female }
+        - { id: Erinome, name: Erinome, description: "Clear", gender: female }
+        - { id: Algenib, name: Algenib, description: "Gravelly", gender: male }
+        - { id: Rasalgethi, name: Rasalgethi, description: "Informative", gender: male }
+        - { id: Laomedeia, name: Laomedeia, description: "Upbeat", gender: female }
+        - { id: Achernar, name: Achernar, description: "Soft", gender: female }
+        - { id: Alnilam, name: Alnilam, description: "Firm", gender: male }
+        - { id: Schedar, name: Schedar, description: "Even", gender: male }
+        - { id: Gacrux, name: Gacrux, description: "Mature", gender: female }
+        - { id: Pulcherrima, name: Pulcherrima, description: "Forward", gender: female }
+        - { id: Achird, name: Achird, description: "Friendly", gender: male }
+        - { id: Zubenelgenubi, name: Zubenelgenubi, description: "Casual", gender: male }
+        - { id: Vindemiatrix, name: Vindemiatrix, description: "Gentle", gender: female }
+        - { id: Sadachbia, name: Sadachbia, description: "Lively", gender: male }
+        - { id: Sadaltager, name: Sadaltager, description: "Knowledgeable", gender: male }
+        - { id: Sulafat, name: Sulafat, description: "Warm", gender: female }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2382,6 +2475,17 @@ sts:
       model: gpt-realtime-2.1
       description: "OpenAI's realtime voice, and what Vision prefers. Semantic turn detection, sees images. Among the dearest."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: marin, name: Marin, description: "Warm, natural" }
+        - { id: cedar, name: Cedar, description: "Clear, steady" }
+        - { id: alloy, name: Alloy, description: "Neutral, balanced", default: true }
+        - { id: ash, name: Ash, description: "Clear, precise" }
+        - { id: ballad, name: Ballad, description: "Melodic, smooth" }
+        - { id: coral, name: Coral, description: "Warm, friendly" }
+        - { id: echo, name: Echo, description: "Resonant, deep" }
+        - { id: sage, name: Sage, description: "Calm, thoughtful" }
+        - { id: shimmer, name: Shimmer, description: "Bright, energetic" }
+        - { id: verse, name: Verse, description: "Versatile, expressive" }
       realtime: true
       tier: high-quality
       supports: [semantic_turns, endpointing, tools, text, input_transcript, output_transcript]
@@ -2397,6 +2501,17 @@ sts:
       model: gpt-realtime-2
       description: "OpenAI's previous realtime voice. Semantic turn detection, sees images. GPT-Realtime-2.1 is better at the same price."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: marin, name: Marin, description: "Warm, natural" }
+        - { id: cedar, name: Cedar, description: "Clear, steady" }
+        - { id: alloy, name: Alloy, description: "Neutral, balanced", default: true }
+        - { id: ash, name: Ash, description: "Clear, precise" }
+        - { id: ballad, name: Ballad, description: "Melodic, smooth" }
+        - { id: coral, name: Coral, description: "Warm, friendly" }
+        - { id: echo, name: Echo, description: "Resonant, deep" }
+        - { id: sage, name: Sage, description: "Calm, thoughtful" }
+        - { id: shimmer, name: Shimmer, description: "Bright, energetic" }
+        - { id: verse, name: Verse, description: "Versatile, expressive" }
       realtime: true
       tier: high-quality
       supports: [semantic_turns, endpointing, tools, text, input_transcript, output_transcript]
@@ -2421,6 +2536,38 @@ sts:
       model: gpt-live-1
       description: "Second on the Artificial Analysis board and keeps talking while a tool runs, but is slower to first audio and cannot see. Backend tokens are billed on top."
       languages: [de, en, fr, hi, ja, ko, pt]
+      voices:
+        - { id: marin, name: Marin, description: "Warm, natural", default: true }
+        - { id: gleam, name: Gleam, description: "North American English", gender: female }
+        - { id: meridian, name: Meridian, description: "North American English", gender: male }
+        - { id: vesper, name: Vesper, description: "British English", gender: male }
+        - { id: quartz, name: Quartz, description: "Australian English", gender: female }
+        - { id: ripple, name: Ripple, description: "Australian English", gender: male }
+        - { id: willow, name: Willow, description: "Irish English", gender: female }
+        - { id: stone, name: Stone, description: "Irish English", gender: male }
+        - { id: delta, name: Delta, description: "Southern U.S. English", gender: female }
+        - { id: cinder, name: Cinder, description: "Southern U.S. English", gender: male }
+        - { id: beacon, name: Beacon, description: "Filipino English", gender: male }
+        - { id: bossa, name: Bossa, description: "Brazilian Portuguese", gender: female }
+        - { id: tempo, name: Tempo, description: "Brazilian Portuguese", gender: male }
+        - { id: nuri, name: Nuri, description: "German", gender: female }
+        - { id: juni, name: Juni, description: "German", gender: female }
+        - { id: flitz, name: Flitz, description: "German", gender: male }
+        - { id: brise, name: Brise, description: "French", gender: female }
+        - { id: sillage, name: Sillage, description: "French", gender: male }
+        - { id: nira, name: Nira, description: "Hindi", gender: female }
+        - { id: harema, name: Harema, description: "Japanese", gender: female }
+        - { id: shida, name: Shida, description: "Japanese", gender: male }
+        - { id: noeul, name: Noeul, description: "Korean", gender: female }
+        - { id: cedar, name: Cedar, description: "Clear, steady" }
+        - { id: alloy, name: Alloy, description: "Neutral, balanced" }
+        - { id: ash, name: Ash, description: "Clear, precise" }
+        - { id: ballad, name: Ballad, description: "Melodic, smooth" }
+        - { id: coral, name: Coral, description: "Warm, friendly" }
+        - { id: echo, name: Echo, description: "Resonant, deep" }
+        - { id: sage, name: Sage, description: "Calm, thoughtful" }
+        - { id: shimmer, name: Shimmer, description: "Bright, energetic" }
+        - { id: verse, name: Verse, description: "Versatile, expressive" }
       realtime: true
       tier: high-quality
       supports: [full_duplex, tools, text, input_transcript, output_transcript]
@@ -2438,6 +2585,12 @@ sts:
       model: grok-voice-3.0
       description: "xAI's Grok Voice 3.0, top of the Artificial Analysis speech-to-speech board and under a second to first audio. Cannot see."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: eve, name: Eve, description: "Energetic, upbeat", gender: female, default: true }
+        - { id: ara, name: Ara, description: "Warm, friendly", gender: female }
+        - { id: rex, name: Rex, description: "Confident, clear", gender: male }
+        - { id: sal, name: Sal, description: "Smooth, balanced", gender: neutral }
+        - { id: leo, name: Leo, description: "Authoritative, strong", gender: male }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2453,6 +2606,12 @@ sts:
       model: grok-voice-think-fast-2.0
       description: "xAI's previous Grok Voice, now deprecated. Fast, cannot see, and priced by the minute of audio xAI bills."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: eve, name: Eve, description: "Energetic, upbeat", gender: female, default: true }
+        - { id: ara, name: Ara, description: "Warm, friendly", gender: female }
+        - { id: rex, name: Rex, description: "Confident, clear", gender: male }
+        - { id: sal, name: Sal, description: "Smooth, balanced", gender: neutral }
+        - { id: leo, name: Leo, description: "Authoritative, strong", gender: male }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2468,6 +2627,39 @@ sts:
       model: qwen3.5-omni-plus-realtime
       description: "Top of the Artificial Analysis quality board and the cheapest, but it takes no tools and has published no data policy."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Tina, name: Tina, description: "Warm, conversational", gender: female, default: true }
+        - { id: Ethan, name: Ethan, description: "Bright, upbeat", gender: male }
+        - { id: Harvey, name: Harvey, description: "Calm, composed", gender: male }
+        - { id: Serena, name: Serena, description: "Gentle, soothing", gender: female }
+        - { id: Maia, name: Maia, description: "Clear, approachable", gender: female }
+        - { id: Ryan, name: Ryan, description: "Expressive, rhythmic", gender: male }
+        - { id: Katerina, name: Katerina, description: "Rich, poised", gender: female }
+        - { id: Jennifer, name: Jennifer, description: "Smooth, natural", gender: female }
+        - { id: Aiden, name: Aiden, description: "Warm, relaxed", gender: male }
+        - { id: Mione, name: Mione, description: "Soft, natural", gender: female }
+        - { id: Mia, name: Mia, description: "Gentle, attentive", gender: female }
+        - { id: Evan, name: Evan, description: "Clear, neutral", gender: male }
+        - { id: Raymond, name: Raymond, description: "Steady, measured", gender: male }
+        - { id: "Theo Calm", name: "Theo Calm", description: "Calm, even", gender: male }
+        - { id: "Liora Mira", name: "Liora Mira", description: "Expressive, bright", gender: female }
+        - { id: Andre, name: Andre, description: "Deep, steady", gender: male }
+        - { id: Emilien, name: Emilien, description: "French, warm", gender: male }
+        - { id: Sonrisa, name: Sonrisa, description: "Spanish, upbeat", gender: female }
+        - { id: Bodega, name: Bodega, description: "Spanish, warm", gender: male }
+        - { id: Dolce, name: Dolce, description: "Italian, smooth", gender: male }
+        - { id: Lenn, name: Lenn, description: "German, clear", gender: male }
+        - { id: Sohee, name: Sohee, description: "Korean, warm", gender: female }
+        - { id: "Ono Anna", name: "Ono Anna", description: "Japanese, lively", gender: female }
+        - { id: Alek, name: Alek, description: "Russian, steady", gender: male }
+        - { id: Griet, name: Griet, description: "Dutch, clear", gender: female }
+        - { id: Siiri, name: Siiri, description: "Finnish, calm", gender: female }
+        - { id: Ingrid, name: Ingrid, description: "Norwegian, clear", gender: female }
+        - { id: Cindy, name: Cindy, description: "Friendly, clear", gender: female }
+        - { id: Sunny, name: Sunny, description: "Bright, cheerful", gender: female }
+        - { id: Dylan, name: Dylan, description: "Casual, natural", gender: male }
+        - { id: Kiki, name: Kiki, description: "Cantonese, upbeat", gender: female }
+        - { id: Rocky, name: Rocky, description: "Cantonese, lively", gender: male }
       realtime: true
       tier: low-latency
       supports: [endpointing, input_transcript, output_transcript]
@@ -2488,6 +2680,20 @@ sts:
       model: qwen-audio-3.1-realtime-plus
       description: "Alibaba's Qwen-Audio. Calls tools, takes typed turns and has a semantic turn detector, but cannot see."
       languages: [de, en, es, fr, id, it, ja, ko, pt, ru, zh]
+      voices:
+        - { id: longanqian_v3.1, name: "Longanqian v3.1", description: "Warm, natural", gender: female, default: true }
+        - { id: longanhuan_v3.1, name: "Longanhuan v3.1", description: "Bright, lively", gender: female }
+        - { id: longanlingxin_v3.1, name: "Longanlingxin v3.1", description: "Clear, gentle", gender: female }
+        - { id: longanfengyue_v3.1, name: "Longanfengyue v3.1", description: "Warm, calm", gender: male }
+        - { id: xunanchuan_v3.1, name: "Xunanchuan v3.1", description: "Steady, expressive", gender: male }
+        - { id: beth_v3.1, name: "Beth v3.1", description: "English, friendly", gender: female }
+        - { id: betty_v3.1, name: "Betty v3.1", description: "English, warm", gender: female }
+        - { id: cally_v3.1, name: "Cally v3.1", description: "English, clear", gender: female }
+        - { id: longanqian, name: Longanqian, description: "Warm, conversational", gender: female }
+        - { id: longanlingxin, name: Longanlingxin, description: "Gentle, steady", gender: female }
+        - { id: longanlingxi, name: Longanlingxi, description: "Soft, natural", gender: female }
+        - { id: longanxiaoxin, name: Longanxiaoxin, description: "Youthful, bright", gender: female }
+        - { id: longanlufeng, name: Longanlufeng, description: "Clear, resonant", gender: male }
       realtime: true
       tier: high-quality
       supports: [semantic_turns, endpointing, tools, text, input_transcript, output_transcript]

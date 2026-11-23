@@ -1708,9 +1708,31 @@ func (s *Server) listProviders(ctx context.Context, request *listProvidersReques
 			UsageShare:  &share,
 			Benchmark:   providerBenchmark(candidate.Config.Benchmark),
 			Price:       s.providerPrice(request.Modality, candidate.Config),
+			Voices:      voicesOf(candidate.Config.Voices),
 		})
 	}
 	return &listProvidersResponse{Body: providers}, nil
+}
+
+// voicesOf renders a model's built-in voices for the wire, nil when it declares none.
+func voicesOf(voices []routing.ModelVoice) []ModelVoice {
+	if len(voices) == 0 {
+		return nil
+	}
+	listed := make([]ModelVoice, 0, len(voices))
+	for _, voice := range voices {
+		item := ModelVoice{
+			Id:          voice.ID,
+			Name:        voice.Name,
+			Description: optional(voice.Description),
+			Gender:      optional(voice.Gender),
+		}
+		if voice.Default {
+			item.Default = new(true)
+		}
+		listed = append(listed, item)
+	}
+	return listed
 }
 
 // supportsOf is the terms a model declared, as the names a request's options use.

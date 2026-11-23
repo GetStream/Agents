@@ -629,7 +629,7 @@ components:
             type: string
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.'
           type: string
         stt:
           type: string
@@ -938,7 +938,7 @@ components:
             type: string
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.'
           type: string
         stt:
           description: A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it.
@@ -6798,6 +6798,30 @@ components:
         - provider
         - requests
       type: object
+    ModelVoice:
+      description: A built-in voice a native speech model accepts by id.
+      properties:
+        default:
+          description: True when this is the model's default voice.
+          type: boolean
+        description:
+          description: Short description of the voice's tone, style or accent.
+          type: string
+        gender:
+          description: Voice presentation, such as female, male or neutral.
+          type: string
+        id:
+          description: The voice identifier the provider accepts in its voice field.
+          example: marin
+          type: string
+        name:
+          description: Display name for the voice.
+          example: Marin
+          type: string
+      required:
+        - id
+        - name
+      type: object
     NumberSearchResult:
       properties:
         numbers:
@@ -7978,6 +8002,11 @@ components:
           description: This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
           format: double
           type: number
+        voices:
+          description: The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+          items:
+            $ref: '#/components/schemas/ModelVoice'
+          type: array
       required:
         - health
         - languages
@@ -10679,7 +10708,7 @@ components:
             $ref: '#/components/schemas/SkillRequest'
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.'
           type: string
         stt:
           type: string

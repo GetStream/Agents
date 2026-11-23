@@ -898,7 +898,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Skills { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
@@ -1318,7 +1318,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Skills { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
@@ -9966,6 +9966,54 @@ namespace GetStream.VisionAgents.Models
 
     }
 
+    /// <summary>
+    /// A built-in voice a native speech model accepts by id.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ModelVoice
+    {
+
+        /// <summary>
+        /// True when this is the model's default voice.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("default")]
+        public bool? Default { get; set; } = default!;
+
+        /// <summary>
+        /// Short description of the voice's tone, style or accent.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string? Description { get; set; } = default!;
+
+        /// <summary>
+        /// Voice presentation, such as female, male or neutral.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("gender")]
+        public string? Gender { get; set; } = default!;
+
+        /// <summary>
+        /// The voice identifier the provider accepts in its voice field.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        public string Id { get; set; } = default!;
+
+        /// <summary>
+        /// Display name for the voice.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class NumberSearchResult
     {
@@ -11676,6 +11724,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("usage_share")]
         public double? UsageShare { get; set; } = default!;
+
+        /// <summary>
+        /// The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("voices")]
+        public System.Collections.Generic.List<ModelVoice>? Voices { get; set; } = default!;
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
@@ -15772,7 +15826,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<SkillRequest>? Skills { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;

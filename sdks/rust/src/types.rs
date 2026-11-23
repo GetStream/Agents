@@ -648,7 +648,7 @@ pub struct AgentConfig {
     pub search: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
-    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -897,7 +897,7 @@ pub struct AgentConfigRequest {
     ///Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
-    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
     ///A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it.
@@ -8470,6 +8470,23 @@ pub struct ModelTokens {
     pub provider: ::std::string::String,
     pub requests: i64,
 }
+///A built-in voice a native speech model accepts by id.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
+pub struct ModelVoice {
+    ///True when this is the model's default voice.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub default: ::std::option::Option<bool>,
+    ///Short description of the voice's tone, style or accent.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub description: ::std::option::Option<::std::string::String>,
+    ///Voice presentation, such as female, male or neutral.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub gender: ::std::option::Option<::std::string::String>,
+    ///The voice identifier the provider accepts in its voice field.
+    pub id: ::std::string::String,
+    ///Display name for the voice.
+    pub name: ::std::string::String,
+}
 ///`NumberSearchResult`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct NumberSearchResult {
@@ -9707,6 +9724,9 @@ pub struct Provider {
     ///This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub usage_share: ::std::option::Option<f64>,
+    ///The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub voices: ::std::option::Option<::std::vec::Vec<ModelVoice>>,
 }
 ///What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
@@ -13381,7 +13401,7 @@ pub struct SyncAgentRequest {
     pub simulations: ::std::option::Option<::std::vec::Vec<SimulationDeclaration>>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<SkillRequest>>,
-    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]

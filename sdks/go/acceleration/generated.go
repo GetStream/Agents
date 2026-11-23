@@ -3859,7 +3859,7 @@ type AgentConfig struct {
 	Search     *string          `json:"search,omitempty"`
 	Skills     *[]string        `json:"skills,omitempty"`
 
-	// Sts A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+	// Sts A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.
 	Sts      *string `json:"sts,omitempty"`
 	Stt      *string `json:"stt,omitempty"`
 	Subagent *string `json:"subagent,omitempty"`
@@ -4100,7 +4100,7 @@ type AgentConfigRequest struct {
 	// Skills Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set.
 	Skills *[]string `json:"skills,omitempty"`
 
-	// Sts A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+	// Sts A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.
 	Sts *string `json:"sts,omitempty"`
 
 	// Stt A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it.
@@ -7845,6 +7845,28 @@ type ModelTokens struct {
 	Requests     int64  `json:"requests"`
 }
 
+// ModelVoice A built-in voice a native speech model accepts by id.
+type ModelVoice struct {
+	// Default True when this is the model's default voice.
+	Default *bool `json:"default,omitempty"`
+
+	// Description Short description of the voice's tone, style or accent.
+	Description *string `json:"description,omitempty"`
+
+	// Gender Voice presentation, such as female, male or neutral.
+	Gender *string `json:"gender,omitempty"`
+
+	// Id The voice identifier the provider accepts in its voice field.
+	//
+	// Example: marin
+	Id string `json:"id"`
+
+	// Name Display name for the voice.
+	//
+	// Example: Marin
+	Name string `json:"name"`
+}
+
 // NumberSearchResult defines model for NumberSearchResult.
 type NumberSearchResult struct {
 	// Numbers What the vendors are offering, cheapest first.
@@ -8598,6 +8620,9 @@ type Provider struct {
 
 	// UsageShare This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
 	UsageShare *float64 `json:"usage_share,omitempty"`
+
+	// Voices The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+	Voices *[]ModelVoice `json:"voices,omitempty"`
 }
 
 // ProviderBenchmark What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it.
@@ -10434,7 +10459,7 @@ type SyncAgentRequest struct {
 	Simulations *[]SimulationDeclaration `json:"simulations,omitempty"`
 	Skills      *[]SkillRequest          `json:"skills,omitempty"`
 
-	// Sts A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+	// Sts A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.
 	Sts *string `json:"sts,omitempty"`
 	Stt *string `json:"stt,omitempty"`
 

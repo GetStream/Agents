@@ -369,6 +369,7 @@ from .model_overwrites import ModelOverwrites
 from .model_overwrites_thinking import ModelOverwritesThinking
 from .model_overwrites_verbosity import ModelOverwritesVerbosity
 from .model_tokens import ModelTokens
+from .model_voice import ModelVoice
 from .number_search_result import NumberSearchResult
 from .ocr_error_code import OcrErrorCode
 from .ocr_options import OcrOptions
@@ -1033,6 +1034,7 @@ __all__ = (
     "ModelOverwritesThinking",
     "ModelOverwritesVerbosity",
     "ModelTokens",
+    "ModelVoice",
     "NumberSearchResult",
     "OcrErrorCode",
     "OcrOptions",

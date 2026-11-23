@@ -150,6 +150,7 @@ func (s *Server) createAgentConfig(ctx context.Context, request *createAgentConf
 	}
 
 	config := storedConfig(*request.Body, customerID)
+	s.defaultVoiceSTS(ctx, &config, request.Body.Sts != nil)
 	if message, ok := textSubagentComplaint(&config, request.Body.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
@@ -1494,6 +1495,33 @@ func (s *Server) storedSkillSandboxComplaint(ctx context.Context, config store.A
 	return "", true, nil
 }
 
+// defaultVoiceSTS points a new voice config at the default speech-to-speech shortcut unless
+// the caller explicitly set sts (even to "", which selects the cascade) or named any
+// cascade-specific setting. It leaves sts empty when the deployment does not serve sts-fast
+// in the agent's region.
+func (s *Server) defaultVoiceSTS(ctx context.Context, config *store.AgentConfig, stsProvided bool) {
+	if cmp.Or(config.Mode, store.AgentModeVoice) != store.AgentModeVoice || stsProvided {
+		return
+	}
+	if config.Models.STT != "" || config.Models.TTS != "" || config.Models.LLM != "" ||
+		len(config.Models.LLMFallbacks) > 0 || len(config.Keyterms) > 0 ||
+		!config.FloorControl.IsZero() || config.Guardrail != "" {
+		return
+	}
+	if s.sessions != nil && !s.sessions.SpeaksNative() {
+		return
+	}
+	router, ok := s.routers[routing.STS]
+	if !ok {
+		return
+	}
+	region := cmp.Or(config.Region, pricing.DefaultRegion)
+	if served, err := router.InRegion(ctx, stsDefaultTarget, region, nil); err != nil || !served {
+		return
+	}
+	config.Models.STS = stsDefaultTarget
+}
+
 // storedConfig turns a request into a row. The customer comes from the trusted header
 // rather than the body, the same way a session's does.
 func storedConfig(request AgentConfigRequest, customerID string) store.AgentConfig {
@@ -1947,7 +1975,7 @@ type AgentConfigRequest struct {
 	Search             *string                  `json:"search,omitempty" doc:"What the agent finds out today's answers with, as a provider/model or a capability shortcut. Empty leaves the default, and a deployment that routes no search offers the tool to nobody either way."`
 	Image              *string                  `json:"image,omitempty" doc:"What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default."`
 	Skills             *[]string                `json:"skills,omitempty" doc:"Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set."`
-	Sts                *string                  `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade."`
+	Sts                *string                  `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade."`
 	Stt                *string                  `json:"stt,omitempty" doc:"A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it."`
 	Tags               *map[string]string       `json:"tags,omitempty" doc:"Cost labels, carried onto every request a session using it makes. The team tag is also the team those sessions are counted under, its spend limits included, when whoever opens one names none: neither the caller's token nor the session's team field. It is 1 to 59 letters, digits, _ . and -, and a config naming another team tag is refused. A config tagged draft_of, naming the config it copies, is a test copy: it answers no message on a channel connection and subscribes to no event, which stay with the live config, and it may bind a channel connection another config binds."`
 	Subagent           *string                  `json:"subagent,omitempty" doc:"The slower model a voice agent hands its skills to, while the voice model keeps talking. Only a voice agent names one: a text agent runs everything, skills included, on its llm. Empty leaves the default subagent."`
@@ -1992,7 +2020,7 @@ type AgentConfig struct {
 	Search             *string                  `json:"search,omitempty"`
 	Image              *string                  `json:"image,omitempty"`
 	Skills             *[]string                `json:"skills,omitempty"`
-	Sts                *string                  `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade."`
+	Sts                *string                  `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade."`
 	Stt                *string                  `json:"stt,omitempty"`
 	SyncHash           *string                  `json:"sync_hash,omitempty" doc:"Fingerprint of the last directory synced onto this config. Empty if it was never synced from a directory."`
 	Tags               *map[string]string       `json:"tags,omitempty"`
