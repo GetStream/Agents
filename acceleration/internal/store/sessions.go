@@ -48,12 +48,12 @@ func (r *Users) Insert(ctx context.Context, user *User) error {
 // would stay one a guest token is minted for (createGuestUser). A guest the router minted
 // stays a guest, because the token minted for them names no role and so reads as a full
 // user's too; so does a claimed one, whose claim stands.
-func (s *Store) RecordAccount(ctx context.Context, customerID, userID string) error {
+func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) error {
 	user := &User{
 		CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated,
 		Custom: map[string]any{}, CreatedAt: time.Now().UTC(),
 	}
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("kind = EXCLUDED.kind").
 		Where("u.kind = ?", UserKindGuest).

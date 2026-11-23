@@ -133,7 +133,7 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 	var err error
 	switch sighting {
 	case UserKindAuthenticated:
-		err = r.store.RecordAccount(ctx, customerID, userID)
+		err = r.RecordAccount(ctx, customerID, userID)
 	case namedUser:
 		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
 	default:

@@ -295,7 +295,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	// What the router recorded of a user is the customer's data: an account arrives an account,
 	// and a claimed guest arrives claimed by the same account, so nobody else can claim it.
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
@@ -2341,7 +2341,7 @@ func (s *DataMoveSuite) TestATurnRollupRowDeletedAtTheSourceIsDeletedByTheReplay
 // drops that, so their next request records them again.
 func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainOnTheirNextRequest() {
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	cursor := s.move("acme", "moved")
 	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "alice", UserKindAuthenticated))
 
@@ -2359,7 +2359,7 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 	destination := s.cachedDestination()
 	app := "moved-" + newID()
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	cursor := s.moveTo(destination, "acme", app)
 	s.Require().NoError(destination.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
 
