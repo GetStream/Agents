@@ -5061,6 +5061,11 @@ export type components = {
             readonly tts?: string;
             /** @description What teaches the agent's model to answer with UI. An empty string removes them. */
             readonly ui_instructions?: string;
+            /**
+             * Format: date-time
+             * @description The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+             */
+            readonly updated_at?: string;
             readonly video?: components["schemas"]["SessionVideo"];
             /** @description Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search. */
             readonly visible_tools?: readonly string[];

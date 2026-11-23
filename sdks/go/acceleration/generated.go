@@ -4028,8 +4028,11 @@ type AgentConfigPatch struct {
 	Tts   *string      `json:"tts,omitempty"`
 
 	// UiInstructions What teaches the agent's model to answer with UI. An empty string removes them.
-	UiInstructions *string       `json:"ui_instructions,omitempty"`
-	Video          *SessionVideo `json:"video,omitempty"`
+	UiInstructions *string `json:"ui_instructions,omitempty"`
+
+	// UpdatedAt The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+	UpdatedAt *time.Time    `json:"updated_at,omitempty"`
+	Video     *SessionVideo `json:"video,omitempty"`
 
 	// VisibleTools Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search.
 	VisibleTools *[]string `json:"visible_tools,omitempty"`

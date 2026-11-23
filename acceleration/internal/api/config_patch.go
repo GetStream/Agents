@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -54,6 +55,7 @@ type AgentConfigPatch struct {
 	EndOfTurn          any                      `json:"end_of_turn,omitempty" hidden:"true"` // refused: floor_control's max_wait_ms replaced it
 	Tags               *map[string]string       `json:"tags,omitempty"`
 	Video              *SessionVideo            `json:"video,omitempty"`
+	UpdatedAt          *time.Time               `json:"updated_at,omitempty" doc:"The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored."`
 }
 
 func (*AgentConfigPatch) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -149,7 +151,6 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
-	existing := agentConfigOf(config)
 	original := config
 	heard := config.Models.STT
 	was := sandboxOfConfig(config)
@@ -309,13 +310,16 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 
-	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+	// Written onto the row as it now is rather than over it, so a save since the read above,
+	// which may have come from the cache, keeps every field this patch does not send.
+	before, err := s.store.AgentConfigs.Save(ctx, original, &config, value(patch.UpdatedAt))
+	if err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditAgentConfig, ResourceID: config.ID, ResourceName: config.Name,
-		Action: store.AuditUpdated, Changes: auditDiff(existing, stored),
+		Action: store.AuditUpdated, Changes: auditDiff(agentConfigOf(before), stored),
 	})
 	return &agentConfigResponse{Body: stored}, nil
 }

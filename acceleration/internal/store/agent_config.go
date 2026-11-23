@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -372,6 +373,10 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 	return nil
 }
 
+// ErrAgentConfigChanged says a save made from a copy of a config was refused because the
+// config was saved again after that copy was read.
+var ErrAgentConfigChanged = errors.New("store: the agent config was saved since it was read")
+
 // Update replaces a config a customer holds. Every field is written, so an update is what the
 // config now is rather than what changed about it. A connection it binds as fixed is locked as
 // Insert locks it, and has to be live unless the stored config binds it already: a forced
@@ -381,18 +386,57 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 // The config is forgotten under its id and under both the name it had and the one it has, since
 // a rename leaves whoever asked for the old name holding a config that no longer answers to it.
 func (r *AgentConfigs) Update(ctx context.Context, config *AgentConfig) error {
+	_, err := r.save(ctx, nil, config, time.Time{})
+	return err
+}
+
+// Save writes what a caller changed in read, a copy of a config it read earlier, onto the config
+// as it now is: each column config holds differently from read is config's, and every other is
+// the row's. Update writes every column, so a copy read before another save, through the cache
+// or not, writes that save's columns back; of two Saves at once that change different columns,
+// both land. It is checked, locked and forgotten as Update is, leaves config as stored, and
+// returns the row as it was before.
+//
+// With unmodifiedSince set, a row saved after it is refused with ErrAgentConfigChanged: the
+// caller made its change from a copy older than the config it would write over.
+func (r *AgentConfigs) Save(ctx context.Context, read AgentConfig, config *AgentConfig, unmodifiedSince time.Time) (AgentConfig, error) {
+	return r.save(ctx, &read, config, unmodifiedSince)
+}
+
+// save is Update when read is nil and Save otherwise. The row is locked first and what it binds
+// after, the order every write of a stored config takes them in, so no two writes wait on each
+// other in a cycle: neither a connection delete nor Insert locks a stored config's row.
+func (r *AgentConfigs) save(ctx context.Context, read, config *AgentConfig, unmodifiedSince time.Time) (AgentConfig, error) {
 	if config.ID == "" {
-		return stack.Wrap(&ValidationError{Model: "agent config", Field: "id", Reason: "is required"})
-	}
-	normalizeConfig(config)
-	if err := config.Validate(); err != nil {
-		return stack.Wrap(err)
+		return AgentConfig{}, stack.Wrap(&ValidationError{Model: "agent config", Field: "id", Reason: "is required"})
 	}
 
-	config.UpdatedAt = time.Now().UTC()
-
-	var wasName string
+	var stored AgentConfig
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		err := tx.NewSelect().Model(&stored).
+			Where("id = ?", config.ID).
+			Where("customer_id = ?", config.CustomerID).
+			Where("deleted_at IS NULL").
+			For("UPDATE").
+			Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownAgentConfig(config.ID)
+		}
+		if err != nil {
+			return fmt.Errorf("store: update agent config: %w", err)
+		}
+		if !unmodifiedSince.IsZero() && stored.UpdatedAt.After(unmodifiedSince) {
+			return ErrAgentConfigChanged
+		}
+		normalizeConfig(config)
+		if read != nil {
+			r.keepUnchanged(*read, config, stored)
+		}
+		if err := config.Validate(); err != nil {
+			return err
+		}
+		config.UpdatedAt = time.Now().UTC()
+
 		missing, err := lockBoundConnections(ctx, tx, config)
 		if err != nil {
 			return err
@@ -400,17 +444,6 @@ func (r *AgentConfigs) Update(ctx context.Context, config *AgentConfig) error {
 		undefined, err := lockCustomDefinitions(ctx, tx, config.CustomerID, boundConnectors(config.Connectors))
 		if err != nil {
 			return err
-		}
-		var stored AgentConfig
-		if len(missing) > 0 || len(undefined) > 0 || bindsAnyFixed(config.Connectors) {
-			err := tx.NewSelect().Model(&stored).Column("connectors", "tags").
-				Where("id = ?", config.ID).
-				Where("customer_id = ?", config.CustomerID).
-				Where("deleted_at IS NULL").
-				Scan(ctx)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("store: update agent config: %w", err)
-			}
 		}
 		if err := refuseUnbindable(missing, stored.Connectors); err != nil {
 			return err
@@ -421,49 +454,56 @@ func (r *AgentConfigs) Update(ctx context.Context, config *AgentConfig) error {
 		if err := refuseSecondChannelAgent(ctx, tx, config, stored.Connectors, stored.TestCopy()); err != nil {
 			return err
 		}
-		// The name the row had is read in the same statement, locked, so the one forgotten is
-		// the one a concurrent rename did not already replace.
-		was := tx.NewSelect().Model((*AgentConfig)(nil)).Column("name").
-			Where("id = ?", config.ID).
-			Where("customer_id = ?", config.CustomerID).
-			Where("deleted_at IS NULL").
-			For("UPDATE")
-		err = tx.NewUpdate().Model(config).
-			With("was", was).
-			TableExpr("was").
+		_, err = tx.NewUpdate().Model(config).
 			Column(configColumns...).
 			Where("ac.id = ?", config.ID).
 			Where("ac.customer_id = ?", config.CustomerID).
-			Returning("was.name").
-			Scan(ctx, &wasName)
+			Exec(ctx)
 		switch constraint(err) {
 		case "agent_configs_name_idx":
 			return ErrNameTaken
 		case "agent_configs_role_idx":
 			return ErrRoleTaken
 		}
-		if errors.Is(err, sql.ErrNoRows) {
-			return unknownAgentConfig(config.ID)
-		}
 		if err != nil {
 			return fmt.Errorf("store: update agent config: %w", err)
 		}
 		return nil
 	}, func() []string {
-		// Named once the write answered: a commit that fails can still have landed.
-		if wasName == "" {
+		// Named once the locked read found the row: a commit that fails can still have landed.
+		if stored.Name == "" {
 			return nil
 		}
 		return []string{
 			agentConfigKey(config.CustomerID, config.ID),
 			agentConfigNameKey(config.CustomerID, config.Name),
-			agentConfigNameKey(config.CustomerID, wasName),
+			agentConfigNameKey(config.CustomerID, stored.Name),
 		}
 	})
 	if err != nil {
-		return stack.Wrap(err)
+		return AgentConfig{}, stack.Wrap(err)
 	}
-	return nil
+	return stored, nil
+}
+
+// keepUnchanged puts into config the stored value of every column config holds as read held it,
+// so the save writes only what its caller changed. Both are normalized first, so a list the
+// caller left nil is not taken for one it emptied. sync_hash is always the caller's: whether
+// the config still holds the directory last synced is for each save to say, and a patch that
+// clears it must clear one a sync wrote since the patch's copy was read.
+func (r *AgentConfigs) keepUnchanged(read AgentConfig, config *AgentConfig, stored AgentConfig) {
+	normalizeConfig(&read)
+	table := r.store.global.Table(reflect.TypeFor[AgentConfig]())
+	was, now, held := reflect.ValueOf(&read).Elem(), reflect.ValueOf(config).Elem(), reflect.ValueOf(&stored).Elem()
+	for _, column := range configColumns {
+		if column == "updated_at" || column == "sync_hash" {
+			continue
+		}
+		field := table.FieldMap[column]
+		if reflect.DeepEqual(field.Value(now).Interface(), field.Value(was).Interface()) {
+			field.Value(now).Set(field.Value(held))
+		}
+	}
 }
 
 // Delete marks a config as gone. The row stays, because the calls that ran under it still name
@@ -686,8 +726,9 @@ func (r *AgentConfigs) where(ctx context.Context, customerID, column, value stri
 // FOR KEY SHARE, not FOR SHARE: it conflicts with the delete's FOR UPDATE and not with the
 // FOR NO KEY UPDATE a plain UPDATE of a non-key column takes (table 13.3,
 // https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS), so a config
-// save does not hold up a credential save. The connection is locked before the config row,
-// as in the delete, so the two never wait on each other in a cycle.
+// save does not hold up a credential save. A config write locks its own row before the
+// connection, and the delete locks no config row, so the two never wait on each other in a
+// cycle.
 func lockBoundConnections(ctx context.Context, tx bun.Tx, config *AgentConfig) ([]string, error) {
 	var bound []string
 	for _, binding := range config.Connectors {
@@ -722,11 +763,6 @@ func refuseUnbindable(missing []string, kept []ConnectorBinding) error {
 		}
 	}
 	return nil
-}
-
-// bindsAnyFixed reports whether a binding has a fixed connection.
-func bindsAnyFixed(bindings []ConnectorBinding) bool {
-	return slices.ContainsFunc(bindings, func(binding ConnectorBinding) bool { return binding.Connection.Type == "fixed" })
 }
 
 // boundConnectors are the connector ids bindings name.

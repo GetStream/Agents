@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -415,18 +416,19 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	config.KnowledgeNamespace = namespace
 	config.SyncHash = hash
 
+	var was any
 	if found {
-		if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+		// Onto the row as it now is, so a setting the directory does not declare keeps what
+		// the dashboard saved since existing was read, which may have come from the cache.
+		before, err := s.store.AgentConfigs.Save(ctx, existing, &config, time.Time{})
+		if err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
+		was = agentConfigOf(before)
 	} else {
 		if err := s.store.AgentConfigs.Insert(ctx, &config); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
-	}
-	var was any
-	if found {
-		was = agentConfigOf(existing)
 	}
 	synced := auditDiff(was, agentConfigOf(config))
 

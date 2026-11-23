@@ -377,13 +377,16 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+	// Written onto the row as it now is, so a field kept above from a copy read before another
+	// save, which may have come from the cache, does not write that save's change back.
+	before, err := s.store.AgentConfigs.Save(ctx, existing, &config, time.Time{})
+	if err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditAgentConfig, ResourceID: config.ID, ResourceName: config.Name,
-		Action: store.AuditUpdated, Changes: auditDiff(agentConfigOf(existing), stored),
+		Action: store.AuditUpdated, Changes: auditDiff(agentConfigOf(before), stored),
 	})
 	return &updateAgentConfigResponse{Body: stored}, nil
 }
@@ -604,6 +607,10 @@ var (
 	}
 )
 
+// errAgentConfigChanged is a patch made from a copy of the config older than the config: it
+// sent updated_at, and the config was saved after it.
+var errAgentConfigChanged = conflict("the agent config was saved after updated_at: read it again and make the change on that")
+
 // errAgentRoleTaken is a save that would give a second live agent config of the customer a
 // role another one holds. The one there is, agent_moderator, is what the chat worker finds the
 // app's moderator by, so two would leave it guessing.
@@ -649,7 +656,8 @@ func channelConnectionTaken(taken *store.ChannelConnectionTakenError) APIError {
 // choosing another name. A record, a connection or a custom connector that is not there, such
 // as one deleted after the request was checked, is the invalid request it has always been
 // answered with. A channel connection another live agent config binds is a 409 naming that
-// config. Anything else is the database failing rather than the
+// config, and an agent config saved after the copy a patch was made from is a 409 too.
+// Anything else is the database failing rather than the
 // caller, so err goes back as it is, to be answered as a 500 and recorded with its stack.
 func storeFailure(err error, taken APIError) error {
 	if owned, ok := errors.AsType[*store.ChannelConnectionTakenError](err); ok {
@@ -660,6 +668,8 @@ func storeFailure(err error, taken APIError) error {
 		return taken
 	case errors.Is(err, store.ErrRoleTaken):
 		return errAgentRoleTaken
+	case errors.Is(err, store.ErrAgentConfigChanged):
+		return errAgentConfigChanged
 	case errors.Is(err, store.ErrNoAgentConfig), errors.Is(err, store.ErrNoSkill),
 		errors.Is(err, store.ErrNoRouterConfig), errors.Is(err, store.ErrNoVoice),
 		errors.Is(err, store.ErrNoConnectorConnection), errors.Is(err, store.ErrNoConnectorDefinition):

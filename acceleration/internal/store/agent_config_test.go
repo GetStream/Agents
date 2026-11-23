@@ -80,6 +80,44 @@ func (s *StoreSuite) TestAnUpdateKeepsABindingAForcedDeleteLeftBehind() {
 	s.Equal([]ConnectorBinding{fixed(connection.ID)}, read.Connectors)
 }
 
+// A save wrote every column from the copy it was made from, so a column another save changed
+// since that copy was read went back to what the copy held.
+func (s *StoreSuite) TestASaveKeepsWhatAnotherSaveWroteSinceItsCopyWasRead() {
+	read := s.boundConfig("acme-app")
+	other := read
+	other.Greeting = "Hello."
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &other))
+
+	mine := read
+	mine.Instructions = "be brief"
+	before, err := s.store.AgentConfigs.Save(s.ctx, read, &mine, time.Time{})
+	s.Require().NoError(err)
+
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("be brief", stored.Instructions)
+	s.Equal("Hello.", stored.Greeting, "the other save's greeting is kept")
+	s.Equal("Hello.", mine.Greeting, "the config is left as stored")
+	s.Equal("Hello.", before.Greeting, "what it saved over is the row, not the copy")
+}
+
+// A save asked to refuse a config saved after its copy must not write over that save.
+func (s *StoreSuite) TestASaveFromACopyOlderThanTheConfigIsRefusedWhenAskedTo() {
+	read := s.boundConfig("acme-app")
+	other := read
+	other.Instructions = "be brief"
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &other))
+
+	mine := read
+	mine.Instructions = "be loud"
+	_, err := s.store.AgentConfigs.Save(s.ctx, read, &mine, read.UpdatedAt)
+	s.Require().ErrorIs(err, ErrAgentConfigChanged)
+
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("be brief", stored.Instructions)
+}
+
 func (s *StoreSuite) TestAConfigWithoutBindingsStoresAnEmptyList() {
 	created := s.boundConfig("acme-app")
 
@@ -282,8 +320,14 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	config.Instructions = "be brief"
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
-		"begin, the update and commit: a config that binds nothing locks no connection")
+	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
+		"begin, the locked read, the update and commit: a config that binds nothing locks no connection")
+	read := config
+	config.Greeting = "Hello."
+	s.Equal(4, s.countQueries(func() {
+		_, err := s.store.AgentConfigs.Save(s.ctx, read, &config, read.UpdatedAt)
+		s.Require().NoError(err)
+	}), "the same as an update: the change is made on the row the locked read returns")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)

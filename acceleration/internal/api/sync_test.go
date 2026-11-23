@@ -341,6 +341,46 @@ func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
 	s.NotContains(string(body), "deadline")
 }
 
+// A sync wrote every setting from the copy of the config it read, which can come from the
+// cache, so a model saved since that the directory does not declare went back to what the copy
+// held. The update below goes past the store, as a save the cache has not heard of yet.
+func (s *SyncSuite) TestASyncKeepsAModelSavedSinceItReadTheConfigThatItsDirectoryDoesNotDeclare() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief.", "llm": "llm-flow"}
+	synced := s.sync(declaration)
+	s.Require().True(s.sync(declaration).Unchanged, "read, and so cached, by name")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("llm = ?", "llm-thinking").Set("updated_at = now()").
+		Where("id = ?", synced.Config.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	result := s.sync(map[string]any{"name": "support", "hash": "v2", "instructions": "Be briefer."})
+
+	s.Equal("Be briefer.", value(result.Config.Instructions))
+	s.Equal("llm-thinking", value(result.Config.Llm), "the directory says nothing of the model")
+}
+
+// A patch clears the hash, so the next sync of the directory writes it again. Made on the row
+// as it stands, a patch whose copy was read before the last sync could leave that sync's hash,
+// and the next sync would find nothing changed. The hash goes past the store, as a sync the
+// cache has not heard of yet.
+func (s *SyncSuite) TestAPatchFromACopyReadBeforeASyncStillHasTheNextSyncWriteAgain() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief."}
+	synced := s.sync(declaration)
+	s.patch(synced.Config.Id, map[string]any{"instructions": "Be briefer."})
+	s.Require().Empty(s.configsNamed("support")[0].SyncHash)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+synced.Config.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("sync_hash = ?", "v1").Where("id = ?", synced.Config.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	s.patch(synced.Config.Id, map[string]any{"instructions": "Be loud."})
+	again := s.sync(declaration)
+
+	s.False(again.Unchanged)
+	s.Equal("Be brief.", value(again.Config.Instructions))
+}
+
 func (s *SyncSuite) TestASyncDeclaringAPageThatIsNotAFetchablePageIsRefusedInItsWords() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
 		"name": "librarian", "hash": "v1",
