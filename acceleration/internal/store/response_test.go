@@ -386,3 +386,82 @@ func (s *StoreSuite) TestAnotherCustomersFinishedTurnDoesNotMoveASessionsClock()
 	s.Equal(before.LastResponseAt, after.LastResponseAt, "app's session was not answered")
 	s.Equal(before.UpdatedAt, after.UpdatedAt)
 }
+
+func (s *StoreSuite) TestAnotherCustomersFinishOfAnAppsResponseDoesNotMoveItsSessionsClock() {
+	s.opened("one", "app", s.base, nil)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "mine", SessionID: "one", CustomerID: "app", CreatedAt: s.base}))
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Responses.Finish(s.ctx, "somebody-else", "mine", ResponseCompleted, "", s.base.Add(time.Hour)))
+
+	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before.LastResponseAt, after.LastResponseAt, "app's session was not answered")
+	s.Equal(before.UpdatedAt, after.UpdatedAt)
+}
+
+func (s *StoreSuite) TestTheSameCustomerWritingARowAgainUnderItsIdIsNotAnError() {
+	s.opened("one", "app", s.base, nil)
+	writes := map[string]func() error{
+		"Responses.Insert": func() error {
+			return s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "first", SessionID: "one", CustomerID: "app", CreatedAt: s.base})
+		},
+		"BranchSwitches.Insert": func() error {
+			return s.store.BranchSwitches.Insert(s.ctx, &AgentBranchSwitch{
+				ID: "switch", SessionID: "one", CustomerID: "app", Kind: SwitchEdit, TargetResponseID: "first",
+				ForkMessageID: "m-one", HiddenFrom: s.base, CreatedAt: s.base,
+			})
+		},
+		"ConversationDocuments.Insert": func() error {
+			return s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{
+				ID: "document", CustomerID: "app", OwnerUserID: "jlahey", SessionID: "one",
+				Name: "document.pdf", SHA256: "digest", Markdown: "text", CreatedAt: s.base,
+			})
+		},
+	}
+	for _, name := range []string{"Responses.Insert", "BranchSwitches.Insert", "ConversationDocuments.Insert"} {
+		s.Run(name, func() {
+			s.Require().NoError(writes[name]())
+			s.NoError(writes[name](), "a retry of the customer's own row")
+		})
+	}
+}
+
+func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
+	at := s.base.Add(time.Hour)
+	writes := map[string]func() error{
+		"Sessions.Close":          func() error { return s.store.Sessions.Close(s.ctx, "", "one", at, "hangup") },
+		"Sessions.SetToolTimeout": func() error { return s.store.Sessions.SetToolTimeout(s.ctx, "", "one", "user", 5_000) },
+		"Sessions.SawVideo":       func() error { return s.store.Sessions.SawVideo(s.ctx, "", "one") },
+		"Sessions.Voiced":         func() error { return s.store.Sessions.Voiced(s.ctx, "", "one") },
+		"Responses.Finish": func() error {
+			return s.store.Responses.Finish(s.ctx, "", "one", ResponseCompleted, "", at)
+		},
+		"Calls.Finish":       func() error { return s.store.Calls.Finish(s.ctx, "", "one", at) },
+		"Calls.ChangeModels": func() error { return s.store.Calls.ChangeModels(s.ctx, &Call{ID: "one", LLM: "openai/gpt-5"}) },
+		"Recordings.Start":   func() error { return s.store.Recordings.Start(s.ctx, "", "one", "deepgram", "nova-3") },
+		"Recordings.Finish": func() error {
+			return s.store.Recordings.Finish(s.ctx, "", "one", "deepgram", "nova-3", nil, nil)
+		},
+		"ScheduledTaskRuns.FinishManual": func() error {
+			return s.store.ScheduledTaskRuns.FinishManual(s.ctx, "", "one", "delivered", "", "", "")
+		},
+		"ConnectorConnections.PutClient": func() error {
+			return s.store.ConnectorConnections.PutClient(s.ctx, "", "one", ConnectorConnectionClient{ClientID: "client"})
+		},
+		"ConnectorConnections.PutValidation": func() error {
+			return s.store.ConnectorConnections.PutValidation(s.ctx, "", "one",
+				ConnectorConnectionValidation{Status: "ok", CheckedAt: at})
+		},
+		"SimulationRuns.Finish": func() error { return s.store.SimulationRuns.Finish(s.ctx, SimulationRun{ID: "one"}) },
+		"CampaignAttempts.End": func() error {
+			return s.store.CampaignAttempts.End(s.ctx, "", "one", "answered", "", "", "", at, nil)
+		},
+	}
+	for name, write := range writes {
+		s.Run(name, func() {
+			s.Error(write(), "a write naming no customer would match only rows with none")
+		})
+	}
+}

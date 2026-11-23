@@ -140,6 +140,10 @@ type sessionRecorder struct {
 
 	closeOnce sync.Once
 	dropped   atomic.Int64
+	// refused are the turns, by response id, whose row the store refused because the id is
+	// another customer's: their items are not written under it. Kept by the writer alone, and
+	// each until its turn ends.
+	refused map[string]struct{}
 }
 
 func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecorder {
@@ -149,6 +153,7 @@ func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecor
 		queue:   make(chan recordWrite, recordQueueSize),
 		flushes: make(chan chan (<-chan struct{})),
 		done:    make(chan struct{}),
+		refused: map[string]struct{}{},
 	}
 	go r.run()
 	return r
@@ -312,7 +317,11 @@ func (r *sessionRecorder) run() {
 			}
 			taken++
 			if len(write.items) > 0 {
-				pending = append(pending, write.items...)
+				for _, item := range write.items {
+					if _, refused := r.refused[item.ResponseID]; !refused {
+						pending = append(pending, item)
+					}
+				}
 				if len(pending) >= itemBatchSize {
 					r.writeItems(pending)
 					pending = pending[:0]
@@ -395,10 +404,15 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session ending", "error", err)
 		}
 	case write.response != nil:
-		if err := r.store.Responses.Insert(ctx, write.response); err != nil {
+		err := r.store.Responses.Insert(ctx, write.response)
+		if errors.Is(err, store.ErrIDTaken) {
+			r.refused[write.response.ID] = struct{}{}
+		}
+		if err != nil {
 			r.logger.Error("could not record the turn starting", "error", err)
 		}
 	case write.finished != "":
+		delete(r.refused, write.finished)
 		if err := r.store.Responses.Finish(ctx, write.customerID, write.finished, write.status, write.failure, write.finishedAt); err != nil {
 			r.logger.Error("could not record the turn ending", "error", err)
 		}

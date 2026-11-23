@@ -885,7 +885,7 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 
 ### A session's later writes touch only its own app's rows
 
-Closing a session, recording its tools, tool timeout, video and voice, finishing its turns and calls, and moving a call onto other models now change only the rows of the app the session belongs to, even when another app's session has the same id. The same holds for a recording job, a scheduled task run made by hand, a connection's OAuth client and validation, a simulation run and a campaign dial. A turn, branch switch or attached document written under an id another app's row already has is refused instead of reported as written.
+Closing a session, recording its tools, tool timeout, video and voice, finishing its turns and calls, and moving a call onto other models now change only the rows of the app the session belongs to, even when another app's session has the same id. The same holds for a recording job, a scheduled task run made by hand, a connection's OAuth client and validation, a simulation run and a campaign dial. A turn, branch switch or attached document written under an id another app's row already has is refused instead of reported as written: a refused switch is answered with a 409, and a refused turn's items are not written.
 
 ### A request counts only toward its own organization's spend grants
 
