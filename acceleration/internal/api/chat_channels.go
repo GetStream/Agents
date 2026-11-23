@@ -19,7 +19,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
-// A channel of a type an agent config names (store.AgentConfig.ChatChannels), such as a team's
+// A channel of a type an agent config names (store.AgentConfig.Channels.Chat), such as a team's
 // group channel, is answered by the Router itself, as a thread channel is:
 //
 //	message.new, no source, in callouts:team-1          receiveMessageEvent, receiveChatInbound
