@@ -109,7 +109,7 @@ type Proxy struct {
 	dial      func(ctx context.Context, network, address string) (net.Conn, error)
 	logger    *slog.Logger
 
-	handshakeTimeout, keepAliveTimeout, dryRunTimeout time.Duration
+	handshakeTimeout, keepAliveTimeout, headerTimeout, dryRunTimeout time.Duration
 
 	now func() time.Time
 	// leaves holds each host's certificate until it is half of leafValidity old, so a handshake
@@ -159,6 +159,7 @@ func New(options Options) (*Proxy, error) {
 	return &Proxy{store: options.Store, tokens: options.Tokens, ca: pair.Leaf, caKey: caKey, leafKey: leafKey,
 		transport: outbound{next: transport, headerTimeout: cmp.Or(options.HeaderTimeout, headerTimeout)}, dial: dial, logger: options.Logger,
 		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout),
+		headerTimeout:    cmp.Or(options.HeaderTimeout, headerTimeout),
 		keepAliveTimeout: cmp.Or(options.KeepAliveTimeout, keepAliveTimeout),
 		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, leaves: leaves{byHost: map[string]keptLeaf{}}}, nil
 }
@@ -425,6 +426,8 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			p.refuseWrite(w, r, t, logger, record.readsSQL(host), why)
 			return
 		}
+		// A host's GOAWAY can leave the request unprocessed; a body kept in memory lets Go send it again.
+		resendable(w, r, p.headerTimeout)
 		forward := &httputil.ReverseProxy{
 			Rewrite:   func(pr *httputil.ProxyRequest) { p.toHost(pr, t) },
 			Transport: timed{next: p.transport, host: t.label},

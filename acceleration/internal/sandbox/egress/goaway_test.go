@@ -1,0 +1,210 @@
+//go:build integration
+
+package egress_test
+
+import (
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"golang.org/x/net/http2"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/egress"
+)
+
+// keptBody is the most of a request's body the proxy keeps to send it again (maxResentBody).
+const keptBody = 1 << 20
+
+// goAwayOrigin is an HTTP/2 host whose first connection answers its first request, once a DATA frame of its body
+// has come and more is to follow, with a GOAWAY that names no stream as processed: last stream id 0 and NO_ERROR,
+// the graceful close after which RFC 9113 section 6.8 lets a client send the request again. Every later connection
+// is Go's HTTP/2 server, which answers 200 and keeps the SHA-256 of each body it read whole.
+type goAwayOrigin struct {
+	conns  atomic.Int32
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (s *ProxySuite) goAwayOrigin() *goAwayOrigin {
+	origin := &goAwayOrigin{}
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{NextProtos: []string{http2.NextProtoTLS},
+		Certificates: []tls.Certificate{sign(s.T(), s.upstreamCA, s.upstreamKey, "*.github.test", "github.test")}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = listener.Close() })
+	server := &http2.Server{}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		origin.mu.Lock()
+		origin.bodies = append(origin.bodies, digest(body))
+		origin.mu.Unlock()
+		_, _ = io.WriteString(w, "processed")
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			first := origin.conns.Add(1) == 1
+			go func() {
+				defer conn.Close()
+				// ServeConn reads the TLS version and ALPN of a finished handshake.
+				if conn.(*tls.Conn).Handshake() != nil {
+					return
+				}
+				if first {
+					origin.goAway(conn)
+					return
+				}
+				server.ServeConn(conn, &http2.ServeConnOpts{Handler: handler})
+			}()
+		}
+	}()
+	s.answerAt(listener.Addr().String())
+	return origin
+}
+
+// goAway serves conn as an HTTP/2 host that starts a graceful shutdown in the middle of the first request's body,
+// then reads on until the client closes, as a host draining its connection does.
+func (o *goAwayOrigin) goAway(conn net.Conn) {
+	preface := make([]byte, len(http2.ClientPreface))
+	if _, err := io.ReadFull(conn, preface); err != nil || string(preface) != http2.ClientPreface {
+		return
+	}
+	framer := http2.NewFramer(conn, conn)
+	if framer.WriteSettings() != nil {
+		return
+	}
+	sent := false
+	for {
+		frame, err := framer.ReadFrame()
+		if err != nil {
+			return
+		}
+		switch frame := frame.(type) {
+		case *http2.SettingsFrame:
+			if !frame.IsAck() && framer.WriteSettingsAck() != nil {
+				return
+			}
+		case *http2.DataFrame:
+			if !sent && !frame.StreamEnded() {
+				sent = true
+				if framer.WriteGoAway(0, http2.ErrCodeNo, nil) != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (o *goAwayOrigin) processed() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.bodies...)
+}
+
+// overHTTP2 has the proxy reach its hosts over HTTP/2, as the router's transport does with a host that offers it
+// (http.DefaultTransport, which NewUnpooledClient clones, sets ForceAttemptHTTP2).
+func (s *ProxySuite) overHTTP2() {
+	s.proxy.Close()
+	s.proxy = httptest.NewServer(s.newProxy(s.store, func(options *egress.Options) {
+		options.Transport.(*http.Transport).ForceAttemptHTTP2 = true
+	}))
+	s.T().Cleanup(s.proxy.Close)
+}
+
+// readsUploadPack grants api.github.test with git-upload-pack as a read, a POST the proxy forwards as it came.
+func (s *ProxySuite) readsUploadPack() {
+	grant := s.grant(s.placeholder, "api.github.test")
+	grant.Reads = []core.SandboxRead{{Host: "api.github.test", Method: http.MethodPost, Path: "/*/*/git-upload-pack"}}
+	s.put(s.credential, egress.Record{Session: s.session, Grants: []egress.Grant{grant}})
+}
+
+// unsized hides a body's length from net/http, which then sends it chunked.
+type unsized struct{ io.Reader }
+
+// TestARequestAnHTTP2HostLeftUnprocessedIsSentAgain: a host that sends GOAWAY in the middle of a forwarded body, and
+// says it processed nothing, gets the request again on a new connection, and the sandbox its answer. On the base
+// (18962cc3e) the sandbox got a 502 with no body, the proxy logged «got no answer it could read from a host», and
+// Go sent nothing again: one connection, no request processed.
+func (s *ProxySuite) TestARequestAnHTTP2HostLeftUnprocessedIsSentAgain() {
+	s.readsUploadPack()
+	for _, size := range []int{32 << 10, keptBody} {
+		for _, chunked := range []bool{false, true} {
+			for _, authorization := range []string{"Bearer " + s.placeholder, ""} {
+				what := fmt.Sprint(size, " ", boolName("chunked", chunked), " ", authorization)
+				s.overHTTP2()
+				origin := s.goAwayOrigin()
+				body := strings.Repeat("0032want ", size/9) + strings.Repeat("x", size%9)
+				var reader io.Reader = strings.NewReader(body)
+				if chunked {
+					reader = unsized{reader}
+				}
+				request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "https://api.github.test/o/r.git/git-upload-pack", reader)
+				s.Require().NoError(err)
+				if authorization != "" {
+					request.Header.Set("Authorization", authorization)
+				}
+
+				response, answer, err := s.send(s.sandbox(s.credential), request)
+
+				s.Require().NoError(err, what)
+				s.Equal(http.StatusOK, response.StatusCode, what)
+				s.Equal("processed", answer, what)
+				s.Equal([]string{digest([]byte(body))}, origin.processed(), what)
+				s.Equal(int32(2), origin.conns.Load(), what)
+			}
+		}
+	}
+}
+
+// TestARequestOverTheKeptSizeIsNotSentAgain is the bound: a body over keptBody streams as it comes, so the proxy
+// cannot send it again, and the sandbox gets the 502 it got on the base (18962cc3e) for any body.
+func (s *ProxySuite) TestARequestOverTheKeptSizeIsNotSentAgain() {
+	s.readsUploadPack()
+	for _, chunked := range []bool{false, true} {
+		s.overHTTP2()
+		origin := s.goAwayOrigin()
+		var reader io.Reader = strings.NewReader(strings.Repeat("x", keptBody+1))
+		if chunked {
+			reader = unsized{reader}
+		}
+		request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "https://api.github.test/o/r.git/git-upload-pack", reader)
+		s.Require().NoError(err)
+		request.Header.Set("Authorization", "Bearer "+s.placeholder)
+
+		response, answer, err := s.send(s.sandbox(s.credential), request)
+
+		s.Require().NoError(err, boolName("chunked", chunked))
+		s.Equal(http.StatusBadGateway, response.StatusCode, boolName("chunked", chunked))
+		s.Empty(answer, boolName("chunked", chunked))
+		s.Empty(origin.processed(), boolName("chunked", chunked))
+		s.Equal(int32(1), origin.conns.Load(), boolName("chunked", chunked))
+	}
+	s.Contains(s.logs.String(), "got no answer it could read from a host")
+}
+
+func digest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func boolName(name string, value bool) string {
+	if value {
+		return name
+	}
+	return "not " + name
+}
