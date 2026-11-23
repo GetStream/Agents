@@ -76,7 +76,9 @@ func (r *heldRecorder) Flush(context.Context) error { return nil }
 
 func (r *heldRecorder) Opened(store.AgentSession, []store.ToolDefinition) {}
 
-func (r *heldRecorder) Closed(string, string, time.Time, EndReason) {}
+func (r *heldRecorder) CarriedOn(store.AgentSession, []store.ToolDefinition) {}
+
+func (r *heldRecorder) Closed(string, string, time.Time, time.Time, EndReason) {}
 
 func (r *heldRecorder) Close() {}
 
@@ -472,6 +474,19 @@ func (s *RecordSuite) TestTheRowSaysWhoseSessionItIsRatherThanWhoTheAgentJoinedA
 	s.Equal("Health", row.Project)
 	s.Equal("A refund", row.Title)
 	s.Equal(store.SessionRunning, row.State)
+}
+
+func (s *RecordSuite) TestTheRowOfASessionCarriedOnIsOpenedWhenThisRouterOpenedIt() {
+	first := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	began := first.Add(time.Hour).Add(1500 * time.Nanosecond)
+	carried := &Session{id: "session-1", created: first, began: began,
+		spec: Spec{CustomerID: "acme", Reopened: first}}
+
+	row := sessionRow(carried)
+
+	s.Equal(first, row.CreatedAt, "created when it first opened")
+	s.Equal(began.Truncate(time.Microsecond), row.OpenedAt,
+		"opened by this router now, so the close of the run before leaves it open")
 }
 
 func (s *RecordSuite) TestMatchesLiveAnswersTheSameFiltersAsTheStore() {
