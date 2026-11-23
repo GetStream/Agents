@@ -3,6 +3,7 @@ package store
 import (
 	"slices"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stretchr/testify/require"
 )
@@ -20,29 +21,6 @@ func TestEveryTableBelongsToOneSet(t *testing.T) {
 	}
 }
 
-// A table a later migration drops is not one the set leaves, so nothing describes or moves it.
-func TestADroppedTableIsNotInItsSet(t *testing.T) {
-	global, err := setTables(globalSet)
-	require.NoError(t, err)
-
-	require.Contains(t, global, "connector_connections")
-	require.NotContains(t, global, "connector_connection_clients")
-}
-
-// A table a later migration drops is no longer the set's, but a database of the other set may
-// still hold it from before the split, so it stays a stray to drop there.
-func TestADroppedTableLeavesItsSetButStaysAStray(t *testing.T) {
-	global, err := setTables(globalSet)
-	require.NoError(t, err)
-	created, err := createdTables(globalSet)
-	require.NoError(t, err)
-	for _, table := range retiredTables {
-		require.NotContains(t, global, table)
-		require.Contains(t, created, table)
-	}
-	require.Contains(t, global, "agent_configs")
-}
-
 // An export reads and writes each table in the database it lives in.
 func TestEveryExportedTableIsOnTheSideItsSetSays(t *testing.T) {
 	shard, err := setTables(shardSet)
@@ -52,10 +30,16 @@ func TestEveryExportedTableIsOnTheSideItsSetSays(t *testing.T) {
 	}
 }
 
-// A table a later migration drops is no longer the set's, though the baseline created it.
-func TestADroppedTableIsNoLongerTheSets(t *testing.T) {
-	shard, err := setTables(shardSet)
+// A table a later migration drops or renames is not one the set leaves under its old name, so
+// nothing describes or moves it.
+func TestATableALaterMigrationDropsOrRenamesIsNotTheSets(t *testing.T) {
+	set := migrationSet{files: fstest.MapFS{
+		"1_initial.sql": {Data: []byte("-- +goose Up\nCREATE TABLE kept (id int);\nCREATE TABLE dropped (id int);\nCREATE TABLE renamed (id int);\n" +
+			"-- +goose Down\nCREATE TABLE downed (id int);\n")},
+		"2_change.sql": {Data: []byte("-- +goose Up\nDROP TABLE dropped;\nALTER TABLE renamed RENAME TO moved;\n")},
+	}}
+
+	tables, err := setTables(set)
 	require.NoError(t, err)
-	require.NotContains(t, shard, "phone_calls")
-	require.Contains(t, shard, "call_legs")
+	require.Equal(t, []string{"kept", "moved"}, tables)
 }

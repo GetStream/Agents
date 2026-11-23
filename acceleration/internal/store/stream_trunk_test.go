@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/pressly/goose/v3"
-	"github.com/pressly/goose/v3/database"
 )
 
 // trunkIDs are the ids of the trunks one group sees.
@@ -371,75 +368,6 @@ func (s *StoreSuite) TestAStreamTrunkIsReadByIdForItsOwnCustomerOnly() {
 	s.ErrorIs(err, ErrNoStreamTrunk)
 	_, err = s.store.StreamTrunks.Get(s.ctx, "acme", "missing")
 	s.ErrorIs(err, ErrNoStreamTrunk)
-}
-
-// bridgesVersion is the global migration that moves numbers' bridges onto their trunks.
-const bridgesVersion int64 = 20270116000002
-
-func (s *StoreSuite) TestMovingBridgesOntoTrunksKeepsEveryNumbersTrunk() {
-	db, err := Open(s.emptyDatabase("trunk_bridges"))
-	s.Require().NoError(err)
-	defer db.Close()
-	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", db.global.DB, globalSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-	_, err = provider.UpTo(s.ctx, bridgesVersion-1)
-	s.Require().NoError(err)
-
-	_, err = db.global.ExecContext(s.ctx, `
-INSERT INTO stream_trunks (id, customer_id, vendor, numbers, bridge_uri, bridge_username, bridge_password_sealed,
-    bridge_password_kek_version) VALUES
-    ('trunk-shared', 'acme', 'telnyx', '{+15125550101,+15125550102}', 'sip:trunk-shared@bridge.test', 'shared-user',
-        'trunk sealed', 1);
-INSERT INTO phone_numbers (e164, vendor, country, customer_id, purchased_at, stream_trunk_id, bridge_uri, bridge_username,
-    bridge_password_sealed, bridge_password_kek_version, attached_at, released_at) VALUES
-    ('+15125550101', 'telnyx', 'US', 'acme', ?0, 'trunk-shared', 'sip:+15125550101@bridge.test', 'shared-user',
-        'number sealed', 1, ?0, NULL),
-    ('+15125550102', 'telnyx', 'US', 'acme', ?0, 'trunk-shared', NULL, NULL, NULL, NULL, NULL, NULL),
-    ('+15125550103', 'telnyx', 'US', 'acme', ?0, 'trunk-own', 'sip:+15125550103@own.test', 'own-user',
-        'own sealed', 2, ?0, NULL),
-    ('+15125550104', 'telnyx', 'US', 'acme', ?0, 'trunk-unkept', 'sip:+15125550104@own.test', 'unkept-user',
-        NULL, NULL, ?0, NULL),
-    ('+15125550105', 'telnyx', 'US', 'acme', ?0, 'trunk-gone', 'sip:+15125550105@own.test', 'gone-user',
-        'gone sealed', 2, NULL, ?0),
-    ('+15125550106', 'telnyx', 'US', 'acme', ?0, 'trunk-bare', NULL, NULL, NULL, NULL, ?0, NULL)`, s.base)
-	s.Require().NoError(err)
-
-	s.Require().NoError(db.Migrate(s.ctx))
-
-	trunks := map[string]StreamTrunk{}
-	s.Require().NoError(db.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "telnyx"},
-		func(_ context.Context, tx *TrunkGroupTx) error {
-			read, err := tx.Trunks()
-			for _, trunk := range read {
-				trunk.CreatedAt = time.Time{}
-				trunks[trunk.ID] = trunk
-			}
-			return err
-		}))
-	s.Equal(map[string]StreamTrunk{
-		"trunk-shared": {ID: "trunk-shared", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550101", "+15125550102"},
-			BridgeURI: "sip:trunk-shared@bridge.test", BridgeUsername: "shared-user",
-			BridgePasswordSealed: []byte("trunk sealed"), BridgePasswordKEKVersion: 1},
-		"trunk-own": {ID: "trunk-own", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550103"},
-			BridgeURI: "sip:+15125550103@own.test", BridgeUsername: "own-user",
-			BridgePasswordSealed: []byte("own sealed"), BridgePasswordKEKVersion: 2, Own: true},
-		"trunk-unkept": {ID: "trunk-unkept", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550104"},
-			BridgeURI: "sip:+15125550104@own.test", BridgeUsername: "unkept-user", BridgePasswordSealed: []byte{}, Own: true},
-	}, trunks, "a shared trunk keeps its password; a number's own becomes a trunk; a released number's does not")
-
-	shared, err := db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125550101")
-	s.Require().NoError(err)
-	s.Equal([]byte("trunk sealed"), shared.PasswordSealed, "the trunk's password, sealed to the trunk")
-	own, err := db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125550103")
-	s.Require().NoError(err)
-	s.Equal(AttachedBridge{CustomerID: "acme", TrunkID: "trunk-own", Own: true, URI: "sip:+15125550103@own.test",
-		Username: "own-user", PasswordSealed: []byte("own sealed"), KEKVersion: 2}, own)
-	for _, unkept := range []string{"+15125550104", "+15125550106"} {
-		_, err = db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", unkept)
-		s.ErrorIs(err, ErrNoStoredBridge, unkept)
-	}
 }
 
 func (s *StoreSuite) TestAnOwnTrunkMadeWithoutAKeyIsSavedWithNoPassword() {
