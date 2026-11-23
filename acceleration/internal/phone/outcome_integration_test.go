@@ -80,6 +80,11 @@ func (s *OutcomeSuite) SetupTest() {
 // build builds the service over a fresh customer whose number is at vendor, reachable at
 // publicURL.
 func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
+	s.buildGated(vendor, publicURL, dlc.NewGate(s.store, s.redis, dlc.Sandbox{}, nil))
+}
+
+// buildGated is build with calls let through by gate.
+func (s *OutcomeSuite) buildGated(vendor Provider, publicURL string, gate *dlc.Gate) {
 	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 	recorder := routing.NewRecorder(routing.Phone, s.store, nil, list, slog.New(slog.DiscardHandler))
@@ -98,7 +103,7 @@ func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
 	s.service, err = NewService(ServiceOptions{
 		Registry: registry, Store: s.store, Recorder: recorder, PublicURL: publicURL, Now: s.clock.now,
 		Apps:   &testApps{deployment: deployment, own: map[string]*chattest.Server{}, pins: map[string]int64{}, blocked: map[string]bool{}},
-		Gate:   dlc.NewGate(s.store, s.redis, dlc.Sandbox{}, nil),
+		Gate:   gate,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	s.Require().NoError(err)

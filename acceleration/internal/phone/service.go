@@ -1053,7 +1053,8 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			return Placed{}, err
 		}
 	}
-	if err := s.gate.Allow(ctx, request.Owner.CustomerID, dlc.Voice, request.To); err != nil {
+	room, err := s.gate.AllowCall(ctx, request.Owner.CustomerID, request.To)
+	if err != nil {
 		return Placed{}, stack.Wrap(err)
 	}
 	stream, pin, err := s.streamFor(ctx, request.Owner.CustomerID)
@@ -1204,16 +1205,16 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	// a customer's own trunk is told by the router's own bridge.
 	_, reader := provider.(StatusReader)
 	reports := reader && s.publicURL != ""
-	token, err := s.outcomes.Placed(ctx, outcome.Call{
+	token, err := s.outcomes.PlacedWithin(ctx, outcome.Call{
 		Key: outcome.Key{
 			CustomerID: request.Owner.CustomerID, StreamAppPK: pin, CallType: callType, CallID: callID,
 			Local: request.From, Remote: request.To,
 		},
 		Vendor:  held.Vendor,
 		Reports: reports || trunk != nil,
-	})
+	}, room.OrganizationID, room.AtOnce)
 	if err != nil {
-		return Placed{}, err
+		return Placed{}, room.Refusal(err)
 	}
 	if reports {
 		outbound.StatusURL = s.publicURL + "/v1/phone/status/" + token

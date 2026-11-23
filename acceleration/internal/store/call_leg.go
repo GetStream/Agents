@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -125,6 +127,9 @@ func (l CallLeg) Used() pricing.Quantities {
 // CallLegs are the legs of phone calls, each on the shard that opened it.
 type CallLegs struct {
 	store *Store
+	// stripes are the turns PlaceWithin waits for, an organization's always the same one.
+	stripes     [placingStripes]chan struct{}
+	stripesOnce sync.Once
 }
 
 // Open records a leg of a call in this shard: an outbound one ringing, an inbound one
@@ -497,29 +502,16 @@ func (r *CallLegs) endLegs(ctx context.Context, where func(*bun.UpdateQuery) *bu
 }
 
 // CountOpen is how many legs of an organization's calls are up or ringing now, in every
-// shard: open, with their phone joined or dialed since ringingSince, so a leg whose answer was
-// never heard drops out once it could no longer be ringing. inCall is how many of those are
-// legs of the call callType:callID, none when it is empty. A leg with no organization is never
-// counted.
+// shard: open, with their phone joined, or dialed or placed since ringingSince, so a leg whose
+// answer was never heard drops out once it could no longer be ringing. inCall is how many of
+// those are legs of the call callType:callID, none when it is empty. A leg with no organization
+// is never counted.
 func (r *CallLegs) CountOpen(ctx context.Context, organizationID string, ringingSince time.Time, callType, callID string) (total, inCall int, err error) {
 	if organizationID == "" {
 		return 0, 0, nil
 	}
-	type counted struct {
-		Total  int `bun:"total"`
-		InCall int `bun:"in_call"`
-	}
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (counted, error) {
-		var found counted
-		err := db.NewSelect().Model((*CallLeg)(nil)).
-			ColumnExpr("count(*) AS total").
-			ColumnExpr("count(*) FILTER (WHERE call_type = ? AND call_id = ?) AS in_call", callType, callID).
-			Where("organization_id = ?", organizationID).Where("ended_at IS NULL").
-			WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
-				return q.Where("started_at IS NOT NULL").WhereOr("dialed_at > ?", ringingSince.UTC())
-			}).
-			Scan(ctx, &found)
-		return found, err
+	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (openCount, error) {
+		return countOpen(ctx, db, organizationID, ringingSince, callType, callID)
 	})
 	if err != nil {
 		return 0, 0, stack.Wrap(fmt.Errorf("store: open call legs: %w", err))
@@ -531,6 +523,27 @@ func (r *CallLegs) CountOpen(ctx context.Context, organizationID string, ringing
 		}
 	}
 	return total, inCall, nil
+}
+
+// openCount is what countOpen counts in one shard.
+type openCount struct {
+	Total  int `bun:"total"`
+	InCall int `bun:"in_call"`
+}
+
+// countOpen is CountOpen in the shard db.
+func countOpen(ctx context.Context, db bun.IDB, organizationID string, ringingSince time.Time, callType, callID string) (openCount, error) {
+	var found openCount
+	err := db.NewSelect().Model((*CallLeg)(nil)).
+		ColumnExpr("count(*) AS total").
+		ColumnExpr("count(*) FILTER (WHERE call_type = ? AND call_id = ?) AS in_call", callType, callID).
+		Where("organization_id = ?", organizationID).Where("ended_at IS NULL").
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.Where("started_at IS NOT NULL").WhereOr("dialed_at > ?", ringingSince.UTC()).
+				WhereOr("placed_at > ?", ringingSince.UTC())
+		}).
+		Scan(ctx, &found)
+	return found, err
 }
 
 // Sweep ends the legs of this shard open longer than longest at now: one whose phone
@@ -672,6 +685,17 @@ func (w PlacedWhere) on(q *bun.SelectQuery) *bun.SelectQuery {
 // Place keeps the outbound leg of a call this shard is about to dial, with its Token and
 // PlacedAt, so the vendor's posts about it find it from the moment it is asked. Open dials it.
 func (r *CallLegs) Place(ctx context.Context, leg *CallLeg) error {
+	if err := placeable(leg); err != nil {
+		return err
+	}
+	if _, err := r.store.shard.NewInsert().Model(leg).Returning("id").Exec(ctx); err != nil {
+		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
+	}
+	return nil
+}
+
+// placeable refuses a leg Place cannot keep, and gives it the hash of its Token.
+func placeable(leg *CallLeg) error {
 	if err := leg.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -685,10 +709,106 @@ func (r *CallLegs) Place(ctx context.Context, leg *CallLeg) error {
 		return stack.Wrap(invalid)
 	}
 	leg.TokenHash = callTokenHash(leg.Token)
-	if _, err := r.store.shard.NewInsert().Model(leg).Returning("id").Exec(ctx); err != nil {
+	return nil
+}
+
+// ErrCallsAtOnce is a leg PlaceWithin did not keep: its organization already has as many calls
+// up or ringing as it may have at once.
+var ErrCallsAtOnce = errors.New("store: the organization has as many calls up as it may have at once")
+
+// CallsAtOnce is how many of an organization's calls may be up or ringing at once: Limit legs
+// as CountOpen counts them, a leg rung or placed less than Ringing before the one being placed
+// counting as ringing.
+type CallsAtOnce struct {
+	Limit   int
+	Ringing time.Duration
+}
+
+// callsAtOnceLockSeed seeds the advisory lock an organization's calls are counted and placed
+// under, one at a time.
+const callsAtOnceLockSeed = 1907
+
+// placingStripes is how many organizations a router counts and places calls for at once.
+const placingStripes = 64
+
+// PlaceWithin is Place for a leg of leg.OrganizationID that only its calls at once leave room
+// for: it counts the organization's open legs in every shard and keeps leg, or refuses it with
+// ErrCallsAtOnce, as one step. The step holds an advisory lock on the organization in the shared
+// database until the leg is kept, so two calls placed at once, from any router, never both see
+// the last free one.
+func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAtOnce) error {
+	if err := placeable(leg); err != nil {
+		return err
+	}
+	if leg.OrganizationID == "" {
+		return stack.Wrap(validate("call leg").required("organization_id", leg.OrganizationID).done())
+	}
+	// A campaign tick places many calls of one organization at once, and each waiting on the
+	// advisory lock holds a connection of the shared database's pool; waiting here first keeps a
+	// router to one per organization, so a burst cannot take the pool every request needs.
+	release, err := r.placing(ctx, leg.OrganizationID)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
+	}
+	defer release()
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
+			return err
+		}
+		// This shard's count and insert run in the lock's own transaction when the shard is the
+		// shared database, so the step never waits on a second connection of the pool it holds one of.
+		var own bun.IDB = r.store.shard
+		if r.store.shard == r.store.global {
+			own = tx
+		}
+		dbs := append([]bun.IDB{own}, r.store.shards()[1:]...)
+		counts := make([]openCount, len(dbs))
+		failed := make([]error, len(dbs))
+		since := leg.PlacedAt.Add(-atOnce.Ringing)
+		var wg sync.WaitGroup
+		for i, db := range dbs {
+			wg.Go(func() { counts[i], failed[i] = countOpen(ctx, db, leg.OrganizationID, since, "", "") })
+		}
+		wg.Wait()
+		if err := errors.Join(failed...); err != nil {
+			return err
+		}
+		open := 0
+		for _, count := range counts {
+			open += count.Total
+		}
+		if open >= atOnce.Limit {
+			return ErrCallsAtOnce
+		}
+		_, err := own.NewInsert().Model(leg).Returning("id").Exec(ctx)
+		return err
+	})
+	if errors.Is(err, ErrCallsAtOnce) {
+		return stack.Wrap(ErrCallsAtOnce)
+	}
+	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
 	}
 	return nil
+}
+
+// placing waits for this router's turn to count and place a call of organization, until ctx
+// ends, and returns what gives the turn up.
+func (r *CallLegs) placing(ctx context.Context, organization string) (func(), error) {
+	r.stripesOnce.Do(func() {
+		for i := range r.stripes {
+			r.stripes[i] = make(chan struct{}, 1)
+		}
+	})
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(organization)) // a hash.Hash never fails to write
+	stripe := r.stripes[h.Sum32()%placingStripes]
+	select {
+	case stripe <- struct{}{}:
+		return func() { <-stripe }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Unplace deletes the placed leg with token, from whichever shard holds it, while it is not
