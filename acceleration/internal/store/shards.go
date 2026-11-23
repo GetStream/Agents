@@ -128,18 +128,52 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 	return found, nil
 }
 
+// peerReadTimeout bounds a read of another shard's database that one shard's answer can settle
+// (answeringShards). Each is one indexed lookup, answered in milliseconds by a peer that is up,
+// even across regions. A peer partitioned away would otherwise hold the caller for pgdriver's
+// 5 s dial timeout, or its 10 s read timeout on a host that accepts and never answers, and the
+// callers here are a vendor and Stream waiting on a call.
+const peerReadTimeout = 2 * time.Second
+
 // answeringShards reads every shard's database at once, as everyShard does, for a read one
 // shard's answer can settle: it returns what each shard answered and, apart, how each that
 // did not answer failed, this shard's first. A shard down then costs only what is on it.
-func answeringShards[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
+//
+// Another shard's read is given peerReadTimeout. Once an answer settles the read, the others
+// are cancelled and not waited for: their entries stay zero, and are not failures.
+func answeringShards[T any](ctx context.Context, s *Store, settles func(T) bool, read func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
 	all := s.shards()
 	found := make([]T, len(all))
 	failed := make([]error, len(all))
-	var wg sync.WaitGroup
-	for i, db := range all {
-		wg.Go(func() { found[i], failed[i] = read(ctx, db) })
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		shard int
+		found T
+		err   error
 	}
-	wg.Wait()
+	// Buffered for every shard, so a read still running when the answer is settled finishes
+	// into it rather than waiting on a reader that has gone.
+	answers := make(chan answer, len(all))
+	for i, db := range all {
+		go func() {
+			readCtx := ctx
+			if i > 0 {
+				var stop context.CancelFunc
+				readCtx, stop = context.WithTimeout(ctx, peerReadTimeout)
+				defer stop()
+			}
+			found, err := read(readCtx, db)
+			answers <- answer{shard: i, found: found, err: err}
+		}()
+	}
+	for range all {
+		got := <-answers
+		found[got.shard], failed[got.shard] = got.found, got.err
+		if got.err == nil && settles(got.found) {
+			break
+		}
+	}
 	return found, failed
 }
 

@@ -135,7 +135,7 @@ func (r *CallResources) Forget(ctx context.Context, resource CallResource) error
 // A call's lines are on the shard that placed it, so rows from one shard settle it while
 // another does not answer; with no rows, a shard that did not answer may hold them.
 func (r *CallResources) Select(ctx context.Context, scope AppScope, callType, callID string) ([]CallResource, error) {
-	lists, failed := answeringShards(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
+	lists, failed := answeringShards(ctx, r.store, func(resources []CallResource) bool { return len(resources) > 0 }, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
 		var resources []CallResource
 		err := db.NewSelect().Model(&resources).
 			Where("call_type = ?", callType).

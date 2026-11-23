@@ -5,6 +5,7 @@ package store
 import (
 	"bytes"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,62 @@ func (s *StoreSuite) TestACallNoAnsweringShardPlacedIsNotAnsweredWhileAnotherIsD
 	placed, err := down.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", newID())
 	s.Require().Error(err, "the shard that is down may have placed it")
 	s.Empty(placed)
+}
+
+// withAShardThatNeverAnswers is a store on the suite's databases beside a peer shard whose
+// host accepts a connection and then says nothing, as a partitioned one can.
+func (s *StoreSuite) withAShardThatNeverAnswers() *Store {
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	s.T().Cleanup(func() {
+		_ = silent.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	dsn := "postgres://postgres:postgres@" + silent.Addr().String() + "/silent?sslmode=disable"
+	down, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Shards: map[string]string{"here": s.shardDSN, "silent": dsn}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(down.Close()) })
+	return down
+}
+
+func (s *StoreSuite) TestACallPlacedOnAShardThatAnswersIsFoundWithoutWaitingOnOneThatDoesNot() {
+	down := s.withAShardThatNeverAnswers()
+	callID := newID()
+	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
+		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: callID, CustomerID: "acme",
+	}))
+
+	began := time.Now()
+	placed, err := down.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", callID)
+	s.Require().NoError(err)
+	s.Len(placed, 1)
+	s.Less(time.Since(began), peerReadTimeout, "the answer that settled it was not held for the silent shard")
+}
+
+func (s *StoreSuite) TestABridgeNoShardHoldsIsRefusedOnceASilentShardRunsOutOfTime() {
+	down := s.withAShardThatNeverAnswers()
+
+	began := time.Now()
+	_, err := down.CallBridges.Claim(s.ctx, newID())
+	s.Require().Error(err)
+	s.Less(time.Since(began), peerReadTimeout+time.Second, "the silent shard was waited on past its read's bound")
 }
 
 // syncBuffer is a log the store's other goroutines may write to at the same time.

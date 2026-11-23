@@ -89,7 +89,7 @@ func (r *CallBridges) Claim(ctx context.Context, token string) (CallBridge, erro
 	// The vendor's fetch lands on whichever shard is nearest it, not the one that parked it.
 	// The bridge is on one shard, and its delete there is done whatever the others answer, so
 	// a shard that did not answer fails the claim only when no other shard held it.
-	lists, failed := answeringShards(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallBridge, error) {
+	lists, failed := answeringShards(ctx, r.store, func(claimed []CallBridge) bool { return len(claimed) > 0 }, func(ctx context.Context, db bun.IDB) ([]CallBridge, error) {
 		var claimed []CallBridge
 		err := db.NewDelete().Model((*CallBridge)(nil)).
 			Where("token_hash = ?", callTokenHash(token)).
