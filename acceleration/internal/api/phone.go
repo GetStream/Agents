@@ -723,7 +723,7 @@ func phoneFailure(logger *slog.Logger, err error) error {
 	}
 	if errors.Is(err, phone.ErrNotConfigured) {
 		// The settings it lacks name the deployment's environment: the operator's to read.
-		logger.Warn("a phone operation lacks a setting of this deployment", "error", err)
+		logger.Warn("a phone operation lacks a setting of this deployment", "error", store.SafeLogText(err.Error()))
 		return errPhoneNotConfigured
 	}
 	for _, theirs := range clientPhoneFailures {

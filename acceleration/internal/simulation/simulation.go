@@ -567,7 +567,7 @@ var errNoAnswer = &told{"simulation: the agent did not answer"}
 // failed logs why a conversation stopped and returns what its case says. Only a told reason
 // is kept: any other error can carry a model vendor's answer, a host or a query.
 func (r *Runner) failed(kase store.SimulationCase, step string, err error) string {
-	r.logger.Warn("a simulated conversation stopped", "case", kase.ID, "step", step, "error", err)
+	r.logger.Warn("a simulated conversation stopped", "case", kase.ID, "step", step, "error", store.SafeLogText(err.Error()))
 	if reason, ok := errors.AsType[*told](err); ok {
 		return reason.reason
 	}

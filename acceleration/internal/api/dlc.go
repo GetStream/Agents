@@ -398,7 +398,7 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.dlc.Hook(r.Context(), r.Header, body); errors.Is(err, dlc.ErrRefused) {
 		// The reason can name the deployment's settings, which are the operator's to read.
-		s.logger.Warn("refused a 10DLC report", "error", err)
+		s.logger.Warn("refused a 10DLC report", "error", store.SafeLogText(err.Error()))
 		writeError(w, unauthenticated("that is not a report from the registrar"))
 		return
 	} else if err != nil {
