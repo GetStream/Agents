@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -50,6 +53,114 @@ func (s *AgentSuite) TestAYesRunsTheCallOnceWithItsOwnID() {
 		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the answer was never reported")
 		decided, _ := firstOf[ToolApprovalDecided](s.reported())
 		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Allowed: true}, decided)
+	})
+}
+
+// Keys of a line for a call that was answered with its question, as main logs them: the asked
+// line has only approval added to them.
+var askedLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "error_code", "level", "msg",
+	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
+
+// connectorLineKeys are the keys main logs a connector's call with: one that asks nothing, and
+// the confirmation that ran one that asked.
+var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "customer", "duration_ms", "error_code",
+	"level", "msg", "outcome", "session", "success", "time", "tool", "tool_call", "turn"}
+
+// confirmedLines has the caller asked whether to book order 12 and answer with arguments, run
+// carrying out the call they allow, and returns the "a tool call came back" lines once the
+// confirmation's has been logged.
+func (s *AgentSuite) confirmedLines(arguments string, run func(context.Context, llm.ToolCall) ([]llm.ContentPart, error)) []map[string]any {
+	s.logs = &logLines{}
+	s.askedToApprove()
+	s.runner.run = run
+	s.confirms(arguments)
+
+	s.says(stt.Participant{ID: "alice"}, "yes please")
+
+	s.eventually(func() bool {
+		return slices.ContainsFunc(s.logs.records(toolBack), func(line map[string]any) bool { return line["tool"] == confirmTool })
+	}, "the confirmation never came back")
+	return s.logs.records(toolBack)
+}
+
+// The call a caller said yes to is logged under its own name, connector and run, so an
+// operator sees the tool that ran and not only the confirmation it ran inside.
+func (s *AgentSuite) TestAnApprovedCallIsLoggedUnderItsOwnName() {
+	s.onFakeClock(func() {
+		okBefore, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "ok")
+		refusedBefore, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "refused")
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":true}`,
+			func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+				ReportTool(ctx, ToolReport{Connector: "github"})
+				time.Sleep(2 * time.Second)
+				return llm.TextParts("order 12 booked"), nil
+			})
+
+		s.Require().Len(lines, 3)
+		asked, ran, confirmed := lines[0], lines[1], lines[2]
+		s.Equal("lookup_order", asked["tool"])
+		s.Equal("call-1", asked["tool_call"])
+		s.Equal("refused", asked["outcome"], "the outcome the metric counts an asked call under is kept")
+		s.Equal("asked", asked["approval"], "the call was answered with its question")
+		s.Equal(askedLineKeys, slices.Sorted(maps.Keys(withoutKey(asked, "approval"))))
+
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("call-1", ran["tool_call"])
+		s.Equal(asked["turn"], ran["turn"], "the run is in the turn that asked for it")
+		s.Equal("allowed", ran["approval"])
+		s.Equal("call-2", ran["confirmation"])
+		s.Equal("github", ran["connector"])
+		s.Equal("ok", ran["outcome"])
+		s.Equal(true, ran["success"])
+		s.Equal("", ran["error_code"])
+		s.Equal(float64(2000), ran["duration_ms"], "the run took the two seconds the tool did")
+		s.Equal("acme", ran["app_id"])
+		s.Equal(s.agentID, ran["agent_id"])
+
+		s.Equal(confirmTool, confirmed["tool"])
+		s.Equal("call-2", confirmed["tool_call"])
+		s.Equal("github", confirmed["connector"], "the confirmation is logged as on main")
+		s.Equal(connectorLineKeys, slices.Sorted(maps.Keys(confirmed)))
+
+		okAfter, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "ok")
+		refusedAfter, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "refused")
+		s.Equal(okBefore+1, okAfter, "the run is timed once, under its confirmation, as on main")
+		s.Equal(refusedBefore+1, refusedAfter)
+	})
+}
+
+// An approved run that failed says so on its own line, with what its runner reported in
+// place of the error it returned.
+func (s *AgentSuite) TestAnApprovedCallThatFailedIsLoggedAsFailed() {
+	s.onFakeClock(func() {
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":true}`,
+			func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+				ReportTool(ctx, ToolReport{Connector: "github", ErrorCode: "customer_auth", Error: "the token was refused"})
+				return nil, errors.New("stub: POST /orders/12/refund was refused")
+			})
+
+		s.Require().Len(lines, 3)
+		ran, confirmed := lines[1], lines[2]
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("error", ran["outcome"])
+		s.Equal(false, ran["success"])
+		s.Equal("customer_auth", ran["error_code"])
+		s.Equal("the token was refused", ran["error"])
+		s.NotContains(fmt.Sprint(ran), "/orders/12/refund", "the returned error is not logged")
+		s.Equal("customer_auth", confirmed["error_code"], "the confirmation is logged as on main")
+		s.NotContains(fmt.Sprint(confirmed), "/orders/12/refund")
+	})
+}
+
+// A no runs nothing, so nothing is logged as run: only the question and the confirmation.
+func (s *AgentSuite) TestADeclinedCallLogsNoRun() {
+	s.onFakeClock(func() {
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":false}`, nil)
+
+		s.Require().Len(lines, 2)
+		s.Equal("asked", lines[0]["approval"])
+		s.Equal(confirmTool, lines[1]["tool"])
+		s.NotContains(lines[1], "approval")
 	})
 }
 
@@ -247,4 +358,11 @@ func (s *AgentSuite) historyWith(role llm.Role) string {
 		}
 	}
 	return strings.Join(text, "\n")
+}
+
+// withoutKey is line without key.
+func withoutKey(line map[string]any, key string) map[string]any {
+	kept := maps.Clone(line)
+	delete(kept, key)
+	return kept
 }

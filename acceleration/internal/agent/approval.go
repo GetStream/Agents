@@ -227,6 +227,7 @@ func (a *Agent) askLocked(turnID, question string) error {
 
 // confirm runs the call the caller answered, when they said yes in time, and returns what
 // the model is told. The confirmation's own context is the call's: its timeout starts now.
+// The run gets its own "a tool call came back" line, under the call's name and id.
 func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.ContentPart, error) {
 	var answer struct {
 		ToolCallID string `json:"tool_call_id"`
@@ -267,7 +268,19 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		delete(a.approvedRuns, call.ID)
 		a.mu.Unlock()
 	}()
-	return a.options.ToolRunner.Run(WithApproval(ctx), call)
+	began := time.Now()
+	runCtx, report := WithToolReport(ctx)
+	parts, err := a.options.ToolRunner.Run(WithApproval(runCtx), call)
+	// The confirmation's own line still says what the runner reported, as it did before the
+	// run had a line of its own.
+	ReportTool(ctx, *report)
+	a.mu.Lock()
+	hold := a.toolHolds[confirmation.ID]
+	answered := hold != nil && hold.answered
+	a.mu.Unlock()
+	a.logToolBack(call, *report, err, time.Since(began), toolOutcome(ctx.Err() != nil, err != nil, false, answered),
+		"approval", "allowed", "confirmation", confirmation.ID)
+	return parts, err
 }
 
 // approvalLocked finds the call a confirmation answers: the one it names, or the only one

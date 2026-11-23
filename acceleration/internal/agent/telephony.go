@@ -749,9 +749,12 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	took := time.Since(began)
 	toolCallSeconds.WithLabelValues(outcome).Observe(took.Seconds())
-	a.logger.Info("a tool call came back", append(a.loggedTool(*report, err), "tool", requested.Call.Name,
-		"tool_call", requested.Call.ID, "turn", requested.TurnID, "duration_ms", took.Milliseconds(),
-		"outcome", outcome)...)
+	var approval []any
+	if asked {
+		// Answered with its question, the call is not run here: the confirmation runs it.
+		approval = []any{"approval", "asked"}
+	}
+	a.logToolBack(requested.Call, *report, err, took, outcome, approval...)
 
 	a.emitter.Send(ToolRan{
 		ID:        requested.Call.ID,
@@ -858,6 +861,14 @@ func (a *Agent) loggedTool(report ToolReport, err error) []any {
 		fields = append(fields, "error", store.SafeLogText(message))
 	}
 	return fields
+}
+
+// logToolBack writes "a tool call came back" for call, which ran in its TurnID for took and
+// ended as outcome, with more fields after the ones every such line has.
+func (a *Agent) logToolBack(call llm.ToolCall, report ToolReport, err error, took time.Duration, outcome string, more ...any) {
+	fields := append(a.loggedTool(report, err), "tool", call.Name, "tool_call", call.ID, "turn", call.TurnID,
+		"duration_ms", took.Milliseconds(), "outcome", outcome)
+	a.logger.Info("a tool call came back", append(fields, more...)...)
 }
 
 // toolOutcome names how a tool call ended: cancelled, failed, refused by the router before
