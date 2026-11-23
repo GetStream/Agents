@@ -119,7 +119,8 @@ func (s *Store) Ping(ctx context.Context) error {
 // first, and by how many distinct people.
 //
 // A bucket with nothing in it is left out rather than returned as zeroes, the same way the
-// stats paths leave out a bucket nobody used.
+// stats paths leave out a bucket nobody used. Calls and voice minutes count only the calls
+// rows of a call: a text session writes one per stretch too, with no call id.
 func (s *Store) CustomerActivity(
 	ctx context.Context,
 	customerID string,
@@ -172,7 +173,7 @@ call_counts AS (
             FILTER (WHERE from_number IS NOT NULL OR to_number IS NOT NULL), 0)::double precision / 60
             AS phone_minutes
     FROM calls
-    WHERE customer_id = ? AND started_at >= ? AND started_at < ?
+    WHERE customer_id = ? AND started_at >= ? AND started_at < ? AND call_id <> ''
     GROUP BY bucket
 ),
 buckets AS (
@@ -281,14 +282,15 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 
 // CustomerConcurrencyPeak returns the most sessions one customer had open at the same time
 // in a window. A session still open counts up to now, and one that closed at the instant
-// another opened did not overlap it.
+// another opened did not overlap it. A session carried on in another shard has a row in each,
+// and is one session while both are open.
 func (s *Store) CustomerConcurrencyPeak(ctx context.Context, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	if customerID == "" {
 		return ConcurrencyPeak{}, stack.Wrap(errors.New("store: customer id is required"))
 	}
 
 	const spans = `
-SELECT GREATEST(created_at, ?0) AS opened, LEAST(COALESCE(closed_at, now()), ?1) AS closed
+SELECT id, GREATEST(created_at, ?0) AS opened, LEAST(COALESCE(closed_at, now()), ?1) AS closed
 FROM agent_sessions
 WHERE customer_id = ?2 AND created_at < ?1 AND (closed_at IS NULL OR closed_at > ?0)`
 	if len(s.peers) > 0 {
@@ -321,10 +323,11 @@ SELECT sessions, at FROM running ORDER BY sessions DESC, at ASC LIMIT 1`,
 }
 
 // peakAcrossShards is CustomerConcurrencyPeak over sessions open in several shards at once,
-// which no one shard's query can see: it reads every shard's spans and walks their edges here,
-// in the order the query does.
+// which no one shard's query can see: it reads every shard's spans, joins the overlapping
+// spans of one session, and walks their edges here, in the order the query does.
 func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	type span struct {
+		ID     string    `bun:"id"`
 		Opened time.Time `bun:"opened"`
 		Closed time.Time `bun:"closed"`
 	}
@@ -340,13 +343,29 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 		at    time.Time
 		delta int64
 	}
-	var edges []edge
+	bySession := map[string][]span{}
 	for _, list := range lists {
 		for _, open := range list {
 			if open.Closed.After(open.Opened) {
-				edges = append(edges, edge{open.Opened, 1}, edge{open.Closed, -1})
+				bySession[open.ID] = append(bySession[open.ID], open)
 			}
 		}
+	}
+	var edges []edge
+	for _, spans := range bySession {
+		slices.SortFunc(spans, func(a, b span) int { return a.Opened.Compare(b.Opened) })
+		joined := spans[0]
+		for _, next := range spans[1:] {
+			if next.Opened.After(joined.Closed) {
+				edges = append(edges, edge{joined.Opened, 1}, edge{joined.Closed, -1})
+				joined = next
+				continue
+			}
+			if next.Closed.After(joined.Closed) {
+				joined.Closed = next.Closed
+			}
+		}
+		edges = append(edges, edge{joined.Opened, 1}, edge{joined.Closed, -1})
 	}
 	slices.SortFunc(edges, func(a, b edge) int {
 		return cmp.Or(a.at.Compare(b.at), cmp.Compare(a.delta, b.delta))
@@ -368,8 +387,8 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 // sessions of that agent config, and empty is every one. A web search the agent made has no
 // result item, so it is not a tool call here.
 //
-// A turn is a top-level response that was not rewound, and a call made in a delegated task
-// belongs to the turn that delegated it.
+// A turn is a response that was not rewound. Work a turn delegated is recorded on that turn's
+// response when it comes back while the turn is open, and as a turn of its own after.
 func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID string, from, to time.Time) (ToolUsage, []ToolUsage, error) {
 	if customerID == "" {
 		return ToolUsage{}, nil, stack.Wrap(errors.New("store: customer id is required"))
@@ -390,6 +409,13 @@ func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID stri
 		Loading           string     `bun:"loading"`
 		DefinitionTokens  *int64     `bun:"definition_tokens"`
 		SummaryTokens     *int64     `bun:"summary_tokens"`
+		SessionIDs        []string   `bun:"session_ids,array"`
+	}
+	// A session carried on in another shard has turns in each, so with several shards the
+	// sessions are counted from their ids once every shard has answered.
+	sessionIDs := "NULL::text[]"
+	if len(s.peers) > 0 {
+		sessionIDs = "array_agg(DISTINCT ran.session_id)"
 	}
 	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]usageRow, error) {
 		var rows []usageRow
@@ -401,7 +427,7 @@ WITH turns AS (
     FROM agent_responses AS a
     JOIN agent_sessions AS s ON s.id = a.session_id
     WHERE a.customer_id = ?3 AND (?6 = '' OR s.config_id = ?6) AND a.created_at < ?5
-        AND a.parent_response_id IS NULL AND a.rewound_at IS NULL
+        AND a.rewound_at IS NULL
 ),
 ran AS (
     SELECT
@@ -420,7 +446,7 @@ ran AS (
     FROM agent_responses AS a
     JOIN agent_sessions AS s ON s.id = a.session_id
     JOIN agent_response_items AS r ON r.response_id = a.id AND r.kind = ?1
-    LEFT JOIN turns AS t ON t.id = COALESCE(a.parent_response_id, a.id)
+    LEFT JOIN turns AS t ON t.id = a.id
     LEFT JOIN LATERAL (
         SELECT c.at, c.payload FROM agent_response_items AS c
         WHERE c.response_id = r.response_id AND c.kind = ?2 AND c.tool_name = r.tool_name
@@ -447,6 +473,7 @@ SELECT
     COUNT(*) AS calls,
     COUNT(*) FILTER (WHERE failed) AS failed,
     COUNT(DISTINCT ran.session_id) AS sessions,
+    `+sessionIDs+` AS session_ids,
     COALESCE(f.firsts, 0) AS firsts,
     f.avg_turns_before_use,
     COALESCE(AVG(tokens), 0)::double precision AS avg_tokens,
@@ -481,6 +508,7 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 	sums := map[usageKey]*ToolUsage{}
 	tokens, ms, p99s, calls := map[usageKey][]*float64{}, map[usageKey][]*float64{}, map[usageKey][]*float64{}, map[usageKey][]int64{}
 	befores, firsts := map[usageKey][]*float64{}, map[usageKey][]int64{}
+	sessions := map[usageKey]map[string]bool{}
 	// The definition is the latest call's on any shard: a tool's description can change.
 	offeredAt := map[usageKey]time.Time{}
 	for _, rows := range lists {
@@ -493,6 +521,15 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 			sums[k].Calls += row.Calls
 			sums[k].Failed += row.Failed
 			sums[k].Sessions += row.Sessions
+			if len(s.peers) > 0 {
+				if sessions[k] == nil {
+					sessions[k] = map[string]bool{}
+				}
+				for _, id := range row.SessionIDs {
+					sessions[k][id] = true
+				}
+				sums[k].Sessions = int64(len(sessions[k]))
+			}
 			avgTokens := row.AvgTokens
 			tokens[k] = append(tokens[k], &avgTokens)
 			ms[k] = append(ms[k], row.AvgMs)
@@ -531,20 +568,31 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 }
 
 // CustomerTurns counts the sessions one customer's agents took a turn in during a window,
-// and those turns, as CustomerToolUsage counts a turn. A configID keeps to the sessions of
-// that agent config, and empty is every one.
+// and those turns: every response that was not rewound, as CustomerToolUsage counts a turn.
+// A configID keeps to the sessions of that agent config, and empty is every one.
 func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, from, to time.Time) (SessionTurns, error) {
 	if customerID == "" {
 		return SessionTurns{}, stack.Wrap(errors.New("store: customer id is required"))
 	}
-	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (SessionTurns, error) {
-		var counts SessionTurns
+	type shardTurns struct {
+		SessionTurns
+		SessionIDs []string `bun:"session_ids,array"`
+	}
+	// A session carried on in another shard has turns in each, so with several shards the
+	// sessions are counted from their ids once every shard has answered.
+	sessionIDs := "NULL::text[]"
+	if len(s.peers) > 0 {
+		sessionIDs = "array_agg(DISTINCT ars.session_id)"
+	}
+	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardTurns, error) {
+		var counts shardTurns
 		q := db.NewSelect().Model((*AgentResponse)(nil)).
 			ColumnExpr("COUNT(DISTINCT ars.session_id) AS sessions, COUNT(*) AS turns").
+			ColumnExpr(sessionIDs+" AS session_ids").
 			Join("JOIN agent_sessions AS asn ON asn.id = ars.session_id").
 			Where("ars.customer_id = ?", customerID).
 			Where("ars.created_at >= ? AND ars.created_at < ?", from, to).
-			Where("ars.parent_response_id IS NULL AND ars.rewound_at IS NULL")
+			Where("ars.rewound_at IS NULL")
 		if configID != "" {
 			q.Where("asn.config_id = ?", configID)
 		}
@@ -555,9 +603,16 @@ func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, 
 		return SessionTurns{}, stack.Wrap(fmt.Errorf("store: turns: %w", err))
 	}
 	var total SessionTurns
+	sessions := map[string]bool{}
 	for _, shard := range counts {
 		total.Sessions += shard.Sessions
 		total.Turns += shard.Turns
+		for _, id := range shard.SessionIDs {
+			sessions[id] = true
+		}
+	}
+	if len(s.peers) > 0 {
+		total.Sessions = int64(len(sessions))
 	}
 	return total, nil
 }

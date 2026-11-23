@@ -191,8 +191,9 @@ func (s *StoreSuite) TestRollupOverPartOfABucketRecomputesAllOfIt() {
 			s.EqualValues(3000, buckets[0].AudioMsTotal, "the bucket keeps both requests")
 			s.EqualValues(2, buckets[0].RequestCount)
 
-			tagged, err := s.store.TagBuckets.Select(s.ctx, customer, TagBucketFilter{Modality: "stt", Key: "project", Granularity: Hourly, From: s.base, To: s.base.Add(time.Hour)})
-			s.Require().NoError(err)
+			var tagged []TagBucket
+			s.Require().NoError(s.store.shard.NewSelect().Table("stats_tags_hourly").
+				Where("customer_id = ?", customer).Scan(s.ctx, &tagged))
 			s.Require().Len(tagged, 1)
 			s.EqualValues(3000, tagged[0].AudioMsTotal, "so does the label's")
 		})

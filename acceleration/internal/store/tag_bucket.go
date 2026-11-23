@@ -110,6 +110,9 @@ ON CONFLICT (modality, customer_id, tag_key, tag_value, bucket) DO UPDATE SET
 // Select returns what each value of one tag key cost, oldest bucket first. It is the "what
 // drives our spend" query: group by project, or by environment, or by whichever label the
 // customer bills on.
+//
+// Reads recorded requests directly, as Buckets.Select does, so a request is counted as soon
+// as it is recorded rather than once somebody runs a rollup.
 func (r *TagBuckets) Select(ctx context.Context, customerID string, f TagBucketFilter) ([]TagBucket, error) {
 	if !f.Granularity.Valid() {
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
@@ -124,17 +127,36 @@ func (r *TagBuckets) Select(ctx context.Context, customerID string, f TagBucketF
 		return nil, stack.Wrap(errors.New("store: tag key is required"))
 	}
 
+	query := fmt.Sprintf(`
+SELECT
+    modality,
+    customer_id,
+    ?0 AS tag_key,
+    tags->>?0 AS tag_value,
+    date_trunc('%[1]s', started_at) AS bucket,
+    COALESCE(SUM(audio_ms), 0) AS audio_ms_total,
+    COALESCE(SUM(characters), 0) AS characters_total,
+    COALESCE(SUM(input_tokens), 0) AS input_tokens_total,
+    COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens_total,
+    COALESCE(SUM(output_tokens), 0) AS output_tokens_total,
+    COALESCE(SUM(images), 0) AS images_total,
+    COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
+    COUNT(*) AS request_count,
+    COUNT(*) FILTER (WHERE NOT success AND %[2]s) AS error_count,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[2]s) AS latency_p50_ms,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[2]s) AS latency_p95_ms,
+    (COUNT(*) - COUNT(*) FILTER (WHERE NOT success AND %[2]s))::double precision
+        / NULLIF(COUNT(*), 0) AS uptime
+FROM requests
+WHERE modality = ?1 AND customer_id = ?2
+  AND started_at >= ?3 AND started_at < ?4
+  AND tags->>?0 IS NOT NULL
+GROUP BY modality, customer_id, tag_value, bucket
+ORDER BY bucket ASC, tag_value ASC`, f.Granularity.truncateUnit(), measured(""))
+
 	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]TagBucket, error) {
 		var buckets []TagBucket
-		err := db.NewSelect().
-			Table(f.Granularity.tagTable()).
-			Where("modality = ?", f.Modality).
-			Where("customer_id = ?", customerID).
-			Where("tag_key = ?", f.Key).
-			Where("bucket >= ?", f.From).
-			Where("bucket < ?", f.To).
-			Order("bucket ASC", "tag_value ASC").
-			Scan(ctx, &buckets)
+		err := db.NewRaw(query, f.Key, f.Modality, customerID, f.From, f.To).Scan(ctx, &buckets)
 		return buckets, err
 	})
 	if err != nil {

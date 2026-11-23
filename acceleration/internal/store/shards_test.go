@@ -105,6 +105,46 @@ func (s *ShardedStoreSuite) TestSessionsOpenInTwoShardsAtOnceAreOnePeak() {
 	s.True(peak.At.Equal(s.base.Add(5 * time.Minute)))
 }
 
+func (s *ShardedStoreSuite) TestASessionOpenInTwoShardsAtOnceIsOneInThePeak() {
+	s.opened("chat", "app", s.base, nil)
+	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "chat", s.base.Add(20*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base.Add(30*time.Minute), ""))
+
+	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "app", s.base.Add(-time.Hour), s.base.Add(time.Hour))
+	s.Require().NoError(err)
+	s.EqualValues(1, peak.Sessions)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfItsTurnsAndTools() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.calledTool(session, "chat-1", "lookup_order", s.base, map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", ConfigID: "cfg-docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+	s.Require().NoError(s.other.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "chat-2", SessionID: "chat", CustomerID: "app", ParentResponseID: "chat-1", CreatedAt: s.base.Add(time.Minute),
+	}))
+	s.Require().NoError(s.other.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
+		{ResponseID: "chat-2", Ordinal: 0, SessionID: "chat", Kind: ItemToolCall, ToolName: "lookup_order",
+			Payload: map[string]any{"call_id": "c2"}, At: s.base.Add(time.Minute)},
+		{ResponseID: "chat-2", Ordinal: 1, SessionID: "chat", Kind: ItemToolResult, ToolName: "lookup_order",
+			Text: "shipped", Payload: map[string]any{"call_id": "c2"}, At: s.base.Add(time.Minute + time.Second)},
+	}))
+
+	turns, err := s.store.CustomerTurns(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+	s.Require().NoError(err)
+	s.Equal(SessionTurns{Sessions: 1, Turns: 2}, turns)
+
+	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.EqualValues(2, tools[0].Calls)
+	s.EqualValues(1, tools[0].Sessions)
+	s.EqualValues(1, overall.Sessions)
+}
+
 func (s *ShardedStoreSuite) TestAGuestsSessionsInEveryShardAreClaimed() {
 	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	s.opened("here", "app", s.base, func(session *AgentSession) { session.UserID = "guest-1" })
