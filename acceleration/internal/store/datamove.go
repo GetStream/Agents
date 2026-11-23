@@ -723,7 +723,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return err
 	}
 	if table == "phone_numbers" {
-		if err := importableNumber(ctx, db, customerID, row); err != nil {
+		if importable, err := importableNumber(ctx, db, customerID, row); err != nil || !importable {
 			return err
 		}
 	}
@@ -837,6 +837,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// An import writes key version 0 and only a seal here raises it: a row past 0 is one sealed here.
 	if table == "connector_connections" {
 		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
+	}
+	// A number bought here and still held is this deployment's, whatever row names its id.
+	if table == "phone_numbers" {
+		conflict += " AND NOT " + boughtHere("phone_numbers")
 	}
 
 	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
@@ -1376,64 +1380,36 @@ func moveRoom(ctx context.Context, tx bun.Tx, customerID string, marked []Schedu
 	return limits, held, nil
 }
 
-// digitsKey is a number as most vendors read the one they are given, as SQL over a text
-// value: its digits. Plivo, DIDWW, Vonage and Bird drop the plus; Twilio, Telnyx and Sinch
-// read it as written, which its digits only widen.
-const digitsKey = `regexp_replace(%s, '[^0-9]', '', 'g')`
-
-// vendorKeys is a number as a vendor that reads it another way does. Bandwidth also drops
-// the 1 of an 11-digit number (bandwidth.digits), so +15551234567 and +5551234567 are one
-// number there.
-var vendorKeys = map[string]string{
-	"bandwidth": `regexp_replace(regexp_replace(%s, '[^0-9]', '', 'g'), '^1([0-9]{10})$', '\1')`,
-}
-
-// importableNumber refuses an imported number the customer would hold in a form other than
-// E.164, or that another customer holds. Every bought number is held in the deployment's one
-// account at its vendor, and releasing it there is what holding it here allows, so a number
-// two customers held would be one either of them could give back. The unique index on what
-// is held compares the text as written, so it sees neither another form of a number nor the
-// same number at another vendor. A number given back is only its bill's history and imports
-// as written; one on the customer's own trunk is in no account here.
-//
-// Two imports of one number into two customers at the same moment can both pass this.
-func importableNumber(ctx context.Context, db bun.IDB, customerID string, row json.RawMessage) error {
+// importableNumber says whether an imported number is written here, and refuses one the API
+// would not store. Only a number on the customer's own trunk moves. A bought one is held in
+// the vendor account of the deployment that bought it, with that one's line, trunk and use
+// case, and its bills move in its requests: written here it would be billed again (Rentals)
+// and given back at this deployment's vendor account. So it is not written, and the customer
+// keeps it by buying or porting it here.
+func importableNumber(ctx context.Context, db bun.IDB, customerID string, row json.RawMessage) (bool, error) {
 	// Read the way the insert reads it, by exact column name: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var e164, vendor sql.NullString
-	var released bool
+	var cost sql.NullInt64
 	if err := db.QueryRowContext(ctx,
-		"SELECT e164, vendor, released_at IS NOT NULL FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
-		string(row)).Scan(&e164, &vendor, &released); err != nil {
-		return fmt.Errorf("store: read an imported number: %w", err)
+		"SELECT e164, vendor, monthly_cost_micros FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
+		string(row)).Scan(&e164, &vendor, &cost); err != nil {
+		return false, fmt.Errorf("store: read an imported number: %w", err)
 	}
-	if released {
-		return nil
+	if vendor.String != sipTrunkVendor {
+		return false, nil
 	}
-	if !IsE164(e164.String) {
-		return stack.Wrap(fmt.Errorf("%w: %q", ErrNotE164, e164.String))
+	number := PhoneNumber{CustomerID: customerID, E164: e164.String, Vendor: vendor.String, MonthlyCostMicros: cost.Int64}
+	if err := number.Validate(); err != nil {
+		return false, stack.Wrap(err)
 	}
-	if vendor.String == "sip_trunk" {
-		return nil
-	}
-	// Compared as the vendor it would be given back at reads a number, so a number held in
-	// another form, before every write checked the form, is found as well.
-	key, found := vendorKeys[vendor.String]
-	if !found {
-		key = digitsKey
-	}
-	var held bool
-	if err := db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT EXISTS (SELECT 1 FROM phone_numbers
-WHERE customer_id <> ? AND released_at IS NULL AND vendor <> 'sip_trunk' AND %s = %s)`,
-		fmt.Sprintf(key, "e164"), fmt.Sprintf(key, "?::text")),
-		customerID, e164.String).Scan(&held); err != nil {
-		return fmt.Errorf("store: who holds an imported number: %w", err)
-	}
-	if held {
-		return stack.Wrap(fmt.Errorf("%w: %s", ErrNumberHeldElsewhere, e164.String))
-	}
-	return nil
+	return true, nil
+}
+
+// boughtHere is the condition that a number, as the given relation names it, was bought here
+// and is still held: no import writes one (importableNumber), so none may update or delete it.
+func boughtHere(relation string) string {
+	return fmt.Sprintf("(%[1]s.released_at IS NULL AND %[1]s.vendor <> '%[2]s')", relation, sipTrunkVendor)
 }
 
 // importableDefinition refuses an imported definition the API would not have stored, and gives the row the manifest as
@@ -1497,10 +1473,11 @@ func (t dataTable) identity() string {
 	}
 	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers
-	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again.
+	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again. Nor with its
+	// use case, which names one of the source's.
 	if t.name == "phone_numbers" {
 		return "jsonb_build_object('customer_id', ?::text, 'stream_trunk_id', NULL, 'stream_route_id', NULL," +
-			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL)"
+			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL, 'dlc_use_case_id', NULL)"
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
@@ -1773,6 +1750,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		if spec.filter != "" {
 			conditions = append(conditions, spec.filter)
 		}
+	}
+	if spec.name == "phone_numbers" {
+		conditions = append(conditions, "NOT "+boughtHere("t"))
 	}
 	args = append(args, customerID)
 
