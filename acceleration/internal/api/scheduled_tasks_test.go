@@ -3859,6 +3859,33 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotT
 	s.Equal([]string{"Done."}, s.sink.to(writer), "the person is texted once")
 }
 
+// A text that failed and whose claim could not be given back stays taken: the retry found it
+// taken and counted the run delivered, though nobody was texted.
+func (s *ScheduledTasksSuite) TestATextThatFailedAndCouldNotBeGivenBackFailsItsRun() {
+	s.retryAtOnce()
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	s.sink.fail(writer, 1)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	task := s.tasksOf(user)[0]
+	s.trigger("failing_release_"+strings.ReplaceAll(s.utils.uuid(), "-", ""), "scheduled_task_runs", "UPDATE",
+		"NEW.task_id = '"+task.ID+"' AND 'whatsapp' = ANY(OLD.texted) AND NOT ('whatsapp' = ANY(NEW.texted))",
+		"RAISE EXCEPTION 'the release fails';")
+	// Due before the worker starts, so its first look claims it.
+	s.makeDue(task)
+	s.runWorker()
+
+	run := s.settledRun(task)
+	s.Require().Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Equal(scheduling.ReasonFailed, *run.Error, "recorded under the send's own reason")
+	s.Equal(int32(1), s.attempts.Load(), "the occurrence was not tried again")
+	s.Empty(s.sink.to(writer))
+}
+
 func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrenceIsRetried() {
 	s.retryAtOnce()
 	number, writer := s.lineNumber(), s.writerNumber()

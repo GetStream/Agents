@@ -455,8 +455,11 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 		}
 		if err := s.notifyText(ctx, delivery, channel, text, files); err != nil {
 			// Not sent, so a later attempt may send it.
-			if err := s.store.ScheduledTaskRuns.ReleaseText(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, channel); err != nil {
-				s.logger.Error("could not give back a scheduled task's text", "run", delivery.RunID, "error", err)
+			if released := s.store.ScheduledTaskRuns.ReleaseText(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, channel); released != nil {
+				s.logger.Error("could not give back a scheduled task's text", "run", delivery.RunID, "error", released)
+				// Still taken: a later attempt would find the words sent and count the run
+				// delivered, so this one is not tried again.
+				return "", "", undeliveredFinally(deliveryReason(err), err)
 			}
 			return "", "", unpaid(err)
 		}
