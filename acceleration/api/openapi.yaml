@@ -4286,8 +4286,8 @@ components:
         channel:
           $ref: '#/components/schemas/OptOutChannel'
         recipient:
-          description: The number, in E.164.
-          maxLength: 20
+          description: The number in E.164, or an iMessage handle's email address, for channel imessage or all.
+          maxLength: 254
           minLength: 2
           type: string
         source:
@@ -7071,7 +7071,7 @@ components:
         id:
           type: string
         recipient:
-          description: The number, in E.164.
+          description: The number in E.164, or an iMessage handle's email address.
           type: string
         source:
           description: keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard.

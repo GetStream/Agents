@@ -6401,7 +6401,7 @@ namespace GetStream.VisionAgents.Models
         public string Channel { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address, for channel imessage or all.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;
@@ -10421,7 +10421,7 @@ namespace GetStream.VisionAgents.Models
         public string Id { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;

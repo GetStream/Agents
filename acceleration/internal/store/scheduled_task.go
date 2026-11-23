@@ -864,11 +864,12 @@ func (r *ScheduledTasks) Postpone(ctx context.Context, customerID, taskID, runID
 	return held, nil
 }
 
-// Renew extends a claim the worker still holds. False is a
-// claim it no longer holds: an update, pause or delete took it.
+// Renew extends a claim the worker still holds, never to earlier than it is: a renewal still
+// on its way when Postpone held the task for quiet hours would cut the hold to one lease.
+// False is a claim it no longer holds: an update, pause or delete took it.
 func (r *ScheduledTasks) Renew(ctx context.Context, customerID, taskID, leasedBy string, lease time.Duration) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
-		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
+		Set("lease_until = GREATEST(lease_until, now() + make_interval(secs => ?))", lease.Seconds()).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", taskID).
 		Where("leased_by = ?", leasedBy).

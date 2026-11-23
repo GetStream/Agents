@@ -293,6 +293,27 @@ func (s *StoreSuite) TestQuietHoursRoundTrip() {
 	s.Equal("07:00", found.QuietHours.End)
 }
 
+func (s *StoreSuite) TestARenewalAfterAHoldDoesNotCutItShort() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	until := time.Now().Add(2 * time.Hour)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].LeasedBy, until)
+	s.Require().NoError(err)
+	s.Require().True(held)
+
+	held, err = s.store.ScheduledTasks.Renew(s.ctx, "acme", "one", claimed[0].LeasedBy, time.Minute)
+	s.Require().NoError(err)
+	s.True(held, "the claim is still the worker's")
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(task.LeaseUntil)
+	s.WithinDuration(until, *task.LeaseUntil, time.Second, "the hold outlasts the renewal's minute")
+}
+
 func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })

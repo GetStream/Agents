@@ -6970,7 +6970,7 @@ export type components = {
         };
         readonly CreateOptOutRequest: {
             readonly channel: components["schemas"]["OptOutChannel"];
-            /** @description The number, in E.164. */
+            /** @description The number in E.164, or an iMessage handle's email address, for channel imessage or all. */
             readonly recipient: string;
             /**
              * @description Omitted is api.
@@ -8641,7 +8641,7 @@ export type components = {
             /** Format: date-time */
             readonly created_at: string;
             readonly id: string;
-            /** @description The number, in E.164. */
+            /** @description The number in E.164, or an iMessage handle's email address. */
             readonly recipient: string;
             /** @description keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard. */
             readonly source: string;

@@ -1052,9 +1052,11 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			m.records.Closed(spec.CustomerID, created.id, row.OpenedAt, time.Now().UTC(), created.kept())
 		})
 		if spec.Reopened.IsZero() {
-			m.records.Opened(row, toolRows(created))
+			m.records.Opened(row, toolRows(created), func() { m.idTaken(created) })
 		} else {
-			m.records.CarriedOn(row, toolRows(created))
+			// A carry-on skips the check that the id is free, so another customer's row written
+			// on another shard meanwhile refuses it too.
+			m.records.CarriedOn(row, toolRows(created), func() { m.idTaken(created) })
 		}
 		created.startRecording()
 	}
@@ -1076,7 +1078,8 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			m.calls.Ended(spec.CustomerID, id, time.Now().UTC())
 			// The review runs on a model rather than in this closer, so it is started
 			// here and lands on the row whenever it comes back.
-			if !spec.NoReview {
+			// A session whose row the store refused (idTaken) has no call row to land on.
+			if !spec.NoReview && !created.idTaken.Load() {
 				m.reviews.Review(row(created), spec.Attribution, spec.Region, spec.reviewTarget(), spec.ReviewInstructions, created.conversation())
 			}
 		})
@@ -1097,6 +1100,13 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		m.mu.Unlock()
 		turnedAway = true
 		created.handedOver.Store(true)
+		fail()
+		return nil, stack.Wrap(ErrSessionExists)
+	}
+	// Its row was refused before the session was held, so idTaken found nothing to end.
+	if created.idTaken.Load() {
+		m.mu.Unlock()
+		turnedAway = true
 		fail()
 		return nil, stack.Wrap(ErrSessionExists)
 	}
@@ -1725,6 +1735,26 @@ func (m *Manager) end(found *Session, reason EndReason) {
 	found.noteEnd(reason)
 	m.logger.Info("ending the session", "session", found.id, "reason", reason)
 	found.abandon()
+}
+
+// idTaken ends created, whose row the store refused because another customer's session has its
+// id: the check that an id is free (Create) runs before the row is written, so two routers
+// opening one id for two customers both pass it. One not held yet is turned away by Create.
+// It runs on the record writer, so the close, which may wait on the writer, runs beside it.
+func (m *Manager) idTaken(created *Session) {
+	created.idTaken.Store(true)
+	m.logger.Warn("ending a session whose id another customer's session has",
+		"session", created.id, "customer", created.Spec().CustomerID)
+	done, held := m.take(created)
+	if !held {
+		return
+	}
+	created.noteEnd(EndClosed)
+	go func() {
+		defer done()
+		m.release(created)
+		created.abandon()
+	}()
 }
 
 // hangUp ends found for its agent hanging up, or reason. It closes as Close does, so the

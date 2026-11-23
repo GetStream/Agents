@@ -1345,6 +1345,10 @@ var errServerSideOnly = APIError{
 // is how a backend says which of its users it is opening a session for, so that the user's
 // own device can reach that session afterwards; what keeps the limit off it is that
 // withQuota looks at whether the caller is server-side rather than at whether there is one.
+// statusClientClosed is what a request whose caller hung up before it was answered is counted
+// as, nginx's 499: no caller reads it.
+const statusClientClosed = 499
+
 func (s *Server) withCustomer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Stream is not a customer, and a delivery is authenticated by its signature. Who a
@@ -1372,6 +1376,15 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
 			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A caller that hung up while its credential was checked is no failure of the router's,
+		// and nobody is left to answer. The status is for withMetrics, which counts and times it
+		// as a 4xx: callers giving up on a stalled key store still show there.
+		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+			s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+			w.WriteHeader(statusClientClosed)
 			return
 		}
 		// A credential that could not be checked (the key store down, a key that would not

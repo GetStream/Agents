@@ -383,6 +383,9 @@ type Session struct {
 	// handedOver is set on a session that must not hang up its call: another session serves
 	// it, or the router turned the session away as it shut down.
 	handedOver atomic.Bool
+	// idTaken is set once the store refused the session's row because another customer's
+	// session has its id (Manager.idTaken).
+	idTaken atomic.Bool
 	// active is set while router_sessions_active counts the session: from the manager
 	// holding it until it has closed. agentLeft is set once its agent left the call by itself
 	// (consume). modelErred and replied are whether its model failed a turn and whether

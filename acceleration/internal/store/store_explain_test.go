@@ -625,7 +625,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{Severity: "error", After: 1000, Forward: true})
 			return err
 		}},
-		{name: "AgentLogs.Select of a session", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
+		{name: "AgentLogs.Select of a session", index: "agent_logs_session_order", run: func(ctx context.Context, store *Store) error {
 			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{SessionID: "seeded-session-7", UserID: "user-7",
 				Sources: []string{"agent"}, Search: "request"})
 			return err

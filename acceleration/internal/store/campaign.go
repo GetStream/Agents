@@ -358,7 +358,8 @@ SELECT replace(gen_random_uuid()::text, '-', ''), ?, to_number, instructions, va
 FROM campaign_contacts cc
 WHERE campaign_id = ? AND reason IS DISTINCT FROM 'duplicate'`
 		if contacts == DuplicateNotContacted {
-			query += ` AND NOT EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id)`
+			// An attempt that was deferred or refused rang nobody.
+			query += ` AND NOT EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id AND ` + placedDial + `)`
 		}
 		if _, err := tx.ExecContext(ctx, query+" ORDER BY seq", copied.ID, source.ID); err != nil {
 			return fmt.Errorf("store: duplicate contacts: %w", err)

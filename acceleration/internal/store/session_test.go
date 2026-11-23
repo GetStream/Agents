@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/uptrace/bun"
 )
@@ -538,6 +539,18 @@ func (s *StoreSuite) TestALateReopenAndItsCloseLeaveTheRunOpenedSinceOpen() {
 	s.Nil(found.ClosedAt, "the run carried on since has not ended")
 	s.True(found.OpenedAt.Equal(again), "the row went back to the run before")
 	s.Empty(found.Title)
+}
+
+func (s *StoreSuite) TestAWriteThatChangesNothingIsRefusedOnlyForAnotherCustomersID() {
+	late, again := s.base.Add(time.Hour), s.base.Add(2*time.Hour)
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = again })
+	write := func(customerID string) error {
+		return s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: customerID, AgentName: "docs",
+			ConfigID: "cfg-docs", UserID: "jlahey", CallerKind: "user", State: SessionRunning, CreatedAt: s.base, OpenedAt: late})
+	}
+
+	s.NoError(write("app"), "a late write of the app's own session is no refusal")
+	s.ErrorIs(write("somebody-else"), ErrIDTaken, "the same write under another customer is")
 }
 
 func (s *StoreSuite) TestDescribingASessionLongAfterItEnded() {
@@ -1585,5 +1598,78 @@ func (s *StoreSuite) TestAnotherCustomersToolsForASessionIdAreNotKept() {
 			s.Require().NoError(err)
 			s.Equal(kept, tools)
 		})
+	}
+}
+
+func (s *StoreSuite) TestAnIdAnotherCustomersSessionHasIsNotWrittenOver() {
+	s.opened("one", "app", s.base, func(session *AgentSession) {
+		session.Title, session.State, session.ClosedAt = "theirs to keep", SessionClosed, &s.base
+	})
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	err = s.store.Sessions.Upsert(s.ctx, &AgentSession{
+		ID: "one", CustomerID: "somebody-else", AgentName: "docs", ConfigID: "cfg-docs", UserID: "randy",
+		CallerKind: "user", State: SessionRunning, Title: "taken over", CreatedAt: s.base,
+	})
+	s.Require().ErrorIs(err, ErrIDTaken)
+
+	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's session is as it was, still ended")
+}
+
+func (s *StoreSuite) TestWhatWasSaidIsKeptWholeAndAToolResultIsCut() {
+	s.opened("one", "app", s.base, nil)
+	secret := strings.Repeat("q7", 12)
+	long := strings.Repeat("Stream ships chat, video and feeds. ", 400) + "my password: " + secret
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "first", SessionID: "one", CustomerID: "app", Said: long, CreatedAt: s.base,
+	}))
+	items := []AgentResponseItem{}
+	for i, kind := range []string{ItemSaid, ItemThought, ItemAnswer, ItemToolResult, ItemError} {
+		items = append(items, AgentResponseItem{ResponseID: "first", Ordinal: i, SessionID: "one", Kind: kind, Text: long, At: s.base})
+	}
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, items))
+
+	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	kept, err := s.store.ResponseItems.Select(s.ctx, "app", "one", ItemFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(kept, 5)
+	for name, text := range map[string]string{"the question asked again": response.Said, "the question": kept[0].Text,
+		"the thought": kept[1].Text, "the answer": kept[2].Text} {
+		s.Equal(400, strings.Count(text, "Stream ships chat, video and feeds. "), "%s is kept whole", name)
+		s.Contains(text, "my [redacted]", "%s is redacted where the credential was", name)
+		s.NotContains(text, secret, "%s keeps no credential", name)
+	}
+	for name, text := range map[string]string{"a tool's output": kept[3].Text, "an error": kept[4].Text} {
+		s.True(strings.HasSuffix(text, truncatedMarker), "%s is cut as a log line is", name)
+		s.LessOrEqual(utf8.RuneCountInString(text), 2048+utf8.RuneCountInString(truncatedMarker), name)
+	}
+}
+
+func (s *StoreSuite) TestATurnPastTheCeilingIsCutWithTheMarker() {
+	s.opened("one", "app", s.base, nil)
+	// One byte ahead, so the ceiling falls inside a two-byte rune.
+	huge := "a" + strings.Repeat("é", maxTurnText)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "first", SessionID: "one", CustomerID: "app", Said: huge, CreatedAt: s.base,
+	}))
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
+		{ResponseID: "first", SessionID: "one", Kind: ItemAnswer, Text: huge, At: s.base},
+	}))
+
+	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	kept, err := s.store.ResponseItems.Select(s.ctx, "app", "one", ItemFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(kept, 1)
+	for name, text := range map[string]string{"the question": response.Said, "the answer": kept[0].Text} {
+		s.LessOrEqual(len(text), maxTurnText+len(truncatedMarker), name)
+		// 256 KiB, the last rune boundary before it, then the marker.
+		s.Equal(256<<10-1+len(truncatedMarker), len(text), "%s is cut at 256 KiB", name)
+		s.True(strings.HasSuffix(text, truncatedMarker), name)
+		s.True(utf8.ValidString(text), "%s is cut between runes", name)
 	}
 }

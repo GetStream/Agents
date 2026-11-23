@@ -4891,7 +4891,7 @@ pub struct CostSource {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct CreateOptOutRequest {
     pub channel: OptOutChannel,
-    ///The number, in E.164.
+    ///The number in E.164, or an iMessage handle's email address, for channel imessage or all.
     pub recipient: ::std::string::String,
     ///Omitted is api.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -8786,7 +8786,7 @@ pub struct OptOut {
     pub channel: OptOutChannel,
     pub created_at: ::std::string::String,
     pub id: ::std::string::String,
-    ///The number, in E.164.
+    ///The number in E.164, or an iMessage handle's email address.
     pub recipient: ::std::string::String,
     ///keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard.
     pub source: ::std::string::String,
