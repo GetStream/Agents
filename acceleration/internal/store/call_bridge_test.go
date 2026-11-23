@@ -29,3 +29,18 @@ func (s *StoreSuite) TestABridgeIsClaimedOnceFromAnyShardAndSweptOnceExpired() {
 	s.Require().NoError(err)
 	s.Equal(int64(1), swept)
 }
+
+func (s *StoreSuite) TestABridgeIsClaimedByItsTokenWithOnlyItsHashStored() {
+	token := newID()
+	s.Require().NoError(s.store.CallBridges.Insert(s.ctx, &CallBridge{Token: token, CustomerID: "acme", Vendor: "plivo",
+		TrunkURI: "sip:x@example.com", CallID: "call", ExpiresAt: time.Now().Add(time.Hour)}))
+
+	var rows []string
+	s.Require().NoError(s.store.shard.NewSelect().ColumnExpr("to_jsonb(cb)::text").TableExpr("call_bridges AS cb").
+		Where("cb.customer_id = ?", "acme").Scan(s.ctx, &rows))
+	s.Require().Len(rows, 1)
+	s.NotContains(rows[0], token, "the bridge holds the token its fetch presents")
+	claimed, err := s.store.CallBridges.Claim(s.ctx, token)
+	s.Require().NoError(err)
+	s.Equal("call", claimed.CallID)
+}

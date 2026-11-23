@@ -1438,18 +1438,27 @@ func (s *Service) park(
 	}
 
 	token := uuid.NewString()
-	err := s.store.CallBridges.Insert(ctx, &store.CallBridge{
+	bridge := &store.CallBridge{
 		Token:         token,
 		CustomerID:    customerID,
 		Vendor:        vendor,
 		TrunkURI:      outbound.Bridge.URI,
 		TrunkUsername: outbound.Bridge.Username,
-		TrunkPassword: outbound.Bridge.Password,
 		InitialDigits: outbound.InitialDigits,
 		CallID:        callID,
 		ExpiresAt:     time.Now().UTC().Add(bridgeLifetime),
-	})
-	if err != nil {
+	}
+	if outbound.Bridge.Password != "" {
+		if s.sealer == nil {
+			return "", stack.Wrap(ErrNoSealer)
+		}
+		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
+		if err != nil {
+			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
+		}
+		bridge.TrunkPasswordSealed, bridge.TrunkPasswordKEKVersion = sealed, s.sealer.CurrentVersion()
+	}
+	if err := s.store.CallBridges.Insert(ctx, bridge); err != nil {
 		return "", err
 	}
 	return s.publicURL + "/v1/phone/answer/" + token, nil
@@ -1479,11 +1488,28 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 			bridge.Vendor)
 	}
 
+	var password string
+	if len(bridge.TrunkPasswordSealed) > 0 {
+		if s.sealer == nil {
+			return Plan{}, stack.Wrap(ErrNoSealer)
+		}
+		password, err = s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, callBridgeAAD(bridge.CustomerID, token), bridge.TrunkPasswordKEKVersion)
+		if err != nil {
+			return Plan{}, stack.Wrap(fmt.Errorf("phone: open a parked bridge's trunk password: %w", err))
+		}
+	}
+
 	return renderer.Answer(Bridge{
 		URI:      bridge.TrunkURI,
 		Username: bridge.TrunkUsername,
-		Password: bridge.TrunkPassword,
+		Password: password,
 	}, bridge.InitialDigits)
+}
+
+// callBridgeAAD binds a parked bridge's sealed trunk password to its customer and its token,
+// which only the fetch presents.
+func callBridgeAAD(customerID, token string) []byte {
+	return []byte("call_bridges/" + customerID + "/" + token)
 }
 
 // ErrNotPlaced is a call whose context ended before the vendor was asked to dial it: nobody

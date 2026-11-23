@@ -245,15 +245,19 @@ func (s *AppsSuite) TestACallOnAVendorThatFetchesItsPlanNeedsAPublicURL() {
 	s.Empty(plivo.dialed.To, "a call nobody could fetch the plan of is not dialled")
 }
 
-func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPassword() {
+// The bridge parked until the vendor fetches its plan keeps the trunk's password sealed and the
+// fetch's token only hashed, and the fetch still carries the password.
+func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPasswordKeptSealed() {
 	plivo := &planStub{stub: stub{vendor: "plivo"}}
 	registry := NewRegistry(s.config())
 	registry.Register(plivo.vendor, func() (Provider, error) { return plivo, nil })
 	for _, name := range s.credentials(plivo.vendor) {
 		s.T().Setenv(name, "set")
 	}
+	sealer, err := auth.NewSealer("apps suite")
+	s.Require().NoError(err)
 	service, err := NewService(ServiceOptions{
-		Registry: registry, Store: s.store, Apps: s.apps, PublicURL: "https://router.example.test",
+		Registry: registry, Store: s.store, Apps: s.apps, Sealer: sealer, PublicURL: "https://router.example.test",
 	})
 	s.Require().NoError(err)
 	e164 := aNumber()
@@ -266,14 +270,21 @@ func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPassword() {
 	})
 	s.Require().NoError(err)
 	token := plivo.dialed.AnswerURL[strings.LastIndex(plivo.dialed.AnswerURL, "/")+1:]
+	trunks := s.deployment.Trunks()
+	s.Require().Len(trunks, 1)
+	password, _ := s.deployment.TrunkAuth(trunks[0])
+	s.Require().NotEmpty(password)
+
+	var rows []string
+	s.Require().NoError(s.store.ShardDB().NewSelect().ColumnExpr("to_jsonb(cb)::text").
+		TableExpr("call_bridges AS cb").Where("cb.customer_id = ?", s.customer).Scan(s.ctx, &rows))
+	s.Require().Len(rows, 1)
+	s.NotContains(rows[0], password, "the parked bridge holds the trunk's password in the clear")
+	s.NotContains(rows[0], token, "the parked bridge holds the token its fetch presents")
 
 	_, err = service.Answer(s.ctx, token)
 	s.Require().NoError(err)
 
-	trunks := s.deployment.Trunks()
-	s.Require().Len(trunks, 1)
-	password, _ := s.deployment.TrunkAuth(trunks[0])
-	s.NotEmpty(password)
 	s.Equal(password, plivo.rendered.Password)
 }
 

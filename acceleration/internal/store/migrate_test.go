@@ -82,7 +82,7 @@ func (s *ShardedStoreSuite) TestARepeatableReadWriteOnANewDatabaseIsRecorded() {
 		s.Equal(1, starts, "the %s database starts with its data_change_starts row", name)
 	}
 	err = split.shard.RunInTx(s.ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead}, func(ctx context.Context, tx bun.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO call_bridges (token, customer_id, call_id, vendor, trunk_uri, expires_at)
+		_, err := tx.ExecContext(ctx, `INSERT INTO call_bridges (token_hash, customer_id, call_id, vendor, trunk_uri, expires_at)
 			VALUES ('t', 'app', 'call', 'telnyx', 'sip:x', now() + interval '1 minute')`)
 		return err
 	})
