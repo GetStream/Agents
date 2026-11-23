@@ -158,8 +158,15 @@ fresh `http.Client` on a caller's URL.
   schema, and never in a list or get response afterwards.
 - Never logged: check new `slog`/log lines and error messages for tokens, keys, `Authorization`
   headers, query strings carrying `token=`, and request bodies.
-- A 500 says only "something went wrong" (`apierror.go`). Flag an error that returns a
-  wrapped driver, provider or upstream message to the caller.
+- A 500 says only "something went wrong" (`apierror.go`). No answer of any status, socket
+  frame or field stored for a later read carries the text of a store, vendor, network or DNS
+  error: it names hosts, ports, SQL, constraint names, URLs, bodies and the cluster's DNS
+  server. Flag `invalidRequest(err.Error())`, `"...: " + err.Error()` and a stored
+  `err.Error()`, unless the error is one this code wrote for the caller to correct. The rules
+  are in the `go` skill's `errors.md`, «HTTP».
+- Refusals of an outbound URL give one answer, whatever egress found. A different answer for a
+  name that does not resolve and one that resolves to a private address lets a caller probe
+  the router's resolver (`createEventDestination`, AI-3575).
 - The ops key (`X-Ops-Key`) is compared in constant time and turns the paths off when empty.
 - The manage key (`X-Manage-Key`) is compared in constant time, makes every `/v1/manage/*`
   path a 404 `not_configured` when empty, is never the ops key, and every call with it must
