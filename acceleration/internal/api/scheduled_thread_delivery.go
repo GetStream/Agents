@@ -89,7 +89,7 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 			}
 		}()
 	}
-	delivery.CommandID = replyCommand(found, delivery.CommandID)
+	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
 	// The delivery sends the reply itself, to settle the run on whether it went out.
 	replies, release := s.channelBridge.Hold(delivery.CommandID)
 	defer release()

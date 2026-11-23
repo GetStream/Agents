@@ -845,7 +845,7 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
-A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
+A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again, and that retry now runs the turn once more, on the conversation and the text channels, so the user gets the reply. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
 
 ### A Swift typed tool no longer crashes the app on deeply nested arguments
 

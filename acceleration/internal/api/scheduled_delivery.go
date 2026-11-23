@@ -101,6 +101,10 @@ type scheduledDelivery struct {
 	// APIKey and UsageCategories are the task's: the key and categories that scheduled it.
 	APIKey          string   `json:"api_key,omitempty"`
 	UsageCategories []string `json:"usage_categories,omitempty"`
+	// Earlier is the reason the occurrence's run records so far (store.ScheduledTaskRun.Error),
+	// if any: the one its last attempt on this worker failed under (deliverWithRetries), or how a
+	// call placed for it ended (SetCallReason). replyCommand reads it.
+	Earlier string `json:"earlier,omitempty"`
 }
 
 func (d scheduledDelivery) owner() session.Owner {
@@ -208,7 +212,11 @@ func (s *Server) occurrenceDelivery(ctx context.Context, claimed store.ClaimedSc
 	if held := claimed.Run.PostponedUntil; held != nil {
 		due = *held
 	}
-	return taskDelivery(claimed.Task, claimed.Run.ID, scheduledPrompt(s.withOccurrence(ctx, claimed), time.Now()), due)
+	delivery := taskDelivery(claimed.Task, claimed.Run.ID, scheduledPrompt(s.withOccurrence(ctx, claimed), time.Now()), due)
+	if claimed.Run.Error != nil {
+		delivery.Earlier = *claimed.Run.Error
+	}
+	return delivery
 }
 
 // taskDelivery is the delivery of task's occurrence on run runID: what the
@@ -405,7 +413,7 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 		if err := s.waitOutCall(ctx, found, scheduledWindow); err != nil {
 			return "", "", err
 		}
-		delivery.CommandID = replyCommand(found, delivery.CommandID)
+		delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
 		if err := s.followUpInConversation(ctx, found, delivery); err != nil {
 			return "", "", err
 		}
@@ -464,7 +472,7 @@ func (s *Server) waitOutCall(ctx context.Context, found *session.Session, window
 // of the turn. A follow-up the conversation already holds is not run again:
 // its words and files are read back.
 func (s *Server) captureReply(ctx context.Context, found *session.Session, delivery scheduledDelivery) (string, []sandbox.Attachment, error) {
-	delivery.CommandID = replyCommand(found, delivery.CommandID)
+	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
 	if _, _, known := found.FollowUpReply(delivery.CommandID); known {
 		reply, err := s.readBackReply(ctx, found, delivery.CommandID)
 		return reply.Text, reply.Files, err
@@ -596,18 +604,22 @@ func refusedTurn(err error) bool {
 }
 
 // rerunSuffix ends the command id an occurrence's turn runs again under when the reply under
-// the run's own was cancelled or interrupted: the user got nothing, and the run's own id would
-// only read that reply back on every retry. It is one suffix, so the turn runs again once.
+// the run's own was cancelled or interrupted, or failed on a refusal for money the run tries
+// again: the user got nothing, and the run's own id would only read that reply back on every
+// retry. It is one suffix, so the turn runs again once.
 const rerunSuffix = "_r1"
 
 // replyCommand is the command id an occurrence's reply is under in found: the run's own, or
 // the rerun's once the reply under the run's own was cancelled or interrupted. The
 // conversation says which, not the run's attempts: it keeps each follow-up's state across a
 // restart and a worker taking over (commandsIn), and an attempt that never reached the turn,
-// such as one on a call, counts as an attempt too.
-func replyCommand(found *session.Session, id string) string {
-	switch state, _, _ := found.FollowUpReply(id); state {
-	case "cancelled", "interrupted":
+// such as one on a call, counts as an attempt too. A failed reply is the rerun's too when
+// earlier, the reason the last attempt failed under (scheduledDelivery.Earlier), is a refusal
+// for money: one the run tries again passes again on its own (unpaid), so the turn it refused
+// is worth running again. A reply that failed for any other reason is read back as it was.
+func replyCommand(found *session.Session, id, earlier string) string {
+	switch state, _, _ := found.FollowUpReply(id); {
+	case state == "cancelled" || state == "interrupted", state == "failed" && moneyCode(earlier):
 		return id + rerunSuffix
 	}
 	return id
