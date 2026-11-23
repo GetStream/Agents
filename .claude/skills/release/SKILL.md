@@ -8,8 +8,8 @@ description: Cut a release of the whole repo - write its section of the root CHA
 A release is one version of the whole repo: the router, the SDKs, the Python packages and the
 apps. It is a tag `vX.Y.Z` on a `main` commit and a GitHub release for that tag. The GitHub
 release starts `.github/workflows/release.yml`, which publishes the Python packages to PyPI.
-Router deploy tags (`accelerate-v*`) and SDK tags (`sdk-js-v*`, `sdks/go/v*`) are not releases
-here and get no CHANGELOG section.
+Router deploy tags (`accelerate-v*`) and SDK tags (`sdk-js-v*`, `sdk-kotlin-v*`, `sdk-dotnet-v*`,
+`sdk-dart-v*`, `sdks/go/v*`) are not releases here and get no CHANGELOG section.
 
 A version uploaded to PyPI can never be uploaded again. Ask the human before step 5.
 
