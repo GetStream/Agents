@@ -40,6 +40,22 @@ func (s *StoreSuite) TestARequestCarryingTwoLabelsIsCountedUnderBoth() {
 	s.EqualValues(1000, byEnvironment[0].AudioMsTotal, "the same request, seen through the other label")
 }
 
+func (s *StoreSuite) TestATagWindowInsideItsHoursReturnsEveryHourItTouches() {
+	s.tagged("acme", s.base.Add(45*time.Minute), 1000, map[string]string{"project": "support"})
+	s.tagged("acme", s.base.Add(2*time.Hour+45*time.Minute), 500, map[string]string{"project": "support"})
+	_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(3*time.Hour))
+	s.Require().NoError(err)
+
+	buckets, err := s.store.TagBuckets.Select(s.ctx, "acme", TagBucketFilter{Modality: "stt", Key: "project", Granularity: Hourly,
+		From: s.base.Add(30 * time.Minute), To: s.base.Add(2*time.Hour + 30*time.Minute)})
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 2, "the hour the window starts in and the hour it ends in")
+	s.Equal(s.base, buckets[0].Bucket.UTC())
+	s.EqualValues(1000, buckets[0].AudioMsTotal)
+	s.Equal(s.base.Add(2*time.Hour), buckets[1].Bucket.UTC())
+	s.EqualValues(500, buckets[1].AudioMsTotal)
+}
+
 // tagged stores a labelled request, which is what the tag rollups are built from.
 func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags map[string]string) {
 	latencyMs := 100.0
