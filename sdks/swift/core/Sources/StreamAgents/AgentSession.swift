@@ -500,11 +500,18 @@ public final class AgentSession: ObservableObject {
     ///
     /// A task of its own, so a slow tool does not hold up the transcript. The handler is a
     /// nonisolated async closure, so its body does not run on the main actor even though this
-    /// call site is on it.
+    /// call site is on it. A typed tool decodes its type from the arguments as written: turning
+    /// the dictionary back into JSON there recurses as deep as the model nested it, on a
+    /// smaller stack than the main thread's.
     private func run(_ call: AgentEvent.ToolCall, with tool: AgentTool) {
         Task { [socket] in
             do {
-                let output = try await tool.run(call.argumentValues)
+                let output: ToolOutput
+                if let runWritten = tool.runWritten {
+                    output = try await runWritten(call.arguments)
+                } else {
+                    output = try await tool.run(call.argumentValues)
+                }
                 try await socket.send(
                     .toolResult(
                         id: call.id, output: output.text, error: nil, images: output.images,
