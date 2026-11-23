@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 from typing_extensions import Self
 
 from ..models.activity_step import ActivityStep
+from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.activity_step_day import ActivityStepDay
@@ -29,11 +30,16 @@ class OrganizationProgress:
             only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the
             first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity
             lists them.
+        funded (bool | Unset): The organization has credit that is not trial credit now, after refunds and disputes, as
+            the usage service holds it: the rule that lets it buy numbers. false for one with only trial credit, none, or no
+            account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment
+            has no usage service or it did not answer.
     """
 
     furthest_step: ActivityStep
     organization_id: str
     steps: list[ActivityStepDay]
+    funded: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -46,6 +52,8 @@ class OrganizationProgress:
             steps_item = steps_item_data.to_dict()
             steps.append(steps_item)
 
+        funded = self.funded
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -55,6 +63,8 @@ class OrganizationProgress:
                 "steps": steps,
             }
         )
+        if funded is not UNSET:
+            field_dict["funded"] = funded
 
         return field_dict
 
@@ -74,10 +84,13 @@ class OrganizationProgress:
 
             steps.append(steps_item)
 
+        funded = d.pop("funded", UNSET)
+
         organization_progress = cls(
             furthest_step=furthest_step,
             organization_id=organization_id,
             steps=steps,
+            funded=funded,
         )
 
         organization_progress.additional_properties = d

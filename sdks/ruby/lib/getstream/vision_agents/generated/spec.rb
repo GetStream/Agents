@@ -2764,7 +2764,7 @@ module GetStream
           required: %w[organization_id since furthest_step steps areas meters shards sessions latency].freeze, open: false
         }.freeze,
         "OrganizationProgress" => {
-          properties: %w[furthest_step organization_id steps].freeze,
+          properties: %w[funded furthest_step organization_id steps].freeze,
           required: %w[organization_id furthest_step steps].freeze, open: false
         }.freeze,
         "PhoneNumber" => {

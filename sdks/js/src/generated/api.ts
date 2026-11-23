@@ -8690,6 +8690,8 @@ export type components = {
             readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
         };
         readonly OrganizationProgress: {
+            /** @description The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the rule that lets it buy numbers. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer. */
+            readonly funded?: boolean;
             /** @description The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since. */
             readonly furthest_step: components["schemas"]["ActivityStep"];
             /** @description The organization. */
