@@ -92,3 +92,22 @@ func TestALineWithTheRowAsJSONIsUnreadableWhateverItsTextHolds(t *testing.T) {
 	require.Empty(t, rows, "the row in a tag is not read as the lost row")
 	require.Equal(t, 1, unreadable)
 }
+
+func TestALineWithTheRowAsJSONIsUnreadableWhateverFieldsItsTextSpells(t *testing.T) {
+	_, other := encodedRow(t)
+	lost := store.Request{
+		UsageID: uuid.Must(uuid.NewV7()), CustomerID: "app-1", APIKey: "key-a", Provider: "openai", Model: "gpt",
+		Tags: map[string]string{"note": "x reason=shutdown usage_id=" + uuid.NewString() + " row_hex=" + other + " y"},
+	}
+	row, err := json.Marshal(lost)
+	require.NoError(t, err)
+	var log bytes.Buffer
+	// As a router from before row_hex logged a lost row.
+	newLogger(&log, slog.LevelInfo).Error("usage row lost", "reason", "shutdown", "usage_id", lost.UsageID, "row", string(row))
+
+	rows, unreadable, err := lostRows(&log, false)
+
+	require.NoError(t, err)
+	require.Empty(t, rows, "fields a tag spells out are not read as the writer's")
+	require.Equal(t, 1, unreadable)
+}

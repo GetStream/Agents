@@ -678,14 +678,14 @@ func loggable(request store.Request) store.Request {
 	return request
 }
 
-// redactLoggedValues is a copy of values with each value as loggable leaves it.
+// redactLoggedValues is a copy of values with each key and value as loggable leaves it.
 func redactLoggedValues(name string, values map[string]string) map[string]string {
 	if values == nil {
 		return nil
 	}
 	redacted := make(map[string]string, len(values))
 	for key, value := range values {
-		redacted[key] = redactLogged(name, value)
+		redacted[redactLogged(name, key)] = redactLogged(name, value)
 	}
 	return redacted
 }

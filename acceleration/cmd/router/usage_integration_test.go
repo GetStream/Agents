@@ -177,15 +177,20 @@ func (s *UsageCommandsSuite) TestALostRowIsLoggedWithoutTheNumbersAndKeysItsText
 	writer.Close(ctx)
 	key := "sk-test" + strings.Repeat("0", 16)
 	lost := uuid.Must(uuid.NewV7())
+	tags := routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key, "sip-15550009909": "named"}
+	categories := []string{"sip-15550004404"}
 	routing.NewRecorderOn(routing.LLM, writer, nil, logger).Record(routing.ProviderConfig{Provider: "openai", Model: "gpt"}, routing.Stat{
 		Owner: routing.Owner{CustomerID: "app-1", Attribution: routing.Attribution{
 			OrganizationID: "org-1", APIKey: "key-a", UserID: "phone:+15550001101", SessionID: "sip-15550002202",
-			UsageCategories: []string{"sip-15550004404"},
-		}, AgentID: "sip-15550006606", CallID: "sip-15550007707", Tags: routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key}},
+			UsageCategories: categories,
+		}, AgentID: "sip-15550006606", CallID: "sip-15550007707", Tags: tags},
 		UsageID: lost, StartedAt: time.Now().UTC(), Usage: routing.Usage{OutputTokens: 10},
 		Attributes: map[string]string{"note": "for +15550005505"},
 	})
-	held := []string{"5550001101", "5550002202", "5550003303", "5550004404", "5550005505", "5550006606", "5550007707", key}
+	held := []string{"5550001101", "5550002202", "5550003303", "5550004404", "5550005505", "5550006606", "5550007707", "5550009909", key}
+	s.Equal(routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key, "sip-15550009909": "named"}, tags,
+		"the session's own tags are not redacted in place")
+	s.Equal([]string{"sip-15550004404"}, categories, "nor its categories")
 	for _, text := range held {
 		s.NotContains(log.String(), text)
 	}
