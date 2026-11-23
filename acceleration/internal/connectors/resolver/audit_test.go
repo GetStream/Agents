@@ -9,6 +9,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/resolver"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -158,4 +159,22 @@ func (s *ResolverSuite) TestAuditOfRevokingAPendingConnectionIsNothing() {
 	s.Require().NoError(s.f.router(s.f.srv.Client()).Revoke(s.f.ctx, ref, core.SignalRevoked, time.Time{}))
 
 	s.Empty(s.audited(ref, 0))
+}
+
+// TestAnUninstallAfterALostRefreshAnswerAddsItsOwnRow: a lost answer leaves the checkpoint's text
+// and one grant_revoked row (uncertain); a Revoke of that row is a change of its own, so a second
+// row (uninstalled) follows and the connection's last_error is the uninstall's.
+func (s *ResolverSuite) TestAnUninstallAfterALostRefreshAnswerAddsItsOwnRow() {
+	ref := s.f.connected()
+	s.f.srv.Use(fakeprovider.LostResponse)
+	s.f.due()
+	_, err := s.f.router(s.f.srv.Client()).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.Require().ErrorIs(err, resolver.ErrNotConnected)
+	s.audited(ref, 1)
+
+	s.Require().NoError(s.f.router(s.f.srv.Client()).Revoke(s.f.ctx, ref, core.SignalUninstalled, time.Time{}))
+
+	rows := s.audited(ref, 2)
+	s.ElementsMatch([]string{"uncertain", string(core.SignalUninstalled)}, []string{rows[0].Reason, rows[1].Reason})
+	s.NotEqual(lostRefresh, s.f.stored(ref).LastError)
 }

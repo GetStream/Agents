@@ -270,6 +270,24 @@ func (s *ResolverSuite) TestARevocationBetweenTwoSavesStands() {
 	s.Contains(s.line("could not save a connector credential refresh"), "attempts=2", "a revoked connection is not tried again")
 }
 
+// TestARevocationOfAnOlderGrantBetweenTwoSavesIsLeft: a reconnect began a new grant and its first
+// refresh left the checkpoint when its save failed; Slack's late tokens_revoked for the grant
+// before it arrives between two tries. The new grant is not the one that ended, so it stays.
+func (s *ResolverSuite) TestARevocationOfAnOlderGrantBetweenTwoSavesIsLeft() {
+	ref := s.f.connected()
+	s.f.due()
+	saves := firstFails(dropped, false)
+	saves.before = func(update int) {
+		if update == 2 {
+			s.Require().NoError(s.f.router(s.f.srv.Client()).Revoke(s.f.ctx, ref, core.SignalUninstalled, time.Now().Add(-time.Hour).Truncate(time.Second)))
+		}
+	}
+
+	_, err := s.f.routerSaving(s.f.srv.Client(), saves).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.NoError(err)
+	s.Equal(store.ConnectionConnected, s.f.stored(ref).Status)
+}
+
 func (s *ResolverSuite) TestARefreshWhoseSaveLandsTakesNoSecondUpdate() {
 	ref := s.f.connected()
 	s.f.due()
