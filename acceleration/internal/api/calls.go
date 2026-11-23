@@ -676,10 +676,14 @@ func (s *Server) getCallEvents(ctx context.Context, request *getCallEventsReques
 		return nil, errUnknownCall
 	}
 
-	stored, err := s.store.CallEvents.Select(
-		ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
-	if err != nil {
-		return nil, err
+	// A session held in writing has no Stream call, so it has no decisions kept under one.
+	var stored []store.CallEvent
+	if call.CallID != "" {
+		stored, err = s.store.CallEvents.Select(
+			ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	decisions := make([]CallEvent, 0, len(stored))

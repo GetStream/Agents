@@ -291,6 +291,20 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 	s.Equal("how is the weather", value(decided[0].Said))
 }
 
+func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
+	// A session held in writing has no Stream call, so no decisions are kept for it; the
+	// store refuses a read without a call id, which used to answer 500.
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
+	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
+
+	decided := []CallEvent{}
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil, &decided))
+	s.Empty(decided)
+	s.Empty(s.errorsAbout(call.ID))
+}
+
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
