@@ -67,7 +67,7 @@ func (s *Suite) SetupSuite() {
 // Answered is the question, asked on the first call and kept for the rest.
 func (s *Suite) Answered() decisionmodel.Result {
 	if s.answered == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+		ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 		defer cancel()
 		answered, err := s.Provider.Classify(ctx, urgent)
 		s.Require().NoError(err)

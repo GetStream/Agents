@@ -149,6 +149,11 @@ type PhoneNumbers struct {
 
 // Insert stores a number a customer now holds.
 func (r *PhoneNumbers) Insert(ctx context.Context, number *PhoneNumber) error {
+	return insertNumber(ctx, r.store.global, number)
+}
+
+// insertNumber stores a number a customer now holds, in db.
+func insertNumber(ctx context.Context, db bun.IDB, number *PhoneNumber) error {
 	if err := number.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -161,7 +166,7 @@ func (r *PhoneNumbers) Insert(ctx context.Context, number *PhoneNumber) error {
 		number.Capabilities = []string{}
 	}
 
-	if _, err := r.store.global.NewInsert().Model(number).Exec(ctx); err != nil {
+	if _, err := db.NewInsert().Model(number).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number: %w", err))
 	}
 	return nil

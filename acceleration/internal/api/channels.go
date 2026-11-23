@@ -85,7 +85,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	account.SecretsSealed = sealed
 	account.SecretsKEKVersion = s.secrets.CurrentVersion()
 	if err := s.store.ChannelAccounts.Upsert(ctx, &account); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	rendered := s.channelAccountOf(account)

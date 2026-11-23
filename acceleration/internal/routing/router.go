@@ -626,7 +626,7 @@ func (r *Router[P]) Resolve(ctx context.Context, target string, languageHints []
 	}
 
 	if len(matching) == 0 {
-		return nil, stack.Wrap(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ",")))
+		return nil, stack.Wrap(Refused(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ","))))
 	}
 
 	candidates := r.candidates(ctx, matching)

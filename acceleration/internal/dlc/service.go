@@ -157,13 +157,14 @@ func (s *Service) poll(ctx context.Context, after *store.CreatedPosition) *store
 	return after
 }
 
-// Create records a new draft use case and the numbers that send as it.
+// Create records a new draft use case and the numbers that send as it, as one: a use case whose
+// numbers cannot be assigned is not left behind.
 func (s *Service) Create(ctx context.Context, useCase *store.UseCase, numbers []string) error {
-	useCase.Status = Draft
-	if err := s.store.UseCases.Insert(ctx, useCase); err != nil {
+	if err := s.checkNumbers(ctx, useCase.CustomerID, numbers); err != nil {
 		return err
 	}
-	return s.assign(ctx, *useCase, numbers)
+	useCase.Status = Draft
+	return s.store.UseCases.Insert(ctx, useCase, numbers...)
 }
 
 // Update replaces what an app wrote on a use case it may still edit. numbers nil leaves
@@ -181,28 +182,37 @@ func (s *Service) Update(ctx context.Context, useCase *store.UseCase, numbers []
 	return s.assign(ctx, *useCase, numbers)
 }
 
-// assign sends numbers as the use case. A number the app does not hold, or one named twice,
-// is the caller's to correct; a store failure is not.
+// assign sends numbers as the use case.
 func (s *Service) assign(ctx context.Context, useCase store.UseCase, numbers []string) error {
-	if len(numbers) > 0 {
-		held, err := s.store.PhoneNumbers.Select(ctx, useCase.CustomerID, store.PhoneNumberFilter{})
-		if err != nil {
-			return err
-		}
-		holds := make(map[string]bool, len(held))
-		for _, number := range held {
-			holds[number.E164] = true
-		}
-		for i, number := range numbers {
-			if !holds[number] {
-				return stack.Wrap(fmt.Errorf("%w: %s is not a number this app holds", ErrInvalid, number))
-			}
-			if slices.Contains(numbers[:i], number) {
-				return stack.Wrap(fmt.Errorf("%w: %s is named twice", ErrInvalid, number))
-			}
-		}
+	if err := s.checkNumbers(ctx, useCase.CustomerID, numbers); err != nil {
+		return err
 	}
 	return s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers)
+}
+
+// checkNumbers refuses numbers a use case of the app could not send from. A number the app
+// does not hold, or one named twice, is the caller's to correct; a store failure is not.
+func (s *Service) checkNumbers(ctx context.Context, customerID string, numbers []string) error {
+	if len(numbers) == 0 {
+		return nil
+	}
+	held, err := s.store.PhoneNumbers.Select(ctx, customerID, store.PhoneNumberFilter{})
+	if err != nil {
+		return err
+	}
+	holds := make(map[string]bool, len(held))
+	for _, number := range held {
+		holds[number.E164] = true
+	}
+	for i, number := range numbers {
+		if !holds[number] {
+			return stack.Wrap(fmt.Errorf("%w: %s is not a number this app holds", ErrInvalid, number))
+		}
+		if slices.Contains(numbers[:i], number) {
+			return stack.Wrap(fmt.Errorf("%w: %s is named twice", ErrInvalid, number))
+		}
+	}
+	return nil
 }
 
 // Delete removes a use case the vendor does not hold.
@@ -397,8 +407,24 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 	return nil
 }
 
+// requestSettles is how long a registration asked for may still be running, on this router
+// or another: far longer than the registrar's timeout, so one asked for longer ago had its
+// answer lost.
+const requestSettles = 10 * time.Minute
+
+// saveAttempts and saveFirstPause bound how often what the vendor answered to a registration
+// is saved: the first save and two more, 100 ms and then 200 ms after the one before, for a
+// dropped connection or a failover. The vendor has registered it, and billed it, by then, so
+// the save is what is tried again, never the registration.
+const (
+	saveAttempts   = 3
+	saveFirstPause = 100 * time.Millisecond
+)
+
 // register registers the app's brand if it has none, and the campaign once the brand is
-// verified. A brand the vendor refused leaves nothing to register the campaign under.
+// verified. A brand the vendor refused leaves nothing to register the campaign under. Each is
+// asked for once (requested): only a request the vendor did not carry out is asked for again,
+// and one whose answer was lost is settled (brandUnanswered, campaignUnanswered).
 func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 	profile, err := s.store.BusinessProfiles.Get(ctx, useCase.CustomerID)
 	if err != nil {
@@ -410,10 +436,22 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		if err != nil {
 			return err
 		}
+		requestedAt := s.now().UTC().Truncate(time.Microsecond)
+		requested, err := s.store.BusinessProfiles.RequestBrand(ctx, useCase.CustomerID, requestedAt)
+		if err != nil || !requested {
+			booked.Release()
+			if err != nil {
+				return err
+			}
+			return s.brandUnanswered(ctx, useCase, profile)
+		}
 		brand, err = routing.Call(ctx, s.feeMeter(ctx, ModelBrand, useCase.CustomerID, nil),
 			func(ctx context.Context) (Brand, error) { return s.registrar.RegisterBrand(ctx, profile) })
 		if err != nil {
 			booked.Release()
+			if errors.Is(err, ErrNotCarriedOut) {
+				err = errors.Join(err, s.store.BusinessProfiles.ForgetBrandRequest(ctx, useCase.CustomerID, requestedAt))
+			}
 			return err
 		}
 		booked.Charged()
@@ -424,42 +462,165 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		return err
 	}
 	if brand.ID != profile.VendorBrandID || brand.Status != profile.BrandStatus {
-		if err := s.store.BusinessProfiles.SetBrand(ctx, useCase.CustomerID, brand.ID, brand.Status); err != nil {
+		err := saved(ctx, func(ctx context.Context) error {
+			return s.store.BusinessProfiles.SetBrand(ctx, useCase.CustomerID, brand.ID, brand.Status)
+		})
+		if err != nil && profile.VendorBrandID == "" {
+			// Its request stays, so it is never registered again; support records the id.
+			s.logger.Error("could not save a brand the vendor registered; record its id on the app's business profile",
+				"customer", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 	}
 
-	log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name()}
 	switch brand.Outcome {
 	case Pending:
 		return nil
 	case Failed:
 		useCase.Status, useCase.VendorStatus = VendorRejected, brand.Status
-		log.Notes, log.VendorPayload = "The vendor refused the brand: "+brand.Status+".", brand.Raw
+		log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name(),
+			Notes: "The vendor refused the brand: " + brand.Status + ".", VendorPayload: brand.Raw}
 		return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
 	}
 	booked, err := s.book(ctx, useCase.CustomerID, s.campaignFees(ctx, useCase))
 	if err != nil {
 		return err
 	}
-	campaign, err := routing.Call(ctx, s.feeMeter(ctx, ModelCampaign, useCase.CustomerID,
-		map[string]string{AttributeUseCaseType: useCaseType(useCase)}),
+	requestedAt := s.now().UTC().Truncate(time.Microsecond)
+	requested, err := s.store.UseCases.RequestCampaign(ctx, useCase.ID, requestedAt)
+	if err != nil || !requested {
+		booked.Release()
+		if err != nil {
+			return err
+		}
+		return s.campaignUnanswered(ctx, useCase, brand.ID)
+	}
+	campaign, err := routing.Call(ctx, s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)),
 		func(ctx context.Context) (Campaign, error) {
 			return s.registrar.RegisterCampaign(ctx, brand.ID, useCase, s.hookURL)
 		})
 	if err != nil {
 		booked.Release()
+		if errors.Is(err, ErrNotCarriedOut) {
+			err = errors.Join(err, s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, requestedAt))
+		}
 		return err
 	}
 	defer booked.Charged()
+	return s.registered(ctx, useCase, campaign, requestedAt)
+}
+
+// registered records the campaign the vendor registered for a use case, asked for at
+// requestedAt, and bills the months the registrar charged for it then. A save that does not
+// land is logged with the campaign's id, and the use case's request stays: campaignUnanswered
+// finds the campaign at the vendor later.
+func (s *Service) registered(ctx context.Context, useCase store.UseCase, campaign Campaign, requestedAt time.Time) error {
 	useCase.VendorCampaignID, useCase.VendorStatus = campaign.ID, campaign.Status
 	if useCase.Vendor == "" {
 		useCase.Vendor = s.registrar.Name()
 	}
 	// A registrar charges a campaign's first months when it registers it.
-	s.billUpfront(useCase, s.now().UTC())
-	log.Notes, log.VendorPayload = registeredNote+campaign.ID+".", campaign.Raw
-	return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
+	s.billUpfront(useCase, requestedAt)
+	err := saved(ctx, func(ctx context.Context) error {
+		log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name(),
+			Notes: registeredNote + campaign.ID + ".", VendorPayload: campaign.Raw}
+		return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
+	})
+	if err != nil && !errors.Is(err, store.ErrUseCaseMoved) {
+		s.logger.Error("could not save a campaign the vendor registered; the poller finds it at the vendor",
+			"use_case", useCase.ID, "vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID, "error", err)
+		return nil
+	}
+	return err
+}
+
+// brandUnanswered settles the app's brand asked for before, with no answer recorded. One asked
+// for less than requestSettles ago may still be registering and is left to it. The vendor
+// keeps no reference of the caller's on a brand, so one whose answer was lost cannot be found
+// there for sure: it is unanswered.
+func (s *Service) brandUnanswered(ctx context.Context, useCase store.UseCase, profile store.BusinessProfile) error {
+	requestedAt := profile.BrandRequestedAt
+	if requestedAt == nil || s.now().Sub(*requestedAt) < requestSettles {
+		return nil
+	}
+	return s.unanswered(ctx, useCase, "brand", *requestedAt)
+}
+
+// campaignUnanswered settles a use case's campaign asked for before, with no answer recorded.
+// One asked for less than requestSettles ago may still be registering and is left to it.
+// Otherwise the vendor is asked for it by the use case's id (CampaignFinder): one it holds is
+// recorded and billed as its answer would have been, under its own id, so nothing billed
+// already is billed again; one it does not hold was never registered, so the request is
+// forgotten and the next poll asks for it again. A registrar that cannot be asked leaves it
+// unanswered.
+func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase, brandID string) error {
+	requestedAt := useCase.CampaignRequestedAt
+	if requestedAt == nil || s.now().Sub(*requestedAt) < requestSettles {
+		return nil
+	}
+	finder, ok := s.registrar.(CampaignFinder)
+	if !ok {
+		return s.unanswered(ctx, useCase, "campaign", *requestedAt)
+	}
+	campaign, found, err := finder.FindCampaign(ctx, brandID, useCase.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, *requestedAt)
+	}
+	if err := routing.Settle(s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)), campaign); err != nil {
+		s.logger.Error("could not bill a 10DLC fee", "model", ModelCampaign, "error", err)
+	}
+	s.logger.Warn("recorded a campaign the vendor registered whose answer was lost", "use_case", useCase.ID,
+		"vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID)
+	return s.registered(ctx, useCase, campaign, *requestedAt)
+}
+
+// unanswered hands a use case whose brand or campaign registration was not answered to the app
+// and to support: it moves to vendor_rejected, which the app may edit and delete, with a note
+// saying why. The request stays, so nothing is registered, and billed, again until support has
+// looked it up at the vendor, then recorded its id or forgotten the request.
+func (s *Service) unanswered(ctx context.Context, useCase store.UseCase, registration string, requestedAt time.Time) error {
+	useCase.Status = VendorRejected
+	log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name(),
+		Notes: "The vendor did not answer when it was asked to register the " + registration +
+			", so it may hold it. Contact support: it is not asked for again until they have looked it up."}
+	err := s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
+	if errors.Is(err, store.ErrUseCaseMoved) {
+		// Another router's poll moved it first.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.logger.Error("a 10DLC registration was not answered; look it up at the vendor, then record its id or forget its request",
+		"use_case", useCase.ID, "customer", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
+		"requested_at", requestedAt)
+	return nil
+}
+
+// saved runs save on a context a caller that went away does not end, until it lands or
+// saveAttempts ran, while its failure is one a retry may fix: not a row the store or Postgres
+// refused, nor a use case that moved meanwhile.
+func saved(ctx context.Context, save func(context.Context) error) error {
+	ctx = context.WithoutCancel(ctx)
+	err := save(ctx)
+	pause := saveFirstPause
+	for attempt := 1; attempt < saveAttempts && err != nil && !store.Unwritable(err) && !errors.Is(err, store.ErrUseCaseMoved); attempt++ {
+		time.Sleep(pause)
+		pause *= 2
+		err = save(ctx)
+	}
+	return err
+}
+
+// campaignAttributes are what a use case's campaign fee is priced by.
+func campaignAttributes(useCase store.UseCase) map[string]string {
+	return map[string]string{AttributeUseCaseType: useCaseType(useCase)}
 }
 
 // assignAtVendor tells the vendor which of its numbers send as the campaign. A number from
