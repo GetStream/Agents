@@ -30,8 +30,8 @@ type Service struct {
 	clock     func() time.Time
 	logger    *slog.Logger
 
-	// pollAfter is where the next Poll starts, set when the last pass stopped at its page cap.
-	// The ticker in Run and a brand report both poll, so it is guarded.
+	// pollAfter is where the next Poll starts, set when the last pass stopped at its page cap
+	// or at a failed read.
 	pollMu    sync.Mutex
 	pollAfter *store.CreatedPosition
 }
@@ -100,15 +100,22 @@ func (s *Service) Poll(ctx context.Context) {
 	if s.registrar == nil {
 		return
 	}
-	limit := store.DLCLimit(pollPageSize)
+	// Poll is exported as well as run by Run's ticker: two passes at once would ask the vendor
+	// twice and overwrite each other's cursor.
 	s.pollMu.Lock()
-	after := s.pollAfter
-	s.pollMu.Unlock()
-	for range pollPages {
+	defer s.pollMu.Unlock()
+	s.pollAfter = s.poll(ctx, s.pollAfter, pollPages)
+}
+
+// poll refreshes up to pages pages of the use cases a vendor holds, starting after after, and
+// returns where the next pass starts: nil once it read the last page.
+func (s *Service) poll(ctx context.Context, after *store.CreatedPosition, pages int) *store.CreatedPosition {
+	limit := store.DLCLimit(pollPageSize)
+	for range pages {
 		useCases, err := s.store.UseCases.SelectInStatus(ctx, VendorPending, limit, after)
 		if err != nil {
 			s.logger.Error("could not list the use cases a vendor holds", "error", err)
-			return
+			return after
 		}
 		last := len(useCases) <= limit
 		if !last {
@@ -120,15 +127,12 @@ func (s *Service) Poll(ctx context.Context) {
 			}
 		}
 		if last {
-			after = nil
-			break
+			return nil
 		}
 		end := useCases[len(useCases)-1]
 		after = &store.CreatedPosition{At: end.UpdatedAt, ID: end.ID}
 	}
-	s.pollMu.Lock()
-	s.pollAfter = after
-	s.pollMu.Unlock()
+	return after
 }
 
 // Create records a new draft use case and the numbers that send as it.
@@ -292,8 +296,9 @@ func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) err
 		return s.refresh(ctx, useCase, body)
 	}
 	if brandID != "" {
-		// A brand report is the moment to register what waited on it, which Poll does.
-		s.Poll(ctx)
+		// A brand report is the moment to register what waited on it. The report's request
+		// waits on this, so it reads one page; Run's passes reach the rest.
+		s.poll(ctx, nil, 1)
 	}
 	return nil
 }

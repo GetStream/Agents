@@ -300,30 +300,34 @@ func (s *DLCSuite) TestARejectionThePollerFindsIsCountedOnce() {
 	s.Equal(1.0, campaignsFailed()-before)
 }
 
-// A use case past the first page of those the vendor holds is still asked about: one Poll
-// reads them all. They are dated before any other test's, so the 55th of 60 is the 55th
-// the poll reads. Catches a poll that reads one page and stops.
+// Use cases past the first page of those the vendor holds are still asked about: one Poll
+// reads them all. They are dated before any other test's, so the 55th and the 230th of 250
+// are the 55th and 230th the poll reads, past the 51 a poll once read and past the first page
+// of the poll's own paging. Catches a poll that reads one page and stops, or a cursor that
+// does not carry it to the next.
 func (s *DLCSuite) TestOnePollReachesAUseCasePastTheFirstPage() {
 	ctx := context.Background()
 	since := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	ids := make([]string, 60)
-	for i := range ids {
+	approved := map[int]bool{54: true, 229: true}
+	useCases := make([]store.UseCase, 250)
+	ids := make([]string, len(useCases))
+	for i := range useCases {
 		campaign := uuid.NewString()
 		status := "TCR_PENDING"
-		if i == 54 {
+		if approved[i] {
 			status = "MNO_PROVISIONED"
 		}
 		s.registry.set(campaign, status)
 		at := since.Add(time.Duration(i) * time.Second)
-		useCase := &store.UseCase{
-			ID: strings.ReplaceAll(uuid.NewString(), "-", ""), CustomerID: s.customerID(), Name: fmt.Sprintf("held %d", i),
+		ids[i] = strings.ReplaceAll(uuid.NewString(), "-", "")
+		useCases[i] = store.UseCase{
+			ID: ids[i], CustomerID: s.customerID(), Name: fmt.Sprintf("held %d", i),
 			Status: dlc.VendorPending, UseCaseType: "CUSTOMER_CARE", MessageSamples: []string{},
 			Vendor: "telnyx", VendorCampaignID: campaign, VendorStatus: "TCR_PENDING", CreatedAt: at, UpdatedAt: at,
 		}
-		_, err := s.store.GlobalDB().NewInsert().Model(useCase).Exec(ctx)
-		s.Require().NoError(err)
-		ids[i] = useCase.ID
 	}
+	_, err := s.store.GlobalDB().NewInsert().Model(&useCases).Exec(ctx)
+	s.Require().NoError(err)
 	// Every app's held use cases are polled, and these would sit ahead of the next run's.
 	s.T().Cleanup(func() {
 		_, err := s.store.GlobalDB().NewDelete().Model((*store.UseCase)(nil)).Where("id IN (?)", bun.In(ids)).Exec(context.Background())
@@ -332,9 +336,11 @@ func (s *DLCSuite) TestOnePollReachesAUseCasePastTheFirstPage() {
 
 	s.registrar10DLC.Poll(ctx)
 
-	var approved UseCase
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+ids[54], nil, &approved))
-	s.Equal(UseCaseStatus(dlc.Approved), approved.Status)
+	for i := range approved {
+		var read UseCase
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+ids[i], nil, &read))
+		s.Equal(UseCaseStatus(dlc.Approved), read.Status, "use case %d", i+1)
+	}
 }
 
 // Telnyx retries a report and the poller reads the same campaign, so several refreshes can
