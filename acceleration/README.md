@@ -2645,6 +2645,7 @@ go run ./cmd/router keys create --org Acme --app-name "Acme production" --key-na
 
 `--app-id` keeps an id the customer already has, which is what makes an import land under
 something. Running it again for an existing app adds a second key rather than refusing.
+`keys revoke --app <id> --key <id>` stops one of the app's keys on every router at once.
 
 Three endpoints move a customer between two deployments, all server-side only:
 

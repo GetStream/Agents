@@ -21,6 +21,11 @@ const keysUsage = `usage: router keys create [flags]
   --org         the organization to put a new app in
   --key-name    what to call the key, so an operator knows which to revoke
   --env         live or test
+
+       router keys revoke --app <id> --key <id>
+
+  --app         the app the key belongs to
+  --key         the key to stop, which stops working on every router at once
 `
 
 // runKeys mints the first credential a self-hosted router has.
@@ -33,7 +38,11 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	if len(args) == 0 {
 		return errors.New(keysUsage)
 	}
-	if args[0] != "create" {
+	switch args[0] {
+	case "create":
+	case "revoke":
+		return revokeKey(args[1:], settings, logger)
+	default:
 		return fmt.Errorf("unknown keys command %q\n\n%s", args[0], keysUsage)
 	}
 
@@ -78,7 +87,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 		Name:       *keyName,
 		Env:        *environment,
 		Sealed:     sealed,
-		KEKVersion: auth.KEKVersion,
+		KEKVersion: sealer.CurrentVersion(),
 		Last4:      auth.Last4(secret),
 		CreatedBy:  "router keys create",
 	}); err != nil {
@@ -91,6 +100,38 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	fmt.Printf("organization  %s\napp           %s\nkey           %s\nsecret        %s\n\n"+
 		"The secret is shown once. Set it where your SDK reads it and keep it out of the router's own config.\n",
 		app.OrganizationID, app.ID, key, secret)
+	return nil
+}
+
+// revokeKey stops one of an app's keys. The app is asked for as well as the key, so a key
+// id pasted under the wrong app revokes nothing.
+func revokeKey(args []string, settings config.Config, logger *slog.Logger) error {
+	flags := flag.NewFlagSet("keys revoke", flag.ContinueOnError)
+	appID := flags.String("app", "", "the app the key belongs to")
+	keyID := flags.String("key", "", "the key to revoke")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *appID == "" || *keyID == "" {
+		return errors.New("revoking a key needs both --app and --key")
+	}
+
+	ctx := context.Background()
+	pgStore, err := openStore(ctx, settings)
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
+
+	err = pgStore.APIKeys.Revoke(ctx, *appID, *keyID, "router keys revoke")
+	if errors.Is(err, store.ErrNoAPIKey) {
+		return fmt.Errorf("app %s has no live key %s", *appID, *keyID)
+	}
+	if err != nil {
+		return err
+	}
+	logger.Info("revoked an api key", "app", *appID, "key", *keyID)
+	fmt.Printf("revoked key %s of app %s\n", *keyID, *appID)
 	return nil
 }
 

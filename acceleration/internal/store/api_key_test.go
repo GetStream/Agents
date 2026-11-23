@@ -47,7 +47,7 @@ func (s *StoreSuite) TestARevokedKeyStopsWorkingButItsRowSurvives() {
 	app := s.app()
 	s.key(app.ID, "vak_live_bbbbbbbbbbbbbbbb00000000", nil)
 
-	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, "vak_live_bbbbbbbbbbbbbbbb00000000", "thierry"))
+	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_bbbbbbbbbbbbbbbb00000000", "thierry"))
 
 	_, err := s.store.APIKeys.GetLive(s.ctx, "vak_live_bbbbbbbbbbbbbbbb00000000")
 	s.ErrorIs(err, ErrNoAPIKey)
@@ -64,8 +64,8 @@ func (s *StoreSuite) TestRevokingAKeyTwiceSaysItWasAlreadyGone() {
 	app := s.app()
 	s.key(app.ID, "vak_live_cccccccccccccccc00000000", nil)
 
-	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, "vak_live_cccccccccccccccc00000000", "thierry"))
-	s.ErrorIs(s.store.APIKeys.Revoke(s.ctx, "vak_live_cccccccccccccccc00000000", "thierry"), ErrNoAPIKey)
+	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_cccccccccccccccc00000000", "thierry"))
+	s.ErrorIs(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_cccccccccccccccc00000000", "thierry"), ErrNoAPIKey)
 }
 
 func (s *StoreSuite) TestAnExpiredKeyIsNotLive() {
@@ -127,7 +127,7 @@ func (s *StoreSuite) TestAKeyRevokedOnOneReplicaStopsWorkingOnTheOther() {
 		s.Require().NoError(err)
 	}
 
-	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, "vak_live_4444444444444444aaaaaaaa", "thierry"))
+	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_4444444444444444aaaaaaaa", "thierry"))
 
 	s.Eventually(func() bool {
 		_, err := replica.APIKeys.GetLive(s.ctx, "vak_live_4444444444444444aaaaaaaa")
@@ -146,6 +146,55 @@ func (s *StoreSuite) TestAKeyCachedWhileLiveStopsWorkingWhenItLapses() {
 		_, err := s.store.APIKeys.GetLive(s.ctx, "vak_live_5555555555555555aaaaaaaa")
 		return errors.Is(err, ErrNoAPIKey)
 	}, 2*time.Second, 10*time.Millisecond, "a lapsed key read from the cache still works")
+}
+
+func (s *StoreSuite) TestAKeyRevokedInTheDatabaseStopsWorkingWithinAMinute() {
+	if s.store.cache == nil {
+		s.T().Skip("ROUTER_REDIS_ADDR not set: the cache is what this bounds")
+	}
+	app := s.app()
+	key := s.key(app.ID, "vak_live_6666666666666666aaaaaaaa", nil)
+	_, err := s.store.APIKeys.GetLive(s.ctx, key.ID)
+	s.Require().NoError(err)
+	// Revoked where no deletion of the cached owner follows, so only its TTL ends it.
+	_, err = s.store.GlobalDB().NewUpdate().Model((*APIKey)(nil)).Set("revoked_at = now()").Where("id = ?", key.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	redis := s.store.sharedRedis()
+	ttl, err := redis.Do(s.ctx, redis.B().Pttl().Key(cacheKey("key", key.ID)).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Positive(ttl, "the owner is cached")
+	s.LessOrEqual(ttl, time.Minute.Milliseconds(), "a revoked key keeps working for as long as its owner is cached")
+}
+
+func (s *StoreSuite) TestAnAppCannotRevokeAnotherAppsKey() {
+	owner, other := s.app(), s.app()
+	key := s.key(owner.ID, "vak_live_7777777777777777aaaaaaaa", nil)
+
+	s.ErrorIs(s.store.APIKeys.Revoke(s.ctx, other.ID, key.ID, "thierry"), ErrNoAPIKey)
+
+	_, err := s.store.APIKeys.GetLive(s.ctx, key.ID)
+	s.NoError(err, "the key still works for the app that holds it")
+	keys, err := s.store.APIKeys.Select(s.ctx, owner.ID)
+	s.Require().NoError(err)
+	s.Nil(keys[0].RevokedAt)
+}
+
+func (s *StoreSuite) TestAKeySealedUnderAnOlderKEKStillAuthenticatesAfterRotation() {
+	before, err := auth.NewSealerWithKeyring(1, map[int]string{1: "first key"})
+	s.Require().NoError(err)
+	after, err := auth.NewSealerWithKeyring(2, map[int]string{1: "first key", 2: "second key"})
+	s.Require().NoError(err)
+	app := s.app()
+	id, secret, err := auth.NewCredential(auth.Live)
+	s.Require().NoError(err)
+	sealed, err := before.Seal(secret)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.APIKeys.Insert(s.ctx, &APIKey{ID: id, AppID: app.ID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: 1, Last4: "cret"}))
+
+	resolved, err := s.store.APIKeys.Lookup(after)(s.ctx, id)
+	s.Require().NoError(err)
+	s.Equal(secret, resolved.Secret)
 }
 
 func (s *StoreSuite) TestALookupResolvesAKeyToItsAppAndTheEndUsersItAdmits() {
@@ -206,6 +255,6 @@ func (s *StoreSuite) TestAPIKeyQueryBudgets() {
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), "then the local cache answers")
 	}
 	s.Equal(1, s.countQueries(func() {
-		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, key.ID, "thierry")) }))
+		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, key.ID, "thierry")) }))
 	}))
 }
