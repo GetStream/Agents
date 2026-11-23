@@ -29,6 +29,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -210,17 +211,20 @@ type Subscription struct {
 // subscription is the url and both would write the same passages anyway. That is what lets
 // a declaration of what an agent reads be applied again as it stands, without the caller
 // first working out which pages are new.
+//
+// A subscription the caller has to correct is refused with ErrRefused; any other error is
+// the store's or the queue's.
 func (s *Service) Add(ctx context.Context, customerID string, wanted Subscription) (store.KnowledgeURL, error) {
 	namespace := strings.TrimSpace(wanted.Namespace)
 	if namespace == "" {
-		return store.KnowledgeURL{}, stack.Wrap(errors.New("urls: a namespace is required, knowledge is never shared"))
+		return store.KnowledgeURL{}, stack.Wrap(refused{errors.New("urls: a namespace is required, knowledge is never shared")})
 	}
 	address, err := clean(wanted.URL)
 	if err != nil {
-		return store.KnowledgeURL{}, err
+		return store.KnowledgeURL{}, refused{err}
 	}
 	if wanted.RefreshHours < 0 {
-		return store.KnowledgeURL{}, stack.Wrap(fmt.Errorf("urls: refresh_hours cannot be negative, got %d", wanted.RefreshHours))
+		return store.KnowledgeURL{}, stack.Wrap(refused{fmt.Errorf("urls: refresh_hours cannot be negative, got %d", wanted.RefreshHours)})
 	}
 
 	page, err := s.store.KnowledgeURLs.GetByURL(ctx, customerID, namespace, address)
@@ -438,7 +442,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 		last = retried >= limit
 		s.logger.Warn("could not read a page into a knowledge base",
 			"url", page.URL, "namespace", page.Namespace, "attempt", retried+1, "error", err)
-		page.Error = err.Error()
+		page.Error = reason(err)
 		if last {
 			page.State = store.KnowledgeURLFailed
 		}
@@ -467,7 +471,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 func (s *Service) write(ctx context.Context, writer knowledge.Writer, page *store.KnowledgeURL, read search.Page) error {
 	passages := ingest.Split(page.URL, read.Text, s.chunkSize, s.limits)
 	if len(passages) == 0 {
-		return fmt.Errorf("urls: there is nothing to read at %s", page.URL)
+		return stack.Wrap(errEmpty)
 	}
 	// A read takes long enough for the page, or its whole knowledge base, to be removed
 	// meanwhile, and passages written for it then would bring both back. The page is looked
@@ -505,6 +509,39 @@ func (s *Service) write(ctx context.Context, writer knowledge.Writer, page *stor
 // errRemoved ends a read of a page removed while it was read: there is no row left to
 // record it on.
 var errRemoved = errors.New("urls: the page was removed while it was read")
+
+// ErrRefused marks a subscription Add refused for the caller to correct: its text is theirs
+// to read.
+var ErrRefused = errors.New("urls: the subscription was refused")
+
+// refused marks err as ErrRefused without changing what it says.
+type refused struct{ err error }
+
+func (r refused) Error() string   { return r.err.Error() }
+func (r refused) Unwrap() []error { return []error{r.err, ErrRefused} }
+
+// errEmpty is a page read whole with no text on it.
+var errEmpty = errors.New("urls: there is nothing to read at the page")
+
+// spendRefusals are the refusals of an admission that are the customer's own to read and to
+// fix. A spend check that could not be made is the router's, and reads as any other error.
+var spendRefusals = []error{
+	policy.ErrSuspended, policy.ErrNoCredits, policy.ErrSystemLimit, policy.ErrBudgetSpent, policy.ErrUserLimit,
+}
+
+// reason is why a read failed, as the row tells the caller. A crawler's or a store's answer
+// names hosts and bodies, so only the reasons this package or a spend refusal wrote are kept.
+func reason(err error) string {
+	if errors.Is(err, errEmpty) {
+		return errEmpty.Error()
+	}
+	for _, refusal := range spendRefusals {
+		if errors.Is(err, refusal) {
+			return refusal.Error()
+		}
+	}
+	return "urls: the page could not be read"
+}
 
 // kept is errRemoved once the page is no longer subscribed to.
 func (s *Service) kept(ctx context.Context, page *store.KnowledgeURL) error {

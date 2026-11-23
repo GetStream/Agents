@@ -442,7 +442,7 @@ func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
 		"Calls.ChangeModels": func() error { return s.store.Calls.ChangeModels(s.ctx, &Call{ID: "one", LLM: "openai/gpt-5"}) },
 		"Recordings.Start":   func() error { return s.store.Recordings.Start(s.ctx, "", "one", "deepgram", "nova-3") },
 		"Recordings.Finish": func() error {
-			return s.store.Recordings.Finish(s.ctx, "", "one", "deepgram", "nova-3", nil, nil)
+			return s.store.Recordings.Finish(s.ctx, "", "one", "deepgram", "nova-3", nil, "")
 		},
 		"ScheduledTaskRuns.FinishManual": func() error {
 			return s.store.ScheduledTaskRuns.FinishManual(s.ctx, "", "one", "delivered", "", "", "")

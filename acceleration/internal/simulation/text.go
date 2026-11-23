@@ -2,7 +2,6 @@ package simulation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -113,7 +112,7 @@ func (w *written) Say(ctx context.Context, text string) (store.SimulationLine, e
 			answer, quiet, failure, gone := w.state()
 			switch {
 			case gone:
-				return store.SimulationLine{}, errors.New("simulation: the conversation ended before the agent answered")
+				return store.SimulationLine{}, &told{"simulation: the conversation ended before the agent answered"}
 			// The agent having said something is not enough: it may be about to say the
 			// rest. Waiting until it has nothing left to do and has been quiet about it is
 			// what keeps the caller from talking over the second half of an answer.
@@ -121,9 +120,9 @@ func (w *written) Say(ctx context.Context, text string) (store.SimulationLine, e
 				return store.SimulationLine{Text: answer, Tools: w.acted()}, nil
 			case time.Since(started) >= w.within:
 				if failure != nil {
-					return store.SimulationLine{}, fmt.Errorf("simulation: the agent did not answer: %w", failure)
+					return store.SimulationLine{}, fmt.Errorf("%w: %w", errNoAnswer, failure)
 				}
-				return store.SimulationLine{}, errors.New("simulation: the agent did not answer")
+				return store.SimulationLine{}, errNoAnswer
 			}
 		}
 	}

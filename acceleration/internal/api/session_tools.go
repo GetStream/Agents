@@ -197,6 +197,9 @@ func toolsChanged(err error) error {
 		return errToolsFixed
 	case errors.Is(err, agent.ErrSpeechEnded):
 		return unavailable(agent.ErrSpeechEnded.Error())
+	case dependencyFailed(err):
+		// A speech-to-speech model given its tools over its connection, which failed.
+		return err
 	default:
 		// What is left is the tools themselves, such as one with no description.
 		return invalidRequest(err.Error())

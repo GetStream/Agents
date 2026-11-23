@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 type RecordingsSuite struct {
@@ -176,6 +178,16 @@ func (s *RecordingsSuite) TestARecordingNamingItsModelOutsideTheOptionsIsRefused
 		request["options"] = map[string]any{"target": "stub/stub-model"}
 		s.assertTopLevelModelRefused(path, request)
 	}
+}
+
+func (s *RecordingsSuite) TestAnInlineTranscriptionTheProviderFailedSaysSoInNoneOfItsWords() {
+	var transcript Transcription
+	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost, "/v1/stt/recordings",
+		map[string]any{"inline": true, "source": map[string]any{
+			"audio": base64.StdEncoding.EncodeToString(wavOf(failToTranscribe))}}, &transcript))
+
+	s.Equal(RecordingStatusFailed, transcript.Status)
+	s.Equal(store.RecordingFailure, value(transcript.Error))
 }
 
 func (s *RecordingsSuite) TestARecordingWithANullModelIsServedAsOneWithNone() {

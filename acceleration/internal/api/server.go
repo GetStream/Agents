@@ -389,9 +389,15 @@ type Server struct {
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
+	exportLineWait     time.Duration
+	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
 	connectors         core.Registry
+	// exporting holds the customers with an export running on this router, one each, and
+	// exports a place for each export running on it, of maxExports.
+	exporting sync.Map
+	exports   chan struct{}
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -589,6 +595,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		authMode:           authMode,
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
+		exportLineWait:     exportLineWait,
+		exportWait:         exportWait,
+		exports:            make(chan struct{}, maxExports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
@@ -1345,6 +1354,16 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
 			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A credential that could not be checked (the key store down, a key that would not
+		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+		// runs after this.
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			s.logger.Error("could not check a credential", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+				"error", err, "stack", stack.Trace(err))
+			writeError(w, internalError())
 			return
 		}
 		if err == nil && principal.AppID != "" {

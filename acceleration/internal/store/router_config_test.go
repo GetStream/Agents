@@ -2,10 +2,24 @@
 
 package store
 
+import "time"
+
 func (s *StoreSuite) routerConfig(customerID, name string) RouterConfig {
 	config := RouterConfig{CustomerID: customerID, Name: name}
 	s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config))
 	return config
+}
+
+func (s *StoreSuite) TestANameNoRouterConfigHoldsIsCachedForAMinuteOnly() {
+	s.routerConfig("acme-app", "fast")
+	_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+	_, err = s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "nobody")
+	s.Require().ErrorIs(err, ErrNoRouterConfig)
+
+	s.Positive(s.expiryOf(routerConfigNameKey("acme-app", "nobody")), "the miss is cached")
+	s.LessOrEqual(s.expiryOf(routerConfigNameKey("acme-app", "nobody")), time.Minute)
+	s.Greater(s.expiryOf(routerConfigNameKey("acme-app", "fast")), 59*time.Minute, "a config found is still cached for the hour")
 }
 
 func (s *StoreSuite) TestARouterConfigIsOnlyItsOwnCustomers() {
