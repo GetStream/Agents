@@ -651,6 +651,8 @@ var (
 		Message: "This number needs a verified address, which is not supported. Choose a number in the US or Canada, or contact support."}
 	errNoKeyring = notConfigured("Numbers from this vendor cannot be attached on this deployment: " +
 		"it has no key encryption key to seal their trunk passwords with.")
+	errCallNoKeyring = notConfigured("Calls from numbers of this vendor cannot be placed on this deployment: " +
+		"it has no key encryption key to seal the trunk password the vendor fetches on answer.")
 	errPhoneVendorFailed = APIError{Type: ErrorTypeUnavailable, Code: codePhoneVendorFailed,
 		Message: "The phone vendor could not complete the request. Try again, or contact support if it keeps failing."}
 	errNumberSettling = APIError{Type: ErrorTypeConflict, Code: codePhoneNumberSettling,
@@ -691,6 +693,10 @@ func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrAddressRequired) {
 		logger.Info("a phone number needs an address", "error", err)
 		return errNumberNeedsAddress
+	}
+	if errors.Is(err, phone.ErrNoSealerToCall) {
+		logger.Warn("a phone call cannot be placed without a keyring", "error", err)
+		return errCallNoKeyring
 	}
 	if errors.Is(err, phone.ErrNoSealer) {
 		// The setting to fix it is the operator's, so it stays in the log.

@@ -2600,7 +2600,9 @@ the person answers. For those, placing a call parks the plan and hands the vendo
 single-use expiring token at `GET /v1/phone/answer/{token}`, which is the one unauthenticated
 path here because the vendor fetching it has no customer to name. It needs `ROUTER_PUBLIC_URL`
 to be set to somewhere those vendors can reach, and says so rather than placing a call
-nothing will answer. Sinch is the near miss: its callbacks belong to the application rather
+nothing will answer. Plivo is sent the trunk's password in that plan, which waits sealed
+until it is fetched, so a Plivo call also needs the keyring (`ROUTER_DEV_KEK` locally) and
+is refused without one; Bandwidth sends no password and needs none. Sinch is the near miss: its callbacks belong to the application rather
 than to a call, so its plan travels inline on the callout instead.
 
 ```bash

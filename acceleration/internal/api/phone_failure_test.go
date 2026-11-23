@@ -293,6 +293,24 @@ func TestAttachingWithoutAKeyringIsNotConfiguredAndNamesNoSetting(t *testing.T) 
 	require.Contains(t, logged.String(), "set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)", "the operator still learns what to set")
 }
 
+// A call refused for want of a keyring says the call cannot be placed, not that a number
+// cannot be attached.
+func TestACallWithoutAKeyringSaysItCannotBePlaced(t *testing.T) {
+	logged := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logged, nil))
+	failure := stack.Wrap(fmt.Errorf("phone: plivo: %w", phone.ErrNoSealerToCall))
+	handler, _ := served(t, func() error { return phoneFailure(logger, failure) })
+
+	response := postSync(handler, `{"name":"jean"}`)
+
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	answer := answered(t, response.Body.Bytes())
+	require.Equal(t, "not_configured", answer.Code)
+	require.Contains(t, answer.Message, "cannot be placed")
+	require.NotContains(t, response.Body.String(), "ROUTER_DEV_KEK")
+	require.Contains(t, logged.String(), "set ROUTER_DEV_KEK (local)", "the operator still learns what to set")
+}
+
 func TestAHookThatCannotBePointedIsAnsweredWithTryAgain(t *testing.T) {
 	logged := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logged, nil))

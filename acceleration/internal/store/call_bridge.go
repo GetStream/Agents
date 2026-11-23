@@ -24,7 +24,7 @@ type CallBridge struct {
 
 	// Token is what the vendor puts in the url it fetches, and the only thing proving the
 	// fetch is one this service asked for. Only its hash is kept (callTokenHash), so the
-	// table never holds the value a fetch presents.
+	// table never holds the value a fetch presents, and a bridge read back has no Token.
 	Token      string `bun:"-"`
 	TokenHash  string `bun:"token_hash,pk"`
 	CustomerID string `bun:"customer_id,notnull"`

@@ -748,6 +748,10 @@ const NumberKey = "phone_number"
 // ErrNoSealer says this deployment has no keyring to seal or open a number's trunk password.
 var ErrNoSealer = errors.New("phone: no key to seal a number's trunk password: set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
 
+// ErrNoSealerToCall says this deployment has no keyring to seal the trunk password a vendor
+// fetches on answer, so a call on that vendor cannot be placed.
+var ErrNoSealerToCall = errors.New("phone: no key to seal the trunk password the vendor fetches on answer, so the call cannot be placed: set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
+
 // Attach puts a number on the trunk it shares with the customer's other numbers of its
 // vendor, with a rule of its own, and tells the vendor to send calls there. This is what
 // turns a bought number into one that reaches an agent. Without a key to seal the trunk's
@@ -1093,6 +1097,11 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	allowedIPs, err := s.allowlistFor(held.Vendor)
 	if err != nil {
 		return Placed{}, stack.Wrap(err)
+	}
+	// A vendor that fetches its plan on answer and sends the trunk's password gets it from a
+	// parked bridge, which keeps it sealed: refused before anything is made at Stream.
+	if _, hosted := provider.(AnswerRenderer); hosted && s.sealer == nil && sendsPassword(s.registry, held.Vendor) {
+		return Placed{}, stack.Wrap(fmt.Errorf("phone: %s: %w", held.Vendor, ErrNoSealerToCall))
 	}
 
 	sessionID := request.SessionID
@@ -1448,9 +1457,10 @@ func (s *Service) park(
 		CallID:        callID,
 		ExpiresAt:     time.Now().UTC().Add(bridgeLifetime),
 	}
-	if outbound.Bridge.Password != "" {
+	// Only a vendor that sends the password is given it, so only its bridge keeps one.
+	if outbound.Bridge.Password != "" && sendsPassword(s.registry, vendor) {
 		if s.sealer == nil {
-			return "", stack.Wrap(ErrNoSealer)
+			return "", stack.Wrap(ErrNoSealerToCall)
 		}
 		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
 		if err != nil {
@@ -1504,6 +1514,12 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 		Username: bridge.TrunkUsername,
 		Password: password,
 	}, bridge.InitialDigits)
+}
+
+// sendsPassword reports whether a vendor presents the trunk's password when it bridges.
+func sendsPassword(registry *Registry, vendor string) bool {
+	declared, _ := registry.Lookup(vendor)
+	return declared.Authenticates() == TrunkPassword
 }
 
 // callBridgeAAD binds a parked bridge's sealed trunk password to its customer and its token,
