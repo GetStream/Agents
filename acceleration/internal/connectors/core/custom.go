@@ -23,9 +23,9 @@ type CustomConnector struct {
 	// are those tools. Set, Endpoint is not.
 	BaseURL string
 	Tools   []HTTPTool
-	Schemes  []string
-	Scopes   []string
-	Client   ClientPolicy
+	Schemes []string
+	Scopes  []string
+	Client  ClientPolicy
 }
 
 // CustomManifest is the manifest a custom connector is stored as, or why it cannot be: one MCP
