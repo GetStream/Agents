@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -34,10 +35,28 @@ type Items struct {
 	sessionID string
 	// responseID is empty for every turn in the session, set for one turn's own items.
 	responseID string
+	// turn is set on the items of one turn, whose empty responseID names no turn rather than
+	// every one.
+	turn bool
 }
+
+// ErrUnnamedTurn is what the items of a turn with no id answer. The router names no turn for
+// a session that records nothing (incognito), for a speech-to-speech session, whose model
+// decides what a turn is, and for the retry of a request_id already taken. An incognito
+// session has its answer on Session.Events alone; the other two record theirs, which
+// Session.Responses.Items reads.
+var ErrUnnamedTurn = errors.New("client: the turn has no id, so it has no items of its own to read: " +
+	"the router names no turn for an incognito session, a speech-to-speech session or the retry of a " +
+	"request_id already taken; follow the answer on Session.Events, or read Session.Responses.Items " +
+	"for a session that records its turns")
 
 func newItems(client *Client, sessionID, responseID string) *Items {
 	return &Items{client: client, sessionID: sessionID, responseID: responseID}
+}
+
+// newTurnItems is one turn's items, which read nothing when the turn has no id.
+func newTurnItems(client *Client, sessionID, responseID string) *Items {
+	return &Items{client: client, sessionID: sessionID, responseID: responseID, turn: true}
 }
 
 // ItemStream is items arriving a page at a time.
@@ -107,6 +126,11 @@ func (i *Items) Unwind(ctx context.Context, page int) *ItemStream {
 // List is one page of items, for a caller doing its own paging. A limit of zero leaves the
 // router's own; an empty cursor is the first page, and the page's NextCursor the next.
 func (i *Items) List(ctx context.Context, limit int, cursor string) (*acceleration.AgentResponseItemPage, error) {
+	// Without this, the request leaves response_id out and reads every turn in the session:
+	// the whole conversation passed off as this turn's, or nothing at all for an incognito one.
+	if i.turn && i.responseID == "" {
+		return nil, fmt.Errorf("client: reading the items of a turn of %s: %w", i.sessionID, ErrUnnamedTurn)
+	}
 	api, err := i.client.api()
 	if err != nil {
 		return nil, err
@@ -149,7 +173,9 @@ func (i *Items) All(ctx context.Context) ([]acceleration.AgentResponseItem, erro
 type AgentResponse struct {
 	// Created is what the router said when it took the question.
 	Created acceleration.AgentResponse
-	// Items are this turn's own, as opposed to the whole conversation's.
+	// Items are this turn's own, as opposed to the whole conversation's. A turn with no id
+	// (an incognito or speech-to-speech session, or the retry of a request_id already taken)
+	// has none to read, and its reads fail with ErrUnnamedTurn.
 	Items *Items
 }
 
@@ -395,7 +421,7 @@ func (r *Responses) create(ctx context.Context, request acceleration.CreateRespo
 	}
 	return &AgentResponse{
 		Created: *created.JSON202,
-		Items:   newItems(r.client, r.sessionID, created.JSON202.Id),
+		Items:   newTurnItems(r.client, r.sessionID, created.JSON202.Id),
 	}, nil
 }
 

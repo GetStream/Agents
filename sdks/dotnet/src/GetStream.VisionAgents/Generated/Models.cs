@@ -6295,6 +6295,45 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ContactUpdateRequest
+    {
+
+        /// <summary>
+        /// What to say to this person. Empty clears it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("instructions")]
+        public string? Instructions { get; set; } = default!;
+
+        /// <summary>
+        /// An IANA zone. Empty clears it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("time_zone")]
+        public string? TimeZone { get; set; } = default!;
+
+        /// <summary>
+        /// With or without a country code.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("to_number")]
+        public string? ToNumber { get; set; } = default!;
+
+        /// <summary>
+        /// Replace all of the contact's variables. Same rules as on add.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("variables")]
+        public System.Collections.Generic.Dictionary<string, string>? Variables { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class ContentPart
     {
 
@@ -6412,7 +6451,7 @@ namespace GetStream.VisionAgents.Models
         public string? ReasoningEffort { get; set; } = default!;
 
         /// <summary>
-        /// An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
+        /// An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("replaces")]
         public string? Replaces { get; set; } = default!;
@@ -6424,7 +6463,7 @@ namespace GetStream.VisionAgents.Models
         public string? RequestId { get; set; } = default!;
 
         /// <summary>
-        /// What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
+        /// What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("text")]
         public string Text { get; set; } = default!;
@@ -7114,7 +7153,7 @@ namespace GetStream.VisionAgents.Models
         public string BaseUrl { get; set; } = default!;
 
         /// <summary>
-        /// Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+        /// Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("context_window")]
         public long? ContextWindow { get; set; } = default!;

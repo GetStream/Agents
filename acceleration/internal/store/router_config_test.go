@@ -2,7 +2,12 @@
 
 package store
 
-import "time"
+import (
+	"context"
+	"time"
+
+	"github.com/uptrace/bun"
+)
 
 func (s *StoreSuite) routerConfig(customerID, name string) RouterConfig {
 	config := RouterConfig{CustomerID: customerID, Name: name}
@@ -72,13 +77,59 @@ func (s *StoreSuite) TestARenamedRouterConfigIsNoLongerFoundUnderItsOldName() {
 	s.ErrorIs(err, ErrNoRouterConfig)
 }
 
+func (s *StoreSuite) TestARenameARequestGaveUpOnIsNotCachedAgainByAReadBeforeItCommits() {
+	config := s.routerConfig("acme-app", "fast")
+	_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+
+	renamed := config
+	renamed.Name = "cheap"
+	err = s.readWhileWriting(s.lockingRow("router_configs", config.ID), func(ctx context.Context) error {
+		return s.store.RouterConfigs.Update(ctx, &renamed)
+	}, func() {
+		_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+		s.Require().NoError(err, "the config is not renamed yet")
+		_, err = s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+		s.Require().NoError(err)
+	}, bun.Tx.Commit)
+
+	_, getErr := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.ErrorIs(getErr, ErrNoRouterConfig)
+	found, getErr := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(getErr)
+	s.Equal("cheap", found.Name)
+	s.NoError(err, "the rename outlives the request that asked for it")
+}
+
+func (s *StoreSuite) TestAnInsertARequestGaveUpOnIsNotCachedAsAbsentByAReadBeforeItCommits() {
+	_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().ErrorIs(err, ErrNoRouterConfig)
+	other := RouterConfig{ID: newID(), CustomerID: "acme-app", Name: "fast"}
+
+	config := RouterConfig{CustomerID: "acme-app", Name: "fast"}
+	err = s.readWhileWriting(func(holder bun.Tx) {
+		_, err := holder.NewInsert().Model(&other).Exec(s.ctx)
+		s.Require().NoError(err)
+	}, func(ctx context.Context) error {
+		return s.store.RouterConfigs.Insert(ctx, &config)
+	}, func() {
+		_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+		s.Require().ErrorIs(err, ErrNoRouterConfig, "the name is not taken yet")
+	}, bun.Tx.Rollback)
+
+	found, getErr := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(getErr, "the insert landed once the other let the name go")
+	s.Equal(config.ID, found.ID)
+	s.NoError(err, "the insert outlives the request that asked for it")
+}
+
 func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 	for range 20 {
 		s.routerConfig("acme-app", "r"+newID())
 	}
 	config := RouterConfig{CustomerID: "acme-app", Name: "fast"}
 
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -89,7 +140,7 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	config.Name = "cheap"
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
@@ -106,5 +157,5 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 }

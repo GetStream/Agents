@@ -367,7 +367,10 @@ func (s *StagesSuite) TestAnAnswerReadAfterTheAttemptWasCancelledHasNoWait() {
 
 func (s *StagesSuite) TestAnAnswerThatNeverSaidAnythingHasNoStream() {
 	config := s.config()
-	session := s.session(s.provider(answering, 0, 0, ""), config)
+	// A real server that says nothing still streams a chunk that ends the answer; one that
+	// streams none at all failed.
+	silent := `data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"stop"}]}` + "\n\n"
+	session := s.session(s.provider(answering, 0, 0, silent), config)
 
 	s.ask(s.T().Context(), session)
 
@@ -375,6 +378,26 @@ func (s *StagesSuite) TestAnAnswerThatNeverSaidAnythingHasNoStream() {
 	streams, _ := s.stage(config, config.Model, routing.StageStream)
 	s.EqualValues(1, waits)
 	s.Zero(streams)
+}
+
+func (s *StagesSuite) TestAWaitForHeadersThatComeWithTheFirstTokenIsCountedOnce() {
+	// llama.cpp and Ollama send their headers with the first token. The response's own time
+	// to first token, which the caller's responded event reports, is the whole wait, and the
+	// row adds no wait for headers on top of it.
+	// Counted twice it would be twice the wait, so anything short of that, with room for a
+	// busy machine, is counted once.
+	const wait, slack = 400 * time.Millisecond, 300 * time.Millisecond
+	config := s.config()
+	session := s.session(s.provider(wait, 0, 0, answer), config)
+	sink := &statSink{}
+	session.recorder = sink
+
+	response := s.ask(s.T().Context(), session)
+
+	s.GreaterOrEqual(response.TimeToFirstTokenMs, float64(wait.Milliseconds()))
+	s.Require().Len(sink.rows, 1)
+	s.GreaterOrEqual(sink.rows[0].LatencyMs, float64(wait.Milliseconds()))
+	s.Less(sink.rows[0].LatencyMs, float64((wait + slack).Milliseconds()))
 }
 
 func (s *StagesSuite) TestAProviderThatMakesNoHTTPRequestHasOnlyTheRoutersStage() {
