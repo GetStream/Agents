@@ -311,4 +311,5 @@ module-level `logger = logging.getLogger(__name__)`. Use `debug` for lifecycle, 
   **Bug Fixes**.
 - Only include user-facing changes (public API breaks, features, fixes). Skip docs-only and CI-only commits.
 - Reference PR numbers inline, e.g. `(#374)`.
-- To generate: `git log <previous release tag>..HEAD --oneline --no-merges`, then classify each commit.
+- To generate: follow step 2 of the `release` skill, which lists the PRs merged since the previous
+  release tag; then classify each one.
