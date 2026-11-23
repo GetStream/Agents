@@ -47,10 +47,11 @@ func (r *AppOrganizations) Upsert(ctx context.Context, membership *AppOrganizati
 		Set("organization_id = EXCLUDED.organization_id").
 		Set("seen_at = EXCLUDED.seen_at").
 		Exec(ctx)
+	// A write can commit and still fail to answer (a cancelled request).
+	r.store.forget(ctx, appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID))
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: join organization: %w", err))
 	}
-	r.store.forget(ctx, appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID))
 	return nil
 }
 

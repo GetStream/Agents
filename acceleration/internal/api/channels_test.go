@@ -404,7 +404,7 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	body := s.delivery(writer, id, "Stop")
 	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
 	s.Equal(http.StatusInternalServerError, status, "a STOP not recorded is the provider's to deliver again")
-	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.Contains(string(answered), "something went wrong")
 	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -507,7 +507,7 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	body := s.delivery(writer, id, "START")
 	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
 	s.Equal(http.StatusInternalServerError, status, "a START not recorded is the provider's to deliver again")
-	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.Contains(string(answered), "something went wrong")
 	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -570,7 +570,7 @@ func (s *ChannelsSuite) TestARedeliveryRacingAStopThatFailsRecordsIt() {
 
 	failed := <-first
 	s.Equal(http.StatusInternalServerError, failed.status)
-	s.Contains(string(failed.body), "the message could not be recorded; deliver it again")
+	s.Contains(string(failed.body), "something went wrong")
 	s.Equal(http.StatusAccepted, (<-second).status)
 	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
