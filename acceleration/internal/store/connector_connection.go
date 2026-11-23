@@ -560,9 +560,6 @@ func softDeleteConnections(ctx context.Context, tx bun.Tx, customerID string, un
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: delete connector connection: %w", err))
 	}
-	if len(deleted) == 0 {
-		return 0, nil
-	}
 	if err := deleteEventSubscriptions(ctx, tx, customerID, deleted); err != nil {
 		return 0, err
 	}
