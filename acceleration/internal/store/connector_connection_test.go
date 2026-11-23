@@ -1049,7 +1049,7 @@ func (s *StoreSuite) TestAUserDeleteThatFailsKeepsTheirEventSubscriptions() {
 
 	_, err = s.store.ConnectorConnections.DeleteUser(ctx, "acme-app", "alice")
 
-	s.Require().Error(err)
+	s.Require().ErrorContains(err, "unlink a user's connector audit")
 	s.Require().NoError(holder.Rollback())
 	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", hers.ID)
 	s.Require().NoError(err, "the connection stays")
