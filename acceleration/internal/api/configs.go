@@ -236,6 +236,11 @@ func (s *Server) getAgentConfig(ctx context.Context, request *getAgentConfigRequ
 
 // updateAgentConfig replaces a config with what it now is.
 func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConfigRequest) (*updateAgentConfigResponse, error) {
+	return onTheConfigAsItIs(func() (*updateAgentConfigResponse, error) { return s.tryUpdateAgentConfig(ctx, request) })
+}
+
+// tryUpdateAgentConfig is one try of updateAgentConfig, on the config as it reads it.
+func (s *Server) tryUpdateAgentConfig(ctx context.Context, request *updateAgentConfigRequest) (*updateAgentConfigResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -377,16 +382,15 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	// Written onto the row as it now is, so a field kept above from a copy read before another
-	// save, which may have come from the cache, does not write that save's change back.
-	before, err := s.store.AgentConfigs.Save(ctx, existing, &config, time.Time{})
-	if err != nil {
+	// Only over existing, which may have come from the cache: the fields kept from it above are
+	// what another save since then wrote.
+	if err := s.store.AgentConfigs.Save(ctx, &config, existing.UpdatedAt, time.Time{}); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditAgentConfig, ResourceID: config.ID, ResourceName: config.Name,
-		Action: store.AuditUpdated, Changes: auditDiff(agentConfigOf(before), stored),
+		Action: store.AuditUpdated, Changes: auditDiff(agentConfigOf(existing), stored),
 	})
 	return &updateAgentConfigResponse{Body: stored}, nil
 }
@@ -610,6 +614,31 @@ var (
 // errAgentConfigChanged is a patch made from a copy of the config older than the config: it
 // sent updated_at, and the config was saved after it.
 var errAgentConfigChanged = conflict("the agent config was saved after updated_at: read it again and make the change on that")
+
+// errAgentConfigBusy is a save of an agent config that other saves replaced the config under on
+// every try: sent again, it is made on the config as it then is.
+var errAgentConfigBusy = conflict("the agent config was saved by others while this save was made: send it again")
+
+// configSaveTries is how many times a save of an agent config is made in all while other saves
+// keep replacing the config it was made from. A try is lost only to a save that landed while it
+// ran, so this many saves of one config at once all land.
+const configSaveTries = 5
+
+// onTheConfigAsItIs runs save, which reads an agent config, makes a change to it, checks the
+// result and stores it, again when another save replaced the config in between
+// (store.ErrStaleAgentConfig). The change is then made and checked again on the config as it
+// now is, rather than written over a config nobody checked it against.
+func onTheConfigAsItIs[T any](save func() (T, error)) (T, error) {
+	for try := 1; ; try++ {
+		saved, err := save()
+		if !errors.Is(err, store.ErrStaleAgentConfig) {
+			return saved, err
+		}
+		if try == configSaveTries {
+			return saved, errAgentConfigBusy
+		}
+	}
+}
 
 // errAgentRoleTaken is a save that would give a second live agent config of the customer a
 // role another one holds. The one there is, agent_moderator, is what the chat worker finds the

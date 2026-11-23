@@ -200,6 +200,71 @@ func (s *ConfigsSuite) TestAPatchSendingTheUpdatedAtItWasLastGivenIsWritten() {
 	s.Equal("Be briefer.", value(again.Instructions))
 }
 
+// A patch was checked against its copy of the config, read through the cache, and written onto
+// a row another save had made a text agent of since: a text agent was stored with a subagent,
+// which none may have. The save goes past the store, as one the cache has not heard of yet.
+func (s *ConfigsSuite) TestAPatchIsCheckedAgainstTheConfigAsASaveItsCachedCopyMissedLeftIt() {
+	created := s.createConfig(map[string]any{"name": "support"})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("mode = ?", store.AgentModeText).Set("updated_at = now()").
+		Where("id = ?", created.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"subagent": "llm-thinking"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "subagent")
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(AgentModeText, read.Mode)
+	s.Nil(read.Subagent)
+}
+
+// A patch that sent the value its cached copy held kept what another save had written there
+// since, and answered 200 with that: the field it sent was never written. The save goes past
+// the store, as one the cache has not heard of yet.
+func (s *ConfigsSuite) TestAPatchWritesAFieldItSendsThatItsCachedCopyAlreadyHeld() {
+	created := s.createConfig(map[string]any{"name": "support", "instructions": "Be brief."})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("instructions = ?", "Be loud.").Set("updated_at = now()").
+		Where("id = ?", created.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	var patched AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "Be brief."}, &patched))
+
+	s.Equal("Be brief.", value(patched.Instructions))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal("Be brief.", value(read.Instructions))
+}
+
+// The same through a replacement, which writes the whole config it is sent.
+func (s *ConfigsSuite) TestAnUpdateWritesAFieldItSendsThatItsCachedCopyAlreadyHeld() {
+	created := s.createConfig(map[string]any{"name": "support", "instructions": "Be brief."})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("instructions = ?", "Be loud.").Set("updated_at = now()").
+		Where("id = ?", created.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	var updated AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": "support", "instructions": "Be brief."}, &updated))
+
+	s.Equal("Be brief.", value(updated.Instructions))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal("Be brief.", value(read.Instructions))
+}
+
 func (s *ConfigsSuite) TestAnImageTargetIsStoredOnCreateAndOnEveryUpdate() {
 	// An update writes a named list of columns; a field missing from it is kept on create and
 	// silently dropped by every save after.

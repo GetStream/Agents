@@ -197,6 +197,11 @@ func (s *Server) registerSync(api huma.API) {
 // The hash is a fingerprint of that directory. A second call with the same hash does
 // nothing, so a process that syncs on startup is cheap when nothing has changed.
 func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
+	return onTheConfigAsItIs(func() (*syncAgentResponse, error) { return s.trySyncAgent(ctx, request) })
+}
+
+// trySyncAgent is one try of syncAgent, on the config as it reads it.
+func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -418,19 +423,20 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	// skills then failed was found unchanged when sent again, and never wrote them.
 	config.SyncHash = ""
 
-	var was any
 	if found {
-		// Onto the row as it now is, so a setting the directory does not declare keeps what
-		// the dashboard saved since existing was read, which may have come from the cache.
-		before, err := s.store.AgentConfigs.Save(ctx, existing, &config, time.Time{})
-		if err != nil {
+		// Only over existing, which may have come from the cache: every setting the directory
+		// does not declare is what another save since then wrote.
+		if err := s.store.AgentConfigs.Save(ctx, &config, existing.UpdatedAt, time.Time{}); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
-		was = agentConfigOf(before)
 	} else {
 		if err := s.store.AgentConfigs.Insert(ctx, &config); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
+	}
+	var was any
+	if found {
+		was = agentConfigOf(existing)
 	}
 	synced := auditDiff(was, agentConfigOf(config))
 
@@ -446,13 +452,13 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 			return nil, err
 		}
 	}
-	// Only onto the config as this sync left it: one saved since no longer holds what the
+	// Only over the config as this sync left it: one saved since no longer holds what the
 	// directory says, and is written again by the next sync of it.
 	marked := config
 	marked.SyncHash = hash
-	if _, err := s.store.AgentConfigs.Save(ctx, config, &marked, config.UpdatedAt); err == nil {
+	if err := s.store.AgentConfigs.Save(ctx, &marked, config.UpdatedAt, time.Time{}); err == nil {
 		config = marked
-	} else if !errors.Is(err, store.ErrAgentConfigChanged) {
+	} else if !errors.Is(err, store.ErrStaleAgentConfig) {
 		return nil, err
 	}
 	// Recorded last, after the skills the directory brought with it, because what it marks

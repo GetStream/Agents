@@ -81,8 +81,9 @@ func (s *StoreSuite) TestAnUpdateKeepsABindingAForcedDeleteLeftBehind() {
 }
 
 // A save wrote every column from the copy it was made from, so a column another save changed
-// since that copy was read went back to what the copy held.
-func (s *StoreSuite) TestASaveKeepsWhatAnotherSaveWroteSinceItsCopyWasRead() {
+// since that copy was read went back to what the copy held, and the change was written over a
+// config nobody had checked it against.
+func (s *StoreSuite) TestASaveMadeFromACopyAnotherSaveReplacedWritesNothing() {
 	read := s.boundConfig("acme-app")
 	other := read
 	other.Greeting = "Hello."
@@ -90,31 +91,47 @@ func (s *StoreSuite) TestASaveKeepsWhatAnotherSaveWroteSinceItsCopyWasRead() {
 
 	mine := read
 	mine.Instructions = "be brief"
-	before, err := s.store.AgentConfigs.Save(s.ctx, read, &mine, time.Time{})
-	s.Require().NoError(err)
+	s.Require().ErrorIs(s.store.AgentConfigs.Save(s.ctx, &mine, read.UpdatedAt, time.Time{}), ErrStaleAgentConfig)
 
 	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", read.ID)
 	s.Require().NoError(err)
-	s.Equal("be brief", stored.Instructions)
 	s.Equal("Hello.", stored.Greeting, "the other save's greeting is kept")
-	s.Equal("Hello.", mine.Greeting, "the config is left as stored")
-	s.Equal("Hello.", before.Greeting, "what it saved over is the row, not the copy")
+	s.Empty(stored.Instructions, "nothing of the stale copy is written")
 }
 
-// A save asked to refuse a config saved after its copy must not write over that save.
+// A save asked to refuse a config saved after the version its caller made the change from must
+// not write over that save, even when its own copy is the config as stored.
 func (s *StoreSuite) TestASaveFromACopyOlderThanTheConfigIsRefusedWhenAskedTo() {
 	read := s.boundConfig("acme-app")
 	other := read
 	other.Instructions = "be brief"
 	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &other))
 
-	mine := read
+	mine := other
 	mine.Instructions = "be loud"
-	_, err := s.store.AgentConfigs.Save(s.ctx, read, &mine, read.UpdatedAt)
-	s.Require().ErrorIs(err, ErrAgentConfigChanged)
+	s.Require().ErrorIs(s.store.AgentConfigs.Save(s.ctx, &mine, other.UpdatedAt, read.UpdatedAt), ErrAgentConfigChanged)
 
 	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", read.ID)
 	s.Require().NoError(err)
+	s.Equal("be brief", stored.Instructions)
+}
+
+// A replica whose clock is behind writes an updated_at earlier than the one before it, and a
+// later-than comparison let a save made from that one through, over the save it did not see.
+func (s *StoreSuite) TestASaveIsRefusedOverASaveWhoseClockWasBehind() {
+	read := s.boundConfig("acme-app")
+	earlier := read.UpdatedAt.Add(-time.Hour).Truncate(time.Microsecond)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*AgentConfig)(nil)).
+		Set("instructions = ?", "be brief").Set("updated_at = ?", earlier).
+		Where("id = ?", read.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	mine := read
+	mine.Instructions = "be loud"
+	s.Require().ErrorIs(s.store.AgentConfigs.Save(s.ctx, &mine, earlier, read.UpdatedAt), ErrAgentConfigChanged)
+
+	var stored AgentConfig
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&stored).Where("id = ?", read.ID).Scan(s.ctx))
 	s.Equal("be brief", stored.Instructions)
 }
 
@@ -322,12 +339,10 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	config.Instructions = "be brief"
 	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
 		"begin, the locked read, the update and commit: a config that binds nothing locks no connection")
-	read := config
+	read := config.UpdatedAt
 	config.Greeting = "Hello."
-	s.Equal(4, s.countQueries(func() {
-		_, err := s.store.AgentConfigs.Save(s.ctx, read, &config, read.UpdatedAt)
-		s.Require().NoError(err)
-	}), "the same as an update: the change is made on the row the locked read returns")
+	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Save(s.ctx, &config, read, read)) }),
+		"the same as an update: the copy is held against the row the locked read returns")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)

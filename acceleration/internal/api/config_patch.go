@@ -136,6 +136,11 @@ func (s *Server) registerConfigPatch(api huma.API) {
 
 // patchAgentConfig writes what a caller changed onto a stored config.
 func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfigRequest) (*agentConfigResponse, error) {
+	return onTheConfigAsItIs(func() (*agentConfigResponse, error) { return s.tryPatchAgentConfig(ctx, request) })
+}
+
+// tryPatchAgentConfig is one try of patchAgentConfig, on the config as it reads it.
+func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentConfigRequest) (*agentConfigResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -151,6 +156,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
+	existing := agentConfigOf(config)
 	original := config
 	heard := config.Models.STT
 	was := sandboxOfConfig(config)
@@ -310,16 +316,15 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 
-	// Written onto the row as it now is rather than over it, so a save since the read above,
-	// which may have come from the cache, keeps every field this patch does not send.
-	before, err := s.store.AgentConfigs.Save(ctx, original, &config, value(patch.UpdatedAt))
-	if err != nil {
+	// Only over original, which may have come from the cache: every field this patch does not
+	// send is what another save since then wrote.
+	if err := s.store.AgentConfigs.Save(ctx, &config, original.UpdatedAt, value(patch.UpdatedAt)); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditAgentConfig, ResourceID: config.ID, ResourceName: config.Name,
-		Action: store.AuditUpdated, Changes: auditDiff(agentConfigOf(before), stored),
+		Action: store.AuditUpdated, Changes: auditDiff(existing, stored),
 	})
 	return &agentConfigResponse{Body: stored}, nil
 }

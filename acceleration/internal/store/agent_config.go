@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -373,9 +372,14 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 	return nil
 }
 
-// ErrAgentConfigChanged says a save made from a copy of a config was refused because the
-// config was saved again after that copy was read.
-var ErrAgentConfigChanged = errors.New("store: the agent config was saved since it was read")
+// ErrAgentConfigChanged says a save was refused because the config is not the one saved at
+// the updated_at its caller made the change from (Save's unmodifiedSince).
+var ErrAgentConfigChanged = errors.New("store: save agent config: saved since the caller's updated_at")
+
+// ErrStaleAgentConfig says a save was refused because it was made from a copy of the config,
+// read through the cache or not, that another save has replaced since. Nothing was written,
+// and the cached copies of the config are forgotten, so a read now returns it as it is.
+var ErrStaleAgentConfig = errors.New("store: save agent config: saved since the copy was read")
 
 // Update replaces a config a customer holds. Every field is written, so an update is what the
 // config now is rather than what changed about it. A connection it binds as fixed is locked as
@@ -386,34 +390,39 @@ var ErrAgentConfigChanged = errors.New("store: the agent config was saved since 
 // The config is forgotten under its id and under both the name it had and the one it has, since
 // a rename leaves whoever asked for the old name holding a config that no longer answers to it.
 func (r *AgentConfigs) Update(ctx context.Context, config *AgentConfig) error {
-	_, err := r.save(ctx, nil, config, time.Time{})
-	return err
+	return r.save(ctx, config, time.Time{}, time.Time{})
 }
 
-// Save writes what a caller changed in read, a copy of a config it read earlier, onto the config
-// as it now is: each column config holds differently from read is config's, and every other is
-// the row's. Update writes every column, so a copy read before another save, through the cache
-// or not, writes that save's columns back; of two Saves at once that change different columns,
-// both land. It is checked, locked and forgotten as Update is, leaves config as stored, and
-// returns the row as it was before.
+// Save is Update for a change made to a copy of the config, the one stored at read: it is
+// written only over that config. When another save has replaced it since, nothing is written
+// and ErrStaleAgentConfig says so, so a change checked against one config is never written
+// over another one nobody checked it against. The caller reads the config again and makes its
+// change on that. With unmodifiedSince set, the config must also be the one saved then, or the
+// save is refused with ErrAgentConfigChanged.
 //
-// With unmodifiedSince set, a row saved after it is refused with ErrAgentConfigChanged: the
-// caller made its change from a copy older than the config it would write over.
-func (r *AgentConfigs) Save(ctx context.Context, read AgentConfig, config *AgentConfig, unmodifiedSince time.Time) (AgentConfig, error) {
-	return r.save(ctx, &read, config, unmodifiedSince)
+// Both are compared with the row's updated_at for equality, at the column's microseconds. A
+// later-than comparison would let through a save whose replica's clock is behind.
+func (r *AgentConfigs) Save(ctx context.Context, config *AgentConfig, read, unmodifiedSince time.Time) error {
+	return r.save(ctx, config, read, unmodifiedSince)
 }
 
-// save is Update when read is nil and Save otherwise. The row is locked first and what it binds
+// save is Update when read is zero and Save otherwise. The row is locked first and what it binds
 // after, the order every write of a stored config takes them in, so no two writes wait on each
 // other in a cycle: neither a connection delete nor Insert locks a stored config's row.
-func (r *AgentConfigs) save(ctx context.Context, read, config *AgentConfig, unmodifiedSince time.Time) (AgentConfig, error) {
+func (r *AgentConfigs) save(ctx context.Context, config *AgentConfig, read, unmodifiedSince time.Time) error {
 	if config.ID == "" {
-		return AgentConfig{}, stack.Wrap(&ValidationError{Model: "agent config", Field: "id", Reason: "is required"})
+		return stack.Wrap(&ValidationError{Model: "agent config", Field: "id", Reason: "is required"})
 	}
+	normalizeConfig(config)
+	if err := config.Validate(); err != nil {
+		return stack.Wrap(err)
+	}
+
+	config.UpdatedAt = time.Now().UTC()
 
 	var stored AgentConfig
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		err := tx.NewSelect().Model(&stored).
+		err := tx.NewSelect().Model(&stored).Column("name", "connectors", "tags", "updated_at").
 			Where("id = ?", config.ID).
 			Where("customer_id = ?", config.CustomerID).
 			Where("deleted_at IS NULL").
@@ -425,17 +434,12 @@ func (r *AgentConfigs) save(ctx context.Context, read, config *AgentConfig, unmo
 		if err != nil {
 			return fmt.Errorf("store: update agent config: %w", err)
 		}
-		if !unmodifiedSince.IsZero() && stored.UpdatedAt.After(unmodifiedSince) {
+		if !unmodifiedSince.IsZero() && !stored.UpdatedAt.Equal(unmodifiedSince.Truncate(time.Microsecond)) {
 			return ErrAgentConfigChanged
 		}
-		normalizeConfig(config)
-		if read != nil {
-			r.keepUnchanged(*read, config, stored)
+		if !read.IsZero() && !stored.UpdatedAt.Equal(read.Truncate(time.Microsecond)) {
+			return ErrStaleAgentConfig
 		}
-		if err := config.Validate(); err != nil {
-			return err
-		}
-		config.UpdatedAt = time.Now().UTC()
 
 		missing, err := lockBoundConnections(ctx, tx, config)
 		if err != nil {
@@ -470,7 +474,8 @@ func (r *AgentConfigs) save(ctx context.Context, read, config *AgentConfig, unmo
 		}
 		return nil
 	}, func() []string {
-		// Named once the locked read found the row: a commit that fails can still have landed.
+		// Named once the locked read found the row: a commit that fails can still have landed,
+		// and a save refused as stale leaves the copy it was made from to be read again.
 		if stored.Name == "" {
 			return nil
 		}
@@ -481,29 +486,9 @@ func (r *AgentConfigs) save(ctx context.Context, read, config *AgentConfig, unmo
 		}
 	})
 	if err != nil {
-		return AgentConfig{}, stack.Wrap(err)
+		return stack.Wrap(err)
 	}
-	return stored, nil
-}
-
-// keepUnchanged puts into config the stored value of every column config holds as read held it,
-// so the save writes only what its caller changed. Both are normalized first, so a list the
-// caller left nil is not taken for one it emptied. sync_hash is always the caller's: whether
-// the config still holds the directory last synced is for each save to say, and a patch that
-// clears it must clear one a sync wrote since the patch's copy was read.
-func (r *AgentConfigs) keepUnchanged(read AgentConfig, config *AgentConfig, stored AgentConfig) {
-	normalizeConfig(&read)
-	table := r.store.global.Table(reflect.TypeFor[AgentConfig]())
-	was, now, held := reflect.ValueOf(&read).Elem(), reflect.ValueOf(config).Elem(), reflect.ValueOf(&stored).Elem()
-	for _, column := range configColumns {
-		if column == "updated_at" || column == "sync_hash" {
-			continue
-		}
-		field := table.FieldMap[column]
-		if reflect.DeepEqual(field.Value(now).Interface(), field.Value(was).Interface()) {
-			field.Value(now).Set(field.Value(held))
-		}
-	}
+	return nil
 }
 
 // Delete marks a config as gone. The row stays, because the calls that ran under it still name
