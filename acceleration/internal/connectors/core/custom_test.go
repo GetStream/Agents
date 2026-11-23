@@ -126,7 +126,7 @@ func (s *CustomSuite) TestAnHTTPConnectorTakesTheSchemesAnMCPOneTakes() {
 		"none":    {func(c *CustomConnector) { c.Schemes = []string{"none"} }, ""},
 		"oauth2_code": {func(c *CustomConnector) {
 			c.Schemes, c.Client.Registration = []string{"oauth2_code"}, []ClientRegistrationMethod{ClientDCR}
-		}, ""},
+		}, "oauth2_code is not available for an http custom connector"},
 		"client credentials": {func(c *CustomConnector) { c.Schemes = []string{"oauth2_client_credentials"} },
 			"oauth2_client_credentials is not available for a custom connector"},
 		"an operator client": {func(c *CustomConnector) { c.Client.Registration = []ClientRegistrationMethod{ClientOperator} },

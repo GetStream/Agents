@@ -78,6 +78,12 @@ func CustomManifest(c CustomConnector) (Manifest, error) {
 		if len(c.Tools) == 0 {
 			return Manifest{}, stack.Wrap(errors.New("an http custom connector needs at least one tool"))
 		}
+		// oauth2_code finds the authorization server from the manifest's issuer, authorize and token
+		// endpoints, which a custom connector cannot set, or from its MCP endpoint, which an http
+		// one has none of (discover in internal/connectors/schemes/oauth2code/discovery.go).
+		if slices.Contains(c.Schemes, "oauth2_code") {
+			return Manifest{}, stack.Wrap(errors.New("oauth2_code is not available for an http custom connector: it needs authorization server endpoints an http connector cannot set"))
+		}
 		manifest.Endpoints = map[string]string{SourceKindHTTP: c.BaseURL}
 		manifest.Sources = []SourceRule{{Kind: SourceKindHTTP, Endpoint: SourceKindHTTP, HTTPTools: c.Tools}}
 	}
