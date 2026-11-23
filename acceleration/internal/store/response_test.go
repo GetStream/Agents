@@ -136,13 +136,13 @@ func (s *StoreSuite) TestMovingThePathRewindsTheOldBranchAndBringsBackTheNew() {
 	s.branchAnswered(s.store, "second-again", "first", "second", s.base.Add(4*time.Minute))
 	s.Require().Equal([]string{"first", "second-again"}, s.conversation())
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "third", s.base.Add(5*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "third", s.base.Add(5*time.Minute), time.Time{}))
 	s.Equal([]string{"first", "second", "third"}, s.conversation())
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "third", s.base.Add(6*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "third", s.base.Add(6*time.Minute), time.Time{}))
 	s.Equal([]string{"first", "second", "third"}, s.conversation(), "moving to the same path again changes nothing")
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "second-again", s.base.Add(7*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "second-again", s.base.Add(7*time.Minute), time.Time{}))
 	s.Equal([]string{"first", "second-again"}, s.conversation())
 }
 
@@ -151,7 +151,7 @@ func (s *StoreSuite) TestMovingToAResponseInTheConversationCutsItShortThere() {
 	s.branchAnswered(s.store, "first", "", "", s.base)
 	s.branchAnswered(s.store, "second", "first", "", s.base.Add(time.Minute))
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "first", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "first", s.base.Add(2*time.Minute), time.Time{}))
 
 	s.Equal([]string{"first"}, s.conversation())
 }
@@ -180,7 +180,7 @@ func (s *StoreSuite) TestMovingThePathKeepsTurnsFromBeforeBranchesWereKept() {
 	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "legacy", s.base.Add(3*time.Minute)))
 	s.branchAnswered(s.store, "first-again", "legacy", "first", s.base.Add(4*time.Minute))
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "second", s.base.Add(5*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "second", s.base.Add(5*time.Minute), time.Time{}))
 
 	s.Equal([]string{"legacy", "first", "second"}, s.conversation())
 }
@@ -190,7 +190,7 @@ func (s *StoreSuite) TestMovingToNoResponseRewindsTheWholeConversation() {
 	s.branchAnswered(s.store, "first", "", "", s.base)
 	s.branchAnswered(s.store, "second", "first", "", s.base.Add(time.Minute))
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "", s.base.Add(2*time.Minute), time.Time{}))
 
 	s.Empty(s.conversation())
 	leaf, err := s.store.Responses.ActiveLeaf(s.ctx, "app", "one")
@@ -204,14 +204,14 @@ func (s *StoreSuite) TestTheActiveLeafIsTheNewestResponseOnTheConversation() {
 	s.opened("one", "app", s.base, nil)
 	s.branchAnswered(s.store, "first", "", "", s.base)
 	s.branchAnswered(s.store, "second", "first", "", s.base.Add(time.Minute))
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "first", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "first", s.base.Add(2*time.Minute), time.Time{}))
 	s.branchAnswered(s.store, "second-again", "first", "second", s.base.Add(3*time.Minute))
 
 	leaf, err := s.store.Responses.ActiveLeaf(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Equal("second-again", leaf)
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "second", s.base.Add(4*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "second", s.base.Add(4*time.Minute), time.Time{}))
 	leaf, err = s.store.Responses.ActiveLeaf(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Equal("second", leaf, "an older branch brought back is the conversation's end")
@@ -234,7 +234,7 @@ func (s *StoreSuite) TestASessionWithNoResponsesHasNoActiveLeaf() {
 func (s *StoreSuite) TestMovingToAResponseTheSessionDoesNotHaveFails() {
 	s.opened("one", "app", s.base, nil)
 
-	err := s.store.Responses.MoveActivePath(s.ctx, "app", "one", "nowhere", s.base)
+	err := s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "nowhere", s.base, time.Time{})
 	s.ErrorIs(err, ErrUnknownResponse)
 }
 
@@ -250,13 +250,13 @@ func (s *ShardedStoreSuite) TestMovingThePathMovesItInEveryShard() {
 	s.branchAnswered(s.other, "third-again", "second-again", "", s.base.Add(4*time.Minute))
 	s.Require().Equal([]string{"first", "second-again", "third-again"}, s.conversation())
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "second", s.base.Add(5*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "second", s.base.Add(5*time.Minute), time.Time{}))
 	s.Equal([]string{"first", "second"}, s.conversation())
 
 	tail, err := s.other.Responses.BranchTail(s.ctx, "app", "one", "second-again")
 	s.Require().NoError(err)
 	s.Equal([]string{"second-again", "third-again"}, responseIDs(tail))
-	s.Require().NoError(s.other.Responses.MoveActivePath(s.ctx, "app", "one", "third-again", s.base.Add(6*time.Minute)))
+	s.Require().NoError(s.other.Responses.MoveActivePathUntil(s.ctx, "app", "one", "third-again", s.base.Add(6*time.Minute), time.Time{}))
 	s.Equal([]string{"first", "second-again", "third-again"}, s.conversation())
 
 	questions, err := s.store.Responses.Siblings(s.ctx, "app", "one", "second-again", SiblingsOfReply)
@@ -317,8 +317,8 @@ func (s *StoreSuite) TestResponseQueryBudgets() {
 			return err
 		}},
 		{"ActiveLeaf", 0, 1, func() error { _, err := s.store.Responses.ActiveLeaf(s.ctx, "app", "conversed"); return err }},
-		{"MoveActivePath", 0, 2, func() error {
-			return s.store.Responses.MoveActivePath(s.ctx, "app", "conversed", retry.ID, at.Add(2*time.Hour))
+		{"MoveActivePathUntil with no until", 0, 2, func() error {
+			return s.store.Responses.MoveActivePathUntil(s.ctx, "app", "conversed", retry.ID, at.Add(2*time.Hour), time.Time{})
 		}},
 		{"MoveActivePathUntil", 0, 2, func() error {
 			return s.store.Responses.MoveActivePathUntil(s.ctx, "app", "conversed", "response-29",

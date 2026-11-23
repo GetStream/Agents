@@ -222,7 +222,7 @@ func (s *StoreSuite) TestBranchesAreOnlyTheirOwnCustomers() {
 	s.ErrorIs(err, ErrUnknownResponse)
 	_, err = s.store.Responses.BranchTail(s.ctx, "somebody-else", "one", "first")
 	s.ErrorIs(err, ErrUnknownResponse)
-	s.ErrorIs(s.store.Responses.MoveActivePath(s.ctx, "somebody-else", "one", "asked", s.base.Add(6*time.Minute)), ErrUnknownResponse)
+	s.ErrorIs(s.store.Responses.MoveActivePathUntil(s.ctx, "somebody-else", "one", "asked", s.base.Add(6*time.Minute), time.Time{}), ErrUnknownResponse)
 	s.Equal([]string{"first"}, s.conversation(), "another customer moves nothing")
 
 	messages, err := s.store.BranchMessages.Select(s.ctx, "somebody-else", "one", nil)
