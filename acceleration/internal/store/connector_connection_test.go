@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -993,6 +994,69 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 	}
 }
 
+// TestDeletingAUsersConnectionsDeletesTheirEventSubscriptions: the subscriptions' sealed secrets and
+// callback tokens go with the connections; another user's, the app's and another customer's stay.
+func (s *StoreSuite) TestDeletingAUsersConnectionsDeletesTheirEventSubscriptions() {
+	first := s.connection("acme-app", userOwned("alice"))
+	second := s.connection("acme-app", userOwned("alice"))
+	bob := s.connection("acme-app", userOwned("bob"))
+	app := s.connection("acme-app", nil)
+	elsewhere := s.connection("other-app", userOwned("alice"))
+	hers := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", first.ID, "config-1", "key-1"),
+		s.eventSubscription("acme-app", first.ID, "config-1", "key-2"),
+		s.eventSubscription("acme-app", second.ID, "config-1", "key-1"),
+	}
+	kept := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", bob.ID, "config-1", "key-1"),
+		s.eventSubscription("acme-app", app.ID, "config-1", "key-1"),
+		s.eventSubscription("other-app", elsewhere.ID, "config-1", "key-1"),
+		// A row of another customer that names her connection's id: the customer is part of the match.
+		s.eventSubscription("other-app", first.ID, "config-2", "key-1"),
+	}
+
+	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	for _, sub := range hers {
+		_, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.ErrorIs(err, ErrNoConnectionEventSubscription, "her subscription %s is gone", sub.Token)
+	}
+	for _, sub := range kept {
+		got, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.Require().NoError(err, "subscription %s stays", sub.Token)
+		s.Equal(sub.ID, got.ID)
+	}
+}
+
+// TestAUserDeleteThatFailsKeepsTheirEventSubscriptions: the subscriptions go in the delete's transaction,
+// so a delete that fails leaves them with the connections.
+func (s *StoreSuite) TestAUserDeleteThatFailsKeepsTheirEventSubscriptions() {
+	hers := s.connection("acme-app", userOwned("alice"))
+	sub := s.eventSubscription("acme-app", hers.ID, "config-1", "key-1")
+	s.Require().NoError(s.store.ConnectorAuditEvents.Insert(s.ctx, &ConnectorAuditEvent{
+		CustomerID: "acme-app", ConnectionID: hers.ID, ConnectorID: "acme", OwnerType: OwnerUser,
+		Action: AuditGrantCreated, Reason: AuditReasonConsent, Revision: 2,
+	}))
+	// Another transaction holds her audit row, so the delete's last statement waits until its deadline.
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holder.Rollback() }()
+	_, err = holder.ExecContext(s.ctx, "SELECT 1 FROM connector_audit WHERE connection_id = ? FOR UPDATE", hers.ID)
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(s.ctx, 500*time.Millisecond)
+	defer cancel()
+
+	_, err = s.store.ConnectorConnections.DeleteUser(ctx, "acme-app", "alice")
+
+	s.Require().ErrorContains(err, "unlink a user's connector audit")
+	s.Require().NoError(holder.Rollback())
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", hers.ID)
+	s.Require().NoError(err, "the connection stays")
+	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+	s.NoError(err, "so does its subscription")
+}
+
 // TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser: the rows stay, with no id that
 // leads back to the user; another user's keep theirs.
 func (s *StoreSuite) TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser() {
@@ -1051,13 +1115,37 @@ func (s *StoreSuite) TestAConnectionIsUsedByTheFixedBindingsOfLiveConfigsThatNam
 	s.Empty(uses[unbound.ID], "a session binding names no connection")
 }
 
+func (s *StoreSuite) TestAnotherCustomersWriteToAConnectionIdChangesNothing() {
+	writes := map[string]func(id string) error{
+		"PutClient": func(id string) error {
+			return s.store.ConnectorConnections.PutClient(s.ctx, "other-app", id, ConnectorConnectionClient{
+				Registration: core.ClientDCR, ClientID: "their-client"})
+		},
+		"PutValidation": func(id string) error {
+			return s.store.ConnectorConnections.PutValidation(s.ctx, "other-app", id, ConnectorConnectionValidation{
+				Revision: 99, Status: "failed", Code: "401", Error: "theirs", CheckedAt: time.Now().UTC().Truncate(time.Microsecond)})
+		},
+	}
+	for name, write := range writes {
+		s.Run(name, func() {
+			s.SetupTest()
+			connection := s.connection("acme-app", userOwned("alice"))
+			before := s.storedConnection(connection.ID)
+
+			s.Require().NoError(write(connection.ID))
+
+			s.Equal(before, s.storedConnection(connection.ID), "acme-app's connection is as it was")
+		})
+	}
+}
+
 func (s *StoreSuite) TestALaterValidationReplacesTheLastOne() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	first := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Status: "failed", Code: "503", Error: "Service Unavailable", CheckedAt: first}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Status: "connected", CheckedAt: first.Add(time.Second)}))
 
 	got := s.storedConnection(connection.ID).Validation
@@ -1072,10 +1160,10 @@ func (s *StoreSuite) TestALaterValidationReplacesTheLastOne() {
 func (s *StoreSuite) TestAValidationThatRanEarlierNeverReplacesALaterOne() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	later := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Status: "connected", CheckedAt: later}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Status: "failed", Code: "500", CheckedAt: later.Add(-time.Second)}))
 
 	got := s.storedConnection(connection.ID).Validation
@@ -1089,10 +1177,10 @@ func (s *StoreSuite) TestAValidationThatRanEarlierNeverReplacesALaterOne() {
 func (s *StoreSuite) TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOnes() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	checked := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Revision: 3, Status: "connected", CheckedAt: checked}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Revision: 2, Status: "failed", Code: "503", CheckedAt: checked.Add(time.Second)}))
 
 	got := s.storedConnection(connection.ID).Validation
@@ -1105,10 +1193,10 @@ func (s *StoreSuite) TestAValidationOfOlderCredentialsNeverReplacesOneOfNewerOne
 func (s *StoreSuite) TestAValidationOfNewerCredentialsReplacesOneThatRanLater() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	checked := time.Now().UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Revision: 2, Status: "failed", Code: "503", CheckedAt: checked}))
 
-	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+	s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 		Revision: 3, Status: "connected", CheckedAt: checked.Add(-time.Second)}))
 
 	got := s.storedConnection(connection.ID).Validation
@@ -1222,13 +1310,13 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		s.Require().NoError(err)
 	}), "Referenced")
 	for _, id := range ids {
-		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, id, ConnectorConnectionClient{
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, "acme-app", id, ConnectorConnectionClient{
 			Registration: core.ClientDCR, ClientID: "dcr-client"}))
-		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, id, ConnectorConnectionValidation{
+		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, "acme-app", id, ConnectorConnectionValidation{
 			Revision: 1, Status: "ok", CheckedAt: now}))
 	}
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, connection.ID, ConnectorConnectionClient{
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionClient{
 			Registration: core.ClientDCR, ClientID: "dcr-client"}))
 	}), "PutClient")
 	s.Equal(1, s.countQueries(func() {
@@ -1237,7 +1325,7 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		s.Len(granted, 30)
 	}), "SelectGrantedOfClient")
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.ID, ConnectorConnectionValidation{
+		s.Require().NoError(s.store.ConnectorConnections.PutValidation(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionValidation{
 			Revision: 1, Status: "ok", CheckedAt: now.Add(time.Second)}))
 	}), "PutValidation")
 	s.Equal(1, s.countQueries(func() {
@@ -1268,7 +1356,7 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connections[2].ID))
 	}), "DeleteUnbound")
-	s.Equal(6, s.countQueries(func() {
+	s.Equal(7, s.countQueries(func() {
 		_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
 		s.Require().NoError(err)
 	}), "DeleteUser")

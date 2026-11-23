@@ -126,8 +126,8 @@ func (g *gatedRecords) Responding(row store.AgentResponse) {
 	g.hold(func() { g.sessionRecords.Responding(row) })
 }
 
-func (g *gatedRecords) Responded(id, status, failure string, at time.Time) {
-	g.hold(func() { g.sessionRecords.Responded(id, status, failure, at) })
+func (g *gatedRecords) Responded(customerID, id, status, failure string, at time.Time) {
+	g.hold(func() { g.sessionRecords.Responded(customerID, id, status, failure, at) })
 }
 
 func (g *gatedRecords) Item(item store.AgentResponseItem) {

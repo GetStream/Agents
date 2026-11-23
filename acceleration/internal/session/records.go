@@ -39,6 +39,8 @@ const itemBatchSize = 64
 // would race: a response row written before the session row it points at violates the
 // foreign key, and items written before their response do the same.
 type recordWrite struct {
+	// customerID is whose session the write is to: an id alone may be another customer's.
+	customerID string
 	// session is a session that opened or was renamed, nil otherwise, and tools what its
 	// model is offered.
 	session *store.AgentSession
@@ -84,22 +86,22 @@ type recorder interface {
 	// Responding says a turn began.
 	Responding(row store.AgentResponse)
 	// Responded says how it ended.
-	Responded(id, status, failure string, at time.Time)
+	Responded(customerID, id, status, failure string, at time.Time)
 	// Item says one thing that happened during it.
 	Item(item store.AgentResponseItem)
 	// Described says the session was renamed. A nil custom leaves the labels as they were.
 	Described(customerID, id, title, description string, custom map[string]any)
 	// SawVideo says the agent saw the user's video.
-	SawVideo(id string)
+	SawVideo(customerID, id string)
 	// Voiced says voice was started on the session.
-	Voiced(id string)
+	Voiced(customerID, id string)
 	// Chose says a login in the conversation chose a connection for the binding called name.
 	Chose(customerID, id, name, connectionID string)
 	// ToolTimeout says the session was given a new tool_timeout_ms while it ran, by a caller
 	// of kind.
-	ToolTimeout(id, kind string, milliseconds int)
+	ToolTimeout(customerID, id, kind string, milliseconds int)
 	// Offered says the session's model is now offered tools, after its caller's changed.
-	Offered(id string, tools []store.ToolDefinition)
+	Offered(customerID, id string, tools []store.ToolDefinition)
 	// Flush waits until everything said so far has been written, which is what reading the
 	// conversation back straight after it happened needs.
 	Flush(ctx context.Context) error
@@ -110,7 +112,7 @@ type recorder interface {
 type sessionRecords interface {
 	recorder
 	Opened(row store.AgentSession, tools []store.ToolDefinition)
-	Closed(id string, at time.Time, reason EndReason)
+	Closed(customerID, id string, at time.Time, reason EndReason)
 	Close()
 }
 
@@ -138,6 +140,10 @@ type sessionRecorder struct {
 
 	closeOnce sync.Once
 	dropped   atomic.Int64
+	// refused are the turns, by response id, whose row the store refused because the id is
+	// another customer's: their items are not written under it. Kept by the writer alone, and
+	// each until its turn ends.
+	refused map[string]struct{}
 }
 
 func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecorder {
@@ -147,6 +153,7 @@ func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecor
 		queue:   make(chan recordWrite, recordQueueSize),
 		flushes: make(chan chan (<-chan struct{})),
 		done:    make(chan struct{}),
+		refused: map[string]struct{}{},
 	}
 	go r.run()
 	return r
@@ -158,13 +165,13 @@ func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefin
 }
 
 // Offered queues what a session's model is now offered.
-func (r *sessionRecorder) Offered(id string, tools []store.ToolDefinition) {
-	r.queueWrite(recordWrite{offered: id, tools: tools})
+func (r *sessionRecorder) Offered(customerID, id string, tools []store.ToolDefinition) {
+	r.queueWrite(recordWrite{customerID: customerID, offered: id, tools: tools})
 }
 
 // Closed queues the time a session ended.
-func (r *sessionRecorder) Closed(id string, at time.Time, reason EndReason) {
-	r.queueWrite(recordWrite{closed: id, closedAt: at, endReason: string(reason)})
+func (r *sessionRecorder) Closed(customerID, id string, at time.Time, reason EndReason) {
+	r.queueWrite(recordWrite{customerID: customerID, closed: id, closedAt: at, endReason: string(reason)})
 }
 
 // described is what a session was renamed to.
@@ -197,18 +204,18 @@ type timed struct {
 
 // ToolTimeout queues a running session's new tool_timeout_ms behind the row it changes, so a
 // reopen's own row, written first, cannot write the old one back over it.
-func (r *sessionRecorder) ToolTimeout(id, kind string, milliseconds int) {
-	r.queueWrite(recordWrite{timed: &timed{id, kind, milliseconds}})
+func (r *sessionRecorder) ToolTimeout(customerID, id, kind string, milliseconds int) {
+	r.queueWrite(recordWrite{customerID: customerID, timed: &timed{id, kind, milliseconds}})
 }
 
 // SawVideo queues that a session became a video one, behind the row it changes.
-func (r *sessionRecorder) SawVideo(id string) {
-	r.queueWrite(recordWrite{sawVideo: id})
+func (r *sessionRecorder) SawVideo(customerID, id string) {
+	r.queueWrite(recordWrite{customerID: customerID, sawVideo: id})
 }
 
 // Voiced queues that voice was started on a session, behind the row it changes.
-func (r *sessionRecorder) Voiced(id string) {
-	r.queueWrite(recordWrite{voiced: id})
+func (r *sessionRecorder) Voiced(customerID, id string) {
+	r.queueWrite(recordWrite{customerID: customerID, voiced: id})
 }
 
 // Responding queues a turn that has just begun.
@@ -217,8 +224,8 @@ func (r *sessionRecorder) Responding(row store.AgentResponse) {
 }
 
 // Responded queues how a turn ended.
-func (r *sessionRecorder) Responded(id, status, failure string, at time.Time) {
-	r.queueWrite(recordWrite{finished: id, status: status, failure: failure, finishedAt: at})
+func (r *sessionRecorder) Responded(customerID, id, status, failure string, at time.Time) {
+	r.queueWrite(recordWrite{customerID: customerID, finished: id, status: status, failure: failure, finishedAt: at})
 }
 
 // Item queues one thing that happened during a turn.
@@ -310,7 +317,11 @@ func (r *sessionRecorder) run() {
 			}
 			taken++
 			if len(write.items) > 0 {
-				pending = append(pending, write.items...)
+				for _, item := range write.items {
+					if _, refused := r.refused[item.ResponseID]; !refused {
+						pending = append(pending, item)
+					}
+				}
 				if len(pending) >= itemBatchSize {
 					r.writeItems(pending)
 					pending = pending[:0]
@@ -381,23 +392,28 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
-		if err := r.store.SessionTools.Upsert(ctx, write.session.ID, write.tools); err != nil {
+		if err := r.store.SessionTools.Upsert(ctx, write.session.CustomerID, write.session.ID, write.tools); err != nil {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.offered != "":
-		if err := r.store.SessionTools.Upsert(ctx, write.offered, write.tools); err != nil {
+		if err := r.store.SessionTools.Upsert(ctx, write.customerID, write.offered, write.tools); err != nil {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.closed != "":
-		if err := r.store.Sessions.Close(ctx, write.closed, write.closedAt, write.endReason); err != nil {
+		if err := r.store.Sessions.Close(ctx, write.customerID, write.closed, write.closedAt, write.endReason); err != nil {
 			r.logger.Error("could not record the session ending", "error", err)
 		}
 	case write.response != nil:
-		if err := r.store.Responses.Insert(ctx, write.response); err != nil {
+		err := r.store.Responses.Insert(ctx, write.response)
+		if errors.Is(err, store.ErrIDTaken) {
+			r.refused[write.response.ID] = struct{}{}
+		}
+		if err != nil {
 			r.logger.Error("could not record the turn starting", "error", err)
 		}
 	case write.finished != "":
-		if err := r.store.Responses.Finish(ctx, write.finished, write.status, write.failure, write.finishedAt); err != nil {
+		delete(r.refused, write.finished)
+		if err := r.store.Responses.Finish(ctx, write.customerID, write.finished, write.status, write.failure, write.finishedAt); err != nil {
 			r.logger.Error("could not record the turn ending", "error", err)
 		}
 	case write.described != nil:
@@ -417,15 +433,15 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.timed != nil:
 		t := write.timed
-		if err := r.store.Sessions.SetToolTimeout(ctx, t.id, t.kind, t.milliseconds); err != nil {
+		if err := r.store.Sessions.SetToolTimeout(ctx, write.customerID, t.id, t.kind, t.milliseconds); err != nil {
 			r.logger.Error("could not record the session's tool timeout", "session", t.id, "error", err)
 		}
 	case write.sawVideo != "":
-		if err := r.store.Sessions.SawVideo(ctx, write.sawVideo); err != nil {
+		if err := r.store.Sessions.SawVideo(ctx, write.customerID, write.sawVideo); err != nil {
 			r.logger.Error("could not record the session's video", "session", write.sawVideo, "error", err)
 		}
 	case write.voiced != "":
-		if err := r.store.Sessions.Voiced(ctx, write.voiced); err != nil {
+		if err := r.store.Sessions.Voiced(ctx, write.customerID, write.voiced); err != nil {
 			r.logger.Error("could not record the session's voice", "session", write.voiced, "error", err)
 		}
 	case write.callStarted != nil:
@@ -437,7 +453,7 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the call changing models", "error", err)
 		}
 	case write.callEnded != "":
-		if err := r.store.Calls.Finish(ctx, write.callEnded, write.callEndedAt); err != nil {
+		if err := r.store.Calls.Finish(ctx, write.customerID, write.callEnded, write.callEndedAt); err != nil {
 			r.logger.Error("could not record the call ending", "error", err)
 		}
 	}

@@ -272,6 +272,11 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The legs a join delivered after its call ended revives.
 	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
 		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},
+	// The placed leg a status post is about, by its token's hash, and the legs whose status
+	// url is still open.
+	{"shard", "call_legs_token_hash_key", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_key ON call_legs (token_hash)"},
+	{"shard", "call_legs_token_hash_placed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_placed_idx ON call_legs (placed_at) " +
+		"WHERE token_hash IS NOT NULL"},
 	// The queued image jobs of each kind, in the order a claim takes them.
 	{"global", "image_jobs_undecided", "CREATE INDEX CONCURRENTLY IF NOT EXISTS image_jobs_undecided ON image_jobs (next_attempt_at, id) " +
 		"WHERE state = 'queued' AND message = ''"},

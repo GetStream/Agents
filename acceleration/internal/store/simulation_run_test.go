@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+func (s *StoreSuite) TestAnotherCustomersFinishOfASimulationRunIdChangesNothing() {
+	run := s.startedRun("app", time.Now().Add(time.Minute))
+	before, err := s.store.SimulationRuns.Get(s.ctx, "app", run.ID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.SimulationRuns.Finish(s.ctx, SimulationRun{ID: run.ID, CustomerID: "somebody-else", State: SimulationPassed, Passed: 3}))
+
+	after, err := s.store.SimulationRuns.Get(s.ctx, "app", run.ID)
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's run is still running")
+}
+
 func (s *StoreSuite) TestARunItsRouterStillRenewsIsNotWrittenOff() {
 	// However long ago it started: a second router booting must not abandon what the first
 	// is still having.
