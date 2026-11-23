@@ -2770,6 +2770,11 @@ including one that was in progress when the export started. A transaction still 
 export answer 503: run it again. A repeatable read or serializable transaction whose snapshot is older than the
 start of recording is refused with a serialization failure when it next writes, so its retry is recorded.
 
+An app runs one export at a time on a router: a second one is answered 409 until the first ends. A router runs
+at most four exports at once, and one more is answered 503. An export ends after an hour, or when one line has
+taken a minute to write; an export that ends early has no cursor line, so run it again. An import is one JSON
+object per line, as an export writes it, and a line over 64 MiB is answered 413.
+
 The source must be a router without shards. A shard's tables (calls, call bridges, recordings,
 sessions, responses, requests and their stats) record no changes, so a router with a shard database
 of its own, or with other shards' databases listed in `postgres.shards`, answers the export and the

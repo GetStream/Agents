@@ -161,12 +161,6 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if written == 0 {
-			// The error document is written under a deadline of its own, not the export's,
-			// which may be what passed.
-			if err := controller.SetWriteDeadline(time.Now().Add(s.exportLineWait)); err != nil {
-				writeFailure(w, r, fmt.Errorf("api: export write deadline: %w", err))
-				return
-			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				writeError(w, errExportTooLong)
 				return
@@ -219,7 +213,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		}
 		var line dataLine
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			writeError(w, invalidRequest("this is not an export: "+err.Error()))
+			writeError(w, invalidRequest("this is not an export: an import is one JSON object per line: "+err.Error()))
 			return
 		}
 

@@ -632,9 +632,6 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
 	for {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("store: export %s: %w", table.name, err)
-		}
 		fetched, err := s.exportBatch(ctx, tx, table.name, write)
 		if err != nil {
 			return err
