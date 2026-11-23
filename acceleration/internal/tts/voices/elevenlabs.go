@@ -201,7 +201,7 @@ func (e *ElevenLabs) Preview(ctx context.Context, id string) (Speech, error) {
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Speech{}, refused(elevenlabs.ProviderName, response)
+		return Speech{}, elevenLabsPreviewRefused(response)
 	}
 	var voice struct {
 		PreviewURL string `json:"preview_url"`
@@ -210,9 +210,29 @@ func (e *ElevenLabs) Preview(ctx context.Context, id string) (Speech, error) {
 		return Speech{}, stack.Wrap(fmt.Errorf("voices: elevenlabs preview: decode: %w", err))
 	}
 	if voice.PreviewURL == "" {
-		return Speech{}, stack.Wrap(fmt.Errorf("voices: elevenlabs has published no sample of %s", id))
+		return Speech{}, stack.Wrap(fmt.Errorf("%w: elevenlabs, %s", ErrNoSample, id))
 	}
 	return fetchPreview(ctx, e.client, elevenlabs.ProviderName, voice.PreviewURL, nil, "audio/mpeg")
+}
+
+// elevenLabsPreviewRefused is previewRefused for ElevenLabs, which has also answered a voice it
+// does not have with a 400 whose detail.code is voice_not_found (see Exists). A 400 is also
+// what a bad key gets, so only that code makes it ErrUnknownVoice.
+func elevenLabsPreviewRefused(response *http.Response) error {
+	if response.StatusCode != http.StatusBadRequest {
+		return previewRefused(elevenlabs.ProviderName, response)
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+	var failure struct {
+		Detail struct {
+			Code string `json:"code"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal(body, &failure) == nil && failure.Detail.Code == "voice_not_found" {
+		return stack.Wrap(fmt.Errorf("%w: elevenlabs (http 400): %s", ErrUnknownVoice, bytes.TrimSpace(body)))
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	return refused(elevenlabs.ProviderName, response)
 }
 
 // Exists reports whether ElevenLabs will speak in a voice.

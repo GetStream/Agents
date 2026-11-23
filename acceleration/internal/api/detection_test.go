@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -62,6 +63,16 @@ func (s *DetectionSuite) TestEmbeddingsAreAskedOfTheModelThatReturnsThemWithItsO
 	s.Equal([]float32{1, 0}, *found.Detections[0].Embedding)
 	s.JSONEq(`{"workflow_id": "doorbell"}`, string(detectors.faces.last().Overwrite))
 	s.Equal(32, detectors.faces.last().Width, "the image is measured before it is sent")
+}
+
+func (s *DetectionSuite) TestADetectionTheProviderFailedSaysSoInNoneOfItsWords() {
+	found := s.detect(DetectionRequest{Image: drawn.Images[0].Data, Options: &DetectionOptions{Target: pointerTo("broken/stub")}})
+
+	s.Equal(DetectionStatusFailed, found.Status)
+	s.Equal(DetectionErrorCode(detection.ProviderFailed), *found.ErrorCode)
+	s.Equal("the provider failed to look at the image", *found.Error)
+	s.NotContains(*found.Error, "upstream.invalid")
+	s.NotContains(*found.Error, "overloaded")
 }
 
 func (s *DetectionSuite) TestAnOptionNothingInTheTargetHonoursIsRefused() {
@@ -122,13 +133,14 @@ func (s *DetectionSuite) refused(request DetectionRequest) int {
 type detector struct {
 	name  string
 	found detection.Result
+	err   error
 
 	mu    sync.Mutex
 	asked []detection.Request
 }
 
 var detectors = struct {
-	coco, faces *detector
+	coco, faces, broken *detector
 }{
 	coco: &detector{name: "coco", found: detection.Result{Detections: []detection.Detection{
 		{Label: "person", Confidence: 0.9, Box: detection.Box{XMin: 0.1, YMin: 0.2, XMax: 0.3, YMax: 0.4}},
@@ -137,13 +149,15 @@ var detectors = struct {
 	faces: &detector{name: "faces", found: detection.Result{Detections: []detection.Detection{
 		{Label: "face", Confidence: 0.8, Embedding: []float32{1, 0}},
 	}}},
+	broken: &detector{name: "broken", err: detection.Fail(detection.ProviderFailed,
+		errors.New(`broken: POST https://upstream.invalid/detect: 500: {"error":"overloaded"}`))},
 }
 
 func (d *detector) Detect(_ context.Context, request detection.Request) (detection.Result, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.asked = append(d.asked, request)
-	return d.found, nil
+	return d.found, d.err
 }
 
 func (d *detector) Start(context.Context) error { return nil }
@@ -169,6 +183,10 @@ func detectionConfig() routing.ModalityConfig {
 				Provider: "faces", Model: "faces", Languages: []string{"en"}, Tier: routing.HighQuality,
 				Terms: []options.Term{options.Confidence, options.Embeddings}, Price: routing.Price{PerImage: 0.0015},
 			},
+			{
+				Provider: "broken", Model: "stub", Languages: []string{"en"}, Tier: routing.HighQuality,
+				Price: routing.Price{PerImage: 0.01},
+			},
 		},
 		Aliases: map[string]routing.Alias{
 			"detection-fast": {Title: "Fast detection", Tier: routing.LowLatency},
@@ -181,5 +199,6 @@ func detectorRegistry() *detectionrouter.Registry {
 	registry := detectionrouter.NewRegistry()
 	registry.Register("coco", func(routing.Spec) (detection.Provider, error) { return detectors.coco, nil })
 	registry.Register("faces", func(routing.Spec) (detection.Provider, error) { return detectors.faces, nil })
+	registry.Register("broken", func(routing.Spec) (detection.Provider, error) { return detectors.broken, nil })
 	return registry
 }

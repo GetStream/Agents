@@ -204,6 +204,28 @@ func (s *StoreSuite) TestADeletedAgentConfigIsForgottenByIdAndName() {
 	s.ErrorIs(err, ErrNoAgentConfig)
 }
 
+// Every name asked for is a key of its own, and no write deletes one nobody creates.
+func (s *StoreSuite) TestANameNoConfigHoldsIsCachedForAMinuteOnly() {
+	config := s.boundConfig("acme-app")
+	_, err := s.store.AgentConfigs.GetByName(s.ctx, "acme-app", config.Name)
+	s.Require().NoError(err)
+	missing := "nobody-" + newID()
+	_, err = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", missing)
+	s.Require().ErrorIs(err, ErrNoAgentConfig)
+
+	s.Positive(s.expiryOf(agentConfigNameKey("acme-app", missing)), "the miss is cached")
+	s.LessOrEqual(s.expiryOf(agentConfigNameKey("acme-app", missing)), time.Minute)
+	s.Greater(s.expiryOf(agentConfigNameKey("acme-app", config.Name)), 59*time.Minute, "a config found is still cached for the hour")
+}
+
+// expiryOf is how long a key has left in Redis.
+func (s *StoreSuite) expiryOf(key string) time.Duration {
+	redis := s.store.sharedRedis()
+	ttl, err := redis.Do(s.ctx, redis.B().Pttl().Key(key).Build()).AsInt64()
+	s.Require().NoError(err)
+	return time.Duration(ttl) * time.Millisecond
+}
+
 func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	for range 20 {
 		s.boundConfig("acme-app")

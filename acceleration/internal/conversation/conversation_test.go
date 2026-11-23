@@ -785,6 +785,33 @@ func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t 
 	require.Error(t, err)
 }
 
+// Stream failing the read is no answer about whose the conversation is: told it is not found,
+// the caller would drop a command that was theirs, and nobody would see the outage.
+func TestASharedConversationStreamFailsToReadIsNoMissingCommand(t *testing.T) {
+	db, client := newChat(t)
+	s := NewForChat(client)
+	t.Cleanup(s.Close)
+	alice, _, _, err := s.OpenForCaller(t.Context(), "customer", "agent", "", "alice")
+	require.NoError(t, err)
+	cid := alice.CID()
+	alice.Release()
+	db.mu.Lock()
+	db.channels[strings.TrimPrefix(cid, "agent:")]["custom"].(map[string]any)["support_access"] = "members"
+	db.mu.Unlock()
+	alice, _, _, err = s.OpenForCaller(t.Context(), "customer", "agent", cid, "alice")
+	require.NoError(t, err)
+	t.Cleanup(alice.Release)
+	require.NoError(t, alice.CheckCaller(t.Context(), "alice"))
+
+	db.mu.Lock()
+	db.fail = true
+	db.mu.Unlock()
+	err = alice.CheckCaller(t.Context(), "alice")
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrCommandNotFound)
+}
+
 func TestMalformedSharedMetadataDoesNotRelaxOwnership(t *testing.T) {
 	for _, mode := range []any{true, "public", "", map[string]any{"members": true}} {
 		err := ownedBy(map[string]any{

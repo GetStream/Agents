@@ -192,7 +192,7 @@ func preregisteredMethod(m core.ResolvedManifest, d server, c Client) (core.Clie
 		case slices.Contains(d.AuthMethods, string(core.AuthClientSecretPost)):
 			method = core.AuthClientSecretPost
 		default:
-			return "", fmt.Errorf("oauth2code: the authorization server supports neither client_secret_basic nor client_secret_post, only %v", d.AuthMethods)
+			return "", &ManifestError{Reason: fmt.Sprintf("the authorization server supports neither client_secret_basic nor client_secret_post, only %v", d.AuthMethods)}
 		}
 	}
 	return method, checkMethod(method, d)
@@ -214,7 +214,7 @@ func (s *Scheme) register(ctx context.Context, ref core.ConnectionRef, m core.Re
 		case slices.Contains(d.AuthMethods, string(core.AuthClientSecretPost)):
 			method = core.AuthClientSecretPost
 		default:
-			return client{}, fmt.Errorf("oauth2code: the authorization server offers no client authentication this scheme has: %v", d.AuthMethods)
+			return client{}, &ManifestError{Reason: fmt.Sprintf("the authorization server offers no client authentication this scheme has: %v", d.AuthMethods)}
 		}
 	}
 	if err := checkMethod(method, d); err != nil {
@@ -334,10 +334,10 @@ func hostOf(raw string) string {
 // methods (RFC 8414 section 2), accepts it.
 func checkMethod(method core.ClientAuthMethod, d server) error {
 	if !slices.Contains(supportedMethods, method) {
-		return fmt.Errorf("oauth2code: client authentication %q is not implemented (only %v)", method, supportedMethods)
+		return &ManifestError{Reason: fmt.Sprintf("client authentication %q is not implemented (only %v)", method, supportedMethods)}
 	}
 	if len(d.AuthMethods) > 0 && !slices.Contains(d.AuthMethods, string(method)) {
-		return fmt.Errorf("oauth2code: the authorization server does not accept %s, only %v", method, d.AuthMethods)
+		return &ManifestError{Reason: fmt.Sprintf("the authorization server does not accept %s, only %v", method, d.AuthMethods)}
 	}
 	return nil
 }

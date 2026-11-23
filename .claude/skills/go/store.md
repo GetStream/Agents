@@ -54,6 +54,9 @@ A state change that is more than a column write gets a domain verb on the same r
 - Migrations live in `acceleration/migrations/global` or `acceleration/migrations/shard`,
   matching where the table lives. Each set has its own goose version table. A table never
   moves between the sets in place: add it to the new set, copy, then drop it.
+- Every migration run in a transaction starts with `SET LOCAL lock_timeout = '5s';`, so one
+  waiting behind a long query fails instead of holding every write queued behind it
+  (`TestEveryTransactionalMigrationAfterTheBaselineSetsALockTimeout`).
 - The change log (`data_changes`, `data_change_capture`, `record_data_change()`) is in both
   sets, written idempotently, because a row's change is recorded in the database it is
   written to. A migration that changes it goes in both sets.

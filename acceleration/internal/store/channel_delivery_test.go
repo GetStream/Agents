@@ -18,6 +18,31 @@ func (s *StoreSuite) TestAMessageAlreadyTakenIsNotClaimedTwice() {
 	s.False(second)
 }
 
+// A STOP whose opt-out could not be written is not taken, so its next delivery records it.
+func (s *StoreSuite) TestAStopWhoseOptOutFailedIsNotTaken() {
+	account := s.line(newID(), "+1555"+newID()[:7])
+	message, person := "wamid."+newID(), "+1555"+newID()[:7]
+
+	_, err := s.store.ChannelDeliveries.ClaimStop(s.ctx, account.ID, message, person,
+		&OptOut{CustomerID: account.CustomerID, Channel: "whatsapp", Source: "keyword"})
+	s.Require().Error(err, "an opt-out naming nobody is refused")
+
+	fresh, err := s.store.ChannelDeliveries.ClaimStop(s.ctx, account.ID, message, person,
+		&OptOut{CustomerID: account.CustomerID, Recipient: person, Channel: "whatsapp", Source: "keyword"})
+	s.Require().NoError(err)
+	s.True(fresh, "the failed write gave the message back")
+	optedOut, err := s.store.OptOuts.OptedOut(s.ctx, account.CustomerID, person, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut)
+
+	again, err := s.store.ChannelDeliveries.ClaimStart(s.ctx, account.ID, message, person, account.CustomerID, person, "whatsapp")
+	s.Require().NoError(err)
+	s.False(again, "a message already taken is not taken again")
+	optedOut, err = s.store.OptOuts.OptedOut(s.ctx, account.CustomerID, person, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut, "a message already taken writes nothing")
+}
+
 func (s *StoreSuite) TestTheLastTimeSomebodyWroteIsWhenTheyLastWrote() {
 	account := s.line(newID(), "+1555"+newID()[:7])
 

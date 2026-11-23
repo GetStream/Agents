@@ -13,7 +13,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/urls"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -271,7 +270,10 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	if message, ok := textSubagentComplaint(&config, body.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
-	warnings, message, ok := s.channelsWarnings(ctx, config)
+	warnings, message, ok, err := s.channelsWarnings(ctx, config)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, invalidRequest(message)
 	}
@@ -391,8 +393,10 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 			wanted.Title = value(page.Title)
 			wanted.Description = value(page.Description)
 			wanted.RefreshHours = value(page.RefreshHours)
-			if _, err := s.pages.Add(ctx, customerID, wanted); err != nil {
+			if _, err := s.pages.Add(ctx, customerID, wanted); errors.Is(err, urls.ErrRefused) {
 				return nil, invalidRequest(err.Error())
+			} else if err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -430,7 +434,7 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	// agent has no id to hang them off until it has been stored.
 	if len(skills) > 0 {
 		if err := s.upsertSkills(ctx, customerID, config.ID, skills); err != nil {
-			return nil, invalidRequest(err.Error())
+			return nil, err
 		}
 	}
 	if body.Simulations != nil {
@@ -659,7 +663,7 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 		// repeat the config id per skill and it is filled in here.
 		skill.ConfigId = configID
 		if message, ok := skillComplaint(skill); !ok {
-			return stack.Wrap(errors.New(message))
+			return invalidRequest(message)
 		}
 		names = append(names, strings.TrimSpace(skill.Name))
 	}

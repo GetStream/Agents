@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -159,7 +160,7 @@ func (r *RouterConfigs) Get(ctx context.Context, customerID, id string) (RouterC
 
 // GetByName returns the config a customer holds under this name, which is how a caller that
 // names a config rather than an id reaches one, and ErrNoRouterConfig when it holds none.
-// That none is cached too.
+// That none is cached too, for missTTL.
 func (r *RouterConfigs) GetByName(ctx context.Context, customerID, name string) (RouterConfig, error) {
 	if customerID == "" || name == "" {
 		return RouterConfig{}, stack.Wrap(errors.New("store: a customer and a config name are required"))
@@ -167,6 +168,7 @@ func (r *RouterConfigs) GetByName(ctx context.Context, customerID, name string) 
 	answer, err := cached(ctx, r.store, routerConfigNameKey(customerID, name), func(ctx context.Context) (found[RouterConfig], error) {
 		config, err := r.where(ctx, customerID, "name", name)
 		if errors.Is(err, ErrNoRouterConfig) {
+			rueidisaside.OverrideCacheTTL(ctx, missTTL)
 			return found[RouterConfig]{}, nil
 		}
 		return found[RouterConfig]{Value: config, Found: err == nil}, err
