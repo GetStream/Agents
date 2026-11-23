@@ -289,6 +289,25 @@ func (s *STTRouterSuite) TestAFailedOverSessionLogsALinePerProviderThatServedIt(
 	})
 }
 
+func (s *STTRouterSuite) TestARefusedRouterMeteredProviderLogsTheAudioBilledAsItRefused() {
+	refusing := &meteredSTT{quietSTT: quietSTT{emitter: stt.NewEmitter(64)}}
+	next := &meteredSTT{quietSTT: quietSTT{emitter: stt.NewEmitter(64)}}
+	reopen := func([]string) (stt.STT, routing.ProviderConfig, error) {
+		return next, timingConfig("assemblyai", "universal-streaming"), nil
+	}
+	session, logs := s.timedSession(refusing, timingConfig("deepgram", "flux-general-en"), reopen)
+
+	s.speak(session, 35)
+	refusing.emitter.Send(stt.Error{Fatal: true, Context: "connect", Err: errors.New("account suspended")})
+	s.Require().True(s.awaitEvent(session, func(event stt.Event) bool { _, ok := event.(stt.Failover); return ok }))
+	s.ended(session)
+
+	lines := s.transcriptionLines(logs)
+	s.Require().Len(lines, 2)
+	s.Equal("deepgram", lines[0]["provider"])
+	s.EqualValues(700, lines[0]["cost_micros"], "the 700 ms the refused vendor heard, billed as it refused")
+}
+
 func (s *STTRouterSuite) TestAFrameInFlightToARefusedProviderIsNotBilledToTheNext() {
 	refusing := &meteredSTT{quietSTT: quietSTT{emitter: stt.NewEmitter(64)}, held: make(chan struct{}), entered: make(chan struct{}, 1)}
 	next := &meteredSTT{quietSTT: quietSTT{emitter: stt.NewEmitter(64)}}
