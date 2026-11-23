@@ -134,7 +134,7 @@ func (s *Service) Close() {
 func (s *Service) Challenge(ctx context.Context, token string, query url.Values) Answer {
 	line, _, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	if query.Get("hub.mode") != "subscribe" || query.Get("hub.verify_token") != line.Challenge {
 		return Answer{Status: http.StatusForbidden, Body: failure("that is not this line's verify token")}
@@ -148,7 +148,7 @@ func (s *Service) Challenge(ctx context.Context, token string, query url.Values)
 func (s *Service) Receive(ctx context.Context, token string, header http.Header, body []byte) Answer {
 	line, account, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	provider, ok := For(line.Kind, s.transport)
 	if !ok {
@@ -166,7 +166,8 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	for _, message := range delivered {
 		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
-			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
+			s.logger.Error("could not claim a channel delivery", "customer", account.CustomerID, "error", err)
+			return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 		}
 		// A provider that did not hear back in time sends the same message again. Answering
 		// it twice is the agent talking over itself, so a message already taken is dropped.
@@ -372,14 +373,37 @@ func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
 // line opens the credentials of the account a delivery is addressed to.
 func (s *Service) line(ctx context.Context, token string) (Account, store.ChannelAccount, error) {
 	account, err := s.store.ChannelAccounts.GetByToken(ctx, token)
+	if errors.Is(err, store.ErrUnknownChannelAccount) {
+		return Account{}, store.ChannelAccount{}, errNoLine
+	}
 	if err != nil {
-		return Account{}, store.ChannelAccount{}, errors.New("no line is connected at this address")
+		return Account{}, store.ChannelAccount{}, err
 	}
 	line, err := Open(s.secrets, account)
 	if err != nil {
-		return Account{}, account, errors.New("this line's credentials cannot be opened: connect it again")
+		s.logger.Error("could not open a channel line's credentials", "customer", account.CustomerID,
+			"channel", account.Kind, "error", err)
+		return Account{}, account, errUnopened
 	}
 	return line, account, nil
+}
+
+// somethingWentWrong is what a provider is told of a failure of ours, which it retries.
+const somethingWentWrong = "something went wrong"
+
+var (
+	errNoLine   = errors.New("no line is connected at this address")
+	errUnopened = errors.New("this line's credentials cannot be opened: connect it again")
+)
+
+// unread answers a delivery whose line could not be read. A line that is gone is a 410, which
+// stops the provider delivering; a database failure is a 500 it tries again.
+func (s *Service) unread(err error) Answer {
+	if errors.Is(err, errNoLine) || errors.Is(err, errUnopened) {
+		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+	}
+	s.logger.Error("could not read the line a delivery is for", "error", err)
+	return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 }
 
 // answer has the agent on a line take one message and writes back what it says.

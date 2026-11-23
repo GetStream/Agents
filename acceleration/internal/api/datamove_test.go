@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -37,7 +38,18 @@ func TestDataMoveSuite(t *testing.T) {
 	suite.Run(t, new(DataMoveSuite))
 }
 
+// letGoWithin is how long a test waits for an export to end and let go of its place: well past
+// the deadlines the tests set, for a machine running other suites beside this one. A wait ends
+// as soon as the export has.
+const letGoWithin = 30 * time.Second
+
 func (s *DataMoveSuite) SetupTest() {
+	// Last of the test's cleanups: the router's places for exports are shared by the tests
+	// after it, so the exports a test left unread have ended before the next one starts.
+	s.T().Cleanup(func() {
+		s.Eventually(func() bool { return len(s.router.exports) == 0 }, letGoWithin, 10*time.Millisecond,
+			"an export of this test is still running")
+	})
 	s.useApp(s.data.createApp())
 }
 
@@ -364,6 +376,148 @@ func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkInAnotherFormIsRefused(
 	s.Contains(failure, "E.164")
 }
 
+func (s *DataMoveSuite) TestAnImportLineOverTheLimitIsRefused() {
+	line := `{"table":"agent_configs","row":{"instructions":"` + strings.Repeat("x", maxImportLine) + `"}}`
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", line)
+
+	s.Require().Equal(http.StatusRequestEntityTooLarge, status, failure[:min(len(failure), 200)])
+	s.Contains(failure, "64 MiB")
+}
+
+func (s *DataMoveSuite) TestAnImportLineJustUnderTheLimitIsRead() {
+	s.data.createAgentConfig()
+	var row json.RawMessage
+	for _, line := range s.export() {
+		if line.Table == "agent_configs" {
+			row = line.Row
+		}
+	}
+	s.Require().NotNil(row, "the app has an agent")
+	fields := map[string]any{}
+	s.Require().NoError(json.Unmarshal(row, &fields))
+	id := "agent-" + s.utils.uuid()
+	fields["id"], fields["name"], fields["instructions"] = id, id, ""
+	empty := s.lineOf(fields)
+	filler := maxImportLine - 1 - len(empty)
+	fields["instructions"] = strings.Repeat("x", filler)
+	line := s.lineOf(fields)
+	s.Require().Len(line, maxImportLine-1)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", line)
+
+	s.Require().Equal(http.StatusOK, status, failure[:min(len(failure), 200)])
+	var stored int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT length(instructions) FROM agent_configs WHERE id = ? AND customer_id = ?", id, s.customerID()).Scan(&stored))
+	s.Equal(filler, stored)
+}
+
+// lineOf is one line of an import carrying an agent config row.
+func (s *DataMoveSuite) lineOf(fields map[string]any) string {
+	row, err := json.Marshal(fields)
+	s.Require().NoError(err)
+	encoded, err := json.Marshal(dataLine{Table: "agent_configs", Row: row})
+	s.Require().NoError(err)
+	return string(encoded)
+}
+
+// An export holds a connection of the router's pool until its client has read it all.
+func (s *DataMoveSuite) TestASecondExportOfAnAppIsRefusedWhileOneIsRunning() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	s.Require().Equal(http.StatusOK, s.stalledExport().StatusCode)
+
+	status, failure := s.serverClient.failure(http.MethodGet, "/v1/data/export", nil)
+
+	s.Require().Equal(http.StatusConflict, status)
+	s.Contains(failure, "already running")
+}
+
+func (s *DataMoveSuite) TestOtherRequestsAreServedWhileExportsRun() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	statuses := map[int]int{}
+	for range suiteConnections {
+		statuses[s.stalledExport().StatusCode]++
+	}
+
+	s.Equal(http.StatusCreated, s.anotherRequest())
+	s.Equal(map[int]int{http.StatusOK: 1, http.StatusConflict: suiteConnections - 1}, statuses)
+}
+
+func (s *DataMoveSuite) TestOtherRequestsAreServedWhileExportsOfManyAppsRun() {
+	s.skipOnARouterWithShards()
+	s.Require().Less(maxExports, suiteConnections, "the suite's pool holds more than the exports a router runs")
+	statuses := map[int]int{}
+	for range suiteConnections {
+		s.useApp(s.data.createApp())
+		s.seedRowsTooBigToBuffer()
+		statuses[s.stalledExport().StatusCode]++
+	}
+
+	s.Equal(http.StatusCreated, s.anotherRequest())
+	s.Equal(map[int]int{http.StatusOK: maxExports, http.StatusServiceUnavailable: suiteConnections - maxExports}, statuses)
+}
+
+// The rows of a table an export ends in the middle of are not all read before it lets go.
+func (s *DataMoveSuite) TestAnExportHungUpOnLetsGoAtOnce() {
+	s.skipOnARouterWithShards()
+	// 20,000 rows of 64 KiB: reading them all takes seconds, and a batch of them a moment.
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO agent_configs (id, customer_id, name, instructions)
+SELECT 'agent-' || gen_random_uuid(), ?, 'agent-' || gen_random_uuid(), repeat('x', 64 << 10)
+FROM generate_series(1, 20000)`, s.customerID())
+	s.Require().NoError(err)
+	export := s.stalledExport()
+	s.Require().Equal(http.StatusOK, export.StatusCode)
+	lines := bufio.NewReader(export.Body)
+	for range 3 {
+		_, err := lines.ReadBytes('\n')
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(export.Body.Close())
+
+	s.Eventually(func() bool { return len(s.router.exports) == 0 }, 2*time.Second, 10*time.Millisecond,
+		"the export hung up on still holds its place")
+}
+
+func (s *DataMoveSuite) TestAnExportReadSlowlyEndsAtItsDeadline() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	s.Equal(exportWait, s.router.exportWait, "the default bound")
+	s.router.exportWait = 2 * time.Second
+	s.T().Cleanup(func() { s.router.exportWait = exportWait })
+	slow := s.stalledExport()
+	s.Require().Equal(http.StatusOK, slow.StatusCode)
+	go func() {
+		// 640 KB a second: the whole export would take most of a minute, and no line a minute.
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := io.ReadFull(slow.Body, chunk); err != nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	s.Eventually(func() bool { return len(s.router.exports) == 0 }, letGoWithin, 50*time.Millisecond,
+		"the export read slowly is still running")
+}
+
+func (s *DataMoveSuite) TestAnExportWhoseClientStopsReadingIsLetGo() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	s.Equal(exportLineWait, s.router.exportLineWait, "the default bound")
+	s.router.exportLineWait = 500 * time.Millisecond
+	s.T().Cleanup(func() { s.router.exportLineWait = exportLineWait })
+	s.Require().Equal(http.StatusOK, s.stalledExport().StatusCode)
+
+	s.Eventually(func() bool { return len(s.router.exports) == 0 }, letGoWithin, 50*time.Millisecond,
+		"the export nobody reads is still running")
+}
+
 func (s *DataMoveSuite) TestSomethingThatIsNotAnExportIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", "not an export at all")
 
@@ -646,6 +800,45 @@ func (s *DataMoveSuite) shardDSN() string {
 	defer shard.Close()
 	s.Require().NoError(migrate(context.Background(), shard, dsn))
 	return dsn
+}
+
+// seedRowsTooBigToBuffer gives the app 32 MiB of agent configs, more than the sockets between
+// the router and a client hold, so an export whose client stops reading stops writing.
+func (s *DataMoveSuite) seedRowsTooBigToBuffer() {
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO agent_configs (id, customer_id, name, instructions)
+SELECT 'agent-' || gen_random_uuid(), ?, 'agent-' || gen_random_uuid(), repeat('x', 1 << 20)
+FROM generate_series(1, 32)`, s.customerID())
+	s.Require().NoError(err)
+}
+
+// stalledExport starts an export on a connection of its own and reads nothing past the headers.
+func (s *DataMoveSuite) stalledExport() *http.Response {
+	request, err := http.NewRequest(http.MethodGet, s.serverClient.base()+"/v1/data/export", nil)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	transport := &http.Transport{}
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_ = response.Body.Close()
+		transport.CloseIdleConnections()
+	})
+	return response
+}
+
+// anotherRequest creates an agent config of the app, giving up after settleFor, and answers its
+// status.
+func (s *DataMoveSuite) anotherRequest() int {
+	request, err := http.NewRequestWithContext(s.T().Context(), http.MethodPost, s.serverClient.base()+"/v1/agents/configs",
+		strings.NewReader(`{"name":"agent-`+s.utils.uuid()+`","llm":"llm-flow"}`))
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: settleFor}).Do(request)
+	s.Require().NoError(err, "the request found no free connection")
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
 }
 
 // openWrite writes an agent config of a customer in a transaction the test ends.

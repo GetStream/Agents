@@ -890,6 +890,12 @@ module GetStream
           body: "LinkChannelRequest", body_required: false,
           socket: false, client_accessible: false
         }.freeze,
+        "listActivity" => {
+          method: :get, path: "/v1/ops/activity",
+          path_params: [].freeze, query: %w[from to org_id app_id limit cursor].freeze,
+          body: nil, body_required: false,
+          socket: false, client_accessible: false
+        }.freeze,
         "listAgentConfigs" => {
           method: :get, path: "/v1/agents/configs",
           path_params: [].freeze, query: %w[name role].freeze,
@@ -1833,6 +1839,10 @@ module GetStream
           properties: %w[active_users bucket calls messages phone_minutes sessions voice_minutes].freeze,
           required: %w[active_users bucket calls messages phone_minutes sessions voice_minutes].freeze, open: false
         }.freeze,
+        "ActivityDay" => {
+          properties: %w[app_id area client day first_at last_at last_refusal_code organization_id refused requests].freeze,
+          required: %w[organization_id app_id day area client first_at last_at requests refused last_refusal_code].freeze, open: false
+        }.freeze,
         "ActivityEnding" => {
           properties: %w[end_reason sessions].freeze,
           required: %w[sessions].freeze, open: false
@@ -1844,6 +1854,10 @@ module GetStream
         "ActivityMeter" => {
           properties: %w[audio_ms characters cost_micros duration_ms input_tokens meter output_tokens requests].freeze,
           required: %w[meter requests input_tokens output_tokens audio_ms characters duration_ms cost_micros].freeze, open: false
+        }.freeze,
+        "ActivityPage" => {
+          properties: %w[has_more items next_cursor organizations].freeze,
+          required: %w[items organizations has_more].freeze, open: false
         }.freeze,
         "ActivitySession" => {
           properties: %w[agent_name app_id closed_at created_at end_reason id modality].freeze,
@@ -2732,6 +2746,10 @@ module GetStream
         "OrganizationActivity" => {
           properties: %w[areas first_seen furthest_step last_seen latency meters organization_id sessions shards since steps].freeze,
           required: %w[organization_id since furthest_step steps areas meters shards sessions latency].freeze, open: false
+        }.freeze,
+        "OrganizationProgress" => {
+          properties: %w[furthest_step organization_id steps].freeze,
+          required: %w[organization_id furthest_step steps].freeze, open: false
         }.freeze,
         "PhoneNumber" => {
           properties: %w[agent_config_id capabilities country e164 monthly_cost_micros purchased_at released_at sip_trunk_id stream_trunk_id tags vendor].freeze,

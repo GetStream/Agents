@@ -156,25 +156,36 @@ func (r *APIKeys) Touch(ctx context.Context, id string, interval time.Duration) 
 // dropped; when it was not, they take the key until that copy lapses.
 func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) (told bool, err error) {
 	now := time.Now().UTC()
-	result, err := r.store.global.NewUpdate().Model((*APIKey)(nil)).
-		Set("revoked_at = ?", now).
-		Set("revoked_by = ?", by).
-		Where("id = ?", id).
-		Where("app_id = ?", appID).
-		Where("revoked_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
+	var affected int64
+	told, err = r.store.detachedWriteTold(ctx, func(ctx context.Context, tx bun.Tx) error {
+		result, err := tx.NewUpdate().Model((*APIKey)(nil)).
+			Set("revoked_at = ?", now).
+			Set("revoked_by = ?", by).
+			Where("id = ?", id).
+			Where("app_id = ?", appID).
+			Where("revoked_at IS NULL").
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		affected, err = result.RowsAffected()
+		return err
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if affected == 0 {
+			return nil
+		}
+		return []string{cacheKey("key", id)}
+	})
+	if affected > 0 {
+		r.touched.Delete(id)
 	}
-	affected, err := result.RowsAffected()
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
 	if affected == 0 {
 		return false, stack.Wrap(ErrNoAPIKey)
 	}
-	told = r.store.forget(ctx, cacheKey("key", id))
-	r.touched.Delete(id)
 	return told, nil
 }
 
@@ -203,12 +214,15 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 			return auth.App{}, auth.ErrUnauthenticated
 		}
 		owner, err := r.GetLive(ctx, key)
-		if err != nil {
+		if errors.Is(err, ErrNoAPIKey) {
 			return auth.App{}, auth.ErrUnauthenticated
+		}
+		if err != nil {
+			return auth.App{}, err
 		}
 		secret, err := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
 		if err != nil {
-			return auth.App{}, fmt.Errorf("unseal key %s: %w", key, err)
+			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
 		}
 		if err := r.Touch(ctx, key, KeyUseInterval); err != nil {
 			slog.Default().Debug("could not record key use", "key", key, "error", err)

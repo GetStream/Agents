@@ -11,6 +11,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // ToolCallStatus is where one tool call stands.
@@ -159,7 +160,7 @@ func (t *toolCalls) observe(event agent.Event) (ToolCallChanged, bool) {
 		case errors.Is(typed.Err, context.Canceled):
 			return t.finishLocked(id, now, ToolCallCancelled, "")
 		case typed.Err != nil:
-			return t.finishLocked(id, now, ToolCallFailed, typed.Err.Error())
+			return t.finishLocked(id, now, ToolCallFailed, store.SafeLogText(typed.Err.Error()))
 		}
 		if state := t.calls[id]; state != nil && state.Status == ToolCallWaiting {
 			return t.finishLocked(id, now, ToolCallCancelled, "")

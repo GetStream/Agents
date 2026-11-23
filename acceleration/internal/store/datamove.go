@@ -625,28 +625,62 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 		return err
 	}
 	query, args := table.selectRows(customerID, shape.secrets())
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
+	// Read through a cursor in the transaction's snapshot rather than as one query: closing a
+	// query's rows early reads every row left, so an export that ends partway would hold its
+	// transaction until the whole table had been read. A batch is all it reads instead.
+	if _, err := tx.ExecContext(ctx, "DECLARE export_rows NO SCROLL CURSOR FOR "+query, args...); err != nil {
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var row json.RawMessage
-		if err := rows.Scan(&row); err != nil {
+	for {
+		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("store: export %s: %w", table.name, err)
 		}
-		if row, err = s.exportPin(table.name, row); err != nil {
+		fetched, err := s.exportBatch(ctx, tx, table.name, write)
+		if err != nil {
 			return err
 		}
-		if err := write(table.name, row); err != nil {
-			return err
+		if fetched < exportBatchRows {
+			break
 		}
 	}
-	if err := rows.Err(); err != nil {
+	if _, err := tx.ExecContext(ctx, "CLOSE export_rows"); err != nil {
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
 	return nil
+}
+
+// exportBatchRows is how many rows an export reads from its cursor at a time, and so the most it
+// reads past the row it stops at. A row can be a whole document's text of several MiB, which
+// a hundred keep to a moment's reading, and most rows are well under a KiB.
+const exportBatchRows = 100
+
+// exportBatch writes the next exportBatchRows rows of the export_rows cursor and returns how many
+// it read.
+func (s *Store) exportBatch(ctx context.Context, tx bun.Tx, table string, write func(string, json.RawMessage) error) (int, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("FETCH %d FROM export_rows", exportBatchRows))
+	if err != nil {
+		return 0, fmt.Errorf("store: export %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	fetched := 0
+	for rows.Next() {
+		fetched++
+		var row json.RawMessage
+		if err := rows.Scan(&row); err != nil {
+			return 0, fmt.Errorf("store: export %s: %w", table, err)
+		}
+		if row, err = s.exportPin(table, row); err != nil {
+			return 0, err
+		}
+		if err := write(table, row); err != nil {
+			return 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: export %s: %w", table, err)
+	}
+	return fetched, nil
 }
 
 // selectRows reads one table's rows for one customer, without the columns that never

@@ -137,10 +137,7 @@ func (s *Server) updateSession(ctx context.Context, request *updateSessionReques
 	live := found.Live
 	if moving {
 		if err := live.SetSettings(ctx, settings); err != nil {
-			if errors.Is(err, session.ErrCardedToNative) {
-				return nil, errCardedSessionToNative
-			}
-			return nil, invalidRequest(err.Error())
+			return nil, settingsRefused(err)
 		}
 	}
 	if labels.Title != nil || labels.Description != nil || labels.Custom != nil {
