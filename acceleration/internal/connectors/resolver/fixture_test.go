@@ -77,6 +77,8 @@ type fixture struct {
 	clientRemoved atomic.Bool
 	// logs is what every router's resolver logged.
 	logs *lockedBuffer
+	// saves, when set, is the seam every router made after it saves through (failingSaves).
+	saves *failingSaves
 }
 
 // database is the resolver's own test database, emptied and migrated, as the store suite
@@ -128,8 +130,13 @@ func (f *fixture) routerLogging(client *http.Client, logger *slog.Logger) *resol
 	require.NoError(f.tb, err)
 	f.tb.Cleanup(func() { _ = db.Close() })
 	require.NoError(f.tb, db.Ping(f.ctx))
-	credentials, err := pgsealed.New(db, f.sealer)
+	sealed, err := pgsealed.New(db, f.sealer)
 	require.NoError(f.tb, err)
+	var credentials core.CredentialStore = sealed
+	if f.saves != nil {
+		f.saves.CredentialStore = sealed
+		credentials = f.saves
+	}
 	r, err := resolver.New(resolver.Config{Store: db, Credentials: credentials,
 		Schemes: map[string]core.Scheme{oauth2code.Name: f.scheme(client), oauth2cc.Name: f.clientCredentials(client)}, Now: f.clock.Now,
 		Logger: logger})
