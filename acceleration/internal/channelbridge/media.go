@@ -73,7 +73,7 @@ func (b *Bridge) download(ctx context.Context, thread store.ChannelThread, messa
 	if err != nil {
 		return nil, named, err
 	}
-	resolved, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	resolved, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return nil, named, stack.Wrap(err)
 	}

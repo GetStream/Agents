@@ -70,7 +70,8 @@ func TestConnectionToolsSuite(t *testing.T) {
 }
 
 // SetupSuite builds the schemes against the fake: oauth2_code with the operator's client in
-// the environment as FAKE_MCP_CLIENT_ID and _SECRET, oauth2_client_credentials, bearer and
+// the environment as FAKE_MCP_CLIENT_ID and _SECRET for a built-in and the app's own for a
+// custom connector (withFakeClient), oauth2_client_credentials, bearer and
 // none, and the mcp source. Every connection's client reaches the fake on loopback.
 func (s *ConnectionToolsSuite) SetupSuite() {
 	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
@@ -1099,6 +1100,7 @@ func (s *ConnectionToolsSuite) driveShaped(coveredBy, granted string) string {
 	s.Require().NoError(err)
 	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	s.withFakeClient(id)
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(id), &created))
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+created.ID+"/credentials",
@@ -1145,12 +1147,26 @@ func (s *ConnectionToolsSuite) connector(scheme, tools string) string {
 	s.Require().NoError(err)
 	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	if scheme == oauth2code.Name {
+		s.withFakeClient(id)
+	}
 	return id
 }
 
+// withFakeClient puts the fake's preregistered client as the app's own client of connector.
+func (s *ConnectionToolsSuite) withFakeClient(connector string) {
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPut, oauthClientPath(connector),
+		ConnectorOAuthClientRequest{ClientID: s.provider.ClientID, ClientSecret: s.provider.ClientSecret}, nil))
+}
+
 // manifest is a connector at the fake taking scheme, at revision; tools is more YAML under its
-// mcp source.
+// mcp source. A built-in's client is the operator's, a custom one's the app's own
+// (withFakeClient): a custom connector never takes the operator's.
 func (s *ConnectionToolsSuite) manifest(id string, revision int, scheme, tools string) string {
+	client := "  registration: [operator]\n  env: FAKE\n"
+	if strings.HasPrefix(id, store.CustomPrefix) {
+		client = "  registration: [customer]\n"
+	}
 	return `
 id: ` + id + `
 revision: ` + strconv.Itoa(revision) + `
@@ -1161,9 +1177,7 @@ endpoints:
   mcp: ` + s.provider.URL + fakeprovider.PathMCP + `
 schemes: [` + scheme + `]
 client:
-  registration: [operator]
-  env: FAKE
-scopes:
+` + client + `scopes:
   list: [chat:write, channels:read]
   separator: ","
 sources:
