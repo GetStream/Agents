@@ -40,11 +40,15 @@ type Items struct {
 	turn bool
 }
 
-// ErrUnnamedTurn is what the items of a turn with no id answer: a session that records
-// nothing (incognito) hands back no id, nor does the retry of a question already taken. There
-// is nothing to read back; the answer is on Session.Events.
-var ErrUnnamedTurn = errors.New("client: the turn has no id, so it has no items to read: " +
-	"a session that records nothing (incognito) names no turn; follow the answer on Session.Events")
+// ErrUnnamedTurn is what the items of a turn with no id answer. The router names no turn for
+// a session that records nothing (incognito), for a speech-to-speech session, whose model
+// decides what a turn is, and for the retry of a request_id already taken. An incognito
+// session has its answer on Session.Events alone; the other two record theirs, which
+// Session.Responses.Items reads.
+var ErrUnnamedTurn = errors.New("client: the turn has no id, so it has no items of its own to read: " +
+	"the router names no turn for an incognito session, a speech-to-speech session or the retry of a " +
+	"request_id already taken; follow the answer on Session.Events, or read Session.Responses.Items " +
+	"for a session that records its turns")
 
 func newItems(client *Client, sessionID, responseID string) *Items {
 	return &Items{client: client, sessionID: sessionID, responseID: responseID}
@@ -170,6 +174,7 @@ type AgentResponse struct {
 	// Created is what the router said when it took the question.
 	Created acceleration.AgentResponse
 	// Items are this turn's own, as opposed to the whole conversation's. A turn with no id
+	// (an incognito or speech-to-speech session, or the retry of a request_id already taken)
 	// has none to read, and its reads fail with ErrUnnamedTurn.
 	Items *Items
 }

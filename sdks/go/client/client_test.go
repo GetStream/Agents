@@ -1480,6 +1480,10 @@ func TestATurnWithNoIDHasNoItemsRatherThanTheWholeSessions(t *testing.T) {
 	if !errors.Is(err, ErrUnnamedTurn) {
 		t.Fatalf("the items of a turn with no id came back as %v, %v", items, err)
 	}
+	page, err := answer.Items.List(t.Context(), 0, "")
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("a page of the items of a turn with no id came back as %v, %v", page, err)
+	}
 	if asked := backend.requests("GET", "/v1/agents/sessions/session-1/responses/items"); asked != 0 {
 		t.Errorf("the router was asked %d times for the items", asked)
 	}
