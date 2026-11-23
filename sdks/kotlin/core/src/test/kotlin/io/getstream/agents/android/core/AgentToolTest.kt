@@ -63,4 +63,12 @@ class AgentToolTest {
 
         assertEquals(ToolOutput("Boulder 3 Imperial null null"), forecast.run(arguments))
     }
+
+    @Test
+    fun `a failure is cut before an emoji's pair rather than inside it`() {
+        val text = "x".repeat(1023) + "\uD83D\uDE00" + "tail"
+
+        assertEquals("x".repeat(1023) + "…", clipped(text))
+        assertEquals("x".repeat(1024), clipped("x".repeat(1024)))
+    }
 }

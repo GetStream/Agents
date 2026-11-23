@@ -846,9 +846,15 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### Deleting a user's connections also deletes their MCP event subscriptions
 
 The subscriptions of a deleted user's connections kept their sealed secrets and callback tokens. They now go in the same transaction as the connections.
+### An SMS reply sets its price aside before it is sent
+
+A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what Telnyx will bill for it, its link and each MMS of up to ten files included, before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).
 ### A Swift typed tool no longer crashes the app on deeply nested arguments
 
 An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
+### A custom connector never gets the deployment's own OAuth client
+
+Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
@@ -919,6 +925,11 @@ A call allowed from the conversation with its arguments ran at once, and ran aga
 - A response that is not the router's error envelope, such as a proxy's HTML page, becomes an error message of at most 1,024 characters, not the whole body.
 - `console.log` and `JSON.stringify` of a `Client`, `Backend` or `Edge` no longer show the API secret, a token handed in, a token function's answer or a token minted from the secret.
 - `loadFolder` leaves hidden files and folders, `node_modules` and `__pycache__` out of knowledge, as it already did for skills, so `.github/` or a `.secrets.yaml` is no longer synced as something the agent can quote. A `node_modules` or hidden folder directly in `skills/` is left out rather than refused as a skill without a `SKILL.md`. A symbolic link that leads out of the agent directory is refused: a file in `skills/` or `knowledge/`, a skill's `SKILL.md`, or `skills/` or `knowledge/` itself. A link within the directory is read, and one to a directory is not followed (#2146).
+
+### Kotlin: a tool's failure and a printed credential keep internal details out
+
+- A tool's failure reaches the model as `StreamAgents.onToolError` says, `agents.onToolError = { call, error -> ... }`, for every session of that client, and as the error's message otherwise, cut to 1,024 characters with an ellipsis, as in JavaScript. The model may repeat it and the conversation keeps it, and an error from a library a tool calls can name an internal host, a table or a value from a record: a hook can pass on only the app's own errors and say something plain for the rest. A hook that throws tells the model only that the tool failed.
+- `StreamCredentials` and `Guest` no longer print their token in `toString()`; it shows as `[redacted]`. The generated `GuestUser` the SDK keeps a guest's store record in still prints its token and refresh secret: it is internal, never handed to the app or logged by the SDK, and the generator has no way to mask a field yet (AND-2019).
 
 ### The Go SDK's `Agent.Sync` works for an agent with skills
 

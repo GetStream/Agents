@@ -335,7 +335,7 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	}
 	// Resolve is what every later use of the connection reads it through, so an input it
 	// refuses here is one the connection could never be used with. Its errors name the input.
-	profile, err := definition.Manifest.Resolve(scheme, sent.Inputs, nil)
+	profile, err := definition.Resolve(scheme, sent.Inputs, nil)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
@@ -620,7 +620,7 @@ func (s *Server) revokeHeld(ctx context.Context, connection store.ConnectorConne
 	if !found {
 		return false, stack.Wrap(fmt.Errorf("%w: %q", store.ErrUnregisteredScheme, connection.AuthScheme))
 	}
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, held.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, held.Metadata)
 	if err != nil {
 		return false, err
 	}

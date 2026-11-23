@@ -347,7 +347,7 @@ func (c consents) connectionFor(ctx context.Context, request session.ConsentRequ
 		return store.ConnectorConnection{}, stack.Wrap(fmt.Errorf("%s takes only a static token or key, which the chat cannot ask for",
 			definition.ID))
 	}
-	profile, err := definition.Manifest.Resolve(scheme, nil, nil)
+	profile, err := definition.Resolve(scheme, nil, nil)
 	if err != nil {
 		return store.ConnectorConnection{}, stack.Wrap(err)
 	}
@@ -1110,7 +1110,7 @@ func definitionManifest(definition store.ConnectorDefinition, connection store.C
 	maps.DeleteFunc(metadata, func(name, _ string) bool {
 		return !slices.ContainsFunc(definition.Manifest.Capture, func(rule core.CaptureRule) bool { return rule.Name == name })
 	})
-	return definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, metadata)
+	return definition.Resolve(connection.AuthScheme, connection.Inputs, metadata)
 }
 
 // openAttemptByID and openAttemptByState read an open attempt and open what it sealed. A

@@ -443,9 +443,16 @@ func checkOAuthClient(manifest core.Manifest, sent ConnectorOAuthClientRequest) 
 // _SECRET (oauth2code.EnvClients). It is called at every exchange, refresh and revocation, so
 // a secret put again is the one the next refresh sends. Without a store or a keyring no record
 // is read.
+//
+// The operator's client, record or environment, is only a built-in's (m.Builtin): a custom
+// definition's manifest is its customer's, whose client.env could name any of the operator's
+// clients and whose endpoints the client would be sent to.
 func ConnectorClients(records *store.Store, secrets *auth.Sealer, getenv func(string) string) oauth2code.ClientLookup {
 	environment := oauth2code.EnvClients(getenv)
 	return func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
+		if registration == core.ClientOperator && !m.Builtin {
+			return oauth2code.Client{}, false, nil
+		}
 		if records != nil && secrets != nil {
 			record, err := records.ConnectorOAuthClients.Get(ctx, ref.CustomerID, m.ConnectorID)
 			if err != nil && !errors.Is(err, store.ErrNoConnectorOAuthClient) {

@@ -332,7 +332,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		}
 		return unavailableReauthorize, nil
 	}
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		m.logger.Warn("a connector binding cannot be opened", "connector", binding.Name, "error", err)
 		return unavailableOpenFailed, nil

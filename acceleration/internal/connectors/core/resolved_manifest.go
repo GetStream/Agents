@@ -4,6 +4,11 @@ package core
 // what a scheme reads instead of switching on a connector id. Manifest.Resolve builds one.
 type ResolvedManifest struct {
 	ConnectorID string
+	// Builtin says the definition is one the router ships rather than a customer's own, read
+	// from whose the stored definition is, never from the manifest, which a customer writes
+	// for its own. Only a built-in gets the operator's client. Manifest.Resolve leaves it
+	// false; the store's ConnectorDefinition.Resolve sets it.
+	Builtin bool
 	// Revision is the definition revision the connection pinned, so a manifest change
 	// reaches a connection only through a reconnect.
 	Revision int
