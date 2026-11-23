@@ -119,3 +119,25 @@ func (s *MeteringSuite) TestANumberWithNoQuoteStillNeedsSomeCredit() {
 	s.Require().NoError(err)
 	s.Equal([]int64{0}, money.booked, "no price to book, so only some credit is asked for")
 }
+
+func (s *MeteringSuite) TestAnUnverifiedOrganizationBuysNoNumber() {
+	money, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationTier = "not-verified"
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().ErrorIs(err, ErrVerificationRequired)
+	s.Zero(s.vendor.ordered, "the vendor is never asked")
+	s.Empty(money.booked, "no credit is set aside")
+}
+
+func (s *MeteringSuite) TestAVerifiedOrganizationBuysANumber() {
+	_, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationTier = "verified"
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().NoError(err)
+}
