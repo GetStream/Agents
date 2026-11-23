@@ -188,15 +188,22 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 	connection.SetReadLimit(maxSocketMessage)
 
 	gone := make(chan error, 1)
+	var closing atomic.Bool
 	go func() {
-		gone <- s.readRelayedCommands(connection, state, watcher, id)
+		gone <- s.readRelayedCommands(connection, state, watcher, id, &closing)
 	}()
-	s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load))
+	ended := s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load))
+	// The holder ends the session on a close command, which reaches this node as its end.
+	if closing.Load() && ended.cause == sessionEnded {
+		ended.cause = closedByClient
+	}
+	recordClose(r.Context(), ended)
 	return true
 }
 
 // writeRelayedEvents writes what arrives on the bus out to the caller, and keeps both the
-// socket and the watcher behind it alive.
+// socket and the watcher behind it alive. It says why the socket closed; the session's end
+// reason is the holder's to log.
 //
 // The ping and the refresh share a tick because they say the same thing in each
 // direction: this socket is still being read, and the watcher standing for it elsewhere
@@ -209,7 +216,7 @@ func (s *Server) writeRelayedEvents(
 	asked wanted,
 	gone <-chan error,
 	ended ending,
-) {
+) socketEnd {
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
 
@@ -218,13 +225,14 @@ func (s *Server) writeRelayedEvents(
 		case stopped := <-gone:
 			if errors.Is(stopped, errUnreadableFrame) {
 				refuseUnreadable(connection)
+				return socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
 			}
-			return
+			return readEnd(stopped)
 
 		case <-socket.closed:
 			code, reason := ended()
 			closeBeforeReader(connection, code, reason, gone)
-			return
+			return sessionEnd(code)
 
 		case payload := <-socket.frames:
 			if !asked.takesFrame(frameType(payload)) {
@@ -233,13 +241,13 @@ func (s *Server) writeRelayedEvents(
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.TextMessage, payload); err != nil {
 				s.logger.Debug("relayed session socket write failed", "error", err)
-				return
+				return socketEnd{cause: clientGone}
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return socketEnd{cause: clientGone}
 			}
 			if err := state.bus.Publish(context.Background(), state.bus.Commands(), relay.Request{
 				Type: relay.Refresh, Node: state.bus.Node(), Session: id, Watcher: watcher,
@@ -258,8 +266,8 @@ func (s *Server) writeRelayedEvents(
 // a command ends this socket as it ends a local one; the holder would only report it.
 //
 // It returns errUnreadableFrame for a frame that is not a command, and the read's own error
-// when the connection ended.
-func (s *Server) readRelayedCommands(connection *websocket.Conn, state *relayed, watcher, id string) error {
+// when the connection ended. closing is set before a close command is carried.
+func (s *Server) readRelayedCommands(connection *websocket.Conn, state *relayed, watcher, id string, closing *atomic.Bool) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -277,6 +285,9 @@ func (s *Server) readRelayedCommands(connection *websocket.Conn, state *relayed,
 		var command watcherCommand
 		if json.Unmarshal(payload, &command) != nil {
 			return errUnreadableFrame
+		}
+		if command.Type == "close" {
+			closing.Store(true)
 		}
 
 		if err := state.bus.Publish(context.Background(), state.bus.Commands(), relay.Request{
