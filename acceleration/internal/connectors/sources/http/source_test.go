@@ -203,6 +203,20 @@ func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 	s.Equal("ok", llm.TextOf(result.Parts))
 }
 
+// R1.5: a 2xx with no body, such as a DELETE's 204 or any HEAD's answer, is its status line, so
+// the model can tell done from nothing.
+func (s *SourceSuite) TestAnEmpty2xxIsItsStatus() {
+	for want, tool := range map[string]core.HTTPTool{
+		"The API answered 204 No Content.": {Name: "remove", Method: http.MethodDelete, Path: "/no-content"},
+		"The API answered 200 OK.":         {Name: "check", Method: http.MethodHead, Path: "/items"},
+	} {
+		result, err := s.call(s.binding(tool), tool.Name, `{}`)
+
+		s.Require().NoError(err, tool.Method)
+		s.Equal(want, llm.TextOf(result.Parts), tool.Method)
+	}
+}
+
 func (s *SourceSuite) TestAToolErrorOverTheCapIsCutWithTheMarker() {
 	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/error-large"}
 
@@ -556,6 +570,8 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/bad-byte-at-the-cap":
 		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20-1))
 		_, _ = w.Write([]byte{0xff})
+	case "/no-content":
+		w.WriteHeader(http.StatusNoContent)
 	case "/missing":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "no such item")

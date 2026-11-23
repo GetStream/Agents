@@ -76,8 +76,8 @@ func (*Toolset) Instructions() string {
 
 // Call runs one offered tool: one request, whose answer the model reads as text. A name this
 // toolset did not offer, or arguments its input schema refuses, never reach the API. An answer
-// that is not a 2xx is a *core.ToolError naming its status. A result past core.MaxResultBytes is
-// cut and ends with core.TruncatedMarker.
+// that is not a 2xx is a *core.ToolError naming its status, and an empty 2xx is its status. A
+// result past core.MaxResultBytes is cut and ends with core.TruncatedMarker.
 func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, error) {
 	offered, found := t.targets[call.Name]
 	if !found {
@@ -127,6 +127,11 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 			message += ": " + text
 		}
 		return core.Result{}, stack.Wrap(&core.ToolError{Message: core.CutResult(message)})
+	}
+	// An empty answer, such as a 204's or any HEAD's, is its status, so the model can tell a
+	// call that was done from one that said nothing.
+	if len(body) == 0 {
+		return core.Result{Parts: llm.TextParts(fmt.Sprintf("The API answered %s.", response.Status))}, nil
 	}
 	return core.Result{Parts: llm.TextParts(core.CutResult(text))}, nil
 }
