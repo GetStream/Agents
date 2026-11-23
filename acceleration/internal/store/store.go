@@ -252,13 +252,27 @@ LEFT JOIN session_counts AS s ON s.bucket = b.bucket
 LEFT JOIN message_counts AS m ON m.bucket = b.bucket
 LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 
+	// A session carried on in another shard has a row in each, so with several shards the
+	// sessions are counted from a hash of their ids once every shard has answered, in the
+	// bucket of the earliest row.
+	opened := fmt.Sprintf(`
+SELECT date_trunc('%[1]s', created_at) AS bucket, hashtextextended(id, 0) AS session
+FROM agent_sessions
+WHERE customer_id = ? AND created_at >= ? AND created_at < ?`, unit)
+	sharded := len(s.peers) > 0
+
 	type seenUser struct {
 		Bucket time.Time `bun:"bucket"`
 		UserID string    `bun:"user_id"`
 	}
+	type openedSession struct {
+		Bucket  time.Time `bun:"bucket"`
+		Session int64     `bun:"session"`
+	}
 	type shardActivity struct {
 		counts []ActivityBucket
 		seen   []seenUser
+		opened []openedSession
 	}
 	answers, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardActivity, error) {
 		var read shardActivity
@@ -270,6 +284,10 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 			return read, err
 		}
 		err := db.NewRaw(people, customerID, from, to, customerID, from, to).Scan(ctx, &read.seen)
+		if err != nil || !sharded {
+			return read, err
+		}
+		err = db.NewRaw(opened, customerID, from, to).Scan(ctx, &read.opened)
 		return read, err
 	})
 	if err != nil {
@@ -312,11 +330,26 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 	for _, answer := range answers {
 		for _, counted := range answer.counts {
 			b := at(counted.Bucket)
-			b.Sessions += counted.Sessions
+			if !sharded {
+				b.Sessions += counted.Sessions
+			}
 			b.Messages += counted.Messages
 			b.Calls += counted.Calls
 			b.VoiceMinutes += counted.VoiceMinutes
 			b.PhoneMinutes += counted.PhoneMinutes
+		}
+	}
+	if sharded {
+		first := map[int64]time.Time{}
+		for _, answer := range answers {
+			for _, session := range answer.opened {
+				if held, seen := first[session.Session]; !seen || session.Bucket.Before(held) {
+					first[session.Session] = session.Bucket
+				}
+			}
+		}
+		for _, bucket := range first {
+			at(bucket).Sessions++
 		}
 	}
 	type person struct {
@@ -411,10 +444,10 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 		}
 	}
 	var edges []edge
-	for _, spans := range bySession {
-		slices.SortFunc(spans, func(a, b span) int { return a.Opened.Compare(b.Opened) })
-		joined := spans[0]
-		for _, next := range spans[1:] {
+	for _, sessionSpans := range bySession {
+		slices.SortFunc(sessionSpans, func(a, b span) int { return a.Opened.Compare(b.Opened) })
+		joined := sessionSpans[0]
+		for _, next := range sessionSpans[1:] {
 			if next.Opened.After(joined.Closed) {
 				edges = append(edges, edge{joined.Opened, 1}, edge{joined.Closed, -1})
 				joined = next
@@ -468,16 +501,22 @@ func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID stri
 		Loading           string     `bun:"loading"`
 		DefinitionTokens  *int64     `bun:"definition_tokens"`
 		SummaryTokens     *int64     `bun:"summary_tokens"`
-		SessionIDs        []string   `bun:"session_ids,array"`
+		SessionHashes     []int64    `bun:"session_hashes,array"`
 	}
-	// A session carried on in another shard has turns in each, so with several shards the
-	// sessions are counted from their ids once every shard has answered.
-	sessionIDs := "NULL::text[]"
-	if len(s.peers) > 0 {
-		sessionIDs = "array_agg(DISTINCT ran.session_id)"
+	type shardUsage struct {
+		rows   []usageRow
+		firsts []firstUse
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]usageRow, error) {
-		var rows []usageRow
+	// A session carried on in another shard has turns in each, so with several shards its
+	// sessions are counted from a hash of their ids once every shard has answered, and its
+	// turns before a tool's first use are counted across every shard (turnsBeforeFirstUse).
+	sharded := len(s.peers) > 0
+	sessionHashes := "NULL::bigint[]"
+	if sharded {
+		sessionHashes = "array_agg(DISTINCT hashtextextended(ran.session_id, 0))"
+	}
+	answers, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardUsage, error) {
+		var read shardUsage
 		err := db.NewRaw(`
 WITH turns AS (
     SELECT
@@ -532,7 +571,7 @@ SELECT
     COUNT(*) AS calls,
     COUNT(*) FILTER (WHERE failed) AS failed,
     COUNT(DISTINCT ran.session_id) AS sessions,
-    `+sessionIDs+` AS session_ids,
+    `+sessionHashes+` AS session_hashes,
     COALESCE(f.firsts, 0) AS firsts,
     f.avg_turns_before_use,
     COALESCE(AVG(tokens), 0)::double precision AS avg_tokens,
@@ -550,11 +589,41 @@ GROUP BY GROUPING SETS (
     ())
 ORDER BY overall DESC, calls DESC, tool ASC`,
 			charsPerToken, ItemToolResult, ItemToolCall, customerID, from, to, configID,
-		).Scan(ctx, &rows)
-		return rows, err
+		).Scan(ctx, &read.rows)
+		if err != nil || !sharded {
+			return read, err
+		}
+		err = db.NewRaw(`
+SELECT
+    r.tool_name AS tool,
+    a.session_id,
+    (array_agg(a.id ORDER BY a.created_at, a.id))[1] AS response_id,
+    MIN(a.created_at) AS at
+FROM agent_responses AS a
+JOIN agent_sessions AS s ON s.id = a.session_id
+JOIN agent_response_items AS r ON r.response_id = a.id AND r.kind = ?0
+WHERE a.customer_id = ?1 AND (?4 = '' OR s.config_id = ?4) AND a.created_at < ?3
+    AND a.rewound_at IS NULL AND r.at >= ?2 AND r.at < ?3
+GROUP BY r.tool_name, a.session_id`,
+			ItemToolResult, customerID, from, to, configID,
+		).Scan(ctx, &read.firsts)
+		return read, err
 	})
 	if err != nil {
 		return ToolUsage{}, nil, stack.Wrap(fmt.Errorf("store: tool usage: %w", err))
+	}
+	lists := make([][]usageRow, len(answers))
+	var firstUses [][]firstUse
+	for i, answer := range answers {
+		lists[i] = answer.rows
+		firstUses = append(firstUses, answer.firsts)
+	}
+	var crossShardBefore map[string]*float64
+	if sharded {
+		crossShardBefore, err = s.turnsBeforeFirstUse(ctx, customerID, firstUses)
+		if err != nil {
+			return ToolUsage{}, nil, err
+		}
 	}
 
 	// Averages and the 99th percentile of several shards are each weighted by the calls behind
@@ -567,7 +636,7 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 	sums := map[usageKey]*ToolUsage{}
 	tokens, ms, p99s, calls := map[usageKey][]*float64{}, map[usageKey][]*float64{}, map[usageKey][]*float64{}, map[usageKey][]int64{}
 	befores, firsts := map[usageKey][]*float64{}, map[usageKey][]int64{}
-	sessions := map[usageKey]map[string]bool{}
+	sessions := map[usageKey]map[int64]bool{}
 	// The definition is the latest call's on any shard: a tool's description can change.
 	offeredAt := map[usageKey]time.Time{}
 	for _, rows := range lists {
@@ -579,15 +648,16 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 			}
 			sums[k].Calls += row.Calls
 			sums[k].Failed += row.Failed
-			sums[k].Sessions += row.Sessions
-			if len(s.peers) > 0 {
+			if sharded {
 				if sessions[k] == nil {
-					sessions[k] = map[string]bool{}
+					sessions[k] = map[int64]bool{}
 				}
-				for _, id := range row.SessionIDs {
-					sessions[k][id] = true
+				for _, hash := range row.SessionHashes {
+					sessions[k][hash] = true
 				}
 				sums[k].Sessions = int64(len(sessions[k]))
+			} else {
+				sums[k].Sessions += row.Sessions
 			}
 			avgTokens := row.AvgTokens
 			tokens[k] = append(tokens[k], &avgTokens)
@@ -610,7 +680,14 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 			usage.AvgTokens = *avg
 		}
 		usage.AvgMs, usage.P99Ms = weighted(ms[k], calls[k]), weighted(p99s[k], calls[k])
-		usage.AvgTurnsBeforeUse = weighted(befores[k], firsts[k])
+		if sharded {
+			usage.AvgTurnsBeforeUse = nil
+			if !k.overall {
+				usage.AvgTurnsBeforeUse = crossShardBefore[k.tool]
+			}
+		} else {
+			usage.AvgTurnsBeforeUse = weighted(befores[k], firsts[k])
+		}
 		if len(lists) == 1 {
 			usage.AvgMs, usage.P99Ms = ms[k][0], p99s[k][0]
 		}
@@ -626,6 +703,81 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 	return overall, tools, nil
 }
 
+// firstUse is the earliest turn in which one session used one tool, as one shard saw it.
+type firstUse struct {
+	Tool       string    `bun:"tool"`
+	SessionID  string    `bun:"session_id"`
+	ResponseID string    `bun:"response_id"`
+	At         time.Time `bun:"at"`
+}
+
+// turnsBeforeFirstUse averages, per tool, how many turns each session took before it first
+// used the tool, counted across every shard: a session carried on in another shard numbers
+// its turns there from where it left off, which no one shard can see.
+func (s *Store) turnsBeforeFirstUse(ctx context.Context, customerID string, shards [][]firstUse) (map[string]*float64, error) {
+	type toolSession struct{ tool, session string }
+	earliest := map[toolSession]firstUse{}
+	for _, uses := range shards {
+		for _, use := range uses {
+			key := toolSession{use.Tool, use.SessionID}
+			held, seen := earliest[key]
+			if !seen || use.At.Before(held.At) || (use.At.Equal(held.At) && use.ResponseID < held.ResponseID) {
+				earliest[key] = use
+			}
+		}
+	}
+	if len(earliest) == 0 {
+		return nil, nil
+	}
+	type turn struct{ session, response string }
+	var sessionIDs, responseIDs []string
+	var ats []time.Time
+	asked := map[turn]bool{}
+	for _, use := range earliest {
+		if t := (turn{use.SessionID, use.ResponseID}); !asked[t] {
+			asked[t] = true
+			sessionIDs, responseIDs, ats = append(sessionIDs, t.session), append(responseIDs, t.response), append(ats, use.At)
+		}
+	}
+	type earlier struct {
+		SessionID  string `bun:"session_id"`
+		ResponseID string `bun:"response_id"`
+		Before     int64  `bun:"before"`
+	}
+	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]earlier, error) {
+		var read []earlier
+		err := db.NewRaw(`
+SELECT x.session_id, x.response_id, COUNT(*) AS before
+FROM unnest(?::text[], ?::text[], ?::timestamptz[]) AS x(session_id, response_id, at)
+JOIN agent_responses AS a ON a.session_id = x.session_id AND a.customer_id = ?
+    AND a.rewound_at IS NULL AND (a.created_at, a.id) < (x.at, x.response_id)
+GROUP BY x.session_id, x.response_id`,
+			pgdialect.Array(sessionIDs), pgdialect.Array(responseIDs), pgdialect.Array(ats), customerID,
+		).Scan(ctx, &read)
+		return read, err
+	})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: tool usage: turns before first use: %w", err))
+	}
+	before := map[turn]int64{}
+	for _, list := range counts {
+		for _, row := range list {
+			before[turn{row.SessionID, row.ResponseID}] += row.Before
+		}
+	}
+	sums, uses := map[string]int64{}, map[string]int64{}
+	for key, use := range earliest {
+		sums[key.tool] += before[turn{use.SessionID, use.ResponseID}]
+		uses[key.tool]++
+	}
+	averages := make(map[string]*float64, len(sums))
+	for tool, n := range uses {
+		avg := float64(sums[tool]) / float64(n)
+		averages[tool] = &avg
+	}
+	return averages, nil
+}
+
 // CustomerTurns counts the sessions one customer's agents took a turn in during a window,
 // and those turns: every response that was not rewound, as CustomerToolUsage counts a turn.
 // A configID keeps to the sessions of that agent config, and empty is every one.
@@ -635,19 +787,19 @@ func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, 
 	}
 	type shardTurns struct {
 		SessionTurns
-		SessionIDs []string `bun:"session_ids,array"`
+		SessionHashes []int64 `bun:"session_hashes,array"`
 	}
 	// A session carried on in another shard has turns in each, so with several shards the
-	// sessions are counted from their ids once every shard has answered.
-	sessionIDs := "NULL::text[]"
+	// sessions are counted from a hash of their ids once every shard has answered.
+	sessionHashes := "NULL::bigint[]"
 	if len(s.peers) > 0 {
-		sessionIDs = "array_agg(DISTINCT ars.session_id)"
+		sessionHashes = "array_agg(DISTINCT hashtextextended(ars.session_id, 0))"
 	}
 	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardTurns, error) {
 		var counts shardTurns
 		q := db.NewSelect().Model((*AgentResponse)(nil)).
 			ColumnExpr("COUNT(DISTINCT ars.session_id) AS sessions, COUNT(*) AS turns").
-			ColumnExpr(sessionIDs+" AS session_ids").
+			ColumnExpr(sessionHashes+" AS session_hashes").
 			Join("JOIN agent_sessions AS asn ON asn.id = ars.session_id").
 			Where("ars.customer_id = ?", customerID).
 			Where("ars.created_at >= ? AND ars.created_at < ?", from, to).
@@ -662,12 +814,12 @@ func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, 
 		return SessionTurns{}, stack.Wrap(fmt.Errorf("store: turns: %w", err))
 	}
 	var total SessionTurns
-	sessions := map[string]bool{}
+	sessions := map[int64]bool{}
 	for _, shard := range counts {
 		total.Sessions += shard.Sessions
 		total.Turns += shard.Turns
-		for _, id := range shard.SessionIDs {
-			sessions[id] = true
+		for _, hash := range shard.SessionHashes {
+			sessions[hash] = true
 		}
 	}
 	if len(s.peers) > 0 {

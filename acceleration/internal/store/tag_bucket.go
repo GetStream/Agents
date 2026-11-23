@@ -11,8 +11,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// TagBucket is one aggregated row from stats_tags_hourly or stats_tags_daily: what the
-// requests carrying one label cost in one time bucket.
+// TagBucket is what the requests carrying one label cost in one time bucket, as Select reads
+// it from the request rows and the rollup writes it to stats_tags_hourly or stats_tags_daily.
 type TagBucket struct {
 	Modality               string    `bun:"modality"`
 	CustomerID             string    `bun:"customer_id"`
@@ -41,7 +41,8 @@ type TagBucketFilter struct {
 	From, To    time.Time
 }
 
-// TagBuckets are each shard's rollups of the requests it recorded, by cost label.
+// TagBuckets are each shard's requests broken down by cost label: read from the request rows,
+// and rolled up by Rollup into stats_tags_hourly and stats_tags_daily.
 type TagBuckets struct {
 	store *Store
 }
