@@ -1,0 +1,120 @@
+name: Release check
+# Proves, without publishing, that a release would build every Python package at the tag's
+# version. It runs the build steps of release.yml (the build-python-packages action) on a local
+# tag, and has no `uv publish`, no `pypi` environment and no `id-token` permission, so it can
+# never reach PyPI. Run it by hand (Actions > Release check) before you tag a release.
+on:
+  pull_request:
+    branches: [ "**" ]
+    # A draft runs nothing: CI starts when the pull request is marked ready (ready_for_review).
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-check.yml'
+      - '.github/actions/build-python-packages/**'
+      - '.github/actions/python-uv-setup/**'
+      - '.github/scripts/check-release-version.sh'
+      - '.github/release-build-constraints.txt'
+      - '**/pyproject.toml'
+      - 'uv.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build every package at the release version
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    env:
+      # A version no release has, so the check never meets a real tag.
+      TAG: v99.0.0
+    steps:
+      # The release job checks out the same way: one commit, no tags but the release's.
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Tag this commit as the release
+        run: |
+          git tag "$TAG"
+          git tag --list
+
+      - name: Build all distributions
+        id: build
+        uses: ./.github/actions/build-python-packages
+        with:
+          tag: ${{ env.TAG }}
+
+      # The action's output is what release.yml hands to the install check, so it must be the
+      # tag's version. This fails if the action no longer runs the version check or no longer
+      # reports its result.
+      - name: The build reports the tag's version
+        run: |
+          echo "build output: '${{ steps.build.outputs.version }}', tag: '$TAG'"
+          test "${{ steps.build.outputs.version }}" = "${TAG#v}"
+
+      # Each wrong input must fail the version check. If one passes, the check no longer guards
+      # the upload.
+      - name: A wrong tag or a wrong file version must fail the check
+        run: |
+          fails() {
+            if "$@" > /dev/null 2>&1; then
+              echo "::error::passed, but must fail: $*"
+              exit 1
+            fi
+            echo "failed as expected: $*"
+          }
+          fails .github/scripts/check-release-version.sh v99.0.1 dist
+          fails .github/scripts/check-release-version.sh 99.0.0 dist
+          fails .github/scripts/check-release-version.sh v99.0.0-rc1 dist
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          wrong_wheel=$(basename "${wheels[0]}" | sed 's/-99\.0\.0-/-99.0.1-/')
+          wrong_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.1.tar/')
+          four_wheel=$(basename "${wheels[0]}" | sed 's/-99\.0\.0-/-99.0.0.1-/')
+          four_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.0.1.tar/')
+          post_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.0.post1.tar/')
+          mkdir empty wheel-wrong sdist-wrong four post stray
+          # One wrong file of a kind, beside a right file of the other kind.
+          cp "${wheels[0]}" "wheel-wrong/$wrong_wheel"
+          cp "${sdists[0]}" wheel-wrong/
+          cp "${sdists[0]}" "sdist-wrong/$wrong_sdist"
+          cp "${wheels[0]}" sdist-wrong/
+          fails .github/scripts/check-release-version.sh "$TAG" wheel-wrong
+          fails .github/scripts/check-release-version.sh "$TAG" sdist-wrong
+          fails .github/scripts/check-release-version.sh "$TAG" empty
+          # A version that merely starts with the tag's must fail. So must a tag that is not
+          # vX.Y.Z even when the files carry its version: hatch-vcs builds 99.0.0.1 from v99.0.0.1.
+          cp "${wheels[0]}" "post/${wheels[0]##*/}"
+          cp "${sdists[0]}" "post/$post_sdist"
+          fails .github/scripts/check-release-version.sh "$TAG" post
+          cp "${wheels[0]}" "four/$four_wheel"
+          cp "${sdists[0]}" "four/$four_sdist"
+          fails .github/scripts/check-release-version.sh v99.0.0.1 four
+          # `uv publish` uploads every file in dist, so a file that is no wheel or sdist must fail.
+          cp "${wheels[0]}" "${sdists[0]}" stray/
+          touch stray/notes.zip
+          fails .github/scripts/check-release-version.sh "$TAG" stray
+
+      # Metadata PyPI refuses, such as a long description that does not render.
+      - name: Check the package metadata
+        run: uvx -q --from twine==7.0.0 twine check dist/*
+
+      # PyPI takes an upload to a project that does not exist only from a pending trusted
+      # publisher. This repo cannot read that setting, so the step lists the projects to look at.
+      - name: List the projects PyPI does not have yet
+        run: |
+          missing=""
+          for wheel in dist/*.whl; do
+            name=$(basename "$wheel" | cut -d- -f1 | tr _ -)
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$name/json")
+            [ "$code" = 200 ] || missing="$missing $name($code)"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::not on PyPI, needs a pending trusted publisher before a release:$missing"
+          fi

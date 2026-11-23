@@ -237,9 +237,13 @@ jobs:
           xcodebuild -project SwiftDemo.xcodeproj -scheme SwiftDemo -destination 'generic/platform=iOS Simulator' \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/DerivedData" build
 
-      # Saved even when a test fails, so a red run still leaves the next one a warm cache.
+      # Saved even when a test fails, so a red run still leaves the next one a warm cache. Only
+      # a push to main saves it: a pull request's copy serves that pull request alone and fills
+      # the cache that all workflows of the repository share.
       - uses: actions/cache/save@v4
-        if: always() && steps.packages.outcome == 'success' && steps.packages.outputs.cache-hit != 'true'
+        if: >-
+          always() && github.event_name == 'push' && steps.packages.outcome == 'success'
+          && steps.packages.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/spm
           key: ${{ steps.packages.outputs.cache-primary-key }}
