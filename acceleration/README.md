@@ -2374,6 +2374,13 @@ events `listUsage` answers, with its filters and cursor, without the organizatio
 `base_cost_micros`, `price_version` or `source`. The manage key opens none of them. The
 router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read them.
 
+**Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
+written. `router usage replay --from <log>` writes them from the log, once each. Each line
+holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
+text in the row is redacted and masked first. A user id that changes is left off, and the row
+bills to its app without that user. A line from before that holds the row as `row=` JSON the
+redaction rewrote, and cannot be recovered: replay counts it as could not be read.
+
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
 customer's users reaches the usage records. `router usage forget-user --app <app> --user <id>
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a

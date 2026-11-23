@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,8 +13,8 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,9 @@ const usageCommands = `usage: router usage <command>
   replay --from path         write the usage rows a log of this shard's routers says were lost
                              (msg="usage row lost"), once each: replaying a file again writes
                              nothing twice. With a usage service (ROUTER_USAGE_URL) the sweeper
-                             ships them. Writes the database
+                             ships them. A line logged with the row as plain JSON (row=, before
+                             row_hex) was rewritten by the log's redaction and cannot be
+                             recovered: it counts as could not be read. Writes the database
   reship --since time [--rejected]
                              queue this shard's rows started since then (RFC 3339, or a duration
                              back from now such as 24h) that the usage service has to be sent to
@@ -289,23 +292,32 @@ func lostRows(log io.Reader, toShip bool) ([]store.Request, int, error) {
 	return rows, unreadable, nil
 }
 
-// lostRow is the row a lost-row line carries in its row field, quoted as slog's text handler
-// quotes it.
+// lostFields are the fields the writer logs a lost row with, in its order. They follow the
+// message and whatever attributes the writer's logger adds, before anything a customer wrote.
+var lostFields = regexp.MustCompile(`^ reason=\S+ usage_id=\S+ row_hex=([0-9a-f]+)(?: |$)`)
+
+// lostRow is the row a lost-row line carries in its row_hex field, the row's JSON hex-encoded,
+// which slog's text handler prints unquoted. The field is read only where the writer puts it,
+// so a row_hex= in a row's own text or in the error after it is never read as the row.
 func lostRow(line string) (store.Request, bool) {
-	_, value, found := strings.Cut(line, " row=")
+	_, fields, found := strings.Cut(line, lostRowMessage)
 	if !found {
 		return store.Request{}, false
 	}
-	quoted, err := strconv.QuotedPrefix(value)
-	if err != nil {
+	start := strings.Index(fields, " reason=")
+	if start < 0 {
 		return store.Request{}, false
 	}
-	raw, err := strconv.Unquote(quoted)
+	match := lostFields.FindStringSubmatch(fields[start:])
+	if match == nil {
+		return store.Request{}, false
+	}
+	raw, err := hex.DecodeString(match[1])
 	if err != nil {
 		return store.Request{}, false
 	}
 	var row store.Request
-	if err := json.Unmarshal([]byte(raw), &row); err != nil || row.UsageID == uuid.Nil {
+	if err := json.Unmarshal(raw, &row); err != nil || row.UsageID == uuid.Nil {
 		return store.Request{}, false
 	}
 	return row, true
