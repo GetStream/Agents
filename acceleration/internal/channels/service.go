@@ -546,7 +546,7 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 		// after the other; only one that matched nothing stays counted.
 		if !errors.Is(err, store.ErrUnknownChannelLink) {
 			if err := s.store.ChannelLinkFailures.Release(ctx, account.ID, message.From, window); err != nil {
-				s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
+				s.logger.Error("could not give back a code counted on a line", "channel", account.Kind, "error", err)
 			}
 		}
 		if err != nil {

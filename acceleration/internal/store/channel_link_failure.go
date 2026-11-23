@@ -31,8 +31,8 @@ func (f *channelLinkFailure) Validate() error {
 }
 
 // ChannelLinkFailures count the messages that claimed no link code, and those still being tried
-// as one, by line, number and window, in the shared database. A code is six digits, so without a count anybody could
-// text guesses until one ties their number to somebody else.
+// as one, by line, number and window, in the shared database. A code is six digits, so without
+// a count anybody could text guesses until one ties their number to somebody else.
 type ChannelLinkFailures struct {
 	store *Store
 }
