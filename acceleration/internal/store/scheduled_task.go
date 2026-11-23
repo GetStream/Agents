@@ -491,7 +491,7 @@ func (r *ScheduledTasks) update(ctx context.Context, task *ScheduledTask, missed
 					task.State, task.NextRunAt = ScheduledTaskCompleted, nil
 					break
 				}
-				again, err := databaseNow(ctx, tx)
+				again, err := transactionStart(ctx, tx)
 				if err != nil {
 					return fmt.Errorf("store: save scheduled task: %w", err)
 				}
@@ -642,7 +642,7 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 	}
 	claimed := []ClaimedScheduledTask{}
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		now, err := databaseNow(ctx, tx)
+		now, err := transactionStart(ctx, tx)
 		if err != nil {
 			return fmt.Errorf("store: claim scheduled tasks: %w", err)
 		}
