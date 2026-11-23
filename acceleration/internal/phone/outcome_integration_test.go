@@ -305,6 +305,27 @@ func (s *OutcomeSuite) TestACallCancelledBeforeItWasSentWasNeverPlaced() {
 	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
 }
 
+// A call that fails before the vendor is asked rang nobody, which a campaign needs to know to
+// try the person again without using an attempt; the failure's own kind is kept.
+func (s *OutcomeSuite) TestACallThatFailedBeforeItWasSentWasNeverDialed() {
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: "+15125550199", To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.ErrorIs(err, ErrNotDialed)
+	s.NotErrorIs(err, ErrNotPlaced, "nothing was cancelled")
+	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
+}
+
+// A vendor that fails the dial had the request, so the phone may be ringing.
+func (s *OutcomeSuite) TestACallTheVendorFailedMayHaveRung() {
+	s.vendor.err = errors.New("telnyx is having a day")
+
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.NotErrorIs(err, ErrNotDialed)
+}
+
 func (s *OutcomeSuite) TestACallCancelledWhileTheVendorWasDialingMayHaveRung() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()

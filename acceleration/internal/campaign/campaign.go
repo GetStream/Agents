@@ -482,7 +482,8 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 }
 
 // codeDialFailed is the code a dial that could not be tried, and gave no reason, is counted
-// refused under.
+// refused under. A dial that failed before anything rang is deferred under it, without using
+// an attempt.
 const codeDialFailed = "dial_failed"
 
 // countDial counts a dial in the activity record, refused when it could not be tried or placed

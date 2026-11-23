@@ -54,7 +54,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 		return Dialed{Result: Paused, Reason: reasonConfigMissing}, nil
 	}
 	if err != nil {
-		return Dialed{}, err
+		return Dialed{Result: Deferred, Reason: codeDialFailed}, err
 	}
 
 	if !dial.Step.Voicemail.hangsUp() && session.FromConfig(config).Native() {
@@ -74,7 +74,8 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	placed, err := d.phone.Call(ctx, request)
 	if err != nil {
 		dialed := resultOf(err)
-		if dialed.Result == "" {
+		// A failure, as opposed to a refusal, is returned to be logged.
+		if dialed.Result == "" || dialed.Reason == codeDialFailed {
 			return dialed, err
 		}
 		return dialed, nil

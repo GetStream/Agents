@@ -66,8 +66,9 @@ func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, conta
 	case Voicemail:
 		return unanswered(step, hours, zone, contact, started, settle), false
 	case Deferred:
+		// A dial that failed before anything rang is tried again as soon as a busy line is.
 		at := now.Add(concurrentRetry)
-		if dialed.Reason != codeConcurrent {
+		if dialed.Reason != codeConcurrent && dialed.Reason != codeDialFailed {
 			local := now.In(zone)
 			at = time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, zone)
 		}
@@ -155,6 +156,8 @@ func resultOf(err error) Dialed {
 		return Dialed{Result: Refused, Reason: code}
 	case errors.Is(err, phone.ErrNotDialable):
 		return Dialed{Result: InvalidNumber, Reason: reasonInvalidNumber}
+	case errors.Is(err, phone.ErrNotDialed):
+		return Dialed{Result: Deferred, Reason: codeDialFailed}
 	}
 	// The vendor may have taken the call and rung the person.
 	return Dialed{Outcome: outcome.Unknown}

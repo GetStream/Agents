@@ -1039,6 +1039,9 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
+	if err != nil && !sent {
+		return Placed{}, notDialed{err}
+	}
 	return placed, err
 }
 
@@ -1535,6 +1538,16 @@ func callBridgeAAD(customerID, token string) []byte {
 // ErrNotPlaced is a call whose context ended before the vendor was asked to dial it: nobody
 // was rung.
 var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
+
+// ErrNotDialed is a call that failed before the vendor was asked to dial it: nobody was rung.
+// It marks the failure, whose own text and kind are kept.
+var ErrNotDialed = errors.New("phone: the call failed before it was dialed")
+
+type notDialed struct{ err error }
+
+func (e notDialed) Error() string        { return e.err.Error() }
+func (e notDialed) Unwrap() error        { return e.err }
+func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.

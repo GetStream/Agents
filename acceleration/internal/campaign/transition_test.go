@@ -226,6 +226,29 @@ func (s *TransitionSuite) TestAWrappedErrorIsRecognisedAsItsKind() {
 	s.Equal(InvalidNumber, resultOf(fmt.Errorf("x: %w", stack.Wrap(phone.Dialable("+19005550123")))).Result)
 }
 
+// A dial that failed before anything rang is tried again five minutes later without using the
+// attempt, rather than taken as a call that may have rung.
+func (s *TransitionSuite) TestADialThatFailedBeforeAnythingRangIsTriedAgainWithoutUsingTheAttempt() {
+	now := s.at(2, 10, 0)
+	dialed := resultOf(fmt.Errorf("%w: %w", phone.ErrNotDialed, errors.New("store: the connection was reset")))
+	s.Equal(Deferred, dialed.Result)
+	s.Equal(codeDialFailed, dialed.Reason)
+
+	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(2), 1, dialed, now, now)
+
+	s.False(again)
+	s.Equal(store.Enrolled, settle.Stage)
+	s.Equal(2, settle.Attempt)
+	s.True(now.Add(5 * time.Minute).Equal(*settle.NextAttemptAt))
+}
+
+// A refusal is what it is, whether or not it came before the vendor was asked.
+func (s *TransitionSuite) TestARefusalBeforeAnythingRangIsStillARefusal() {
+	dialed := resultOf(fmt.Errorf("%w: %w", phone.ErrNotDialed, dlc.NewRefusal("sandbox_recipient")))
+	s.Equal(Refused, dialed.Result)
+	s.Equal("sandbox_recipient", dialed.Reason)
+}
+
 func (s *TransitionSuite) TestAContactWithNoOpeningFailsInsteadOfGettingNoTime() {
 	hours := s.hours
 	hours.Windows = map[string][]Window{"monday": {{Start: "09:00", End: "18:00"}}}
