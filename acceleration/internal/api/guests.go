@@ -296,6 +296,9 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if guestID == "" || userID == "" {
 		return nil, invalidRequest("a guest id and a user id are required")
 	}
+	if guestID == userID {
+		return nil, invalidRequest("a guest cannot be claimed by itself")
+	}
 
 	guest, err := s.store.Guest(ctx, customerID, guestID)
 	if err != nil {
@@ -311,8 +314,12 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	}
 
 	moved, err := s.store.ClaimGuest(ctx, customerID, guestID, userID)
+	// Another claim won since the guest was read.
+	if errors.Is(err, store.ErrGuestClaimed) {
+		return nil, conflict("that guest was already claimed")
+	}
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	// The guest's row has changed under every replica holding it, so the caches are told.

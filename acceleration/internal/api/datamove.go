@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,6 +30,38 @@ const (
 // meant to sit open. Postgres cannot say whose a transaction still open past that is, and
 // an export is a rare call whose caller can come back, so it is told to rather than held.
 const exportWritesWait = 30 * time.Second
+
+// exportLineWait bounds the write of one line of an export. The export reads in one
+// transaction, which holds a database connection until the last line is written, so a client
+// that stops reading lets go of it after this rather than holding it for as long as it likes.
+// A line is one row, which a client still reading takes in well under a minute.
+const exportLineWait = time.Minute
+
+// exportWait bounds a whole export. Its rows are read in one repeatable-read transaction, and
+// Postgres vacuums none of the rows that snapshot can see while it is open. An hour is a
+// choice: it reads 36 GB at 10 MB/s.
+const exportWait = time.Hour
+
+// maxExports bounds the exports running on one router at once, each holding a connection of
+// its pool: a tenth of the 40 the store opens (store.maxConns), so the rest are left to
+// requests.
+const maxExports = 4
+
+// maxImportLine bounds one line of an import, which is read into memory whole. A line is one
+// row, and the largest row the router writes is a conversation document's text, read from a
+// file of at most maxFetchedDocument (20 MiB): 64 MiB holds that with room for its JSON
+// escaping.
+const maxImportLine = 64 << 20
+
+// errExportRunning refuses a second export of an app while one is running on this router. Each
+// export holds a connection of this router's pool until its client has read it all.
+var errExportRunning = conflict("an export of this app is already running: wait for it to finish")
+
+// errExportTooLong is an export whose exportWait passed before its first row was read.
+var errExportTooLong = unavailable("the export ran out of time before its first row: try again")
+
+// errExportsBusy refuses an export while maxExports are running on this router.
+var errExportsBusy = unavailable("this router is running as many exports as it takes at once: try again later")
 
 // errWritesOpen is a capture start, or the export after it, that gave up on a write from before
 // the start (store.ErrWritesOpen).
@@ -66,6 +101,19 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errShardedSource)
 		return
 	}
+	if _, running := s.exporting.LoadOrStore(customerID, struct{}{}); running {
+		writeError(w, errExportRunning)
+		return
+	}
+	defer s.exporting.Delete(customerID)
+	select {
+	case s.exports <- struct{}{}:
+	default:
+		writeError(w, errExportsBusy)
+		return
+	}
+	defer func() { <-s.exports }()
+	ends := time.Now().Add(s.exportWait)
 
 	// Recording starts before the snapshot is read rather than after, so a write that
 	// lands while the export is being streamed is in one of the two and not in neither.
@@ -94,16 +142,35 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	encoder := json.NewEncoder(w)
+	controller := http.NewResponseController(w)
+	encode := func(line dataLine) error {
+		if err := controller.SetWriteDeadline(time.Now().Add(min(s.exportLineWait, time.Until(ends)))); err != nil {
+			return fmt.Errorf("api: export write deadline: %w", err)
+		}
+		return encoder.Encode(line)
+	}
 
 	// A failure before the first line is still an error document. One after it is a
 	// truncated stream, which the missing cursor line on the end is what says.
 	written := int64(0)
-	cursor, err := s.store.ExportCustomer(r.Context(), customerID, func(table string, row json.RawMessage) error {
+	ctx, cancel := context.WithDeadline(r.Context(), ends)
+	defer cancel()
+	cursor, err := s.store.ExportCustomer(ctx, customerID, func(table string, row json.RawMessage) error {
 		written++
-		return encoder.Encode(dataLine{Table: table, Row: row})
+		return encode(dataLine{Table: table, Row: row})
 	})
 	if err != nil {
 		if written == 0 {
+			// The error document is written under a deadline of its own, not the export's,
+			// which may be what passed.
+			if err := controller.SetWriteDeadline(time.Now().Add(s.exportLineWait)); err != nil {
+				writeFailure(w, r, fmt.Errorf("api: export write deadline: %w", err))
+				return
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				writeError(w, errExportTooLong)
+				return
+			}
 			writeFailure(w, r, err)
 			return
 		}
@@ -112,7 +179,7 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
-	if err := encoder.Encode(dataLine{Cursor: &cursor, Customer: customerID, At: &now}); err != nil {
+	if err := encode(dataLine{Cursor: &cursor, Customer: customerID, At: &now}); err != nil {
 		s.logger.Debug("export was not finished", "customer", customerID, "error", err)
 		return
 	}
@@ -144,13 +211,14 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	rows := int64(0)
 	tables := map[string]int64{}
 
-	decoder := json.NewDecoder(r.Body)
-	for {
+	scanner := bufio.NewScanner(r.Body)
+	scanner.Buffer(nil, maxImportLine)
+	for scanner.Scan() {
+		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+			continue
+		}
 		var line dataLine
-		if err := decoder.Decode(&line); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			writeError(w, invalidRequest("this is not an export: "+err.Error()))
 			return
 		}
@@ -187,6 +255,14 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		case line.Cursor != nil:
 			cursor = line.Cursor
 		}
+	}
+	if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+		writeError(w, payloadTooLarge(fmt.Sprintf("a line of an import is at most %d MiB", maxImportLine>>20)))
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		writeError(w, invalidRequest("this is not an export: "+err.Error()))
+		return
 	}
 
 	s.logger.Info("imported a customer", "customer", customerID, "rows", rows)

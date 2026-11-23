@@ -3,7 +3,6 @@ package simulation
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -91,8 +90,8 @@ func rule(
 	read, err := parseVerdict(response.OutputText)
 	// An answer the cap cut off reads as broken JSON, which hides what broke it.
 	if err != nil && response.Status == llm.StatusIncomplete {
-		return verdict{}, fmt.Errorf("simulation: the ruling stopped early (%s) after %d output tokens, %d of them thinking",
-			response.IncompleteReason, response.Usage.OutputTokens, response.Usage.OutputTokensDetails.ReasoningTokens)
+		return verdict{}, &told{fmt.Sprintf("simulation: the ruling stopped early (%s) after %d output tokens, %d of them thinking",
+			response.IncompleteReason, response.Usage.OutputTokens, response.Usage.OutputTokensDetails.ReasoningTokens)}
 	}
 	return read, err
 }
@@ -137,7 +136,7 @@ func parseVerdict(answer string) (verdict, error) {
 		return verdict{}, fmt.Errorf("simulation: decode the ruling: %w", err)
 	}
 	if strings.TrimSpace(ruled.Reason) == "" {
-		return verdict{}, errors.New("simulation: the judge ruled without saying why")
+		return verdict{}, &told{"simulation: the judge ruled without saying why"}
 	}
 	return ruled, nil
 }
