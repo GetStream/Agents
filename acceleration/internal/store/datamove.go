@@ -870,6 +870,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if table == "phone_numbers" {
 		conflict += " AND NOT " + boughtHere("phone_numbers")
 	}
+	// An opt-out here stays on the recipient and channel it was recorded for: a row arriving
+	// under its id for another one neither moves nor lifts it.
+	if table == "opt_outs" {
+		conflict += " AND opt_outs.recipient = EXCLUDED.recipient AND opt_outs.channel = EXCLUDED.channel"
+	}
 
 	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
 	// commit in order and a reader resuming after one misses none. The row is read through the
@@ -1971,10 +1976,12 @@ func dataTableByName(name string) (dataTable, bool) {
 // shared database, empty when none does. A table kept in the shards is left out: it holds the
 // customer's own traffic here, and a shard's pod reads only its own shard, so counting it would
 // make the answer depend on which pod runs. A table that belongs to a customer through a parent
-// is left out too: its rows are written only under a parent of the customer's.
+// is left out too: its rows are written only under a parent of the customer's. So are opt-outs:
+// an import keeps one recorded here live (importRow), so an app holding only those holds nothing
+// an export would write over.
 func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, error) {
 	for _, table := range dataTables {
-		if table.customer == "" || table.shard {
+		if table.customer == "" || table.shard || table.name == "opt_outs" {
 			continue
 		}
 		where := table.customer + " = ?"

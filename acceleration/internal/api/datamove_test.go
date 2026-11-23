@@ -242,6 +242,20 @@ func (s *DataMoveSuite) TestAnExportIsNotWrittenOverAnAppThatHoldsDataWhenFullIs
 	s.Equal("edited here", s.instructionsOf(agent.Id))
 }
 
+// Defect: an app whose only rows here are opt-outs had an import refused without full.
+func (s *DataMoveSuite) TestAnAppHoldingOnlyAnOptOutImportsWithoutFull() {
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
+		CustomerID: s.customerID(), Recipient: "+15550001112", Channel: "sms", Source: "keyword",
+	}))
+	exported := s.export()
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(exported), nil))
+
+	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+15550001112", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+}
+
 // A lookup that fails is not an answer that the app holds nothing: the export is not written.
 func (s *DataMoveSuite) TestAnExportIsNotWrittenWhenWhatTheAppHoldsCannotBeRead() {
 	agent := s.data.createAgentConfig()
