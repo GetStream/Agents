@@ -108,7 +108,7 @@ func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAu
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the client is stored, so a delete of the connector
 		// waits and then deletes it too, or went first and leaves no definition to find
-		// (DeleteConnectorDefinition): no client secret outlives its connector.
+		// (ConnectorDefinitions.Delete): no client secret outlives its connector.
 		if _, err := lockCustomDefinitions(ctx, tx, client.CustomerID, []string{client.ConnectorID}); err != nil {
 			return err
 		}
@@ -182,7 +182,7 @@ func (r *ConnectorOAuthClients) Get(ctx context.Context, customerID, connectorID
 // GetByProviderApp returns the record of the connector's provider app, the
 // one customer whose app it is. An inbound request names the app and carries no app
 // credential, so the app id, not a customer, is what finds the row, as the OAuth state finds an
-// attempt (ConnectorAuthorizationAttemptByState).
+// attempt (ConnectorAuthorizationAttempts.GetByState).
 func (r *ConnectorOAuthClients) GetByProviderApp(ctx context.Context, connectorID, providerAppID string) (ConnectorOAuthClient, error) {
 	if connectorID == "" || providerAppID == "" {
 		return ConnectorOAuthClient{}, stack.Wrap(errors.New("store: a connector id and a provider app id are required"))
@@ -208,8 +208,7 @@ func (r *ConnectorOAuthClients) RewrapSecret(ctx context.Context, customerID, co
 	return r.rewrap(ctx, "secret_sealed", "kek_version", customerID, connectorID, was, sealed, version)
 }
 
-// RewrapSigningSecret is RewrapConnectorOAuthClientSecret for the provider
-// app's signing secret.
+// RewrapSigningSecret is RewrapSecret for the provider app's signing secret.
 func (r *ConnectorOAuthClients) RewrapSigningSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
 	return r.rewrap(ctx, "signing_secret_sealed", "signing_kek_version", customerID, connectorID, was, sealed, version)
 }

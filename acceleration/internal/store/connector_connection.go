@@ -95,7 +95,7 @@ type ConnectorConnection struct {
 	Status        string            `bun:"status,notnull"`
 	GrantedScopes []string          `bun:"granted_scopes,type:jsonb,notnull"`
 	// ProviderUnitID is the routing key of a shared webhook, such as a WhatsApp
-	// phone_number_id: empty unless SetConnectorConnectionProviderUnit wrote it, and emptied
+	// phone_number_id: empty unless ConnectorConnections.SetProviderUnit wrote it, and emptied
 	// when the connection stops being connected (saveAtRevision).
 	ProviderUnitID string `bun:"provider_unit_id,nullzero"`
 	// Revision advances with every new stored credentials, which are sealed against it.
@@ -210,7 +210,7 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 	}
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the connection is stored, so a delete of it waits
-		// and then finds the connection (DeleteConnectorDefinition). A built-in is never
+		// and then finds the connection (ConnectorDefinitions.Delete). A built-in is never
 		// deleted, so a revision found here stays.
 		if _, err := lockCustomDefinitions(ctx, tx, connection.CustomerID, []string{connection.ConnectorID}); err != nil {
 			return err
@@ -447,7 +447,7 @@ func (r *ConnectorConnections) Select(ctx context.Context, customerID string, fi
 
 // Delete soft deletes a live connection and drops its credentials at once,
 // so nothing can use it from here on, whether or not a config still binds it. It is the
-// forced delete; DeleteUnboundConnectorConnection is the one that refuses a bound connection.
+// forced delete; DeleteUnbound is the one that refuses a bound connection.
 func (r *ConnectorConnections) Delete(ctx context.Context, customerID, id string) error {
 	affected, err := softDeleteConnections(ctx, r.store.global, customerID, false, id)
 	if err != nil {
@@ -459,8 +459,8 @@ func (r *ConnectorConnections) Delete(ctx context.Context, customerID, id string
 	return nil
 }
 
-// DeleteUnbound soft deletes a live connection as DeleteConnectorConnection
-// does, unless a live agent config of the customer's binds it as its fixed connection.
+// DeleteUnbound soft deletes a live connection as Delete does, unless a live agent config of
+// the customer's binds it as its fixed connection.
 //
 // It locks the connection FOR UPDATE first, and checks for a binding in the UPDATE after.
 // A config write locks each connection it binds before it writes the binding
@@ -501,8 +501,8 @@ func (r *ConnectorConnections) DeleteUnbound(ctx context.Context, customerID, id
 }
 
 // boundByConfig is true for a connection cc that a live agent config of the same customer
-// binds as its fixed connection. ConnectorConnectionReferenced and
-// DeleteUnbound both use it, so what one reports bound the other refuses.
+// binds as its fixed connection. ConnectorConnections.Referenced and DeleteUnbound both use
+// it, so what one reports bound the other refuses.
 //
 // A binding is matched by containment on the shape the prototype stored
 // ({"connection": {"type": "fixed", "connection_id": ...}}, ConnectorBinding in
@@ -551,8 +551,8 @@ func softDeleteConnections(ctx context.Context, db bun.IDB, customerID string, u
 	return affected, nil
 }
 
-// DeletedConnection is one connection DeleteUserConnectorConnections or
-// DeleteConnectorDefinition removed.
+// DeletedConnection is one connection ConnectorConnections.DeleteUser or
+// ConnectorDefinitions.Delete removed.
 type DeletedConnection struct {
 	ID          string
 	ConnectorID string
@@ -562,7 +562,7 @@ type DeletedConnection struct {
 }
 
 // SelectGrantedOfUser is every live connection of one user of the customer's
-// that holds credentials, oldest first: the grants DeleteUserConnectorConnections drops.
+// that holds credentials, oldest first: the grants DeleteUser drops.
 func (r *ConnectorConnections) SelectGrantedOfUser(ctx context.Context, customerID, userID string) ([]ConnectorConnection, error) {
 	var connections []ConnectorConnection
 	err := r.store.global.NewSelect().Model(&connections).
@@ -835,7 +835,7 @@ var credentialColumns = []string{
 
 // SaveAtRevision saves new stored credentials, already sealed for
 // expectedRevision + 1, onto a connection that is live and still at expectedRevision, under
-// the same lock WithLockedConnectorConnection holds, so it never lands in the middle of a
+// the same lock WithLocked holds, so it never lands in the middle of a
 // refresh. It always advances the revision by one. A locked callback can commit a status
 // without advancing it (needs_reauthorization before a refresh), so a save at the same
 // revision from a snapshot read before that would pass the compare-and-swap and put back the
@@ -925,7 +925,7 @@ func (r *ConnectorConnections) saveAtRevision(ctx context.Context, conn bun.ICon
 		connection.GrantedScopes = []string{}
 	}
 	// A save that leaves the connection anything but connected frees its provider unit
-	// (SetConnectorConnectionProviderUnit says why); one that keeps it connected, such as a
+	// (SetProviderUnit says why); one that keeps it connected, such as a
 	// refresh, keeps the unit the row holds. The row's, not the caller's copy, which may
 	// predate the unit.
 	if connection.Status != ConnectionConnected {

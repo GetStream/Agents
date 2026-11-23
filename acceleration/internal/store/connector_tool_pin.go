@@ -156,7 +156,7 @@ func (r *ConnectorToolPins) Reapprove(ctx context.Context, connection ConnectorC
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	// By name, so two approves of the same tools take the pins' locks in one order, as
-	// PinConnectorTools does.
+	// Pin does.
 	ordered := slices.SortedFunc(slices.Values(tools), func(a, b ApprovedTool) int { return strings.Compare(a.Name, b.Name) })
 	names, digests, previous := make([]string, len(ordered)), make([]string, len(ordered)), make([]string, len(ordered))
 	for i, tool := range ordered {

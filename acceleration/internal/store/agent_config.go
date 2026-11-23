@@ -629,7 +629,7 @@ func (r *AgentConfigs) GetByRole(ctx context.Context, customerID, role string) (
 }
 
 // GetByChatChannel returns the customer's live agent config that answers in Stream Chat
-// channels of the type channelType (AgentConfig.ChatChannels): the oldest, when more than one
+// channels of the type channelType (AgentConfig.Channels.Chat): the oldest, when more than one
 // names it, as the oldest config binding a line answers on it. A test copy (DraftOfTag)
 // answers in none. It is ErrNoAgentConfig when no config names the type.
 func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channelType string) (AgentConfig, error) {
@@ -717,7 +717,7 @@ func (r *AgentConfigs) where(ctx context.Context, customerID, column, value stri
 
 // lockBoundConnections locks each live connection of the config's customer that the config
 // binds as fixed until the transaction ends, and returns the ids it binds that are not live.
-// It makes a bind and an unforced delete (DeleteUnboundConnectorConnection, which locks the
+// It makes a bind and an unforced delete (ConnectorConnections.DeleteUnbound, which locks the
 // connection FOR UPDATE first) wait for each other, so one of them always sees the other:
 //
 //   - A delete that locked the connection first is waited for. Under READ COMMITTED the
@@ -780,7 +780,7 @@ func boundConnectors(bindings []ConnectorBinding) []string {
 
 // refuseUndefined refuses a binding to a custom connector the customer has no definition of,
 // unless kept, the bindings stored before this write, names it already: a forced connector
-// delete leaves its bindings behind on purpose (DeleteConnectorDefinition), and a save that
+// delete leaves its bindings behind on purpose (ConnectorDefinitions.Delete), and a save that
 // keeps one is not a new bind, as refuseUnbindable keeps a forced connection delete's.
 func refuseUndefined(undefined []string, kept []ConnectorBinding) error {
 	for _, id := range undefined {
