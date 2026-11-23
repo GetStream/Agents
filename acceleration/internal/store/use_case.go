@@ -447,13 +447,15 @@ func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time)
 	return requested == 1, nil
 }
 
-// ForgetCampaignRequest forgets a campaign request the vendor refused, so the campaign may be
-// asked for again.
-func (r *UseCases) ForgetCampaignRequest(ctx context.Context, id string) error {
+// ForgetCampaignRequest forgets the campaign request made at at, which the vendor did not carry
+// out or does not hold, so the campaign may be asked for again. A request made since is
+// another's, and is kept.
+func (r *UseCases) ForgetCampaignRequest(ctx context.Context, id string, at time.Time) error {
 	_, err := r.store.global.NewUpdate().Model((*UseCase)(nil)).
 		Set("campaign_requested_at = NULL").
 		Where("id = ?", id).
 		Where("vendor_campaign_id = ''").
+		Where("campaign_requested_at = ?", at.UTC()).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: forget campaign request: %w", err))

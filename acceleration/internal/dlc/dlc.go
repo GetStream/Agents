@@ -67,9 +67,10 @@ var ErrLocked = errors.New("dlc: the use case cannot do that in its status")
 // ErrRefused is a text or call the gate would not let through.
 var ErrRefused = errors.New("dlc: refused")
 
-// ErrVendorRefused is a vendor answering that it refused a request, and so did not carry it
-// out: a registration it refused registered nothing, and may be asked for again.
-var ErrVendorRefused = errors.New("dlc: the vendor refused")
+// ErrNotCarriedOut is a request the vendor did not carry out: it answered refusing it, or the
+// request never reached it. A registration so failed registered nothing, and may be asked for
+// again.
+var ErrNotCarriedOut = errors.New("dlc: the vendor did not carry out the request")
 
 // ErrUnpaid is a text, call or number refused because the organization may not pay for it.
 // The refusal it wraps says why: suspended, out of credit, or past a spend limit.
@@ -92,7 +93,8 @@ type Registrar interface {
 	Name() string
 	RegisterBrand(ctx context.Context, profile store.BusinessProfile) (Brand, error)
 	Brand(ctx context.Context, brandID string) (Brand, error)
-	// RegisterCampaign registers a use case under a brand, reporting on hookURL.
+	// RegisterCampaign registers a use case under a brand, reporting on hookURL, with the use
+	// case's id as its reference where the vendor keeps one (CampaignFinder).
 	RegisterCampaign(ctx context.Context, brandID string, useCase store.UseCase, hookURL string) (Campaign, error)
 	Campaign(ctx context.Context, campaignID string) (Campaign, error)
 	// AssignNumber makes a number send as a campaign.
@@ -101,6 +103,14 @@ type Registrar interface {
 	VerifyHook(header http.Header, body []byte, now time.Time) error
 	// HookSubject is the campaign, or failing that the brand, a delivery is about.
 	HookSubject(body []byte) (campaignID, brandID string)
+}
+
+// CampaignFinder is a registrar that can find a campaign by the reference RegisterCampaign
+// registered it with, the use case's id, which settles a registration whose answer was lost.
+type CampaignFinder interface {
+	// FindCampaign returns the campaign registered under brandID with reference, and false
+	// when the vendor holds none.
+	FindCampaign(ctx context.Context, brandID, reference string) (Campaign, bool, error)
 }
 
 // Outcome is where a vendor's word for a brand or campaign leaves it.

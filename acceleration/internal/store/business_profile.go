@@ -179,13 +179,14 @@ func (r *BusinessProfiles) RequestBrand(ctx context.Context, customerID string, 
 	return requested == 1, nil
 }
 
-// ForgetBrandRequest forgets a brand request the vendor refused, so the brand may be asked for
-// again.
-func (r *BusinessProfiles) ForgetBrandRequest(ctx context.Context, customerID string) error {
+// ForgetBrandRequest forgets the brand request made at at, which the vendor did not carry out,
+// so the brand may be asked for again. A request made since is another's, and is kept.
+func (r *BusinessProfiles) ForgetBrandRequest(ctx context.Context, customerID string, at time.Time) error {
 	_, err := r.store.global.NewUpdate().Model((*BusinessProfile)(nil)).
 		Set("brand_requested_at = NULL").
 		Where("customer_id = ?", customerID).
 		Where("vendor_brand_id = ''").
+		Where("brand_requested_at = ?", at.UTC()).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: forget brand request: %w", err))

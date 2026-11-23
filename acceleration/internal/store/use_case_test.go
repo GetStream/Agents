@@ -165,7 +165,7 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(requested)
 	}), "RequestCampaign")
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID)) }),
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID, s.base)) }),
 		"ForgetCampaignRequest")
 	useCase.Status, useCase.Vendor, useCase.VendorCampaignID = "submitted", "telnyx", "campaign-"+useCase.ID
 	s.Equal(2+2, s.countQueries(func() {

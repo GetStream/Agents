@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
@@ -42,7 +43,14 @@ type campaignRegistry struct {
 	// and campaignsAsked count the registrations asked for.
 	brandAnswers, campaignAnswers []int
 	brandsAsked, campaignsAsked   int
+	// brands are the ids of the brands registered, and listed the campaigns a list of a
+	// brand's answers, with the reference each was registered with.
+	brands []string
+	listed []listedCampaign
 }
+
+// listedCampaign is a campaign as a list of its brand's names it.
+type listedCampaign struct{ id, brand, reference string }
 
 // campaignRegistryFails is a campaign status no vendor sends: the fake answers a read of a
 // campaign set to it with a 500.
@@ -62,18 +70,29 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 			w.WriteHeader(answer)
 			return
 		}
-		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, uuid.NewString())
+		r.brands = append(r.brands, uuid.NewString())
+		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, r.brands[len(r.brands)-1])
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/brand/"):
 		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, strings.TrimPrefix(path, "/v2/10dlc/brand/"))
 	case request.Method == http.MethodPost && path == "/v2/10dlc/campaignBuilder":
 		r.campaignsAsked++
 		id := uuid.NewString()
 		r.campaigns[id] = "TCR_PENDING"
+		r.listed = append(r.listed, listedCampaign{id: id, brand: body["brandId"], reference: body["referenceId"]})
 		if answer := nextAnswer(&r.campaignAnswers); answer != http.StatusOK {
 			w.WriteHeader(answer)
 			return
 		}
 		fmt.Fprintf(w, `{"campaignId":%q,"campaignStatus":"TCR_PENDING"}`, id)
+	case request.Method == http.MethodGet && path == "/v2/10dlc/campaign":
+		var records []string
+		for _, listed := range r.listed {
+			if listed.brand == request.URL.Query().Get("brandId") {
+				records = append(records, fmt.Sprintf(`{"campaignId":%q,"campaignStatus":%q,"referenceId":%q}`,
+					listed.id, r.campaigns[listed.id], listed.reference))
+			}
+		}
+		fmt.Fprintf(w, `{"records":[%s],"page":1,"totalRecords":%d}`, strings.Join(records, ","), len(records))
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/campaign/"):
 		id := strings.TrimPrefix(path, "/v2/10dlc/campaign/")
 		if r.campaigns[id] == campaignRegistryFails {
@@ -110,6 +129,32 @@ func (r *campaignRegistry) answer(brands, campaigns []int) (int, int) {
 
 // asked is how many brand and campaign registrations were asked for so far.
 func (r *campaignRegistry) asked() (int, int) { return r.answer(nil, nil) }
+
+// campaignFor is the campaign registered with reference, empty when there is none.
+func (r *campaignRegistry) campaignFor(reference string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, listed := range r.listed {
+		if listed.reference == reference {
+			return listed.id
+		}
+	}
+	return ""
+}
+
+// lastBrand is the brand registered last.
+func (r *campaignRegistry) lastBrand() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.brands[len(r.brands)-1]
+}
+
+// unlist forgets every campaign registered so far, as a registration Telnyx never carried out.
+func (r *campaignRegistry) unlist() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listed = nil
+}
 
 func (r *campaignRegistry) set(campaignID, status string) {
 	r.mu.Lock()
@@ -299,7 +344,143 @@ func (s *DLCSuite) TestABrandWhoseRegistrationWasNotAnsweredIsNotRegisteredTwice
 
 	asked, _ := s.registry.asked()
 	s.Equal(2, asked-brands, "refused, then asked once more")
-	s.Contains(s.logged.String(), "its answer was not recorded")
+	s.Empty(s.loggedLines("a 10DLC registration was not answered", s.customerID()), "one that may still be registering is not reported lost")
+}
+
+// A brand whose registration was not answered, and still has no answer once it could no longer
+// be running, may be registered and billed at Telnyx, which keeps no reference of ours to find
+// it by: the use case is handed back to the app as vendor_rejected, which it may delete, and the
+// brand is not asked for again until support has looked it up.
+func (s *DLCSuite) TestABrandWhoseAnswerWasLostIsLeftToSupportAndFreesTheUseCase() {
+	brands, _ := s.registry.answer([]int{http.StatusInternalServerError}, nil)
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("business_profiles", "brand_requested_at", "customer_id", s.customerID())
+
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+
+	s.Equal(UseCaseStatus(dlc.VendorRejected), s.useCase(sent.Id).Status)
+	asked, _ := s.registry.asked()
+	s.Equal(1, asked-brands, "never asked for again")
+	s.Len(s.loggedLines("a 10DLC registration was not answered", s.customerID()), 1)
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/phone/use-cases/"+sent.Id, nil, nil))
+}
+
+// A campaign whose registration was not answered is found at Telnyx by the use case it was
+// registered for, and recorded, without asking for a second one.
+func (s *DLCSuite) TestACampaignWhoseAnswerWasLostIsFoundAtTheVendor() {
+	_, campaigns := s.registry.answer(nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().Nil(reviewed.VendorCampaignId)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	_, asked := s.registry.asked()
+	s.Equal(1, asked-campaigns)
+}
+
+// A campaign Telnyx does not hold, its registration answered with a failure, was never
+// registered: it is asked for again.
+func (s *DLCSuite) TestACampaignTheVendorNeverRegisteredIsAskedForAgain() {
+	_, campaigns := s.registry.answer(nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.registry.unlist()
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	_, asked := s.registry.asked()
+	s.Equal(2, asked-campaigns)
+}
+
+// A brand Telnyx registered whose id the database would not take is logged with its id, so
+// support can record it, and is not asked for again.
+func (s *DLCSuite) TestABrandRegisteredWhoseIdCouldNotBeSavedIsLoggedWithIt() {
+	s.failQueries(`SET vendor_brand_id = '`)
+	sent := s.submitted()
+
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+
+	s.Require().Equal(http.StatusOK, status)
+	line := s.loggedLine("could not save a brand the vendor registered", s.customerID())
+	s.Contains(line, "level=ERROR")
+	s.Contains(line, "vendor_brand_id="+s.registry.lastBrand())
+}
+
+// A campaign Telnyx registered whose save the database failed is logged with its id, and found
+// at Telnyx by the poller once the database is back.
+func (s *DLCSuite) TestACampaignRegisteredWhoseSaveFailedIsFoundAtTheVendorLater() {
+	_, campaigns := s.registry.asked()
+	s.failQueries(registeredNote)
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	line := s.loggedLine("could not save a campaign the vendor registered", sent.Id)
+	s.Contains(line, "level=ERROR")
+	s.Contains(line, "vendor_campaign_id="+s.registry.campaignFor(sent.Id))
+	s.failQueries("no query holds this")
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	_, asked := s.registry.asked()
+	s.Equal(1, asked-campaigns)
+}
+
+// registeredNote begins the review entry a campaign's registration writes.
+const registeredNote = "Registered as campaign "
+
+// backdate moves a registration's request time past the time one may still be running, as if
+// it had been asked for long ago.
+func (s *dlcRegistration) backdate(table, column, key, value string) {
+	_, err := s.store.GlobalDB().NewUpdate().Table(table).
+		Set("? = ? - interval '11 minutes'", bun.Ident(column), bun.Ident(column)).
+		Where("? = ?", bun.Ident(key), value).
+		Exec(context.Background())
+	s.Require().NoError(err)
+}
+
+// loggedLines are the lines logged with message that name about, the suite's tests sharing
+// one log.
+func (s *dlcRegistration) loggedLines(message, about string) []string {
+	var found []string
+	for line := range strings.Lines(s.logged.String()) {
+		if strings.Contains(line, `msg="`+message) && strings.Contains(line, "="+about+" ") {
+			found = append(found, line)
+		}
+	}
+	return found
+}
+
+// loggedLine is the one line logged with message that names about.
+func (s *dlcRegistration) loggedLine(message, about string) string {
+	found := s.loggedLines(message, about)
+	s.Require().Len(found, 1, "one line %q about %s", message, about)
+	return found[0]
+}
+
+// useCase is one of the app's use cases.
+func (s *dlcRegistration) useCase(id string) UseCase {
+	var found UseCase
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+id, nil, &found))
+	return found
 }
 
 // A campaign whose registration was answered with a failure may be registered, and billed, all

@@ -28,7 +28,7 @@ func (s *StoreSuite) TestBusinessProfileQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(requested)
 	}), "RequestBrand")
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.BusinessProfiles.ForgetBrandRequest(s.ctx, customerID)) }),
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.BusinessProfiles.ForgetBrandRequest(s.ctx, customerID, s.base)) }),
 		"ForgetBrandRequest")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.BusinessProfiles.SetBrand(s.ctx, customerID, "brand-1", "VERIFIED"))
