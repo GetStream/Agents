@@ -835,7 +835,7 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
 	})
 	s.opened("somebody-elses", "app", s.base, func(session *AgentSession) { session.UserID = "randy" })
 
-	moved, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	moved, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	s.Equal(int64(1), moved)
 
@@ -855,31 +855,31 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
 
 func (s *StoreSuite) TestAGuestIsClaimedOnce() {
 	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 
 	// A second claim naming somebody else would move one person's conversations onto
 	// another's account.
-	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "randy")
 	s.Require().ErrorIs(err, ErrGuestClaimed, "so a caller can answer a conflict, not a failure")
 	s.NotContains(err.Error(), "jlahey", "the error is logged, and names no end user")
 }
 
 func (s *StoreSuite) TestClaimingSomethingThatWasNeverAGuestFails() {
-	_, err := s.store.ClaimGuest(s.ctx, "app", "not-a-guest", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "not-a-guest", "jlahey")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
 }
 
 func (s *StoreSuite) TestAGuestCannotBeClaimedByItself() {
 	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
 	s.Require().Error(err)
 }
 
 func (s *StoreSuite) TestAGuestOfAnotherAppIsNotClaimable() {
 	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
 	s.Require().Error(err)
 }
 
@@ -929,7 +929,7 @@ func (s *StoreSuite) TestAnotherAppsRefreshSecretIsRefused() {
 func (s *StoreSuite) TestAClaimedGuestsRefreshSecretIsRefused() {
 	// A guest who signed up has an account to sign in with now.
 	secret, _ := s.guestWithSecret("guest-1")
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
@@ -968,7 +968,7 @@ func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
 
 func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 	s.guestWithSecret("guest-1")
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
@@ -998,7 +998,7 @@ func (s *StoreSuite) TestAnAccountIsNobodysToClaim() {
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
 
-	_, err = s.store.ClaimGuest(s.ctx, "app", "jlahey", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "jlahey", "randy")
 	s.Require().Error(err)
 }
 
@@ -1146,7 +1146,7 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 	s.task("sams", nil)
 	s.task("theirs", func(task *ScheduledTask) { task.CustomerID, task.UserID = "globex", "guest-1" })
 
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
 
 	for _, want := range []struct{ customer, task, user string }{
@@ -1165,7 +1165,7 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
 	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
 	guest, err := s.store.Users.GetGuest(s.ctx, "acme", "guest-1")

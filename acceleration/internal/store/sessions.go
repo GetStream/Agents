@@ -146,7 +146,7 @@ func (r *Users) GetGuest(ctx context.Context, customerID, id string) (User, erro
 // shard, and no transaction spans them. The guest is claimed with its tasks first. A claim by
 // the same user again moves whatever sessions a failed one left behind, with shards or without,
 // so a caller with steps after this one can finish them on a retry.
-func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID string) (int64, error) {
+func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID string) (int64, error) {
 	if customerID == "" || guestID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
 	}
@@ -184,9 +184,9 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return nil
 	}
 
-	if !s.Sharded() && len(s.peers) == 0 {
+	if !r.store.Sharded() && len(r.store.peers) == 0 {
 		var moved int64
-		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 				return err
 			}
@@ -209,7 +209,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return moved, nil
 	}
 
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 			return err
 		}
@@ -218,7 +218,7 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: %w", err))
 	}
-	moved, err := onEveryShard(ctx, s, moveSessions)
+	moved, err := onEveryShard(ctx, r.store, moveSessions)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: claim guest sessions: %w", err))
 	}

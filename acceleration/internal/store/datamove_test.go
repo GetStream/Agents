@@ -297,7 +297,7 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	// and a claimed guest arrives claimed by the same account, so nobody else can claim it.
 	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
-	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
+	_, err := s.source.Users.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
@@ -307,7 +307,7 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	guest, err := s.destination.Users.GetGuest(s.ctx, "moved", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("alice", guest.ClaimedBy)
-	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
+	_, err = s.destination.Users.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
 	s.ErrorIs(err, ErrGuestClaimed)
 }
 

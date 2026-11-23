@@ -33,7 +33,7 @@ func (s *StoreSuite) TestAGuestsRefreshSecretIsSpentOnce() {
 
 func (s *StoreSuite) TestAClaimedGuestTakesNoSecretOrProfile() {
 	id := s.guest("app", "first")
-	_, err := s.store.ClaimGuest(s.ctx, "app", id, "ann")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", id, "ann")
 	s.Require().NoError(err)
 
 	_, err = s.store.Guests.RotateSecret(s.ctx, "app", id, GuestSecretHash("first"), GuestSecretHash("second"))

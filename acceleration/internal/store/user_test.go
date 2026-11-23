@@ -275,7 +275,7 @@ func (s *StoreSuite) TestAClaimedGuestStaysAGuestOnAFullToken() {
 	// The claim stands: a retried claim reads the guest row.
 	app := s.freshApp()
 	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
-	_, err := s.store.ClaimGuest(s.ctx, app, "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, app, "guest-1", "jlahey")
 	s.Require().NoError(err)
 	s.store.Users.Forget(s.ctx, app, "guest-1")
 

@@ -459,14 +459,14 @@ func (s *ShardedStoreSuite) TestAGuestsSessionsInEveryShardAreClaimed() {
 	there := &AgentSession{ID: "there", CustomerID: "app", AgentName: "docs", UserID: "guest-1", CallerKind: "guest", CreatedAt: s.base}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, there))
 
-	moved, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	moved, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	s.EqualValues(2, moved)
 
-	again, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	again, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err, "the same user claiming again finishes a claim rather than failing")
 	s.Zero(again)
-	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "randy")
 	s.Error(err)
 }
 

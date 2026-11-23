@@ -316,7 +316,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 		return &claimGuestUserResponse{Body: ClaimGuestResult{GuestId: guestID, UserId: userID, SessionsMoved: 0}}, nil
 	}
 
-	moved, err := s.store.ClaimGuest(ctx, customerID, guestID, userID)
+	moved, err := s.store.Users.ClaimGuest(ctx, customerID, guestID, userID)
 	// Another claim won since the guest was read.
 	if errors.Is(err, store.ErrGuestClaimed) {
 		return nil, conflict("that guest was already claimed")

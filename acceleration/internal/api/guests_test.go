@@ -404,7 +404,7 @@ func (s *GuestsSuite) TestTheSameClaimArrivingTwiceIsNotAConflict() {
 func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhenSentAgain() {
 	guest, account := s.recordGuest(), s.data.createUser()
 	talked := s.talked(guest)
-	_, err := s.store.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
+	_, err := s.store.Users.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), account.userID)
 
