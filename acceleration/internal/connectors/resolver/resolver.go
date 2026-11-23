@@ -48,11 +48,15 @@ const auditWriteTimeout = 5 * time.Second
 // (store.withCredentialLock), and the pg driver closes that connection on every failure but a
 // Postgres ERROR (isBadConn in github.com/uptrace/bun/driver/pgdriver v1.2.18), so a dropped
 // connection, the short failure this is for, ends the lock with it. The pauses give the pool time to open another
-// connection. Every retry runs on the refresh's detached context, which retrieveTimeout
-// (30 s) bounds from the lock taken, and each save statement within store's
-// credentialDetachedTimeout (2 s): three saves and the pauses take at most 6.3 s, inside the
-// 8 s retrieveTimeout leaves beside the two token requests and the checkpoint. A choice, not
-// measured; a database down for longer still loses the renewal.
+// connection. Each retry is a whole Update on the refresh's detached context: a pool
+// connection (pgdriver's DialTimeout, 5 s), the lock's tries and the locked read (its
+// ReadTimeout, 10 s), then the save and the unlock (store's credentialDetachedTimeout, 2 s
+// each). No sum of those is the bound: retrieveTimeout (30 s), counted from the lock taken
+// for the refresh, ends the context, and the pauses then end the retries (wait). The caller
+// is not held for it: Resolve returns when its own ctx ends. Between two tries the lock is
+// free and the row says needs_reauthorization, so a Resolve then gets ErrNotConnected; while
+// the refresh runs a waiter waits on the lock instead. A choice, not measured; a database
+// down for longer still loses the renewal.
 const (
 	saveAttempts   = 3
 	saveFirstPause = 100 * time.Millisecond
