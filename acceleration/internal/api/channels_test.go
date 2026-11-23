@@ -525,6 +525,22 @@ func (s *ChannelsSuite) TestNumbersGuessingCodesOnOneLineTogetherCannotClaimOne(
 	s.ErrorIs(err, store.ErrNoContact)
 }
 
+// A code the router cannot write is its own failure: the caller is told so, not what the store said.
+func (s *ChannelsSuite) TestACodeThatCannotBeWrittenIsA500WithoutTheStoresWords() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+
+	s.failQueries(`INSERT INTO "channel_links"`)
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()})
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	s.Contains(string(payload), "something went wrong")
+	s.NotContains(string(payload), "channel link")
+	s.NotContains(string(payload), "store:")
+}
+
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {
 	number := s.number()
 	s.connect(number)

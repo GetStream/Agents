@@ -172,7 +172,7 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 
 	link, err := s.channels.Link(ctx, customerID, config.ID, request.Body.UserId)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &channelLinkResponse{Body: ChannelLink{Code: link.Code, ExpiresAt: link.ExpiresAt}}, nil
 }
