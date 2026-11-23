@@ -35,7 +35,7 @@ type SyncAgentRequest struct {
 	Region            *string                    `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region."`
 	Stt               *string                    `json:"stt,omitempty"`
 	Tts               *string                    `json:"tts,omitempty"`
-	Sts               *string                    `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade."`
+	Sts               *string                    `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade."`
 	Voice             *string                    `json:"voice,omitempty" doc:"The voice the agent speaks in, as TtsOptions.voice takes it: a provider's own voice id, or one of your voices, with the custom: prefix to mean only yours. A native agent (sts) takes the vendor's own voice name instead."`
 	Llm               *string                    `json:"llm,omitempty"`
 	Video             *SessionVideo              `json:"video,omitempty"`
@@ -252,12 +252,18 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	if found {
 		stored = sandboxOfConfig(existing)
 	} else {
-		config = store.AgentConfig{CustomerID: customerID, Name: name}
+		config = store.AgentConfig{CustomerID: customerID, Name: name, Mode: store.AgentModeVoice}
 	}
 	applySettings(&config, body)
 	// Named whatever the directory says, so the knowledge the sync writes is never written
 	// into a base kept in another region than the agent's.
 	config.Region = cmp.Or(config.Region, pricing.DefaultRegion)
+	if !found {
+		// Guardrail is applied later for existing configs so syncConflict can inspect the stored one;
+		// new configs need the incoming guardrail here so defaultVoiceSTS sees it.
+		config.Guardrail = value(body.Guardrail)
+		s.defaultVoiceSTS(ctx, &config, body.Sts != nil)
+	}
 	// Before anything is written, for the same reason as the simulations in syncComplaint.
 	if err := config.Validate(); err != nil {
 		return nil, err

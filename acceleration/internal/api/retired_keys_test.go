@@ -111,7 +111,7 @@ func (s *ConfigsSuite) TestARetiredKeyThatNamesNothingSavesAsOnBase() {
 
 			status, created := s.fields(http.MethodPost, "/v1/agents/configs", body(map[string]any{"name": name, "instructions": "Be brief."}), "")
 			s.Equal(http.StatusCreated, status)
-			s.Equal(rendered, created.keys)
+			s.Equal(slices.Concat(rendered[:7], []string{"sts"}, rendered[7:]), created.keys)
 			id := created.id
 			status, updated := s.fields(http.MethodPut, "/v1/agents/configs/"+id, body(map[string]any{"name": name, "instructions": "Be brief."}), "")
 			s.Equal(http.StatusOK, status)
@@ -122,7 +122,7 @@ func (s *ConfigsSuite) TestARetiredKeyThatNamesNothingSavesAsOnBase() {
 			s.Equal("Be briefer.", value(s.read(id).Instructions))
 			status, synced := s.fields(http.MethodPost, "/v1/agents/sync", body(map[string]any{"name": "synced-" + name, "hash": "v1", "instructions": "Be brief."}), "config")
 			s.Equal(http.StatusOK, status)
-			s.Equal(slices.Concat(rendered[:7], []string{"sync_hash"}, rendered[7:]), synced.keys)
+			s.Equal(slices.Concat(rendered[:7], []string{"sts", "sync_hash"}, rendered[7:]), synced.keys)
 		})
 	}
 }

@@ -950,3 +950,32 @@ func (s *SyncSuite) TestSyncingAnAgentStoresHowLongEachGroupKeepsToolOutput() {
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "tools[0].output_retention")
 }
+
+func (s *SyncSuite) TestSyncingANewVoiceAgentDefaultsToSTSFast() {
+	result := s.sync(map[string]any{"name": "live-sync", "hash": "v1", "instructions": "Be brief."})
+	s.Equal(stsDefaultTarget, value(result.Config.Sts))
+}
+
+func (s *SyncSuite) TestSyncingAnExistingCascadedAgentKeepsItCascaded() {
+	created := s.sync(map[string]any{"name": "legacy-cascade", "hash": "v1", "sts": "", "instructions": "Be brief."})
+	s.Nil(created.Config.Sts)
+
+	updated := s.sync(map[string]any{"name": "legacy-cascade", "hash": "v2", "instructions": "Be briefer."})
+	s.Nil(updated.Config.Sts, "updating an existing cascaded config without naming sts must keep it cascaded")
+}
+
+func (s *SyncSuite) TestSyncingANewVoiceAgentWithEmptySTSOrCascadeSettingsStaysCascaded() {
+	explicit := s.sync(map[string]any{"name": "sync-cascade", "hash": "v1", "sts": ""})
+	s.Nil(explicit.Config.Sts)
+
+	withSTT := s.sync(map[string]any{"name": "sync-stt", "hash": "v1", "stt": "stub/stub-model"})
+	s.Nil(withSTT.Config.Sts)
+
+	withGuardrail := s.sync(map[string]any{
+		"name": "sync-guardrail", "hash": "v1", "guardrail": webhookGuardrail("https://example.com/check"),
+	})
+	s.Nil(withGuardrail.Config.Sts)
+
+	text := s.sync(map[string]any{"name": "sync-text", "hash": "v1", "mode": "text"})
+	s.Nil(text.Config.Sts)
+}
