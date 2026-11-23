@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -242,4 +243,35 @@ func (s *STSRouterSuite) TestAudioTakenWhileRepliesCompleteIsAllCounted() {
 	s.Equal(4000.0, lines[0]["audio_ms"], "200 frames of 20 ms")
 	s.Equal(50.0, lines[0]["replies"])
 	s.Equal(50.0, lines[0]["output_tokens"])
+}
+
+// A caller still talking as the provider hangs up sends audio on the call's goroutine while the
+// session's own one writes the line that counts it.
+func (s *STSRouterSuite) TestAudioArrivingAsTheProviderHangsUpIsCountedUpToTheLine() {
+	session, provider, logs := s.timedSession()
+	stop := make(chan struct{})
+	var sent atomic.Int64
+	var caller sync.WaitGroup
+	caller.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.NoError(session.ProcessAudio(heard(20), sts.Participant{}))
+			sent.Add(1)
+		}
+	})
+	s.Require().Eventually(func() bool { return sent.Load() >= 50 }, 5*time.Second, time.Millisecond)
+	provider.emitter.Close()
+	s.drain(session)
+	close(stop)
+	caller.Wait()
+
+	lines := timingLines(s.T(), logs, session.id)
+	s.Require().Len(lines, 1)
+	logged, _ := lines[0]["audio_ms"].(float64)
+	s.GreaterOrEqual(logged, 1000.0, "the 50 frames taken before the hang-up")
+	s.LessOrEqual(logged, float64(sent.Load()*20), "no more than was sent")
 }
