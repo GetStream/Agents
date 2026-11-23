@@ -266,6 +266,48 @@ func (s *OpsActivitySuite) TestACursorThisListDidNotHandOutIsRefused() {
 	}
 }
 
+// Defect: an org_id or app_id that is no id (a NUL, bytes that are not UTF-8) reaching the
+// query, where bun drops the NUL, so "<org>\x00" read the rows of <org>, and answering 200
+// rather than a 400 that names the field.
+func (s *OpsActivitySuite) TestAnOrgIdOrAppIdThatIsNoIdIsRefused() {
+	day := daysAgo(30, 0)
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(s.app, s.app.app.ID, activity.AreaConversations, store.AuditSourceSDK, day, 3, 0),
+	}))
+
+	for _, field := range []string{"org_id", "app_id"} {
+		own := s.app.organization.ID
+		if field == "app_id" {
+			own = s.app.app.ID
+		}
+		for _, value := range []string{"%00", "a%00b", "%ff", "org-%c3%28", own + "%00", "%00" + own} {
+			status, payload := s.staff.call(http.MethodGet, activityPath(day, day, 0)+"&"+field+"="+value, nil)
+			s.Equal(http.StatusBadRequest, status, field+"="+value+" "+string(payload))
+			s.Contains(string(payload), field)
+		}
+	}
+}
+
+// Defect: a cursor whose position holds a NUL, which this list never handed out, reaching the
+// query and answered with a 500, not a 400.
+func (s *OpsActivitySuite) TestACursorWithAPositionPostgresCannotStoreIsRefused() {
+	day := daysAgo(30, 0)
+	for _, key := range []string{"o", "a", "r", "c"} {
+		position := map[string]any{
+			"o": "org", "d": day.Format(time.DateOnly), "a": "app", "r": "area", "c": "client",
+			"q": map[string]string{"f": day.Format(time.DateOnly), "t": day.Format(time.DateOnly)},
+		}
+		position[key] = "x\x00y"
+		cursor, err := json.Marshal(position)
+		s.Require().NoError(err)
+		encoded := base64.RawURLEncoding.EncodeToString(cursor)
+
+		status, payload := s.staff.call(http.MethodGet, activityPath(day, day, 0)+"&cursor="+url.QueryEscape(encoded), nil)
+		s.Equal(http.StatusBadRequest, status, key+" "+string(payload))
+		s.Contains(string(payload), "cursor")
+	}
+}
+
 // Defect: a page with no limit named holding another number of items than 500, or a limit over
 // 1000 read.
 func (s *OpsActivitySuite) TestAPageHoldsFiveHundredItemsUnlessALimitUpToAThousandIsNamed() {

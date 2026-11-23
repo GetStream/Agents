@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -22,7 +24,14 @@ var (
 	errActivityReversed = invalidRequest("to may not be before from")
 	errActivitySpan     = invalidRequest(fmt.Sprintf("from and to may span at most %d days, what is kept", store.ActivityKeepDays))
 	errActivityFilters  = invalidRequest("cursor was handed out for another from, to, org_id or app_id")
+	errActivityText     = func(field string) error { return invalidRequest(field + " is UTF-8 text without a NUL") }
 )
+
+// isActivityText is whether text is one the query reads as it is: bun drops a NUL from a value
+// and Postgres refuses bytes that are not UTF-8, so such an id would read another one's rows.
+func isActivityText(text string) bool {
+	return utf8.ValidString(text) && !strings.ContainsRune(text, 0)
+}
 
 // activityFilters is what a page of listActivity was read with, kept in its cursor so that the
 // next page is read with the same.
@@ -86,6 +95,12 @@ func (s *Server) listActivity(ctx context.Context, request *listActivityRequest)
 	if request.To.Sub(request.From) >= store.ActivityKeepDays*24*time.Hour {
 		return nil, errActivitySpan
 	}
+	if !isActivityText(request.OrgId.Value) {
+		return nil, errActivityText("org_id")
+	}
+	if !isActivityText(request.AppId.Value) {
+		return nil, errActivityText("app_id")
+	}
 	filters := activityFilters{
 		From: request.From.Format(time.DateOnly), To: request.To.Format(time.DateOnly),
 		OrganizationID: request.OrgId.Value, AppID: request.AppId.Value,
@@ -93,6 +108,10 @@ func (s *Server) listActivity(ctx context.Context, request *listActivityRequest)
 	cursor, err := decodeCursor[activityCursor](&request.Cursor)
 	if err == nil && cursor != nil {
 		_, err = time.Parse(time.DateOnly, cursor.Day)
+		if !isActivityText(cursor.OrganizationID) || !isActivityText(cursor.AppID) ||
+			!isActivityText(cursor.Area) || !isActivityText(cursor.Client) {
+			err = errBadCursor
+		}
 	}
 	if err != nil {
 		return nil, invalidRequest(errBadCursor.Error())
