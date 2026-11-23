@@ -298,7 +298,7 @@ module-level `logger = logging.getLogger(__name__)`. Use `debug` for lifecycle, 
 
 ## Changelog
 
-- Lives in `CHANGELOG.md` at the repo root. A pull request does not edit it: when every PR added
+- Lives in the root `CHANGELOG.md`, not the Dart package's own `CHANGELOG.md`. A pull request does not edit it: when every PR added
   lines at the same place, any two open PRs conflicted there. One exception: a PR that breaks a
   published SDK's API (Go: a renamed or removed field or signature) adds one line under
   `# Unreleased` → **Breaking Changes**.
