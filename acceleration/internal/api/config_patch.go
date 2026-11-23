@@ -147,7 +147,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	}
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.ID)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	existing := agentConfigOf(config)
 	original := config

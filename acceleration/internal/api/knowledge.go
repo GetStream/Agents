@@ -119,7 +119,7 @@ func (s *Server) getKnowledgeDocument(ctx context.Context, request *getKnowledge
 
 	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	read := indexedKnowledgeDocumentOf(document)
 	read.Text = &document.Text
@@ -138,7 +138,7 @@ func (s *Server) deleteKnowledgeDocument(ctx context.Context, request *deleteKno
 
 	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	if err := s.removeKnowledgeDocument(ctx, document); err != nil {
 		return nil, err
@@ -216,7 +216,7 @@ func (s *Server) listKnowledgeDocumentPassages(ctx context.Context, request *lis
 
 	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	passages, err := s.knowledgePassages(ctx, customerID, document.Namespace, document.Source, document.Passages)
 	if err != nil {

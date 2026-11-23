@@ -256,7 +256,7 @@ func (s *Server) getAgentChanges(ctx context.Context, request *agentChangesReque
 	}
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 
 	changes, syncedAt, err := s.unsyncedChanges(ctx, customerID, config.ID, "")

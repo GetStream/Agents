@@ -409,6 +409,8 @@ type RouterSuite struct {
 	// logs, set by a suite before it starts the harness, is where the router logs, as text at
 	// debug and up, for a suite about what it warns of. Nil discards them.
 	logs io.Writer
+	// failing makes the queries that a test names with failQueries fail.
+	failing *failingQueries
 	// telnyxPublicKey, set by a suite about Telnyx's call webhook before it starts the
 	// harness, is the key Telnyx's requests are checked against. Nil leaves it unconfigured.
 	telnyxPublicKey ed25519.PublicKey
@@ -591,6 +593,11 @@ func (s *RouterSuite) SetupSuite() {
 	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
+	s.failing = &failingQueries{}
+	pgStore.GlobalDB().AddQueryHook(s.failing)
+	if pgStore.Sharded() {
+		pgStore.ShardDB().AddQueryHook(s.failing)
+	}
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
@@ -990,6 +997,28 @@ func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) 
 	s.T().Cleanup(drop)
 	return drop
 }
+
+// failQueries makes each query that contains value fail, until the test ends.
+func (s *RouterSuite) failQueries(value string) {
+	s.failing.value.Store(&value)
+	s.T().Cleanup(func() { s.failing.value.Store(nil) })
+}
+
+// failingQueries makes each query that contains a value fail. The query stops before Postgres
+// gets it, with the same error as when the database does not answer in time.
+type failingQueries struct{ value atomic.Pointer[string] }
+
+func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	value := f.value.Load()
+	if value == nil || !strings.Contains(event.Query, *value) {
+		return ctx
+	}
+	expired, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return expired
+}
+
+func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // channelBridgeOptions are the options channelBridge builds the bridge with, for a test to
 // build another router's bridge.

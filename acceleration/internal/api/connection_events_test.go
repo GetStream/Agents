@@ -371,22 +371,22 @@ func (s *ConnectionEventsSuite) TestABindingsEventsAreReadBackAsWritten() {
 	s.Equal("Say what broke.", value(events[0].Instructions))
 }
 
-// TestWithNoSubscriptionsAnIdleWorkerLooksTwiceALease: a router with connectors on and no
-// subscription looks at start and then once a lease, a claim and when the next one is due
-// each time: about 2 queries a lease, as eventforward's idle worker (#778), and never a busy
-// loop. Its own service over its own pool, so the suite's router's queries are not counted;
+// TestWithNoSubscriptionsAnIdleWorkerLooksNoMoreThanTwiceALease: a router with connectors on
+// and no subscription looks at start and then once a lease, a claim and when the next one is
+// due each time: about 2 queries a lease, as eventforward's idle worker (#778), and never a busy
+// loop. A slow machine makes the count lower, never higher, so the test checks only the upper
+// limit. TestAnIdleRouterTakesARowAnotherRouterAddsWithinALease checks that the worker looks
+// again. Its own service over its own pool, so the suite's router's queries are not counted;
 // every subscription row is dropped first, as a deployment with no connections has none.
-func (s *ConnectionEventsSuite) TestWithNoSubscriptionsAnIdleWorkerLooksTwiceALease() {
+func (s *ConnectionEventsSuite) TestWithNoSubscriptionsAnIdleWorkerLooksNoMoreThanTwiceALease() {
 	_, err := s.store.GlobalDB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions")
 	s.Require().NoError(err)
+	started := time.Now()
 	queries := s.idleWorker(idleLease)
 
 	s.Require().Eventually(func() bool { return queries.Load() >= 2 }, settleFor, 10*time.Millisecond)
-	time.Sleep(idleWindow)
-
-	looks := idleWindow / idleLease
-	s.GreaterOrEqual(queries.Load(), int64(2*looks-2), "it looked again once a lease")
-	s.LessOrEqual(queries.Load(), int64(2*looks+4), "and no more often")
+	s.Never(func() bool { return queries.Load() > int64(2*(time.Since(started)/idleLease)+4) },
+		idleWindow, 10*time.Millisecond, "it looks no more than twice a lease")
 }
 
 // TestAnIdleRouterTakesARowAnotherRouterAddsWithinALease: router A adds a subscription due now

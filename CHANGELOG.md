@@ -1804,6 +1804,10 @@ In a channel of a type an agent config answers in (`chat_channels`), a tool call
 
 A call's transcript, its timeline and a campaign's outcome read every line marked `source: agent` as the agent's, whoever wrote it, so a member of the channel the transcript is in could put words in the agent's mouth. A call now records the user the agent wrote as, and only that user's lines, or the agent id's, are the agent's; a person's typed turn reads as theirs too. A call from before this change reads as it did (AI-3265).
 
+### A database failure is a 500, not a 404
+
+When the router cannot read or change a row because the database failed, it now sends a 500 and logs the error. Before, it sent a 404, for example "no such session" or "no such agent config". A client then dropped a session that was still there, or a delete that failed looked done. A 404 now means only that the row does not exist. A session that names its agent by name gets a 500 for a database failure, not a 400 with the text of the database error. The voice socket sends "something went wrong" in its error frame when it cannot read the agent config, not the text of the error (AI-3491).
+
 ## Breaking Changes
 
 ### The Dart SDK has no views of its own
