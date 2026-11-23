@@ -34,6 +34,10 @@ var errTooManyScheduledTasks = APIError{Type: ErrorTypeConflict, Code: codeTooMa
 	Message: "the user already has the most active scheduled tasks this agent allows; " +
 		"cancel or pause one first"}
 
+// errScheduledTaskChanged is a write to a task that changed between its read and its save, by a
+// pause, an edit or a delivery: saving the copy read would undo that change.
+var errScheduledTaskChanged = conflict("the scheduled task changed while this request was made; read it again and retry")
+
 // errUnkeptTaskSession is a create naming a session whose conversation is not kept: an
 // occurrence follows up by reopening the conversation, which an incognito session leaves
 // nothing of.
@@ -397,8 +401,11 @@ func (s *Server) updateScheduledTask(ctx context.Context, request *updateSchedul
 		}
 	}
 	if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
-		if errors.Is(err, store.ErrNoAgentConfig) {
+		switch {
+		case errors.Is(err, store.ErrNoAgentConfig):
 			return nil, errUnknownConfig
+		case errors.Is(err, store.ErrScheduledTaskChanged):
+			return nil, errScheduledTaskChanged
 		}
 		return nil, err
 	}
@@ -506,6 +513,9 @@ func (s *Server) pauseScheduledTask(ctx context.Context, request *pauseScheduled
 	if task.State == store.ScheduledTaskActive || (task.State == store.ScheduledTaskPaused && task.MovePaused) {
 		task.State, task.MovePaused = store.ScheduledTaskPaused, false
 		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
+			if errors.Is(err, store.ErrScheduledTaskChanged) {
+				return nil, errScheduledTaskChanged
+			}
 			return nil, err
 		}
 	}
@@ -570,8 +580,11 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 		}
 		task.ConsecutiveFailures, task.MovePaused = 0, false
 		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
-			if errors.Is(err, store.ErrNoAgentConfig) {
+			switch {
+			case errors.Is(err, store.ErrNoAgentConfig):
 				return nil, errUnknownConfig
+			case errors.Is(err, store.ErrScheduledTaskChanged):
+				return nil, errScheduledTaskChanged
 			}
 			return nil, err
 		}

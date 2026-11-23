@@ -116,6 +116,12 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   not held. `TestSchedulerSuite/TestAHeldTaskIsDeliveredWhenTheHoldEnds`,
   `TestSchedulerSuite/TestAHeldOccurrenceIsCountedFromTheHoldAndNotFromWhenItCameDue`,
   `TestScheduledTasksSuite/TestAQuietTaskIsHeldUntilItsQuietHoursEnd`.
+- **A save never undoes a write it did not read.** `ScheduledTasks.Update` saves only while
+  `updated_at` is what the caller read, and refuses a copy read before a pause, an edit, a claim, a
+  hold or a finish with `ErrScheduledTaskChanged` (409 over the API). Creates of one user on one
+  config count the active limit under an advisory lock, so creates at once stop at it.
+  `TestStoreSuite/TestASaveOfACopyReadBeforeAPauseIsRefused`,
+  `TestStoreSuite/TestCreatesAtOnceStopAtTheActiveLimit`.
 - **A pause or edit writes a running run `missed`, held or in flight (S4).** An edited active
   one-shot comes due again as it now reads, unless its run placed a call: then it is completed.
   Only an edit that leaves a one-shot active while it is delivered keeps its claim and run.

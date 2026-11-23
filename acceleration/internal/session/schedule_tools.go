@@ -464,8 +464,11 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
 	}
 	if err := r.db.ScheduledTasks.Update(ctx, &task); err != nil {
-		if errors.Is(err, store.ErrNoAgentConfig) {
+		switch {
+		case errors.Is(err, store.ErrNoAgentConfig):
 			return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
+		case errors.Is(err, store.ErrScheduledTaskChanged):
+			return refusal(conflictCode, "that task changed while you were changing it; read it again with list_scheduled_tasks and retry"), nil
 		}
 		return nil, err
 	}

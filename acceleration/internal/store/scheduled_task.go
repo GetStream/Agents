@@ -19,6 +19,10 @@ var ErrNoScheduledTask = errors.New("store: no such scheduled task")
 // ErrScheduledTaskIDTaken says a create named a task id the customer already holds.
 var ErrScheduledTaskIDTaken = errors.New("store: a scheduled task with that id already exists")
 
+// ErrScheduledTaskChanged says a save was of a copy of a task read before another write to it:
+// saving it would undo that write, a pause or a worker's advance of the schedule.
+var ErrScheduledTaskChanged = errors.New("store: the scheduled task changed since it was read")
+
 // ErrTooManyScheduledTasks says a create or resume would put a user over their
 // active-task limit on the task's agent config.
 var ErrTooManyScheduledTasks = errors.New("store: too many scheduled tasks")
@@ -59,6 +63,11 @@ const scheduledTaskRunPaused = "task_paused"
 // and no end recorded: scheduling.ReasonRungAlready, which leaves the run out
 // of the task's failure streak.
 const scheduledTaskRunRungAlready = "already_called"
+
+// scheduledTaskLimitLockSeed is the second argument to hashtextextended for the lock a user's
+// creates on one config take turns under while they count the active limit. The value only has
+// to differ from the other seeds.
+const scheduledTaskLimitLockSeed = 3496
 
 // ScheduledTask is something the agent agreed to do for one end user at a
 // wall-clock time in that user's zone, once or on a repeat.
@@ -200,6 +209,10 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 			return err
 		}
 		if maxActive > 0 {
+			// Two creates at once would otherwise both count room for one more.
+			if err := lockUntilCommit(ctx, tx, task.CustomerID+"/"+task.UserID+"/"+task.ConfigID, scheduledTaskLimitLockSeed); err != nil {
+				return fmt.Errorf("store: lock scheduled task limit: %w", err)
+			}
 			count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
 			if err != nil {
 				return err
@@ -343,11 +356,13 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 // the one-shot forward would deliver it a second time. The caller reads the
 // task, changes it, and saves it back. An active one-shot whose settled
 // occurrence placed a call is completed instead: a second call is worse than
-// an edit missed.
+// an edit missed. A copy read before another write to the task is refused
+// (ErrScheduledTaskChanged): saving it would undo that write.
 func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error {
 	if err := task.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
+	read := task.UpdatedAt
 	task.UpdatedAt = time.Now().UTC()
 	task.LeasedBy = ""
 	task.LeaseUntil = nil
@@ -427,6 +442,7 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 		result, err := save.
 			Where("customer_id = ?", task.CustomerID).
 			Where("id = ?", task.ID).
+			Where("updated_at = ?", read).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: save scheduled task: %w", err)
@@ -436,6 +452,17 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 			return fmt.Errorf("store: save scheduled task: %w", err)
 		}
 		if affected == 0 {
+			// The row is locked, so it is either there and changed or not there at all.
+			found, err := tx.NewSelect().Model((*ScheduledTask)(nil)).
+				Where("customer_id = ?", task.CustomerID).
+				Where("id = ?", task.ID).
+				Exists(ctx)
+			if err != nil {
+				return fmt.Errorf("store: save scheduled task: %w", err)
+			}
+			if found {
+				return fmt.Errorf("%w: %s", ErrScheduledTaskChanged, task.ID)
+			}
 			return fmt.Errorf("%w: %s", ErrNoScheduledTask, task.ID)
 		}
 		return nil
@@ -993,6 +1020,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 		err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("state = ?", ScheduledTaskPaused).
 			Set("leased_by = ''").
+			Set("lease_until = NULL").
 			Set("updated_at = now()").
 			Where("customer_id = ?", customerID).
 			Where("config_id = ?", configID).

@@ -1471,6 +1471,104 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotResumeATaskWhileItsConfigIsDelet
 	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }
 
+// whileChanging makes a request while another write to the task is under way: the write is in
+// and not committed when the request reads the task, and commits once the request waits on it.
+func (s *ScheduledTasksSuite) whileChanging(id, set string, request func()) {
+	ctx := context.Background()
+	changing, err := s.store.GlobalDB().BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = changing.Rollback() }()
+	_, err = changing.ExecContext(ctx, "UPDATE scheduled_tasks SET "+set+", updated_at = now() WHERE id = ?", id)
+	s.Require().NoError(err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		request()
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity"+
+			" WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the request saved the task without waiting for the write under way")
+	s.Require().NoError(changing.Commit())
+	<-done
+}
+
+func (s *ScheduledTasksSuite) TestAnEditOfATaskPausedMeanwhileIsRefusedAndLeavesItPaused() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+
+	var status int
+	var failure ErrorResponse
+	s.whileChanging(created.Id, "state = 'paused'", func() {
+		status, failure = s.taskFailure(user, http.MethodPatch, "/v1/agents/scheduled-tasks/"+created.Id,
+			UpdateScheduledTaskRequest{Title: pointerTo("Renamed")})
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal(errScheduledTaskChanged.Message, failure.Error.Message)
+	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskPaused, task.State)
+	s.Equal("Stretch", task.Title)
+}
+
+func (s *ScheduledTasksSuite) TestAPauseOfATaskEditedMeanwhileIsRefusedAndKeepsTheEdit() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+
+	var status int
+	var failure ErrorResponse
+	s.whileChanging(created.Id, "title = 'Renamed'", func() {
+		status, failure = s.taskFailure(user, http.MethodPost, "/v1/agents/scheduled-tasks/"+created.Id+"/pause", nil)
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal(errScheduledTaskChanged.Message, failure.Error.Message)
+	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
+}
+
+func (s *ScheduledTasksSuite) TestAResumeOfATaskEditedMeanwhileIsRefusedAndKeepsTheEdit() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	path := "/v1/agents/scheduled-tasks/" + created.Id
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, path+"/pause", nil, nil))
+
+	var status int
+	var failure ErrorResponse
+	s.whileChanging(created.Id, "title = 'Renamed'", func() {
+		status, failure = s.taskFailure(user, http.MethodPost, path+"/resume", nil)
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal(errScheduledTaskChanged.Message, failure.Error.Message)
+	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskPaused, task.State)
+	s.Equal("Renamed", task.Title)
+}
+
+func (s *ScheduledTasksSuite) TestTheAgentIsToldATaskChangedUnderItsEdit() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	before := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + created.Id + `","action":"snooze","in":"PT30M"}`})
+	s.whileChanging(created.Id, "state = 'paused'", func() { s.say(user, opened.Id, "half an hour later, please") })
+	s.Contains(s.ranResult(watching), `"error":"conflict"`)
+	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskPaused, task.State)
+	s.Require().NotNil(task.NextRunAt)
+	s.True(before.NextRunAt.Equal(*task.NextRunAt), "the snooze did not move the task")
+}
+
 func (s *ScheduledTasksSuite) TestADueTaskIsNotCountedOnItsUsersDay() {
 	// The user agreed to the task once, not to each time it runs: the turn it
 	// fires in their own conversation is the customer's spend, and the turn

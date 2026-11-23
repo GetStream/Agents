@@ -4,7 +4,10 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -957,6 +960,84 @@ func (s *StoreSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMissed() {
 		"a config with no active task left pauses nothing")
 }
 
+func (s *StoreSuite) TestPausingAConfigsTasksLeavesAHeldTaskNoLease() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.held("one", time.Now().Add(8*time.Hour))
+
+	s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Empty(task.LeasedBy)
+	s.Nil(task.LeaseUntil, "a task resumed later is claimed at once, not after the hold's eight hours")
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAPauseIsRefused() {
+	s.task("one", nil)
+	stale, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	pause, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	pause.State = ScheduledTaskPaused
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &pause))
+
+	stale.Title = "Stretch twice"
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, &stale), ErrScheduledTaskChanged)
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(ScheduledTaskPaused, task.State)
+	s.Equal("Stretch", task.Title)
+}
+
+func (s *StoreSuite) TestASavedCopyCanBeSavedAgain() {
+	task := s.task("one", nil)
+	task.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, task), "the copy a create wrote is the stored one")
+	task.Title = "Stretch three times"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, task), "the copy a save wrote is the stored one")
+}
+
+func (s *StoreSuite) TestASaveOfADeletedTaskSaysItIsNotThere() {
+	task := s.task("one", nil)
+	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "one"))
+
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, task), ErrNoScheduledTask)
+}
+
+func (s *StoreSuite) TestCreatesAtOnceStopAtTheActiveLimit() {
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 20 {
+		wg.Go(func() {
+			errs <- s.store.ScheduledTasks.Insert(s.ctx, &ScheduledTask{
+				ID: fmt.Sprintf("task-%d", i), CustomerID: "acme", ConfigID: "config-1", UserID: "sam",
+				CallerKind: "authenticated", Title: "Stretch", Instructions: "Remind Sam to stretch.",
+				StartLocal: s.base, Timezone: "UTC",
+			}, 5)
+		})
+	}
+	wg.Wait()
+	close(errs)
+	created, refused := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, ErrTooManyScheduledTasks):
+			refused++
+		default:
+			s.Require().NoError(err)
+		}
+	}
+	s.Equal(5, created)
+	s.Equal(15, refused)
+	active, err := s.store.ScheduledTasks.CountActive(s.ctx, "acme", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(5, active)
+}
+
 func (s *StoreSuite) TestATaskOnADeletedConfigIsRefused() {
 	deleted := s.boundConfig("acme")
 	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme", deleted.ID))
@@ -1148,8 +1229,8 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 		Title: "Stretch", Instructions: "Remind Sam to stretch.", StartLocal: s.base, Timezone: "Europe/Amsterdam",
 		State: ScheduledTaskActive, CreatedBy: "api"}
 
-	// The transaction, the config locked, the user's active tasks counted and the insert.
-	s.Equal(5, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, added, 25)) }), "Insert")
+	// The transaction, the config locked, the limit locked, the user's active tasks counted and the insert.
+	s.Equal(6, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, added, 25)) }), "Insert")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "st-new")
 		s.Require().NoError(err)
