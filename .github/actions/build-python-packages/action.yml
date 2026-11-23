@@ -16,6 +16,8 @@ runs:
     - uses: ./.github/actions/python-uv-setup
       with:
         enable-cache: "false"
+        # `uv build` makes its own build environments and needs none of the dev dependencies.
+        sync: "false"
 
     - name: Clean dist directory
       shell: bash
