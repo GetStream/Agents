@@ -1208,10 +1208,20 @@ func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery,
 
 // callEnded records on the run the reason the call callID failed under, and
 // answers that failure: a worker taking the run over after this one stopped
-// finds the call placed, and records how it went rather than that it was.
+// finds the call placed, and records how it went rather than that it was. A
+// failure tried again is given back instead, as a call that was not placed is,
+// or the retry would ring nobody: the one such failure is a refusal because the
+// money could not be checked (unpaid), which passes again on its own, so the
+// retry rings again to run the turn again (AI-3597).
 func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, callID string, err error) error {
 	var failure *scheduling.Failure
 	if !errors.As(err, &failure) {
+		return err
+	}
+	if !failure.Final {
+		if err := s.store.ScheduledTaskRuns.ReleaseCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID); err != nil {
+			s.logger.Error("could not give back a scheduled task's call", "run", delivery.RunID, "error", err)
+		}
 		return err
 	}
 	if err := s.store.ScheduledTaskRuns.SetCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
@@ -1272,12 +1282,15 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 // before the agent answered anything on the call, leaves the agent silent:
 // the attempt fails under the money (turnRefusal), final unless the money
 // could not be checked, and the agent hangs up. A refusal after the agent
-// answered is a later turn's: the task was said.
+// answered is a later turn's: the task was said. The call a retry places after
+// a refusal for money runs the turn again (replyCommand), once: its rerun
+// refused as well fails the run, final, so the user is rung twice at most.
 func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session, delivery scheduledDelivery, events <-chan session.Event) error {
 	// The call's turn has an id of its own: a channel tried before the call
 	// left its turn in the conversation under the run's, which would be taken
 	// for this one and leave the agent silent on the call.
-	delivery.CommandID += "_call"
+	delivery.CommandID = replyCommand(created, delivery.CommandID+"_call", delivery.Earlier)
+	rerun := strings.HasSuffix(delivery.CommandID, rerunSuffix)
 	if err := s.followUpWithin(ctx, created, delivery); err != nil {
 		return undeliveredFinally(scheduling.ReasonFailed, err)
 	}
@@ -1293,6 +1306,9 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 				return nil
 			}
 			if refusal := turnRefusal(event); refusal != nil && !answered {
+				if rerun {
+					return undeliveredFinally(deliveryReason(refusal), refusal)
+				}
 				return refusal
 			}
 			if reply, ok := event.(agent.Responded); ok && reply.Purpose != agent.PurposeGreeting {
