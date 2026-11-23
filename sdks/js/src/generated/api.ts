@@ -4669,6 +4669,43 @@ export type components = {
              */
             readonly voice_minutes: number;
         };
+        readonly ActivityDay: {
+            /** @description The app. */
+            readonly app_id: string;
+            /** @description The area of the API, such as agent_setup or conversations. */
+            readonly area: string;
+            /** @description The client the requests named themselves as: dashboard, cli, sdk or api. */
+            readonly client: string;
+            /**
+             * Format: date
+             * @description The UTC day, YYYY-MM-DD.
+             */
+            readonly day: string;
+            /**
+             * Format: date-time
+             * @description When the first request arrived.
+             */
+            readonly first_at: string;
+            /**
+             * Format: date-time
+             * @description When the last request arrived.
+             */
+            readonly last_at: string;
+            /** @description The error code of the latest refusal, empty when there was none. */
+            readonly last_refusal_code: string;
+            /** @description The organization the app was in when the row was last written. */
+            readonly organization_id: string;
+            /**
+             * Format: int64
+             * @description How many were answered with a status of 400 or more.
+             */
+            readonly refused: number;
+            /**
+             * Format: int64
+             * @description How many requests arrived, refused ones included.
+             */
+            readonly requests: number;
+        };
         readonly ActivityEnding: {
             /** @description Why they ended. Absent for the sessions that ended with no reason kept, as before reasons were. */
             readonly end_reason?: components["schemas"]["SessionEndReason"];
@@ -4746,6 +4783,15 @@ export type components = {
              * @description How many requests. Runtime and sandbox are time, not requests, and read 0.
              */
             readonly requests: number;
+        };
+        readonly ActivityPage: {
+            readonly has_more: boolean;
+            /** @description One item per organization, day, app, area and client, sorted in that order. */
+            readonly items: readonly components["schemas"]["ActivityDay"][];
+            /** @description Pass as cursor for the next page, with the same from and to. Absent on the last. */
+            readonly next_cursor?: string;
+            /** @description Every organization items names, by id. An organization whose items span two pages is on both, the same. */
+            readonly organizations: readonly components["schemas"]["OrganizationProgress"][];
         };
         readonly ActivitySession: {
             /** @description The name of the agent config it was opened with. */
@@ -8595,6 +8641,14 @@ export type components = {
             readonly since: string;
             /** @description Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused. */
             readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
+        };
+        readonly OrganizationProgress: {
+            /** @description The furthest step from from to to, as getOrganizationActivity reads it from since. */
+            readonly furthest_step: components["schemas"]["ActivityStep"];
+            /** @description The organization. */
+            readonly organization_id: string;
+            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them. */
+            readonly steps: readonly components["schemas"]["ActivityStepDay"][];
         };
         /**
          * @description What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.

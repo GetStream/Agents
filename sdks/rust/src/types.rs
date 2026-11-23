@@ -228,6 +228,30 @@ pub struct ActivityBucket {
     ///How long those calls lasted. One still running counts up to now.
     pub voice_minutes: f64,
 }
+///`ActivityDay`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
+pub struct ActivityDay {
+    ///The app.
+    pub app_id: ::std::string::String,
+    ///The area of the API, such as agent_setup or conversations.
+    pub area: ::std::string::String,
+    ///The client the requests named themselves as: dashboard, cli, sdk or api.
+    pub client: ::std::string::String,
+    ///The UTC day, YYYY-MM-DD.
+    pub day: ::std::string::String,
+    ///When the first request arrived.
+    pub first_at: ::std::string::String,
+    ///When the last request arrived.
+    pub last_at: ::std::string::String,
+    ///The error code of the latest refusal, empty when there was none.
+    pub last_refusal_code: ::std::string::String,
+    ///The organization the app was in when the row was last written.
+    pub organization_id: ::std::string::String,
+    ///How many were answered with a status of 400 or more.
+    pub refused: i64,
+    ///How many requests arrived, refused ones included.
+    pub requests: i64,
+}
 ///`ActivityEnding`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct ActivityEnding {
@@ -319,6 +343,18 @@ pub struct ActivityMeter {
     pub output_tokens: i64,
     ///How many requests. Runtime and sandbox are time, not requests, and read 0.
     pub requests: i64,
+}
+///`ActivityPage`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
+pub struct ActivityPage {
+    pub has_more: bool,
+    ///One item per organization, day, app, area and client, sorted in that order.
+    pub items: ::std::vec::Vec<ActivityDay>,
+    ///Pass as cursor for the next page, with the same from and to. Absent on the last.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub next_cursor: ::std::option::Option<::std::string::String>,
+    ///Every organization items names, by id. An organization whose items span two pages is on both, the same.
+    pub organizations: ::std::vec::Vec<OrganizationProgress>,
 }
 ///`ActivitySession`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
@@ -8814,6 +8850,16 @@ pub struct OrganizationActivity {
     ///Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused.
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub steps: ::std::option::Option<::std::vec::Vec<ActivityStepDay>>,
+}
+///`OrganizationProgress`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+pub struct OrganizationProgress {
+    ///The furthest step from from to to, as getOrganizationActivity reads it from since.
+    pub furthest_step: ActivityStep,
+    ///The organization.
+    pub organization_id: ::std::string::String,
+    ///Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, as getOrganizationActivity lists them.
+    pub steps: ::std::vec::Vec<ActivityStepDay>,
 }
 ///What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.
 #[derive(

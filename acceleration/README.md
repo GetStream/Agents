@@ -2154,6 +2154,7 @@ is every call on a deployment with no ops key. They are tagged `Staff` in the sp
 
 | Route | What it is for |
 | ----- | -------------- |
+| `GET /v1/ops/activity` | Every organization's activity by UTC day, by cursor, with how far each got |
 | `GET /v1/ops/orgs/{org_id}/activity` | Whether an organization tried Agents, how far it got and how much it used |
 | `GET`, `PUT`, `DELETE /v1/ops/customers/{customer_id}/telephony-suspension` | Stop an app using the phone, and lift it |
 | `GET /v1/ops/use-cases`, `GET /v1/ops/use-cases/{id}`, `POST /v1/ops/use-cases/{id}/review` | Review 10DLC use cases |
@@ -2166,6 +2167,15 @@ out):
 
 ```bash
 curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
+```
+
+Every organization's activity is a list by cursor of `customer_activity`'s rows from `from` to
+`to`, UTC days, both included, at most 400 days apart (500 a page, `limit` up to 1000). Each page
+also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
+on it. Its description holds the definitions of tried, API calls, production and churned:
+
+```bash
+curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
@@ -2218,6 +2228,7 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
 The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
