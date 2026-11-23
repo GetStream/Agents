@@ -2,10 +2,13 @@ package routing
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"reflect"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -622,23 +625,95 @@ func writtenRows(requests []store.Request, written []uuid.UUID) []store.Request 
 }
 
 // lose logs every row in full, which is what replaying them reads, and counts them, which is
-// what the lost alert reads.
+// what the lost alert reads. The row's JSON is logged hex-encoded as row_hex: the router's log
+// redacts credential shapes and masks phone numbers in every value, which rewrites JSON (an
+// "APIKey" member alone matches), and no rule can match a run of 0-9 and a-f. So the row is
+// redacted first, field by field (loggable).
 func (w *Writer) lose(rows []store.Request, reason string, cause error) {
 	for _, request := range rows {
 		cost := max(request.CostMicros, 0)
 		usageLost.WithLabelValues(reason).Inc()
 		usageLostMicros.Add(float64(cost))
-		row, err := json.Marshal(request)
+		row, err := json.Marshal(loggable(request))
 		if err != nil {
 			w.logger.Error("usage row lost", "reason", reason, "usage_id", request.UsageID, "encode_error", err)
 			continue
 		}
-		args := []any{"reason", reason, "usage_id", request.UsageID, "row", string(row)}
+		args := []any{"reason", reason, "usage_id", request.UsageID, "row_hex", hex.EncodeToString(row)}
 		if cause != nil {
 			args = append(args, "error", cause)
 		}
 		w.logger.Error("usage row lost", args...)
 	}
+}
+
+// loggable is a row as the log may hold it. Its text can hold what a customer, a caller or a
+// provider wrote: a phone: user id (an SMS or WhatsApp sender), a sip- session or call id, a
+// number or a key in a tag, a category, an attribute or the error. Each is redacted and masked
+// as the log does a value, under its own name. A user id that changes is left off instead, so
+// the replayed row is billed to its app without that user, as RecordedUser leaves one. What
+// the row is billed by is kept as is: CustomerID, OrganizationID, APIKey (which names a key and
+// never holds its secret), UsageID and the quantities.
+func loggable(request store.Request) store.Request {
+	if redactLogged("user_id", request.UserID) != request.UserID {
+		request.UserID = ""
+	}
+	for name, text := range map[string]*string{
+		"modality": &request.Modality, "organization_tier": &request.OrganizationTier,
+		"agent_id": &request.AgentID, "session_id": &request.SessionID, "call_id": &request.CallID,
+		"provider": &request.Provider, "model": &request.Model, "operation_id": &request.OperationID,
+		"purpose": &request.Purpose, "turn_id": &request.TurnID, "price_version": &request.PriceVersion,
+		"sku": &request.SKU, "region": &request.Region, "error_code": &request.ErrorCode,
+		"error_message": &request.ErrorMessage, "ship_error": &request.ShipError,
+	} {
+		*text = redactLogged(name, *text)
+	}
+	if request.UsageCategories != nil {
+		categories := make([]string, len(request.UsageCategories))
+		for i, category := range request.UsageCategories {
+			categories[i] = redactLogged("usage_categories", category)
+		}
+		request.UsageCategories = categories
+	}
+	request.Tags = redactLoggedValues("tags", request.Tags)
+	request.Attributes = redactLoggedValues("attributes", request.Attributes)
+	return request
+}
+
+// redactLoggedValues is a copy of values with each key and value as loggable leaves it. A key
+// that masking changes and that would land on a key already taken, as two sip- ids masked
+// alike would, gets the first free #2, #3 suffix, in key order, so replay keeps every value.
+// A key masking leaves alone keeps its name.
+func redactLoggedValues(name string, values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	redacted := make(map[string]string, len(values))
+	var masked []string
+	for key, value := range values {
+		if redactLogged(name, key) != key {
+			masked = append(masked, key)
+			continue
+		}
+		redacted[key] = redactLogged(name, value)
+	}
+	slices.Sort(masked)
+	for _, key := range masked {
+		logged := redactLogged(name, key)
+		for n := 2; ; n++ {
+			if _, taken := redacted[logged]; !taken {
+				break
+			}
+			logged = redactLogged(name, key) + "#" + strconv.Itoa(n)
+		}
+		redacted[logged] = redactLogged(name, values[key])
+	}
+	return redacted
+}
+
+// redactLogged is text as the router's log prints it under name.
+func redactLogged(name, text string) string {
+	return store.RedactLogAttr(nil, slog.String(name, text)).Value.String()
 }
 
 // throttled reports whether every has passed since last, and if so moves last to now.

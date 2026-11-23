@@ -1,8 +1,11 @@
 -- +goose Up
 
--- The shared tables as they stood at 20270103090000, the last version of the single migration
--- history every database ran. A database that ran it is marked as having applied this baseline
--- (store.adoptLegacy); a new one runs it. Every shard reads them from the one shared database.
+-- The shared tables: tenants, configs, connectors, numbers, limits. Every shard reads them from the
+-- one shared database. This is the whole history up to 20270124093000, squashed; a database that ran
+-- that history records this version as applied and runs nothing here.
+
+-- The change log, kept by both sets: a deployment of one database runs both initial migrations on
+-- it, so each of these is a no-op the second time.
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION record_data_change() RETURNS trigger
@@ -50,16 +53,21 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    FOREACH column_name IN ARRAY TG_ARGV[3:] LOOP
+    -- TG_ARGV[3] is the table's secret columns as an array literal (store.isSecret, attached by
+    -- Store.watchDataChanges), and TG_ARGV[4:] the columns naming the row. A trigger attached
+    -- before the list was passed would record the secrets, so it records nothing and fails.
+    IF coalesce(left(TG_ARGV[3], 1), '') <> '{' THEN
+        RAISE EXCEPTION 'record_data_change: % was attached without its secret columns', TG_TABLE_NAME;
+    END IF;
+
+    FOREACH column_name IN ARRAY TG_ARGV[4:] LOOP
         identity := identity || jsonb_build_object(column_name, subject -> column_name);
     END LOOP;
 
     -- Credentials are left behind. A secret this deployment sealed is worth nothing to
     -- the one reading it, and an access token a customer's user granted to this
     -- deployment is not something to hand out because somebody asked for their data.
-    subject := subject - 'secret_sealed' - 'access_token' - 'refresh_token'
-        - 'oauth_state' - 'code_verifier' - 'credentials_sealed' - 'password_sealed'
-        - 'bridge_password_sealed' - 'refresh_secret_hash';
+    subject := subject - TG_ARGV[3]::text[];
 
     -- A change is numbered when it is written and seen when its transaction commits, so no
     -- committed row tells a reader which lower number a transaction still running holds.
@@ -93,15 +101,21 @@ $_$;
 -- +goose StatementEnd
 
 CREATE TABLE IF NOT EXISTS data_change_capture (
-    customer_id text PRIMARY KEY,
+    customer_id text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     recorded_since bigint DEFAULT 0 NOT NULL,
     pruned_through bigint DEFAULT 0 NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS data_change_starts (
+    one boolean DEFAULT true NOT NULL,
+    started bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT data_change_starts_one_check CHECK (one)
+);
+
 CREATE TABLE IF NOT EXISTS data_changes (
-    seq bigserial PRIMARY KEY,
+    seq bigint NOT NULL,
     customer_id text NOT NULL,
     table_name text NOT NULL,
     op text NOT NULL,
@@ -111,14 +125,57 @@ CREATE TABLE IF NOT EXISTS data_changes (
     at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+CREATE SEQUENCE IF NOT EXISTS data_changes_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE data_changes_seq_seq OWNED BY data_changes.seq;
+
+ALTER TABLE ONLY data_changes ALTER COLUMN seq SET DEFAULT nextval('data_changes_seq_seq'::regclass);
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_change_capture_pkey' AND conrelid = 'data_change_capture'::regclass) THEN
+        ALTER TABLE ONLY data_change_capture
+            ADD CONSTRAINT data_change_capture_pkey PRIMARY KEY (customer_id);
+    END IF;
+END $$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_change_starts_pkey' AND conrelid = 'data_change_starts'::regclass) THEN
+        ALTER TABLE ONLY data_change_starts
+            ADD CONSTRAINT data_change_starts_pkey PRIMARY KEY (one);
+    END IF;
+END $$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_changes_pkey' AND conrelid = 'data_changes'::regclass) THEN
+        ALTER TABLE ONLY data_changes
+            ADD CONSTRAINT data_changes_pkey PRIMARY KEY (seq);
+    END IF;
+END $$;
+-- +goose StatementEnd
+
 CREATE INDEX IF NOT EXISTS data_changes_at_idx ON data_changes USING btree (at);
 
 CREATE INDEX IF NOT EXISTS data_changes_customer_idx ON data_changes USING btree (customer_id, seq);
 
-COMMENT ON SCHEMA public IS '';
+INSERT INTO data_change_starts DEFAULT VALUES ON CONFLICT DO NOTHING;
+
+-- The set's own objects.
 
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION price_changes_guard() RETURNS trigger
+CREATE FUNCTION price_changes_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -138,7 +195,7 @@ END $$;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION price_entries_guard() RETURNS trigger
+CREATE FUNCTION price_entries_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -149,6 +206,12 @@ BEGIN
     RETURN NEW;
 END $$;
 -- +goose StatementEnd
+
+CREATE TABLE activity_digests (
+    day date NOT NULL,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    posted_at timestamp with time zone
+);
 
 CREATE TABLE agent_configs (
     id text NOT NULL,
@@ -171,8 +234,7 @@ CREATE TABLE agent_configs (
     sync_hash text DEFAULT ''::text NOT NULL,
     search text DEFAULT ''::text NOT NULL,
     mode text DEFAULT 'voice'::text NOT NULL,
-    plugins jsonb DEFAULT '[]'::jsonb NOT NULL,
-    sandbox text DEFAULT ''::text NOT NULL,
+    sandbox_provider text DEFAULT ''::text CONSTRAINT agent_configs_sandbox_not_null NOT NULL,
     video_source text DEFAULT ''::text NOT NULL,
     video_max_frames integer DEFAULT 1 NOT NULL,
     sts text DEFAULT ''::text NOT NULL,
@@ -183,24 +245,20 @@ CREATE TABLE agent_configs (
     dispatch_text boolean DEFAULT false NOT NULL,
     connectors jsonb DEFAULT '[]'::jsonb NOT NULL,
     sandbox_options jsonb DEFAULT '{}'::jsonb NOT NULL,
-    plugin_events jsonb DEFAULT '[]'::jsonb NOT NULL,
-    mcp_servers jsonb DEFAULT '[]'::jsonb NOT NULL,
-    channels jsonb DEFAULT '{}'::jsonb NOT NULL,
-    episode_cards boolean DEFAULT false NOT NULL,
-    progressive_tools boolean DEFAULT false NOT NULL,
+    channels_lines jsonb DEFAULT '{}'::jsonb CONSTRAINT agent_configs_channels_not_null NOT NULL,
+    episode_cards_on boolean DEFAULT false CONSTRAINT agent_configs_episode_cards_not_null NOT NULL,
     greeting_mode text DEFAULT 'exact'::text NOT NULL,
     left_out_connectors jsonb DEFAULT '[]'::jsonb NOT NULL,
     role text DEFAULT ''::text NOT NULL,
     scheduling jsonb DEFAULT '{}'::jsonb NOT NULL,
     review_instructions text DEFAULT ''::text NOT NULL,
-    tool_output_retention text DEFAULT ''::text NOT NULL,
     resume_history jsonb DEFAULT '{}'::jsonb NOT NULL,
     region text DEFAULT 'us'::text NOT NULL,
     calls jsonb DEFAULT '{}'::jsonb NOT NULL,
     episode_cards_record boolean DEFAULT false NOT NULL,
     floor_control jsonb,
     llm_fallbacks jsonb,
-    chat_channels jsonb DEFAULT '[]'::jsonb NOT NULL,
+    channels_chat jsonb DEFAULT '[]'::jsonb CONSTRAINT agent_configs_chat_channels_not_null NOT NULL,
     agents jsonb,
     image text DEFAULT ''::text NOT NULL,
     ui_instructions text DEFAULT ''::text NOT NULL,
@@ -233,63 +291,6 @@ CREATE SEQUENCE agent_logs_id_seq
     CACHE 1;
 
 ALTER SEQUENCE agent_logs_id_seq OWNED BY agent_logs.id;
-
-CREATE TABLE agent_plugin_clients (
-    customer_id text NOT NULL,
-    config_id text NOT NULL,
-    plugin_id text NOT NULL,
-    client_id text NOT NULL,
-    secret_sealed bytea,
-    kek_version integer DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL
-);
-
-CREATE TABLE agent_plugin_connections (
-    id text NOT NULL,
-    customer_id text NOT NULL,
-    config_id text NOT NULL,
-    plugin_id text NOT NULL,
-    instance_url text DEFAULT ''::text NOT NULL,
-    access_token text DEFAULT ''::text NOT NULL,
-    refresh_token text DEFAULT ''::text NOT NULL,
-    expires_at timestamp with time zone,
-    status text DEFAULT 'pending'::text NOT NULL,
-    oauth_state text DEFAULT ''::text NOT NULL,
-    code_verifier text DEFAULT ''::text NOT NULL,
-    client_id text DEFAULT ''::text NOT NULL,
-    token_endpoint text DEFAULT ''::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone,
-    user_id text DEFAULT ''::text NOT NULL
-);
-
-CREATE TABLE agent_plugin_event_deliveries (
-    subscription_id text NOT NULL,
-    event_id text NOT NULL,
-    received_at timestamp with time zone NOT NULL
-);
-
-CREATE TABLE agent_plugin_event_subscriptions (
-    id text NOT NULL,
-    customer_id text NOT NULL,
-    config_id text NOT NULL,
-    plugin_id text NOT NULL,
-    user_id text DEFAULT ''::text NOT NULL,
-    event text NOT NULL,
-    arguments jsonb DEFAULT '{}'::jsonb NOT NULL,
-    key text NOT NULL,
-    token text NOT NULL,
-    secret text NOT NULL,
-    remote_id text DEFAULT ''::text NOT NULL,
-    refresh_before timestamp with time zone,
-    status text NOT NULL,
-    error text DEFAULT ''::text NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    deleted_at timestamp with time zone
-);
 
 CREATE TABLE api_keys (
     id text NOT NULL,
@@ -335,16 +336,6 @@ CREATE TABLE audit_log (
     request_id text DEFAULT ''::text NOT NULL,
     changes jsonb DEFAULT '[]'::jsonb NOT NULL,
     created_at timestamp with time zone NOT NULL
-);
-
-CREATE TABLE balance_notices (
-    organization_id text NOT NULL,
-    kind text NOT NULL,
-    granted_micros bigint NOT NULL,
-    balance_micros bigint NOT NULL,
-    threshold_micros bigint NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT balance_notices_kind_check CHECK ((kind = ANY (ARRAY['balance_low'::text, 'balance_exhausted'::text])))
 );
 
 CREATE TABLE business_profiles (
@@ -412,7 +403,7 @@ CREATE TABLE campaign_contacts (
     step_id text DEFAULT ''::text NOT NULL,
     next_attempt_at timestamp with time zone,
     leased_by text DEFAULT ''::text NOT NULL,
-    leased_until timestamp with time zone,
+    lease_until timestamp with time zone,
     outcome text DEFAULT ''::text NOT NULL,
     converted boolean DEFAULT false NOT NULL
 );
@@ -474,17 +465,11 @@ CREATE TABLE channel_deliveries (
     from_address text DEFAULT ''::text NOT NULL
 );
 
-CREATE TABLE channel_identities (
-    id text NOT NULL,
-    customer_id text NOT NULL,
-    config_id text NOT NULL,
-    kind text NOT NULL,
-    address text NOT NULL,
-    user_id text NOT NULL,
-    conversation_id text DEFAULT ''::text NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    thread text DEFAULT ''::text NOT NULL
+CREATE TABLE channel_link_failures (
+    account_id text NOT NULL,
+    from_address text NOT NULL,
+    window_start timestamp with time zone NOT NULL,
+    failures integer NOT NULL
 );
 
 CREATE TABLE channel_links (
@@ -543,16 +528,6 @@ CREATE TABLE channel_thread_messages (
     CONSTRAINT channel_thread_messages_kind_check CHECK ((kind = ANY (ARRAY['inbound'::text, 'turn'::text, 'reply'::text])))
 );
 
-CREATE TABLE channel_thread_people (
-    channel_id text NOT NULL,
-    chat_person text NOT NULL
-);
-
-CREATE TABLE channel_thread_starters (
-    channel_id text NOT NULL,
-    starter text NOT NULL
-);
-
 CREATE TABLE channel_thread_waiting (
     customer_id text NOT NULL,
     connector_id text NOT NULL,
@@ -575,21 +550,21 @@ CREATE TABLE channel_threads (
     thread_parts jsonb DEFAULT '{}'::jsonb NOT NULL,
     stream_app_pk bigint,
     last_inbound_at timestamp with time zone NOT NULL,
-    turn_holder text,
-    turn_until timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    chat_person text DEFAULT ''::text NOT NULL,
+    starter text DEFAULT ''::text NOT NULL
 );
 
-CREATE TABLE chat_channel_turns (
-    stream_app_pk bigint NOT NULL,
-    cid text NOT NULL,
-    turn_holder text NOT NULL,
-    turn_until timestamp with time zone NOT NULL
+CREATE TABLE channel_turns (
+    stream_app_pk bigint CONSTRAINT chat_channel_turns_stream_app_pk_not_null NOT NULL,
+    cid text CONSTRAINT chat_channel_turns_cid_not_null NOT NULL,
+    leased_by text CONSTRAINT chat_channel_turns_turn_holder_not_null NOT NULL,
+    lease_until timestamp with time zone CONSTRAINT chat_channel_turns_turn_until_not_null NOT NULL
 );
 
 CREATE TABLE chat_inbound (
     seq bigint NOT NULL,
-    stream_app bigint NOT NULL,
+    stream_app_pk bigint CONSTRAINT chat_inbound_stream_app_not_null NOT NULL,
     message_id text NOT NULL,
     customer_id text DEFAULT ''::text NOT NULL,
     deployment boolean NOT NULL,
@@ -613,12 +588,6 @@ ALTER TABLE chat_inbound ALTER COLUMN seq ADD GENERATED ALWAYS AS IDENTITY (
     CACHE 1
 );
 
-CREATE TABLE connection_event_deliveries (
-    subscription_id text NOT NULL,
-    event_id text NOT NULL,
-    received_at timestamp with time zone NOT NULL
-);
-
 CREATE TABLE connection_event_subscriptions (
     id text NOT NULL,
     customer_id text NOT NULL,
@@ -639,6 +608,8 @@ CREATE TABLE connection_event_subscriptions (
     failures integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    CONSTRAINT connection_event_subscriptions_attempts_check CHECK ((attempts >= 0)),
     CONSTRAINT connection_event_subscriptions_kek_version_check CHECK ((kek_version >= 1)),
     CONSTRAINT connection_event_subscriptions_secret_sealed_check CHECK ((secret_sealed <> '\x'::bytea)),
     CONSTRAINT connection_event_subscriptions_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'active'::text, 'failed'::text])))
@@ -660,18 +631,8 @@ CREATE TABLE connector_audit (
     latency_ms integer,
     target text DEFAULT ''::text NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    tools jsonb
-);
-
-CREATE TABLE connector_audit_credentials (
-    audit_id text NOT NULL,
-    access_fingerprint text DEFAULT ''::text NOT NULL,
-    previous_access_fingerprint text DEFAULT ''::text CONSTRAINT connector_audit_credentials_previous_access_fingerprin_not_null NOT NULL,
-    refresh_fingerprint text DEFAULT ''::text NOT NULL,
-    previous_refresh_fingerprint text DEFAULT ''::text CONSTRAINT connector_audit_credentials_previous_refresh_fingerpri_not_null NOT NULL,
-    rotated boolean DEFAULT false NOT NULL,
-    access_expires_at timestamp with time zone,
-    refresh_expires_at timestamp with time zone
+    tools jsonb,
+    credential jsonb
 );
 
 CREATE TABLE connector_authorization_attempts (
@@ -712,22 +673,6 @@ CREATE TABLE connector_config_tokens (
     CONSTRAINT connector_config_tokens_tokens_sealed_check CHECK ((tokens_sealed <> '\x'::bytea))
 );
 
-CREATE TABLE connector_connection_clients (
-    connection_id text NOT NULL,
-    registration text NOT NULL,
-    client_id text NOT NULL,
-    updated_at timestamp with time zone NOT NULL
-);
-
-CREATE TABLE connector_connection_validations (
-    connection_id text NOT NULL,
-    revision integer NOT NULL,
-    status text NOT NULL,
-    code text DEFAULT ''::text NOT NULL,
-    error text DEFAULT ''::text NOT NULL,
-    checked_at timestamp with time zone NOT NULL
-);
-
 CREATE TABLE connector_connections (
     id text NOT NULL,
     customer_id text NOT NULL,
@@ -756,6 +701,14 @@ CREATE TABLE connector_connections (
     deleted_at timestamp with time zone,
     provider_unit_id text,
     connected_at timestamp with time zone,
+    client_registration text DEFAULT ''::text NOT NULL,
+    client_id text DEFAULT ''::text NOT NULL,
+    client_updated_at timestamp with time zone,
+    validation_revision integer DEFAULT 0 NOT NULL,
+    validation_status text DEFAULT ''::text NOT NULL,
+    validation_code text DEFAULT ''::text NOT NULL,
+    validation_error text DEFAULT ''::text NOT NULL,
+    validation_checked_at timestamp with time zone,
     CONSTRAINT connector_connections_definition_revision_check CHECK ((definition_revision >= 1)),
     CONSTRAINT connector_connections_owner CHECK ((((owner_type = 'app'::text) AND (owner_id = ''::text)) OR ((owner_type = 'user'::text) AND (owner_id <> ''::text)))),
     CONSTRAINT connector_connections_revision_check CHECK ((revision >= 1))
@@ -803,11 +756,6 @@ CREATE TABLE connector_event_destinations (
     CONSTRAINT connector_event_destinations_secret_sealed_check CHECK ((secret_sealed <> '\x'::bytea))
 );
 
-CREATE TABLE connector_invocation_arguments (
-    invocation_id text NOT NULL,
-    shape jsonb NOT NULL
-);
-
 CREATE TABLE connector_invocations (
     id text NOT NULL,
     customer_id text NOT NULL,
@@ -822,6 +770,7 @@ CREATE TABLE connector_invocations (
     error_type text DEFAULT ''::text NOT NULL,
     provider_status integer,
     error_message text DEFAULT ''::text NOT NULL,
+    arguments jsonb,
     CONSTRAINT connector_invocations_error_type_check CHECK ((error_type = ANY (ARRAY[''::text, 'customer_auth'::text, 'external_server'::text, 'client_timeout'::text, 'outcome_unknown'::text, 'denied'::text]))),
     CONSTRAINT connector_invocations_latency_ms_check CHECK ((latency_ms >= 0))
 );
@@ -857,7 +806,7 @@ CREATE TABLE connector_tool_pins (
 CREATE TABLE contact_map (
     id text NOT NULL,
     customer_id text NOT NULL,
-    agent_config_id text NOT NULL,
+    config_id text CONSTRAINT contact_map_agent_config_id_not_null NOT NULL,
     kind text NOT NULL,
     address text NOT NULL,
     conversation_id text NOT NULL,
@@ -865,17 +814,8 @@ CREATE TABLE contact_map (
     stream_app_pk bigint,
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
+    thread text DEFAULT ''::text NOT NULL,
     CONSTRAINT contact_map_address_check CHECK ((address <> ''::text))
-);
-
-CREATE TABLE cost_anomaly_notices (
-    organization_id text NOT NULL,
-    day date NOT NULL,
-    spent_micros bigint NOT NULL,
-    baseline_micros bigint NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
-    posted_at timestamp with time zone
 );
 
 CREATE TABLE custom_models (
@@ -910,17 +850,18 @@ CREATE TABLE customer_activity (
     last_at timestamp with time zone NOT NULL
 );
 
-CREATE TABLE data_change_starts (
-    one boolean DEFAULT true NOT NULL,
-    started bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT data_change_starts_one_check CHECK (one)
-);
-
 CREATE TABLE data_move_cursors (
     customer_id text NOT NULL,
     source text NOT NULL,
     cursor bigint,
     read_at timestamp with time zone NOT NULL
+);
+
+CREATE TABLE deliveries_seen (
+    scope text NOT NULL,
+    key text NOT NULL,
+    seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT deliveries_seen_key_check CHECK ((key <> ''::text))
 );
 
 CREATE TABLE dlc_review_logs (
@@ -965,12 +906,6 @@ CREATE TABLE dlc_use_cases (
     approved_at timestamp with time zone
 );
 
-CREATE TABLE episode_activity (
-    episode_id text NOT NULL,
-    last_message_at timestamp with time zone,
-    summary_lease_until timestamp with time zone
-);
-
 CREATE TABLE episodes (
     id text NOT NULL,
     customer_id text NOT NULL,
@@ -985,19 +920,17 @@ CREATE TABLE episodes (
     ended_at timestamp with time zone,
     stream_app_pk bigint,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_message_at timestamp with time zone,
+    lease_until timestamp with time zone,
+    leased_by text,
     CONSTRAINT episodes_check CHECK (((source = 'call'::text) = (session_id IS NOT NULL))),
     CONSTRAINT episodes_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'ended'::text, 'summarized'::text, 'summary_failed'::text])))
-);
-
-CREATE TABLE hook_deliveries (
-    key text NOT NULL,
-    seen_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 CREATE TABLE image_jobs (
     id text NOT NULL,
     customer_id text NOT NULL,
-    stream_app bigint DEFAULT 0 NOT NULL,
+    stream_app_pk bigint DEFAULT 0 CONSTRAINT image_jobs_stream_app_not_null NOT NULL,
     cid text NOT NULL,
     agent_user text NOT NULL,
     session_id text NOT NULL,
@@ -1122,19 +1055,6 @@ CREATE SEQUENCE limit_grants_id_seq
 
 ALTER SEQUENCE limit_grants_id_seq OWNED BY limit_grants.id;
 
-CREATE TABLE limit_notices (
-    organization_id text NOT NULL,
-    kind text NOT NULL,
-    app_id text DEFAULT ''::text NOT NULL,
-    tier text DEFAULT ''::text NOT NULL,
-    enforced boolean NOT NULL,
-    message text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
-    posted_at timestamp with time zone,
-    CONSTRAINT limit_notices_kind_check CHECK ((kind = ANY (ARRAY['no_credit'::text, 'spend_hard_limit'::text, 'spend_limit'::text])))
-);
-
 CREATE TABLE limits (
     id bigint NOT NULL,
     subject text NOT NULL,
@@ -1152,7 +1072,7 @@ CREATE TABLE limits (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT limits_ids_check CHECK ((((app_id <> ''::text) = (level = ANY (ARRAY['app'::text, 'api_key'::text, 'user'::text]))) AND ((api_key <> ''::text) = (level = 'api_key'::text)) AND ((user_id <> ''::text) = (level = 'user'::text)) AND ((category <> ''::text) = (subject = ANY (ARRAY['category'::text, 'app_category'::text]))))),
     CONSTRAINT limits_interval_check CHECK (("interval" = ANY (ARRAY['daily'::text, 'weekly'::text, 'biweekly'::text, 'monthly'::text]))),
-    CONSTRAINT limits_level_check CHECK ((((((((((((subject = 'organization'::text) AND (level = 'organization'::text)) OR ((subject = 'app'::text) AND (level = 'app'::text))) OR ((subject = 'api_key'::text) AND (level = 'organization'::text))) OR ((subject = 'api_key'::text) AND (level = 'app'::text))) OR ((subject = 'api_key'::text) AND (level = 'api_key'::text))) OR ((subject = 'user'::text) AND (level = 'organization'::text))) OR ((subject = 'user'::text) AND (level = 'app'::text))) OR ((subject = 'user'::text) AND (level = 'user'::text))) OR ((subject = 'category'::text) AND (level = 'organization'::text))) OR ((subject = 'app_category'::text) AND (level = 'app'::text)))),
+    CONSTRAINT limits_level_check CHECK ((((subject = 'organization'::text) AND (level = 'organization'::text)) OR ((subject = 'app'::text) AND (level = 'app'::text)) OR ((subject = 'api_key'::text) AND (level = 'organization'::text)) OR ((subject = 'api_key'::text) AND (level = 'app'::text)) OR ((subject = 'api_key'::text) AND (level = 'api_key'::text)) OR ((subject = 'user'::text) AND (level = 'organization'::text)) OR ((subject = 'user'::text) AND (level = 'app'::text)) OR ((subject = 'user'::text) AND (level = 'user'::text)) OR ((subject = 'category'::text) AND (level = 'organization'::text)) OR ((subject = 'app_category'::text) AND (level = 'app'::text)))),
     CONSTRAINT limits_limit_micros_check CHECK ((limit_micros >= 0)),
     CONSTRAINT limits_organization_id_check CHECK ((organization_id <> ''::text))
 );
@@ -1165,6 +1085,19 @@ CREATE SEQUENCE limits_id_seq
     CACHE 1;
 
 ALTER SEQUENCE limits_id_seq OWNED BY limits.id;
+
+CREATE TABLE notices (
+    organization_id text NOT NULL,
+    kind text NOT NULL,
+    dedupe_key text DEFAULT ''::text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    posted_at timestamp with time zone,
+    CONSTRAINT notices_kind_check CHECK ((kind = ANY (ARRAY['no_credit'::text, 'spend_hard_limit'::text, 'spend_limit'::text, 'balance_low'::text, 'balance_exhausted'::text, 'cost_anomaly'::text]))),
+    CONSTRAINT notices_organization_id_check CHECK ((organization_id <> ''::text)),
+    CONSTRAINT notices_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text))
+);
 
 CREATE TABLE opt_outs (
     id text NOT NULL,
@@ -1208,10 +1141,6 @@ CREATE TABLE phone_numbers (
     stream_app_pk bigint,
     stream_route_id text,
     sip_trunk_id text,
-    bridge_uri text,
-    bridge_username text,
-    bridge_password_sealed bytea,
-    bridge_password_kek_version integer,
     attached_at timestamp with time zone,
     config_id text
 );
@@ -1351,7 +1280,7 @@ CREATE TABLE scheduled_tasks (
     custom jsonb DEFAULT '{}'::jsonb NOT NULL,
     quiet_hours jsonb,
     lease_until timestamp with time zone,
-    claim_id text DEFAULT ''::text NOT NULL,
+    leased_by text DEFAULT ''::text CONSTRAINT scheduled_tasks_claim_id_not_null NOT NULL,
     consecutive_failures integer DEFAULT 0 NOT NULL,
     created_by text DEFAULT 'api'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -1396,7 +1325,7 @@ CREATE TABLE simulation_runs (
     error text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     finished_at timestamp with time zone,
-    held_until timestamp with time zone,
+    lease_until timestamp with time zone,
     stop_requested boolean DEFAULT false NOT NULL
 );
 
@@ -1475,12 +1404,12 @@ CREATE TABLE stream_trunks (
     customer_id text NOT NULL,
     stream_app_pk bigint,
     vendor text NOT NULL,
-    numbers text[] NOT NULL,
     bridge_uri text NOT NULL,
     bridge_username text NOT NULL,
     bridge_password_sealed bytea NOT NULL,
     bridge_password_kek_version integer NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    own boolean DEFAULT false NOT NULL
 );
 
 CREATE TABLE telephony_suspensions (
@@ -1597,23 +1526,35 @@ ALTER TABLE ONLY price_list_entries ALTER COLUMN id SET DEFAULT nextval('price_e
 
 ALTER TABLE ONLY usage_resets ALTER COLUMN id SET DEFAULT nextval('usage_resets_id_seq'::regclass);
 
+ALTER TABLE audit_log
+    ADD CONSTRAINT audit_log_action_check CHECK ((action = ANY (ARRAY['created'::text, 'updated'::text, 'deleted'::text, 'synced'::text, 'cancelled'::text]))) NOT VALID;
+
+ALTER TABLE audit_log
+    ADD CONSTRAINT audit_log_resource_type_check CHECK ((resource_type = ANY (ARRAY['agent_config'::text, 'skill'::text, 'knowledge'::text, 'knowledge_url'::text, 'router_config'::text, 'plugin'::text, 'policy'::text, 'price_list'::text, 'end_user'::text, 'limit'::text, 'provider_key'::text]))) NOT VALID;
+
+ALTER TABLE audit_log
+    ADD CONSTRAINT audit_log_source_check CHECK ((source = ANY (ARRAY['dashboard'::text, 'cli'::text, 'sdk'::text, 'api'::text, 'manage'::text]))) NOT VALID;
+
+ALTER TABLE connector_audit
+    ADD CONSTRAINT connector_audit_action_check CHECK ((action = ANY (ARRAY['grant_created'::text, 'grant_refreshed'::text, 'grant_revoked'::text, 'proxy_call'::text, 'token_export'::text, 'tool_reapproved'::text]))) NOT VALID;
+
+ALTER TABLE contact_map
+    ADD CONSTRAINT contact_map_kind_check CHECK ((kind = ANY (ARRAY['phone'::text, 'slack'::text, 'stream_user'::text, 'whatsapp'::text, 'sms'::text, 'imessage'::text]))) NOT VALID;
+
+ALTER TABLE episodes
+    ADD CONSTRAINT episodes_source_check CHECK ((source = ANY (ARRAY['call'::text, 'sms'::text, 'whatsapp'::text, 'slack'::text, 'imessage'::text, 'chat'::text]))) NOT VALID;
+
+ALTER TABLE knowledge_documents
+    ADD CONSTRAINT knowledge_documents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'indexed'::text, 'failed'::text]))) NOT VALID;
+
+ALTER TABLE policies
+    ADD CONSTRAINT policies_scope_check CHECK ((scope = ANY (ARRAY['organization'::text, 'app'::text, 'user'::text]))) NOT VALID;
+
 ALTER TABLE ONLY agent_configs
     ADD CONSTRAINT agent_configs_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY agent_logs
     ADD CONSTRAINT agent_logs_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY agent_plugin_clients
-    ADD CONSTRAINT agent_plugin_clients_pkey PRIMARY KEY (customer_id, config_id, plugin_id);
-
-ALTER TABLE ONLY agent_plugin_connections
-    ADD CONSTRAINT agent_plugin_connections_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY agent_plugin_event_deliveries
-    ADD CONSTRAINT agent_plugin_event_deliveries_pkey PRIMARY KEY (subscription_id, event_id);
-
-ALTER TABLE ONLY agent_plugin_event_subscriptions
-    ADD CONSTRAINT agent_plugin_event_subscriptions_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY api_keys
     ADD CONSTRAINT api_keys_pkey PRIMARY KEY (id);
@@ -1624,20 +1565,8 @@ ALTER TABLE ONLY app_organizations
 ALTER TABLE ONLY apps
     ADD CONSTRAINT apps_pkey PRIMARY KEY (id);
 
-ALTER TABLE audit_log
-    ADD CONSTRAINT audit_log_action_check CHECK ((action = ANY (ARRAY['created'::text, 'updated'::text, 'deleted'::text, 'synced'::text, 'cancelled'::text]))) NOT VALID;
-
 ALTER TABLE ONLY audit_log
     ADD CONSTRAINT audit_log_pkey PRIMARY KEY (id);
-
-ALTER TABLE audit_log
-    ADD CONSTRAINT audit_log_resource_type_check CHECK ((resource_type = ANY (ARRAY['agent_config'::text, 'skill'::text, 'knowledge'::text, 'knowledge_url'::text, 'router_config'::text, 'plugin'::text, 'policy'::text, 'price_list'::text, 'end_user'::text, 'limit'::text, 'provider_key'::text]))) NOT VALID;
-
-ALTER TABLE audit_log
-    ADD CONSTRAINT audit_log_source_check CHECK ((source = ANY (ARRAY['dashboard'::text, 'cli'::text, 'sdk'::text, 'api'::text, 'manage'::text]))) NOT VALID;
-
-ALTER TABLE ONLY balance_notices
-    ADD CONSTRAINT balance_notices_pkey PRIMARY KEY (organization_id, kind, granted_micros);
 
 ALTER TABLE ONLY business_profiles
     ADD CONSTRAINT business_profiles_pkey PRIMARY KEY (customer_id);
@@ -1657,9 +1586,6 @@ ALTER TABLE ONLY channel_accounts
 ALTER TABLE ONLY channel_deliveries
     ADD CONSTRAINT channel_deliveries_pkey PRIMARY KEY (account_id, message_id);
 
-ALTER TABLE ONLY channel_identities
-    ADD CONSTRAINT channel_identities_pkey PRIMARY KEY (id);
-
 ALTER TABLE ONLY channel_links
     ADD CONSTRAINT channel_links_pkey PRIMARY KEY (code);
 
@@ -1675,38 +1601,23 @@ ALTER TABLE ONLY channel_thread_members
 ALTER TABLE ONLY channel_thread_messages
     ADD CONSTRAINT channel_thread_messages_pkey PRIMARY KEY (channel_id, kind, message_id);
 
-ALTER TABLE ONLY channel_thread_people
-    ADD CONSTRAINT channel_thread_people_pkey PRIMARY KEY (channel_id);
-
-ALTER TABLE ONLY channel_thread_starters
-    ADD CONSTRAINT channel_thread_starters_pkey PRIMARY KEY (channel_id);
-
 ALTER TABLE ONLY channel_thread_waiting
     ADD CONSTRAINT channel_thread_waiting_pkey PRIMARY KEY (customer_id, connector_id, provider_unit_id, thread_key, provider_message_id);
 
 ALTER TABLE ONLY channel_threads
     ADD CONSTRAINT channel_threads_pkey PRIMARY KEY (channel_id);
 
-ALTER TABLE ONLY chat_channel_turns
-    ADD CONSTRAINT chat_channel_turns_pkey PRIMARY KEY (stream_app_pk, cid);
+ALTER TABLE ONLY channel_turns
+    ADD CONSTRAINT channel_turns_pkey PRIMARY KEY (stream_app_pk, cid);
 
 ALTER TABLE ONLY chat_inbound
     ADD CONSTRAINT chat_inbound_pkey PRIMARY KEY (seq);
 
 ALTER TABLE ONLY chat_inbound
-    ADD CONSTRAINT chat_inbound_stream_app_message_id_key UNIQUE (stream_app, message_id);
-
-ALTER TABLE ONLY connection_event_deliveries
-    ADD CONSTRAINT connection_event_deliveries_pkey PRIMARY KEY (subscription_id, event_id);
+    ADD CONSTRAINT chat_inbound_stream_app_pk_message_id_key UNIQUE (stream_app_pk, message_id);
 
 ALTER TABLE ONLY connection_event_subscriptions
     ADD CONSTRAINT connection_event_subscriptions_pkey PRIMARY KEY (id);
-
-ALTER TABLE connector_audit
-    ADD CONSTRAINT connector_audit_action_check CHECK ((action = ANY (ARRAY['grant_created'::text, 'grant_refreshed'::text, 'grant_revoked'::text, 'proxy_call'::text, 'token_export'::text, 'tool_reapproved'::text]))) NOT VALID;
-
-ALTER TABLE ONLY connector_audit_credentials
-    ADD CONSTRAINT connector_audit_credentials_pkey PRIMARY KEY (audit_id);
 
 ALTER TABLE ONLY connector_audit
     ADD CONSTRAINT connector_audit_pkey PRIMARY KEY (id);
@@ -1723,12 +1634,6 @@ ALTER TABLE ONLY connector_broken_revisions
 ALTER TABLE ONLY connector_config_tokens
     ADD CONSTRAINT connector_config_tokens_pkey PRIMARY KEY (customer_id, connector_id);
 
-ALTER TABLE ONLY connector_connection_clients
-    ADD CONSTRAINT connector_connection_clients_pkey PRIMARY KEY (connection_id);
-
-ALTER TABLE ONLY connector_connection_validations
-    ADD CONSTRAINT connector_connection_validations_pkey PRIMARY KEY (connection_id);
-
 ALTER TABLE ONLY connector_connections
     ADD CONSTRAINT connector_connections_pkey PRIMARY KEY (id);
 
@@ -1741,9 +1646,6 @@ ALTER TABLE ONLY connector_event_deliveries
 ALTER TABLE ONLY connector_event_destinations
     ADD CONSTRAINT connector_event_destinations_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY connector_invocation_arguments
-    ADD CONSTRAINT connector_invocation_arguments_pkey PRIMARY KEY (invocation_id);
-
 ALTER TABLE ONLY connector_invocations
     ADD CONSTRAINT connector_invocations_pkey PRIMARY KEY (id);
 
@@ -1753,25 +1655,14 @@ ALTER TABLE ONLY connector_oauth_clients
 ALTER TABLE ONLY connector_tool_pins
     ADD CONSTRAINT connector_tool_pins_pkey PRIMARY KEY (connection_id, tool_name);
 
-ALTER TABLE contact_map
-    ADD CONSTRAINT contact_map_kind_check CHECK ((kind = ANY (ARRAY['phone'::text, 'slack'::text, 'stream_user'::text]))) NOT VALID;
-
 ALTER TABLE ONLY contact_map
     ADD CONSTRAINT contact_map_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY cost_anomaly_notices
-    ADD CONSTRAINT cost_anomaly_notices_pkey PRIMARY KEY (organization_id, day);
 
 ALTER TABLE ONLY custom_models
     ADD CONSTRAINT custom_models_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY customer_activity
     ADD CONSTRAINT customer_activity_pkey PRIMARY KEY (app_id, area, client, day);
-
-ALTER TABLE ONLY data_change_starts
-    ADD CONSTRAINT data_change_starts_pkey PRIMARY KEY (one);
-
-INSERT INTO data_change_starts DEFAULT VALUES;
 
 ALTER TABLE ONLY data_move_cursors
     ADD CONSTRAINT data_move_cursors_pkey PRIMARY KEY (customer_id, source);
@@ -1782,17 +1673,8 @@ ALTER TABLE ONLY dlc_review_logs
 ALTER TABLE ONLY dlc_use_cases
     ADD CONSTRAINT dlc_use_cases_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY episode_activity
-    ADD CONSTRAINT episode_activity_pkey PRIMARY KEY (episode_id);
-
 ALTER TABLE ONLY episodes
     ADD CONSTRAINT episodes_pkey PRIMARY KEY (id);
-
-ALTER TABLE episodes
-    ADD CONSTRAINT episodes_source_check CHECK ((source = ANY (ARRAY['call'::text, 'sms'::text, 'whatsapp'::text, 'slack'::text, 'imessage'::text, 'chat'::text]))) NOT VALID;
-
-ALTER TABLE ONLY hook_deliveries
-    ADD CONSTRAINT hook_deliveries_pkey PRIMARY KEY (key);
 
 ALTER TABLE ONLY image_jobs
     ADD CONSTRAINT image_jobs_pkey PRIMARY KEY (id);
@@ -1802,9 +1684,6 @@ ALTER TABLE ONLY image_jobs
 
 ALTER TABLE ONLY knowledge_documents
     ADD CONSTRAINT knowledge_documents_pkey PRIMARY KEY (id);
-
-ALTER TABLE knowledge_documents
-    ADD CONSTRAINT knowledge_documents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'indexed'::text, 'failed'::text]))) NOT VALID;
 
 ALTER TABLE ONLY knowledge_namespaces
     ADD CONSTRAINT knowledge_namespaces_pkey PRIMARY KEY (customer_id, namespace);
@@ -1820,9 +1699,6 @@ ALTER TABLE ONLY limit_grant_uses
 
 ALTER TABLE ONLY limit_grants
     ADD CONSTRAINT limit_grants_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY limit_notices
-    ADD CONSTRAINT limit_notices_pkey PRIMARY KEY (organization_id, kind);
 
 ALTER TABLE ONLY limits
     ADD CONSTRAINT limits_pkey PRIMARY KEY (id);
@@ -1841,9 +1717,6 @@ ALTER TABLE ONLY phone_numbers
 
 ALTER TABLE ONLY policies
     ADD CONSTRAINT policies_pkey PRIMARY KEY (scope, scope_id);
-
-ALTER TABLE policies
-    ADD CONSTRAINT policies_scope_check CHECK ((scope = ANY (ARRAY['organization'::text, 'app'::text, 'user'::text]))) NOT VALID;
 
 ALTER TABLE ONLY price_changes
     ADD CONSTRAINT price_changes_idempotency_key_key UNIQUE (idempotency_key);
@@ -1934,16 +1807,6 @@ CREATE INDEX agent_logs_error_order ON agent_logs USING btree (customer_id, seve
 
 CREATE UNIQUE INDEX agent_logs_source_idx ON agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL);
 
-CREATE INDEX agent_plugin_connections_config_idx ON agent_plugin_connections USING btree (customer_id, config_id) WHERE (deleted_at IS NULL);
-
-CREATE UNIQUE INDEX agent_plugin_connections_one_idx ON agent_plugin_connections USING btree (config_id, plugin_id, user_id) WHERE (deleted_at IS NULL);
-
-CREATE UNIQUE INDEX agent_plugin_connections_state_idx ON agent_plugin_connections USING btree (oauth_state) WHERE ((deleted_at IS NULL) AND (oauth_state <> ''::text));
-
-CREATE UNIQUE INDEX agent_plugin_event_subscriptions_one_idx ON agent_plugin_event_subscriptions USING btree (config_id, plugin_id, user_id, key) WHERE (deleted_at IS NULL);
-
-CREATE UNIQUE INDEX agent_plugin_event_subscriptions_token_idx ON agent_plugin_event_subscriptions USING btree (token);
-
 CREATE INDEX api_keys_app_idx ON api_keys USING btree (app_id, created_at DESC);
 
 CREATE INDEX app_organizations_organization_idx ON app_organizations USING btree (organization_id);
@@ -1964,7 +1827,7 @@ CREATE INDEX campaign_contacts_campaign_idx ON campaign_contacts USING btree (ca
 
 CREATE INDEX campaign_contacts_due_idx ON campaign_contacts USING btree (campaign_id, stage, next_attempt_at);
 
-CREATE INDEX campaign_contacts_lease_idx ON campaign_contacts USING btree (leased_until) WHERE (stage = 'in_progress'::text);
+CREATE INDEX campaign_contacts_lease_idx ON campaign_contacts USING btree (lease_until) WHERE (stage = 'in_progress'::text);
 
 CREATE UNIQUE INDEX campaign_contacts_number_idx ON campaign_contacts USING btree (campaign_id, to_number) WHERE (reason IS DISTINCT FROM 'duplicate'::text);
 
@@ -1977,8 +1840,6 @@ CREATE UNIQUE INDEX channel_accounts_line_idx ON channel_accounts USING btree (c
 CREATE UNIQUE INDEX channel_accounts_token_idx ON channel_accounts USING btree (token);
 
 CREATE INDEX channel_deliveries_from_idx ON channel_deliveries USING btree (account_id, from_address, received_at DESC);
-
-CREATE UNIQUE INDEX channel_identities_address_idx ON channel_identities USING btree (customer_id, config_id, kind, address);
 
 CREATE INDEX channel_thread_inbound_finished ON channel_thread_inbound USING btree (finished_at) WHERE (state <> 'queued'::text);
 
@@ -2016,13 +1877,11 @@ CREATE INDEX connector_invocations_connection_idx ON connector_invocations USING
 
 CREATE UNIQUE INDEX connector_oauth_clients_provider_app ON connector_oauth_clients USING btree (connector_id, provider_app_id) WHERE (provider_app_id <> ''::text);
 
-CREATE UNIQUE INDEX contact_map_address ON contact_map USING btree (customer_id, agent_config_id, kind, address);
+CREATE UNIQUE INDEX contact_map_address ON contact_map USING btree (customer_id, config_id, kind, address);
 
-CREATE INDEX contact_map_conversation ON contact_map USING btree (customer_id, agent_config_id, conversation_id);
+CREATE INDEX contact_map_conversation ON contact_map USING btree (customer_id, config_id, conversation_id);
 
 CREATE INDEX contact_map_retired ON contact_map USING btree (customer_id, regexp_replace(address, '^retired:[^:]*:'::text, ''::text)) WHERE (address ~~ 'retired:%'::text);
-
-CREATE INDEX cost_anomaly_notices_unposted ON cost_anomaly_notices USING btree (claimed_at) WHERE (posted_at IS NULL);
 
 CREATE INDEX custom_models_customer_idx ON custom_models USING btree (customer_id, created_at DESC, id DESC);
 
@@ -2038,8 +1897,6 @@ CREATE UNIQUE INDEX dlc_use_cases_default_idx ON dlc_use_cases USING btree (cust
 
 CREATE INDEX dlc_use_cases_status_idx ON dlc_use_cases USING btree (status, updated_at, id);
 
-CREATE INDEX episode_activity_summary_lease ON episode_activity USING btree (summary_lease_until) WHERE (summary_lease_until IS NOT NULL);
-
 CREATE UNIQUE INDEX episodes_call_session ON episodes USING btree (session_id);
 
 CREATE INDEX episodes_contact ON episodes USING btree (contact_id, started_at DESC);
@@ -2050,10 +1907,6 @@ CREATE UNIQUE INDEX episodes_open_thread ON episodes USING btree (customer_id, t
 
 CREATE INDEX episodes_thread ON episodes USING btree (customer_id, thread_channel, started_at);
 
-CREATE INDEX hook_deliveries_seen_at ON hook_deliveries USING btree (seen_at);
-
-CREATE INDEX image_jobs_due ON image_jobs USING btree (next_attempt_at) WHERE (state = 'queued'::text);
-
 CREATE UNIQUE INDEX knowledge_documents_source_idx ON knowledge_documents USING btree (customer_id, namespace, source);
 
 CREATE INDEX knowledge_urls_namespace_idx ON knowledge_urls USING btree (customer_id, namespace) WHERE (deleted_at IS NULL);
@@ -2063,8 +1916,6 @@ CREATE UNIQUE INDEX knowledge_urls_url_idx ON knowledge_urls USING btree (custom
 CREATE INDEX limit_grant_uses_usage_idx ON limit_grant_uses USING btree (usage_id);
 
 CREATE INDEX limit_grants_live_idx ON limit_grants USING btree (organization_id) WHERE (revoked_at IS NULL);
-
-CREATE INDEX limit_notices_unposted ON limit_notices USING btree (claimed_at) WHERE (posted_at IS NULL);
 
 CREATE UNIQUE INDEX limits_one_per_level ON limits USING btree (organization_id, subject, level, "interval", app_id, api_key, user_id, category);
 
@@ -2116,7 +1967,7 @@ CREATE INDEX simulation_cases_run_idx ON simulation_cases USING btree (run_id, v
 
 CREATE INDEX simulation_runs_customer_idx ON simulation_runs USING btree (customer_id, started_at DESC);
 
-CREATE INDEX simulation_runs_held_idx ON simulation_runs USING btree (held_until) WHERE (state = 'running'::text);
+CREATE INDEX simulation_runs_lease_idx ON simulation_runs USING btree (lease_until) WHERE (state = 'running'::text);
 
 CREATE INDEX simulation_runs_simulation_idx ON simulation_runs USING btree (simulation_id, started_at DESC);
 
@@ -2143,6 +1994,38 @@ CREATE INDEX voice_samples_voice_idx ON voice_samples USING btree (voice_id, cre
 CREATE INDEX voices_customer_idx ON voices USING btree (customer_id, created_at DESC);
 
 CREATE UNIQUE INDEX voices_name_idx ON voices USING btree (customer_id, name) WHERE (deleted_at IS NULL);
+
+ALTER TABLE ONLY notices
+    ADD CONSTRAINT notices_pkey PRIMARY KEY (organization_id, kind, dedupe_key);
+
+CREATE INDEX notices_unposted ON notices USING btree (claimed_at) WHERE (posted_at IS NULL);
+
+CREATE INDEX knowledge_urls_due_idx ON knowledge_urls USING btree (updated_at) WHERE ((deleted_at IS NULL) AND (refresh_hours > 0) AND (state <> 'pending'::text));
+
+ALTER TABLE ONLY deliveries_seen
+    ADD CONSTRAINT deliveries_seen_pkey PRIMARY KEY (scope, key);
+
+CREATE INDEX deliveries_seen_seen_at ON deliveries_seen USING btree (seen_at);
+
+CREATE INDEX episodes_lease ON episodes USING btree (lease_until) WHERE (lease_until IS NOT NULL);
+
+CREATE INDEX phone_numbers_trunk_idx ON phone_numbers USING btree (customer_id, stream_trunk_id) WHERE (released_at IS NULL);
+
+CREATE INDEX dlc_use_cases_vendor_campaign_idx ON dlc_use_cases USING btree (vendor, vendor_campaign_id) WHERE (vendor_campaign_id <> ''::text);
+
+CREATE INDEX image_jobs_undecided ON image_jobs USING btree (next_attempt_at, id) WHERE ((state = 'queued'::text) AND (message = ''::text));
+
+CREATE INDEX image_jobs_decided ON image_jobs USING btree (next_attempt_at, id) WHERE ((state = 'queued'::text) AND (message <> ''::text));
+
+ALTER TABLE ONLY channel_link_failures
+    ADD CONSTRAINT channel_link_failures_pkey PRIMARY KEY (account_id, from_address, window_start);
+
+CREATE INDEX channel_link_failures_window_idx ON channel_link_failures USING btree (window_start);
+
+CREATE INDEX voice_bindings_external_idx ON voice_bindings USING btree (provider, external_id);
+
+ALTER TABLE ONLY activity_digests
+    ADD CONSTRAINT activity_digests_pkey PRIMARY KEY (day);
 
 CREATE TRIGGER price_changes_guard BEFORE DELETE OR UPDATE ON price_changes FOR EACH ROW EXECUTE FUNCTION price_changes_guard();
 
@@ -2172,32 +2055,11 @@ ALTER TABLE ONLY channel_thread_members
 ALTER TABLE ONLY channel_thread_messages
     ADD CONSTRAINT channel_thread_messages_channel_id_fkey FOREIGN KEY (channel_id) REFERENCES channel_threads(channel_id);
 
-ALTER TABLE ONLY channel_thread_people
-    ADD CONSTRAINT channel_thread_people_channel_id_fkey FOREIGN KEY (channel_id) REFERENCES channel_threads(channel_id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY channel_thread_starters
-    ADD CONSTRAINT channel_thread_starters_channel_id_fkey FOREIGN KEY (channel_id) REFERENCES channel_threads(channel_id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY connection_event_deliveries
-    ADD CONSTRAINT connection_event_deliveries_subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES connection_event_subscriptions(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY connector_audit_credentials
-    ADD CONSTRAINT connector_audit_credentials_audit_id_fkey FOREIGN KEY (audit_id) REFERENCES connector_audit(id) ON DELETE CASCADE;
-
 ALTER TABLE ONLY connector_authorization_attempts
     ADD CONSTRAINT connector_authorization_attempts_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES connector_connections(id);
 
-ALTER TABLE ONLY connector_connection_clients
-    ADD CONSTRAINT connector_connection_clients_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES connector_connections(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY connector_connection_validations
-    ADD CONSTRAINT connector_connection_validations_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES connector_connections(id) ON DELETE CASCADE;
-
 ALTER TABLE ONLY connector_event_deliveries
     ADD CONSTRAINT connector_event_deliveries_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES connector_event_destinations(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY connector_invocation_arguments
-    ADD CONSTRAINT connector_invocation_arguments_invocation_id_fkey FOREIGN KEY (invocation_id) REFERENCES connector_invocations(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY connector_invocations
     ADD CONSTRAINT connector_invocations_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES connector_connections(id) ON DELETE CASCADE;
@@ -2207,9 +2069,6 @@ ALTER TABLE ONLY connector_tool_pins
 
 ALTER TABLE ONLY dlc_review_logs
     ADD CONSTRAINT dlc_review_logs_use_case_id_fkey FOREIGN KEY (use_case_id) REFERENCES dlc_use_cases(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY episode_activity
-    ADD CONSTRAINT episode_activity_episode_id_fkey FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY episodes
     ADD CONSTRAINT episodes_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES contact_map(id);
@@ -2242,5 +2101,5 @@ ALTER TABLE ONLY voice_samples
     ADD CONSTRAINT voice_samples_voice_id_fkey FOREIGN KEY (voice_id) REFERENCES voices(id) ON DELETE CASCADE;
 
 -- +goose Down
--- A baseline is not undone.
+-- The initial migration is not undone.
 SELECT 1;

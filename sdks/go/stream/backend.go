@@ -52,7 +52,11 @@ const (
 	// log records a configuration change as having been made with. An SDK syncing an agent
 	// directory is this one; the dashboard and the CLI name themselves.
 	ClientHeader = "X-Stream-Client"
-	ClientSDK    = "sdk"
+	// ClientSDK is how this SDK names itself there: its name and release, in the shape other
+	// Stream SDKs send (stream-chat-go's stream-go-client-<version>). The router counts any
+	// client starting stream-agents- as the SDK. A browser cannot set User-Agent, so this
+	// header is the one every SDK can name its release in.
+	ClientSDK = "stream-agents-go-v" + Version
 	// Version is this SDK's release, the tag sdks/go/vX.Y.Z without its v. It is written
 	// here by hand at each release (see the sdk-go skill), because build info reads (devel)
 	// for any build not fetched by tag.

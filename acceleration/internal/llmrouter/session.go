@@ -247,7 +247,16 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 		}
 		return nil, err
 	}
+	// The stream's clock starts where its provider says the request was sent, which for one
+	// that waits on headers is before Create returned: what it measures from then is not
+	// counted twice as a wait for headers.
 	createdAt := time.Now()
+	if at := stream.StartedAt(); !at.IsZero() && at.Before(createdAt) {
+		createdAt = at
+		if createdAt.Before(startedAt) {
+			createdAt = startedAt
+		}
+	}
 	charged := s.charged(ctx)
 	settled := s.keep(held)
 	// The response settles with its status alone, so what its failure said is taken from the
@@ -384,8 +393,9 @@ func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponsePar
 	}
 
 	response := completed.Response
-	// A provider may wait for response headers before returning its stream. The stream's
-	// own clock starts only then, but the caller has been waiting since Create began.
+	// A provider may wait for response headers before returning its stream. Unless it said
+	// when it sent the request (llm.StreamOptions.StartedAt), the stream's own clock starts
+	// only then, but the caller has been waiting since Create began.
 	headersMs := float64(createdAt.Sub(startedAt).Microseconds()) / 1000
 	ttftMs := measuredLatency(response, headersMs+response.TimeToFirstTokenMs)
 	durationMs := headersMs + response.DurationMs
