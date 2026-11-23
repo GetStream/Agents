@@ -177,7 +177,6 @@ func runUsageSandboxes(ctx context.Context, args []string, settings config.Confi
 	if keys := customerDaytonaKeys(pgStore, secrets); keys != nil {
 		opened, err := keys(ctx)
 		if err != nil {
-			logger.Error("could not open every customer's Daytona key, so their organizations are not looked after", "error", err)
 			failed = append(failed, fmt.Errorf("usage sandboxes: %w", err))
 		}
 		for _, key := range opened {
@@ -266,7 +265,6 @@ func (j *sandboxJob) heading() string {
 func (j *sandboxJob) sweep(ctx context.Context) error {
 	listed, err := j.fleet.Labelled(ctx, j.labels())
 	if err != nil {
-		j.logger.Error("could not list this shard's sandboxes, so none is swept", "error", err)
 		return fmt.Errorf("usage sandboxes: %w", err)
 	}
 	var sessions, ids []string
@@ -358,7 +356,6 @@ func (j *sandboxJob) reconcile(ctx context.Context, day time.Time) error {
 	dayText := day.Format(time.DateOnly)
 	billed, err := j.fleet.Usage(ctx, from, to)
 	if err != nil {
-		j.logger.Error("could not read Daytona's records, so no sandbox is reconciled for the day", "day", dayText, "error", err)
 		alerts.SendItem(sandboxMismatch, dayText, alerts.Warn, map[string]any{"day": dayText, "reading": err.Error(),
 			"rerun": "router usage sandboxes --reconcile --day " + dayText})
 		return fmt.Errorf("usage sandboxes: read Daytona's records for %s: %w", dayText, err)

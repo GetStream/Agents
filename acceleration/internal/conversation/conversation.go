@@ -952,32 +952,38 @@ func Shared(custom map[string]any) bool {
 	return custom["support_access"] == "members"
 }
 
+// RefusedRead is a conversation the caller may not read, as against one that could not be
+// read: a store or Stream failure is not a refusal. Its text is the caller's to see.
+type RefusedRead string
+
+func (r RefusedRead) Error() string { return string(r) }
+
 // ownedBy reads server-owned channel metadata. Explicit member access still
 // requires the caller's current membership, checked against the query response.
 // A channel with no owner is a backend-owned demo, which no end user may claim.
 func ownedBy(custom map[string]any, customer, agentID, caller string) error {
 	if custom[CustomerField] != customer || (agentID != "" && custom["support_agent_id"] != agentID) {
-		return stack.Wrap(errors.New("conversation belongs to another customer or agent"))
+		return stack.Wrap(RefusedRead("conversation belongs to another customer or agent"))
 	}
 	rawOwner, bound := custom["support_owner_id"]
 	owner, valid := rawOwner.(string)
 	if bound && !valid {
-		return stack.Wrap(errors.New("conversation has invalid ownership metadata"))
+		return stack.Wrap(RefusedRead("conversation has invalid ownership metadata"))
 	}
 	if mode, present := custom["support_access"]; present {
 		switch mode {
 		case "members":
 			if owner == "" || caller == "" {
-				return stack.Wrap(errors.New("shared conversations require a verified user"))
+				return stack.Wrap(RefusedRead("shared conversations require a verified user"))
 			}
 			return nil
 		case "owner":
 		default:
-			return stack.Wrap(errors.New("conversation has invalid access metadata"))
+			return stack.Wrap(RefusedRead("conversation has invalid access metadata"))
 		}
 	}
 	if owner != caller {
-		return stack.Wrap(errors.New("conversation belongs to another user"))
+		return stack.Wrap(RefusedRead("conversation belongs to another user"))
 	}
 	return nil
 }
@@ -1029,6 +1035,10 @@ func (s *Service) CommandForCaller(ctx context.Context, customer, agentID, cid, 
 	// overwrite the ownership recorded on one.
 	r, err := client.Chat().GetOrCreateChannel(lookup, channelType, id, &getstream.GetOrCreateChannelRequest{
 		State: &state, Messages: &getstream.MessagePaginationParams{Limit: &limit}})
+	// A channel Chat does not have is answered as one the caller may not read (history).
+	if refused, ok := errors.AsType[*getstream.StreamError](err); ok && (refused.StatusCode == http.StatusBadRequest || refused.StatusCode == http.StatusNotFound) {
+		return CommandReceipt{}, stack.Wrap(ErrCommandNotFound)
+	}
 	if err != nil {
 		return CommandReceipt{}, stack.Wrap(err)
 	}
@@ -1139,7 +1149,13 @@ func (s *Service) history(ctx context.Context, customer, agentID, cid, before, c
 	if err != nil {
 		return Page{}, stack.Wrap(err)
 	}
-	return s.historyIn(ctx, client, customer, agentID, cid, before, caller, pending, hidden, voiceAgent...)
+	page, err := s.historyIn(ctx, client, customer, agentID, cid, before, caller, pending, hidden, voiceAgent...)
+	// Read without Data, a channel Chat does not have is refused as input (400: server-side
+	// auth must name a creator) or not found, and is refused as one the caller may not read.
+	if refused, ok := errors.AsType[*getstream.StreamError](err); ok && (refused.StatusCode == http.StatusBadRequest || refused.StatusCode == http.StatusNotFound) {
+		return Page{}, stack.Wrap(RefusedRead("invalid conversation channel"))
+	}
+	return page, err
 }
 
 func (s *Service) historyIn(ctx context.Context, client *getstream.Stream, customer, agentID, cid, before, caller string, pending []operation, hidden map[string]bool, voiceAgent ...string) (Page, error) {
@@ -1154,7 +1170,7 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 	defer cancel()
 	channelType, id := channelOf(cid)
 	if !Openable(ctx, cid) {
-		return Page{}, stack.Wrap(errors.New("invalid conversation channel"))
+		return Page{}, stack.Wrap(RefusedRead("invalid conversation channel"))
 	}
 	limit := 100
 	state := true
@@ -1181,11 +1197,11 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 	// a request names reads nothing there.
 	thread := opensThread(ctx, cid)
 	if !thread && threadChannel(id, r.Data.Channel.Custom) {
-		return Page{}, stack.Wrap(errors.New("invalid conversation channel"))
+		return Page{}, stack.Wrap(RefusedRead("invalid conversation channel"))
 	}
 	if caller != "" {
 		if r.Data.Channel.Custom[TriggerField] != SessionCommandTrigger {
-			return Page{}, stack.Wrap(errors.New("conversation is not a session-command channel"))
+			return Page{}, stack.Wrap(RefusedRead("conversation is not a session-command channel"))
 		}
 		member := false
 		for _, candidate := range r.Data.Members {
@@ -1195,7 +1211,7 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 			}
 		}
 		if !member {
-			return Page{}, stack.Wrap(errors.New("conversation caller is not a channel member"))
+			return Page{}, stack.Wrap(RefusedRead("conversation caller is not a channel member"))
 		}
 	}
 	p := Page{agent: stored, shared: Shared(r.Data.Channel.Custom), thread: thread, named: channelType != streamapp.AgentChannelType, dispatched: dispatched, empty: len(r.Data.Messages) == 0, Messages: []Message{}, Truncated: len(r.Data.Messages) == limit,
@@ -1511,8 +1527,12 @@ func (c *Conversation) CheckCaller(ctx context.Context, caller string) error {
 		return stack.Wrap(ErrCommandNotFound)
 	}
 	if shared {
-		if _, err := c.service.HistoryForCaller(ctx, customer, agentID, cid, "", caller); err != nil {
+		_, err := c.service.HistoryForCaller(ctx, customer, agentID, cid, "", caller)
+		if _, refused := errors.AsType[RefusedRead](err); refused {
 			return stack.Wrap(ErrCommandNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("conversation: check the caller of %s: %w", cid, err)
 		}
 	}
 	return nil

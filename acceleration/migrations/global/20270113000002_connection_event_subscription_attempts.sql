@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- A claim counts its attempt here, and a worker's write names the count it claimed, so a
 -- worker whose lease ran out does not overwrite the one that took the subscription after it.

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -413,6 +414,62 @@ func (s *GuestsSuite) TestAGuestNobodyMintedCannotBeClaimed() {
 
 	s.Equal(http.StatusNotFound, status)
 	s.Contains(failure, "no such guest")
+}
+
+// TestClaimsRacingForOneGuestLoseWithAConflict: claims sent at once all read the guest
+// unclaimed, and those the store then refuses lost to the one that won, which is a 409 as a
+// claim arriving after it is, not a 500.
+func (s *GuestsSuite) TestClaimsRacingForOneGuestLoseWithAConflict() {
+	guest := s.recordGuest()
+	const claims = 20
+	statuses := make(chan int, claims)
+	var wg sync.WaitGroup
+	for range claims {
+		wg.Go(func() {
+			status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/guests/claim",
+				ClaimGuestRequest{GuestId: guest, UserId: s.utils.uuid()})
+			statuses <- status
+		})
+	}
+	wg.Wait()
+	close(statuses)
+
+	won := 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			won++
+			continue
+		}
+		s.Equal(http.StatusConflict, status)
+	}
+	s.Equal(1, won)
+}
+
+// TestAClaimTheDatabaseCannotMoveIsAnsweredAsInternal (AI-3575): a move the database fails is a
+// 500 that quotes none of the query, not a 400 the caller could correct.
+func (s *GuestsSuite) TestAClaimTheDatabaseCannotMoveIsAnsweredAsInternal() {
+	guest := s.recordGuest()
+	s.failQueries("caller_kind = CASE")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: s.utils.uuid()})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "claim guest")
+	s.NotContains(string(body), "deadline")
+}
+
+// TestAGuestCannotClaimItself is the control: the one refusal the move made is still a 400
+// saying what is wrong.
+func (s *GuestsSuite) TestAGuestCannotClaimItself() {
+	guest := s.recordGuest()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: guest})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "claimed by itself")
 }
 
 func (s *GuestsSuite) TestAClaimHasToSayWhoIsClaimingWhom() {

@@ -17,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sttrouter"
@@ -118,8 +119,9 @@ func (s *Server) transcribeRecording(ctx context.Context, request *transcribeRec
 		if failure == nil {
 			failure = subErr
 		}
+		// Plain fields always encode.
 		raw, _ := json.Marshal(transcriptResult{Text: transcript.Text, Language: transcript.Language, Words: wordsOf(transcript.Words), Speakers: transcript.Speakers, Subtitles: subtitles, Summary: transcript.Summary, Entities: entitiesOf(transcript.Entities), AudioDurationMs: transcript.AudioDurationMs})
-		return &transcribeRecordingResponse{Body: transcriptionOf(inlineResult(job, provider.Provider, provider.Model, raw, failure))}, nil
+		return &transcribeRecordingResponse{Body: transcriptionOf(inlineResult(ctx, job, provider.Provider, provider.Model, raw, failure))}, nil
 	}
 	if err := callbackComplaint(ctx, job.Callback); err != nil {
 		return nil, err
@@ -249,8 +251,9 @@ func (s *Server) recordSpeech(ctx context.Context, request *recordSpeechRequest)
 		if answer, refused := moneyError(failure); refused {
 			return nil, answer
 		}
+		// Plain fields always encode.
 		raw, _ := json.Marshal(speechResult{Audio: audio.Audio, Format: audio.Format, Characters: audio.Characters, AudioDurationMs: audio.AudioDurationMs, Voice: audio.Voice})
-		return &recordSpeechResponse{Body: speechOf(inlineResult(job, provider.Provider, provider.Model, raw, failure))}, nil
+		return &recordSpeechResponse{Body: speechOf(inlineResult(ctx, job, provider.Provider, provider.Model, raw, failure))}, nil
 	}
 	if err := callbackComplaint(ctx, job.Callback); err != nil {
 		return nil, err
@@ -346,10 +349,12 @@ func (s *Server) record(attribution routing.Attribution, job store.Recording, re
 // finished writes the result down and, if the caller asked to be told rather than to
 // poll, tells them.
 func (s *Server) finished(ctx context.Context, job store.Recording, provider, model string, result json.RawMessage, failure error) {
+	reason := ""
 	if failure != nil {
 		s.logger.Error("a recording failed", "recording", job.ID, "modality", job.Modality, "error", failure)
+		reason = recordingReason(failure)
 	}
-	if err := s.store.Recordings.Finish(ctx, job.CustomerID, job.ID, provider, model, result, failure); err != nil {
+	if err := s.store.Recordings.Finish(ctx, job.CustomerID, job.ID, provider, model, result, reason); err != nil {
 		s.logger.Error("could not write down a finished recording", "recording", job.ID, "error", err)
 		return
 	}
@@ -579,7 +584,9 @@ func subtitled(output string) bool {
 }
 
 // inlineResult exists only for this HTTP response; no recording, audio or transcript is stored.
-func inlineResult(job store.Recording, provider, model string, result json.RawMessage, failure error) store.Recording {
+// A failure is told as a stored job's is, unless it is the caller's to fix, and is left for
+// the request log.
+func inlineResult(ctx context.Context, job store.Recording, provider, model string, result json.RawMessage, failure error) store.Recording {
 	now := time.Now().UTC()
 	job.ID = uuid.NewString()
 	job.Provider = provider
@@ -590,10 +597,20 @@ func inlineResult(job store.Recording, provider, model string, result json.RawMe
 	job.UpdatedAt = now
 	job.CompletedAt = &now
 	if failure != nil {
+		recordFailure(ctx, failure, stack.Trace(failure))
 		job.Status = "failed"
-		job.Error = store.SafeLogText(failure.Error())
+		job.Error = recordingReason(failure)
 	}
 	return job
+}
+
+// recordingReason is what a job that failed tells its caller: the refusal when it is theirs
+// to correct (an unknown voice, target or region), otherwise store.RecordingFailure.
+func recordingReason(failure error) string {
+	if errors.Is(failure, routing.ErrRequest) {
+		return store.SafeLogText(failure.Error())
+	}
+	return store.RecordingFailure
 }
 
 // registerRecordings declares the operations served in recordings.go.

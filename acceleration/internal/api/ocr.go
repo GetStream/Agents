@@ -11,6 +11,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ocr"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ocrrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // ocrDeadline bounds one page, failover included: each candidate has
@@ -75,7 +76,18 @@ func (s *Server) readPage(ctx context.Context, request *readPageRequest) (*readP
 	if err != nil && !errors.As(err, &failure) {
 		return nil, invalidRequest(err.Error())
 	}
+	if err != nil {
+		recordFailure(ctx, err, stack.Trace(err))
+	}
 	return &readPageResponse{Body: ocrResultOf(reading, err)}, nil
+}
+
+// ocrFailures is what a failed reading says, by its code. What the provider said names its
+// URL and its body, so it is left for the request log.
+var ocrFailures = map[ocr.Code]string{
+	ocr.ProviderFailed: "the provider failed to read the page",
+	ocr.Timeout:        "the page was not read in time",
+	ocr.Cancelled:      "the caller stopped waiting for the page",
 }
 
 // ocrResultOf renders a reading for the wire, and why nothing was read when it failed.
@@ -92,7 +104,7 @@ func ocrResultOf(reading ocrrouter.Reading, failure error) OcrResult {
 		code := OcrErrorCode(ocr.CodeOf(failure))
 		rendered.Status = OcrStatusFailed
 		rendered.ErrorCode = &code
-		rendered.Error = optional(failure.Error())
+		rendered.Error = optional(ocrFailures[ocr.Code(code)])
 		rendered.Markdown = ""
 	}
 	return rendered

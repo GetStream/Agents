@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 -- A placed call is its outbound leg: kept from before the dial, with its status token, until its
 -- outcome is decided. dialed_at is NULL until the vendor takes the dial.
 ALTER TABLE call_legs
@@ -22,19 +23,21 @@ CREATE INDEX call_legs_token_placed_idx ON call_legs (placed_at) WHERE token IS 
 
 -- Each placed call goes onto the outbound leg it opened, the one with its vendor id first, then
 -- the one dialled nearest it; a call no leg is left for becomes an ended leg of its own, which
--- was never answered and is billed nothing.
+-- was never answered and is billed nothing. A leg two placed calls pick goes to the one by the
+-- same rule: its vendor id first, then the nearest in time.
 WITH candidates AS (
-    SELECT DISTINCT ON (pc.id) pc.id AS pc_id, cl.id AS cl_id
+    SELECT DISTINCT ON (pc.id) pc.id AS pc_id, cl.id AS cl_id,
+        (cl.vendor_call_id IS NOT DISTINCT FROM pc.vendor_call_id) AS same_vendor_call,
+        abs(extract(epoch FROM cl.dialed_at - pc.placed_at)) AS apart
     FROM phone_calls pc
     JOIN call_legs cl ON cl.direction = 'outbound'
         AND cl.customer_id = pc.customer_id AND cl.call_type = pc.call_type AND cl.call_id = pc.call_id
         AND COALESCE(cl.stream_app_pk, 0) = COALESCE(pc.stream_app_pk, 0)
         AND cl.local_number = pc.local_number AND cl.remote_number = pc.remote_number
         AND (pc.vendor_call_id IS NULL OR cl.vendor_call_id IS NULL OR cl.vendor_call_id = pc.vendor_call_id)
-    ORDER BY pc.id, (cl.vendor_call_id IS NOT DISTINCT FROM pc.vendor_call_id) DESC,
-        abs(extract(epoch FROM cl.dialed_at - pc.placed_at)), cl.id
+    ORDER BY pc.id, same_vendor_call DESC, apart, cl.id
 ), matched AS (
-    SELECT DISTINCT ON (cl_id) pc_id, cl_id FROM candidates ORDER BY cl_id, pc_id DESC
+    SELECT DISTINCT ON (cl_id) pc_id, cl_id FROM candidates ORDER BY cl_id, same_vendor_call DESC, apart, pc_id DESC
 ), merged AS (
     UPDATE call_legs cl SET
         token = pc.token, reports = pc.reports, placed_at = pc.placed_at, answered_at = pc.answered_at,

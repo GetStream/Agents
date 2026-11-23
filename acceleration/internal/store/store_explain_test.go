@@ -345,7 +345,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Calls.Select(ctx, "customer-7", CallFilter{AgentID: "agent-7"})
 			return err
 		}},
-		{name: "Calls.Select by campaign", index: "calls_campaign_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Calls.Select by campaign", index: "calls_customer_campaign_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Calls.Select(ctx, "customer-10", CallFilter{CampaignID: "campaign-10"})
 			return err
 		}},
