@@ -3,15 +3,20 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -55,6 +60,51 @@ func (s *ServerSuite) TestHealthReportsEveryDependencyAsOk() {
 	s.Equal("ok", status.Dependencies["redis"])
 	s.Equal("ok", status.Dependencies["stt"])
 	s.Equal("ok", status.Dependencies["tts"])
+}
+
+// The health check needs no credential, so what it says of a dependency must not name where
+// the dependency is.
+func (s *ServerSuite) TestHealthSaysADatabaseThatDoesNotAnswerIsUnavailableAndNothingMore() {
+	url := s.unreachableDatabase(slog.New(slog.DiscardHandler))
+
+	response, err := http.Get(url + "/health")
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	var status HealthStatus
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&status))
+
+	s.Equal(http.StatusServiceUnavailable, response.StatusCode)
+	s.Equal("unavailable", status.Dependencies["postgres"])
+}
+
+// Every probe asks, so a database that is down would otherwise fill the log with one line each.
+func (s *ServerSuite) TestADatabaseThatDoesNotAnswerTheHealthCheckIsLoggedOnceAMinute() {
+	var logged bytes.Buffer
+	url := s.unreachableDatabase(slog.New(slog.NewTextHandler(&logged, nil)))
+
+	for range 2 {
+		response, err := http.Get(url + "/health")
+		s.Require().NoError(err)
+		s.Require().NoError(response.Body.Close())
+		s.Require().Equal(http.StatusServiceUnavailable, response.StatusCode)
+	}
+
+	s.Equal(1, strings.Count(logged.String(), "the database did not answer the health check"))
+}
+
+// unreachableDatabase serves a router whose database never answers, and returns its URL.
+func (s *ServerSuite) unreachableDatabase(logger *slog.Logger) string {
+	unreachable, err := store.Open("postgres://router:secret@127.0.0.1:1/router?sslmode=disable")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(unreachable.Close()) })
+	server, err := NewServer(Options{
+		Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Store:   unreachable, Logger: logger,
+	})
+	s.Require().NoError(err)
+	listener := httptest.NewServer(server.Handler())
+	s.T().Cleanup(listener.Close)
+	return listener.URL
 }
 
 func (s *ServerSuite) TestAnAnswerSaysHowLongTheServerTook() {
@@ -261,6 +311,29 @@ func (s *ServerSuite) TestSpendCanBeGroupedByACostLabel() {
 	s.Equal("sales", buckets[1].Value)
 	s.Equal("", buckets[2].Value, "the synthesis carries no product, and is still part of the bill")
 	s.EqualValues(100, buckets[2].CostMicrosTotal)
+}
+
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *ServerSuite) TestSpendTheDatabaseCannotReadIsAFailureWithNoDatabaseText() {
+	label := s.utils.uuid()
+	s.failQueries(label)
+
+	status, payload := s.serverClient.call(http.MethodGet,
+		fmt.Sprintf("/v1/stats/spend?group_by=%s&from=%s&to=%s", label, s.from(), s.to(24*time.Hour)), nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(payload), "store:")
+}
+
+func (s *ServerSuite) TestTagStatsTheDatabaseCannotReadAreAFailureWithNoDatabaseText() {
+	key := s.utils.uuid()
+	s.failQueries(key)
+
+	status, payload := s.serverClient.call(http.MethodGet,
+		fmt.Sprintf("/v1/llm/stats/tags?key=%s&from=%s&to=%s", key, s.from(), s.to(time.Hour)), nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(payload), "store:")
 }
 
 func (s *ServerSuite) TestTagKeysReportWhichLabelIsWorthABreakdown() {

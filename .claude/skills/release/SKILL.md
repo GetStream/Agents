@@ -54,6 +54,10 @@ In the root `CHANGELOG.md`:
   ending with the PR number, e.g. `(#2207)`. Since AI-3557, PRs add only breaking-change lines,
   so most of the entries are written here. Skip docs-only, CI-only, test-only and skill-only PRs.
 
+In `sdks/swift/core/Sources/StreamAgents/Backend.swift`, set `version` to `X.Y.Z`. The tag is the
+Swift SDK's release, and SwiftPM gives a package no way to read it, so this literal is what an iOS
+app names itself with in `X-Stream-Client`.
+
 Open the PR with the title `Release vX.Y.Z: CHANGELOG`. It needs one approving review. Merge it
 before you tag.
 

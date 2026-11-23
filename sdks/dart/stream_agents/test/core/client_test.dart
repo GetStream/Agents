@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:test/test.dart';
+import 'package:stream_agents/src/core/backend.dart' show sdkVersion;
 import 'package:stream_agents/src/core/core.dart';
+import 'package:yaml/yaml.dart';
 
 import 'support/fixtures.dart';
 import 'support/router.dart';
@@ -101,7 +103,14 @@ void main() {
       expect(request.header('X-Customer-Id'), 'acme');
       expect(request.header('Stream-Auth-Type'), 'jwt');
       expect(request.header('X-Stream-User-Id'), 'ada');
+      expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
       expect(request.header('Authorization'), isNull);
+    });
+
+    test('names the release pubspec.yaml publishes', () {
+      final pubspec = loadYaml(File('pubspec.yaml').readAsStringSync()) as YamlMap;
+
+      expect(sdkVersion, pubspec['version']);
     });
 
     test('presents a token with the api key, asking the provider once while it holds', () async {
@@ -131,6 +140,7 @@ void main() {
       expect(request.header('X-Api-Key'), isNull);
       expect(request.header('Authorization'), 'Bearer token-1');
       expect(request.header('Stream-Auth-Type'), 'jwt');
+      expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
       expect(request.header('X-Customer-Id'), isNull);
       expect(router.upgrades.single.query['token'], 'token-1');
     });
@@ -1440,6 +1450,7 @@ void main() {
       expect(minted.id, 'guest-1');
       final request = router.last('POST /v1/agents/guests');
       expect(request.header('Stream-Auth-Type'), 'anonymous');
+      expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
       expect(request.header('Authorization'), isNull);
       expect(request.query['api_key'], 'key');
     });

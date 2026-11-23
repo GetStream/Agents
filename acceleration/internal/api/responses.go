@@ -271,7 +271,8 @@ func (s *Server) branchResponse(ctx context.Context, id string, body *CreateResp
 	return &createResponseResponse{Body: answer}, nil
 }
 
-// refusedResponse is the answer to a question its session refused before the turn started.
+// refusedResponse is the answer to a question its session refused before the turn started. A
+// failure that is not the caller's mistake goes on as is, a 500 that names nothing of ours.
 func refusedResponse(err error) error {
 	switch {
 	case errors.Is(err, session.ErrSwitchUnfinished):
@@ -282,8 +283,10 @@ func refusedResponse(err error) error {
 		return notConfigured(agent.ErrCannotSeeImages.Error())
 	case errors.Is(err, agent.ErrNoRoomForDocument):
 		return documentTooLarge("the conversation has no room left for the file: another was sent at the same time")
-	default:
+	case callerMistake(err):
 		return invalidRequest(err.Error())
+	default:
+		return err
 	}
 }
 
