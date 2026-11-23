@@ -167,7 +167,7 @@ func (s *ReplicateIDsSuite) held(id int64) bool {
 // copiedNumber is a number of acme's as an export carries it, under the source's id, which
 // also makes its digits, so no two copied numbers are one.
 func copiedNumber(id int64) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"id":%d,"e164":"+1555%07d","vendor":"telnyx","country":"US","customer_id":"acme",`+
+	return json.RawMessage(fmt.Sprintf(`{"id":%d,"e164":"+1555%07d","vendor":"sip_trunk","country":"US","customer_id":"acme",`+
 		`"capabilities":["voice"],"monthly_cost_micros":0,"tags":{},"purchased_at":"2026-10-30T00:00:00Z"}`, id, id))
 }
 

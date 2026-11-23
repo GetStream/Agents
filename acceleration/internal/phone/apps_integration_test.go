@@ -134,6 +134,16 @@ func (s *AppsSuite) vendorOnAnAllowlist() onAnAllowlist {
 // numberOn registers a stub for the vendor next to the suite's own and gives the suite's
 // customer a number on it.
 func (s *AppsSuite) numberOn(vendor string) string {
+	other := s.vendorBeside(vendor)
+	e164 := aNumber()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: other.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+	return e164
+}
+
+// vendorBeside registers a stub for the vendor next to the suite's own.
+func (s *AppsSuite) vendorBeside(vendor string) *stub {
 	other := &stub{vendor: vendor}
 	registry := NewRegistry(s.config())
 	registry.Register(s.vendor.vendor, func() (Provider, error) { return s.vendor, nil })
@@ -144,12 +154,7 @@ func (s *AppsSuite) numberOn(vendor string) string {
 	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps})
 	s.Require().NoError(err)
 	s.service = service
-
-	e164 := aNumber()
-	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
-		E164: e164, Vendor: other.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
-	}))
-	return e164
+	return other
 }
 
 // planStub is a vendor that fetches its call plan when the call is answered, and renders
@@ -309,6 +314,24 @@ func (s *AppsSuite) TestReleasingANumberDeletesItsTrunkAndRouteInItsApp() {
 
 	s.Empty(s.own.Trunks())
 	s.Empty(s.own.Rules())
+}
+
+func (s *AppsSuite) TestAnImportedNumberIsNeverGivenBackAtTheVendor() {
+	telnyx := s.vendorBeside("telnyx")
+	e164 := aNumber()
+	row, err := json.Marshal(map[string]any{
+		"id": rand.Int64N(1 << 50), "e164": e164, "vendor": telnyx.vendor, "country": "US",
+		"capabilities": []string{"voice"}, "monthly_cost_micros": 0, "customer_id": s.customer,
+		"tags": map[string]string{}, "purchased_at": time.Now().UTC(),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "phone_numbers", row))
+
+	s.ErrorIs(s.service.Release(s.ctx, s.customer, e164), store.ErrNoNumber)
+	s.Empty(telnyx.released, "the vendor is not asked to give it back")
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+	s.ErrorIs(err, store.ErrNoNumber, "nor are its calls pointed at an agent")
+	s.Empty(s.deployment.Trunks())
 }
 
 func (s *AppsSuite) TestReleasingStopsTheVendorSendingCallsFirst() {

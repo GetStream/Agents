@@ -311,6 +311,7 @@ function screenDeps(tools: Tools, incognito: boolean): ChatScreenDeps {
     },
     approver: approverFor,
     voiceOf: (session) => VoiceSession.of(session),
+    incognito,
   };
 }
 
