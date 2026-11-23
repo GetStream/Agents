@@ -416,9 +416,6 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		if !ok {
 			return refusal(scheduling.CodeScheduleInPast, "that task has no occurrence left; reschedule it to a new time instead"), nil
 		}
-		if parts, err := r.room(ctx, &task); parts != nil || err != nil {
-			return parts, err
-		}
 		task.State = store.ScheduledTaskActive
 		task.NextRunAt = &next
 		task.ConsecutiveFailures = 0
@@ -430,9 +427,6 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		}
 		schedule = parsed
 		if task.State != store.ScheduledTaskPaused {
-			if parts, err := r.room(ctx, &task); parts != nil || err != nil {
-				return parts, err
-			}
 			task.State = store.ScheduledTaskActive
 		}
 	case "snooze":
@@ -471,7 +465,7 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		case errors.Is(err, store.ErrNoAgentConfig):
 			return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
 		case errors.Is(err, store.ErrTooManyScheduledTasks):
-			return refusal(tooManyTasks, fmt.Sprintf("the user already has %d tasks running, the most this agent allows; cancel one first, or pause one until it is wanted", r.maxActive())), nil
+			return refusal(tooManyTasks, "the user already has the most tasks running that this agent allows; cancel one first, or pause one until it is wanted"), nil
 		case errors.Is(err, store.ErrScheduledTaskChanged):
 			return refusal(taskChanged, "that task changed while you were changing it; read it again with list_scheduled_tasks and retry"), nil
 		}
@@ -620,19 +614,6 @@ func (r *scheduleRunner) snoozeTarget(task store.ScheduledTask, args updateArgs,
 		return time.Time{}, parts
 	}
 	return target, nil
-}
-
-// room refuses putting the task back among the active ones when its agent config is
-// deleted: a session opened before the delete still runs, but the task has nothing to run
-// on. The save counts the user's active tasks against the limit, under its lock.
-func (r *scheduleRunner) room(ctx context.Context, task *store.ScheduledTask) ([]llm.ContentPart, error) {
-	if task.State == store.ScheduledTaskActive {
-		return nil, nil
-	}
-	if _, err := r.db.AgentConfigs.Get(ctx, r.spec.CustomerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
-		return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
-	}
-	return nil, nil
 }
 
 // zone picks the zone for a new task: what was named for it, the session's,
