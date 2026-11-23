@@ -114,7 +114,6 @@ TABLE agent_sessions
     CREATE INDEX agent_sessions_agent_idx ON public.agent_sessions USING btree (customer_id, agent_name, updated_at DESC, id DESC)
     CREATE INDEX agent_sessions_conversation_idx ON public.agent_sessions USING btree (customer_id, conversation_id, created_at DESC)
     CREATE INDEX agent_sessions_custom_idx ON public.agent_sessions USING gin (custom jsonb_path_ops)
-    CREATE UNIQUE INDEX agent_sessions_customer_id_id_key ON public.agent_sessions USING btree (customer_id, id)
     CREATE INDEX agent_sessions_customer_idx ON public.agent_sessions USING btree (customer_id, created_at DESC, id DESC)
     CREATE INDEX agent_sessions_last_message_idx ON public.agent_sessions USING btree (customer_id, COALESCE(last_response_at, created_at) DESC, id DESC)
     CREATE INDEX agent_sessions_modality_idx ON public.agent_sessions USING btree (customer_id, modality, updated_at DESC, id DESC)

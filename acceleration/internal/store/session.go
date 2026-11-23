@@ -300,10 +300,10 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		session.ConnectorSelections = []SessionConnectorSelection{}
 	}
 
-	// The customer's own row is updated. Another customer's of the same id is no conflict here,
-	// so it fails on the primary key.
-	_, err := r.store.shard.NewInsert().Model(session).
-		On("CONFLICT (customer_id, id) DO UPDATE").
+	// Only the customer's own row is updated: another customer's of the same id matches the
+	// conflict but not the WHERE, so nothing is written.
+	result, err := r.store.shard.NewInsert().Model(session).
+		On("CONFLICT (id) DO UPDATE").
 		Set("title = EXCLUDED.title").
 		Set("description = EXCLUDED.description").
 		Set("custom = EXCLUDED.custom").
@@ -323,12 +323,17 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		// remembered before is still in the store, so once true it stays true. Not known
 		// stays not known: NULL OR false is NULL.
 		Set("remembers = ?TableAlias.remembers OR EXCLUDED.remembers").
+		Where("?TableAlias.customer_id = EXCLUDED.customer_id").
 		Exec(ctx)
-	if constraint(err) == "agent_sessions_pkey" {
-		return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
-	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+	}
+	if written == 0 {
+		return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
 	}
 	return nil
 }

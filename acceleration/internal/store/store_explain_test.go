@@ -454,33 +454,33 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 
-		{name: "Sessions.Upsert", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Upsert", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Upsert(ctx, &AgentSession{ID: "seeded-session-7", CustomerID: "customer-7", AgentName: "agent 7",
 				UserID: "user-7", CallerKind: "user", CreatedAt: s.base})
 		}},
-		{name: "Sessions.SetToolTimeout", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.SetToolTimeout", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.SetToolTimeout(ctx, "customer-7", "seeded-session-7", "search", 1000)
 		}},
-		{name: "Sessions.Close", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Close", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, "left")
 		}},
-		{name: "Sessions.SawVideo", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.SawVideo", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.SawVideo(ctx, "customer-7", "seeded-session-7")
 		}},
-		{name: "Sessions.Voiced", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Voiced", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Voiced(ctx, "customer-7", "seeded-session-7")
 		}},
-		{name: "Sessions.Describe", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Describe", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Describe(ctx, "customer-7", "seeded-session-7", "call 7", "", nil)
 		}},
-		{name: "Sessions.ChooseConnection", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.ChooseConnection", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.ChooseConnection(ctx, "customer-7", "seeded-session-7", "github", "connection")
 		}},
 		{name: "Sessions.Exists", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Exists(ctx, "seeded-session-7")
 			return err
 		}},
-		{name: "Sessions.Get", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Get", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Get(ctx, "customer-7", "seeded-session-7")
 			return err
 		}},
@@ -488,7 +488,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, _, err := store.Sessions.ConversationPin(ctx, "customer-7", "conversation-7")
 			return err
 		}},
-		{name: "Sessions.Delete", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Delete", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Delete(ctx, "customer-199", "seeded-session-99999")
 		}},
 		// What calls_session_id_fkey runs on the calls of a session deleted, which no hook sees.
@@ -520,7 +520,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{Order: SessionOrder{PinnedFirst: true}})
 			return err
 		}},
-		{name: "Sessions.Select by review score", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Select by review score", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{Order: SessionOrder{By: SessionSortReviewScore}})
 			return err
 		}},
@@ -543,11 +543,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{Where: &where})
 			return err
 		}},
-		{name: "Sessions.Search", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Search", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Search(ctx, "customer-7", "call 7", SessionFilter{})
 			return err
 		}},
-		{name: "Sessions.Pin", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Pin", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Pin(ctx, "customer-7", "seeded-session-7", false, s.base)
 			return err
 		}},
@@ -559,7 +559,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Latest(ctx, []string{"customer-7", "customer-8"}, since, 10)
 			return err
 		}},
-		{name: "Sessions.Ends", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Ends", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Ends(ctx, []SessionKey{{"customer-7", "seeded-session-7"}, {"customer-7", "seeded-session-207"}}, since)
 			return err
 		}},
@@ -578,7 +578,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.BranchMessages.DeleteUser(ctx, "customer-7", "user-7")
 			return err
 		}},
-		{name: "Responses.Finish", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Responses.Finish", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Responses.Finish(ctx, "customer-7", "explained-response", ResponseCompleted, "", s.base)
 		}},
 		{name: "Responses.Replies", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
@@ -592,7 +592,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			}
 			return err
 		}},
-		{name: "Episodes.closeCardsWithSessions", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Episodes.closeCardsWithSessions", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			cards := []EpisodeCard{{Episode: Episode{SessionID: "seeded-session-7"}}, {Episode: Episode{SessionID: "seeded-session-207"}}}
 			return store.Episodes.closeCardsWithSessions(ctx, "customer-7", cards)
 		}},
@@ -627,15 +627,15 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.CustomerActivity(ctx, "customer-7", ActivityDaily, since, until)
 			return err
 		}},
-		{name: "Store.CustomerConcurrencyPeak", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Store.CustomerConcurrencyPeak", index: "agent_sessions_agent_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CustomerConcurrencyPeak(ctx, "customer-7", since, until)
 			return err
 		}},
-		{name: "Store.CustomerToolUsage", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Store.CustomerToolUsage", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, _, err := store.CustomerToolUsage(ctx, "customer-7", "config-7", since, until)
 			return err
 		}},
-		{name: "Store.CustomerTurns", index: "agent_sessions_customer_id_id_key", run: func(ctx context.Context, store *Store) error {
+		{name: "Store.CustomerTurns", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CustomerTurns(ctx, "customer-7", "config-7", since, until)
 			return err
 		}},

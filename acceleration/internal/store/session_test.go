@@ -3,7 +3,9 @@
 package store
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -1254,6 +1256,32 @@ func (s *StoreSuite) TestASessionHasEndedOnlyWhenItsCustomersOwnRowSaysSo() {
 	s.Require().NoError(err)
 	s.True(ends[theirs].Ended())
 	s.False(ends[mine].Ended(), "somebody-else's session is still recording runtime")
+}
+
+// A session is saved from more than one place at once: its recorder and a reopen, or a retry.
+// The saves that lost the race failed on a unique index their conflict did not name, and were
+// told the id was another customer's.
+func (s *StoreSuite) TestOneCustomersSavesOfANewSessionAtOnceAllSucceed() {
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	const rounds, saves = 10, 8
+	for round := range rounds {
+		id := fmt.Sprintf("raced-%d", round)
+		start := make(chan struct{})
+		errs := make([]error, saves)
+		var wg sync.WaitGroup
+		for i := range saves {
+			wg.Go(func() {
+				<-start
+				errs[i] = s.store.Sessions.Upsert(ctx, &AgentSession{ID: id, CustomerID: "app", Title: fmt.Sprint("save ", i)})
+			})
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			s.Require().NoError(err, "round %d, save %d", round, i)
+		}
+	}
 }
 
 // The API read a row's tools only once it found the row was the caller's; the store handed
