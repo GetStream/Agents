@@ -756,6 +756,19 @@ func (s *ChannelsSuite) TestACodeThatCannotBeWrittenIsA500WithoutTheStoresWords(
 	s.NotContains(string(payload), "store:")
 }
 
+// Two people linking on one agent before either texts get two codes.
+func (s *ChannelsSuite) TestTwoPeopleLinkingOnOneAgentGetTwoCodes() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	var first, second ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &first))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &second))
+	s.NotEqual(first.Code, second.Code)
+}
+
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {
 	number := s.number()
 	s.connect(number)
