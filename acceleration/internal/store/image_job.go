@@ -248,12 +248,10 @@ func (r *ImageJobs) update(ctx context.Context, job ImageJob, doing string,
 
 // Prune deletes the jobs past their keep as of now, and returns how many.
 func (r *ImageJobs) Prune(ctx context.Context, now time.Time) (int64, error) {
-	result, err := r.store.global.NewDelete().Model((*ImageJob)(nil)).
-		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
-			ImageJobDone, now.Add(-imageJobDoneKeep).UTC(), ImageJobFailed, now.Add(-imageJobFailedKeep).UTC()).
-		Exec(ctx)
+	pruned, err := deleteInBatches(ctx, r.store.global, "image_jobs", "(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
+		ImageJobDone, now.Add(-imageJobDoneKeep).UTC(), ImageJobFailed, now.Add(-imageJobFailedKeep).UTC())
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune image jobs: %w", err))
+		return pruned, stack.Wrap(fmt.Errorf("store: prune image jobs: %w", err))
 	}
-	return result.RowsAffected()
+	return pruned, nil
 }
