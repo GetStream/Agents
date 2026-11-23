@@ -302,9 +302,9 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 
 	s.move("acme", "moved")
 
-	_, err = s.destination.Guest(s.ctx, "moved", "alice")
+	_, err = s.destination.Users.GetGuest(s.ctx, "moved", "alice")
 	s.Error(err, "an account is nobody's guest to claim")
-	guest, err := s.destination.Guest(s.ctx, "moved", "guest-1")
+	guest, err := s.destination.Users.GetGuest(s.ctx, "moved", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("alice", guest.ClaimedBy)
 	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")

@@ -111,15 +111,15 @@ func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	return r.Insert(ctx, guest)
 }
 
-// Guest returns one guest of a customer's. A user of some other kind is not one: an
+// GetGuest returns one guest of a customer's. A user of some other kind is not one: an
 // account that signed up is nobody's to claim.
-func (s *Store) Guest(ctx context.Context, customerID, id string) (User, error) {
+func (r *Users) GetGuest(ctx context.Context, customerID, id string) (User, error) {
 	if customerID == "" || id == "" {
 		return User{}, stack.Wrap(errors.New("store: a customer and a guest id are required"))
 	}
 
 	var guest User
-	err := s.global.NewSelect().Model(&guest).
+	err := r.store.global.NewSelect().Model(&guest).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("kind = ?", UserKindGuest).

@@ -152,7 +152,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		return s.redeemGuestSecret(ctx, customerID, bound, requested, strings.TrimSpace(value(body.RefreshSecret)))
 	}
 
-	held, err := s.store.Guest(ctx, customerID, requested)
+	held, err := s.store.Users.GetGuest(ctx, customerID, requested)
 	switch {
 	case err != nil || (!held.Minted && !s.ownApp(customerID, bound.Identity.StreamApp)):
 		// Not a guest this customer was handed. It may be nobody at all, or a real user, which
@@ -300,7 +300,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 		return nil, invalidRequest("a guest cannot be claimed by itself")
 	}
 
-	guest, err := s.store.Guest(ctx, customerID, guestID)
+	guest, err := s.store.Users.GetGuest(ctx, customerID, guestID)
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNotAGuest, notFound("no such guest"))
 	}

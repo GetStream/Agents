@@ -252,7 +252,7 @@ func (s *StreamAppsSuite) TestAMintedGuestCallingWithTheirOwnTokenIsStillMintedA
 	var again GuestUser
 	s.Equal(http.StatusCreated, s.data.signedInAs(minted.Id).do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: pointerTo(minted.Id)}, &again))
 	s.Equal(minted.Id, again.Id)
-	held, err := s.store.Guest(context.Background(), s.customerID(), minted.Id)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), minted.Id)
 	s.Require().NoError(err, "and they stay a guest to claim")
 	s.Empty(held.ClaimedBy)
 }
