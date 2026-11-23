@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -77,6 +78,10 @@ const (
 // grantEndedBefore is the SQL condition a grant g expired or was revoked before ? seconds ago.
 const grantEndedBefore = "least(g.revoked_at, g.expires_at) < now() - make_interval(secs => ?)"
 
+// grantOwned is the SQL condition the grant g is one the row s (its grant_id, customer_id and
+// organization_id) counts toward, with ao the app_organizations row of its app.
+const grantOwned = "g.organization_id IN (s.organization_id, coalesce(ao.organization_id, s.customer_id)) AND g.app_id IN ('', s.customer_id)"
+
 // InsertMany counts the rows toward their grants in the shared database: each (grant, usage
 // id) once, however often it is sent, added to the grant's used_micros. A grant that is not
 // there, is of neither the row's organization nor its app's, is scoped to another app, or ended
@@ -135,7 +140,7 @@ WITH sent AS (
     SELECT * FROM unnest(?::bigint[], ?::text[], ?::text[], ?::uuid[], ?::bigint[]) AS s (grant_id, customer_id, organization_id, usage_id, micros)
 ), granted AS (
     SELECT s.grant_id, s.usage_id, s.micros,
-        g.organization_id IN (s.organization_id, coalesce(ao.organization_id, s.customer_id)) AND g.app_id IN ('', s.customer_id) AS owned
+        `+grantOwned+` AS owned
     FROM sent s
     LEFT JOIN app_organizations ao ON ao.app_id = s.customer_id
     JOIN limit_grants g ON g.id = s.grant_id
@@ -350,5 +355,111 @@ func (r *LimitGrantUses) reconcileShard(ctx context.Context, shard bun.IDB, name
 		if len(rows) < grantReconcilePage {
 			return counted, nil
 		}
+	}
+}
+
+// ForeignGrantUses is what rows counted toward one grant that is of neither their
+// organization nor their app's, or is scoped to another app.
+type ForeignGrantUses struct {
+	GrantID int64
+	// OrganizationID is the grant's.
+	OrganizationID string
+	Rows           int
+	Micros         int64
+}
+
+// Foreign is, per grant, the rows of every shard that limit_grant_uses counted toward a grant
+// InsertMany would refuse them now, by grant id: rows that counted before the owner check, such
+// as an import that kept the grant ids it was sent with and that a reconcile read. Each
+// (grant, usage id) counts once, however many shards hold the row. It writes nothing.
+func (r *LimitGrantUses) Foreign(ctx context.Context) ([]ForeignGrantUses, error) {
+	seen := map[grantUse]bool{}
+	byGrant := map[int64]*ForeignGrantUses{}
+	for i, shard := range r.store.shards() {
+		if err := r.foreignInShard(ctx, shard, seen, byGrant); err != nil {
+			return nil, stack.Wrap(fmt.Errorf("store: foreign grant uses: shard %s: %w", r.store.shardNames[i], err))
+		}
+	}
+	var foreign []ForeignGrantUses
+	for _, grant := range byGrant {
+		foreign = append(foreign, *grant)
+	}
+	slices.SortFunc(foreign, func(a, b ForeignGrantUses) int { return cmp.Compare(a.GrantID, b.GrantID) })
+	return foreign, nil
+}
+
+// foreignInShard is Foreign for one shard's rows naming a grant, read a page at a time by
+// requests_limit_grants_started_idx, each page matched against the shared database's uses.
+func (r *LimitGrantUses) foreignInShard(ctx context.Context, shard bun.IDB, seen map[grantUse]bool, byGrant map[int64]*ForeignGrantUses) error {
+	var after time.Time
+	var afterID int64
+	for {
+		var rows []struct {
+			ID             int64     `bun:"id"`
+			StartedAt      time.Time `bun:"started_at"`
+			CustomerID     string    `bun:"customer_id"`
+			OrganizationID string    `bun:"organization_id"`
+			UsageID        uuid.UUID `bun:"usage_id"`
+			LimitGrants    []int64   `bun:"limit_grants,array"`
+		}
+		err := shard.NewSelect().Table("requests").
+			Column("id", "started_at", "customer_id", "organization_id", "usage_id", "limit_grants").
+			Where("limit_grants <> '{}'").
+			Where("(started_at, id) > (?, ?)", after, afterID).
+			OrderExpr("started_at, id").
+			Limit(grantReconcilePage).
+			Scan(ctx, &rows)
+		if err != nil {
+			return err
+		}
+		var grants []int64
+		var customers, organizations, usageIDs []string
+		for _, row := range rows {
+			for _, grant := range row.LimitGrants {
+				grants, customers = append(grants, grant), append(customers, row.CustomerID)
+				organizations, usageIDs = append(organizations, row.OrganizationID), append(usageIDs, row.UsageID.String())
+			}
+		}
+		if len(grants) > 0 {
+			var uses []struct {
+				GrantID        int64     `bun:"grant_id"`
+				UsageID        uuid.UUID `bun:"usage_id"`
+				Micros         int64     `bun:"micros"`
+				OrganizationID string    `bun:"organization_id"`
+			}
+			err = r.store.global.NewRaw(`
+WITH sent AS (
+    SELECT * FROM unnest(?::bigint[], ?::text[], ?::text[], ?::uuid[]) AS s (grant_id, customer_id, organization_id, usage_id)
+)
+SELECT u.grant_id, u.usage_id, u.micros, g.organization_id
+FROM sent s
+JOIN limit_grant_uses u ON u.grant_id = s.grant_id AND u.usage_id = s.usage_id
+JOIN limit_grants g ON g.id = s.grant_id
+LEFT JOIN app_organizations ao ON ao.app_id = s.customer_id
+WHERE NOT (`+grantOwned+`)`,
+				pgdialect.Array(grants), pgdialect.Array(customers), pgdialect.Array(organizations), pgdialect.Array(usageIDs)).Scan(ctx, &uses)
+			if err != nil {
+				return err
+			}
+			for _, use := range uses {
+				key := grantUse{GrantID: use.GrantID, UsageID: use.UsageID}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				grant := byGrant[use.GrantID]
+				if grant == nil {
+					grant = &ForeignGrantUses{GrantID: use.GrantID, OrganizationID: use.OrganizationID}
+					byGrant[use.GrantID] = grant
+				}
+				grant.Rows++
+				grant.Micros += use.Micros
+			}
+		}
+		if len(rows) < grantReconcilePage {
+			return nil
+		}
+		last := rows[len(rows)-1]
+		after, afterID = last.StartedAt, last.ID
 	}
 }

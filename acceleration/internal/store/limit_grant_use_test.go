@@ -353,3 +353,89 @@ func (s *StoreSuite) TestLimitGrantUseQueryBudgets() {
 		s.Require().NoError(err)
 	}), "begin, the lock, and for each shard where it got, one page and where it gets to, then the end")
 }
+
+// countedByID writes the row to the shard and counts it toward each grant it names by id
+// alone, as the writer and the reconcile did before the owner check.
+func (s *StoreSuite) countedByID(store *Store, row Request) {
+	s.Require().NoError(prepareRequest(&row))
+	_, err := store.ShardDB().NewInsert().Model(&row).Exec(s.ctx)
+	s.Require().NoError(err)
+	for _, grant := range row.LimitGrants {
+		_, err = s.store.GlobalDB().NewInsert().Model(&grantUse{GrantID: grant, UsageID: row.UsageID, Micros: row.CostMicros}).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+}
+
+// namingGrants is a billable row of the app and organization naming the grants.
+func (s *StoreSuite) namingGrants(app, organization string, cost int64, grants ...int64) Request {
+	return Request{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: app, OrganizationID: organization, Provider: "openai", Model: "m",
+		StartedAt: s.base, CostMicros: cost, Billable: true, Success: true, LimitGrants: grants,
+	}
+}
+
+func (s *StoreSuite) foreign() []ForeignGrantUses {
+	foreign, err := s.store.LimitGrantUses.Foreign(s.ctx)
+	s.Require().NoError(err)
+	return foreign
+}
+
+func (s *StoreSuite) TestForeignIsTheRowsCountedTowardAGrantNotTheirs() {
+	organization := s.grant(LimitGrant{AmountMicros: 10_000})
+	app := s.grant(LimitGrant{Subject: usage.SubjectApp, AppID: "app-1", AmountMicros: 10_000})
+	alone := s.grant(LimitGrant{OrganizationID: "app-alone", AmountMicros: 10_000})
+	s.member("app-1", "org-1")
+	for _, row := range []Request{
+		s.namingGrants("app-1", "org-1", 1, organization.ID, app.ID),
+		s.namingGrants("app-9", "org-1", 2, organization.ID),
+		s.namingGrants("app-1", "", 3, organization.ID),
+		s.namingGrants("app-alone", "", 4, alone.ID),
+		s.namingGrants("app-2", "org-2", 900, organization.ID),
+		s.namingGrants("app-3", "org-1", 50, app.ID),
+		s.namingGrants("app-2", "org-2", 4_000, organization.ID, app.ID, alone.ID),
+	} {
+		s.countedByID(s.store, row)
+	}
+	s.uncounted(s.store, s.base, 70_000, organization.ID)
+	notCounted := s.namingGrants("app-2", "org-2", 80_000, organization.ID)
+	s.Require().NoError(prepareRequest(&notCounted))
+	_, err := s.store.ShardDB().NewInsert().Model(&notCounted).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Equal([]ForeignGrantUses{
+		{GrantID: organization.ID, OrganizationID: "org-1", Rows: 2, Micros: 4_900},
+		{GrantID: app.ID, OrganizationID: "org-1", Rows: 2, Micros: 4_050},
+		{GrantID: alone.ID, OrganizationID: "app-alone", Rows: 1, Micros: 4_000},
+	}, s.foreign(), "a row of the grant's organization, of its app or of an app alone counts toward it; one of another "+
+		"organization or another app does not, and one the grant never counted is not there to take off")
+}
+
+func (s *StoreSuite) TestForeignReadsEveryPageOfAShard() {
+	grant := s.grant(LimitGrant{AmountMicros: 1_000_000})
+	own := make([]Request, grantReconcilePage)
+	for i := range own {
+		own[i] = s.namingGrants("app-1", "org-1", 1, grant.ID)
+	}
+	_, err := s.store.Requests.InsertMany(s.ctx, own)
+	s.Require().NoError(err)
+	late := s.namingGrants("app-2", "org-2", 900, grant.ID)
+	late.StartedAt = s.base.Add(time.Minute)
+	s.countedByID(s.store, late)
+
+	s.Equal([]ForeignGrantUses{{GrantID: grant.ID, OrganizationID: "org-1", Rows: 1, Micros: 900}}, s.foreign(),
+		"the row after the first page")
+}
+
+func (s *ShardedStoreSuite) TestForeignCountsEveryShardAndEachUseOnce() {
+	grant := s.grant(LimitGrant{AmountMicros: 10_000})
+	here := s.namingGrants("app-2", "org-2", 900, grant.ID)
+	s.countedByID(s.store, here)
+	s.countedByID(s.other, s.namingGrants("app-3", "org-3", 50, grant.ID))
+	copied := here
+	s.Require().NoError(prepareRequest(&copied))
+	_, err := s.other.ShardDB().NewInsert().Model(&copied).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Equal([]ForeignGrantUses{{GrantID: grant.ID, OrganizationID: "org-1", Rows: 2, Micros: 950}}, s.foreign(),
+		"a row in another shard counts; one held by two shards was counted once")
+}

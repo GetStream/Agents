@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -336,4 +337,37 @@ func (s *UsageCommandsSuite) TestReshipNeedsAUsageService() {
 	err := runUsage([]string{"reship", "--since", "1h"}, s.settings, &bytes.Buffer{})
 
 	s.ErrorContains(err, "ROUTER_USAGE_URL")
+}
+
+func (s *UsageCommandsSuite) TestForeignGrantsPrintsTheRowsCountedTowardAGrantNotTheirs() {
+	grant := store.LimitGrant{
+		OrganizationID: "org-1", Subject: usageservice.SubjectCategory, Category: "team:finance", AmountMicros: 10_000,
+		Reason: "support", Actor: "someone",
+	}
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: "app-1", Source: store.AuditSourceAPI}))
+	var rows []store.Request
+	for _, row := range []struct {
+		app, organization string
+		cost              int64
+	}{{"app-1", "org-1", 30}, {"app-2", "org-2", 900}, {"app-3", "org-3", 50}} {
+		rows = append(rows, store.Request{
+			UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: row.app, OrganizationID: row.organization, Provider: "openai",
+			Model: "m", StartedAt: time.Now().UTC(), CostMicros: row.cost, Billable: true, Success: true, LimitGrants: []int64{grant.ID},
+		})
+	}
+	_, err := s.store.Requests.InsertMany(s.ctx, rows)
+	s.Require().NoError(err)
+	// The writer counted the row of the grant's organization; the others count as they did
+	// before the owner check, by grant id alone.
+	for _, row := range rows[1:] {
+		_, err = s.store.GlobalDB().ExecContext(s.ctx, "INSERT INTO limit_grant_uses (grant_id, usage_id, micros) VALUES (?, ?, ?)",
+			grant.ID, row.UsageID, row.CostMicros)
+		s.Require().NoError(err)
+	}
+
+	var out bytes.Buffer
+	s.Require().NoError(runUsage([]string{"foreign-grants"}, s.settings, &out))
+
+	s.Equal(fmt.Sprintf("grant %d of organization org-1: 2 rows, 950 micros\n2 rows counted toward 1 grants not theirs, 950 micros\n", grant.ID),
+		out.String())
 }
