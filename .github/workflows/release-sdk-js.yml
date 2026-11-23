@@ -64,7 +64,7 @@ jobs:
           semantic-release $([ "$DRY_RUN" = "true" ] && echo --dry-run)
 
       # The release is created as a draft so that publishing it can leave the repository's
-      # latest release where it is: the Python packages' `v*`.
+      # latest release where it is: the repo's `vX.Y.Z` release.
       - name: Publish the GitHub release
         if: ${{ !inputs.dry_run }}
         env:
