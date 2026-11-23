@@ -431,7 +431,7 @@ func (s *StoreSuite) TestTheSameCustomerWritingARowAgainUnderItsIdIsNotAnError()
 func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
 	at := s.base.Add(time.Hour)
 	writes := map[string]func() error{
-		"Sessions.Close":          func() error { return s.store.Sessions.Close(s.ctx, "", "one", at, "hangup") },
+		"Sessions.Close":          func() error { return s.store.Sessions.Close(s.ctx, "", "one", time.Time{}, at, "hangup") },
 		"Sessions.SetToolTimeout": func() error { return s.store.Sessions.SetToolTimeout(s.ctx, "", "one", "user", 5_000) },
 		"Sessions.SawVideo":       func() error { return s.store.Sessions.SawVideo(s.ctx, "", "one") },
 		"Sessions.Voiced":         func() error { return s.store.Sessions.Voiced(s.ctx, "", "one") },

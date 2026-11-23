@@ -154,13 +154,13 @@ func (s *StoreSuite) ranTool(session *AgentSession, tool string, at time.Time, t
 
 func (s *StoreSuite) TestThePeakIsTheMostSessionsOpenAtOnce() {
 	s.opened("first", "acme", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "first", s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "first", time.Time{}, s.base.Add(10*time.Minute), ""))
 	s.opened("second", "acme", s.base.Add(2*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "second", s.base.Add(5*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "second", time.Time{}, s.base.Add(5*time.Minute), ""))
 	s.opened("third", "acme", s.base.Add(3*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "third", s.base.Add(4*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "third", time.Time{}, s.base.Add(4*time.Minute), ""))
 	s.opened("later", "acme", s.base.Add(20*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "later", s.base.Add(21*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "later", time.Time{}, s.base.Add(21*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -171,9 +171,9 @@ func (s *StoreSuite) TestThePeakIsTheMostSessionsOpenAtOnce() {
 
 func (s *StoreSuite) TestASessionThatClosedAsAnotherOpenedDidNotOverlapIt() {
 	s.opened("before", "acme", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "before", s.base.Add(time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "before", time.Time{}, s.base.Add(time.Minute), ""))
 	s.opened("after", "acme", s.base.Add(time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "after", s.base.Add(2*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "after", time.Time{}, s.base.Add(2*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)

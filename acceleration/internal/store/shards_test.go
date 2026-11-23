@@ -80,7 +80,7 @@ func (s *ShardedStoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 
 func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnce() {
 	s.opened("chat", "app", s.base, func(session *AgentSession) { session.Title = "before" })
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base.Add(time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(time.Minute), ""))
 	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", Title: "after", CreatedAt: s.base}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
 
@@ -91,12 +91,102 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnce() {
 	s.Equal(SessionRunning, sessions[0].State)
 }
 
+// carriedOn writes what a router of the other shard writes of session id of "app" when it
+// carries the session on there, having opened it at opened.
+func (s *ShardedStoreSuite) carriedOn(id string, opened time.Time) {
+	carried := &AgentSession{ID: id, CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user",
+		CreatedAt: s.base, OpenedAt: opened, Remembers: new(false)}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+	s.Require().NoError(s.other.Sessions.Supersede(s.ctx, "app", id, opened))
+}
+
+// answered records a turn of session id of "app" ending at, in into's shard.
+func (s *ShardedStoreSuite) answered(into *Store, id string, at time.Time) {
+	response := id + "-" + at.Format(time.RFC3339)
+	s.Require().NoError(into.Responses.Insert(s.ctx, &AgentResponse{ID: response, SessionID: id, CustomerID: "app", CreatedAt: at}))
+	s.Require().NoError(into.Responses.Finish(s.ctx, "app", response, ResponseCompleted, "", at))
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnceOnEveryPageWithItsPin() {
+	s.opened("chat", "app", s.base, nil)
+	_, err := s.store.Sessions.Pin(s.ctx, "app", "chat", true, s.base)
+	s.Require().NoError(err)
+	s.answered(s.store, "chat", s.base.Add(10*time.Minute))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(11*time.Minute), ""))
+	// Answered between chat's last answer here and its first there, so on pages of one session
+	// each of chat's two rows falls on a page of its own.
+	s.opened("other", "app", s.base.Add(15*time.Minute), nil)
+	s.answered(s.store, "other", s.base.Add(20*time.Minute))
+	s.carriedOn("chat", s.base.Add(25*time.Minute))
+	s.answered(s.other, "chat", s.base.Add(30*time.Minute))
+
+	var listed []AgentSession
+	filter := SessionFilter{Limit: 1}
+	for range 5 {
+		page, err := s.store.Sessions.Select(s.ctx, "app", filter)
+		s.Require().NoError(err)
+		s.Require().NotEmpty(page)
+		listed = append(listed, page[0])
+		if len(page) == 1 {
+			break
+		}
+		filter.Cursor = after(page[0])
+	}
+	s.Equal([]string{"chat", "other"}, sessionIDs(listed), "once, by the row it runs in")
+	s.NotNil(listed[0].PinnedAt, "pinned before it was carried on")
+	s.Equal(SessionRunning, listed[0].State)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsFoundAsItIsThereFromTheShardItLeft() {
+	s.opened("chat", "app", s.base, nil)
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(time.Minute), "left"))
+	s.carriedOn("chat", s.base.Add(time.Hour))
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "chat")
+	s.Require().NoError(err)
+	s.Equal(SessionRunning, found.State, "the row it runs in, not the one it left closed here")
+	s.Nil(found.ClosedAt)
+	s.Empty(found.EndReason)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardKeepsWhatItsRowHereSaid() {
+	s.opened("chat", "app", s.base, func(session *AgentSession) {
+		session.Modality = ModalityVoice
+		session.Remembers = new(true)
+	})
+	s.answered(s.store, "chat", s.base.Add(10*time.Minute))
+	s.changed("chat", "review_score = ?", 4)
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(11*time.Minute), ""))
+	s.carriedOn("chat", s.base.Add(time.Hour))
+
+	found, err := s.other.Sessions.Get(s.ctx, "app", "chat")
+	s.Require().NoError(err)
+	s.Equal(SessionRunning, found.State)
+	s.Require().NotNil(found.LastResponseAt, "it sorts by its last answer, not by when it began")
+	s.True(found.LastResponseAt.Equal(s.base.Add(10 * time.Minute)))
+	s.Require().NotNil(found.ReviewScore)
+	s.Equal(4, *found.ReviewScore)
+	s.Equal(ModalityVoice, found.Modality, "a session spoken in stays a voice one")
+	s.Require().NotNil(found.Remembers)
+	s.True(*found.Remembers, "deleting it still forgets what it taught the memory store")
+}
+
+func (s *ShardedStoreSuite) TestALateRowFromARouterThatHeldASessionEarlierHidesNoRowOpenedSince() {
+	s.opened("chat", "app", s.base, func(session *AgentSession) { session.OpenedAt = s.base.Add(2 * time.Hour) })
+	// The other shard's write of a run before the one here, landing after it.
+	s.carriedOn("chat", s.base.Add(time.Hour))
+
+	var here AgentSession
+	s.Require().NoError(s.store.shard.NewSelect().Model(&here).Where("id = ?", "chat").Scan(s.ctx))
+	s.Nil(here.SupersededAt, "the run opened here since is still listed")
+}
+
 func (s *ShardedStoreSuite) TestSessionsOpenInTwoShardsAtOnceAreOnePeak() {
 	s.opened("here", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "here", s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "here", time.Time{}, s.base.Add(10*time.Minute), ""))
 	there := &AgentSession{ID: "there", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base.Add(5 * time.Minute)}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, there))
-	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "there", s.base.Add(20*time.Minute), ""))
+	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "there", time.Time{}, s.base.Add(20*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "app", s.base.Add(-time.Hour), s.base.Add(time.Hour))
 	s.Require().NoError(err)

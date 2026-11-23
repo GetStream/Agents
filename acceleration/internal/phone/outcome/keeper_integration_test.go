@@ -126,7 +126,7 @@ func (s *KeeperSuite) sessionClosed(at time.Time, reason string) {
 	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: s.call.CallID, CustomerID: s.call.CustomerID,
 	}))
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, s.call.CustomerID, s.call.CallID, at, reason))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, s.call.CustomerID, s.call.CallID, time.Time{}, at, reason))
 }
 
 func (s *KeeperSuite) placed() string {

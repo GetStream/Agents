@@ -329,7 +329,7 @@ func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOp
 	row := s.row()
 	s.records.Opened(row, nil)
 
-	s.records.Closed("other-"+s.customer, row.ID, time.Now().UTC(), TimeoutHangup)
+	s.records.Closed("other-"+s.customer, row.ID, row.OpenedAt, time.Now().UTC(), TimeoutHangup)
 	s.Require().NoError(s.records.Flush(s.bounded()))
 
 	got, err := s.store.Sessions.Get(s.ctx, s.customer, row.ID)
@@ -337,6 +337,32 @@ func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOp
 	s.Nil(got.ClosedAt, "the session is still open")
 	s.Equal(store.SessionRunning, got.State)
 	s.Empty(got.EndReason)
+}
+
+func (s *RecordFlushSuite) TestACloseQueuedByTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
+	row := s.row()
+	row.OpenedAt = row.CreatedAt.Truncate(time.Microsecond)
+	s.records.Opened(row, nil)
+	s.Require().NoError(s.records.Flush(s.bounded()))
+	// Another router carries the session on while the close of this one is still queued.
+	reopening := newSessionRecorder(s.store, slog.New(slog.DiscardHandler))
+	s.T().Cleanup(reopening.Close)
+	reopened := row
+	reopened.OpenedAt = row.OpenedAt.Add(time.Minute)
+	reopening.CarriedOn(reopened, nil)
+	s.Require().NoError(reopening.Flush(s.bounded()))
+
+	s.records.Closed(s.customer, row.ID, row.OpenedAt, time.Now().UTC(), TimeoutHangup)
+	s.Require().NoError(s.records.Flush(s.bounded()))
+	got, err := s.store.Sessions.Get(s.ctx, s.customer, row.ID)
+	s.Require().NoError(err)
+	s.Nil(got.ClosedAt, "the run that carried it on has not ended")
+
+	reopening.Closed(s.customer, row.ID, reopened.OpenedAt, time.Now().UTC(), TimeoutHangup)
+	s.Require().NoError(reopening.Flush(s.bounded()))
+	got, err = s.store.Sessions.Get(s.ctx, s.customer, row.ID)
+	s.Require().NoError(err)
+	s.NotNil(got.ClosedAt, "the router running it closes it")
 }
 
 func (s *RecordFlushSuite) TestTheItemsOfATurnWhoseIdIsAnotherCustomersAreNotWritten() {
@@ -456,9 +482,9 @@ func (s *RecordFlushSuite) TestEndsThatCannotBeStoredAreCountedOnceTheRetriesRun
 	callsLost := testutil.ToFloat64(recordsLost.WithLabelValues(lostCallEnd))
 
 	start := time.Now()
-	records.Closed(s.customer, rand.Text(), time.Now().UTC(), TimeoutHangup)
+	records.Closed(s.customer, rand.Text(), time.Now().UTC(), time.Now().UTC(), TimeoutHangup)
 	// Refused before it reaches the database, which says nothing about whether it is back.
-	records.Closed("", rand.Text(), time.Now().UTC(), TimeoutHangup)
+	records.Closed("", rand.Text(), time.Now().UTC(), time.Now().UTC(), TimeoutHangup)
 	(&callRecorder{records: records}).Ended(s.customer, rand.Text(), time.Now().UTC())
 	// Bounded well past one retry budget, so a slow runner is not read as a hang.
 	ctx, cancel := context.WithTimeout(s.ctx, 3*recordRetryFor)
@@ -510,7 +536,7 @@ func (s *RecordFlushSuite) TestEveryWriteCutOffByADroppedConnectionIsStored() {
 	}, {
 		name: "a session ending",
 		queue: func(r *sessionRecorder, rows cutRows) {
-			r.Closed(s.customer, rows.session.ID, time.Now().UTC(), TimeoutHangup)
+			r.Closed(s.customer, rows.session.ID, rows.session.OpenedAt, time.Now().UTC(), TimeoutHangup)
 		},
 		check: func(rows cutRows) { s.NotNil(s.sessionOf(rows.session.ID).ClosedAt) },
 	}, {
@@ -641,7 +667,7 @@ func (s *RecordFlushSuite) TestAnEndQueuedWhileTheDatabaseIsBrieflyDownAfterAnOu
 	// A blip: down when the end is first tried, up again for its retry.
 	proxy.setDown(true)
 	refused := proxy.refused.Load()
-	records.Closed(s.customer, row.ID, time.Now().UTC(), TimeoutHangup)
+	records.Closed(s.customer, row.ID, row.OpenedAt, time.Now().UTC(), TimeoutHangup)
 	s.Require().Eventually(func() bool { return proxy.refused.Load() > refused }, settleFor, time.Millisecond,
 		"the end was never tried while the database was down")
 	proxy.setDown(false)
@@ -658,7 +684,7 @@ func (s *RecordFlushSuite) TestEndsAFullQueueDropsAreCounted() {
 	sessionsLost := testutil.ToFloat64(recordsLost.WithLabelValues(lostSessionEnd))
 	callsLost := testutil.ToFloat64(recordsLost.WithLabelValues(lostCallEnd))
 
-	s.records.Closed(s.customer, rand.Text(), time.Now().UTC(), TimeoutHangup)
+	s.records.Closed(s.customer, rand.Text(), time.Now().UTC(), time.Now().UTC(), TimeoutHangup)
 	(&callRecorder{records: s.records}).Ended(s.customer, rand.Text(), time.Now().UTC())
 
 	s.Equal(int64(2), s.records.Dropped(), "the queue was not full")
