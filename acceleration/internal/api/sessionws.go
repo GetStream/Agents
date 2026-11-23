@@ -383,8 +383,7 @@ type watcherCommand struct {
 //
 // It returns nil once a command closed the session, errUnreadableFrame for a frame that is not
 // a command, and the read's own error when the connection ended. closing is set before a close
-// command is applied, unless the session had already left the manager: then its end was not
-// the command's.
+// command that ends the session is applied (closesSession).
 func (s *Server) readCommands(
 	connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller, closing *atomic.Bool,
 ) error {
@@ -407,14 +406,21 @@ func (s *Server) readCommands(
 			return errUnreadableFrame
 		}
 		if command.Type == "close" {
-			_, held := s.sessions.Get(found.ID(), seat.Owner)
-			closing.Store(held)
+			closing.Store(s.closesSession(found, seat.Owner))
 		}
 
 		if !s.applyCommand(found, seat, sender, command) {
 			return nil
 		}
 	}
+}
+
+// closesSession is whether a close command from owner ends found: the manager still holds it.
+// A session that already left the manager was ended by something else, which a close command
+// sent as its end crossed it only follows.
+func (s *Server) closesSession(found *session.Session, owner session.Owner) bool {
+	_, held := s.sessions.Get(found.ID(), owner)
+	return held
 }
 
 // errNoApprovalWaits answers a tool_approval no call waits for.

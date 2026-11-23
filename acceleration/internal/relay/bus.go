@@ -109,6 +109,8 @@ type Response struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 	// Halted is a Closed for a session the holder's router stopped on its way down.
 	Halted bool `json:"halted,omitempty"`
+	// ByCommand is a Closed for a session that a close command from the watcher ended.
+	ByCommand bool `json:"by_command,omitempty"`
 }
 
 // Options configures a Bus.

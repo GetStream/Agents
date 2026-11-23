@@ -117,6 +117,18 @@ func (s *SocketCloseLogSuite) TestARelayedCloseCommandAfterTheSessionEndedIsTheS
 	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 ")
 }
 
+func (s *SocketCloseLogSuite) TestARelayedCloseCommandAheadOfTheEndItFollowedIsTheSessionsEnd() {
+	// Catches the end judged on the socket's node: the holder's word of the end may reach it
+	// after a close command the caller sent once the session had ended.
+	opened, connection, id := s.watched(s.other)
+
+	s.serverClient.stopSession(opened.Id)
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "close"}))
+	_, _ = s.socketEnd(connection)
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 ")
+}
+
 func (s *SocketCloseLogSuite) TestAStopOnTheVoiceSocketAfterTheSessionEndedIsTheSessionsEnd() {
 	connection, session, id := s.socketSession()
 
