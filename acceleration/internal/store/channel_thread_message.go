@@ -60,11 +60,11 @@ func (r *ChannelThreadMessages) Claim(ctx context.Context, channelID, kind, mess
 	return claimChannelThreadMessage(ctx, r.store.global, channelID, kind, messageID)
 }
 
-// Release forgets a claim, so the step that took it can take it again: a reply whose send
-// failed is sent on a later attempt.
-func (r *ChannelThreadMessages) Release(ctx context.Context, channelID, kind, messageID string) error {
+// ReleaseReply forgets the claim of a reply, so the step that took it can take it again: a
+// reply whose send failed is sent on a later attempt.
+func (r *ChannelThreadMessages) ReleaseReply(ctx context.Context, channelID, messageID string) error {
 	_, err := r.store.global.NewDelete().Model((*channelThreadMessage)(nil)).
-		Where("channel_id = ? AND kind = ? AND message_id = ?", channelID, kind, messageID).
+		Where("channel_id = ? AND kind = ? AND message_id = ?", channelID, ClaimReply, messageID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: release channel thread message: %w", err))
