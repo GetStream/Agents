@@ -244,16 +244,24 @@ func (s *DataMoveSuite) TestAnExportIsNotWrittenOverAnAppThatHoldsDataWhenFullIs
 
 // Defect: an app whose only rows here are opt-outs had an import refused without full.
 func (s *DataMoveSuite) TestAnAppHoldingOnlyAnOptOutImportsWithoutFull() {
-	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
-		CustomerID: s.customerID(), Recipient: "+15550001112", Channel: "sms", Source: "keyword",
-	}))
+	ctx := context.Background()
+	s.Require().NoError(s.store.OptOuts.Insert(ctx, &store.OptOut{CustomerID: s.customerID(), Recipient: "+15550001112", Channel: "sms", Source: "keyword"}))
 	exported := s.export()
+	for i, line := range exported {
+		if line.Table == "opt_outs" {
+			exported[i].Row = s.withID(line.Row, store.NewID())
+		}
+	}
+	s.useApp(s.data.createApp()) // has made no request, so no activity row
+	s.Require().NoError(s.store.OptOuts.Insert(ctx, &store.OptOut{CustomerID: s.customerID(), Recipient: "+15550001113", Channel: "sms", Source: "keyword"}))
 
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(exported), nil))
 
-	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+15550001112", "sms")
-	s.Require().NoError(err)
-	s.True(optedOut)
+	for _, recipient := range []string{"+15550001112", "+15550001113"} {
+		optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), recipient, "sms")
+		s.Require().NoError(err)
+		s.True(optedOut, recipient)
+	}
 }
 
 // A lookup that fails is not an answer that the app holds nothing: the export is not written.
