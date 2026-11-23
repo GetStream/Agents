@@ -3295,7 +3295,9 @@ func (s *ScheduledTasksSuite) TestATaskTextedBySMSCarriesTheFileItsCodeMade() {
 	s.Equal("sms", run.DeliveredTo)
 	s.Require().Eventually(func() bool { return len(s.sink.mediaTo(writer)) > 0 },
 		10*time.Second, 50*time.Millisecond, "no file was texted to %s", writer)
-	s.Equal([]string{"Done."}, s.sink.to(writer))
+	// The words of both rounds, as the conversation keeps them and a thread task texts them
+	// (reportReply).
+	s.Equal([]string{"Done.\n\nDone."}, s.sink.to(writer))
 	s.Equal([]string{report}, s.sink.mediaTo(writer))
 }
 
@@ -3328,7 +3330,7 @@ func (s *ScheduledTasksSuite) TestATaskWhoseFileTheLineRefusesTextsItsWordsOnce(
 	run := s.delivered(s.tasksOf(user)[0])
 	s.Equal("sms", run.DeliveredTo)
 	s.Never(func() bool { return len(s.sink.to(writer)) > 1 }, dropped, 20*time.Millisecond, "texted once")
-	s.Equal([]string{"Done."}, s.sink.to(writer))
+	s.Equal([]string{"Done.\n\nDone."}, s.sink.to(writer), "the words of both rounds, as the conversation keeps them")
 	s.Empty(s.sink.mediaTo(writer), "the file was refused")
 }
 
@@ -3819,7 +3821,7 @@ func (s *ScheduledTasksSuite) TestATurnCancelledBeforeItsReplyRunsAgainOnTheRetr
 	task, found := s.onWhatsApp(writer, "whatsapp")
 	run := s.manualRun(task)
 	_, err := s.cutOff(s.router, task, run, found.Interrupt)
-	s.Equal(scheduling.ReasonNoReply, scheduling.ReasonOf(err), "%v", err)
+	s.Equal(scheduling.ReasonReplyFailed, scheduling.ReasonOf(err), "%v", err)
 
 	deliveredTo, err := s.deliverRun(task, run)
 
@@ -3856,7 +3858,7 @@ func (s *ScheduledTasksSuite) TestATurnWhoseProviderBrokeAsItWasCancelledRunsAga
 		}
 	})
 	_, err := s.cutOff(s.router, task, run, found.Interrupt)
-	s.Equal(scheduling.ReasonNoReply, scheduling.ReasonOf(err), "%v", err)
+	s.Equal(scheduling.ReasonReplyFailed, scheduling.ReasonOf(err), "%v", err)
 	state, _, _ := found.FollowUpReply(command)
 	s.Equal("cancelled", state)
 
