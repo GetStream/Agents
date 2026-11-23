@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,43 @@ func (s *ActivityKeySuite) TestOnlyAnActivityKeyInItsOwnHeaderReadsActivity() {
 			}
 		})
 	}
+}
+
+// Defect: a key compared by its length, its prefix or without its case: a key of the right
+// length with other bytes, the key in upper case, one byte off and one byte longer each read
+// activity, or with the ops key, the 10DLC use cases.
+func (s *ActivityKeySuite) TestAKeyCloseToTheRightOneIsRefused() {
+	near := func(key string) map[string]string {
+		return map[string]string{
+			"other bytes":   strings.Repeat("x", len(key)),
+			"upper case":    strings.ToUpper(key),
+			"one byte off":  key[:len(key)-1] + "x",
+			"one byte more": key + "x",
+		}
+	}
+	for name, held := range map[string]struct{ header, key string }{
+		"activity key":          {activityKeyHeader, suiteActivityKey},
+		"previous activity key": {activityKeyHeader, suitePreviousActivityKey},
+		"ops key":               {opsKeyHeader, suiteOpsKey},
+	} {
+		for change, key := range near(held.key) {
+			s.Run(name+" "+change, func() {
+				caller := s.holding(held.header, key)
+				for _, path := range append(s.activityPaths(), "/v1/ops/use-cases") {
+					s.refused(caller, http.MethodGet, path, "")
+				}
+			})
+		}
+	}
+	// Control: each key as it is reads them.
+	for _, held := range []struct{ header, key string }{
+		{activityKeyHeader, suiteActivityKey}, {activityKeyHeader, suitePreviousActivityKey}, {opsKeyHeader, suiteOpsKey},
+	} {
+		for _, path := range s.activityPaths() {
+			s.Equal(http.StatusOK, s.holding(held.header, held.key).do(http.MethodGet, path, nil, nil), held.header+" "+path)
+		}
+	}
+	s.Equal(http.StatusOK, s.holding(opsKeyHeader, suiteOpsKey).do(http.MethodGet, "/v1/ops/use-cases", nil, nil))
 }
 
 // Defect: the activity key reaching a staff route that is not an activity read, a write
