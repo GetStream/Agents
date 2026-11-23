@@ -121,6 +121,32 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnceOnEve
 	s.carriedOn("chat", s.base.Add(25*time.Minute))
 	s.answered(s.other, "chat", s.base.Add(30*time.Minute))
 
+	listed := s.pagesOfOne()
+	s.Equal([]string{"chat", "other"}, sessionIDs(listed), "once, by the row it runs in")
+	s.NotNil(listed[0].PinnedAt, "pinned before it was carried on")
+	s.Equal(SessionRunning, listed[0].State)
+}
+
+func (s *ShardedStoreSuite) TestALateReopenWrittenInTheShardASessionLeftKeepsItListedOnce() {
+	s.opened("chat", "app", s.base, nil)
+	s.answered(s.store, "chat", s.base.Add(10*time.Minute))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(11*time.Minute), ""))
+	s.opened("other", "app", s.base.Add(15*time.Minute), nil)
+	s.answered(s.store, "other", s.base.Add(20*time.Minute))
+	s.carriedOn("chat", s.base.Add(25*time.Minute))
+	s.answered(s.other, "chat", s.base.Add(30*time.Minute))
+
+	// A router of this shard reopened it before it was carried on there, and the row of that
+	// reopen lands only now. Its supersede comes next, and may fail.
+	late := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user",
+		CreatedAt: s.base, OpenedAt: s.base.Add(12 * time.Minute)}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, late))
+
+	s.Equal([]string{"chat", "other"}, sessionIDs(s.pagesOfOne()), "listed by the row it runs in alone")
+}
+
+// pagesOfOne lists the sessions of "app" one to a page, following each page's cursor.
+func (s *ShardedStoreSuite) pagesOfOne() []AgentSession {
 	var listed []AgentSession
 	filter := SessionFilter{Limit: 1}
 	for range 5 {
@@ -133,9 +159,7 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnceOnEve
 		}
 		filter.Cursor = after(page[0])
 	}
-	s.Equal([]string{"chat", "other"}, sessionIDs(listed), "once, by the row it runs in")
-	s.NotNil(listed[0].PinnedAt, "pinned before it was carried on")
-	s.Equal(SessionRunning, listed[0].State)
+	return listed
 }
 
 func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsFoundAsItIsThereFromTheShardItLeft() {
@@ -207,14 +231,16 @@ func (s *ShardedStoreSuite) withAShardDown(own string, up ...string) *Store {
 	return router
 }
 
-func (s *ShardedStoreSuite) TestALateRowFromARouterThatHeldASessionEarlierHidesNoRowOpenedSince() {
+func (s *ShardedStoreSuite) TestALateRowFromARouterThatHeldASessionEarlierLeavesItListedOnceByTheRunOpenedSince() {
 	s.opened("chat", "app", s.base, func(session *AgentSession) { session.OpenedAt = s.base.Add(2 * time.Hour) })
+	s.answered(s.store, "chat", s.base.Add(3*time.Hour))
+	s.opened("other", "app", s.base.Add(time.Minute), nil)
 	// The other shard's write of a run before the one here, landing after it.
 	s.carriedOn("chat", s.base.Add(time.Hour))
 
-	var here AgentSession
-	s.Require().NoError(s.store.shard.NewSelect().Model(&here).Where("id = ?", "chat").Scan(s.ctx))
-	s.Nil(here.SupersededAt, "the run opened here since is still listed")
+	listed := s.pagesOfOne()
+	s.Equal([]string{"chat", "other"}, sessionIDs(listed), "listed by the row of the run opened since alone")
+	s.Equal(SessionRunning, listed[0].State)
 }
 
 func (s *ShardedStoreSuite) TestSessionsOpenInTwoShardsAtOnceAreOnePeak() {

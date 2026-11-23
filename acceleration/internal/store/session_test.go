@@ -513,6 +513,21 @@ func (s *StoreSuite) TestACloseFromTheRouterThatHeldASessionBeforeItWasReopenedL
 	s.NotNil(found.ClosedAt, "the router running it closes it")
 }
 
+func (s *StoreSuite) TestALateReopenAndItsCloseLeaveTheRunOpenedSinceOpen() {
+	late, again := s.base.Add(time.Hour), s.base.Add(2*time.Hour)
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = s.base })
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = again })
+	// The router that reopened it before then, its writes held up behind a slow one.
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt, session.Title = late, "late" })
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", late, late.Add(time.Minute), "left"))
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Nil(found.ClosedAt, "the run carried on since has not ended")
+	s.True(found.OpenedAt.Equal(again), "the row went back to the run before")
+	s.Empty(found.Title)
+}
+
 func (s *StoreSuite) TestDescribingASessionLongAfterItEnded() {
 	s.opened("one", "app", s.base, nil)
 	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", time.Time{}, s.base.Add(time.Hour), ""))
