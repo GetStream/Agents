@@ -762,6 +762,16 @@ class VisionAgentsTest {
     }
 
     @Test
+    fun `a guest printed shows who they are, never their token`() = runTest {
+        router.answer = { Reply(201, """{"id":"guest-1","token":"tok-guest-secret","name":"Ada","expires_at":"2999-01-01T00:00:00Z"}""") }
+
+        val printed = agents.guestUser(GuestOptions(name = "Ada")).toString()
+
+        assertFalse("tok-guest-secret" in printed, printed)
+        assertTrue("guest-1" in printed && "Ada" in printed && "[redacted]" in printed, printed)
+    }
+
+    @Test
     fun `a minted guest has its refresh secret remembered`() = runTest {
         val store = FileGuestStore(File(Files.createTempDirectory("guest").toFile(), "guest.json"))
         router.answer = { Reply(201, """{"id":"guest-1","token":"tok","refresh_secret":"s1"}""") }

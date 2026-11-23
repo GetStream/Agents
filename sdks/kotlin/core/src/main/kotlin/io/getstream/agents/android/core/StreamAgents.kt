@@ -33,6 +33,29 @@ public class StreamAgents(public val backend: Backend) : AutoCloseable {
     /** The reminders and later work agents hold for this user. */
     public val scheduledTasks: ScheduledTasks = ScheduledTasks(backend)
 
+    /**
+     * What the model is told when one of the app's tools throws, in place of the error's message.
+     *
+     * Left null, the message goes to the model as it is, which is how it can say something useful
+     * about a tool that did not work, and is why a tool may throw words meant for it. The model
+     * may repeat it to the person, and the conversation keeps it, and an error from a library a
+     * tool calls can name an internal host, a table or a value from a record. The safe hook passes
+     * on only an error of the app's own, thrown with words meant for the model, and says something
+     * plain for anything else. Either way it is cut to 1,024 characters, and a hook that throws
+     * tells the model only that the tool failed.
+     *
+     *     class ToolError(message: String) : Exception(message)
+     *
+     *     agents.onToolError = { call, error -> if (error is ToolError) error.message.orEmpty() else "${call.name} failed" }
+     *
+     * It covers every session of this client, those already open included.
+     */
+    public var onToolError: ((call: AgentEvent.ToolCall, error: Throwable) -> String)?
+        get() = backend.onToolError
+        set(value) {
+            backend.onToolError = value
+        }
+
     /** Says who this device is acting for, and how to prove it. See [Backend.setUser]. */
     public fun setUser(user: User, token: TokenProvider): Unit = backend.setUser(user, token)
 
