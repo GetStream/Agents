@@ -841,6 +841,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### The Decart example uses a supported Callum voice
+
+The runnable example and README now use Callum - Husky Trickster, the recommended replacement for the ElevenLabs default voice that expires on December 31, 2026.
+
 ### Connecting one line twice at once no longer fails
 
 Two connects of the same channel line at the same moment could fail one of them on a unique violation. Both now get the same line.
