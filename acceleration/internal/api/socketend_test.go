@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -61,6 +63,47 @@ func (s *SocketEndSuite) TestARequestThatOpenedNoSocketLogsNoCloseReason() {
 
 	s.Contains(line, `msg="served a request"`)
 	s.False(strings.Contains(line, "close_"), line)
+}
+
+// brokenSocket is the router's side of a real socket whose connection is closed under it in
+// both directions, so the next write to it fails.
+func (s *SocketEndSuite) brokenSocket() *websocket.Conn {
+	upgraded := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		s.Require().NoError(err)
+		upgraded <- connection
+		<-r.Context().Done()
+	}))
+	s.T().Cleanup(server.Close)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	s.Require().NoError(err)
+	routerSide := <-upgraded
+	s.Require().NoError(client.UnderlyingConn().Close())
+	s.Require().NoError(routerSide.UnderlyingConn().Close())
+	return routerSide
+}
+
+func (s *SocketEndSuite) TestAnEventTheCallerCannotBeSentIsClientGone() {
+	// Catches a failed write left with no reason.
+	events := make(chan session.Event, 1)
+	events <- agent.Said{TurnID: "a-turn", Text: "hello"}
+	server := &Server{logger: slog.New(slog.DiscardHandler)}
+
+	ended := server.writeEvents(s.brokenSocket(), events, wanted{}, make(chan error), endingOf(resuming{}, func() bool { return false }))
+
+	s.Equal(socketEnd{cause: clientGone}, ended)
+}
+
+func (s *SocketEndSuite) TestARelayedFrameTheCallerCannotBeSentIsClientGone() {
+	socket := &remoteSocket{frames: make(chan json.RawMessage, 1), closed: make(chan struct{})}
+	socket.frames <- json.RawMessage(`{"type":"said"}`)
+	server := &Server{logger: slog.New(slog.DiscardHandler)}
+
+	ended := server.writeRelayedEvents(s.brokenSocket(), nil, socket, "a-watcher", "a-session", wanted{}, make(chan error),
+		endingOf(resuming{}, func() bool { return false }))
+
+	s.Equal(socketEnd{cause: clientGone}, ended)
 }
 
 func (s *SocketEndSuite) TestACloseFrameIsTheCallersCloseWithItsCode() {

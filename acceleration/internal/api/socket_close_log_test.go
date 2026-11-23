@@ -137,6 +137,44 @@ func (s *SocketCloseLogSuite) TestAStopOnTheVoiceSocketAfterTheSessionEndedIsThe
 	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 end_reason=closed ")
 }
 
+// commandThenTheEnd sends a command other than close, waits for the session's answer to it,
+// then stops the session.
+func (s *SocketCloseLogSuite) commandThenTheEnd(connection *websocket.Conn, session string) {
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "not-a-command"}))
+	s.await(connection, "error")
+	s.serverClient.stopSession(session)
+	_, _ = s.socketEnd(connection)
+}
+
+func (s *SocketCloseLogSuite) TestAnotherCommandBeforeTheSessionEndsIsNotTheCallersClose() {
+	// Catches any command taken for a close command.
+	opened, connection, id := s.watched(nil)
+
+	s.commandThenTheEnd(connection, opened.Id)
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 end_reason=closed ")
+}
+
+func (s *SocketCloseLogSuite) TestAnotherRelayedCommandBeforeTheSessionEndsIsNotTheCallersClose() {
+	opened, connection, id := s.watched(s.other)
+
+	s.commandThenTheEnd(connection, opened.Id)
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 ")
+}
+
+func (s *SocketCloseLogSuite) TestAudioOnTheVoiceSocketAfterTheSessionEndedIsTheSessionsEnd() {
+	// Catches audio the agent can no longer hear taken for a connection that broke.
+	connection, session, id := s.socketSession()
+
+	s.serverClient.stopSession(session)
+	s.awaitRouterClose(connection)
+	s.Require().NoError(connection.WriteMessage(websocket.BinaryMessage, make([]byte, 640)))
+	s.Require().NoError(connection.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")))
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 end_reason=closed ")
+}
+
 func (s *SocketCloseLogSuite) TestACloseCommandIsTheCallersClose() {
 	// Catches the session's end, which the command causes before the reader stops, logged in
 	// place of the command.
