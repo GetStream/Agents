@@ -1355,12 +1355,11 @@ WHERE customer_id <> ? AND released_at IS NULL AND vendor <> 'sip_trunk' AND %s 
 	return nil
 }
 
-// importableDefinition refuses an imported definition the API would not have stored, and
-// gives the row the manifest as the API would have stored it, so no field this release does
-// not read arrives for one that does. Every imported definition is a custom one, since the
-// customer is forced onto the row (identity) and importRow refuses an import with no customer, and only the API's rules keep a custom manifest
-// from naming the operator's client or anything else the router would trust a built-in with
-// (core.Manifest.AsCustom).
+// importableDefinition refuses an imported definition the API would not have stored, and gives the row the manifest as
+// the API would have stored it, so no field this release does not read arrives for one that does. Every imported
+// definition is a custom one, since the customer is forced onto the row (identity) and importRow refuses an import with
+// no customer, and only the API's rules keep a custom manifest from naming the operator's client or anything else the
+// router would trust a built-in with (core.Manifest.AsCustom).
 func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
