@@ -234,6 +234,7 @@ jobs:
         run: xcrun simctl shutdown "$SIMULATOR" || true
 
       - name: Build swift_demo
+        id: build-demo
         working-directory: examples/voice_agents/swift_demo/app
         timeout-minutes: 10
         run: |
@@ -241,11 +242,12 @@ jobs:
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/SwiftDemoDerivedData" build
 
       # Saved even when a test fails, so a red run still leaves the next one a warm cache. Not
-      # from a cancelled run or a failed core build, whose fetch may have stopped half way: a
-      # key once saved is restored as is and never saved again.
+      # from a cancelled run, a failed core build or a failed swift_demo build, whose fetch
+      # may have stopped half way: a key once saved is restored as is and never saved again.
       - uses: actions/cache/save@v4
         if: >-
           !cancelled() && steps.packages.outcome == 'success' && steps.build-core.outcome == 'success'
+          && steps.build-demo.outcome != 'failure'
           && steps.packages.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/spm
