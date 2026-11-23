@@ -1141,6 +1141,16 @@ func (s *Session) FollowUpReply(id string) (state, text string, known bool) {
 	return s.persisted.FollowUpReply(id)
 }
 
+// FollowUpFailure is the error the reply to the follow-up under id failed on
+// (persistent.Conversation.FollowUpFailure). The conversation records it before any watcher is
+// sent the agent.Error (consume), and a watcher that has fallen behind never gets that event.
+func (s *Session) FollowUpFailure(id string) error {
+	if s.persisted == nil {
+		return nil
+	}
+	return s.persisted.FollowUpFailure(id)
+}
+
 // FollowUpFinished is the reply to the follow-up under id as the conversation told it once it
 // finished, with its files (persistent.Conversation.FollowUpFinished).
 func (s *Session) FollowUpFinished(id string) persistent.FinishedReply {

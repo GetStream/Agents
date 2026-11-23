@@ -497,19 +497,16 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		ended := false
 		select {
 		case <-ctx.Done():
 			return "", nil, ctx.Err()
 		case event, open := <-events:
 			if !open {
-				return captured(said, files)
+				ended = true
+				break
 			}
 			active, last = true, time.Now()
-			// A turn the organization may not pay for ends with the model's refusal, which no
-			// reply follows: the run records the money, not an agent that said nothing.
-			if refusal := turnRefusal(event); refusal != nil {
-				return "", nil, refusal
-			}
 			if text := spokenOf(event); text != "" && (len(said) == 0 || said[len(said)-1] != text) {
 				said = append(said, text)
 			}
@@ -519,12 +516,15 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 			if found.Busy() {
 				active = true
 			}
-			switch {
-			case time.Now().After(deadline):
-				return captured(said, files)
-			case active && !found.Busy() && time.Since(last) >= scheduledReplySettle:
-				return captured(said, files)
-			}
+			ended = time.Now().After(deadline) || active && !found.Busy() && time.Since(last) >= scheduledReplySettle
+		}
+		// A turn the organization may not pay for ends with the model's refusal, which no reply
+		// follows: the run records the money, not an agent that said nothing.
+		if refusal := turnRefusal(found, delivery.CommandID); refusal != nil {
+			return "", nil, refusal
+		}
+		if ended {
+			return captured(said, files)
 		}
 	}
 }
@@ -545,36 +545,33 @@ func (s *Server) followUpInConversation(ctx context.Context, found *session.Sess
 	_, _, known := found.FollowUpReply(delivery.CommandID)
 	events, detach := found.Watch()
 	defer detach()
-	if err := s.followUpWithin(ctx, found, delivery); err != nil || known {
+	if err := s.followUpWithin(ctx, found, delivery); err != nil {
 		return err
+	}
+	if known {
+		return turnRefusal(found, delivery.CommandID)
 	}
 	deadline := time.Now().Add(scheduledReplyWindow)
 	ticker := time.NewTicker(s.replyPoll)
 	defer ticker.Stop()
 	for {
+		// An event or a tick is when to look: how the turn ended is read from the conversation,
+		// which records it before the session sends watchers the event (Session.consume), so a
+		// watcher that has fallen behind and lost it still settles the same.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case event, open := <-events:
+		case _, open := <-events:
 			if !open {
 				return nil
 			}
-			if refusal := turnRefusal(event); refusal != nil {
-				return refusal
-			}
-			// The conversation records the agent.Error that fails a turn before the session sends
-			// it to watchers (Session.consume), so the turn has failed by now if it was this one.
-			if _, erred := event.(agent.Error); erred {
-				if state, _, _ := found.FollowUpReply(delivery.CommandID); replyEnded(state) {
-					return nil
-				}
-			}
 		case <-ticker.C:
-			// A failed turn is told by its agent.Error, which says whether it was the money.
-			state, _, _ := found.FollowUpReply(delivery.CommandID)
-			if state != "failed" && replyEnded(state) || time.Now().After(deadline) {
-				return nil
-			}
+		}
+		if state, _, _ := found.FollowUpReply(delivery.CommandID); replyEnded(state) {
+			return turnRefusal(found, delivery.CommandID)
+		}
+		if time.Now().After(deadline) {
+			return nil
 		}
 	}
 }
@@ -596,14 +593,14 @@ type turnRefused struct{ error }
 
 func (e turnRefused) Unwrap() error { return e.error }
 
-// turnRefusal is the failure a text turn's event ends it with, when the event is the model's
-// refusal for money (unpaid), and nil otherwise: any other agent.Error, such as a tool's, leaves
-// the turn running.
-func turnRefusal(event session.Event) error {
-	if failed, erred := event.(agent.Error); erred {
-		if _, refused := moneyError(failed.Err); refused {
-			return unpaid(turnRefused{failed.Err})
-		}
+// turnRefusal is the failure the reply to the follow-up under id in found ends with, when the
+// conversation records it failed on the model's refusal for money (unpaid), and nil otherwise:
+// a reply still running, one that ended any other way, or a failure a watcher alone was told of,
+// such as a tool's (Session.Report), which leaves the turn running.
+func turnRefusal(found *session.Session, id string) error {
+	failure := found.FollowUpFailure(id)
+	if _, refused := moneyError(failure); refused {
+		return unpaid(turnRefused{failure})
 	}
 	return nil
 }
@@ -663,6 +660,11 @@ func (s *Server) readBackReply(ctx context.Context, found *session.Session, id s
 			}
 			return reply, nil
 		case "cancelled", "interrupted", "failed":
+			// A turn the organization may not pay for failed on the model's refusal: the run records
+			// the money, as the attempt that ran the turn would have.
+			if refusal := turnRefusal(found, id); refusal != nil {
+				return conversation.FinishedReply{}, refusal
+			}
 			return conversation.FinishedReply{}, undelivered(scheduling.ReasonReplyFailed, fmt.Errorf("the reply to this occurrence was %s", state))
 		}
 		if time.Now().After(deadline) {

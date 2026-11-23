@@ -162,6 +162,10 @@ type commandRecord struct {
 	// Heard is what the voice note sent with the command said, for a retry to carry rather
 	// than hear it again (CheckBegin).
 	Heard string `json:",omitempty"`
+	// Failure is the error the agent.Error that failed the command's reply carried
+	// (FollowUpFailure). It is kept in memory only: a conversation opened again reads no
+	// failure back.
+	Failure error `json:"-"`
 }
 
 var ErrCommandNotFound = errors.New("command not found")
@@ -2021,6 +2025,12 @@ func (c *Conversation) Observe(event agent.Event) {
 		// Only the screen's refusal names a turn, and only this reply's is about it.
 		if e.TurnID != "" && c.acceptTurn(e.TurnID, false) {
 			refuse(m)
+		}
+		// Kept beside the state, so a delivery reads why the reply failed without watching for
+		// this event, which a watcher that has fallen behind never gets.
+		if record, ok := c.data.Commands[m.CommandID]; ok {
+			record.Failure = e.Err
+			c.data.Commands[m.CommandID] = record
 		}
 		c.finish("failed")
 		return
