@@ -1688,10 +1688,8 @@ Writes go to this shard's database. Reads of one call, session or recording look
 shard, and lists merge every shard's rows, so a session carried on in another region is
 still one session. Each database runs the migration set it holds: `migrations/global` on the
 global one and `migrations/shard` on each shard's, both on the one database of a single node
-(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A database migrated
-before the sets were split kept every table; once every router runs a release with two sets,
-`router schema drop-strays` drops the empty ones of the other set. A socket for a session held in
-another shard is proxied to the node holding it, since that shard's relay is not this
+(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A socket for a session
+held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
