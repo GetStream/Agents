@@ -172,6 +172,8 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 			Endpoints: map[string]string{SourceKindMCP: "https://api.example.com/mcp"},
 			Sources:   []SourceRule{{Kind: SourceKindMCP, Endpoint: SourceKindMCP, HTTPTools: []HTTPTool{forecast()}}}},
 			`sources[0].http_tools: is set only on a source of kind http`},
+		"a second http source": {func() Manifest { m := httpManifest(forecast()); m.Sources = append(m.Sources, m.Sources[0]); return m }(),
+			`sources[1].kind: is http a second time`},
 		"http_tools on another kind": {withSource(func(r *SourceRule) { r.Kind = "rest" }), `sources[0].http_tools: is set only on a source of kind http`},
 	} {
 		s.ErrorContains(test.manifest.Validate(), test.refusal, name)
