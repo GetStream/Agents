@@ -17,9 +17,10 @@ import (
 // to make, never permission to make it.
 //
 // X-Stream-Client is the client itself (dashboard, cli, or an SDK's name and release such as
-// stream-agents-go-v0.3.0), which Stream's own clients already tag themselves with. The other two are the person behind it, which only a client
-// that signs its users in can know: the dashboard has the operator who clicked save, the
-// CLI has whoever ran it, and an SDK syncing on startup has nobody and says nothing.
+// stream-agents-go-v0.3.0), which Stream's own clients already tag themselves with. The other
+// two are the person behind it, which only a client that signs its users in can know: the
+// dashboard has the operator who clicked save, the CLI has whoever ran it, and an SDK syncing
+// on startup has nobody and says nothing.
 const (
 	clientHeader    = "X-Stream-Client"
 	actorIDHeader   = "X-Stream-Actor-Id"
