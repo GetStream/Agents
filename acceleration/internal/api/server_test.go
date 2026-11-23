@@ -408,6 +408,31 @@ func (s *ServerSuite) TestAProviderShowsTheTokenRatesItIsBilledAt() {
 	s.Nil(prices["stub/stub-model"], "a model billed by no token has no token rates")
 }
 
+func (s *ServerSuite) TestAnSTSProviderListsItsVoicesAndOtherModalitiesLeaveThemOut() {
+	var stsProviders []Provider
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodGet, "/v1/sts/providers", nil, &stsProviders))
+
+	s.Require().Len(stsProviders, 1)
+	s.Require().Len(stsProviders[0].Voices, 2)
+	s.Equal("alpha", stsProviders[0].Voices[0].Id)
+	s.Equal("Alpha", stsProviders[0].Voices[0].Name)
+	s.Equal(pointerTo("Warm, natural"), stsProviders[0].Voices[0].Description)
+	s.Equal(pointerTo("female"), stsProviders[0].Voices[0].Gender)
+	s.Equal(pointerTo(true), stsProviders[0].Voices[0].Default)
+	s.Equal("beta", stsProviders[0].Voices[1].Id)
+	s.Nil(stsProviders[0].Voices[1].Default)
+
+	status, raw := s.serverClient.call(http.MethodGet, "/v1/llm/providers", nil)
+	s.Require().Equal(http.StatusOK, status)
+	var llmProviders []map[string]any
+	s.Require().NoError(json.Unmarshal(raw, &llmProviders))
+	s.Require().NotEmpty(llmProviders)
+	for _, provider := range llmProviders {
+		s.NotContains(provider, "voices", "non-STS providers omit voices")
+	}
+}
+
 func (s *ServerSuite) TestAModelThatServedRequestsHasAShareOfThem() {
 	var providers []Provider
 	s.Require().Equal(http.StatusOK,
