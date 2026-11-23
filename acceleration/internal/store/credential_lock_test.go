@@ -609,6 +609,53 @@ func (s *StoreSuite) TestACustomersLockSlotIsGivenBackHoweverItsLockEnds() {
 	s.Zero(closed.lockSlots.callersOf("acme-app"), "a lock that got no connection gives its slot back")
 }
 
+// panicsOnValue is a context whose Value panics once armed, as a driver or query hook that
+// reads a context value can: the seam for a panic inside the lock's own statements.
+type panicsOnValue struct {
+	context.Context
+	armed *atomic.Bool
+}
+
+func (c panicsOnValue) Value(key any) any {
+	if c.armed.Load() {
+		panic("context value")
+	}
+	return c.Context.Value(key)
+}
+
+func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheLockStatementPanics() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+	armed := new(atomic.Bool)
+	armed.Store(true)
+
+	s.Panics(func() {
+		_ = router.ConnectorConnections.WithLocked(panicsOnValue{s.ctx, armed}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) {
+				s.Fail("a lock that panicked never runs the callback")
+				return false, nil
+			})
+	})
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic while taking the lock gives the slot back")
+	s.Zero(router.lockSlots.customersLocking())
+}
+
+func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheUnlockStatementPanics() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+	armed := new(atomic.Bool)
+
+	s.Panics(func() {
+		_ = router.ConnectorConnections.WithLocked(panicsOnValue{s.ctx, armed}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) {
+				armed.Store(true)
+				return false, nil
+			})
+	})
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic while unlocking gives the slot back")
+	s.Zero(router.lockSlots.customersLocking())
+}
+
 // deadlinePassedUnsaid is a context whose deadline has passed but which does not say so yet:
 // a context.WithDeadline whose timer has not run, as on a busy machine.
 type deadlinePassedUnsaid struct{ context.Context }
