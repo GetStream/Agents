@@ -9,6 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -21,6 +24,37 @@ const recordQueueSize = 1024
 
 // recordWriteTimeout bounds a single write so a stuck database cannot wedge the writer.
 const recordWriteTimeout = 5 * time.Second
+
+// recordRetryFor bounds how long one write is tried again after a failure that may pass, so
+// a database that stays down holds the single writer, and the rows queued behind it, no
+// longer than a failover takes. recordRetryFirst is the wait before the first retry, doubled
+// each time up to recordRetryMost.
+const (
+	recordRetryFor   = 10 * time.Second
+	recordRetryFirst = 50 * time.Millisecond
+	recordRetryMost  = time.Second
+)
+
+// The writes recordsLost counts, a fixed set.
+const (
+	lostSessionEnd = "session_ended"
+	lostCallEnd    = "call_ended"
+	lostItems      = "items"
+)
+
+var recordsLost = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "session_records_lost_total",
+	Help: "Session records the writer could not store after retrying, by write: session_ended and call_ended " +
+		"(the row stays open), and items (dropped because their session or response row was never stored)",
+}, []string{"write"})
+
+// The series exist from the start, so a rate over the first loss reads it.
+func init() {
+	for _, write := range []string{lostSessionEnd, lostCallEnd, lostItems} {
+		recordsLost.WithLabelValues(write)
+	}
+}
 
 // itemFlushEvery is how long a partial batch of items waits for company.
 //
@@ -144,6 +178,10 @@ type sessionRecorder struct {
 	// another customer's: their items are not written under it. Kept by the writer alone, and
 	// each until its turn ends.
 	refused map[string]struct{}
+	// failing is set, by the writer alone, once a write ran out of retries, and cleared by the
+	// next that succeeds. Meanwhile each write is tried once: a database that stays down
+	// would otherwise hold every queued write, and Close behind them, for a whole budget each.
+	failing bool
 }
 
 func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecorder {
@@ -274,6 +312,13 @@ func (r *sessionRecorder) queueWrite(write recordWrite) {
 	case r.queue <- write:
 	default:
 		r.dropped.Add(1)
+		// An end dropped here leaves its row open, as one the store refused does.
+		switch {
+		case write.closed != "":
+			recordsLost.WithLabelValues(lostSessionEnd).Inc()
+		case write.callEnded != "":
+			recordsLost.WithLabelValues(lostCallEnd).Inc()
+		}
 	}
 }
 
@@ -383,28 +428,33 @@ func (w *flushWaiters) release(taken int) {
 }
 
 func (r *sessionRecorder) write(write recordWrite) {
-	ctx, cancel := context.WithTimeout(context.Background(), recordWriteTimeout)
-	defer cancel()
-
 	switch {
 	case write.session != nil:
-		if err := r.store.Sessions.Upsert(ctx, write.session); err != nil {
+		if err := r.attempt(func(ctx context.Context) error { return r.store.Sessions.Upsert(ctx, write.session) }); err != nil {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
-		if err := r.store.SessionTools.Upsert(ctx, write.session.CustomerID, write.session.ID, write.tools); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.SessionTools.Upsert(ctx, write.session.CustomerID, write.session.ID, write.tools)
+		}); err != nil {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.offered != "":
-		if err := r.store.SessionTools.Upsert(ctx, write.customerID, write.offered, write.tools); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.SessionTools.Upsert(ctx, write.customerID, write.offered, write.tools)
+		}); err != nil {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.closed != "":
-		if err := r.store.Sessions.Close(ctx, write.customerID, write.closed, write.closedAt, write.endReason); err != nil {
-			r.logger.Error("could not record the session ending", "error", err)
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Sessions.Close(ctx, write.customerID, write.closed, write.closedAt, write.endReason)
+		}); err != nil {
+			// The row stays open, read as live and counted in every concurrency peak.
+			recordsLost.WithLabelValues(lostSessionEnd).Inc()
+			r.logger.Error("could not record the session ending", "session", write.closed, "error", err)
 		}
 	case write.response != nil:
-		err := r.store.Responses.Insert(ctx, write.response)
+		err := r.attempt(func(ctx context.Context) error { return r.store.Responses.Insert(ctx, write.response) })
 		if errors.Is(err, store.ErrIDTaken) {
 			r.refused[write.response.ID] = struct{}{}
 		}
@@ -413,12 +463,16 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.finished != "":
 		delete(r.refused, write.finished)
-		if err := r.store.Responses.Finish(ctx, write.customerID, write.finished, write.status, write.failure, write.finishedAt); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Responses.Finish(ctx, write.customerID, write.finished, write.status, write.failure, write.finishedAt)
+		}); err != nil {
 			r.logger.Error("could not record the turn ending", "error", err)
 		}
 	case write.described != nil:
 		d := write.described
-		err := r.store.Sessions.Describe(ctx, d.customerID, d.id, d.title, d.description, d.custom)
+		err := r.attempt(func(ctx context.Context) error {
+			return r.store.Sessions.Describe(ctx, d.customerID, d.id, d.title, d.description, d.custom)
+		})
 		if errors.Is(err, store.ErrNoSession) {
 			// The conversation is named after it ran, so the customer may have deleted it by
 			// then. Nothing is lost: the title had nothing left to name.
@@ -428,33 +482,45 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.chose != nil:
 		c := write.chose
-		if err := r.store.Sessions.ChooseConnection(ctx, c.customerID, c.id, c.name, c.connectionID); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Sessions.ChooseConnection(ctx, c.customerID, c.id, c.name, c.connectionID)
+		}); err != nil {
 			r.logger.Error("could not record the connection a login chose", "session", c.id, "error", err)
 		}
 	case write.timed != nil:
 		t := write.timed
-		if err := r.store.Sessions.SetToolTimeout(ctx, write.customerID, t.id, t.kind, t.milliseconds); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Sessions.SetToolTimeout(ctx, write.customerID, t.id, t.kind, t.milliseconds)
+		}); err != nil {
 			r.logger.Error("could not record the session's tool timeout", "session", t.id, "error", err)
 		}
 	case write.sawVideo != "":
-		if err := r.store.Sessions.SawVideo(ctx, write.customerID, write.sawVideo); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Sessions.SawVideo(ctx, write.customerID, write.sawVideo)
+		}); err != nil {
 			r.logger.Error("could not record the session's video", "session", write.sawVideo, "error", err)
 		}
 	case write.voiced != "":
-		if err := r.store.Sessions.Voiced(ctx, write.customerID, write.voiced); err != nil {
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Sessions.Voiced(ctx, write.customerID, write.voiced)
+		}); err != nil {
 			r.logger.Error("could not record the session's voice", "session", write.voiced, "error", err)
 		}
 	case write.callStarted != nil:
-		if err := r.store.Calls.Start(ctx, write.callStarted); err != nil {
+		if err := r.attempt(func(ctx context.Context) error { return r.store.Calls.Start(ctx, write.callStarted) }); err != nil {
 			r.logger.Error("could not record the call starting", "error", err)
 		}
 	case write.callChanged != nil:
-		if err := r.store.Calls.ChangeModels(ctx, write.callChanged); err != nil {
+		if err := r.attempt(func(ctx context.Context) error { return r.store.Calls.ChangeModels(ctx, write.callChanged) }); err != nil {
 			r.logger.Error("could not record the call changing models", "error", err)
 		}
 	case write.callEnded != "":
-		if err := r.store.Calls.Finish(ctx, write.customerID, write.callEnded, write.callEndedAt); err != nil {
-			r.logger.Error("could not record the call ending", "error", err)
+		if err := r.attempt(func(ctx context.Context) error {
+			return r.store.Calls.Finish(ctx, write.customerID, write.callEnded, write.callEndedAt)
+		}); err != nil {
+			// The call stays open, its minutes growing, as a session left open does.
+			recordsLost.WithLabelValues(lostCallEnd).Inc()
+			r.logger.Error("could not record the call ending", "call", write.callEnded, "error", err)
 		}
 	}
 }
@@ -463,14 +529,69 @@ func (r *sessionRecorder) writeItems(items []store.AgentResponseItem) {
 	if len(items) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), recordWriteTimeout)
-	defer cancel()
-
 	// The slice is copied because the caller reuses its buffer, and the write outlives the
 	// call that handed it over only by as long as this statement takes.
 	batch := append([]store.AgentResponseItem(nil), items...)
-	if err := r.store.ResponseItems.InsertMany(ctx, batch); err != nil {
-		r.logger.Error("could not record what a turn did", "error", err, "items", len(batch))
+	err := r.attempt(func(ctx context.Context) error { return r.store.ResponseItems.InsertMany(ctx, batch) })
+	if !store.IsForeignKeyViolation(err) {
+		if err != nil {
+			r.logger.Error("could not record what a turn did", "error", err, "items", len(batch))
+		}
+		return
+	}
+	// The batch holds the items of every turn, and an item's key is its response, so one
+	// whose response row was never written would fail all of them: each turn's are written
+	// on their own instead. A batch of one turn already had its answer.
+	var responses []string
+	byResponse := map[string][]store.AgentResponseItem{}
+	for _, item := range batch {
+		if _, seen := byResponse[item.ResponseID]; !seen {
+			responses = append(responses, item.ResponseID)
+		}
+		byResponse[item.ResponseID] = append(byResponse[item.ResponseID], item)
+	}
+	for _, response := range responses {
+		own := byResponse[response]
+		if len(responses) > 1 {
+			err = r.attempt(func(ctx context.Context) error { return r.store.ResponseItems.InsertMany(ctx, own) })
+		}
+		switch {
+		case store.IsForeignKeyViolation(err):
+			recordsLost.WithLabelValues(lostItems).Add(float64(len(own)))
+			r.logger.Warn("dropped what a turn did: its response was never recorded",
+				"session", own[0].SessionID, "response", response, "items", len(own))
+		case err != nil:
+			r.logger.Error("could not record what a turn did", "session", own[0].SessionID, "response", response,
+				"error", err, "items", len(own))
+		}
+	}
+}
+
+// attempt runs do until it succeeds, fails for a reason another try would not change, or
+// recordRetryFor has passed. It retries in place, holding the writes queued behind it: a
+// session or response row lost to a dropped connection or a failover would fail the foreign
+// key of every later row of its conversation, and the queue's order is what keeps those
+// keys whole. While failing, a write is tried once.
+func (r *sessionRecorder) attempt(do func(context.Context) error) error {
+	deadline := time.Now().Add(recordRetryFor)
+	wait := recordRetryFirst
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), min(time.Until(deadline), recordWriteTimeout))
+		err := do(ctx)
+		cancel()
+		if err == nil || !store.Transient(err) {
+			// Only a write that succeeded says the database is back.
+			if err == nil {
+				r.failing = false
+			}
+			return err
+		}
+		if r.failing || time.Until(deadline) < wait {
+			r.failing = true
+			return err
+		}
+		time.Sleep(wait)
+		wait = min(2*wait, recordRetryMost)
 	}
 }
 
