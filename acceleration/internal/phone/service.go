@@ -1118,6 +1118,40 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	}
 	callID, callType := sessionID, defaultCallType
 
+	// The call is kept, and counted against the calls its organization may have at once, before
+	// anything is made at Stream for it: a call the count refuses costs nothing there.
+	// Only a vendor the router can be reached by can post how the call ended. A call through
+	// a customer's own trunk is told by the router's own bridge.
+	_, reader := provider.(StatusReader)
+	reports := reader && s.publicURL != ""
+	token, err := s.outcomes.PlacedWithin(ctx, outcome.Call{
+		Key: outcome.Key{
+			CustomerID: request.Owner.CustomerID, StreamAppPK: pin, CallType: callType, CallID: callID,
+			Local: request.From, Remote: request.To,
+		},
+		Vendor:  held.Vendor,
+		Reports: reports || trunk != nil,
+	}, room.OrganizationID, room.AtOnce)
+	if errors.Is(err, store.ErrCallsAtOnce) {
+		return Placed{}, room.Refusal(err)
+	}
+	if err != nil {
+		// Nothing was asked of the vendor, so nobody was rung.
+		return Placed{}, stack.Wrap(fmt.Errorf("%w: %w", ErrNotPlaced, err))
+	}
+	// Until the dial, whose failures forget it themselves, a call that goes no further is
+	// forgotten here: it never rang.
+	forget := true
+	defer func() {
+		if forget {
+			s.forgetOutcome(ctx, token, callID)
+		}
+	}()
+	// Its leg counts against the organization it was placed under once it is dialled too.
+	if request.Owner.OrganizationID == "" {
+		request.Owner.OrganizationID = room.OrganizationID
+	}
+
 	line, shared, err := s.sharedLine(ctx, stream, pin, provider, held)
 	if err != nil {
 		return Placed{}, stack.Wrap(err)
@@ -1201,21 +1235,6 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		}
 	}
 
-	// Only a vendor the router can be reached by can post how the call ended. A call through
-	// a customer's own trunk is told by the router's own bridge.
-	_, reader := provider.(StatusReader)
-	reports := reader && s.publicURL != ""
-	token, err := s.outcomes.PlacedWithin(ctx, outcome.Call{
-		Key: outcome.Key{
-			CustomerID: request.Owner.CustomerID, StreamAppPK: pin, CallType: callType, CallID: callID,
-			Local: request.From, Remote: request.To,
-		},
-		Vendor:  held.Vendor,
-		Reports: reports || trunk != nil,
-	}, room.OrganizationID, room.AtOnce)
-	if err != nil {
-		return Placed{}, room.Refusal(err)
-	}
 	if reports {
 		outbound.StatusURL = s.publicURL + "/v1/phone/status/" + token
 	}
@@ -1249,6 +1268,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		StreamAppPK: pin,
 		Shared:      shared,
 	}
+	forget = false
 	// A shared line outlives the call, so its row costs nothing to undo when the dial fails,
 	// and the call's app (CallPin) is known before its leg arrives.
 	if shared {
@@ -1533,8 +1553,8 @@ func callBridgeAAD(customerID, token string) []byte {
 	return []byte("call_bridges/" + customerID + "/" + token)
 }
 
-// ErrNotPlaced is a call whose context ended before the vendor was asked to dial it: nobody
-// was rung.
+// ErrNotPlaced is a call the vendor was never asked to dial, its context ended or its placing
+// failed: nobody was rung.
 var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,

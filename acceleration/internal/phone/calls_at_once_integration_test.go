@@ -56,7 +56,8 @@ func (s *OutcomeSuite) TestFiftyCallsPlacedAtOnceRingNoMoreThanTheTierAllows() {
 	for range 50 {
 		wg.Go(func() {
 			_, err := s.service.Call(s.ctx, CallRequest{
-				Owner: routing.Owner{CustomerID: s.customer, OrganizationID: organization}, From: s.e164, To: "+15125550123",
+				// As the campaign dialer and the API send it: the organization is admission's.
+				Owner: routing.Owner{CustomerID: s.customer, Attribution: routing.Attribution{APIKey: "key"}}, From: s.e164, To: "+15125550123",
 			})
 			if err == nil {
 				return

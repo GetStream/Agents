@@ -127,8 +127,10 @@ func (l CallLeg) Used() pricing.Quantities {
 // CallLegs are the legs of phone calls, each on the shard that opened it.
 type CallLegs struct {
 	store *Store
-	// stripes are the turns PlaceWithin waits for, an organization's always the same one.
+	// stripes are the turns PlaceWithin waits for, an organization's always the same one, and
+	// placings the places of the placements under way, at most placingAtOnce.
 	stripes     [placingStripes]chan struct{}
+	placings    chan struct{}
 	stripesOnce sync.Once
 }
 
@@ -155,9 +157,14 @@ func (r *CallLegs) Open(ctx context.Context, leg *CallLeg) (bool, error) {
 		leg.StartedAt = &started
 	}
 	if leg.Token != "" {
+		kept := []string{"id", "token_hash", "reports", "placed_at", "answered_at", "outcome_ended_at", "outcome", "vendor_status", "decided_at"}
+		if leg.OrganizationID == "" {
+			// The organization the leg was placed and counted under, when the dial names none.
+			kept = append(kept, "organization_id")
+		}
 		var dialed []CallLeg
 		err := r.store.shard.NewUpdate().Model(leg).
-			ExcludeColumn("id", "token_hash", "reports", "placed_at", "answered_at", "outcome_ended_at", "outcome", "vendor_status", "decided_at").
+			ExcludeColumn(kept...).
 			Where("token_hash = ?", callTokenHash(leg.Token)).Where("dialed_at IS NULL").
 			Returning("*").Scan(ctx, &dialed)
 		if err != nil {
@@ -728,8 +735,18 @@ type CallsAtOnce struct {
 // under, one at a time.
 const callsAtOnceLockSeed = 1907
 
-// placingStripes is how many organizations a router counts and places calls for at once.
+// placingStripes is how many turns organizations are hashed onto: an organization always
+// waits on the same one, and two organizations on one wait for each other.
 const placingStripes = 64
+
+// placingAtOnce is how many placements a router has under way at once, each holding a
+// connection of the shared database's pool (maxConns) while it counts and places, so a stalled
+// shard can hold up only these and never the pool every request needs.
+const placingAtOnce = 8
+
+// placingFor bounds a placement once it holds its lock, so one stalled on a shard gives up
+// its connection and its organization's turn rather than hold them for as long as its caller waits.
+const placingFor = 3 * time.Second
 
 // PlaceWithin is Place for a leg of leg.OrganizationID that only its calls at once leave room
 // for: it counts the organization's open legs in every shard and keeps leg, or refuses it with
@@ -744,21 +761,26 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 		return stack.Wrap(validate("call leg").required("organization_id", leg.OrganizationID).done())
 	}
 	// A campaign tick places many calls of one organization at once, and each waiting on the
-	// advisory lock holds a connection of the shared database's pool; waiting here first keeps a
-	// router to one per organization, so a burst cannot take the pool every request needs.
+	// advisory lock holds a connection of the shared database's pool: waiting here first keeps a
+	// router to one per organization, and to placingAtOnce in all.
 	release, err := r.placing(ctx, leg.OrganizationID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
 	}
 	defer release()
+	ctx, cancel := context.WithTimeout(ctx, placingFor)
+	defer cancel()
+	// This shard's count and insert run in the lock's own transaction when the shard is the
+	// shared database, so the step never waits on a second connection of the pool it holds one of.
+	// Otherwise the insert commits on the shard before the lock's transaction does.
+	shared := r.store.shard == r.store.global
+	inserted := false
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
 			return err
 		}
-		// This shard's count and insert run in the lock's own transaction when the shard is the
-		// shared database, so the step never waits on a second connection of the pool it holds one of.
 		var own bun.IDB = r.store.shard
-		if r.store.shard == r.store.global {
+		if shared {
 			own = tx
 		}
 		dbs := append([]bun.IDB{own}, r.store.shards()[1:]...)
@@ -780,11 +802,23 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 		if open >= atOnce.Limit {
 			return ErrCallsAtOnce
 		}
-		_, err := own.NewInsert().Model(leg).Returning("id").Exec(ctx)
-		return err
+		if _, err := own.NewInsert().Model(leg).Returning("id").Exec(ctx); err != nil {
+			return err
+		}
+		inserted = true
+		return nil
 	})
 	if errors.Is(err, ErrCallsAtOnce) {
 		return stack.Wrap(ErrCallsAtOnce)
+	}
+	if err != nil && inserted && !shared {
+		// The shard kept the leg but the lock's commit failed, so the caller dials nothing: the
+		// leg would hold a call of the organization's for as long as it could ring.
+		gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
+		if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
+			err = errors.Join(err, derr)
+		}
+		stop()
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
@@ -792,21 +826,28 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 	return nil
 }
 
-// placing waits for this router's turn to count and place a call of organization, until ctx
-// ends, and returns what gives the turn up.
+// placing waits for this router's turn to count and place a call of organization, then for a
+// place among the placements under way, until ctx ends, and returns what gives both up.
 func (r *CallLegs) placing(ctx context.Context, organization string) (func(), error) {
 	r.stripesOnce.Do(func() {
 		for i := range r.stripes {
 			r.stripes[i] = make(chan struct{}, 1)
 		}
+		r.placings = make(chan struct{}, placingAtOnce)
 	})
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(organization)) // a hash.Hash never fails to write
 	stripe := r.stripes[h.Sum32()%placingStripes]
 	select {
 	case stripe <- struct{}{}:
-		return func() { <-stripe }, nil
 	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case r.placings <- struct{}{}:
+		return func() { <-r.placings; <-stripe }, nil
+	case <-ctx.Done():
+		<-stripe
 		return nil, ctx.Err()
 	}
 }
