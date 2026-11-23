@@ -462,32 +462,13 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	spec.Custom["channel_from"] = message.From
 
 	created, err := s.sessions.Create(ctx, spec)
+	if err == nil && identity.ConversationID == "" {
+		created, err = s.recordConversation(ctx, created, spec, &identity, logger)
+	}
 	if err != nil {
 		logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
 			"agent", config.Name, "error", err)
 		return
-	}
-	// The conversation a session opened is the one the next message carries on, so it is
-	// recorded before the turn rather than after: a turn that fails halfway still leaves the
-	// person's history where they can see it.
-	if identity.ConversationID == "" {
-		opened := created.Spec().ConversationID
-		identity.ConversationID = opened
-		if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
-			logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
-		} else if identity.ConversationID != opened {
-			// Another router opened one for this person's first message at the same time and
-			// recorded it first: this message goes on in that one, which is what continues.
-			if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
-				logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
-			}
-			spec.ConversationID = identity.ConversationID
-			if created, err = s.sessions.Create(ctx, spec); err != nil {
-				logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
-					"agent", config.Name, "error", err)
-				return
-			}
-		}
 	}
 	// The session ends with the message it answered, which is what saves the conversation:
 	// the next message reopens it by its id rather than starting over.
@@ -510,6 +491,29 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 		logger.Error("the agent could not take a channel message", "session", created.ID(), "error", err)
 	}
 	<-sending
+}
+
+// recordConversation records the conversation a person's first message opened, and returns
+// the session the message goes on in. It is recorded before the turn rather than after: a turn
+// that fails halfway still leaves the person's history where they can see it.
+func (s *Service) recordConversation(ctx context.Context, created *session.Session, spec session.Spec,
+	identity *store.ContactMapEntry, logger *slog.Logger) (*session.Session, error) {
+	opened := created.Spec().ConversationID
+	identity.ConversationID = opened
+	if err := s.store.ContactMapEntries.Upsert(ctx, identity); err != nil {
+		logger.Error("could not record a channel conversation", "agent", spec.AgentName, "error", err)
+		return created, nil
+	}
+	if identity.ConversationID == opened {
+		return created, nil
+	}
+	// Another router opened one for this person's first message at the same time and recorded
+	// it first: this message goes on in that one, which is what continues.
+	if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
+		logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
+	}
+	spec.ConversationID = identity.ConversationID
+	return s.sessions.Create(ctx, spec)
 }
 
 // identify is who the number writing belongs to, and false when nobody is to be answered.

@@ -723,7 +723,11 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWhoseAgentIsGoneIsRefused() 
 	config := s.config("echo/local-model")
 	ctx := context.Background()
 	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, config))
-	s.Require().NoError(s.store.AgentConfigs.Delete(ctx, s.customerID(), config))
+	// A delete refuses a config a number answers with, so the row is marked deleted as a
+	// router from before that refusal left it.
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").Set("deleted_at = now()").
+		Where("id = ?", config).Exec(ctx)
+	s.Require().NoError(err)
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 
