@@ -535,6 +535,7 @@ TABLE connector_definitions
     manifest jsonb NOT NULL
     name text NOT NULL
     revision integer NOT NULL
+    sync_hash text NOT NULL DEFAULT ''::text
     CONSTRAINT connector_definitions_custom_prefix CHECK (((customer_id = ''::text) <> starts_with(id, 'custom_'::text)))
     CONSTRAINT connector_definitions_pkey PRIMARY KEY (customer_id, id, revision)
     CONSTRAINT connector_definitions_revision_check CHECK ((revision >= 1))
@@ -1094,6 +1095,7 @@ TABLE router_configs
     search jsonb NOT NULL DEFAULT '{}'::jsonb
     sts jsonb NOT NULL DEFAULT '{}'::jsonb
     stt jsonb NOT NULL DEFAULT '{}'::jsonb
+    sync_hash text NOT NULL DEFAULT ''::text
     tts jsonb NOT NULL DEFAULT '{}'::jsonb
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT router_configs_pkey PRIMARY KEY (id)
