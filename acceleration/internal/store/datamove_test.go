@@ -1443,9 +1443,13 @@ func (s *DataMoveSuite) TestAMovedVoiceArrivesWithoutItsSamplesOrBindings() {
 
 func (s *DataMoveSuite) TestAnImportOfAVoiceSampleOrBindingIsRefused() {
 	voice := s.seedVoice(s.destination, "moved", "narrator")
+	now := time.Now().UTC()
+	// Whole rows, as an export from before carried them.
 	rows := map[string]map[string]any{
-		"voice_samples":  {"id": newID(), "voice_id": voice, "object_key": "voices/moved/1.wav"},
-		"voice_bindings": {"id": newID(), "voice_id": voice, "provider": "elevenlabs", "external_id": "provider-voice-1", "state": VoiceReady},
+		"voice_samples": {"id": newID(), "voice_id": voice, "object_key": "voices/moved/1.wav",
+			"content_type": "audio/wav", "bytes": 1024, "transcript": "", "created_at": now},
+		"voice_bindings": {"id": newID(), "voice_id": voice, "provider": "elevenlabs", "external_id": "provider-voice-1",
+			"state": VoiceReady, "error": "", "created_at": now, "updated_at": now},
 	}
 	for table, row := range rows {
 		encoded, err := json.Marshal(row)
