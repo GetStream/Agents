@@ -120,23 +120,6 @@ func (r *BranchMessages) Select(ctx context.Context, customerID, sessionID strin
 	return distinct(all, func(m AgentBranchMessage) string { return m.OriginalMessageID }), nil
 }
 
-// Delete deletes every copy of a session's hidden messages, and answers how many it deleted.
-func (r *BranchMessages) Delete(ctx context.Context, customerID, sessionID string) (int64, error) {
-	if customerID == "" || sessionID == "" {
-		return 0, stack.Wrap(errors.New("store: a customer and a session id are required"))
-	}
-	deleted, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Exec(ctx)
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: delete branch messages: %w", err))
-	}
-	return deleted, nil
-}
-
 // DeleteUser deletes every copy of a hidden message in the sessions of an app's end user, on
 // every shard, and answers how many it deleted. The changes recorded of those copies are
 // emptied with them, since they hold the same words (forgottenCopies).
