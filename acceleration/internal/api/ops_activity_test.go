@@ -408,6 +408,28 @@ func (s *OpsActivitySuite) TestAnUnknownOrgIdOrAppIdIsAnEmptyPage() {
 	}
 }
 
+// Defect: an id check that takes only ASCII for an id, refusing (400) or never matching an
+// organization or app whose id holds other UTF-8, through the filters and through a cursor.
+func (s *OpsActivitySuite) TestAnOrgIdOrAppIdWithNonASCIIUTF8IsStillAccepted() {
+	day := daysAgo(300, 50)
+	org := store.Organization{ID: "org-é日本-" + s.utils.uuid()}
+	app := "app-ü😀-" + s.utils.uuid()
+	owner := testApp{organization: org}
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(owner, app, activity.AreaAgentSetup, store.AuditSourceCLI, day, 1, 0),
+		s.on(owner, app, activity.AreaWorkers, store.AuditSourceCLI, day, 1, 0),
+		s.on(owner, app, activity.AreaConversations, store.AuditSourceSDK, day, 1, 0),
+	}))
+
+	pages := s.walkFiltered(day, day, 1, "&org_id="+url.QueryEscape(org.ID)+"&app_id="+url.QueryEscape(app))
+
+	items, _ := listedOf(pages)
+	s.Len(pages, 3)
+	s.ElementsMatch([]string{
+		org.ID + "/" + app + "/agent_setup", org.ID + "/" + app + "/workers", org.ID + "/" + app + "/conversations",
+	}, items)
+}
+
 // Defect: a cursor read under another org_id, app_id, from or to than the page it came from,
 // which goes on from a position in rows the new filters do not read, answered rather than
 // refused; or one read under the same refused.
