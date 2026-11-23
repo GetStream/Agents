@@ -400,11 +400,9 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 	if err != nil {
 		return err
 	}
-	pgStore, err := openPriceStore(settings)
-	if err != nil {
-		return err
+	if settings.Postgres.DSN == "" {
+		return errors.New("this needs a database: set postgres.dsn")
 	}
-	defer pgStore.Close()
 	redis, err := forgetRedis(settings)
 	if err != nil {
 		return err
@@ -414,6 +412,17 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 			client.Close()
 		}
 	}()
+	// With the routers' Redis, so the policy deleted is dropped from what every router cached.
+	pgStore, err := store.OpenShards(store.Options{
+		DSN:      settings.Postgres.DSN,
+		ShardDSN: settings.Postgres.ShardDSN,
+		Shards:   settings.Postgres.Shards,
+		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+	})
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
 	run := forgetting{
 		store: pgStore, usage: client, redis: redis, app: *app, user: *user, actor: *actor,
 		replacement: *replacement, out: out,

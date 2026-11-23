@@ -60,7 +60,7 @@ const (
 	// Version is this SDK's release, the tag sdks/go/vX.Y.Z without its v. It is written
 	// here by hand at each release (see the sdk-go skill), because build info reads (devel)
 	// for any build not fetched by tag.
-	Version = "0.3.0"
+	Version = "0.5.1"
 	// UserAgent is what every request says this SDK is, which is how the router's request log
 	// tells which SDK, and which release of it, made a call.
 	UserAgent = "stream-agents-go/" + Version

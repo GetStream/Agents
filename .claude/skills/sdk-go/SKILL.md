@@ -120,12 +120,15 @@ is copied. While 0.x, a minor may break a signature; a patch only fixes.
    tagged commit's.
 3. Tag the commit that holds the change by its SHA, not whatever `main` is by then. Never
    create a GitHub Release for it: `release.yml` publishes the Python packages on a release.
+   Check its `Version` first, as below: the proxy takes a pushed tag before the workflow runs,
+   so a tag the workflow refuses stays public (`v0.5.0` did).
 
    ```bash
    set -euo pipefail   # a failed check below stops before the tag
    git fetch origin
    SHA=<the main commit>
    git merge-base --is-ancestor "$SHA" origin/main   # exits 0, else the script stops
+   git show "$SHA:sdks/go/stream/backend.go" | grep -q 'Version = "X.Y.Z"'   # the workflow's own check
    git tag sdks/go/vX.Y.Z "$SHA"
    git push origin sdks/go/vX.Y.Z
    ```
