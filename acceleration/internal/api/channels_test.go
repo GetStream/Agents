@@ -359,8 +359,11 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	}
 	defer allow()
 
-	s.Equal(http.StatusInternalServerError, s.deliver(line, writer, id, "Stop"),
-		"a STOP not recorded is the provider's to deliver again")
+	body := s.delivery(writer, id, "Stop")
+	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
+	s.Equal(http.StatusInternalServerError, status, "a STOP not recorded is the provider's to deliver again")
+	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
 	s.False(optedOut)
@@ -379,8 +382,8 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 }
 
 // A provider that hangs up on a slow delivery and delivers it again still leaves the person
-// opted out, confirmed once: the hang-up does not cut the write, and the second delivery
-// waits for the first instead of taking a message the first has not stored yet. A trigger
+// opted out, confirmed once: the hang-up does not cut the write, so the delivery hung up on
+// records the opt-out itself, and the second is answered as already taken. A trigger
 // makes the app's opt-out slower than the provider waits.
 func (s *ChannelsSuite) TestAStopWhoseDeliveryWasHungUpOnIsObeyed() {
 	number := s.number()
@@ -411,12 +414,14 @@ func (s *ChannelsSuite) TestAStopWhoseDeliveryWasHungUpOnIsObeyed() {
 	impatient := &http.Client{Timeout: 200 * time.Millisecond}
 	_, err = impatient.Do(request)
 	s.Require().Error(err, "the provider hangs up before the opt-out is stored")
+	s.Require().Eventually(func() bool {
+		optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+		s.Require().NoError(err)
+		return optedOut
+	}, settleFor, 50*time.Millisecond, "the STOP hung up on is recorded by its own delivery")
+	s.Contains(s.answer(writer), "unsubscribed")
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "Stop"))
-	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
-	s.Require().NoError(err)
-	s.True(optedOut, "the STOP hung up on is recorded")
-	s.Contains(s.answer(writer), "unsubscribed")
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
 	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 2))
 	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once")
@@ -454,8 +459,11 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	}
 	defer allow()
 
-	s.Equal(http.StatusInternalServerError, s.deliver(line, writer, id, "START"),
-		"a START not recorded is the provider's to deliver again")
+	body := s.delivery(writer, id, "START")
+	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
+	s.Equal(http.StatusInternalServerError, status, "a START not recorded is the provider's to deliver again")
+	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
 	s.True(optedOut)
