@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -659,6 +660,38 @@ func TestRedactLogTextReadsALongJSONTextInTime(t *testing.T) {
 			got := RedactLogText(text)
 			require.Less(t, time.Since(started), 5*time.Second)
 			require.True(t, json.Valid([]byte(got)))
+		})
+	}
+}
+
+// A JSON text costs about what the rules cost on it as plain text: a string that holds JSON is
+// read as JSON one level deep only, and a string with no escape is read by the rules once. The
+// rows are a string holding JSON 16 levels deep around a payload of 1 MB, and 1 MB of short
+// strings that each hold a keyword and a value.
+func TestRedactLogTextAllocatesForAJSONTextAboutWhatTheRulesDo(t *testing.T) {
+	nested := `{"password":"x","m":"` + strings.Repeat("key=Ab1 ", 1<<17) + `"}`
+	for range 16 {
+		quoted, err := json.Marshal(nested)
+		require.NoError(t, err)
+		nested = `{"output":` + string(quoted) + `}`
+	}
+	allocated := func(redact func(string) string, text string) uint64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		redact(text)
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	for name, text := range map[string]string{
+		"string in string": nested,
+		"short strings":    `[` + strings.Repeat(`"key=Ab1",`, 100000) + `1]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, json.Valid([]byte(text)))
+			rules := allocated(redactCredentialShapes, text)
+			read := allocated(RedactLogText, text)
+			require.Less(t, read, 3*rules, "%d bytes for JSON, %d for the rules", read, rules)
 		})
 	}
 }

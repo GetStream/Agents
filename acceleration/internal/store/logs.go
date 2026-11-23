@@ -216,7 +216,7 @@ func holdsWord(text string, words []string) bool {
 // as JSON (redactJSONText), so it is JSON still; any other text goes through the rules.
 func redactCredentials(text string) string {
 	if json.Valid([]byte(text)) {
-		if redacted, ok := redactJSONText(text); ok {
+		if redacted, ok := redactJSONText(text, false); ok {
 			return redacted
 		}
 	}
@@ -270,9 +270,10 @@ const jsonRedacted = `"[redacted]"`
 // (password, client_secret, x-api-key) keeps its name, and its value, whether a string, a number,
 // an object or an array, becomes "[redacted]"; true, false and null hold no credential and stay,
 // as a value that is a word does in credentialText. A "token" key does the same for a string
-// value, as jsonToken does. Every other string, key or value, goes through redactJSONString.
-// It is false when the text cannot be read, and the caller uses the rules on it.
-func redactJSONText(text string) (string, bool) {
+// value, as jsonToken does. Every other string, key or value, goes through redactJSONString;
+// nested is true for a text that is itself a string of a JSON text, whose strings are read by
+// the rules only. It is false when the text cannot be read, and the caller uses the rules on it.
+func redactJSONText(text string, nested bool) (string, bool) {
 	type edit struct {
 		start, end int
 		text       string
@@ -313,7 +314,7 @@ func redactJSONText(text string) (string, bool) {
 			switch {
 			case frame != nil && frame.key:
 				frame.key, frame.token = false, strings.EqualFold(typed, "token")
-				if edited, changed := redactJSONString(text[start:end], typed); changed {
+				if edited, changed := redactJSONString(text[start:end], typed, nested); changed {
 					edits = append(edits, edit{start, end, edited})
 				}
 				if jsonCredentialName.MatchString(typed) {
@@ -332,7 +333,7 @@ func redactJSONText(text string) (string, bool) {
 				edits = append(edits, edit{start, end, jsonRedacted})
 				frame.key = true
 			default:
-				if edited, changed := redactJSONString(text[start:end], typed); changed {
+				if edited, changed := redactJSONString(text[start:end], typed, nested); changed {
 					edits = append(edits, edit{start, end, edited})
 				}
 				if frame != nil {
@@ -359,25 +360,40 @@ func redactJSONText(text string) (string, bool) {
 
 // redactJSONString is a JSON string, as written in the text (literal, quotes included) and as
 // decoded, with its credentials taken out, and whether that changed it. A string that holds JSON
-// is redacted as JSON. Any other is read decoded and between its quotes, as a log line quotes it:
+// is redacted as JSON, unless the string is nested in such a JSON already: one level is read as
+// JSON and a deeper one by the rules, so a string that holds itself over and over costs no more
+// than two reads of it. Any other is read decoded and between its quotes, as a log line quotes it:
 // a rule that wants a quote before a value (a query at the start of a string) finds it, a value
 // stops at the closing one, and an escape such as \" is not in the way of a rule or cut by one
 // (bearerCredential takes the backslash of \" after a token). What is left is written as JSON.
+// A literal with no escape (and no byte the decoder replaced) is the decoded string between its
+// quotes, so the rules read it once.
 // The string keeps its escapes (\u0026) when the rules, run on it as written, leave the same text.
-func redactJSONString(literal, decoded string) (string, bool) {
-	if decoded != "" && (decoded[0] == '{' || decoded[0] == '[' || decoded[0] == '"') && json.Valid([]byte(decoded)) {
-		if redacted := redactCredentials(decoded); redacted != decoded {
+func redactJSONString(literal, decoded string, nested bool) (string, bool) {
+	if !nested && decoded != "" && (decoded[0] == '{' || decoded[0] == '[' || decoded[0] == '"') && json.Valid([]byte(decoded)) {
+		if redacted, ok := redactJSONText(decoded, true); ok {
+			if redacted == decoded {
+				return literal, false
+			}
 			return jsonString(redacted), true
 		}
-		return literal, false
 	}
-	read := redactCredentialShapes(`"` + decoded + `"`)
+	escaped := literal[1:len(literal)-1] != decoded
+	read := literal
+	if escaped {
+		read = `"` + decoded + `"`
+	}
+	read = redactCredentialShapes(read)
 	redacted := strings.TrimSuffix(strings.TrimPrefix(read, `"`), `"`)
 	if redacted == decoded {
 		return literal, false
 	}
+	written := read
+	if escaped {
+		written = redactCredentialShapes(literal)
+	}
 	var kept string
-	if written := redactCredentialShapes(literal); json.Unmarshal([]byte(written), &kept) == nil && kept == redacted {
+	if json.Unmarshal([]byte(written), &kept) == nil && kept == redacted {
 		return written, true
 	}
 	return jsonString(redacted), true
