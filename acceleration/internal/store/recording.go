@@ -143,6 +143,9 @@ func (r *Recordings) Finish(ctx context.Context, id, provider, model string, res
 	return nil
 }
 
+// ErrNoRecording is a recording id that the customer has no job for.
+var ErrNoRecording = errors.New("store: there is no recording")
+
 // Get returns one job a customer holds.
 func (r *Recordings) Get(ctx context.Context, customerID, id string) (Recording, error) {
 	if customerID == "" || id == "" {
@@ -159,7 +162,7 @@ func (r *Recordings) Get(ctx context.Context, customerID, id string) (Recording,
 		return recording, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return Recording{}, stack.Wrap(fmt.Errorf("store: there is no recording %s", id))
+		return Recording{}, stack.Wrap(fmt.Errorf("%w %s", ErrNoRecording, id))
 	}
 	if err != nil {
 		return Recording{}, stack.Wrap(fmt.Errorf("store: recording: %w", err))

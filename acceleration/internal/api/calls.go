@@ -99,7 +99,7 @@ func (s *Server) getCall(ctx context.Context, request *getCallRequest) (*getCall
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 	rendered := callOf(call)
 	s.attachUsed(ctx, customerID, call, &rendered)
@@ -141,7 +141,7 @@ func (s *Server) getCallTokens(ctx context.Context, request *getCallTokensReques
 	}
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 	spent, err := s.tokensOf(ctx, customerID, call)
 	if err != nil {
@@ -271,7 +271,7 @@ func (s *Server) createCallToken(ctx context.Context, request *createCallTokenRe
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	var wanted CallTokenRequest
@@ -472,7 +472,7 @@ func (s *Server) getCallTranscript(ctx context.Context, request *getCallTranscri
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	said, err := s.transcriptOf(ctx, customerID, call)
@@ -673,7 +673,7 @@ func (s *Server) getCallEvents(ctx context.Context, request *getCallEventsReques
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	stored, err := s.store.CallEvents.Select(
@@ -710,7 +710,7 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 
 	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	turns, err := s.store.Turns.Select(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)

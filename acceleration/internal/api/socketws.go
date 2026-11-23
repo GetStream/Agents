@@ -134,6 +134,13 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	config, failure := s.configFor(ctx, customerID, start.Session.ConfigId, start.Session.Agent)
+	// A failure that is not an APIError comes from the database or from another service. The
+	// device gets no text of it.
+	if _, answered := errors.AsType[APIError](failure); failure != nil && !answered {
+		s.logger.Error("could not read the agent config of a socket session", "error", failure)
+		refuseWith(internalError())
+		return
+	}
 	if failure != nil {
 		refuse(store.RedactLogText(failure.Error()))
 		return

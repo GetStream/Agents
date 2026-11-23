@@ -105,7 +105,7 @@ func (s *Server) getVoice(ctx context.Context, request *getVoiceRequest) (*getVo
 
 	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownVoice
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
 	}
 
 	described, err := s.describeVoice(ctx, voice)
@@ -362,7 +362,7 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 		return nil, invalidRequest("name the provider to hear the voice through")
 	}
 	if _, err := s.store.Voices.Get(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownVoice
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
 	}
 
 	provider := request.Body.Provider

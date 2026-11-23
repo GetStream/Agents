@@ -226,7 +226,7 @@ func (s *Server) getAgentConfig(ctx context.Context, request *getAgentConfigRequ
 
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	return &getAgentConfigResponse{Body: agentConfigOf(config)}, nil
 }
@@ -252,7 +252,7 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 
 	existing, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	if message, ok, err := s.unboundConnectors(ctx, customerID, request.Body.Connectors); err != nil {
 		return nil, err
@@ -396,7 +396,7 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	// Read before it goes, so the entry recording the deletion can say what was deleted.
 	existing, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, customerID, request.Id)
 	if err != nil {
@@ -413,7 +413,7 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 		return nil, conflict(fmt.Sprintf("%q hands work to this agent: take it out of %q's agents first", parent, parent))
 	}
 	if err := s.store.AgentConfigs.Delete(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	// A deleted config's tasks have no agent left to run on: paused, they stop failing
 	// every occurrence and counting against their users' limit, and stay readable. The delete
@@ -471,7 +471,7 @@ func (s *Server) createSkill(ctx context.Context, request *createSkillRequest) (
 	}
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	if message, ok := skillSandboxComplaint([]SkillRequest{*request.Body}, config.Sandbox.Provider != ""); !ok {
 		return nil, invalidRequest(message)
@@ -501,7 +501,7 @@ func (s *Server) getSkill(ctx context.Context, request *getSkillRequest) (*getSk
 
 	skill, err := s.store.Skills.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSkill
+		return nil, unknownOr(err, store.ErrNoSkill, errUnknownSkill)
 	}
 	return &getSkillResponse{Body: skillOf(skill)}, nil
 }
@@ -523,7 +523,7 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 	}
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	if message, ok := skillSandboxComplaint([]SkillRequest{*request.Body}, config.Sandbox.Provider != ""); !ok {
 		return nil, invalidRequest(message)
@@ -531,7 +531,7 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 
 	existing, err := s.store.Skills.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSkill
+		return nil, unknownOr(err, store.ErrNoSkill, errUnknownSkill)
 	}
 
 	skill := storedSkill(*request.Body, customerID)
@@ -563,10 +563,10 @@ func (s *Server) deleteSkill(ctx context.Context, request *deleteSkillRequest) (
 	// which agent it was under.
 	existing, err := s.store.Skills.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSkill
+		return nil, unknownOr(err, store.ErrNoSkill, errUnknownSkill)
 	}
 	if err := s.store.Skills.Delete(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownSkill
+		return nil, unknownOr(err, store.ErrNoSkill, errUnknownSkill)
 	}
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditSkill, ResourceID: existing.ID, ResourceName: existing.Name,

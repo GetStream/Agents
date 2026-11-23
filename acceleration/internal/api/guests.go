@@ -299,7 +299,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 
 	guest, err := s.store.Guest(ctx, customerID, guestID)
 	if err != nil {
-		return nil, notFound("no such guest")
+		return nil, unknownOr(err, store.ErrNotAGuest, notFound("no such guest"))
 	}
 	if guest.ClaimedBy != "" {
 		// A second claim naming the same account is the same claim arriving twice, which is

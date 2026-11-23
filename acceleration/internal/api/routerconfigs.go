@@ -94,7 +94,7 @@ func (s *Server) getRouterConfig(ctx context.Context, request *getRouterConfigRe
 
 	config, err := s.store.RouterConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 	return &getRouterConfigResponse{Body: routerConfigOf(config)}, nil
 }
@@ -117,7 +117,7 @@ func (s *Server) updateRouterConfig(ctx context.Context, request *updateRouterCo
 
 	existing, err := s.store.RouterConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 
 	config := storedRouterConfig(*request.Body, customerID)
@@ -147,10 +147,10 @@ func (s *Server) deleteRouterConfig(ctx context.Context, request *deleteRouterCo
 	// Read before it goes, so the entry recording the deletion can say what was deleted.
 	existing, err := s.store.RouterConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 	if err := s.store.RouterConfigs.Delete(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditRouterConfig, ResourceID: existing.ID, ResourceName: existing.Name,

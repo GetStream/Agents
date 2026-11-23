@@ -846,6 +846,19 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### The router starts on a Redis Cluster again
 
 A router whose Redis is a cluster crashed on start, and on any write that changed cached rows in more than one hash slot, such as an app's organization and its policies: the cache sent one `DEL` across slots, which a cluster refuses. It now deletes each key on its own in the same round trip, and the replica that wrote still reads the new row next (AI-3556).
+### JavaScript: a reply the model couldn't write keeps its error and Try again
+
+The router finishes a reply the model failed to write as an empty message in the channel. `agentChatTransport` fed it to the `AIConversationController`, which takes a finished reply as the answer and clears the error, so stream-chat-react's "couldn't answer" and Try again showed for a moment and went, leaving the question with no reply under it. While the reply has failed, the transport now leaves out an agent message that finished with no text, attachments or UI and was not cut off; it shows again once the agent answers.
+### The Go SDK syncs an agent's directory to a router it was never synced to
+
+`Agent.Sync` skipped a directory whose `.agent_sync` stamp matched it, whichever router the stamp came from, so a directory synced to a local router and then to the hosted one (`go run ./configure` with another `STREAM_ACCELERATION_URL`) answered the hosted router's old config and sent nothing. A matching stamp is now trusted only when the stored config's `sync_hash` is the same hash, as the JavaScript SDK does.
+### JavaScript: a live UI patch is merged onto the card the router merges it onto
+
+`Conversation` merges an OpenUI patch onto the UI of the latest earlier turn that completed and was not interrupted, whatever its format, as the router does and as Kotlin has since #2089. It used to take the latest OpenUI card it held, so with an A2UI card in between, or after an interrupted reply, the live preview showed a card Stream Chat's copy then replaced. A patch whose base is not OpenUI now shows no UI on its turn, even a preview already merged onto an older card, and Stream Chat's copy is the one that shows.
+
+### The assistant and demo sample apps open sessions with their tools again
+
+The sample apps' agents name their tools in a tool group (`swift_assistant`: the assistants' device tools and `reserve_table`; `swift_demo`: `lookup_order` and `issue_refund`), which the router has required of a session's tools since #2088. Sync them again with `go run ./configure`.
 
 ### A hosted tool call in a group channel names the person who wrote
 
@@ -1799,6 +1812,10 @@ In a channel of a type an agent config answers in (`chat_channels`), a tool call
 ### A member's line in a call's transcript is no longer read as the agent's
 
 A call's transcript, its timeline and a campaign's outcome read every line marked `source: agent` as the agent's, whoever wrote it, so a member of the channel the transcript is in could put words in the agent's mouth. A call now records the user the agent wrote as, and only that user's lines, or the agent id's, are the agent's; a person's typed turn reads as theirs too. A call from before this change reads as it did (AI-3265).
+
+### A database failure is a 500, not a 404
+
+When the router cannot read or change a row because the database failed, it now sends a 500 and logs the error. Before, it sent a 404, for example "no such session" or "no such agent config". A client then dropped a session that was still there, or a delete that failed looked done. A 404 now means only that the row does not exist. A session that names its agent by name gets a 500 for a database failure, not a 400 with the text of the database error. The voice socket sends "something went wrong" in its error frame when it cannot read the agent config, not the text of the error (AI-3491).
 
 ## Breaking Changes
 
