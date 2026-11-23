@@ -100,7 +100,7 @@ func (s *MeteringSuite) TestCharactersAreWhatWasSent() {
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	s.Require().Len(rows, 2)
 	s.EqualValues(15, rows[0].Characters, "the runes handed to the voice, not the 17 the adapter counted")
 	s.Equal("u1", rows[0].OperationID)
@@ -118,7 +118,7 @@ func (s *MeteringSuite) TestCharactersAreWhatWasSent() {
 // closed.
 func (s *MeteringSuite) rows(customer string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	return rows
 }
 

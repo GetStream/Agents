@@ -1,0 +1,176 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidisaside"
+	"github.com/redis/rueidis/rueidishook"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
+)
+
+var tracer = tracing.Tracer("store")
+
+// cacheTTL is how long a cached row lives in Redis when nothing deletes it first. It is long
+// because every write deletes the keys it changed, and the expiry is only the backstop for a
+// deletion that did not land.
+const cacheTTL = time.Hour
+
+// Redis says where a Redis server is. An empty Address is none.
+type Redis struct {
+	// Address is a host:port, for example localhost:6379.
+	Address  string
+	Username string
+	Password string
+}
+
+func (r Redis) option() rueidis.ClientOption {
+	return rueidis.ClientOption{InitAddress: []string{r.Address}, Username: r.Username, Password: r.Password}
+}
+
+// openRedis connects the store to its Redis servers: the shared one, where rows read on every
+// request are cached, and the shard's, where a running call's state is kept.
+func (s *Store) openRedis(options Options) error {
+	if options.Redis.Address == "" {
+		return nil
+	}
+	build := func(option rueidis.ClientOption) (rueidis.Client, error) {
+		client, err := rueidis.NewClient(option)
+		if err != nil || options.redisHook == nil {
+			return client, err
+		}
+		return rueidishook.WithHook(client, options.redisHook), nil
+	}
+	// The shared client tracks the keys it reads for rueidisaside and for Users, whose LRU
+	// hears from Redis which users went stale.
+	shared := func(option rueidis.ClientOption) (rueidis.Client, error) {
+		aside := option.OnInvalidations
+		option.OnInvalidations = func(messages []rueidis.RedisMessage) {
+			aside(messages)
+			s.Users.invalidate(messages)
+		}
+		return build(option)
+	}
+	cache, err := rueidisaside.NewClient(rueidisaside.ClientOption{ClientOption: options.Redis.option(), ClientBuilder: shared})
+	if err != nil {
+		return fmt.Errorf("store: connect to redis: %w", err)
+	}
+	s.cache = cache
+	s.redis = cache.Client()
+	if options.ShardRedis.Address != "" && options.ShardRedis.Address != options.Redis.Address {
+		if s.redis, err = build(options.ShardRedis.option()); err != nil {
+			cache.Close()
+			return fmt.Errorf("store: connect to the shard's redis: %w", err)
+		}
+	}
+	return nil
+}
+
+// closeRedis releases the Redis connections.
+func (s *Store) closeRedis() {
+	if s.cache == nil {
+		return
+	}
+	if s.redis != s.cache.Client() {
+		s.redis.Close()
+	}
+	s.cache.Close()
+}
+
+// sharedRedis is the Redis every shard shares, or nil without Redis.
+func (s *Store) sharedRedis() rueidis.Client {
+	if s.cache == nil {
+		return nil
+	}
+	return s.cache.Client()
+}
+
+// redisFamilies are the prefixes of every key the store keeps in Redis.
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
+
+// cacheKey names one cached row. Every key is prefixed, so what the store cached can be told
+// from what the rest of the router keeps.
+func cacheKey(parts ...string) string { return "appcfg:" + strings.Join(parts, ":") }
+
+// cached returns what load produced, from the local cache rueidis keeps, from Redis, or from
+// Postgres, in that order. Redis invalidates the local copy itself when the key is deleted,
+// so every replica forgets a changed row at once.
+//
+// An error from load is the caller's answer, unchanged, so that ErrNoAPIKey and its siblings
+// still read as themselves. An error from Redis is not: the row is loaded from Postgres
+// instead, because a cache nobody can reach is a slow deployment and not a broken one.
+func cached[T any](ctx context.Context, s *Store, name string, load func(context.Context) (T, error)) (T, error) {
+	var value T
+	if s.cache == nil {
+		return load(ctx)
+	}
+
+	ctx, span := tracer.Start(ctx, "store.cached")
+	defer span.End()
+
+	var refused error
+	encoded, err := s.cache.Get(ctx, cacheTTL, name, func(ctx context.Context, _ string) (string, error) {
+		loaded, err := load(ctx)
+		if err != nil {
+			refused = err
+			return "", err
+		}
+		raw, err := json.Marshal(loaded)
+		return string(raw), err
+	})
+	switch {
+	case refused != nil:
+		return value, stack.Wrap(refused)
+	case err != nil:
+		slog.Default().Error("could not read a cached row from redis, reading postgres", "key", name, "error", err)
+		return load(ctx)
+	}
+
+	if err := json.Unmarshal([]byte(encoded), &value); err != nil {
+		return value, stack.Wrap(fmt.Errorf("store: decode %s: %w", name, err))
+	}
+	return value, nil
+}
+
+// found is a row looked up together with whether there was one, so that a row nobody holds
+// can be cached as well.
+type found[T any] struct {
+	Value T    `json:"value"`
+	Found bool `json:"found"`
+}
+
+// forget drops cached rows from Redis, which drops them from every replica's local cache
+// too, in one round trip.
+//
+// A deletion that does not land is logged rather than returned: the write it followed has
+// already happened, and refusing it afterwards would tell the caller their change was
+// rejected when it was not. The TTL is what covers the difference.
+//
+// The deletion goes out even when the request has been cancelled since the write: rueidis
+// returns the context's error before it sends anything, so neither the DEL nor the PING would
+// reach Redis and every node would keep the old value until the TTL.
+func (s *Store) forget(ctx context.Context, names ...string) {
+	if s.cache == nil || len(names) == 0 {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	client := s.cache.Client()
+	// Redis sends this node the invalidation of its own local copy after the DEL's reply, so
+	// a read made as soon as the DEL returns can still be answered by the old copy. The
+	// client reads everything over one connection, in order, so once a PING after the DEL is
+	// answered the invalidation has been applied. A PING that fails needs nothing more: a
+	// broken connection drops every local copy it held, and any other failure is the one the
+	// TTL covers.
+	replies := client.DoMulti(ctx, client.B().Del().Key(names...).Build(), client.B().Ping().Build())
+	if err := replies[0].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
+		slog.Default().Error("could not drop cached rows", "keys", names, "error", err)
+	}
+}

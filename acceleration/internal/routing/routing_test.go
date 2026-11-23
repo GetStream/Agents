@@ -1378,6 +1378,35 @@ func (s *RoutingSuite) TestAProviderWhoseOverwriteNamesAVoiceIsNotAskedAboutTheR
 	s.Equal([]string{"lush"}, asked)
 }
 
+// An overwrite is handed to the provider as written, so it is no back door to a voice the
+// resolver would refuse as the request's.
+func (s *RoutingSuite) TestAVoiceOnlyAnOverwriteNamesIsRefusedAsTheRequestsWouldBe() {
+	var built []string
+	router := s.newRouterResolving(refusing("theirs"), func(spec Spec) (*stubProvider, error) {
+		built = append(built, spec.Model)
+		return &stubProvider{model: spec.Model}, nil
+	})
+
+	_, _, err := router.Select(s.ctx, Request{
+		CustomerID: "acme", Providers: []string{"quick/en"},
+		TTS: options.TTS{Overwrites: map[string]json.RawMessage{"quick": json.RawMessage(`{"voice_id":"theirs"}`)}},
+	})
+
+	s.Require().ErrorIs(err, ErrRequest)
+	s.Contains(err.Error(), `"theirs" is not one of this customer's voices`)
+	s.Empty(built)
+}
+
+// refusing is a resolver that refuses one voice as another customer's.
+type refusing string
+
+func (r refusing) ResolveVoice(_ context.Context, _, _, voice string) (string, error) {
+	if voice == string(r) {
+		return "", Refused(fmt.Errorf("%q is not one of this customer's voices", voice))
+	}
+	return voice, nil
+}
+
 func (s *RoutingSuite) TestARequestWithNoVoiceIsNotVetted() {
 	var asked []string
 	router := s.newRouterResolving(vetting{unvouched: []string{"quick"}, asked: &asked},

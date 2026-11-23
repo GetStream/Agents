@@ -61,7 +61,7 @@ func (b *Bridge) download(ctx context.Context, thread store.ChannelThread, messa
 	if len(wanted) == 0 {
 		return nil, named, nil
 	}
-	connection, err := b.store.ConnectorConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	connection, err := b.store.ConnectorConnections.Get(ctx, thread.CustomerID, thread.ConnectionID)
 	if err != nil {
 		return nil, named, err
 	}
@@ -69,11 +69,11 @@ func (b *Bridge) download(ctx context.Context, thread store.ChannelThread, messa
 	if !found {
 		return nil, named, stack.Wrap(fmt.Errorf("%w: %q", store.ErrUnregisteredScheme, connection.AuthScheme))
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return nil, named, err
 	}
-	resolved, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	resolved, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return nil, named, stack.Wrap(err)
 	}

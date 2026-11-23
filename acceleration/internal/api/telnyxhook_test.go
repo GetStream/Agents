@@ -240,7 +240,7 @@ func (s *TelnyxHookSuite) TestASignedCallCarryingCredentialsRecordsNoUserAndJoin
 	s.NotContains(string(answered), claimed)
 
 	ctx := context.Background()
-	recorded, err := s.store.DB().NewSelect().Model((*store.User)(nil)).
+	recorded, err := s.store.GlobalDB().NewSelect().Model((*store.User)(nil)).
 		Where("customer_id = ?", s.customerID()).
 		Where("id = ?", userID).
 		Count(ctx)
@@ -248,12 +248,12 @@ func (s *TelnyxHookSuite) TestASignedCallCarryingCredentialsRecordsNoUserAndJoin
 	s.Zero(recorded)
 
 	s.Never(func() bool {
-		under, err := s.store.OrganizationOf(ctx, s.customerID())
-		return err == nil && under != ""
+		under, err := s.store.AppOrganizations.Get(ctx, s.customerID())
+		return err == nil && under.OrganizationID != ""
 	}, time.Second, 20*time.Millisecond)
-	under, err := s.store.OrganizationOf(ctx, claimed)
+	under, err := s.store.AppOrganizations.Get(ctx, claimed)
 	s.Require().NoError(err)
-	s.Empty(under)
+	s.Empty(under.OrganizationID)
 }
 
 func (s *TelnyxHookSuite) call(to string) url.Values {
@@ -311,25 +311,35 @@ func (l telnyxRinger) deliver(form url.Values, signed bool) (int, string, string
 	return response.StatusCode, response.Header.Get("Content-Type"), string(answered)
 }
 
-// attach holds the number at Telnyx for the suite's app and attaches it as the phone
-// service does, its trunk password sealed under the service's key. An empty uri is a
-// number attached before trunks were kept.
+// attach holds the number at Telnyx for the suite's app and attaches it on a trunk of its
+// own, as the phone service does, its trunk password sealed under the service's key. An empty
+// uri is a number attached before trunks were kept.
 func (l telnyxRinger) attach(e164, uri, username, password string) {
 	s := l.suite
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default"}
-	if uri != "" {
-		sealer, err := auth.NewSealer(suiteTrunkKEK)
-		s.Require().NoError(err)
-		sealed, err := sealer.SealWithAAD(password, []byte("phone_numbers/"+s.customerID()+"/"+e164))
-		s.Require().NoError(err)
-		attachment.BridgeURI, attachment.BridgeUsername = uri, username
-		attachment.BridgePasswordSealed, attachment.BridgePasswordKEKVersion = sealed, sealer.CurrentVersion()
+	if uri == "" {
+		s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, attachment))
+		return
 	}
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164, attachment))
+	sealer, err := auth.NewSealer(suiteTrunkKEK)
+	s.Require().NoError(err)
+	sealed, err := sealer.SealWithAAD(password, []byte("phone_numbers/"+s.customerID()+"/"+e164))
+	s.Require().NoError(err)
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		err := tx.SaveTrunk(store.StreamTrunk{
+			ID: attachment.TrunkID, BridgeURI: uri, BridgeUsername: username,
+			BridgePasswordSealed: sealed, BridgePasswordKEKVersion: sealer.CurrentVersion(), Own: true,
+		})
+		if err != nil {
+			return err
+		}
+		return tx.Attach(e164, attachment)
+	}))
 }
 
 // TelnyxHookUnconfiguredSuite is a deployment with no Telnyx public key.

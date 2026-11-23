@@ -3,6 +3,7 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 // readODT reads an OpenDocument text: headings by their outline level, lists by their
 // list styles, and tables as tables. Pages are numbered where the program that saved it
 // recorded them, as LibreOffice does with a soft page break.
-func readODT(data []byte) (Document, error) {
+func readODT(ctx context.Context, data []byte) (Document, error) {
 	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return Document{}, fail(Corrupt, ODT, fmt.Errorf("the archive cannot be opened: %w", err))
@@ -45,17 +46,17 @@ func readODT(data []byte) (Document, error) {
 		}
 	}
 
+	parts := newMedia(archive)
 	reader := &odtReader{bullets: bullets, media: func(href string) []byte {
 		// A picture linked from outside the file is not in it.
 		if strings.Contains(href, ":") {
 			return nil
 		}
-		data, _ := zipFile(archive, path.Clean(strings.TrimPrefix(href, "./")))
-		return data
+		return parts.part(path.Clean(strings.TrimPrefix(href, "./")))
 	}}
 	reader.numbered = bytes.Contains(content, []byte("soft-page-break"))
-	if err := reader.read(content); err != nil {
-		return Document{}, fail(Corrupt, ODT, err)
+	if err := reader.read(ctx, content); err != nil {
+		return Document{}, unreadable(ctx, ODT, err)
 	}
 	return Document{Pages: reader.pages(), Pictures: reader.pictures.kept}, nil
 }
@@ -109,13 +110,16 @@ type odtReader struct {
 	paragraphs int
 }
 
-func (o *odtReader) read(content []byte) error {
+func (o *odtReader) read(ctx context.Context, content []byte) error {
 	decoder := xml.NewDecoder(bytes.NewReader(content))
 	body := false
 	// skip is how deep the reader is in something that is not text a reader sees: a
 	// footnote, a comment, a change kept for review.
 	skip := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
 			return nil

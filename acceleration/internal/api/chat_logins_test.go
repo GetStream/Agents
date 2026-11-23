@@ -54,16 +54,15 @@ func TestChatLoginsSuite(t *testing.T) {
 	runSuite(t, new(ChatLoginsSuite))
 }
 
-// SetupSuite builds oauth2_code against the fake with the operator's client in the
-// environment, as AuthorizationsSuite does, and bearer for the twin, with the mcp source.
+// SetupSuite builds oauth2_code against the fake with the router's own client lookup, where each
+// connector has the fake's client as the app's own, and bearer for the twin, with the mcp source.
 func (s *ChatLoginsSuite) SetupSuite() {
 	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
 	s.provider.AllowRedirect(consentPublicURL + ConnectorCallbackPath)
-	environment := map[string]string{"FAKE_MCP_CLIENT_ID": s.provider.ClientID, "FAKE_MCP_CLIENT_SECRET": s.provider.ClientSecret}
 	code, err := oauth2code.New(oauth2code.Config{
 		HTTP: s.provider.Client(),
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, func(string) string { return "" })(ctx, ref, m, registration)
 		},
 		PublicEndpoint: loopbackOrPublic,
 	})
@@ -172,7 +171,7 @@ func (s *ChatLoginsSuite) TestASecondUserCannotUseTheLaunchURL() {
 func (s *ChatLoginsSuite) TestAConnectionThatNeedsReauthorizationAsksForAReconnect() {
 	connector, grant := s.connector()
 	mine := s.connected(s.client, connector)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", store.ConnectionNeedsReauthorization, mine)
 	s.Require().NoError(err)
 	opened := s.client.createSession(s.session(s.config(connector, grant), map[string]string{"crm": mine}))
@@ -384,7 +383,7 @@ func (s *ChatLoginsSuite) TestAReopenedChatUsesTheConnectionTheLoginChose() {
 		"the reopened chat runs the tool on the connection it chose")
 	s.Equal(1, s.connectionsOf(s.client, connector), "no second connection")
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", chosen).Scan(&attempts))
 	s.Equal(1, attempts, "no second consent")
 }
@@ -408,7 +407,7 @@ func (s *ChatLoginsSuite) TestAConsentFinishedWithoutAHandBackIsPickedUpByTheWai
 
 	s.Equal(connectorEchoText, ran["result"])
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", chosen).Scan(&attempts))
 	s.Equal(2, attempts, "the chat's and the backend's, no third")
 }
@@ -438,7 +437,7 @@ func (s *ChatLoginsSuite) TestANewChatUsesTheCallersOneConnectedConnection() {
 
 	s.Equal(1, s.connectionsOf(s.client, connector))
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", mine).Scan(&attempts))
 	s.Equal(1, attempts, "no second consent")
 }
@@ -474,7 +473,7 @@ identity: [team_id, user_id]
 	account := s.connectionOf(s.client, mine).AccountID
 
 	// A connected one would be implied (session.impliedSelection), with no login to ask.
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", store.ConnectionNeedsReauthorization, mine)
 	s.Require().NoError(err)
 	s.provider.SwitchAccount()
@@ -607,19 +606,26 @@ func (s *ChatLoginsSuite) connectorWithoutTwin() string {
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	s.define(id, oauth2code.Name, `
 client:
-  registration: [operator]
+  registration: [customer]
   auth_method: client_secret_post
-  env: FAKE
 scopes:
   list: [chat:write]
 `)
-	return id
+	return s.withFakeClient(id)
+}
+
+// withFakeClient puts the fake's preregistered client as the app's own client of connector: a
+// custom connector never takes the operator's.
+func (s *ChatLoginsSuite) withFakeClient(connector string) string {
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPut, oauthClientPath(connector),
+		ConnectorOAuthClientRequest{ClientID: s.provider.ClientID, ClientSecret: s.provider.ClientSecret}, nil))
+	return connector
 }
 
 // pinsOf are the schema digests connection's tools are pinned at.
 func (s *ChatLoginsSuite) pinsOf(connection string) []string {
 	var digests []string
-	s.Require().NoError(s.store.DB().NewSelect().Table("connector_tool_pins").Column("schema_digest").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("connector_tool_pins").Column("schema_digest").
 		Where("connection_id = ?", connection).Scan(context.Background(), &digests))
 	return digests
 }
@@ -649,8 +655,9 @@ func (s *ChatLoginsSuite) withToken(user *testClient, connector, token string) s
 
 // connectionsOf is how many live connections user has to connector.
 func (s *ChatLoginsSuite) connectionsOf(user *testClient, connector string) int {
-	connections, err := s.store.ConnectorConnectionsByOwner(context.Background(), s.customerID(),
+	connections, err := s.store.ConnectorConnections.Select(context.Background(), s.customerID(),
 		store.ConnectionFilter{OwnerType: store.OwnerUser, OwnerID: user.userID, ConnectorID: connector})
+
 	s.Require().NoError(err)
 	return len(connections)
 }
@@ -675,10 +682,12 @@ func (s *ChatLoginsSuite) connectorOf(schemes, extra string) (string, map[string
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	s.define(id, schemes, `
 client:
-  registration: [operator]
+  registration: [customer]
   auth_method: client_secret_post
-  env: FAKE
 `+extra)
+	if strings.Contains(schemes, oauth2code.Name) {
+		s.withFakeClient(id)
+	}
 	twin := id + "twin"
 	s.define(twin, bearer.Name, "")
 	var created Connection
@@ -713,7 +722,7 @@ sources:
     endpoint: mcp
 ` + extra))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 }
 
@@ -721,7 +730,7 @@ sources:
 // YAML in extra, as a router start with that file does: only a built-in's later revision marks
 // an earlier one broken.
 func (s *ChatLoginsSuite) builtin(id string, revision int, extra string) {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{id + ".yaml": {Data: []byte(`
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{id + ".yaml": {Data: []byte(`
 id: ` + id + `
 revision: ` + strconv.Itoa(revision) + `
 name: Fake
@@ -783,7 +792,7 @@ func (s *ChatLoginsSuite) askAs(user *testClient, id string) CommandReceipt {
 // attemptKind is the kind the consent's attempt was stored with.
 func (s *ChatLoginsSuite) attemptKind(id string) string {
 	var kind string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT kind FROM connector_authorization_attempts WHERE id = ?", id).Scan(&kind))
 	return kind
 }

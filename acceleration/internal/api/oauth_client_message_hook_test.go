@@ -38,7 +38,7 @@ func (s *ProviderAppMessageHookSuite) TestPuttingTheAppsOwnSlackAppLeavesThePinn
 	status, payload := s.putOwnApp("slack_bot", s.ownSlackApp())
 
 	s.Require().Equal(http.StatusCreated, status, string(payload))
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Equal(s.appID(), record.StreamAppPK)
 	s.leftAlone(hooks)
@@ -66,13 +66,14 @@ func (s *ProviderAppMessageHookSuite) TestAnOAuthClientWithNoProviderAppOrNoChan
 // connectors were on is pinned to.
 func (s *ProviderAppMessageHookOffSuite) TestTheOAuthClientPutAnswersAsBeforeAndAsksNothingOfStream() {
 	// A provider app stored while connectors were on, pinned to the customer's app.
-	_, err := s.store.PutConnectorOAuthClient(context.Background(), &store.ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(context.Background(), &store.ConnectorOAuthClient{
 		CustomerID: s.customerID(), ConnectorID: "slack_bot", Registration: core.ClientCustomer,
 		ClientID: "synthetic-client", ProviderAppID: s.ownSlackApp().ProviderAppID, StreamAppPK: s.appID(),
 	})
+
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		s.Require().NoError(s.store.DeleteConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot", core.ClientCustomer))
+		s.Require().NoError(s.store.ConnectorOAuthClients.Delete(context.Background(), s.customerID(), "slack_bot", core.ClientCustomer))
 	})
 	asked := len(s.chat.Requests(s.apiKey))
 

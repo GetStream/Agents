@@ -80,7 +80,7 @@ func (s *StepUpSuite) TestAStepUpThatWasUsedIsAskedForAgain() {
 	_, err := s.guarded(d, "turn-1", `{"scope":"crm:write"}`)
 	s.Require().NoError(err)
 	s.Require().Len(s.events, 1)
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, s.events[0].(ConnectorScopeRequired).AuthorizationID)
+	_, err = s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, s.events[0].(ConnectorScopeRequired).AuthorizationID)
 	s.Require().NoError(err)
 
 	_, err = s.guarded(d, "turn-1", `{"scope":"crm:write"}`)
@@ -135,7 +135,7 @@ func (s *StepUpSuite) TestAStepUpShownOnAnEarlierReplyIsAskedForAgain() {
 	s.Require().Len(s.events, 1)
 	first := s.events[0].(ConnectorScopeRequired).AuthorizationID
 	// What handOffConnectorLaunch does: the sealed blob is replaced, and the row stays open.
-	s.Require().NoError(s.store.HandOffConnectorAuthorizationAttempt(s.ctx, first, []byte("sealed"), []byte("handed-off"), 1))
+	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, first, []byte("sealed"), []byte("handed-off"), 1))
 
 	read, err := s.guarded(d, "turn-2", `{"scope":"crm:write"}`)
 
@@ -227,10 +227,11 @@ func (s *StepUpSuite) consents(ctx context.Context, request ConsentRequest) (Con
 	}
 	id := store.NewID()
 	expires := time.Now().Add(10 * time.Minute)
-	err := s.store.CreateConnectorAuthorizationAttempt(ctx, &store.ConnectorAuthorizationAttempt{
+	err := s.store.ConnectorAuthorizationAttempts.Insert(ctx, &store.ConnectorAuthorizationAttempt{
 		ID: id, CustomerID: request.CustomerID, ConnectionID: request.ConnectionID, Kind: store.AttemptStepUp,
 		StateHash: store.AuthorizationStateHash(id), AttemptSealed: []byte("sealed"), KEKVersion: 1, ExpiresAt: expires,
 	})
+
 	s.Require().NoError(err)
 	return Consent{ConnectionID: request.ConnectionID, AuthorizationID: id, LaunchURL: "https://router.example/launch/" + id,
 		HandoffToken: "handoff-" + id, ExpiresAt: expires, Name: "CRM"}, nil
@@ -256,7 +257,7 @@ func (s *StepUpSuite) notify(event Event) {
 
 // status is the connection's status as stored.
 func (s *StepUpSuite) status(id string) string {
-	connection, err := s.store.ConnectorConnection(s.ctx, s.customerID, id)
+	connection, err := s.store.ConnectorConnections.Get(s.ctx, s.customerID, id)
 	s.Require().NoError(err)
 	return connection.Status
 }

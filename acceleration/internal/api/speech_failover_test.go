@@ -121,7 +121,7 @@ func (s *SpeechFailoverSuite) finished(id string) Speech {
 // speechStats are the text-to-speech rows written for this test's app.
 func (s *SpeechFailoverSuite) speechStats() []store.Request {
 	rows := []store.Request{}
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID()).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID()).
 		Where("modality = ?", "tts").Scan(context.Background()))
 	return rows
 }

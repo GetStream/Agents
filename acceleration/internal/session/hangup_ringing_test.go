@@ -78,7 +78,7 @@ func (s *RingingSuite) SetupTest() {
 	s.customer = "ringing-" + uuid.NewString()
 	s.number = fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
 	s.asked, s.stall, s.joining = nil, nil, nil
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.number, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 	s.manager = s.manages()

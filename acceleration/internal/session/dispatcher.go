@@ -434,12 +434,17 @@ func (d *dispatcher) admit(ctx context.Context, deadline time.Time, r route, cal
 	}
 	waiting, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	release, err := d.slots.take(waiting, r.connection.ID, r.maxInFlight)
+	release, waited, err := d.slots.take(waiting, r.connection.ID, r.maxInFlight)
 	if err != nil {
 		if ctx.Err() == nil {
 			return nil, llm.TextParts(busy(call.Name, r.maxInFlight)), failure{kind: store.InvocationDenied, message: heldByTheCap(r.maxInFlight)}, nil
 		}
 		return nil, nil, failure{kind: store.InvocationClientTimeout}, stack.Wrap(fmt.Errorf("session: %s was not sent: %w", call.Name, err))
+	}
+	// Only a call that waited for its slot reads the hold again: the call it waited behind may
+	// have been answered 429 meanwhile.
+	if !waited {
+		return release, nil, failure{}, nil
 	}
 	if wait := d.limiter.Wait(ctx, r.limit); wait > 0 {
 		release()
@@ -577,7 +582,7 @@ func (d *dispatcher) recheck(ctx context.Context, r route) (store.ConnectorBindi
 		return store.ConnectorBinding{}, stack.Wrap(fmt.Errorf("session: connector %q: %s, so %s was not called",
 			r.binding.Name, why, r.binding.Name+mcp.Separator+r.tool))
 	}
-	config, err := d.store.AgentConfig(ctx, d.spec.CustomerID, d.spec.ConfigID)
+	config, err := d.store.AgentConfigs.Get(ctx, d.spec.CustomerID, d.spec.ConfigID)
 	if err != nil {
 		return refuse("the agent config could not be read")
 	}
@@ -596,7 +601,7 @@ func (d *dispatcher) recheck(ctx context.Context, r route) (store.ConnectorBindi
 	case !slices.Contains(current.Tools, store.ToolGrant{Name: r.tool, SchemaDigest: r.digest}):
 		return refuse("the tool is no longer granted")
 	}
-	connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, r.connection.ID)
+	connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, r.connection.ID)
 	switch {
 	case errors.Is(err, store.ErrNoConnectorConnection):
 		return refuse("the connection is gone")

@@ -2,6 +2,10 @@
 
 ## Features
 
+### Qwen4-Max is `qwen/qwen4-max`
+
+Alibaba's Qwen4-Max can be routed as `qwen/qwen4-max`, in the `high-quality` tier, with images in, tools and JSON Schema answers. It is reached on QwenCloud's Singapore endpoint with `DASHSCOPE_API_KEY`, the key the qwen realtime models take; `QWEN_BASE_URL` names another region's endpoint for a key made there. Thinking is off unless the model entry sets `thinking: true`, which takes `reasoning_effort` `low`, `high` or `xhigh`. It is $1.50 in, $4.50 out and $0.075 for a cache hit per 1M tokens.
+
 ### Usage alerts are a counter on /metrics
 
 The router and the usage service add to `router_alert_holds_total{alert,level}` at every check of their alerts: 1 when a condition holds, or the number of items a condition of items holds for, and nothing when it does not. It counts whether or not the Sentry limit sends the event, so a monitor outside Sentry can page on `increase(...{level="page"}[5m]) > 0`, including for a condition that holds at one check only. A hold at the last check, on shutdown, or during a drain reaches Sentry only. The Sentry events and their limit are unchanged (AI-3424).
@@ -21,6 +25,8 @@ A client that holds a user's token (`as_user`, `SetUser`) and names `user_id` on
 ### The .NET SDK connects a user's own accounts
 
 `VisionAgentsClient.Connections` creates, authorizes, reads, lists and deletes connections: `CreateAsync("linear", new NewConnectionOptions { UserId = "alice" })`, `AuthorizeAsync(id, new AuthorizeOptions { ReturnUrl = ..., UserId = ... })` for the consent's launch URL, handoff token and expiry, `GetAsync(id, userId)`, `ListAsync(new ConnectionFilter { ConnectorId = ..., UserId = ... })` reading every page, and `DeleteAsync(id, userId)`; a user given is sent as the owner and as `X-Stream-User-Id`, and none is the app's own connection (#2099).
+
+A `Connections` call that names a user on a client with an API key holding a user's token throws a `ConfigurationException` before any request, rather than the 403 Stream's proxy answers (#2155).
 
 ### The JavaScript SDK connects a user's own accounts
 
@@ -161,6 +167,10 @@ A signed `messaging-profile.spend-limit-reached` on an SMS line's hook adds 1 to
 ### Python: local model plugins take a `revision`, and Vogent's model is pinned
 
 `huggingface.TransformersLLM`, `TransformersVLM` and `TransformersDetectionProcessor` take a `revision` argument (a commit hash, tag or branch) and pass it to every `from_pretrained` call. `moondream.LocalVLM` and `LocalDetectionProcessor` take `revision` too. `vogent.TurnDetection` loads `vogent/Vogent-Turn-80M` at a pinned commit; before, it followed the `main` branch.
+
+### The router reaches Gemini 4 Carbon
+
+`gemini/gemini-4-carbon` is Google's strongest reasoning model, in the high-quality tier beside Gemini 4 Argon, read with `GOOGLE_API_KEY`, paid tier only. It reads images, has a 1M-token context, thinks at `high` unless asked for `low` or `medium`, and costs Google's introductory $2 per million input tokens, $0.10 cached and $10 output, thinking included, through 30 November 2026, then $4, $0.20 and $20. No shortcut prefers it: it is a member of `llm-smart`, `llm-thinking` and the other high-quality groups, ordered by health.
 
 ### The router reaches Gemini 4 Hydrogen
 
@@ -682,6 +692,18 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### A call has an id of its own and names its session
+
+A call's `id` was its session's id; it is now the call's own, and a session starts a new call each time voice is started or stopped on it (an incognito session keeps none). `Call` gains `session_id`, absent once the session is deleted, and loses `config_id` and `user_id`, which are the session's. `GET /v1/agents/calls?session_id=` lists one session's calls, newest first. A read of `/v1/agents/calls/{id}` and its `transcript`, `timeline`, `events` and `tokens` with a session id now answers 404 `call_not_found`: list the session's calls for the call id. A call from before keeps the id it had, its session's. The Go SDK's `Sessions.Timeline` and `Sessions.Decisions` read the session's newest call this way, and fail with `client.ErrNoCall` for a session that has none. The other SDKs and the Volt dashboard still read a session id as a call id.
+
+### Deploying this release needs a short stop
+
+The migrations split into a global set and a shard set, each with its own goose table, and they drop and rename tables and columns a router of the previous release reads. Scale the old routers down, run the migrations, then start the new ones; a rolling deploy fails on the old routers until they are replaced.
+
+### Some agent config checks answer `validation_failed`
+
+An agent config with too many keyterms, an unknown sandbox provider, or sandbox domains, CIDR ranges or setup commands out of bounds is now refused by the store with a 400 `validation_failed` instead of `invalid_request`. A sync checks the config before it writes anything, so a refused config leaves no knowledge half written.
+
 ### A JavaScript backend sends its socket credential as headers
 
 A `Backend` holding the API secret put its token on every socket's URL, as `token` (and `authorization` behind the proxy): a token that speaks for the whole app, written into every access log between the process and the router. Such a backend now sends the same credential as headers on the upgrade, `X-Api-Key` and `Authorization` to a router reached directly and `api_key`, `stream-auth-type: jwt` and `Authorization` behind the proxy, and leaves it out of the URL; the socket still never says it is a backend. `backend.socketHeaders()` answers them, and `Socket.open(backend, url)` and `Socket.dial` send them. A `webSocket` option on such a backend is now called with a second argument, `{ headers }`, as Node's own WebSocket and the `ws` package take it; one that ignores it is refused by the router. A page, which has no secret and whose WebSocket sends no headers, keeps its user's token in the URL as before, and `WebSocketConstructor` is still the browser's `WebSocket`. `WebSocketInit` names the second argument, and the option also takes a `HeaderWebSocketConstructor`, a class that requires it (#2144).
@@ -824,6 +846,37 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### A hosted tool call in a group channel names the person who wrote
 
 In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.
+
+### A connection keeps a rotated token when saving it fails once
+
+When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
+
+### An SMS reply sets its price aside before it is sent
+
+A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what Telnyx will bill for it, its link and each MMS of up to ten files included, before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).
+### A Swift typed tool no longer crashes the app on deeply nested arguments
+
+An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
+### A custom connector never gets the deployment's own OAuth client
+
+Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
+
+### A customer can no longer list or speak in another customer's cloned voice
+
+Clones made through `/v1/agents/voices` sit in the deployment's shared provider account, which lists them all as its own. A voice id that another customer's voice was prepared as is now refused, whether it is the session's voice or the `voice_id` of TTS overwrites. The voice library lists only the caller's own clones besides the provider's published voices, previews another customer's clone as not found, and no longer suggests one as the closest voice.
+
+### A link code can no longer be guessed by texting one after another
+
+On a line whose agent identifies people by link code, a number gets 5 wrong codes in 15 minutes and the line 20 from every number together. Past that, a code is answered with "Too many codes did not match" and claims nothing until the window ends.
+
+### A document's pictures and reading time are bounded
+
+A DOCX or ODT keeps at most 64 MiB of pictures, and unpacks each picture part once however often the body names it, with 4x the unzip limit across all of them. Reading a DOCX, ODT, DOC, XLSX or RTF stops at the request's deadline instead of running on after the caller gave up. A DOC whose piece table goes back over text it already read is refused as corrupt, instead of holding its text once per piece.
+
+### Connecting one line twice at once no longer fails
+
+Two connects of the same channel line at the same moment could fail one of them on a unique violation. Both now get the same line.
+
 ### A POST from a sandbox through a tunnel to an allowed domain no longer fails after a pause
 
 The router's sandbox proxy closed a tunnel to an allowed domain after 90 s with no traffic. That is also how long a Go client keeps a pooled connection, and the proxy's clock starts first. So a POST that a Go client sent on a kept connection near that limit could fail with `EOF`. The proxy now keeps such a tunnel for 4 min, as it keeps a connection to the proxy, so the client closes it first. The sandbox's TLS forwarder waits as long for a silent proxy (#2161, AI-2346).
@@ -877,6 +930,11 @@ A call allowed from the conversation with its arguments ran at once, and ran aga
 - A response that is not the router's error envelope, such as a proxy's HTML page, becomes an error message of at most 1,024 characters, not the whole body.
 - `console.log` and `JSON.stringify` of a `Client`, `Backend` or `Edge` no longer show the API secret, a token handed in, a token function's answer or a token minted from the secret.
 - `loadFolder` leaves hidden files and folders, `node_modules` and `__pycache__` out of knowledge, as it already did for skills, so `.github/` or a `.secrets.yaml` is no longer synced as something the agent can quote. A `node_modules` or hidden folder directly in `skills/` is left out rather than refused as a skill without a `SKILL.md`. A symbolic link that leads out of the agent directory is refused: a file in `skills/` or `knowledge/`, a skill's `SKILL.md`, or `skills/` or `knowledge/` itself. A link within the directory is read, and one to a directory is not followed (#2146).
+
+### Kotlin: a tool's failure and a printed credential keep internal details out
+
+- A tool's failure reaches the model as `StreamAgents.onToolError` says, `agents.onToolError = { call, error -> ... }`, for every session of that client, and as the error's message otherwise, cut to 1,024 characters with an ellipsis, as in JavaScript. The model may repeat it and the conversation keeps it, and an error from a library a tool calls can name an internal host, a table or a value from a record: a hook can pass on only the app's own errors and say something plain for the rest. A hook that throws tells the model only that the tool failed.
+- `StreamCredentials` and `Guest` no longer print their token in `toString()`; it shows as `[redacted]`. The generated `GuestUser` the SDK keeps a guest's store record in still prints its token and refresh secret: it is internal, never handed to the app or logged by the SDK, and the generator has no way to mask a field yet (AND-2019).
 
 ### The Go SDK's `Agent.Sync` works for an agent with skills
 

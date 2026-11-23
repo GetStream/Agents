@@ -365,7 +365,7 @@ func (s *Server) getActivePriceList(ctx context.Context, request *getActivePrice
 		}
 		at = parsed
 	}
-	snapshot, err := s.store.PriceListAt(ctx, at)
+	snapshot, err := s.store.PriceEntries.At(ctx, at)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +407,7 @@ func (s *Server) listPriceChanges(ctx context.Context, request *listPriceChanges
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.PriceChanges(ctx, store.PriceChangeFilter{Kind: string(request.Kind), Limit: request.Limit, After: after})
+	found, err := s.store.PriceChanges.Select(ctx, store.PriceChangeFilter{Kind: string(request.Kind), Limit: request.Limit, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +427,7 @@ func (s *Server) getPriceChange(ctx context.Context, request *priceChangeNameReq
 	if s.store == nil {
 		return nil, errNoPriceList
 	}
-	change, rows, err := s.store.PriceChange(ctx, request.Name)
+	change, rows, err := s.store.PriceChanges.Get(ctx, request.Name)
 	if errors.Is(err, store.ErrNoPriceChange) {
 		return nil, errPriceChangeNotFound
 	}
@@ -449,7 +449,7 @@ func (s *Server) previewPriceChange(ctx context.Context, request *previewPriceCh
 	if err != nil {
 		return nil, err
 	}
-	before, err := s.store.PriceListBefore(ctx, input.EffectiveAt)
+	before, err := s.store.PriceEntries.Before(ctx, input.EffectiveAt)
 	if errors.Is(err, store.ErrPriceChangeInPast) {
 		return nil, errPriceChangeInPast
 	}
@@ -486,7 +486,7 @@ func (s *Server) createPriceChange(ctx context.Context, request *createPriceChan
 		return nil, err
 	}
 	actor := managedBy(ctx)
-	change, rows, replayed, err := s.store.CreatePriceChange(ctx, store.PriceChangeWrite{
+	change, rows, replayed, err := s.store.PriceChanges.Insert(ctx, store.PriceChangeWrite{
 		Name: input.Name, Reason: input.Reason, Source: input.Source, EffectiveAt: input.EffectiveAt,
 		Entries: writes, Expand: withTwins, IdempotencyKey: request.IdempotencyKey, ActorID: actor.ID, ActorName: actor.Name,
 	}, func(before store.PriceListAt, assigned []store.PriceEntryWrite) error {
@@ -537,7 +537,7 @@ func (s *Server) cancelPriceChange(ctx context.Context, request *cancelPriceChan
 		return nil, invalidRequest("a cancel says why: reason is 1 to 2000 characters")
 	}
 	actor := managedBy(ctx)
-	change, rows, cancelled, err := s.store.CancelPriceChange(ctx, request.Name, reason, actor.ID, actor.Name)
+	change, rows, cancelled, err := s.store.PriceChanges.Cancel(ctx, request.Name, reason, actor.ID, actor.Name)
 	switch {
 	case errors.Is(err, store.ErrNoPriceChange):
 		return nil, errPriceChangeNotFound

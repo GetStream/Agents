@@ -110,7 +110,7 @@ func (s *Server) listResponseSiblings(ctx context.Context, request *listResponse
 		return nil, invalidRequest(err.Error())
 	}
 	customer := OwnerFrom(ctx).CustomerID
-	siblings, err := s.store.Siblings(ctx, customer, found.ID(), request.ResponseId, of)
+	siblings, err := s.store.Responses.Siblings(ctx, customer, found.ID(), request.ResponseId, of)
 	if errors.Is(err, store.ErrUnknownResponse) {
 		return nil, errUnknownResponse
 	}
@@ -154,7 +154,7 @@ func (s *Server) siblingActive(ctx context.Context, customer, sessionID string, 
 	if sibling.RewoundAt == nil || of == store.SiblingsOfReply {
 		return sibling.RewoundAt == nil, nil
 	}
-	answers, err := s.store.Siblings(ctx, customer, sessionID, sibling.ID, store.SiblingsOfReply)
+	answers, err := s.store.Responses.Siblings(ctx, customer, sessionID, sibling.ID, store.SiblingsOfReply)
 	if err != nil {
 		return false, err
 	}

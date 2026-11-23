@@ -32,18 +32,18 @@ var (
 // connection that was removed (store.ErrNoConnectorConnection), and free text past the
 // provider's window (ErrOutsideWindow, pastWindow).
 func (b *Bridge) Reachable(ctx context.Context, thread store.ChannelThread) error {
-	connection, err := b.store.ConnectorConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	connection, err := b.store.ConnectorConnections.Get(ctx, thread.CustomerID, thread.ConnectionID)
 	if err != nil {
 		return err
 	}
 	if err := b.refusesReply(ctx, thread); err != nil {
 		return err
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return err
 	}
-	resolved, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	resolved, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return stack.Wrap(err)
 	}
@@ -115,7 +115,7 @@ func (b *Bridge) refusesReply(ctx context.Context, thread store.ChannelThread) e
 	if err != nil {
 		return err
 	}
-	optedOut, err := b.store.OptedOut(ctx, thread.CustomerID, to, source.optOuts)
+	optedOut, err := b.store.OptOuts.OptedOut(ctx, thread.CustomerID, to, source.optOuts)
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func (b *Bridge) silenced(ctx context.Context, thread store.ChannelThread) (bool
 	if !source.chats || source.optOuts == "" {
 		return false, nil
 	}
-	return b.store.ChannelThreadMemberOptedOut(ctx, thread.CustomerID, thread.ChannelID, source.optOuts)
+	return b.store.ChannelThreadMembers.OptedOut(ctx, thread.CustomerID, thread.ChannelID, source.optOuts)
 }
 
 // replyTo is the person a thread's replies reach, as its opt-outs and the gate name them. On
@@ -167,9 +167,9 @@ func (b *Bridge) replyTo(ctx context.Context, thread store.ChannelThread) (strin
 	if err != nil || len(configs) == 0 {
 		return "", err
 	}
-	contact, err := b.store.ThreadContact(ctx, thread.CustomerID, configs[0].ID, chatlog.ChannelType+":"+thread.ChannelID)
+	contact, err := b.store.ContactMapEntries.GetByThread(ctx, thread.CustomerID, configs[0].ID, chatlog.ChannelType+":"+thread.ChannelID)
 	if errors.Is(err, store.ErrNoContact) {
-		return b.store.ChannelThreadStarter(ctx, thread.ChannelID)
+		return b.store.ChannelThreads.Starter(ctx, thread.ChannelID)
 	}
 	if err != nil {
 		return "", err

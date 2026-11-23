@@ -69,9 +69,9 @@ func (s *WriterSuite) SetupSuite() {
 	own, err := store.Open(testenv.Database(dsn, "writer"))
 	s.Require().NoError(err)
 	var database string
-	s.Require().NoError(own.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(own.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = own.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = own.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(own.Migrate(s.ctx))
 	s.store = own

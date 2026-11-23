@@ -4471,6 +4471,9 @@ pub struct ListCallsQuery {
     /// Narrow to one agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Narrow to the calls one campaign placed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub campaign_id: Option<String>,

@@ -191,8 +191,8 @@ type Session struct {
 	typedTurns map[string]struct{}
 	tools      *bridge
 	toolCalls  toolCalls
-	// calls records the call's row when it moves onto other models. Nil when the
-	// deployment keeps no calls.
+	// calls records the session's calls: the one it opened on, and one each time voice is
+	// started on it. Nil when the deployment keeps no calls.
 	calls      *callRecorder
 	transcript Transcript
 	// skills are what the fast model may hand over, resolved once when the session was
@@ -318,6 +318,10 @@ type Session struct {
 	labelMu     sync.Mutex
 	title       string
 	description string
+	// call is the id of the session's current call row, and callStarted when it began.
+	// Guarded by labelMu.
+	call        string
+	callStarted time.Time
 	// renamed is set once somebody named the conversation, after which naming leaves it be.
 	renamed bool
 
@@ -1244,6 +1248,23 @@ type Recorded interface {
 	ConversationDocuments(ctx context.Context, customerID string, scope store.DocumentScope) ([]store.ConversationDocument, error)
 }
 
+// RecordedIn is the conversation as written stores it.
+func RecordedIn(written *store.Store) Recorded { return storedRecord{written} }
+
+type storedRecord struct{ store *store.Store }
+
+func (r storedRecord) Exchanges(ctx context.Context, customerID, sessionID, upTo string) ([]store.Exchange, error) {
+	return r.store.Responses.Exchanges(ctx, customerID, sessionID, upTo)
+}
+
+func (r storedRecord) RewindResponses(ctx context.Context, customerID, sessionID, kept string, at time.Time) error {
+	return r.store.Responses.Rewind(ctx, customerID, sessionID, kept, at)
+}
+
+func (r storedRecord) ConversationDocuments(ctx context.Context, customerID string, scope store.DocumentScope) ([]store.ConversationDocument, error) {
+	return r.store.ConversationDocuments.Select(ctx, customerID, scope)
+}
+
 // Rewind carries the conversation on from the end of a response, as though nothing after it
 // had been said. The reply being spoken is abandoned and the model's history is rebuilt from
 // what was recorded up to that response.
@@ -1656,10 +1677,14 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 	s.mu.Unlock()
 	if s.records != nil && voice {
-		s.records.Voiced(s.id, next.CallID, next.CallType)
+		s.records.Voiced(s.id)
 	}
+	// Each time voice is started or stopped begins a call of its own, so every moment of a
+	// session is on exactly one call.
 	if s.calls != nil {
-		s.calls.Changed(row(s))
+		now := time.Now()
+		s.calls.Ended(s.nextCall(now), now.UTC())
+		s.calls.Started(row(s))
 	}
 
 	if err := old.Close(); err != nil {
@@ -2159,7 +2184,7 @@ func (s *Session) nextTurn(ctx context.Context) persistent.Turn {
 	s.turnsMu.Unlock()
 	var place persistent.Place
 	if s.tree != nil {
-		asked, err := s.tree.QuestionsAt(ctx, s.spec.CustomerID, s.id, parent)
+		asked, err := s.tree.Responses.QuestionsAt(ctx, s.spec.CustomerID, s.id, parent)
 		if err != nil {
 			s.logger.Warn("could not read the questions asked before, so the next one is marked as the only one",
 				"session", s.id, "error", err)
@@ -2544,7 +2569,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 
 	defined := map[string]harness.Skill{}
 	if m.options.Store != nil {
-		stored, err := m.options.Configs.SkillsNamed(ctx, customerID, configID, names)
+		stored, err := m.options.Store.Skills.GetByNames(ctx, customerID, configID, names)
 		if err != nil {
 			return harness.Skills{}, err
 		}
@@ -2565,7 +2590,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 	resolved := harness.Skills{Skills: make([]harness.Skill, 0, len(names))}
 	if m.options.Store != nil {
 		resolved.Load = func(ctx context.Context, name string) (harness.Loaded, error) {
-			found, err := m.options.Configs.SkillsNamed(ctx, customerID, configID, []string{name})
+			found, err := m.options.Store.Skills.GetByNames(ctx, customerID, configID, []string{name})
 			if err != nil {
 				return harness.Loaded{}, err
 			}

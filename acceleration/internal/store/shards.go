@@ -7,11 +7,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"maps"
 	"slices"
 	"sync"
 
+	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -37,6 +37,12 @@ type Options struct {
 	// Shards is every shard's DSN by name, this one's included. Reads of calls, sessions and
 	// requests cover them all. Empty is this shard's alone.
 	Shards map[string]string
+	// Redis is where rows read on every request are cached. Empty reads Postgres every time.
+	Redis Redis
+	// ShardRedis is where this shard's running calls keep their state. Empty is Redis.
+	ShardRedis Redis
+	// redisHook sees every Redis command, for the tests counting round trips.
+	redisHook rueidishook.Hook
 }
 
 // OpenShards connects to the shared database, this shard's, and every other shard's.
@@ -45,7 +51,7 @@ func OpenShards(options Options) (*Store, error) {
 		return nil, errors.New("store: dsn is required")
 	}
 	db := connect(options.DSN, maxConns)
-	s := &Store{db: db, shard: db}
+	s := &Store{global: db, shard: db}
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
 		s.shard = connect(options.ShardDSN, maxConns)
 	}
@@ -55,10 +61,17 @@ func OpenShards(options Options) (*Store, error) {
 		switch dsn := options.Shards[name]; {
 		case dsn == own:
 			s.shardNames[0] = name
+			s.globalIsShard = s.globalIsShard || dsn == options.DSN
 		case dsn != "":
+			s.globalIsShard = s.globalIsShard || dsn == options.DSN
 			s.peers = append(s.peers, connect(dsn, peerConns))
 			s.shardNames = append(s.shardNames, name)
 		}
+	}
+	// Wired first: the shared Redis client tells Users of stale keys as soon as it connects.
+	s.wire()
+	if err := s.openRedis(options); err != nil {
+		return nil, errors.Join(err, s.Close())
 	}
 	return s, nil
 }
@@ -71,7 +84,7 @@ func unnamedShard(dsn string) string {
 }
 
 // Sharded reports whether this shard's calls are kept apart from the shared database.
-func (s *Store) Sharded() bool { return s.shard != s.db }
+func (s *Store) Sharded() bool { return s.shard != s.global }
 
 // HasShards reports whether any shard's tables are kept outside the shared database: this
 // shard's own, or another shard's.
@@ -203,17 +216,4 @@ func (s *Store) closeShards() error {
 		failed = append(failed, peer.Close())
 	}
 	return stack.Wrap(errors.Join(failed...))
-}
-
-// migrateShard brings this shard's database to the same schema as the shared one. Every
-// database carries every table, so a deployment can be split, or a shard added, without a
-// second migration history to keep in step.
-func (s *Store) migrateShard(ctx context.Context) error {
-	if !s.Sharded() {
-		return nil
-	}
-	if err := s.migrate(ctx, s.shard); err != nil {
-		return fmt.Errorf("store: shard: %w", err)
-	}
-	return nil
 }

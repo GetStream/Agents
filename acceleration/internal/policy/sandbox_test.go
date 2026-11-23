@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
@@ -46,8 +45,7 @@ func (s *PolicySuite) sandboxed(change ...func(*Settings)) *sandboxed {
 
 // readingSandboxes is another enforcer reading the same usage service, as another router.
 func (s *PolicySuite) readingSandboxes(service *usagetest.Service, tiers map[string]usage.Tier, change ...func(*Settings)) *sandboxed {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: service.URL, Token: service.Token})
 	s.Require().NoError(err)
 	written := &logs{}
@@ -202,8 +200,7 @@ func (s *PolicySuite) TestOffChecksNoSandboxAndCountsNone() {
 func (s *PolicySuite) unread(change ...func(*Settings)) *Enforcer {
 	unreachable, err := usage.NewClient(usage.ClientOptions{URL: "http://127.0.0.1:1", Token: "none"})
 	s.Require().NoError(err)
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, append([]func(*Settings){func(settings *Settings) {
 		settings.Usage, settings.FirstRead = unreachable, 20*time.Millisecond
 	}}, change...)...)

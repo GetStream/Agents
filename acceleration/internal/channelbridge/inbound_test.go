@@ -70,9 +70,9 @@ func (s *InboundSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.store = db
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.sealer, err = auth.NewSealerWithKeyring(1, map[int]string{1: "test key one"})
@@ -98,8 +98,8 @@ func (s *InboundSuite) SetupTest() {
 	}), streamapp.ClientsOptions{})
 	s.logs = &syncBuffer{}
 	s.customer = "customer-" + uuid.NewString()
-	s.config = store.AgentConfig{CustomerID: s.customer, Name: "Support", EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &s.config))
+	s.config = store.AgentConfig{CustomerID: s.customer, Name: "Support", EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &s.config))
 }
 
 func (s *InboundSuite) TestAQueuedMessageIsWrittenOnceUnderItsOwnID() {
@@ -126,7 +126,7 @@ func (s *InboundSuite) TestAMessageStreamChatAlreadyHoldsCountsAsWritten() {
 	s.bridge(nil)
 
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(0, s.row(thread, "m-1").Attempts)
+	s.Equal(1, s.row(thread, "m-1").Attempts)
 	s.Len(s.chat.Stored(thread.ChannelID), 1)
 }
 
@@ -153,7 +153,7 @@ func (s *InboundSuite) TestARetryWritesTheCardWhenTheRoutersClockIsBehindPostgre
 	thread := s.thread("slack_bot")
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "1793125611.816139", "hello", nil)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at + interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at + interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
 	s.Require().NoError(err)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour}})
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
@@ -175,7 +175,7 @@ func (s *InboundSuite) TestACardAStoppedRouterLeftIsWrittenByTheNextAttempt() {
 	s.bridge(nil)
 
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(0, s.row(thread, "1793125611.816139").Attempts)
+	s.Equal(1, s.row(thread, "1793125611.816139").Attempts)
 	omni, card := s.card(thread)
 	s.Equal([]string{card}, messageIDs(s.chat.Stored(omni)))
 }
@@ -196,7 +196,7 @@ func (s *InboundSuite) TestAThreadUnderAConfigWithTheCardsOffOpensNoEpisodeAndIs
 	s.Zero(s.episodes(), "no episode")
 	s.Zero(s.omniRequests(), "nothing asked of an omni-channel")
 	s.NotContains(s.logs.String(), "could not open the episode")
-	starter, err := s.store.ChannelThreadStarter(s.ctx, thread.ChannelID)
+	starter, err := s.store.ChannelThreads.Starter(s.ctx, thread.ChannelID)
 	s.Require().NoError(err)
 	s.Empty(starter, "a Slack thread is no chat, and has no starter")
 }
@@ -220,7 +220,7 @@ func (s *InboundSuite) TestAChatWithNoEpisodeNamesThePersonWhoStartedIt() {
 		s.Require().Eventually(func() bool { return s.row(thread, id).State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond, id)
 	}
 	s.Zero(s.episodes())
-	starter, err := s.store.ChannelThreadStarter(s.ctx, thread.ChannelID)
+	starter, err := s.store.ChannelThreads.Starter(s.ctx, thread.ChannelID)
 	s.Require().NoError(err)
 	s.Equal("+16505550100", starter)
 }
@@ -259,7 +259,7 @@ func (s *InboundSuite) TestAMessageQueuedBeforeItsConfigTurnedTheCardsOffOpensNo
 func (s *InboundSuite) TestAMessageWhoseConfigWasDeletedOpensNoEpisodeAndLogsNoError() {
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.816139", "hello", nil)
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, s.customer, s.config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, s.customer, s.config.ID))
 	handed := s.handedTo(nil)
 
 	s.Equal(inboundMessageID(thread.ChannelID, "1793125611.816139"), s.handed(handed).ID)
@@ -280,7 +280,7 @@ func (s *InboundSuite) TestACardStreamChatAlreadyHoldsCountsAsWritten() {
 	s.bridge(nil)
 
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(0, s.row(thread, "1793125611.816139").Attempts, "written on its first attempt")
+	s.Equal(1, s.row(thread, "1793125611.816139").Attempts, "written on its first attempt")
 	omni, card := s.card(thread)
 	s.Equal([]string{card}, messageIDs(s.chat.Stored(omni)))
 	s.NotContains(s.logs.String(), "could not write the episode card", "a card already there is no failure")
@@ -300,7 +300,7 @@ func (s *InboundSuite) TestALaterMessageOfAnOpenEpisodeWritesNoCard() {
 	bridge.wake()
 
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.000002").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(0, s.row(thread, "1793125611.000002").Attempts)
+	s.Equal(1, s.row(thread, "1793125611.000002").Attempts)
 	s.Equal(asked, s.asked(omni), "no request to the omni-channel")
 	s.Equal([]string{card}, messageIDs(s.chat.Stored(omni)))
 	s.Equal([]string{"first", "second"}, s.chat.Messages(thread.ChannelID))
@@ -311,7 +311,7 @@ func (s *InboundSuite) TestALaterMessageOfAnOpenEpisodeWritesNoCard() {
 func (s *InboundSuite) TestAMessageOfAnEpisodeOpenedAfterItWasQueuedWritesNoCard() {
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.000002", "second", nil)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at - interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at - interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
 	s.Require().NoError(err)
 	message := s.row(thread, "1793125611.000002")
 	bridge := s.newBridge(nil)
@@ -392,7 +392,7 @@ func (s *InboundSuite) TestAMessageThatNeverGetsThroughIsGivenUpAndItsDeliveryFo
 	s.Equal(3, s.row(thread, "m-1").Attempts, "the first attempt and the two waits")
 	s.Equal(2, strings.Count(s.logs.String(), "level=WARN msg=\"gave up an inbound message: it was never written into its thread channel or handed to the agent, so no agent answers it\""))
 	var deliveries []store.EventDelivery
-	s.Require().NoError(s.store.DB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
 	s.Require().Len(deliveries, 1)
 	s.Equal([]byte(`{"text":"hello"}`), deliveries[0].Body)
 	s.Equal(forward.Headers, deliveries[0].Headers)
@@ -426,7 +426,7 @@ func (s *InboundSuite) TestADeliveryWhoseForwardFailedIsForwardedByItsNextMessag
 	s.Equal(store.ChannelInboundFailed, s.row(thread, "m-1").State, "given up although its forward failed")
 	s.Contains(s.logs.String(), "synthetic forward failure")
 	var deliveries []store.EventDelivery
-	s.Require().NoError(s.store.DB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
 	s.Require().Len(deliveries, 1)
 	s.Equal([]byte(`{"text":"again"}`), deliveries[0].Body, "the second message forwards it, the third does not")
 	s.Equal(int32(2), calls.Load())
@@ -447,7 +447,7 @@ func (s *InboundSuite) TestAMessageStreamChatRefusesIsGivenUpAtOnce() {
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundFailed }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(1, s.row(thread, "m-1").Attempts)
 	s.Equal(1, strings.Count(s.logs.String(), "level=WARN msg=\"gave up an inbound message"))
-	count, err := s.store.DB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(1, count)
 }
@@ -476,14 +476,14 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 	thread := s.thread("fake_line")
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", &store.ChannelInboundForward{ID: "Ev0001"})
-	_, err = s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 1").
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 1").
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, "m-1").Exec(s.ctx)
 	s.Require().NoError(err)
-	stale, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Millisecond))
+	stale, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Millisecond))
 	s.Require().NoError(err)
 	s.Require().Len(stale, 1)
 	time.Sleep(5 * time.Millisecond)
-	taken, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Hour))
+	taken, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "another worker took it once the lease ran out")
 
@@ -491,9 +491,9 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 
 	row := s.row(thread, "m-1")
 	s.Equal(store.ChannelInboundQueued, row.State)
-	s.Equal(1, row.Attempts)
+	s.Equal(3, row.Attempts, "the one set up and the two claims")
 	s.NotContains(s.logs.String(), "level=WARN")
-	count, err := s.store.DB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(count)
 }
@@ -501,7 +501,7 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 // A STOP whose opt-out the store keeps failing to record is never given up: past the waits it
 // is due again after the last one. A trigger refuses the test customer's opt-outs.
 func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
-	_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 		CREATE FUNCTION inbound_suite_refuse_opt_out() RETURNS trigger AS $$
 			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
 		CREATE TRIGGER inbound_suite_refuse_opt_out BEFORE INSERT ON opt_outs FOR EACH ROW
@@ -509,7 +509,7 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 		COMMIT`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 			DROP TRIGGER inbound_suite_refuse_opt_out ON opt_outs;
 			DROP FUNCTION inbound_suite_refuse_opt_out();
 			COMMIT`)
@@ -518,10 +518,10 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 	s.emptyQueue()
 	thread := s.thread("telnyx")
 	s.queue(thread, "m-1", "STOP", nil)
-	_, err = s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 2").
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 2").
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, "m-1").Exec(s.ctx)
 	s.Require().NoError(err)
-	claimed, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
+	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -537,7 +537,7 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 // The WARN for a STOP that is still not recorded starts past the waits: attempt 1 and the attempt
 // that uses the last wait are retried at INFO only.
 func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
-	_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 		CREATE FUNCTION inbound_suite_refuse_opt_out() RETURNS trigger AS $$
 			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
 		CREATE TRIGGER inbound_suite_refuse_opt_out BEFORE INSERT ON opt_outs FOR EACH ROW
@@ -545,7 +545,7 @@ func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
 		COMMIT`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(s.ctx, `BEGIN;
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, `BEGIN;
 			DROP TRIGGER inbound_suite_refuse_opt_out ON opt_outs;
 			DROP FUNCTION inbound_suite_refuse_opt_out();
 			COMMIT`)
@@ -560,10 +560,10 @@ func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
 		id := fmt.Sprintf("m-%d", tried)
 		s.emptyQueue()
 		s.queue(thread, id, "STOP", nil)
-		_, err = s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = ?", tried).
+		_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = ?", tried).
 			Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, id).Exec(s.ctx)
 		s.Require().NoError(err)
-		claimed, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
+		claimed, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
 		s.Require().NoError(err)
 		s.Require().Len(claimed, 1)
 		before := warnings()
@@ -605,7 +605,7 @@ func (s *InboundSuite) TestAGivenUpMessageWithNoForwardForwardsNothing() {
 	s.bridge(&Options{InboundRetries: []time.Duration{time.Millisecond}, Unanswered: forwarder.ForwardUnanswered})
 
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundFailed }, 5*time.Second, 10*time.Millisecond)
-	count, err := s.store.DB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(count)
 }
@@ -631,7 +631,7 @@ func (s *InboundSuite) TestAMessageAStoppedWorkerLeftIsWrittenByTheNextOne() {
 func (s *InboundSuite) TestAMessageALeaseHeldIsWrittenWhenTheLeaseRunsOut() {
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
-	claimed, err := s.store.ClaimChannelInbound(s.ctx, time.Now(), 1, time.Now().Add(300*time.Millisecond))
+	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(300*time.Millisecond))
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -764,7 +764,7 @@ func (s *InboundSuite) TestTheWorkerDeletesRowsPastTheirKeepOnceAnHour() {
 	bridge.writeDue(s.ctx)
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
-	_, err := s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).
 		Set("state = 'done'").Set("finished_at = ?", time.Now().Add(-25*time.Hour)).
 		Where("channel_id = ? AND provider_message_id = 'm-1'", thread.ChannelID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -780,7 +780,7 @@ func (s *InboundSuite) TestTheWorkerDeletesAWrittenMessagesRowAfterADay() {
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
 	s.queue(thread, "m-2", "hello", nil)
-	_, err := s.store.DB().NewUpdate().Model((*store.ChannelInbound)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).
 		Set("state = 'done'").Set("finished_at = ?", time.Now().Add(-25*time.Hour)).
 		Where("channel_id = ? AND provider_message_id = 'm-1'", thread.ChannelID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -795,7 +795,7 @@ func (s *InboundSuite) TestTheWorkerDeletesAWrittenMessagesRowAfterADay() {
 // mark on it, and the message is done once the agent took it.
 func (s *InboundSuite) TestAWrittenMessageIsHandedToTheAgentAsStreamChatStoredIt() {
 	thread := s.thread("fake_line")
-	queued, err := s.store.AcceptChannelInbound(s.ctx, store.ChannelInbound{
+	queued, err := s.store.ChannelInbounds.Accept(s.ctx, store.ChannelInbound{
 		ChannelID: thread.ChannelID, ProviderMessageID: "m-1", CustomerID: thread.CustomerID, ConnectorID: thread.ConnectorID,
 		ProviderUnitID: thread.ProviderUnitID, ThreadKey: thread.ThreadKey, ConfigID: s.config.ID, ConfigName: s.config.Name,
 		AuthorID: "U0000ALICE", Text: "what is this?", Media: []core.Media{{URL: "https://cdn.example/a.jpg", MIMEType: "image/jpeg"}},
@@ -828,7 +828,7 @@ func (s *InboundSuite) TestAMessageStreamChatAlreadyHoldsIsHandedToTheAgentFromI
 	thread := s.thread("fake_line")
 	id := inboundMessageID(thread.ChannelID, "m-1")
 	s.writeAhead(thread, id, "hello")
-	queued, err := s.store.AcceptChannelInbound(s.ctx, store.ChannelInbound{
+	queued, err := s.store.ChannelInbounds.Accept(s.ctx, store.ChannelInbound{
 		ChannelID: thread.ChannelID, ProviderMessageID: "m-1", CustomerID: thread.CustomerID, ConnectorID: thread.ConnectorID,
 		ProviderUnitID: thread.ProviderUnitID, ThreadKey: thread.ThreadKey, ConfigID: s.config.ID, ConfigName: s.config.Name,
 		AuthorID: "U0000ALICE", Text: "hello", Media: []core.Media{{URL: "https://cdn.example/a.jpg", MIMEType: "image/jpeg"}},
@@ -846,7 +846,7 @@ func (s *InboundSuite) TestAMessageStreamChatAlreadyHoldsIsHandedToTheAgentFromI
 	s.Require().Len(message.Attachments, 1, "the photo goes with it, so a photo alone is still answered")
 	s.Equal("https://cdn.example/a.jpg", *message.Attachments[0].ImageUrl)
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(0, s.row(thread, "m-1").Attempts)
+	s.Equal(1, s.row(thread, "m-1").Attempts)
 }
 
 // A card Stream Chat refuses costs the card, not the answer: the message is written and handed
@@ -891,7 +891,7 @@ func (s *InboundSuite) TestAMessageWhoseEpisodeCannotBeOpenedIsStillHandedToTheA
 
 	s.Equal(thread.ChannelID+"-1793125611.816139", s.handed(handed).ID)
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Zero(s.row(thread, "1793125611.816139").Attempts)
+	s.Equal(1, s.row(thread, "1793125611.816139").Attempts)
 	s.Never(func() bool { return len(handed) > 0 }, 200*time.Millisecond, 10*time.Millisecond, "handed to the agent twice")
 	s.Contains(s.logs.String(), `level=ERROR msg="could not open the episode of an inbound message" connector=slack_bot customer=`+s.customer+" channel="+thread.ChannelID)
 }
@@ -935,7 +935,7 @@ func (s *InboundSuite) TestAMessageWhoseTurnCouldNotBeClaimedIsHandedOverAgain()
 	s.Equal(first.ID, second.ID)
 	s.Equal(first.Text, second.Text)
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(1, s.row(thread, "m-1").Attempts)
+	s.Equal(2, s.row(thread, "m-1").Attempts)
 	s.Len(s.chat.Stored(thread.ChannelID), 1)
 	s.Contains(s.logs.String(), `msg="an inbound message was not written into its thread channel or not handed to the agent, and is tried again"`)
 }
@@ -1026,7 +1026,7 @@ func (s *InboundSuite) handedOnce(thread store.ChannelThread, providerMessageID 
 
 	s.Equal(inboundMessageID(thread.ChannelID, providerMessageID), s.handed(handed).ID)
 	s.Require().Eventually(func() bool { return s.row(thread, providerMessageID).State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Zero(s.row(thread, providerMessageID).Attempts)
+	s.Equal(1, s.row(thread, providerMessageID).Attempts)
 	s.Never(func() bool { return len(handed) > 0 }, 200*time.Millisecond, 10*time.Millisecond, "handed to the agent twice")
 	s.Equal([]string{"hello"}, s.chat.Messages(thread.ChannelID))
 	omni, _ := s.card(thread)
@@ -1115,7 +1115,7 @@ func (s *InboundSuite) openEpisode(thread store.ChannelThread, message store.Cha
 // emptyQueue deletes every row of the suite's own database's queue, the ones earlier tests
 // left too.
 func (s *InboundSuite) emptyQueue() {
-	_, err := s.store.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("TRUE").Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("TRUE").Exec(s.ctx)
 	s.Require().NoError(err)
 }
 
@@ -1136,7 +1136,7 @@ func (s *InboundSuite) thread(connector string) store.ChannelThread {
 		ChannelID: threadChannelPrefix + uuid.NewString(), CustomerID: s.customer, ConnectorID: connector,
 		ProviderUnitID: "T0000TEAM", ThreadKey: uuid.NewString(), ConnectionID: "connection-1",
 	}
-	_, err := s.store.LinkChannelThread(s.ctx, &thread)
+	_, err := s.store.ChannelThreads.Link(s.ctx, &thread)
 	s.Require().NoError(err)
 	return thread
 }
@@ -1148,7 +1148,7 @@ func (s *InboundSuite) queue(thread store.ChannelThread, providerMessageID, text
 
 // queueAt queues a message of U0000ALICE in thread, due at due.
 func (s *InboundSuite) queueAt(thread store.ChannelThread, providerMessageID, text string, forward *store.ChannelInboundForward, due time.Time) {
-	queued, err := s.store.AcceptChannelInbound(s.ctx, store.ChannelInbound{
+	queued, err := s.store.ChannelInbounds.Accept(s.ctx, store.ChannelInbound{
 		ChannelID: thread.ChannelID, ProviderMessageID: providerMessageID, CustomerID: thread.CustomerID,
 		ConnectorID: thread.ConnectorID, ProviderUnitID: thread.ProviderUnitID, ThreadKey: thread.ThreadKey,
 		ConfigID: s.config.ID, ConfigName: s.config.Name, AuthorID: "U0000ALICE", Text: text,
@@ -1161,14 +1161,14 @@ func (s *InboundSuite) queueAt(thread store.ChannelThread, providerMessageID, te
 // row is a queued message's row as it is now.
 func (s *InboundSuite) row(thread store.ChannelThread, providerMessageID string) store.ChannelInbound {
 	var row store.ChannelInbound
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, providerMessageID).Scan(s.ctx))
 	return row
 }
 
 // rows is how many rows thread has.
 func (s *InboundSuite) rows(thread store.ChannelThread) int {
-	count, err := s.store.DB().NewSelect().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Count(s.ctx)
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Count(s.ctx)
 	s.Require().NoError(err)
 	return count
 }
@@ -1202,14 +1202,14 @@ func (s *InboundSuite) writeAhead(thread store.ChannelThread, id, text string) {
 
 // cardsMode stores the suite's config with episode_cards and episode_cards_record as given.
 func (s *InboundSuite) cardsMode(on, record bool) {
-	s.config.EpisodeCards, s.config.EpisodeCardsRecord = on, record
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &s.config))
+	s.config.EpisodeCards.On, s.config.EpisodeCards.Record = on, record
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &s.config))
 }
 
 // episodes is how many episodes the test's customer has.
 func (s *InboundSuite) episodes() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes WHERE customer_id = ?", s.customer).Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM episodes WHERE customer_id = ?", s.customer).Scan(&count))
 	return count
 }
 
@@ -1227,7 +1227,7 @@ func (s *InboundSuite) omniRequests() int {
 // card is the omni-channel id and the card message id of thread's episode.
 func (s *InboundSuite) card(thread store.ChannelThread) (omni, card string) {
 	var conversation string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `SELECT cm.conversation_id, ep.card_message_id FROM episodes ep
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT cm.conversation_id, ep.card_message_id FROM episodes ep
 JOIN contact_map cm ON cm.id = ep.contact_id WHERE ep.thread_channel = ?`, chatlog.ChannelType+":"+thread.ChannelID).Scan(&conversation, &card))
 	return strings.TrimPrefix(conversation, chatlog.ChannelType+":"), card
 }
@@ -1240,7 +1240,7 @@ func (s *InboundSuite) destination(forwarder *eventforward.Forwarder) string {
 	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	return destination.ID
 }
 
@@ -1292,9 +1292,9 @@ func (s *InboundSuite) TestAdmitDecidesTheChatPersonFromTheMessageAlone() {
 	} {
 		s.Run(name, func() {
 			thread := s.thread("linq")
-			s.Require().NoError(s.store.SetChannelThreadChatPerson(s.ctx, thread.ChannelID, "U0000BOB"))
+			s.Require().NoError(s.store.ChannelThreads.SetChatPerson(s.ctx, thread.ChannelID, "U0000BOB"))
 			s.queueLinq(thread, "m1", test.isGroup)
-			stored, err := s.store.ChannelThread(s.ctx, thread.ChannelID)
+			stored, err := s.store.ChannelThreads.Get(s.ctx, thread.ChannelID)
 			s.Require().NoError(err)
 			s.Require().Equal("U0000BOB", stored.ChatPerson, "the thread arrives with a stored person")
 
@@ -1302,7 +1302,7 @@ func (s *InboundSuite) TestAdmitDecidesTheChatPersonFromTheMessageAlone() {
 			s.Require().NoError(err)
 			s.True(admitted)
 
-			after, err := s.store.ChannelThread(s.ctx, thread.ChannelID)
+			after, err := s.store.ChannelThreads.Get(s.ctx, thread.ChannelID)
 			s.Require().NoError(err)
 			s.Equal(test.want, after.ChatPerson)
 		})
@@ -1316,7 +1316,7 @@ func (s *InboundSuite) queueLinq(thread store.ChannelThread, providerMessageID s
 
 // queueLinqBy queues a Linq message of author in thread, whose raw event says whether the chat is a group.
 func (s *InboundSuite) queueLinqBy(thread store.ChannelThread, providerMessageID, author string, isGroup bool) {
-	queued, err := s.store.AcceptChannelInbound(s.ctx, store.ChannelInbound{
+	queued, err := s.store.ChannelInbounds.Accept(s.ctx, store.ChannelInbound{
 		ChannelID: thread.ChannelID, ProviderMessageID: providerMessageID, CustomerID: thread.CustomerID,
 		ConnectorID: thread.ConnectorID, ProviderUnitID: thread.ProviderUnitID, ThreadKey: thread.ThreadKey,
 		ConfigID: s.config.ID, ConfigName: s.config.Name, AuthorID: author, Text: "hi",

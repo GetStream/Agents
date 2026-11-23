@@ -349,7 +349,7 @@ func (s *SlackChannelSuite) heldOnThread() string {
 	held := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
 	s.Require().Equal("agent:"+channel, value(held.ConversationId))
 	s.Require().Eventually(func() bool {
-		_, err := s.store.StoredSession(context.Background(), s.customerID(), held.Id)
+		_, err := s.store.Sessions.Get(context.Background(), s.customerID(), held.Id)
 		return err == nil
 	}, settleFor, 20*time.Millisecond, "the session's row was never stored")
 	handOver()
@@ -360,10 +360,10 @@ func (s *SlackChannelSuite) heldOnThread() string {
 // unreadableLink leaves a thread channel's channel_threads row one the store cannot read:
 // thread_parts holds a number where a string goes, so ChannelThread fails to scan it.
 func (s *SlackChannelSuite) unreadableLink(channel string) {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE channel_threads SET thread_parts = '{"ts": 1}'::jsonb WHERE channel_id = ?`, channel)
 	s.Require().NoError(err)
-	_, err = s.store.ChannelThread(context.Background(), channel)
+	_, err = s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().Error(err)
 	s.Require().NotErrorIs(err, store.ErrNoChannelThread)
 }
@@ -411,13 +411,13 @@ func (s *SlackChannelSuite) TestAThreadTheMessageHookOpensIsSharedAndOffersNoCal
 		Name: "mine", ConnectorID: "slack_bot",
 		Connection: store.ConnectionBinding{Type: "session"},
 	})
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	data, foundChannel := s.chat.Channel(channel)
 	s.Require().True(foundChannel)
 	custom, _ := data["custom"].(map[string]any)
-	thread, err := s.store.ChannelThread(context.Background(), channel)
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().NoError(err)
 
 	// The same event the message hook hands answerThread, which calls threadSession.
@@ -456,14 +456,14 @@ draining:
 func (s *SlackChannelSuite) TestAHookStartedReplyIsMarkedHookChat() {
 	// No key opened the thread channel's session: the message hook did, for its sender.
 	organization := s.RouterSuite.app.organization.ID
-	s.Require().NoError(s.store.JoinOrganization(context.Background(), s.customerID(), organization))
-	s.Require().NoError(s.store.SetOrganizationTier(context.Background(), organization, "tier-a", time.Now()))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: s.customerID(), OrganizationID: organization}))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(context.Background(), &store.OrganizationTier{OrganizationID: organization, Tier: "tier-a", SeenAt: time.Now()}))
 	s.holdHandOffs()
 	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
 	data, foundChannel := s.chat.Channel(channel)
 	s.Require().True(foundChannel)
 	custom, _ := data["custom"].(map[string]any)
-	thread, err := s.store.ChannelThread(context.Background(), channel)
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().NoError(err)
 	event := messageEvent{ChannelType: chatlog.ChannelType, ChannelID: channel, ChannelCustom: custom}
 	event.Message.Text = "is the build green?"

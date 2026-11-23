@@ -904,7 +904,7 @@ module GetStream
         }.freeze,
         "listCalls" => {
           method: :get, path: "/v1/agents/calls",
-          path_params: [].freeze, query: %w[running limit agent_id campaign_id from to max_review_score].freeze,
+          path_params: [].freeze, query: %w[running limit agent_id session_id campaign_id from to max_review_score].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
@@ -2034,7 +2034,7 @@ module GetStream
           required: %w[e164 vendor].freeze, open: false
         }.freeze,
         "Call" => {
-          properties: %w[agent_id call_id campaign_id config_id contact_id direction ended_at from_number id instructions llm llm_used mode review_notes review_score skills started_at sts sts_used stt stt_used subagent subagent_used summary tags to_number tts tts_used usage user_id voice voice_used].freeze,
+          properties: %w[agent_id call_id campaign_id contact_id direction ended_at from_number id instructions llm llm_used mode review_notes review_score session_id skills started_at sts sts_used stt stt_used subagent subagent_used summary tags to_number tts tts_used usage voice voice_used].freeze,
           required: %w[agent_id call_id direction id started_at].freeze, open: false
         }.freeze,
         "CallEvent" => {

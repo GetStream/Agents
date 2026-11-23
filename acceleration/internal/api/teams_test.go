@@ -57,11 +57,11 @@ func (s *AgentTeamsSuite) useTeamsApp(settings store.AppSettings) {
 func (s *AgentTeamsSuite) useDeploymentApp(settings store.AppSettings) {
 	id := streamAppID()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(context.Background(), &organization))
+	s.Require().NoError(s.store.Organizations.Insert(context.Background(), &organization))
 	app := store.App{
 		ID: streamapp.CustomerOf(id), OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings,
 	}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
 	s.useApp(s.data.keyed(organization, app))
 	s.teamsChat = chattest.NewServer(s.T())
 	s.setApps(s.customerID(), func(apps *suiteApps) {
@@ -200,7 +200,7 @@ func (s *AgentTeamsSuite) TestAFailedReadAnswersAlikeForAConfigThatExistsAndOneT
 func (s *AgentTeamsSuite) TestAnAppWhoseSettingsCannotBeReadAnswersAlikeForAnUnknownConfig() {
 	dana := s.inTeams()
 	config := s.configOf("")
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 
@@ -273,16 +273,16 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerWithNoPinReadsItsUsers
 	id := streamapp.CustomerOf(suiteStreamApp)
 	settings := store.AppSettings{AgentTeams: new(true)}
 	var app store.App
-	if err := s.store.DB().NewSelect().Model(&app).Where("id = ?", id).Scan(ctx); err == nil {
+	if err := s.store.GlobalDB().NewSelect().Model(&app).Where("id = ?", id).Scan(ctx); err == nil {
 		app.Settings = settings
-		_, err = s.store.DB().NewUpdate().Model(&app).Column("settings").WherePK().Exec(ctx)
+		_, err = s.store.GlobalDB().NewUpdate().Model(&app).Column("settings").WherePK().Exec(ctx)
 		s.Require().NoError(err)
 		s.useApp(s.data.keyed(store.Organization{ID: app.OrganizationID}, app))
 	} else {
 		organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-		s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+		s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 		app = store.App{ID: id, OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings}
-		s.Require().NoError(s.store.CreateApp(ctx, &app))
+		s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 		s.useApp(s.data.keyed(organization, app))
 	}
 	s.teamsChat = s.chat
@@ -332,7 +332,7 @@ func (s *AgentTeamsSuite) TestWithTheSettingOffTheDeploymentAppsOwnCustomerIsNot
 func (s *AgentTeamsSuite) TestAnAppWhoseSettingsCannotBeReadOpensNothingToAUser() {
 	dana := s.inTeams()
 	config := s.configOf("")
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 
@@ -549,9 +549,10 @@ func (s *AgentTeamsSuite) TestAConfigThatCannotBeReadFailsAReopenOnlyWhenChecked
 		ended := anya.createSession(s.recorded(s.configOf("red")))
 		s.endHere(ended.Id)
 		for _, opened := range []Session{parent, ended} {
-			_, err := s.store.DB().NewRaw(`UPDATE agent_configs SET skills = '"unreadable"'::jsonb WHERE id = ?`,
+			_, err := s.store.GlobalDB().NewRaw(`UPDATE agent_configs SET skills = '"unreadable"'::jsonb WHERE id = ?`,
 				value(opened.ConfigId)).Exec(s.T().Context())
 			s.Require().NoError(err)
+			s.store.AgentConfigs.ForgetCached(s.T().Context(), s.customerID(), value(opened.ConfigId))
 		}
 
 		s.Equal(http.StatusInternalServerError, s.status(anya.call(http.MethodPost, s.forking(parent.Id), s.offRecord())), "flag %v", settings != nil)

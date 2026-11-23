@@ -86,30 +86,32 @@ func (s *LimitsSuite) TestTheCostAnomalyCheckRunsWhereThereIsAChannelAndPostgres
 	logger := slog.New(slog.DiscardHandler)
 	db := &store.Store{}
 	s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "xoxb-test", "C123"
-	s.NotNil(costAnomalies(s.settings, db, logger))
+	s.NotNil(costAnomalies(db, noticeSender(s.settings, db, logger), logger))
 	s.settings.Limits.Mode = config.LimitsOff
-	s.NotNil(costAnomalies(s.settings, db, logger), "spend is priced and recorded with limits off too")
+	s.NotNil(costAnomalies(db, noticeSender(s.settings, db, logger), logger), "spend is priced and recorded with limits off too")
 
-	s.Nil(costAnomalies(s.settings, nil, logger), "no Postgres to read the spend from")
+	s.Nil(noticeSender(s.settings, nil, logger), "no Postgres to keep the notices in")
+	s.Nil(costAnomalies(nil, noticeSender(s.settings, db, logger), logger), "no Postgres to read the spend from")
 	s.settings.Limits.SlackToken = " "
-	s.Nil(costAnomalies(s.settings, db, logger), "no token")
+	s.Nil(noticeSender(s.settings, db, logger), "no token")
+	s.Nil(costAnomalies(db, noticeSender(s.settings, db, logger), logger), "no token")
 	s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "xoxb-test", ""
-	s.Nil(costAnomalies(s.settings, db, logger), "no channel")
+	s.Nil(noticeSender(s.settings, db, logger), "no channel")
 }
 
-// The message names its environment and links to the staff page, so an operator reading it in the
-// shared channel knows which deployment it is from and where to look.
-func (s *LimitsSuite) TestTheCostAnomalyCheckNamesItsEnvironmentAndLinksTheStaffPage() {
+// The message names its environment and links to the app and staff pages, so an operator reading
+// it in the shared channel knows which deployment it is from and where to look.
+func (s *LimitsSuite) TestTheNoticesNameTheirEnvironmentAndLinkTheStaffPage() {
 	s.T().Setenv("SENTRY_ENVIRONMENT", "staging-test")
 	s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "xoxb-test", "C123"
 	s.settings.Limits.StaffURL = "https://staff.example.test/orgs"
+	s.settings.Limits.AppURL = "https://dash.example.test/{organization}/{app}"
 	logger := slog.New(slog.DiscardHandler)
-	db := &store.Store{}
 
-	options, ok := costAnomalyOptions(s.settings, db, logger)
+	options, ok := noticeSenderOptions(s.settings, &store.Store{}, logger)
 
 	s.Require().True(ok)
 	s.Equal("staging-test", options.Environment)
 	s.Equal(s.settings.Limits.StaffURL, options.Links.Staff)
-	s.Same(db, options.Store)
+	s.Equal(s.settings.Limits.AppURL, options.Links.App)
 }

@@ -195,7 +195,7 @@ func (s *RunsSuite) TestARunWhoseInputTheScreenRefusedIsARefusalNotAModelFailure
 func (s *RunsSuite) TestASpentLimitIsAPaymentRequired() {
 	s.useApp(s.data.createApp())
 	s.limitApp(usage.Daily, 1_000)
-	s.Require().NoError(s.store.RecordRequest(s.T().Context(), &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(s.T().Context(), &store.Request{
 		Modality: "llm", CustomerID: s.customerID(), Provider: "echo", Model: "echo-model",
 		StartedAt: time.Now().UTC(), CostMicros: 5_000, Billable: true, Success: true,
 	}))
@@ -221,8 +221,8 @@ func (s *RunsSuite) TestATeamLimitRefusesTheAgentTaggedWithTheTeam() {
 		Subject: usage.SubjectCategory, Level: store.LevelOrganization, OrganizationID: s.app.organization.ID,
 		Category: usage.TeamPrefix + "support", Interval: usage.Daily, LimitMicros: 1_000, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
-	s.Require().NoError(s.store.RecordRequest(s.T().Context(), &store.Request{
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Requests.Insert(s.T().Context(), &store.Request{
 		Modality: "llm", CustomerID: s.customerID(), Provider: "echo", Model: "echo-model", UsageCategories: []string{"team:support"},
 		StartedAt: time.Now().UTC(), CostMicros: 5_000, Billable: true, Success: true,
 	}))

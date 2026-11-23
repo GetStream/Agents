@@ -129,7 +129,7 @@ func (s *StreamsSuite) TestAModelThatRefusedTheAccountIsListedUnavailable() {
 	var recorded []store.Request
 	s.Require().Eventually(func() bool {
 		recorded = nil
-		err := s.store.DB().NewSelect().Model(&recorded).
+		err := s.store.GlobalDB().NewSelect().Model(&recorded).
 			Where("model = ? AND NOT success", refusingModel).Limit(1).Scan(context.Background())
 		return err == nil && len(recorded) == 1
 	}, 5*time.Second, 20*time.Millisecond)
@@ -209,7 +209,7 @@ func (s *StreamsSuite) TestAStartPinnedToABatchModelIsRefusedAndLeavesItsHealthA
 	s.Equal("routing: "+pinned+" is a batch model for recordings, not live calls; for a live call name en-low-latency",
 		read[0]["error"])
 	s.Never(func() bool {
-		count, err := s.store.DB().NewSelect().Model((*store.Request)(nil)).
+		count, err := s.store.GlobalDB().NewSelect().Model((*store.Request)(nil)).
 			Where("model = ?", batchModel).Count(context.Background())
 		return err != nil || count > 0
 	}, time.Second, 50*time.Millisecond, "no start_failed row counts against the model")
@@ -531,7 +531,7 @@ func (s *StreamsSuite) TestAModelOfTheCustomersOwnAnswersAtItsEndpointWithItsKey
 	name := "own-" + s.utils.uuid()
 	sealed, err := s.sealer.SealWithAAD("sk-own", []byte(s.customerID()))
 	s.Require().NoError(err)
-	s.Require().NoError(s.configs.CreateCustomModel(context.Background(), &store.CustomModel{
+	s.Require().NoError(s.store.CustomModels.Insert(context.Background(), &store.CustomModel{
 		CustomerID: s.customerID(), Name: name, BaseURL: "https://8.8.8.8/v1", Model: "acme/tuned-27b",
 		APIKeySealed: sealed, KEKVersion: s.sealer.CurrentVersion(),
 	}))
@@ -549,7 +549,7 @@ func (s *StreamsSuite) TestAModelOfTheCustomersOwnAnswersAtItsEndpointWithItsKey
 
 func (s *StreamsSuite) TestAnotherCustomersModelIsNotOneThisCustomerCanName() {
 	name := "theirs-" + s.utils.uuid()
-	s.Require().NoError(s.configs.CreateCustomModel(context.Background(), &store.CustomModel{
+	s.Require().NoError(s.store.CustomModels.Insert(context.Background(), &store.CustomModel{
 		CustomerID: s.utils.uuid(), Name: name, BaseURL: "https://8.8.8.8/v1", Model: "acme/tuned-27b",
 	}))
 

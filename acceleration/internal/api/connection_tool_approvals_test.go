@@ -118,7 +118,7 @@ func (s *ConnectionToolsSuite) approval(id string, tools ...string) map[string]a
 
 // pins are the digests the connection's tools are pinned at for its current grant.
 func (s *ConnectionToolsSuite) pins(id string) map[string]string {
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, s.connectedAt(id))
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, s.connectedAt(id))
 	s.Require().NoError(err)
 	return pins
 }
@@ -131,10 +131,11 @@ func (s *SessionConnectorsSuite) TestAToolApprovedAgainIsOfferedToTheNextSession
 	connector := s.connector()
 	mine, echo := s.connection(s.client, connector)
 	config := s.config(s.binding("crm", connector, "session", "", map[string]any{"name": "echo"}))
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), mine)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), mine)
 	s.Require().NoError(err)
-	_, err = s.store.PinConnectorTools(context.Background(), mine, connection.ConnectedAt,
+	_, err = s.store.ConnectorToolPins.Pin(context.Background(), mine, connection.ConnectedAt,
 		map[string]string{"echo": "pinned-before-it-changed"})
+
 	s.Require().NoError(err)
 	backend := s.serverClient.actingFor(s.client)
 	validate := func() ConnectionValidation {
@@ -163,7 +164,7 @@ func (s *SessionConnectorsSuite) TestAToolApprovedAgainIsOfferedToTheNextSession
 func (s *ConnectionToolsSuite) racedApprove(id string, change string, args ...any) (int, string) {
 	approval := s.approval(id, "echo")
 	ctx := context.Background()
-	tx, err := s.store.DB().BeginTx(ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, "SELECT 1 FROM connector_connections WHERE id = ? FOR UPDATE", id)
@@ -179,7 +180,7 @@ func (s *ConnectionToolsSuite) racedApprove(id string, change string, args ...an
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		_ = s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "+
+		_ = s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "+
 			"AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'").Scan(&waiting)
 		return waiting > 0
 	}, 10*time.Second, 10*time.Millisecond)
@@ -218,10 +219,11 @@ func (s *ConnectionToolsSuite) TestAConnectionDeletedDuringTheApproveIsNotFound(
 func (s *SessionConnectorsSuite) TestOnlyTheOwnersBackendApprovesTheirTools() {
 	connector := s.connector()
 	mine, echo := s.connection(s.client, connector)
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), mine)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), mine)
 	s.Require().NoError(err)
-	_, err = s.store.PinConnectorTools(context.Background(), mine, connection.ConnectedAt,
+	_, err = s.store.ConnectorToolPins.Pin(context.Background(), mine, connection.ConnectedAt,
 		map[string]string{"echo": "pinned-before-it-changed"})
+
 	s.Require().NoError(err)
 	body := map[string]any{"tools": []map[string]any{echo}}
 
@@ -229,7 +231,7 @@ func (s *SessionConnectorsSuite) TestOnlyTheOwnersBackendApprovesTheirTools() {
 		"/v1/agents/connections/"+mine+"/tools/approve", body, nil))
 	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodPost, "/v1/agents/connections/"+mine+"/tools/approve", body, nil))
 
-	pins, err := s.store.ConnectorToolPins(context.Background(), mine, connection.ConnectedAt)
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), mine, connection.ConnectedAt)
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"echo": "pinned-before-it-changed"}, pins)
 	s.Equal(http.StatusOK, s.serverClient.actingFor(s.client).do(http.MethodPost,

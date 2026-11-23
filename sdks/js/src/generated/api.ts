@@ -5596,7 +5596,6 @@ export type components = {
             readonly agent_id: string;
             readonly call_id: string;
             readonly campaign_id?: string;
-            readonly config_id?: string;
             readonly contact_id?: string;
             /** @enum {string} */
             readonly direction: "inbound" | "outbound";
@@ -5606,7 +5605,6 @@ export type components = {
              */
             readonly ended_at?: string;
             readonly from_number?: string;
-            /** @description The session that ran the call, which is what it is held by. */
             readonly id: string;
             /** @description What the agent was told to be on this call. */
             readonly instructions?: string;
@@ -5618,6 +5616,8 @@ export type components = {
             readonly review_notes?: string;
             /** @description How well the agent handled it, from 1 to 5. */
             readonly review_score?: number;
+            /** @description The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted. */
+            readonly session_id?: string;
             /** @description What the fast model could hand to the subagent. The instructions behind each name are in the skill registry. */
             readonly skills?: readonly string[];
             /** Format: date-time */
@@ -5645,8 +5645,6 @@ export type components = {
             /** @description The provider/model that spoke, on the same terms as stt_used. */
             readonly tts_used?: string;
             readonly usage?: components["schemas"]["CallUsage"];
-            /** @description Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name. */
-            readonly user_id?: string;
             /** @description The voice the call asked for, in the provider's own terms. Empty means the provider's default. */
             readonly voice?: string;
             /** @description The voice that spoke, which is the provider's default when none was asked for. Known only while the call is running. */
@@ -12238,6 +12236,8 @@ export interface operations {
                 readonly max_review_score?: number;
                 /** @description Only calls that have not ended. */
                 readonly running?: boolean;
+                /** @description Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it. */
+                readonly session_id?: string;
                 /** @description Only calls that started before this, exclusive. */
                 readonly to?: string;
             };

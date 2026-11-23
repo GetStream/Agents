@@ -55,7 +55,7 @@ func (s *StoredSuite) SetupSuite() {
 
 func (s *StoredSuite) SetupTest() {
 	// The database is this suite's own, and an api key is the same key in every test.
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE stream_fallback_uses, stream_app_tokens CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE stream_fallback_uses, stream_app_tokens CASCADE")
 	s.Require().NoError(err)
 	s.stream = chattest.NewServer(s.T())
 	s.deployment = NewDeployment(DeploymentOptions{APIKey: "deploy-key", Secret: "deploy-secret", App: 1, Strict: true, BaseURL: s.stream.URL})
@@ -101,7 +101,7 @@ func (s *StoredSuite) TestAnUnregisteredAppFallsBackOnlyWhenAllowed() {
 	s.Require().NoError(err)
 	s.Equal("deploy-key", identity.APIKey)
 	s.Equal(int64(1), identity.StreamApp)
-	uses, err := s.store.StreamFallbackUses(s.ctx, s.clock.Now().Add(-time.Minute))
+	uses, err := s.store.StreamFallbackUses.Select(s.ctx, s.clock.Now().Add(-time.Minute))
 	s.Require().NoError(err)
 	s.Contains(customersOf(uses), s.customer)
 }
@@ -200,7 +200,7 @@ func (s *StoredSuite) TestForwardedTokensAreNotKeptWithoutAKeyring() {
 }
 
 func (s *StoredSuite) usesOf(customer string) int64 {
-	uses, err := s.store.StreamFallbackUses(s.ctx, time.Unix(0, 0))
+	uses, err := s.store.StreamFallbackUses.Select(s.ctx, time.Unix(0, 0))
 	s.Require().NoError(err)
 	for _, use := range uses {
 		if use.CustomerID == customer {

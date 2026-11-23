@@ -145,13 +145,13 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if err := retiredComplaint(patch.Plugins, patch.PluginEvents, patch.McpServers); err != nil {
 		return nil, err
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, request.ID)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.ID)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
 	existing := agentConfigOf(config)
 	original := config
-	heard := config.STT
+	heard := config.Models.STT
 	was := sandboxOfConfig(config)
 
 	if message, ok := configComplaint(ctx, AgentConfigRequest{
@@ -184,20 +184,20 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		config.Mode, _ = modeOf(patch.Mode)
 	}
 	config.Region = override(config.Region, patch.Region)
-	config.STT = override(config.STT, patch.Stt)
-	config.TTS = override(config.TTS, patch.Tts)
-	config.STS = override(config.STS, patch.Sts)
-	config.Voice = override(config.Voice, patch.Voice)
-	config.LLM = override(config.LLM, patch.Llm)
+	config.Models.STT = override(config.Models.STT, patch.Stt)
+	config.Models.TTS = override(config.Models.TTS, patch.Tts)
+	config.Models.STS = override(config.Models.STS, patch.Sts)
+	config.Models.Voice = override(config.Models.Voice, patch.Voice)
+	config.Models.LLM = override(config.Models.LLM, patch.Llm)
 	if patch.LlmFallbacks != nil {
-		config.LLMFallbacks = fallbacksOf(patch.LlmFallbacks)
+		config.Models.LLMFallbacks = fallbacksOf(patch.LlmFallbacks)
 	}
 	if patch.Agents != nil {
 		config.Agents = childAgentsOf(patch.Agents)
 	}
-	config.Subagent = override(config.Subagent, patch.Subagent)
-	config.Search = override(config.Search, patch.Search)
-	config.Image = override(config.Image, patch.Image)
+	config.Models.Subagent = override(config.Models.Subagent, patch.Subagent)
+	config.Models.Search = override(config.Models.Search, patch.Search)
+	config.Models.Image = override(config.Models.Image, patch.Image)
 	config.Instructions = override(config.Instructions, patch.Instructions)
 	if patch.Greeting != nil {
 		config.Greeting, config.GreetingMode = greetingOf(patch.Greeting)
@@ -210,10 +210,10 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		config.Connectors = storedBindings(*patch.Connectors)
 	}
 	if patch.Channels != nil {
-		config.Channels = channelsOf(patch.Channels)
+		config.Channels.Lines = channelsOf(patch.Channels)
 	}
 	if patch.ChatChannels != nil {
-		config.ChatChannels = chatChannelsOf(patch.ChatChannels)
+		config.Channels.Chat = chatChannelsOf(patch.ChatChannels)
 	}
 	if patch.Keyterms != nil {
 		config.Keyterms = keytermsOf(patch.Keyterms)
@@ -221,10 +221,10 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	config.VisibleTools = override(config.VisibleTools, patch.VisibleTools)
 	config.KnowledgeNamespace = override(config.KnowledgeNamespace, patch.KnowledgeNamespace)
 	if patch.Sandbox != nil {
-		config.Sandbox, _ = sandboxOf(patch.Sandbox)
+		config.Sandbox.Provider = sandboxOf(patch.Sandbox)
 	}
 	if patch.SandboxOptions != nil {
-		config.SandboxOptions = sandboxConfigOf(patch.SandboxOptions)
+		config.Sandbox.Options = sandboxConfigOf(patch.SandboxOptions)
 	}
 	if patch.Harness != nil {
 		config.Harness, _ = harnessOf(patch.Harness)
@@ -260,8 +260,8 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 	if patch.Video != nil {
-		config.VideoSource = override(config.VideoSource, patch.Video.Source)
-		config.VideoMaxFrames = override(config.VideoMaxFrames, patch.Video.MaxFrames)
+		config.Video.Source = override(config.Video.Source, patch.Video.Source)
+		config.Video.MaxFrames = override(config.Video.MaxFrames, patch.Video.MaxFrames)
 	}
 	if message, ok := textSubagentComplaint(&config, patch.Subagent); !ok {
 		return nil, invalidRequest(message)
@@ -290,7 +290,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if message, ok := s.liveSTTComplaint(config, heard); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.llmFallbacksComplaint(config, original.LLMFallbacks); !ok {
+	if message, ok := s.llmFallbacksComplaint(config, original.Models.LLMFallbacks); !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.childAgentsComplaint(ctx, customerID, &config, &original); err != nil {
@@ -307,7 +307,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 
-	if err := s.configs.UpdateAgentConfig(ctx, &config); err != nil {
+	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)

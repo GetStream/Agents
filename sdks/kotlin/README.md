@@ -186,6 +186,22 @@ Tools are answered inside `AgentSession` whether or not anybody collects `events
 conversation see while it runs, and `executor = AgentTool.Executor.Client` shows the call as
 waiting on the person's device.
 
+A tool that throws is reported to the model, because the model is mid-sentence waiting for it and
+can only say something useful if it is told. What it is told is the error's message, cut to 1,024
+characters, so a tool may throw words meant for it. The model may repeat them to the person and
+the conversation keeps them, and an error from a library a tool calls can name an internal host, a
+table or a value from a record. To pass on only the words you wrote, throw those as an error of
+your own and say something plain for anything else:
+
+```kotlin
+class ToolError(message: String) : Exception(message) // thrown with words meant for the model
+
+agents.onToolError = { call, error -> if (error is ToolError) error.message.orEmpty() else "${call.name} failed" }
+```
+
+It covers every session of that `StreamAgents`, and a hook that throws tells the model only that
+the tool failed.
+
 A running conversation can be given more tools and have them taken back, such as the ones a card
 shown in it brings:
 

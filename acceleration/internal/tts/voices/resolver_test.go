@@ -6,9 +6,9 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // ResolverSuite covers a voice that is not the customer's own, which needs no database:
@@ -70,7 +70,7 @@ func (s *ResolverSuite) TestAVoiceNoProviderLooksUpIsNeverAskedOfTheStore() {
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", s.library)
 	// A store with no database behind it: asking it panics.
-	resolver := NewResolver(new(appconfig.Store), catalogue)
+	resolver := NewResolver(new(store.Store), catalogue)
 
 	s.NotPanics(func() {
 		s.Empty(resolver.Unvouched(s.ctx, "acme", cartesiaID, []string{"elevenlabs", "cartesia"}))

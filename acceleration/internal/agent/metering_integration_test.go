@@ -70,7 +70,7 @@ func (s *AgentMeteringSuite) TearDownTest() {
 func (s *AgentMeteringSuite) rows(modality routing.Modality) []store.Request {
 	s.agents.metering.Close()
 	var rows []store.Request
-	s.Require().NoError(s.pgStore.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.pgStore.GlobalDB().NewSelect().Model(&rows).
 		Where("started_at >= ? AND modality = ?", s.since, string(modality)).Scan(context.Background()))
 	return rows
 }

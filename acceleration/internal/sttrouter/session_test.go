@@ -171,7 +171,7 @@ func (s *SessionSuite) TestARefusedSessionIsCarriedOnByTheNextModel() {
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	var recorded []string
 	for _, row := range rows {
@@ -476,7 +476,7 @@ func (s *SessionSuite) TestNothingTheRefusingModelSaysAfterItsRefusalIsRecorded(
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	var recorded []string
 	for _, row := range rows {
@@ -625,7 +625,7 @@ func (s *SessionSuite) TestAFatalErrorIsRecordedWithTheVendorsReason() {
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	s.Equal("provider_fatal", rows[0].ErrorCode)
@@ -641,7 +641,7 @@ func (s *SessionSuite) TestAnErrorThatIsNotFatalIsRecordedWithItsMessage() {
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	s.Equal("commit_throttled", rows[0].ErrorCode)

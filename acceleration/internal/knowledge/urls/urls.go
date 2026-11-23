@@ -223,15 +223,16 @@ func (s *Service) Add(ctx context.Context, customerID string, wanted Subscriptio
 		return store.KnowledgeURL{}, stack.Wrap(fmt.Errorf("urls: refresh_hours cannot be negative, got %d", wanted.RefreshHours))
 	}
 
-	page, subscribed, err := s.store.SubscribedKnowledgeURL(ctx, customerID, namespace, address)
-	if err != nil {
+	page, err := s.store.KnowledgeURLs.GetByURL(ctx, customerID, namespace, address)
+	subscribed := err == nil
+	if err != nil && !errors.Is(err, store.ErrNoKnowledgeURL) {
 		return store.KnowledgeURL{}, err
 	}
 	page.DeclaredTitle = wanted.Title
 	page.Description = wanted.Description
 	page.RefreshHours = wanted.RefreshHours
 	if subscribed {
-		if err := s.store.SaveKnowledgeURL(ctx, &page); err != nil {
+		if err := s.store.KnowledgeURLs.Update(ctx, &page); err != nil {
 			return store.KnowledgeURL{}, err
 		}
 	} else {
@@ -239,7 +240,7 @@ func (s *Service) Add(ctx context.Context, customerID string, wanted Subscriptio
 		page.Namespace = namespace
 		page.URL = address
 		page.State = store.KnowledgeURLPending
-		if err := s.store.CreateKnowledgeURL(ctx, &page); err != nil {
+		if err := s.store.KnowledgeURLs.Insert(ctx, &page); err != nil {
 			return store.KnowledgeURL{}, err
 		}
 	}
@@ -249,12 +250,12 @@ func (s *Service) Add(ctx context.Context, customerID string, wanted Subscriptio
 // List returns the pages a knowledge base is filled from, newest first. An empty namespace
 // lists every one the customer has.
 func (s *Service) List(ctx context.Context, customerID, namespace string) ([]store.KnowledgeURL, error) {
-	return s.store.CustomerKnowledgeURLs(ctx, customerID, strings.TrimSpace(namespace))
+	return s.store.KnowledgeURLs.Select(ctx, customerID, store.KnowledgeURLFilter{Namespace: strings.TrimSpace(namespace)})
 }
 
 // Get returns one page.
 func (s *Service) Get(ctx context.Context, customerID, id string) (store.KnowledgeURL, error) {
-	return s.store.KnowledgeURL(ctx, customerID, id)
+	return s.store.KnowledgeURLs.Get(ctx, customerID, id)
 }
 
 // Remove takes a page out of the knowledge base, passages and all.
@@ -263,7 +264,7 @@ func (s *Service) Get(ctx context.Context, customerID, id string) (store.Knowled
 // before its row is deleted: a page we have forgotten we subscribe to but are still
 // answering out of is the failure worth avoiding.
 func (s *Service) Remove(ctx context.Context, customerID, id string) error {
-	page, err := s.store.KnowledgeURL(ctx, customerID, id)
+	page, err := s.store.KnowledgeURLs.Get(ctx, customerID, id)
 	if err != nil {
 		return err
 	}
@@ -272,13 +273,13 @@ func (s *Service) Remove(ctx context.Context, customerID, id string) error {
 	if err := s.knowledge.For(owner).Delete(ctx, page.Namespace, ingest.IDs(page.URL, 0, page.Passages)); err != nil {
 		return err
 	}
-	return s.store.DeleteKnowledgeURL(ctx, customerID, page.ID)
+	return s.store.KnowledgeURLs.Delete(ctx, customerID, page.ID)
 }
 
 // Reindex queues a page to be read again, replacing what it wrote last time. The row comes
 // back as it is now; the read lands on it when the worker gets to it.
 func (s *Service) Reindex(ctx context.Context, customerID, id string) (store.KnowledgeURL, error) {
-	page, err := s.store.KnowledgeURL(ctx, customerID, id)
+	page, err := s.store.KnowledgeURLs.Get(ctx, customerID, id)
 	if err != nil {
 		return store.KnowledgeURL{}, err
 	}
@@ -298,7 +299,7 @@ func (s *Service) refresh() {
 		case <-ticker.C:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.sweep)
-		due, err := s.store.DueKnowledgeURLs(ctx, time.Now().UTC(), sweepBatch)
+		due, err := s.store.KnowledgeURLs.SelectDue(ctx, time.Now().UTC(), sweepBatch)
 		if err != nil {
 			s.logger.Warn("could not look for pages due a refresh", "error", err)
 		}
@@ -408,7 +409,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 		return fmt.Errorf("urls: read the task: %v: %w", err, asynq.SkipRetry)
 	}
 
-	page, err := s.store.KnowledgeURL(ctx, payload.CustomerID, payload.ID)
+	page, err := s.store.KnowledgeURLs.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeURL) {
 		return nil
 	}
@@ -443,7 +444,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 		}
 	}
 
-	if saveErr := s.store.SaveKnowledgeURL(ctx, &page); saveErr != nil {
+	if saveErr := s.store.KnowledgeURLs.Update(ctx, &page); saveErr != nil {
 		return errors.Join(err, saveErr)
 	}
 	// The last failure is on the row, so the task ends there rather than being archived:
@@ -507,7 +508,7 @@ var errRemoved = errors.New("urls: the page was removed while it was read")
 
 // kept is errRemoved once the page is no longer subscribed to.
 func (s *Service) kept(ctx context.Context, page *store.KnowledgeURL) error {
-	_, err := s.store.KnowledgeURL(ctx, page.CustomerID, page.ID)
+	_, err := s.store.KnowledgeURLs.Get(ctx, page.CustomerID, page.ID)
 	if errors.Is(err, store.ErrNoKnowledgeURL) {
 		return errRemoved
 	}
