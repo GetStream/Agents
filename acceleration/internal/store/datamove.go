@@ -726,6 +726,12 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		}
 	}
 	if table == "connector_definitions" {
+		// The built-in customer owns the built-in definitions every app shares, and an import
+		// never writes them: `router replicate` without --as hands over "" until a row names
+		// a customer.
+		if customerID == BuiltinCustomer {
+			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+		}
 		if row, err = importableDefinition(row); err != nil {
 			return err
 		}
@@ -1352,7 +1358,7 @@ WHERE customer_id <> ? AND released_at IS NULL AND vendor <> 'sip_trunk' AND %s 
 // importableDefinition refuses an imported definition the API would not have stored, and
 // gives the row the manifest as the API would have stored it, so no field this release does
 // not read arrives for one that does. Every imported definition is a custom one, since the
-// customer is forced onto the row (identity), and only the API's rules keep a custom manifest
+// customer is forced onto the row (identity) and importRow refuses an import with no customer, and only the API's rules keep a custom manifest
 // from naming the operator's client or anything else the router would trust a built-in with
 // (core.Manifest.AsCustom).
 func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
