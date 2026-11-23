@@ -2182,7 +2182,7 @@ An organization's activity reads `customer_activity` for every app of the organi
 out):
 
 ```bash
-curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
 ```
 
 Every organization's activity is a list by cursor of `customer_activity`'s rows from `from` to
@@ -2194,8 +2194,8 @@ refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its descr
 definitions of tried, API calls, production and churned:
 
 ```bash
-curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
-curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
