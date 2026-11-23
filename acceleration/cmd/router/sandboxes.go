@@ -95,20 +95,27 @@ func newSandboxes(settings config.Config, writer *routing.Writer, prices pricing
 	})
 }
 
+// keptDaytonaKey is a key customers keep for their own Daytona organization, and the apps that
+// keep it.
+type keptDaytonaKey struct {
+	key  string
+	apps []string
+}
+
 // customerDaytonaKeys reads the keys customers keep for their own Daytona organizations, each once
-// however many apps and regions keep it, for the jobs that look after every organization a
-// sandbox may be in. A key that does not open is its error, and the others are read. Nil without
-// a database or a keyring, without which no key could have been kept.
-func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(context.Context) ([]string, error) {
+// however many apps and regions keep it, with every app that keeps it, for the jobs that look
+// after every organization a sandbox may be in. A key that does not open is its error, and the
+// others are read. Nil without a database or a keyring, without which no key could have been kept.
+func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(context.Context) ([]keptDaytonaKey, error) {
 	if pgStore == nil || secrets == nil {
 		return nil
 	}
-	return func(ctx context.Context) ([]string, error) {
+	return func(ctx context.Context) ([]keptDaytonaKey, error) {
 		rows, err := pgStore.ProviderKeys.SelectByProvider(ctx, providerkeys.Daytona)
 		if err != nil {
 			return nil, err
 		}
-		var keys []string
+		var keys []keptDaytonaKey
 		var failed []error
 		for _, row := range rows {
 			key, err := providerkeys.Open(secrets, row)
@@ -116,11 +123,32 @@ func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(contex
 				failed = append(failed, err)
 				continue
 			}
-			if !slices.Contains(keys, key) {
-				keys = append(keys, key)
+			at := slices.IndexFunc(keys, func(kept keptDaytonaKey) bool { return kept.key == key })
+			if at < 0 {
+				keys = append(keys, keptDaytonaKey{key: key})
+				at = len(keys) - 1
+			}
+			if !slices.Contains(keys[at].apps, row.CustomerID) {
+				keys[at].apps = append(keys[at].apps, row.CustomerID)
 			}
 		}
 		return keys, errors.Join(failed...)
+	}
+}
+
+// daytonaKeysOf is the keys kept reads, without who keeps them, for what only reaches their
+// organizations. Nil when kept is.
+func daytonaKeysOf(kept func(context.Context) ([]keptDaytonaKey, error)) func(context.Context) ([]string, error) {
+	if kept == nil {
+		return nil
+	}
+	return func(ctx context.Context) ([]string, error) {
+		opened, err := kept(ctx)
+		var keys []string
+		for _, key := range opened {
+			keys = append(keys, key.key)
+		}
+		return keys, err
 	}
 }
 
@@ -180,14 +208,14 @@ func runUsageSandboxes(ctx context.Context, args []string, settings config.Confi
 			failed = append(failed, fmt.Errorf("usage sandboxes: %w", err))
 		}
 		for _, key := range opened {
-			theirs, err := daytona.NewFleet(daytona.FleetOptions{APIKey: key, Customer: true})
+			theirs, err := daytona.NewFleet(daytona.FleetOptions{APIKey: key.key, Customer: true})
 			if err != nil {
 				failed = append(failed, fmt.Errorf("usage sandboxes: %w", err))
 				continue
 			}
 			defer theirs.Close(ctx) //nolint:errcheck // nothing is left to send
 			customer := *job
-			customer.fleet, customer.byok = theirs, true
+			customer.fleet, customer.byok, customer.apps = theirs, true, key.apps
 			failed = append(failed, customer.run(ctx, *reconcile, day)...)
 		}
 	}
@@ -226,7 +254,9 @@ type sandboxJob struct {
 	// empty, and is on each of their rows too.
 	deployment, router string
 	// byok is a customer's own organization, whose sandboxes are priced at the BYOK entries.
-	byok   bool
+	byok bool
+	// apps keep the key of the customer's organization: the only apps a gap in it is billed to.
+	apps   []string
 	logger *slog.Logger
 	out    io.Writer
 	now    time.Time
@@ -343,8 +373,9 @@ func apart(billed, recorded tally) bool {
 // reconcile checks a day of each sandbox of this shard's that Daytona's records say used
 // something against what was billed for it, and records what was billed short from Daytona's
 // figures: a whole sandbox no router metered a period at a time, a sandbox billed short by
-// the day's difference. Owned by the sandbox's labels' organization and app, under the
-// reconciliation's origin, and priced as the rest of the sandbox's life. Too far apart is a
+// the day's difference. Owned by the sandbox's labels' organization and app (in a customer's
+// organization, only an app that keeps its key, in the organization the router has for it), under
+// the reconciliation's origin, and priced as the rest of the sandbox's life. Too far apart is a
 // mismatch, logged at ERROR with both figures, counted, and alerted on once for the day as
 // sandbox_mismatch. Only this deployment's rows and labels count: a sandbox labelled by no
 // router was made by hand, one labelled by another deployment or a router without
@@ -370,7 +401,7 @@ func (j *sandboxJob) reconcile(ctx context.Context, day time.Time) error {
 	}
 
 	var matched, filled, handMade, notOurs, unknown int
-	var mismatched, unread []string
+	var mismatched, unread, keyless, keylessApps []string
 	for _, used := range billed {
 		daytonas := tally{cpu: rounded(used.CPUSeconds), memory: rounded(used.RAMGBSeconds), disk: rounded(used.DiskGBSeconds)}
 		if daytonas.zero() {
@@ -389,6 +420,10 @@ func (j *sandboxJob) reconcile(ctx context.Context, day time.Time) error {
 			continue
 		case known == ownerTheirs:
 			notOurs++
+			continue
+		case known == ownerKeyless:
+			notOurs++
+			keyless, keylessApps = append(keyless, used.SandboxID), append(keylessApps, owner.CustomerID)
 			continue
 		case known == ownerUnknown:
 			j.logger.Warn("Daytona billed a sandbox it no longer knows and this shard recorded none of: whose it was cannot "+
@@ -421,6 +456,12 @@ func (j *sandboxJob) reconcile(ctx context.Context, day time.Time) error {
 		j.heading(), dayText, matched, len(mismatched), filled, handMade, notOurs, unknown, len(unread)); err != nil {
 		return err
 	}
+	if len(keyless) > 0 {
+		// One line a run, as how many there are is the customer's to choose.
+		j.logger.Warn("sandboxes in a customer's organization are labelled with apps that do not keep its key, so they are "+
+			"not reconciled", "day", dayText, "count", len(keyless), "sandboxes", keyless[:min(len(keyless), 20)],
+			"apps", keylessApps[:min(len(keylessApps), 20)])
+	}
 	if len(mismatched) > 0 {
 		alerts.SendItem(sandboxMismatch, dayText, alerts.Warn, map[string]any{
 			"day": dayText, "mismatched": len(mismatched), "sandboxes": mismatched[:min(len(mismatched), 20)],
@@ -439,14 +480,19 @@ const (
 	ownerTheirs
 	ownerHandMade
 	ownerUnknown
+	// ownerKeyless is a sandbox in a customer's organization labelled with an app that does not
+	// keep its key.
+	ownerKeyless
 )
 
 // owner is whose a sandbox Daytona billed was, what class of sandbox and the region it ran in:
 // the organization, app, session and region on its rows, when this shard recorded some under
-// this deployment, or on its labels. A sandbox labelled by no router is made by hand; one
-// without this deployment and shard on its labels, such as one made by a router with no
-// code_sandbox.deployment, is another's. Every Daytona target of the organization is listed, so
-// a sandbox in any region is reconciled.
+// this deployment, or on its labels, in a customer's organization with the organization the
+// router has for its app instead. A sandbox labelled by no router is made by hand; one without
+// this deployment and shard on its labels, such as one made by a router with no
+// code_sandbox.deployment, is another's; one in a customer's organization labelled with an app
+// that does not keep its key is keyless, its owner naming only that app. Every Daytona target
+// of the organization is listed, so a sandbox in any region is reconciled.
 func (j *sandboxJob) owner(ctx context.Context, id string, recorded store.SandboxUsed) (owner routing.Owner, class, region string, known int, err error) {
 	owned := func(app, organization, session string) routing.Owner {
 		return routing.Owner{CustomerID: app, Attribution: routing.Attribution{
@@ -468,8 +514,19 @@ func (j *sandboxJob) owner(ctx context.Context, id string, recorded store.Sandbo
 		return routing.Owner{}, "", "", ownerTheirs, nil
 	}
 	labels := box.Labels
-	return owned(labels[metered.LabelApp], labels[metered.LabelOrganization], labels[metered.LabelSession]), box.Class,
-		labels[metered.LabelRegion], ownerOurs, nil
+	app := labels[metered.LabelApp]
+	organization := labels[metered.LabelOrganization]
+	if j.byok {
+		if !slices.Contains(j.apps, app) {
+			return routing.Owner{CustomerID: app}, "", "", ownerKeyless, nil
+		}
+		// Only the router writes the labels in the deployment's organization, but the customer
+		// can write them in its own.
+		if organization, err = j.store.AppOrganizations.OrganizationOf(ctx, app); err != nil {
+			return routing.Owner{}, "", "", ownerUnknown, err
+		}
+	}
+	return owned(app, organization, labels[metered.LabelSession]), box.Class, labels[metered.LabelRegion], ownerOurs, nil
 }
 
 // gaps records what a sandbox was billed short of Daytona's records over the day, and says how

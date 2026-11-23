@@ -1154,8 +1154,11 @@ no keys.
   organization too, and the hourly secret sweep covers every customer organization a key is kept
   for. `router usage sandboxes` deletes the orphans and reconciles Daytona's records in each customer
   organization on its key, as it does in the deployment's (its lines start `a customer's
-  organization:`), pricing a gap at the BYOK entry. A sandbox labelled for a customer's organization
-  is never the deployment organization's, even where one key reaches both.
+  organization:`), pricing a gap at the BYOK entry. A gap there is billed only to an app that keeps
+  the organization's key, in the organization the router has for that app; a sandbox labelled with
+  any other app is counted as another's, logged and not billed: an app that removes its key is no
+  longer billed for gaps there, though another app still keeps the same key. A sandbox labelled for a customer's
+  organization is never the deployment organization's, even where one key reaches both.
 
 `router usage storage` and `router usage sandboxes` open the customers' keys with the same keyring
 as the router, so their CronJobs need its variables too.

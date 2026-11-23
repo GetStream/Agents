@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
@@ -212,6 +214,7 @@ func (s *UsageCommandsSuite) TestAnOrphansTimeIsBilledToItsLabels() {
 	s.Equal(disk, stopped.BaseCostMicros, "an hour of a 3 GiB disk at Daytona's rate")
 	for _, row := range rows {
 		s.Equal("app-b", row.CustomerID, "the app on its labels")
+		s.Equal("org-app-b", row.OrganizationID, "and the organization, which only the router writes there")
 		s.Equal("session-b", row.SessionID, "the session on its labels")
 		s.Equal(sandboxOrigin, row.APIKey)
 		s.Equal(routing.UsageID(metered.SandboxReconciledKind, "sandbox-b", row.StartedAt.UTC().Format(time.RFC3339)), row.UsageID)
@@ -345,7 +348,7 @@ func (s *UsageCommandsSuite) TestASandboxMadeOnACustomersKeyIsLookedAfterInTheir
 	fleet, err := daytona.NewFleet(daytona.FleetOptions{APIKey: customerDaytonaKey, APIURL: server.APIURL(), Customer: true})
 	s.Require().NoError(err)
 	theirs, out, stopTheirs := s.sandboxJob(server, slog.New(slog.DiscardHandler), now)
-	theirs.fleet, theirs.byok = fleet, true
+	theirs.fleet, theirs.byok, theirs.apps = fleet, true, []string{"app-1"}
 	s.Require().NoError(theirs.reconcile(s.ctx, sandboxDay))
 	s.Require().NoError(theirs.sweep(s.ctx))
 	stopTheirs()
@@ -358,6 +361,106 @@ func (s *UsageCommandsSuite) TestASandboxMadeOnACustomersKeyIsLookedAfterInTheir
 	s.True(strings.HasSuffix(gaps[0].SKU, "-us-byok"), gaps[0].SKU)
 	s.Zero(gaps[0].BaseCostMicros, "Daytona bills the customer")
 	s.Equal("app-1", gaps[0].CustomerID)
+}
+
+func (s *UsageCommandsSuite) TestASandboxInACustomersOrganizationIsBilledOnlyToAnAppThatKeepsItsKey() {
+	server := daytonatest.Start(s.T())
+	s.T().Setenv("DAYTONA_API_KEY", "key-1")
+	s.T().Setenv("DAYTONA_API_URL", server.APIURL())
+	s.settings.CodeSandbox.Deployment = ourDeployment
+	setDevKEK(s.T(), "usage commands suite")
+	secrets, err := newSecretSealer(s.ctx, s.settings)
+	s.Require().NoError(err)
+	for _, app := range []string{"app-1", "app-3", "app-4"} {
+		s.keeps(secrets, app, customerDaytonaKey)
+	}
+	for _, app := range []string{"app-1", "app-2"} {
+		s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: app, OrganizationID: "org-of-" + app}))
+	}
+	registered := store.Organization{Name: "app 3's"}
+	s.Require().NoError(s.store.Organizations.Insert(s.ctx, &registered))
+	s.Require().NoError(s.store.Apps.Insert(s.ctx, &store.App{ID: "app-3", OrganizationID: registered.ID, Name: "app 3"}))
+	own := customersOwn("app-1", "session-own")
+	own[metered.LabelOrganization] = "org-of-app-2"
+	server.Holds(daytonatest.Box{ID: "box-own", Labels: own})
+	unnamed := customersOwn("app-2", "session-other")
+	delete(unnamed, metered.LabelOrganization)
+	server.Holds(daytonatest.Box{ID: "box-unnamed", Labels: unnamed})
+	server.Holds(daytonatest.Box{ID: "box-named", Labels: customersOwn("app-2", "session-named")})
+	server.Holds(daytonatest.Box{ID: "box-shared", Labels: customersOwn("app-3", "session-shared")})
+	server.Holds(daytonatest.Box{ID: "box-unseen", Labels: customersOwn("app-4", "session-unseen")})
+	billed := []string{"box-unseen", "box-shared", "box-own", "box-unnamed", "box-named"}
+	for i := range 20 {
+		id := fmt.Sprintf("box-keyless-%02d", i)
+		server.Holds(daytonatest.Box{ID: id, Labels: customersOwn("app-2", "session-"+id)})
+		billed = append(billed, id)
+	}
+	var bills []string
+	for _, id := range billed {
+		bills = append(bills, `{"sandboxId": "`+id+`", "totalCPUSeconds": 600, "totalRAMGBSeconds": 600, "totalDiskGBSeconds": 1800}`)
+	}
+	server.Bills([]byte("[" + strings.Join(bills, ",") + "]"))
+	period := []byte(`[{"startAt": "2026-10-21T10:00:00Z", "endAt": "2026-10-21T10:10:00Z", "cpu": 1, "ramGB": 1, "diskGB": 3}]`)
+	for _, id := range []string{"box-own", "box-unnamed", "box-named", "box-shared", "box-unseen"} {
+		server.Periods(id, period)
+	}
+
+	var logs bytes.Buffer
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(defaultLogger)
+
+	var out bytes.Buffer
+	s.Require().NoError(runUsageSandboxes(s.ctx, []string{"--reconcile", "--day", "2026-10-21"}, s.settings, &out))
+
+	s.Contains(out.String(), "a customer's organization: 2026-10-21: 0 sandboxes matched Daytona's records, 3 did not, "+
+		"3 gaps recorded from them, 0 made by hand, 22 another deployment's")
+	gaps := s.reconciled()
+	s.Empty(gaps["box-unnamed"], "an app that does not keep the key is never billed for a sandbox in its organization")
+	s.Empty(gaps["box-named"], "whatever organization its labels name")
+	s.Require().Len(gaps["box-own"], 1, "the app that keeps the key is billed for its own")
+	s.Equal("app-1", gaps["box-own"][0].CustomerID)
+	s.Equal("org-of-app-1", gaps["box-own"][0].OrganizationID, "in the organization the router has for the app, not its labels'")
+	s.True(strings.HasSuffix(gaps["box-own"][0].SKU, "-us-byok"), gaps["box-own"][0].SKU)
+	s.Require().Len(gaps["box-shared"], 1, "as is every other app that keeps the same key")
+	s.Equal("app-3", gaps["box-shared"][0].CustomerID)
+	s.Equal(registered.ID, gaps["box-shared"][0].OrganizationID, "the organization it is registered under, never seen under one")
+	s.Require().Len(gaps["box-unseen"], 1)
+	s.Equal("app-4", gaps["box-unseen"][0].CustomerID)
+	s.Empty(gaps["box-unseen"][0].OrganizationID, "an app the router has no organization for is not given its labels'")
+	s.Equal(1, strings.Count(logs.String(), "labelled with apps that do not keep its key"), "one line a run")
+	s.Contains(logs.String(), `level=WARN msg="sandboxes in a customer's organization are labelled with apps that do not keep `+
+		`its key, so they are not reconciled" day=2026-10-21 count=22 sandboxes="[box-unnamed box-named box-keyless-00 `)
+	s.Contains(logs.String(), `box-keyless-17]" apps="[`+strings.Repeat("app-2 ", 19)+`app-2]"`, "and the app each names")
+	s.NotContains(logs.String(), "box-keyless-18", "the first 20, however many there are")
+}
+
+func (s *UsageCommandsSuite) TestEachCustomerDaytonaKeyIsReadWithTheAppsThatKeepIt() {
+	setDevKEK(s.T(), "usage commands suite")
+	secrets, err := newSecretSealer(s.ctx, s.settings)
+	s.Require().NoError(err)
+	s.keeps(secrets, "app-1", customerDaytonaKey)
+	s.keeps(secrets, "app-2", "dtn_customer_b_of_app_2")
+	s.keeps(secrets, "app-3", customerDaytonaKey)
+
+	kept, err := customerDaytonaKeys(s.store, secrets)(s.ctx)
+	s.Require().NoError(err)
+
+	byKey := map[string][]string{}
+	for _, key := range kept {
+		byKey[key.key] = key.apps
+	}
+	s.Len(kept, 2, "each key once")
+	s.ElementsMatch([]string{"app-1", "app-3"}, byKey[customerDaytonaKey])
+	s.Equal([]string{"app-2"}, byKey["dtn_customer_b_of_app_2"], "no app is given a key it does not keep")
+}
+
+// keeps stores key as app's own Daytona key for us.
+func (s *UsageCommandsSuite) keeps(secrets *auth.Sealer, app, key string) {
+	sealed, err := providerkeys.Seal(secrets, app, providerkeys.Daytona, pricing.RegionUS, key)
+	s.Require().NoError(err)
+	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &sealed)
+	s.Require().NoError(err)
 }
 
 func (s *UsageCommandsSuite) TestTheSandboxJobLooksAfterEachCustomersOrganizationOnTheKeyTheyKeep() {
