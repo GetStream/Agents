@@ -707,10 +707,11 @@ func (s *PolicySuite) TestAnUnackedHoldGoesOnceTheShardSaysItShipped() {
 	s.Require().ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrNoCredits)
 
 	// Another router's sweeper ships the row, so no ack of it reaches this one.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &store.Request{
+	_, err := s.store.Requests.InsertMany(s.ctx, []store.Request{{
 		UsageID: usageID, Modality: "llm", CustomerID: s.app, Provider: "openai", Model: "gpt-5.6-luna",
 		StartedAt: time.Now().UTC(), CostMicros: 1_000_000, Success: true, ToShip: true,
-	}))
+	}})
+	s.Require().NoError(err)
 	s.Require().NoError(s.store.Requests.Ship(s.ctx, []uuid.UUID{usageID}, nil))
 
 	s.eventually(func() bool { return balanceHeld(enforcer.Enforcer, s.org) == 0 }, 5*time.Second, 10*time.Millisecond,

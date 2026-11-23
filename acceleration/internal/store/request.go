@@ -285,18 +285,6 @@ type Requests struct {
 	store *Store
 }
 
-// Insert stores one request, giving it a usage id when it has none. Latency is optional
-// because a request that failed before reaching the provider has none.
-func (r *Requests) Insert(ctx context.Context, request *Request) error {
-	if request.UsageID == uuid.Nil {
-		request.UsageID = uuid.Must(uuid.NewV7())
-	}
-	requests := []Request{*request}
-	_, err := r.InsertMany(ctx, requests)
-	*request = requests[0]
-	return err
-}
-
 // InsertMany writes rows that are not written yet, in one transaction in this shard's
 // database, and returns the usage ids it wrote. A row whose usage id is already there is
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.

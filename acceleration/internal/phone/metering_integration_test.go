@@ -1176,8 +1176,9 @@ func (s *MeteringSuite) TestAnImportedRequestNamingANumbersComingMonthDoesNotSto
 
 	// A request row as an export carries it, sent with the usage id of the number's next month.
 	other := "customer-" + uuid.NewString()
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &store.Request{UsageID: uuid.Must(uuid.NewV7()), CustomerID: other,
-		Modality: string(routing.Phone), Provider: s.vendor.vendor, Model: ModelNumber, StartedAt: next, Success: true}))
+	_, err = s.store.Requests.InsertMany(s.ctx, []store.Request{{UsageID: uuid.Must(uuid.NewV7()), CustomerID: other,
+		Modality: string(routing.Phone), Provider: s.vendor.vendor, Model: ModelNumber, StartedAt: next, Success: true}})
+	s.Require().NoError(err)
 	var row map[string]any
 	_, err = s.store.ExportCustomer(s.ctx, other, func(table string, encoded json.RawMessage) error {
 		if table == "requests" {

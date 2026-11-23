@@ -250,7 +250,7 @@ func (s *SessionCreateSuite) TestAUsersEndedSessionTellsOnlyTheBackendWhatItSpen
 
 // spent records a model request made for a session's agent, as its turns would.
 func (s *SessionCreateSuite) spent(opened Session, inputTokens, costMicros int64) {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: opened.AgentId,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: time.Now().UTC(), InputTokens: inputTokens, CostMicros: costMicros, Success: true,
