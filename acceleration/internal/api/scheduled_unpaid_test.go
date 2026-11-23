@@ -18,6 +18,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -376,10 +377,11 @@ func (s *TelnyxUnpaidSuite) TestATaskWhoseSessionCannotOpenWhileMoneyCannotBeChe
 	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
 }
 
-// reservationRefused is work the router refuses at its reservation, before any vendor is asked, as
+// reservationRefused is an SMS the router refuses at its reservation, before Telnyx is asked, as
 // Notify's send is refused when the money changes after the gate let it through, recorded through a
-// writer the policies gate, as cmd/router's telephony is. The work is a 10DLC brand fee, whose price
-// needs none of the attributes a reservation leaves out (routing.Meter.Estimate).
+// writer the policies gate, as cmd/router's telephony is. Its meter is the one a text to a US number
+// is sent under (channels.Service.textMeter): the reservation prices it with its direction and
+// country, as its row is priced (routing.Meter.reserve).
 func (s *TelnyxUnpaidSuite) reservationRefused() error {
 	logger := slog.New(slog.DiscardHandler)
 	writer := routing.NewWriter(routing.WriterOptions{Store: s.store, Logger: logger, Gate: s.enforcer})
@@ -387,8 +389,10 @@ func (s *TelnyxUnpaidSuite) reservationRefused() error {
 	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), logger)
 	s.Require().NoError(err)
 	meter := routing.Meter{Recorder: routing.NewRecorderOn(routing.Phone, writer, list, logger),
-		Owner:  routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{APIKey: s.RouterSuite.app.key}},
-		Config: routing.ProviderConfig{Provider: "telnyx", Model: "dlc_brand"}, Estimate: pricing.Quantities{pricing.Requests: 1}}
+		Owner:      routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{APIKey: s.RouterSuite.app.key}},
+		Config:     routing.ProviderConfig{Provider: channels.Vendor(channels.SMS), Model: string(channels.SMS)},
+		Attributes: map[string]string{phone.AttributeDirection: store.Outbound, phone.AttributeCountry: phone.Country("+13479018418")},
+		Estimate:   pricing.Quantities{pricing.Messages: 1, pricing.MessageSegments: 1}}
 	_, err = routing.Call(context.Background(), meter, func(context.Context) (channels.Sent, error) {
 		s.Fail("a refused reservation asks no vendor")
 		return channels.Sent{}, nil
