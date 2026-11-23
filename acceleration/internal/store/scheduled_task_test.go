@@ -1103,6 +1103,116 @@ func (s *StoreSuite) TestCreatesAtOnceStopAtTheActiveLimit() {
 	s.Equal(5, active)
 }
 
+func (s *StoreSuite) TestASaveOfACopyReadBeforeARenewalIsKept() {
+	s.dueRepeat()
+	claim := s.claimOne()
+	read, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	renewed, err := s.store.ScheduledTasks.Renew(s.ctx, "acme", "one", claim.LeasedBy, time.Minute)
+	s.Require().NoError(err)
+	s.Require().True(renewed)
+	read.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &read), "a renewal is not a change the edit undoes")
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal("Stretch twice", task.Title)
+}
+
+// limitedConfig stores a config of acme's whose users may hold limit active tasks.
+func (s *StoreSuite) limitedConfig(limit int) AgentConfig {
+	config := &AgentConfig{CustomerID: "acme", Name: "agent-" + newID(), Scheduling: AgentScheduling{MaxTasksPerUser: limit}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+	return *config
+}
+
+func (s *StoreSuite) TestResumesAtOnceStopAtTheConfigsActiveLimit() {
+	config := s.limitedConfig(5)
+	for i := range 20 {
+		s.task(fmt.Sprintf("task-%d", i), func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskPaused })
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 20 {
+		wg.Go(func() {
+			task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", fmt.Sprintf("task-%d", i))
+			if err != nil {
+				errs <- err
+				return
+			}
+			task.State = ScheduledTaskActive
+			errs <- s.store.ScheduledTasks.Update(s.ctx, &task)
+		})
+	}
+	wg.Wait()
+	close(errs)
+	resumed, refused := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			resumed++
+		case errors.Is(err, ErrTooManyScheduledTasks):
+			refused++
+		default:
+			s.Require().NoError(err)
+		}
+	}
+	s.Equal(5, resumed)
+	s.Equal(15, refused)
+	active, err := s.store.ScheduledTasks.CountActive(s.ctx, "acme", "sam", config.ID)
+	s.Require().NoError(err)
+	s.Equal(5, active)
+}
+
+func (s *StoreSuite) TestAnEditOfAnActiveTaskAtTheLimitIsSaved() {
+	config := s.limitedConfig(1)
+	task := s.task("one", func(task *ScheduledTask) { task.ConfigID = config.ID })
+	task.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, task), "the task is counted already, not one more")
+	paused := s.task("two", func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskPaused })
+	paused.Title = "Walk"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, paused), "a task left paused takes no room")
+	paused.State = ScheduledTaskActive
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, paused), ErrTooManyScheduledTasks)
+}
+
+// sleptThrough stores a paused one-shot whose time passed, and the missed run a resume records.
+func (s *StoreSuite) sleptThrough() (ScheduledTask, *ScheduledTaskRun) {
+	due := s.base.Add(-time.Hour)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt, task.State = &due, ScheduledTaskPaused })
+	read, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	read.State, read.NextRunAt = ScheduledTaskCompleted, nil
+	reason, finished := scheduledTaskRunPaused, time.Now().UTC()
+	return read, &ScheduledTaskRun{TaskID: "one", CustomerID: "acme", ScheduledFor: due,
+		State: ScheduledTaskRunMissed, Error: &reason, FinishedAt: &finished}
+}
+
+func (s *StoreSuite) TestClosingATaskRecordsTheOccurrenceItSleptThrough() {
+	task, missed := s.sleptThrough()
+	s.Require().NoError(s.store.ScheduledTasks.Close(s.ctx, &task, missed))
+
+	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "one"})
+	s.Require().NoError(err)
+	s.Require().Len(runs, 1)
+	s.Equal(ScheduledTaskRunMissed, runs[0].State)
+	closed, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(ScheduledTaskCompleted, closed.State)
+}
+
+func (s *StoreSuite) TestAClosingRefusedAsChangedRecordsNoRun() {
+	stale, missed := s.sleptThrough()
+	edit, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	edit.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &edit))
+
+	s.ErrorIs(s.store.ScheduledTasks.Close(s.ctx, &stale, missed), ErrScheduledTaskChanged)
+	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "one"})
+	s.Require().NoError(err)
+	s.Empty(runs, "the refused resume left no run behind")
+}
+
 func (s *StoreSuite) TestATaskOnADeletedConfigIsRefused() {
 	deleted := s.boundConfig("acme")
 	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme", deleted.ID))

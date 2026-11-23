@@ -36,7 +36,8 @@ var errTooManyScheduledTasks = APIError{Type: ErrorTypeConflict, Code: codeTooMa
 
 // errScheduledTaskChanged is a write to a task that changed between its read and its save, by a
 // pause, an edit or a delivery: saving the copy read would undo that change.
-var errScheduledTaskChanged = conflict("the scheduled task changed while this request was made; read it again and retry")
+var errScheduledTaskChanged = APIError{Type: ErrorTypeConflict, Code: codeTaskChanged,
+	Message: "the scheduled task changed while this request was made; read it again and retry"}
 
 // errUnkeptTaskSession is a create naming a session whose conversation is not kept: an
 // occurrence follows up by reopening the conversation, which an incognito session leaves
@@ -555,36 +556,27 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 				return nil, scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 					Message: "that task has no occurrence left; give it a new schedule, then resume it"})
 			}
-			if err := s.store.ScheduledTaskRuns.Insert(ctx, missed); err != nil {
-				return nil, err
-			}
 			task.State, task.NextRunAt = store.ScheduledTaskCompleted, nil
+			task.ConsecutiveFailures, task.MovePaused = 0, false
+			err = s.store.ScheduledTasks.Close(ctx, &task, missed)
 		} else {
-			maxActive := store.DefaultMaxActiveTasks
 			// A deleted config leaves a task nothing to run on; any other failure to read it is not that.
-			config, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID)
-			if errors.Is(err, store.ErrNoAgentConfig) {
+			if _, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
 				return nil, errUnknownConfig
 			}
-			if err == nil {
-				maxActive = config.Scheduling.MaxActive()
-			}
-			active, err := s.store.ScheduledTasks.CountActive(ctx, customerID, task.UserID, task.ConfigID)
-			if err != nil {
-				return nil, err
-			}
-			if active >= maxActive {
-				return nil, errTooManyScheduledTasks
-			}
 			task.State, task.NextRunAt = store.ScheduledTaskActive, &next
+			task.ConsecutiveFailures, task.MovePaused = 0, false
+			// The save counts the user's active tasks against the config's limit.
+			err = s.store.ScheduledTasks.Update(ctx, &task)
 		}
-		task.ConsecutiveFailures, task.MovePaused = 0, false
-		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
+		if err != nil {
 			switch {
 			case errors.Is(err, store.ErrNoAgentConfig):
 				return nil, errUnknownConfig
 			case errors.Is(err, store.ErrScheduledTaskChanged):
 				return nil, errScheduledTaskChanged
+			case errors.Is(err, store.ErrTooManyScheduledTasks):
+				return nil, errTooManyScheduledTasks
 			}
 			return nil, err
 		}

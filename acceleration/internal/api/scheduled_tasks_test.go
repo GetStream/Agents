@@ -1509,7 +1509,7 @@ func (s *ScheduledTasksSuite) TestAnEditOfATaskPausedMeanwhileIsRefusedAndLeaves
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(errScheduledTaskChanged.Message, failure.Error.Message)
+	s.Equal(codeTaskChanged, failure.Error.Code)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Equal("Stretch", task.Title)
@@ -1527,7 +1527,7 @@ func (s *ScheduledTasksSuite) TestAPauseOfATaskEditedMeanwhileIsRefusedAndKeepsT
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(errScheduledTaskChanged.Message, failure.Error.Message)
+	s.Equal(codeTaskChanged, failure.Error.Code)
 	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
 }
 
@@ -1545,10 +1545,49 @@ func (s *ScheduledTasksSuite) TestAResumeOfATaskEditedMeanwhileIsRefusedAndKeeps
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(errScheduledTaskChanged.Message, failure.Error.Message)
+	s.Equal(codeTaskChanged, failure.Error.Code)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Equal("Renamed", task.Title)
+}
+
+func (s *ScheduledTasksSuite) TestResumesAtOnceStopAtTheActiveLimit() {
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Scheduling.MaxTasksPerUser = pointerTo(5)
+	})
+	user := s.data.createUser()
+	var ids []string
+	for range 4 {
+		for range 5 {
+			ids = append(ids, s.createTask(user, taskRequest(config)).Id)
+		}
+		for _, id := range ids[len(ids)-5:] {
+			s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+id+"/pause", nil, nil))
+		}
+	}
+
+	var wg sync.WaitGroup
+	statuses := make(chan int, len(ids))
+	for _, id := range ids {
+		wg.Go(func() {
+			status, _ := user.call(http.MethodPost, "/v1/agents/scheduled-tasks/"+id+"/resume", nil)
+			statuses <- status
+		})
+	}
+	wg.Wait()
+	close(statuses)
+	answered := map[int]int{}
+	for status := range statuses {
+		answered[status]++
+	}
+	s.Equal(map[int]int{http.StatusOK: 5, http.StatusConflict: 15}, answered)
+	active := 0
+	for _, task := range s.tasksOf(user) {
+		if task.State == store.ScheduledTaskActive {
+			active++
+		}
+	}
+	s.Equal(5, active)
 }
 
 func (s *ScheduledTasksSuite) TestTheAgentIsToldATaskChangedUnderItsEdit() {
@@ -1562,7 +1601,7 @@ func (s *ScheduledTasksSuite) TestTheAgentIsToldATaskChangedUnderItsEdit() {
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"snooze","in":"PT30M"}`})
 	s.whileChanging(created.Id, "state = 'paused'", func() { s.say(user, opened.Id, "half an hour later, please") })
-	s.Contains(s.ranResult(watching), `"error":"conflict"`)
+	s.Contains(s.ranResult(watching), `"error":"task_changed"`)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Require().NotNil(task.NextRunAt)

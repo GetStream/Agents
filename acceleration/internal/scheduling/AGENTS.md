@@ -118,10 +118,17 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduledTasksSuite/TestAQuietTaskIsHeldUntilItsQuietHoursEnd`.
 - **A save never undoes a write it did not read.** `ScheduledTasks.Update` saves only while
   `updated_at` is what the caller read, and refuses a copy read before a pause, an edit, a claim, a
-  hold or a finish with `ErrScheduledTaskChanged` (409 over the API). Creates of one user on one
-  config count the active limit under an advisory lock, so creates at once stop at it.
-  `TestStoreSuite/TestASaveOfACopyReadBeforeAPauseIsRefused`,
-  `TestStoreSuite/TestCreatesAtOnceStopAtTheActiveLimit`.
+  hold, a finish or a session write (`SetSession`) with `ErrScheduledTaskChanged` (409
+  `task_changed` over the API). A lease renewal leaves `updated_at` alone, so an edit during a long
+  delivery still saves. A resume that slept through a one-shot records its missed run in the same
+  transaction (`ScheduledTasks.Close`), so a refused save leaves none.
+  `TestStoreSuite/TestASaveOfACopyReadBefore*` (six tests), `TestStoreSuite/TestAClosingRefusedAsChangedRecordsNoRun`.
+- **The active limit is counted under a lock.** A create, and a save that makes a task active
+  again, count the user's active tasks on the config under an advisory lock on customer, user and
+  config, so creates and resumes at once stop at `max_tasks_per_user`.
+  `TestStoreSuite/TestCreatesAtOnceStopAtTheActiveLimit`,
+  `TestStoreSuite/TestResumesAtOnceStopAtTheConfigsActiveLimit`,
+  `TestScheduledTasksSuite/TestResumesAtOnceStopAtTheActiveLimit`.
 - **A pause or edit writes a running run `missed`, held or in flight (S4).** An edited active
   one-shot comes due again as it now reads, unless its run placed a call: then it is completed.
   Only an edit that leaves a one-shot active while it is delivered keeps its claim and run.

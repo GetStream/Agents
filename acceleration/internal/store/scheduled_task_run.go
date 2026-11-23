@@ -84,6 +84,10 @@ type ScheduledTaskRuns struct {
 // or a missed occurrence. A scheduled occurrence that already has its run is
 // left as it is.
 func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) error {
+	return stack.Wrap(insertScheduledTaskRun(ctx, r.store.global, run))
+}
+
+func insertScheduledTaskRun(ctx context.Context, db bun.IDB, run *ScheduledTaskRun) error {
 	if run.ID == "" {
 		run.ID = newID()
 	}
@@ -97,13 +101,10 @@ func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) e
 		run.State = ScheduledTaskRunRunning
 	}
 	if err := run.Validate(); err != nil {
-		return stack.Wrap(err)
+		return err
 	}
-	_, err := r.store.global.NewInsert().Model(run).
-		On("CONFLICT DO NOTHING").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: insert scheduled task run: %w", err))
+	if _, err := db.NewInsert().Model(run).On("CONFLICT DO NOTHING").Exec(ctx); err != nil {
+		return fmt.Errorf("store: insert scheduled task run: %w", err)
 	}
 	return nil
 }

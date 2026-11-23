@@ -205,20 +205,12 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 	task.UpdatedAt = now
 
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
+		if _, err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
 			return err
 		}
 		if maxActive > 0 {
-			// Two creates at once would otherwise both count room for one more.
-			if err := lockUntilCommit(ctx, tx, task.CustomerID+"/"+task.UserID+"/"+task.ConfigID, scheduledTaskLimitLockSeed); err != nil {
-				return fmt.Errorf("store: lock scheduled task limit: %w", err)
-			}
-			count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
-			if err != nil {
+			if err := refuseOverLimit(ctx, tx, task, maxActive); err != nil {
 				return err
-			}
-			if count >= maxActive {
-				return ErrTooManyScheduledTasks
 			}
 		}
 		if _, err := tx.NewInsert().Model(task).Exec(ctx); err != nil {
@@ -231,7 +223,25 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 	}))
 }
 
-// refuseDeletedConfig refuses an active task on a deleted config. The caller read
+// refuseOverLimit refuses one more active task for the task's user on its config when they hold
+// maxActive already. Two creates or resumes at once would otherwise both count room for one more,
+// so the count is taken under a lock on the user and config held until the transaction ends.
+func refuseOverLimit(ctx context.Context, tx bun.Tx, task *ScheduledTask, maxActive int) error {
+	if err := lockUntilCommit(ctx, tx, task.CustomerID+"/"+task.UserID+"/"+task.ConfigID, scheduledTaskLimitLockSeed); err != nil {
+		return fmt.Errorf("store: lock scheduled task limit: %w", err)
+	}
+	count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
+	if err != nil {
+		return err
+	}
+	if count >= maxActive {
+		return ErrTooManyScheduledTasks
+	}
+	return nil
+}
+
+// refuseDeletedConfig refuses an active task on a deleted config, and returns the config's
+// scheduling settings (the zero value when there is no row). The caller read
 // the config live; a delete landing after that read pauses the config's tasks
 // once its own write is in (ScheduledTasks.PauseForConfig), so a task written
 // meanwhile would be left active on nothing. The config row is locked FOR SHARE
@@ -249,21 +259,24 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 // https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
 // A config is only ever soft-deleted (DeleteAgentConfig), so an id with no row
 // is not a delete and is left to the caller, which resolved it.
-func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID string) error {
-	var deleted []bool
-	err := tx.NewSelect().Model((*AgentConfig)(nil)).
-		ColumnExpr("deleted_at IS NOT NULL").
+func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID string) (AgentScheduling, error) {
+	var configs []AgentConfig
+	err := tx.NewSelect().Model(&configs).
+		Column("deleted_at", "scheduling").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", configID).
 		For("SHARE").
-		Scan(ctx, &deleted)
+		Scan(ctx)
 	if err != nil {
-		return fmt.Errorf("store: lock scheduled task config: %w", err)
+		return AgentScheduling{}, fmt.Errorf("store: lock scheduled task config: %w", err)
 	}
-	if len(deleted) > 0 && deleted[0] {
-		return unknownAgentConfig(configID)
+	if len(configs) == 0 {
+		return AgentScheduling{}, nil
 	}
-	return nil
+	if configs[0].DeletedAt != nil {
+		return AgentScheduling{}, unknownAgentConfig(configID)
+	}
+	return configs[0].Scheduling, nil
 }
 
 // lockScheduledTask locks a task's row before its transaction writes the
@@ -275,18 +288,22 @@ func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID st
 // deadlock (SQLSTATE 40P01). FOR NO KEY UPDATE is what the task's own UPDATE
 // takes, so it does not hold back a run insert's foreign key check (table
 // 13.3, https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
-func lockScheduledTask(ctx context.Context, tx bun.Tx, customerID, id string) error {
+// It returns the task's stored state, empty when there is no such task.
+func lockScheduledTask(ctx context.Context, tx bun.Tx, customerID, id string) (string, error) {
 	var locked []string
 	err := tx.NewSelect().Model((*ScheduledTask)(nil)).
-		Column("id").
+		Column("state").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		For("NO KEY UPDATE").
 		Scan(ctx, &locked)
 	if err != nil {
-		return fmt.Errorf("store: lock scheduled task: %w", err)
+		return "", fmt.Errorf("store: lock scheduled task: %w", err)
 	}
-	return nil
+	if len(locked) == 0 {
+		return "", nil
+	}
+	return locked[0], nil
 }
 
 // Get returns one of a customer's tasks by id.
@@ -357,8 +374,21 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 // task, changes it, and saves it back. An active one-shot whose settled
 // occurrence placed a call is completed instead: a second call is worse than
 // an edit missed. A copy read before another write to the task is refused
-// (ErrScheduledTaskChanged): saving it would undo that write.
+// (ErrScheduledTaskChanged): saving it would undo that write. A save that makes
+// a task active again is refused over the user's active limit on the config
+// (ErrTooManyScheduledTasks).
 func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error {
+	return r.update(ctx, task, nil)
+}
+
+// Close saves a task whose one-shot slept through its time while paused, with
+// the missed run of that occurrence, in one transaction: a save refused leaves
+// no run behind.
+func (r *ScheduledTasks) Close(ctx context.Context, task *ScheduledTask, missed *ScheduledTaskRun) error {
+	return r.update(ctx, task, missed)
+}
+
+func (r *ScheduledTasks) update(ctx context.Context, task *ScheduledTask, missed *ScheduledTaskRun) error {
 	if err := task.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -370,13 +400,21 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 		task.Channels = []string{ScheduledTaskDeliveredConversation}
 	}
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		var scheduling AgentScheduling
 		if task.State == ScheduledTaskActive {
-			if err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
+			var err error
+			if scheduling, err = refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
 				return err
 			}
 		}
-		if err := lockScheduledTask(ctx, tx, task.CustomerID, task.ID); err != nil {
+		stored, err := lockScheduledTask(ctx, tx, task.CustomerID, task.ID)
+		if err != nil {
 			return err
+		}
+		if task.State == ScheduledTaskActive && stored != "" && stored != ScheduledTaskActive {
+			if err := refuseOverLimit(ctx, tx, task, scheduling.MaxActive()); err != nil {
+				return err
+			}
 		}
 		oneShot := task.RRule == "" && task.State == ScheduledTaskActive && task.NextRunAt != nil
 		// The run of a one-shot's occurrence a worker holds: its lease is live
@@ -464,6 +502,9 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 				return fmt.Errorf("%w: %s", ErrScheduledTaskChanged, task.ID)
 			}
 			return fmt.Errorf("%w: %s", ErrNoScheduledTask, task.ID)
+		}
+		if missed != nil {
+			return insertScheduledTaskRun(ctx, tx, missed)
 		}
 		return nil
 	}))
@@ -859,7 +900,7 @@ func (r *ScheduledTasks) Finish(ctx context.Context, customerID, runID, leasedBy
 		if err := tx.NewSelect().Model(&run).Where("id = ?", runID).Limit(1).Scan(ctx); err != nil {
 			return fmt.Errorf("store: finish scheduled task run: %w", err)
 		}
-		if err := lockScheduledTask(ctx, tx, customerID, run.TaskID); err != nil {
+		if _, err := lockScheduledTask(ctx, tx, customerID, run.TaskID); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
