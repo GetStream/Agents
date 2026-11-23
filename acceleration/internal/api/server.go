@@ -1046,7 +1046,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		}
 
 		// A socket reports the life of the connection rather than a time to respond,
-		// since it is logged once it has closed.
+		// since it is logged once it has closed, and why it closed (socketEnd).
 		fields := []any{
 			"method", r.Method,
 			"path", loggedPath(routes, r),
@@ -1058,6 +1058,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		if recorder.written > 0 {
 			fields = append(fields, "bytes", recorder.written)
 		}
+		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
 			fields = append(fields, "error", failure.err.Error())
 		}

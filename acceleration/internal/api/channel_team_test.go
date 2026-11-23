@@ -3,6 +3,7 @@
 package api
 
 import (
+	"crypto/rand"
 	"maps"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/redis/rueidis"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -182,7 +184,8 @@ func (s *AgentTeamsSuite) TestASocketSessionIsRefusedWhenTheSettingsCannotBeRead
 	config := s.configOf("red")
 	s.makeSettingsUnreadable()
 	logBefore := len(s.logged.String())
-	connection := s.serverClient.opens("/v1/agents/socket")
+	id := rand.Text()
+	connection := s.serverClient.withRequestID(id).opens("/v1/agents/socket")
 	s.Require().NoError(connection.WriteJSON(map[string]any{
 		"type": "start", "sample_rate": 24_000, "session": map[string]any{"config_id": config.Id},
 	}))
@@ -194,6 +197,17 @@ func (s *AgentTeamsSuite) TestASocketSessionIsRefusedWhenTheSettingsCannotBeRead
 	s.Equal(somethingWentWrong, refused["error"])
 	s.Contains(s.logged.String()[logBefore:], "the app's settings could not be read", "the 500 is logged with its error")
 	s.Equal(string(ErrorTypeInternal), refused["error_type"])
+	s.closedForTheRoutersFailure(connection, id)
+}
+
+// closedForTheRoutersFailure is a refused socket session's access line naming the router's
+// own failure, not the caller's refusal.
+func (s *AgentTeamsSuite) closedForTheRoutersFailure(connection *websocket.Conn, id string) {
+	_, _ = s.socketEnd(connection)
+	s.Require().Eventually(func() bool {
+		return lineWith(s.logged, `msg="served a request"`, " request_id="+id) != ""
+	}, settleFor, 20*time.Millisecond, "the socket left no access line")
+	s.Contains(lineWith(s.logged, `msg="served a request"`, " request_id="+id), " close_reason=server_error close_code=1008 ")
 }
 
 // The device gets no text of the database error, and the router logs the error.
@@ -201,7 +215,8 @@ func (s *AgentTeamsSuite) TestASocketSessionWhoseConfigTheDatabaseCannotReadIsRe
 	id := s.utils.uuid()
 	s.failQueries(id)
 	logBefore := len(s.logged.String())
-	connection := s.serverClient.opens("/v1/agents/socket")
+	request := rand.Text()
+	connection := s.serverClient.withRequestID(request).opens("/v1/agents/socket")
 	s.Require().NoError(connection.WriteJSON(map[string]any{
 		"type": "start", "sample_rate": 24_000, "session": map[string]any{"config_id": id},
 	}))
@@ -212,6 +227,7 @@ func (s *AgentTeamsSuite) TestASocketSessionWhoseConfigTheDatabaseCannotReadIsRe
 	s.Equal("error", refused["type"], "%v", refused)
 	s.Equal(somethingWentWrong, refused["error"])
 	s.Contains(s.logged.String()[logBefore:], "could not read the agent config of a socket session")
+	s.closedForTheRoutersFailure(connection, request)
 }
 
 // A chat that ended here is carried on by the next message, a create like any other.
