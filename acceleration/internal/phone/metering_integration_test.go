@@ -305,6 +305,35 @@ func (s *MeteringSuite) TestACallersJoinBeforeSessionStartedIsTakenByTheInboundL
 	s.Zero(s.kept(callID))
 }
 
+// A caller's join made after the call arrived but delivered before it bills the caller from the
+// arrival, as the same join delivered after it does.
+func (s *MeteringSuite) TestACallerIsBilledFromTheArrivalWhicheverEventIsDeliveredFirst() {
+	arrival := s.clock.now()
+	s.clock.advance(2 * time.Second)
+	joined := func(callID string) {
+		s.Require().NoError(s.service.Connect(s.ctx, everyApp, defaultCallType, callID, "session-1", "caller-1", "15125550199",
+			arrival.Add(time.Second)))
+	}
+	arrived := func(callID string) {
+		s.service.OpenLeg(s.ctx, routing.Owner{CustomerID: s.customer, Attribution: routing.Attribution{APIKey: routing.OriginPhoneInbound}},
+			store.CallLeg{CallType: defaultCallType, CallID: callID, StreamSessionID: "session-1", Vendor: s.vendor.vendor,
+				Direction: store.Inbound, LocalNumber: s.e164, Country: "US", DialedAt: arrival}, true)
+	}
+	joinFirst, arrivalFirst := "call-"+uuid.NewString(), "call-"+uuid.NewString()
+	joined(joinFirst)
+	arrived(joinFirst)
+	arrived(arrivalFirst)
+	joined(arrivalFirst)
+	s.clock.set(arrival.Add(time.Minute))
+
+	s.left(defaultCallType, joinFirst, "caller-1")
+	s.left(defaultCallType, arrivalFirst, "caller-1")
+
+	minutes := s.rowsWhen(ModelCallMinutes, 2)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 60}, minutes[0].Meters, "from the arrival")
+	s.Equal(minutes[0].Meters, minutes[1].Meters)
+}
+
 // A leave kept between Connect reading the phone's leaves and connecting its leg ends the leg
 // at it, rather than being forgotten with the leg left open, and billed, until the call ends.
 func (s *MeteringSuite) TestALeaveRacingItsJoinEndsTheLeg() {
