@@ -14,7 +14,9 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // The tools the agent knows how to run. A tool the model asks for by any other name is
@@ -214,6 +216,38 @@ func DestinationTransfer(destinations []Destination) harness.Tool {
 // would never hear about.
 type ToolRunner interface {
 	Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error)
+}
+
+// ToolReport is what a runner says of a call for the call's log line ("a tool call came back"),
+// where the error it returned cannot say it: a connector call cut off at its binding's timeout
+// returns words for the model and no error.
+type ToolReport struct {
+	// Connector is the connector the tool belongs to.
+	Connector string
+	// ErrorCode is how the call failed, "" when it answered.
+	ErrorCode string
+	// Error is what the failure said, with what the runner redacts already taken out. The line
+	// logs it in place of the returned error's text, which can echo a token.
+	Error string
+	// Client is set when the caller's own code ran the tool and failed it. What it said of the
+	// failure is the caller's, and can carry its users' data, so the line leaves it out.
+	Client bool
+}
+
+type toolReportKey struct{}
+
+// WithToolReport is ctx keeping what a runner reports of the call it is handed for (ReportTool).
+func WithToolReport(ctx context.Context) (context.Context, *ToolReport) {
+	report := &ToolReport{}
+	return context.WithValue(ctx, toolReportKey{}, report), report
+}
+
+// ReportTool keeps report for the line of the call ctx was handed to a runner for. A context
+// made by no WithToolReport keeps nothing.
+func ReportTool(ctx context.Context, report ToolReport) {
+	if kept, ok := ctx.Value(toolReportKey{}).(*ToolReport); ok {
+		*kept = report
+	}
 }
 
 // ToolPolicy is what one tool asks of the agent (Options.ToolPolicy). The zero value asks
@@ -614,6 +648,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		a.mu.Unlock()
 	}()
 	began := time.Now()
+	ctx, report := WithToolReport(ctx)
 	started := ToolStarted{ID: requested.Call.ID, TurnID: requested.TurnID, Tool: requested.Call.Name, Arguments: requested.Call.Arguments, StartedAt: time.Now().UTC()}
 	started.Product, started.SDK = toolScope(requested.Call)
 	started.PreSpeech = a.preSpeech([]llm.ToolCall{requested.Call})
@@ -714,8 +749,9 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	took := time.Since(began)
 	toolCallSeconds.WithLabelValues(outcome).Observe(took.Seconds())
-	a.logger.Info("a tool call came back", "tool", requested.Call.Name, "tool_call", requested.Call.ID,
-		"turn", requested.TurnID, "duration_ms", took.Milliseconds(), "outcome", outcome)
+	a.logger.Info("a tool call came back", append(a.loggedTool(*report, err), "tool", requested.Call.Name,
+		"tool_call", requested.Call.ID, "turn", requested.TurnID, "duration_ms", took.Milliseconds(),
+		"outcome", outcome)...)
 
 	a.emitter.Send(ToolRan{
 		ID:        requested.Call.ID,
@@ -789,6 +825,39 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			a.logger.Error("could not leave after transferring", "error", err)
 		}
 	}()
+}
+
+// loggedTool is what "a tool call came back" says beside the agent logger's customer, session and
+// call: whose agent it was, under the keys "model call timing" names them with, the connector
+// the tool belongs to, and whether it failed and how. A call fails when it returned err or
+// its runner reported a failure (ToolReport); error_code is the runner's, else timeout or
+// cancelled for a context that ended, else error. The error a connector call returned is
+// never logged, only what its runner reported, redacted; nor is the one a caller's own tool
+// failed with (ToolReport.Client). What a call was asked and answered is not logged: it is the
+// caller's and its users'.
+func (a *Agent) loggedTool(report ToolReport, err error) []any {
+	fields := []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID}
+	if report.Connector != "" {
+		fields = append(fields, "connector", report.Connector)
+	}
+	code, message := report.ErrorCode, report.Error
+	switch {
+	case code != "" || err == nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		code = routing.ErrorTimeout
+	case errors.Is(err, context.Canceled):
+		code = routing.ErrorCancelled
+	default:
+		code = "error"
+	}
+	if err != nil && report.Connector == "" && !report.Client {
+		message = err.Error()
+	}
+	fields = append(fields, "success", code == "", "error_code", code)
+	if message != "" {
+		fields = append(fields, "error", store.SafeLogText(message))
+	}
+	return fields
 }
 
 // toolOutcome names how a tool call ended: cancelled, failed, refused by the router before

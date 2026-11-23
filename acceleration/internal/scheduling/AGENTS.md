@@ -34,7 +34,8 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
                  |   | ended: reopen from its row | none yet: open one
                  v
         deliver_to, in order, first that lands:
-          conversation  Session.FollowUp(command id "st_<run id>", or "st_<run id>_r1")
+          conversation  Session.FollowUp(command id "st_<run id>", or "st_<run id>_r1"),
+                        waits for the turn to end: refused for money -> failed under its code
           sms | whatsapp | imessage   same turn's words and files -> channels.Service.Notify
           phone         phone.Service.Call -> call session -> task as first turn
 
@@ -171,7 +172,17 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   Stream after a restart), not the run's `attempts`, which also count attempts that never
   reached the turn. `st_<run>` cancelled or interrupted: the turn runs under `st_<run>_r1`, on
   the retry or on the next channel; `_r1` cut off as well is read back as `reply_failed`. A
-  failed reply is not run again. A call's turn keeps `st_<run>_call`. A channel carries the
+  failed reply is run again only after a refusal for money (AI-3183): the scheduler hands each
+  retry the reason the attempt before it failed under (`deliverWithRetries` sets
+  `claim.Run.Error`, `occurrenceDelivery` reads it as `scheduledDelivery.Earlier`), and a
+  hand-off to the router holding the session carries it too (`scheduledHandOff.Earlier`, taken
+  only when `moneyCode` holds). After a money code, `replyCommand` runs a failed `st_<run>` once
+  more under `st_<run>_r1`, in the conversation, a text channel or a thread. In the conversation
+  an `_r1` that failed as well fails the attempt under that reason, tried again
+  (`followUpInConversation`), so the run fails under it once its retries are spent and is never
+  `delivered`. Any other failed reply is read back as it was. A worker that takes the run over
+  rebuilds it from the row, which keeps no reason between attempts, so it reruns nothing.
+  A call's turn keeps `st_<run>_call`. A channel carries the
   agent's reply only, never settled work's own words (`spokenOf`, AI-1559), so the first
   attempt and a read-back send the same words.
   `TestScheduledTasksSuite/TestATurnCancelledBeforeItsReplyRunsAgainOnTheRetry`,
@@ -181,6 +192,13 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduledTasksSuite/TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrenceIsRetried`,
   `TestScheduledTasksSuite/TestARetriedOccurrenceTextsTheReplyItAlreadyHas`,
   `TestTelnyxChannelSuite/TestATaskWhoseTurnWasCancelledRunsAgainOnTheRetry`,
+  `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedWhileMoneyCannotBeCheckedRunsAgainOnItsRetry`,
+  `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedAgainOnItsRerunFailsTheRun`,
+  `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedOnAnotherRouterRunsAgainThereOnItsRetry`,
+  `TestTelnyxUnpaidSuite/TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAgainOnItsRetry`,
+  `TestTelnyxUnpaidSuite/TestATextTurnFailedNotForMoneyIsNotRunAgainOnItsRetry`,
+  `TestTelnyxUnpaidSuite/TestAThreadRetryAfterARefusalForMoneyRunsTheTurnAgain`,
+  `TestEveryMoneyCodeRerunsAFailedTurn`, `TestAHandOffReadsOnlyTheIdsAPeerChecks`,
   `TestSettledWorksOwnWordsAreNotCarriedButTheAgentsReplyIs` (unit).
 - **A repeat `Describe` would misstate is refused (S18)**; a stored one still runs.
   `TestARepeatItsDescriptionWouldMisstateIsRefused` (unit and `ScheduledTasksSuite`),

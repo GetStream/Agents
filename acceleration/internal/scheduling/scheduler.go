@@ -487,6 +487,10 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		case <-timer.C:
 		}
 		earlier := err
+		// The next attempt reads the reason this one failed under as the run's, as a worker
+		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall).
+		reason := ReasonOf(earlier)
+		claim.Run.Error = &reason
 		deliveredTo, sessionID, err = s.deliver(ctx, claim)
 		err = rungEarlier(earlier, err)
 	}

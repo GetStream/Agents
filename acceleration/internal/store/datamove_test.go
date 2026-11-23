@@ -3516,7 +3516,7 @@ func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEve
 	s.Equal(first["usage_id"], again["usage_id"], "importing it again names the same unit of work")
 }
 
-func (s *DataMoveSuite) TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped() {
+func (s *DataMoveSuite) TestAnImportedRequestIsGivenAUsageIDOfItsOwnAndIsNeverShipped() {
 	usageID := uuid.Must(uuid.NewV7())
 	shippedAt := time.Now().UTC().Add(-time.Minute)
 	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
@@ -3524,8 +3524,10 @@ func (s *DataMoveSuite) TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped() 
 		ShippedAt: &shippedAt, ShipError: "missing_api_key"}))
 
 	moved := s.movedRequest(false)
+	again := s.movedRequest(false)
 
-	s.Equal(usageID.String(), moved["usage_id"])
+	s.NotEqual(usageID.String(), moved["usage_id"], "the usage id sent names a unit of work of the source's")
+	s.Equal(moved["usage_id"], again["usage_id"], "importing it again names the same row")
 	s.Equal(false, moved["to_ship"], "the deployment that recorded it bills it")
 	s.Nil(moved["shipped_at"], "what the other deployment's usage service answered stays there")
 	s.Equal("", moved["ship_error"])
@@ -3572,8 +3574,12 @@ func (s *DataMoveSuite) TestAMovedRequestNeverOverwritesTheDestinationsRowWithIt
 	s.Require().Len(rows, 2, "the moved row beside the destination's own, once however often it is imported")
 	s.EqualValues(id, rows[own.UsageID.String()]["id"])
 	s.Equal(true, rows[own.UsageID.String()]["to_ship"], "the destination's own row is left as it was")
-	s.NotEqualValues(id, rows[moved.UsageID.String()]["id"], "the moved row is given an id of the destination's")
-	s.Equal(false, rows[moved.UsageID.String()]["to_ship"])
+	delete(rows, own.UsageID.String())
+	s.NotContains(rows, moved.UsageID.String(), "the moved row is given a usage id of the destination's")
+	for _, row := range rows {
+		s.NotEqualValues(id, row["id"], "the moved row is given an id of the destination's")
+		s.Equal(false, row["to_ship"])
+	}
 }
 
 func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
@@ -3594,7 +3600,7 @@ func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
 
 	rows := s.requestsByUsage()
-	s.NotContains(rows, doomed.UsageID.String())
+	s.Len(rows, 1, "the moved row is deleted")
 	s.Contains(rows, own.UsageID.String(), "the destination's row with the deleted row's id is not the row deleted")
 }
 
@@ -3614,6 +3620,79 @@ func (s *DataMoveSuite) TestADeletedRequestFromBeforeUsageIDsIsReplayedToo() {
 	rows := s.requestsByUsage()
 	s.NotContains(rows, moved["usage_id"], "found by the usage id its import made from its source id")
 	s.Contains(rows, kept.UsageID.String())
+}
+
+func (s *DataMoveSuite) TestADeleteNamingARequestRecordedHereLeavesIt() {
+	id := time.Now().UnixNano() % 1_000_000_000_000
+	own := s.takenRequest(s.destination, id)
+
+	key := fmt.Sprintf(`{"usage_id": %q, "id": %d}`, own.UsageID, id)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{
+		{Table: "requests", Op: ChangeDelete, Key: json.RawMessage(key)},
+	}))
+
+	s.Contains(s.requestsByUsage(), own.UsageID.String(), "a replayed delete names a moved row, never one recorded here")
+}
+
+func (s *DataMoveSuite) TestARequestImportedByTwoAppsIsHeldByEach() {
+	s.takenRequest(s.source, time.Now().UnixNano()%1_000_000_000_000)
+	exported := s.export("acme").of("requests")
+	s.Require().Len(exported, 1)
+	encoded, err := json.Marshal(exported[0])
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "requests", encoded))
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "globex", "requests", encoded))
+
+	s.Len(s.exportFrom(s.destination, "globex").of("requests"), 1, "the usage id is made from the app importing the row")
+}
+
+func (s *DataMoveSuite) TestADeleteNamingAMovedRequestInCapitalsFindsIt() {
+	id := time.Now().UnixNano() % 1_000_000_000_000
+	moved := s.takenRequest(s.source, id)
+	s.move("acme", "acme")
+	s.Require().Len(s.requestsByUsage(), 1)
+
+	key := fmt.Sprintf(`{"usage_id": %q, "id": %d}`, strings.ToUpper(moved.UsageID.String()), id)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{
+		{Table: "requests", Op: ChangeDelete, Key: json.RawMessage(key)},
+	}))
+
+	s.Empty(s.requestsByUsage(), "a usage id is the same uuid however it is written")
+}
+
+func (s *DataMoveSuite) TestARequestMovedBackIsOneRowWhereItWasRecorded() {
+	home := s.takenRequest(s.source, time.Now().UnixNano()%1_000_000_000_000)
+	s.move("acme", "acme")
+
+	for _, row := range s.exportFrom(s.destination, "acme").of("requests") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "requests", encoded))
+		s.Require().NoError(s.source.ImportRow(s.ctx, "globex", "requests", encoded))
+	}
+
+	rows := s.exportFrom(s.source, "acme").of("requests")
+	s.Require().Len(rows, 1, "the moved copy is the row it was copied from")
+	s.Equal(home.UsageID.String(), rows[0]["usage_id"])
+	s.Len(s.exportFrom(s.source, "globex").of("requests"), 1, "another app's import of it is a row of that app's")
+}
+
+func (s *DataMoveSuite) TestARequestMovedOnFromACopyIsOneRowWhereverItLands() {
+	id := time.Now().UnixNano() % 1_000_000_000_000
+	s.takenRequest(s.source, id)
+	s.move("acme", "acme")
+	_, err := s.source.ShardDB().ExecContext(s.ctx, "DELETE FROM requests WHERE id = ?", id)
+	s.Require().NoError(err)
+	for _, row := range s.exportFrom(s.destination, "acme").of("requests") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "requests", encoded))
+	}
+
+	s.move("acme", "acme")
+
+	s.Len(s.requestsByUsage(), 1, "a copy of a copy is the copy already here")
 }
 
 // drewNothing restarts the sequence behind a column, so the store has drawn nothing from it yet.
