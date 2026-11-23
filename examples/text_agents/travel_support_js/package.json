@@ -10,6 +10,6 @@
     "start": "node --env-file=../../../.env index.mjs"
   },
   "dependencies": {
-    "@stream-io/stream-agents": "^0.4.3"
+    "@stream-io/stream-agents": "^0.8.0"
   }
 }
