@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionmodel"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -111,6 +113,50 @@ func (s *AgentSuite) TestATextAgentMovedOntoAFlowControllerItCannotOpenIsNotRefu
 	s.Require().NoError(agent.Join(s.ctx))
 
 	s.Require().NoError(agent.SetSettings(s.ctx, Settings{LLMTarget: "en-low-latency", ControllerTarget: unkeyedFlow}))
+	_, err = agent.RespondTo(s.ctx, "hello", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the written turn was never answered")
+}
+
+// unkeyedJudge is a flow judge on a deployment that holds no key for the vendor it routes
+// to: every session it starts fails to open, as a hosted one does with none set.
+func (s *AgentSuite) unkeyedJudge(logger *slog.Logger) *decisionrouter.Router {
+	registry := decisionrouter.NewRegistry()
+	registry.Register("hosted", func(routing.Spec) (decisionmodel.Provider, error) {
+		return nil, errors.New("HOSTED_API_KEY is required")
+	})
+	judging, err := decisionrouter.New(decisionrouter.Options{
+		Config: routing.ModalityConfig{
+			Providers: []routing.ProviderConfig{{Provider: "hosted", Model: "judge", Languages: []string{"en"}, Realtime: true}},
+		},
+		Registry: registry,
+		Logger:   logger,
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(judging.Close)
+	return judging
+}
+
+// Every session is handed the deployment's flow judge, which the flow controller asks in
+// place of its own model. A conversation held in writing asks neither, so a judge it could
+// not open is no reason to refuse it either.
+func (s *AgentSuite) TestATextAgentOpensWithoutAFlowJudgeItCouldNotOpen() {
+	s.model = newStubLLM()
+	s.model.reply = []string{"Hello there."}
+	logger := slog.New(slog.DiscardHandler)
+
+	agent, err := New(Options{
+		Text: true, CustomerID: "acme", Instructions: "be brief",
+		LLM: s.unkeyedReasoner(logger), LLMTarget: "en-low-latency", ControllerTarget: unkeyedFlow,
+		Judge: s.unkeyedJudge(logger), JudgeTarget: "hosted/judge",
+		Logger: logger,
+	})
+	s.Require().NoError(err)
+	s.agent = agent
+	s.events = collect(agent)
+	s.closesAtEnd(agent)
+
+	s.Require().NoError(agent.Join(s.ctx), "a text session does not need the flow judge's vendor")
 	_, err = agent.RespondTo(s.ctx, "hello", nil, options.LLM{})
 	s.Require().NoError(err)
 	s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the written turn was never answered")

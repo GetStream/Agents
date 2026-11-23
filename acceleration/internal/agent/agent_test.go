@@ -1057,8 +1057,9 @@ func (s *AgentSuite) delegates() {
 	}}}
 }
 
-// reasoner is the model router the agent answers through. The agent opens the voice
-// model, the flow controller and the optional subagent from it, in that order.
+// reasoner is the model router a voice agent answers through. It opens the conversation's
+// model, the flow controller and the optional subagent from it, in that order. A text agent
+// opens no flow controller, so it uses textReasoner.
 func (s *AgentSuite) reasoner(logger *slog.Logger) *llmrouter.Router {
 	return s.reasonerOver(logger, s.model, s.flow)
 }
