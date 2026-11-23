@@ -2152,7 +2152,7 @@ rather than a time to respond and its status is the `101` of the upgrade. A sock
 | `client_gone` | The connection broke with no close frame, or a write to the caller failed |
 | `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` and `/v1/{modality}/stream` |
 | `session_ended` | The session ended for another reason. `end_reason` says which. Session sockets only |
-| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`). A stream socket closes a refused start frame with the code it always has (`1011`, or `1008` for a setting the model cannot take), and a frame it cannot read after the start (`tts`, `llm`) with `1000` |
+| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`). A stream socket closes a refused start frame with the code it always has (`1011`, or `1008` for an unknown target, a setting the model cannot take or a refusal about money), and a frame it cannot read after the start (`tts`, `llm`) with `1000` |
 | `server_error` | A failure that is not the caller's: `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read (`1008`), or a stream socket could not read the config it names or start a provider (`1011`) |
 | `shutdown` | The router stopped a resumable socket's session on its way down (`1012`), or sent a dispatch worker to reconnect elsewhere (`1001`) |
 

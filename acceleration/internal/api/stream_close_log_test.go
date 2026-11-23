@@ -85,8 +85,9 @@ func (s *StreamsSuite) TestAStartFrameWithBytesAfterItsJSONStarts() {
 
 func (s *StreamsSuite) TestAStartTheCallerMustChangeIsARefusal() {
 	// Catches each refusal of the caller's start logged as the router's failure. The close
-	// codes are the ones the caller is sent on base: 1011 for a plain failure, 1008 for a
-	// setting the model cannot take (TestAStartPinnedToABatchModelEndsAsAPolicyViolation).
+	// codes are the ones the caller is sent on base: 1011 for a plain failure, 1008 for an
+	// unknown target or a setting the model cannot take
+	// (TestAStartPinnedToABatchModelEndsAsAPolicyViolation).
 	keyterms := make([]string, stt.MaxKeyterms+1)
 	for i := range keyterms {
 		keyterms[i] = fmt.Sprintf("term %d", i)
@@ -104,6 +105,7 @@ func (s *StreamsSuite) TestAStartTheCallerMustChangeIsARefusal() {
 		"a tts option":      {"/v1/tts/stream", frame{"target": "en-low-latency", "tts": frame{"overwrites": frame{"": frame{}}}}, 1011},
 		"an sts option":     {"/v1/sts/stream", frame{"target": "stub/stub-sts", "sts": frame{"turn_detection": "whichever"}}, 1011},
 		"a batch model":     {"/v1/stt/stream", frame{"target": "batch/" + batchModel}, 1008},
+		"an unknown target": {"/v1/stt/stream", frame{"target": "nobody/nothing"}, 1008},
 	} {
 		s.Run(name, func() {
 			connection, id := s.startNamed(refused.path, refused.opening)
