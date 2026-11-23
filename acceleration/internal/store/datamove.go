@@ -46,6 +46,9 @@ type dataTable struct {
 	// filter is an extra predicate on an export, for a table that holds more than one
 	// kind of row.
 	filter string
+	// order is the order an export reads the table's rows in, for a table whose rows must
+	// arrive in one.
+	order string
 	// shard is a table kept in the shards rather than the shared database.
 	shard bool
 	// across is the column a row is known by in every deployment, for a table whose primary
@@ -133,7 +136,9 @@ var dataTables = []dataTable{
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
 	// Who asked not to be reached: STOP and START at the source carry on here through the changes.
-	{name: "opt_outs", customer: "customer_id"},
+	// Revoked rows go first, so one revoked at the source lifts its copy here before the live
+	// row that replaced it arrives, rather than after the import skipped that row beside it.
+	{name: "opt_outs", customer: "customer_id", order: "revoked_at IS NULL"},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
@@ -660,6 +665,9 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 	where := t.customer + " = ?"
 	if t.filter != "" {
 		where += " AND " + t.filter
+	}
+	if t.order != "" {
+		where += " ORDER BY " + t.order
 	}
 	return fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s", subject.String(), t.name, where), []any{customerID}
 }
