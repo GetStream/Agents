@@ -316,7 +316,7 @@ func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt(
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the table lock")
 	s.bind("acme-app", fixedBinding(connection.ID))
@@ -369,7 +369,7 @@ func (s *StoreSuite) TestABindThatCommitsWhileTheDeleteWaitsForTheRowStopsIt() {
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the row")
 	s.bind("acme-app", fixedBinding(connection.ID))
@@ -759,7 +759,7 @@ func (s *StoreSuite) TestARevocationThatCommitsWhileTheUnitIsSetWins() {
 	setter := s.router()
 	set := make(chan error, 1)
 	go func() { set <- setter.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1") }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the set waits for the row")
 	s.Require().NoError(held.Commit())
