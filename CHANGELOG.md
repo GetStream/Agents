@@ -843,6 +843,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### An SMS reply sets its price aside before it is sent
+
+A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what it may cost before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).
+
 ### A customer can no longer list or speak in another customer's cloned voice
 
 Clones made through `/v1/agents/voices` sit in the deployment's shared provider account, which lists them all as its own. A voice id that another customer's voice was prepared as is now refused, whether it is the session's voice or the `voice_id` of TTS overwrites. The voice library lists only the caller's own clones besides the provider's published voices, previews another customer's clone as not found, and no longer suggests one as the closest voice.
