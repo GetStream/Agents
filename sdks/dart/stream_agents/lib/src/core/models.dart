@@ -487,10 +487,11 @@ final class SessionOptions {
   /// in through `responses.create` and are read back from `responses.items`.
   final bool watch;
 
-  /// Whether the model is told its config's UI instructions in this session. False is for an
-  /// app that shows no UI: they are left out and prose is the expected answer, but it does not
-  /// prevent the model from writing UI, and a block it writes still reaches the reply. Null
-  /// leaves them in. Reopening or forking the session keeps it.
+  /// Whether the model is told its config's UI instructions in this session.
+  ///
+  /// False is for an app that shows no UI: they are left out and prose is the expected answer,
+  /// but it does not prevent the model from writing UI, and a block it writes still reaches the
+  /// reply. Null leaves them in. Reopening or forking the session keeps it.
   final bool? ui;
 }
 
