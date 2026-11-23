@@ -624,11 +624,17 @@ func (s *StoreSuite) TestEveryCachedWriteARequestGaveUpOnLeavesNoStaleCopy() {
 				document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
 				s.Require().NoError(err)
 				s.Require().NotNil(document.PromptInjection, "the user's policy is not deleted yet")
+				has, err := s.store.Policies.HasUsers(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().True(has, "the app still has a user with a policy")
 			}, bun.Tx.Commit)
 			s.Require().NoError(err)
 			document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
 			s.Require().NoError(err)
 			s.Nil(document.PromptInjection)
+			has, err := s.store.Policies.HasUsers(s.ctx, app)
+			s.Require().NoError(err)
+			s.False(has, "the app has no user with a policy any more")
 		},
 		"Skills.Insert": func() {
 			config := s.boundConfig("acme-app")

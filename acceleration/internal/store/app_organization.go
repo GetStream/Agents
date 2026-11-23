@@ -35,8 +35,9 @@ type AppOrganizations struct {
 	store *Store
 }
 
-// Upsert records that an app was seen under an organization now, and drops what every
-// replica had cached of the app's.
+// Upsert records that an app was seen under an organization now, in a write that outlives ctx
+// within the store's write timeout, and drops what every replica had cached of the app's
+// (detachedWrite).
 func (r *AppOrganizations) Upsert(ctx context.Context, membership *AppOrganization) error {
 	if err := membership.Validate(); err != nil {
 		return stack.Wrap(err)

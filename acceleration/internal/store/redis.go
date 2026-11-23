@@ -47,11 +47,13 @@ const missTTL = time.Minute
 // forgetAttempts is how many times a deletion Redis did not take is tried again, the first
 // forgetBackoff after it and each one twice as long after the last. forgetSlots bounds how
 // many are being retried at once, so a Redis that is down costs a few goroutines and not one
-// per write.
+// per write. forgetGrace is how long Close lets them run before it stops them: past the last
+// attempt of one that began as Close did.
 const (
 	forgetAttempts = 3
 	forgetBackoff  = 100 * time.Millisecond
 	forgetSlots    = 64
+	forgetGrace    = forgetBackoff << forgetAttempts
 )
 
 // Redis says where a Redis server is. An empty Address is none.
@@ -295,7 +297,7 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 		}
 	}
 	if len(missed) > 0 {
-		s.forgetLater(missed, failed)
+		s.forgetLater(missed, failed, false)
 	}
 	return len(missed) == 0
 }
@@ -303,8 +305,9 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 // forgetLater tries again, a few times and in the background, a deletion Redis did not take.
 // The usual cause is a connection Redis dropped, which the client dials again at once. A
 // deletion still not taken after that, or one with no slot left to retry in, is what the TTL
-// covers.
-func (s *Store) forgetLater(names []string, err error) {
+// covers. With every set, each attempt deletes all of names whatever the last one answered:
+// the keys of a COMMIT whose answer was lost, which may land at any time during them.
+func (s *Store) forgetLater(names []string, err error, every bool) {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
 	if s.closed {
@@ -323,6 +326,7 @@ func (s *Store) forgetLater(names []string, err error) {
 		defer func() { <-s.retries }()
 		client := s.cache.Client()
 		wait := forgetBackoff
+		var missed []string
 		for range forgetAttempts {
 			timer := time.NewTimer(wait)
 			select {
@@ -337,7 +341,7 @@ func (s *Store) forgetLater(names []string, err error) {
 			for _, name := range names {
 				commands = append(commands, client.B().Del().Key(name).Build())
 			}
-			var missed []string
+			missed = nil
 			attempt, cancel := context.WithTimeout(s.closing, forgetWait)
 			for i, reply := range client.DoMulti(attempt, commands...) {
 				if failed := reply.Error(); failed != nil && !errors.Is(failed, rueidis.Nil) {
@@ -345,11 +349,15 @@ func (s *Store) forgetLater(names []string, err error) {
 				}
 			}
 			cancel()
-			if names = missed; len(names) == 0 {
-				return
+			if !every {
+				if names = missed; len(names) == 0 {
+					return
+				}
 			}
 			wait *= 2
 		}
-		slog.Default().Error("gave up dropping cached rows", "keys", names, "attempts", forgetAttempts, "error", err)
+		if len(missed) > 0 {
+			slog.Default().Error("gave up dropping cached rows", "keys", missed, "attempts", forgetAttempts, "error", err)
+		}
 	}()
 }

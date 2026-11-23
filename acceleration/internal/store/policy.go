@@ -302,7 +302,7 @@ func (r *Policies) keys(ctx context.Context, scope PolicyScope, id string) []str
 }
 
 // policyKeys are the cached values a write of one scope's document changes, but for the
-// AppPolicies of an organization's apps (forget).
+// AppPolicies of an organization's apps (keys).
 func policyKeys(scope PolicyScope, id string) []string {
 	keys := []string{cacheKey("policy", string(scope), id)}
 	if scope == ScopeApp {

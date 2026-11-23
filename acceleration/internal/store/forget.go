@@ -118,8 +118,9 @@ func forgottenCopies(db bun.IDB, customerID string) *bun.UpdateQuery {
 // and records entry, with these counts added to its changes, in the same transaction. The
 // changes recorded of their campaigns, deleted ones' included, name the replacement too
 // (renamedChanges). A campaign's contacts and their attempts stay: they are the app's data
-// about third parties, not the user's. It outlives ctx, within the store's write timeout, and
-// then drops the user's cached policy (detachedWrite).
+// about third parties, not the user's. It outlives ctx, its statements sharing the store's write
+// timeout, and drops the user's cached policy whatever the commit answered, and again after a
+// COMMIT whose answer was lost (detachedWrite).
 func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replacement string, entry *AuditEntry) (UserSettings, error) {
 	var counts UserSettings
 	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {

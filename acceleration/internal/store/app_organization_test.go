@@ -81,11 +81,11 @@ func (s *StoreSuite) TestAppOrganizationQueryBudgets() {
 	registered := s.app()
 	seen := "app-" + uuid.NewString()
 
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(3, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: seen, OrganizationID: "org-1"}))
 		}))
-	}))
+	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	get := func() {
 		_, err := s.store.AppOrganizations.Get(s.ctx, seen)
 		s.Require().NoError(err)

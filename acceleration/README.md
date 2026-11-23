@@ -2392,7 +2392,9 @@ window the replacement already has taking the forgotten one's spend), and again 
 database their own policy and user-level limits, deleted, so the app's defaults apply, and the
 id on their resets, grants and campaigns. Usage and cost stay under the app. It writes one
 `end_user` audit row naming the replacement and the actor, never the id, and the service one
-`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Every
+`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Once the
+last step, the shared database's, has started, it completes even if the command is interrupted,
+and the command drops the user's cached policy from every router before it exits. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
 that one replacement, with the run's own audit row. Sessions, conversation history and

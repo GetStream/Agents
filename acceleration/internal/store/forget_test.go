@@ -178,6 +178,9 @@ func (s *StoreSuite) TestAUsersPolicyForgottenByACommitThatLandsAfterItGaveUpIsF
 	document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
 	s.Require().NoError(err)
 	s.Require().NotNil(document.PromptInjection, "the policy is still there while the COMMIT is held")
+	has, err := s.store.Policies.HasUsers(s.ctx, app)
+	s.Require().NoError(err)
+	s.Require().True(has, "and the app still has a user with a policy")
 	proxy.let()
 	s.Require().Eventually(func() bool {
 		held, err := s.store.global.NewSelect().Model((*Policy)(nil)).
@@ -189,6 +192,8 @@ func (s *StoreSuite) TestAUsersPolicyForgottenByACommitThatLandsAfterItGaveUpIsF
 	s.Eventually(func() bool {
 		document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
 		s.Require().NoError(err)
-		return document.PromptInjection == nil
-	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped again")
+		has, err := s.store.Policies.HasUsers(s.ctx, app)
+		s.Require().NoError(err)
+		return document.PromptInjection == nil && !has
+	}, 5*time.Second, 10*time.Millisecond, "the copies cached before the COMMIT landed are dropped again")
 }
