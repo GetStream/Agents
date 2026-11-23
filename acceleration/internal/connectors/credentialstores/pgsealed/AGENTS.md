@@ -1,6 +1,6 @@
 # internal/connectors/credentialstores/pgsealed
 
-The `core.CredentialStore` that keeps a connection's credential state in Postgres: the `connector_connections` row, with `core.StoredCredentials` sealed by `auth.Sealer` (AES-GCM, KEK keyring) into `credentials_sealed`. The SQL is the store's (`internal/store/credentials.go`: `ConnectorConnections.WithLocked`, `ConnectorConnections.SaveAtRevision`); this package turns the row into a `core.CredentialState` and back, and owns sealing, the revision and the rewrap. The resolver (`internal/connectors/resolver`) takes it directly, built in `cmd/router/resolver.go`: a connection names no credential store, so `core.Registry.CredentialStores` stays empty until a second one exists.
+The `core.CredentialStore` that keeps a connection's credential state in Postgres: the `connector_connections` row, with `core.StoredCredentials` sealed by `auth.Sealer` (AES-GCM, KEK keyring) into `credentials_sealed`. The SQL is the store's (`internal/store/connector_connection.go`: `ConnectorConnections.WithLocked`, `ConnectorConnections.SaveAtRevision`); this package turns the row into a `core.CredentialState` and back, and owns sealing, the revision and the rewrap. The resolver (`internal/connectors/resolver`) takes it directly, built in `cmd/router/resolver.go`: a connection names no credential store, so `core.Registry.CredentialStores` stays empty until a second one exists.
 
 ## Flow
 
@@ -25,10 +25,10 @@ Update(ref, fn)
 
 Nothing waits inside Postgres at 1, so a caller that gives up just stops trying: no wait stays queued on the server and no connection is held while it pauses. A blocking `pg_advisory_lock` cannot promise that, because pgdriver bounds every read by its `ReadTimeout` (10s by default, `newDefaultConfig` in `uptrace/bun/driver/pgdriver` v1.2.18) or the ctx deadline, drops the socket when it passes, and the server "will detect the loss of the connection only at the next interaction with the socket" ([client_connection_check_interval](https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-CLIENT-CONNECTION-CHECK-INTERVAL)). The cost of trying is that waiters are not served in order. Writes at 5 and 6 run detached from ctx for the same driver reason: a passed deadline is a passed socket deadline, which would drop tokens a provider already rotated.
 
-## Why session-level here and xact-level in connectors.go
+## Why session-level here and xact-level in connector_definition.go
 
 ```
-connectors.go (T6, definition revisions)      credentials.go (T8, this store)
+connector_definition.go (T6, revisions)       credential_lock.go (T8, this store)
 BEGIN                                          pg_try_advisory_lock        <- held
   pg_advisory_xact_lock    <- held             UPDATE  status = needs_reauthorization   (checkpoint, autocommit)
   SELECT latest, INSERT next                   POST refresh_token to the provider        <- side effect
