@@ -35,7 +35,21 @@ git log <previous tag>..origin/main --first-parent --oneline
 
 In the root `CHANGELOG.md`:
 
-- Rename `# Unreleased` to `# vX.Y.Z`, and add a new, empty `# Unreleased` above it.
+- Sort the entries by the previous release tag. `# Unreleased` can hold work that is older than
+  that tag: `0.7.0` shipped without a section, so its work is still there. An entry whose PR
+  merged before the previous release tag goes under that release's own heading (`# 0.7.0`, as
+  the tag is written), which you create below `# vX.Y.Z` if it is missing. Only the rest goes
+  under `# vX.Y.Z`. For an entry with a PR number, find its merge commit. For one without, take
+  the commit that wrote its `###` line (`git blame -l -L <line>,<line> origin/main --
+  CHANGELOG.md`). Then test it:
+
+  ```bash
+  c=$(git log origin/main --first-parent --format=%H --grep='(#2047)' | head -1)
+  git merge-base --is-ancestor "$c" <previous tag> && echo before || echo after
+  ```
+
+  `before` means the previous release's heading, `after` means `# vX.Y.Z`.
+- Rename the rest of `# Unreleased` to `# vX.Y.Z`, and add a new, empty `# Unreleased` above it.
 - Keep three sections, in this order: `## Breaking Changes`, `## New Features`, `## Bug Fixes`.
   Merge sections that appear twice or under another name (`## Features`). The `# Unreleased`
   written before AI-3557 has both problems.
