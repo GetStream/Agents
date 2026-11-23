@@ -4,11 +4,13 @@ package store
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math/big"
 	"math/rand/v2"
 	"net/url"
 	"os"
@@ -3693,6 +3695,29 @@ func (s *DataMoveSuite) TestARequestMovedOnFromACopyIsOneRowWhereverItLands() {
 	s.move("acme", "acme")
 
 	s.Len(s.requestsByUsage(), 1, "a copy of a copy is the copy already here")
+}
+
+func (s *DataMoveSuite) TestARequestMovedOnTwiceAndBackIsOneRowWhereItWasRecorded() {
+	id, err := cryptorand.Int(cryptorand.Reader, big.NewInt(1_000_000_000_000))
+	s.Require().NoError(err)
+	home := s.takenRequest(s.source, id.Int64())
+	s.move("acme", "acme")
+
+	// A third holder: the destination's copy, sent on to another customer there.
+	for _, row := range s.exportFrom(s.destination, "acme").of("requests") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "globex", "requests", encoded))
+	}
+	for _, row := range s.exportFrom(s.destination, "globex").of("requests") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "requests", encoded))
+	}
+
+	rows := s.exportFrom(s.source, "acme").of("requests")
+	s.Require().Len(rows, 1, "a copy of a copy of a copy is the row it was copied from")
+	s.Equal(home.UsageID.String(), rows[0]["usage_id"])
 }
 
 // drewNothing restarts the sequence behind a column, so the store has drawn nothing from it yet.
