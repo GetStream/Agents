@@ -747,11 +747,19 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	quoted := strings.Join(columns, ", ")
 	picked := slices.Clone(columns)
 	if i := slices.Index(columns, "usage_id"); spec.name == "requests" && i >= 0 {
-		// The usage id is this deployment's, made from the one the row was sent with, or from the
-		// source's id for a row from before usage ids. A usage id names a unit of work this
-		// deployment bills, such as a month of a number, so the one sent is never kept.
-		// Importing the row again names the same row.
-		picked[i] = importedUsageID("customer_id", "COALESCE(usage_id::text, id::text)")
+		// The usage id is this deployment's, made from the one the row had where it was first
+		// recorded, or from the source's id for a row from before usage ids. A usage id names a
+		// unit of work this deployment bills, such as a month of a number, so the one sent is
+		// not kept. Importing the row again, from wherever it moved since, names the same row.
+		// A row taken back where it was first recorded is that row again: one this customer
+		// already holds here names no charge still to come.
+		origin := "COALESCE(r.source_usage_id, r.usage_id)"
+		picked[i] = fmt.Sprintf("CASE WHEN EXISTS (SELECT 1 FROM requests AS h WHERE h.usage_id = %[1]s AND h.customer_id = r.customer_id) THEN %[1]s ELSE %[2]s END",
+			origin, importedUsageID("customer_id", "COALESCE("+origin+"::text, id::text)"))
+		if j := slices.Index(columns, "source_usage_id"); j >= 0 {
+			// Where the row was first recorded, however many moves ago.
+			picked[j] = origin
+		}
 	}
 	if i := slices.Index(columns, spec.copied); spec.copied != "" && i >= 0 {
 		// The source's id, whatever the source kept as the id of where the row came from.
@@ -1548,8 +1556,8 @@ func (t dataTable) captured(s shape) []string {
 }
 
 // importedUsageID is the usage id a request is imported under, as SQL, made from the customer
-// importing it and the request's usage id in the source (its id there, for one from before usage
-// ids), so importing it again and replaying its delete name the same row.
+// importing it and the request's usage id where it was first recorded (its id in the source, for
+// one from before usage ids), so importing it again and replaying its delete name the same row.
 func importedUsageID(customer, sourceID string) string {
 	return fmt.Sprintf("md5('import:' || %s || ':' || %s)::uuid", customer, sourceID)
 }
