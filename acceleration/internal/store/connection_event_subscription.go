@@ -94,12 +94,12 @@ type ConnectionEventSubscriptions struct {
 // adding the same one at once store it once (connection_event_subscriptions_one). A connection
 // not live is ErrNoConnectorConnection, and nothing is stored.
 //
-// The connection is locked FOR SHARE first, which a delete's UPDATE or DELETE of the row waits
-// for and makes wait (https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS):
-// an insert during a delete's transaction reads the row once the delete committed and finds it
-// gone, and a delete that comes second drops what the insert committed (softDeleteConnections,
-// DeleteUser). Otherwise the row, with its sealed secret and callback token, would outlive the
-// connection.
+// The connection is locked FOR SHARE first, a lock that conflicts with the one a delete's UPDATE
+// or DELETE of the row takes (https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
+// An insert during a delete's transaction waits for its commit and then finds the connection
+// gone; a delete that comes second waits for the insert and drops what it committed
+// (softDeleteConnections, DeleteUser). Otherwise the row, with its sealed secret and callback
+// token, would outlive the connection.
 func (r *ConnectionEventSubscriptions) Insert(ctx context.Context, sub *ConnectionEventSubscription) (bool, error) {
 	if err := sub.Validate(); err != nil {
 		return false, stack.Wrap(err)
