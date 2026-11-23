@@ -264,7 +264,9 @@ func (s *ConnectorLoginSuite) TestAReconnectFinishedWithoutAHandBackIsPickedUpOn
 	s.Require().NoError(err)
 	s.Require().Contains(asked, `"status":"authorization_required"`)
 
-	s.setState(stale, func(state *core.CredentialState) { state.Status = store.ConnectionConnected })
+	s.setState(stale, func(state *core.CredentialState) {
+		state.Status, state.ConnectedAt = store.ConnectionConnected, time.Now().UTC()
+	})
 	said, err := s.call(d, "crm__call_tool", `{"tool":"whoami"}`)
 
 	s.Require().NoError(err)
@@ -703,12 +705,13 @@ func (s *ConnectorLoginSuite) noneConnection(user, account string) string {
 	return connection.ID
 }
 
-// connect is a consent finishing on id: account's token stored, the connection connected.
+// connect is a consent finishing on id: account's token stored, the connection connected, the
+// grant begun now (api/authorizations.go names it; the credential store stamps nothing).
 func (s *connectorFixture) connect(id, account string) {
 	stored, _, err := bearer.New().Complete(s.ctx, core.CompleteInput{Supplied: map[string]string{bearer.SuppliedToken: tokenOf(account)}})
 	s.Require().NoError(err)
 	s.setState(id, func(state *core.CredentialState) {
-		state.Credentials, state.Status = stored, store.ConnectionConnected
+		state.Credentials, state.Status, state.ConnectedAt = stored, store.ConnectionConnected, time.Now().UTC()
 	})
 }
 
