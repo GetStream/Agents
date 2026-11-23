@@ -160,6 +160,13 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 		_, err := s.store.UseCases.GetByID(s.ctx, useCase.ID)
 		s.Require().NoError(err)
 	}), "GetByID")
+	s.Equal(1, s.countQueries(func() {
+		requested, err := s.store.UseCases.RequestCampaign(s.ctx, useCase.ID, s.base)
+		s.Require().NoError(err)
+		s.True(requested)
+	}), "RequestCampaign")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID)) }),
+		"ForgetCampaignRequest")
 	useCase.Status, useCase.Vendor, useCase.VendorCampaignID = "submitted", "telnyx", "campaign-"+useCase.ID
 	s.Equal(2+2, s.countQueries(func() {
 		s.Require().NoError(s.store.UseCases.Move(s.ctx, &useCase, "draft", &ReviewLog{Actor: "vendor", Notes: "Registered campaign-" + useCase.ID + "."}))

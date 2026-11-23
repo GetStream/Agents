@@ -40,13 +40,16 @@ type UseCase struct {
 	Channels UseCaseChannels `bun:"channels,type:jsonb,notnull"`
 	// Vendor is who the campaign was registered with, VendorCampaignID its id there and
 	// VendorStatus the vendor's own word for where it stands.
-	Vendor           string     `bun:"vendor,notnull"`
-	VendorCampaignID string     `bun:"vendor_campaign_id,notnull"`
-	VendorStatus     string     `bun:"vendor_status,notnull"`
-	CreatedAt        time.Time  `bun:"created_at,notnull"`
-	UpdatedAt        time.Time  `bun:"updated_at,notnull"`
-	SubmittedAt      *time.Time `bun:"submitted_at"`
-	ApprovedAt       *time.Time `bun:"approved_at"`
+	Vendor           string `bun:"vendor,notnull"`
+	VendorCampaignID string `bun:"vendor_campaign_id,notnull"`
+	VendorStatus     string `bun:"vendor_status,notnull"`
+	// CampaignRequestedAt is when the vendor was asked to register the campaign
+	// (RequestCampaign). Set with no VendorCampaignID, the vendor's answer was lost.
+	CampaignRequestedAt *time.Time `bun:"campaign_requested_at"`
+	CreatedAt           time.Time  `bun:"created_at,notnull"`
+	UpdatedAt           time.Time  `bun:"updated_at,notnull"`
+	SubmittedAt         *time.Time `bun:"submitted_at"`
+	ApprovedAt          *time.Time `bun:"approved_at"`
 }
 
 // UseCaseChannels are the fields the channels besides 10DLC ask for. Each is absent for a
@@ -424,6 +427,38 @@ func (r *UseCases) Move(ctx context.Context, useCase *UseCase, from string, log 
 		}
 		return nil
 	}))
+}
+
+// RequestCampaign records that the vendor is about to be asked to register a use case's
+// campaign. It reports false, and records nothing, for a use case with a campaign, or one the
+// vendor was asked for already: that registration may be running, or its answer was lost, and
+// asking again could register and bill a second campaign.
+func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*UseCase)(nil)).
+		Set("campaign_requested_at = ?", at.UTC()).
+		Where("id = ?", id).
+		Where("vendor_campaign_id = ''").
+		Where("campaign_requested_at IS NULL").
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: request campaign: %w", err))
+	}
+	requested, _ := result.RowsAffected()
+	return requested == 1, nil
+}
+
+// ForgetCampaignRequest forgets a campaign request the vendor refused, so the campaign may be
+// asked for again.
+func (r *UseCases) ForgetCampaignRequest(ctx context.Context, id string) error {
+	_, err := r.store.global.NewUpdate().Model((*UseCase)(nil)).
+		Set("campaign_requested_at = NULL").
+		Where("id = ?", id).
+		Where("vendor_campaign_id = ''").
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: forget campaign request: %w", err))
+	}
+	return nil
 }
 
 // AssignNumbers makes numbers exactly the ones that send as a use case. A number named

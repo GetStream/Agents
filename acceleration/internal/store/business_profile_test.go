@@ -24,6 +24,13 @@ func (s *StoreSuite) TestBusinessProfileQueryBudgets() {
 	profile := BusinessProfile{CustomerID: customerID, LegalBusinessName: "Acme Inc"}
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.BusinessProfiles.Upsert(s.ctx, &profile)) }), "Upsert")
 	s.Equal(1, s.countQueries(func() {
+		requested, err := s.store.BusinessProfiles.RequestBrand(s.ctx, customerID, s.base)
+		s.Require().NoError(err)
+		s.True(requested)
+	}), "RequestBrand")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.BusinessProfiles.ForgetBrandRequest(s.ctx, customerID)) }),
+		"ForgetBrandRequest")
+	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.BusinessProfiles.SetBrand(s.ctx, customerID, "brand-1", "VERIFIED"))
 	}), "SetBrand")
 	s.Equal(1, s.countQueries(func() {

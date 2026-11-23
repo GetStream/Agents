@@ -294,7 +294,12 @@ func (r *Registrar) do(ctx context.Context, method, path string, body, into any)
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyLimit))
-		return nil, stack.Wrap(fmt.Errorf("telnyx: %s: %s: %s", path, response.Status, strings.TrimSpace(string(detail))))
+		err := fmt.Errorf("telnyx: %s: %s: %s", path, response.Status, strings.TrimSpace(string(detail)))
+		// A 4xx is Telnyx refusing the request; a 5xx may follow work it did.
+		if response.StatusCode < http.StatusInternalServerError {
+			err = fmt.Errorf("%w: %w", dlc.ErrVendorRefused, err)
+		}
+		return nil, stack.Wrap(err)
 	}
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {

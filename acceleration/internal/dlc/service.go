@@ -407,8 +407,15 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 	return nil
 }
 
+// errUnanswered is a brand or campaign the vendor was asked to register, with no answer
+// recorded: it may be registered, and billed, at the vendor, and the vendor takes no key that
+// would make asking again safe. An operator looks it up there, and records its id or forgets
+// the request.
+var errUnanswered = errors.New("dlc: the vendor was asked to register this before and its answer was not recorded")
+
 // register registers the app's brand if it has none, and the campaign once the brand is
-// verified. A brand the vendor refused leaves nothing to register the campaign under.
+// verified. A brand the vendor refused leaves nothing to register the campaign under. Each is
+// asked for once (requested): only a refusal lets it be asked for again.
 func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 	profile, err := s.store.BusinessProfiles.Get(ctx, useCase.CustomerID)
 	if err != nil {
@@ -420,10 +427,17 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		if err != nil {
 			return err
 		}
+		if err := requested(s.store.BusinessProfiles.RequestBrand(ctx, useCase.CustomerID, s.now())); err != nil {
+			booked.Release()
+			return fmt.Errorf("%w: the brand of %s", err, useCase.CustomerID)
+		}
 		brand, err = routing.Call(ctx, s.feeMeter(ctx, ModelBrand, useCase.CustomerID, nil),
 			func(ctx context.Context) (Brand, error) { return s.registrar.RegisterBrand(ctx, profile) })
 		if err != nil {
 			booked.Release()
+			if errors.Is(err, ErrVendorRefused) {
+				err = errors.Join(err, s.store.BusinessProfiles.ForgetBrandRequest(ctx, useCase.CustomerID))
+			}
 			return err
 		}
 		booked.Charged()
@@ -452,6 +466,10 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 	if err != nil {
 		return err
 	}
+	if err := requested(s.store.UseCases.RequestCampaign(ctx, useCase.ID, s.now())); err != nil {
+		booked.Release()
+		return fmt.Errorf("%w: the campaign of use case %s", err, useCase.ID)
+	}
 	campaign, err := routing.Call(ctx, s.feeMeter(ctx, ModelCampaign, useCase.CustomerID,
 		map[string]string{AttributeUseCaseType: useCaseType(useCase)}),
 		func(ctx context.Context) (Campaign, error) {
@@ -459,6 +477,9 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		})
 	if err != nil {
 		booked.Release()
+		if errors.Is(err, ErrVendorRefused) {
+			err = errors.Join(err, s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID))
+		}
 		return err
 	}
 	defer booked.Charged()
@@ -470,6 +491,14 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 	s.billUpfront(useCase, s.now().UTC())
 	log.Notes, log.VendorPayload = registeredNote+campaign.ID+".", campaign.Raw
 	return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
+}
+
+// requested is a request's outcome as an error: errUnanswered for one asked for before.
+func requested(requested bool, err error) error {
+	if err == nil && !requested {
+		return stack.Wrap(errUnanswered)
+	}
+	return err
 }
 
 // assignAtVendor tells the vendor which of its numbers send as the campaign. A number from

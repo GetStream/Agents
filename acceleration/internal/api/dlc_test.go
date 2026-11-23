@@ -37,6 +37,11 @@ type campaignRegistry struct {
 	mu        sync.Mutex
 	campaigns map[string]string
 	assigned  map[string]string
+	// brandAnswers and campaignAnswers are the statuses the next registrations are answered
+	// with, each registered whatever the answer; past them every one is answered 200. brands
+	// and campaignsAsked count the registrations asked for.
+	brandAnswers, campaignAnswers []int
+	brandsAsked, campaignsAsked   int
 }
 
 // campaignRegistryFails is a campaign status no vendor sends: the fake answers a read of a
@@ -52,12 +57,22 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 	path := request.URL.Path
 	switch {
 	case request.Method == http.MethodPost && path == "/v2/10dlc/brand":
+		r.brandsAsked++
+		if answer := nextAnswer(&r.brandAnswers); answer != http.StatusOK {
+			w.WriteHeader(answer)
+			return
+		}
 		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, uuid.NewString())
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/brand/"):
 		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, strings.TrimPrefix(path, "/v2/10dlc/brand/"))
 	case request.Method == http.MethodPost && path == "/v2/10dlc/campaignBuilder":
+		r.campaignsAsked++
 		id := uuid.NewString()
 		r.campaigns[id] = "TCR_PENDING"
+		if answer := nextAnswer(&r.campaignAnswers); answer != http.StatusOK {
+			w.WriteHeader(answer)
+			return
+		}
 		fmt.Fprintf(w, `{"campaignId":%q,"campaignStatus":"TCR_PENDING"}`, id)
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/campaign/"):
 		id := strings.TrimPrefix(path, "/v2/10dlc/campaign/")
@@ -73,6 +88,28 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 		w.WriteHeader(http.StatusNotFound)
 	}
 }
+
+// nextAnswer takes the first of answers, or 200 when there is none.
+func nextAnswer(answers *[]int) int {
+	if len(*answers) == 0 {
+		return http.StatusOK
+	}
+	answer := (*answers)[0]
+	*answers = (*answers)[1:]
+	return answer
+}
+
+// answer has the next brand and campaign registrations answered with brands and campaigns,
+// and reports how many of each were asked for so far.
+func (r *campaignRegistry) answer(brands, campaigns []int) (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.brandAnswers, r.campaignAnswers = brands, campaigns
+	return r.brandsAsked, r.campaignsAsked
+}
+
+// asked is how many brand and campaign registrations were asked for so far.
+func (r *campaignRegistry) asked() (int, int) { return r.answer(nil, nil) }
 
 func (r *campaignRegistry) set(campaignID, status string) {
 	r.mu.Lock()
@@ -245,6 +282,39 @@ func (s *DLCSuite) TestAUseCaseIsApprovedByStreamAndThenByTheVendor() {
 	dialed, failure := s.dial("+15559990000")
 	s.Equal(http.StatusBadRequest, dialed, "past the gate, the call fails for want of Stream: "+failure)
 	s.Contains(failure, "no Stream app")
+}
+
+// A brand Telnyx refused registered nothing, and is asked for again. One whose registration was
+// answered with a failure may be registered, and billed, all the same, so it is not asked for
+// again, however often the poller looks.
+func (s *DLCSuite) TestABrandWhoseRegistrationWasNotAnsweredIsNotRegisteredTwice() {
+	brands, _ := s.registry.answer([]int{http.StatusBadRequest, http.StatusInternalServerError}, nil)
+	sent := s.submitted()
+
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Equal(UseCaseStatus(dlc.VendorPending), reviewed.Status)
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing), "the poller asks again after the refusal")
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+
+	asked, _ := s.registry.asked()
+	s.Equal(2, asked-brands, "refused, then asked once more")
+	s.Contains(s.logged.String(), "its answer was not recorded")
+}
+
+// A campaign whose registration was answered with a failure may be registered, and billed, all
+// the same, so it is not asked for again.
+func (s *DLCSuite) TestACampaignWhoseRegistrationWasNotAnsweredIsNotRegisteredTwice() {
+	_, campaigns := s.registry.answer(nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Nil(reviewed.VendorCampaignId)
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"another"}`, s.signing))
+
+	_, asked := s.registry.asked()
+	s.Equal(1, asked-campaigns)
 }
 
 // pendingWithTheVendor is a use case Stream approved and Telnyx holds a campaign for.

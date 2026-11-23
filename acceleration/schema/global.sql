@@ -147,6 +147,7 @@ TABLE business_profiles
     authorized_contact_phone text NOT NULL DEFAULT ''::text
     authorized_contact_title text NOT NULL DEFAULT ''::text
     brand_name text NOT NULL DEFAULT ''::text
+    brand_requested_at timestamp with time zone
     brand_status text NOT NULL DEFAULT ''::text
     business_registration_country text NOT NULL DEFAULT ''::text
     business_verification_documents text[] NOT NULL DEFAULT '{}'::text[]
@@ -738,6 +739,7 @@ TABLE dlc_review_logs
 TABLE dlc_use_cases
     age_gated boolean NOT NULL DEFAULT false
     approved_at timestamp with time zone
+    campaign_requested_at timestamp with time zone
     channels jsonb NOT NULL DEFAULT '{}'::jsonb
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
