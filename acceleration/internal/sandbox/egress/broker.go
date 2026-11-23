@@ -96,8 +96,9 @@ type Broker struct {
 
 	mu sync.Mutex
 	// held are the grants each run's record holds while recorded: from a Prepare that gave the
-	// sandbox the proxy (proxied) until Close. credential is the running code's proxy credential while its record is in the store,
-	// or one whose delete the store refused, which the next call tries again.
+	// sandbox the proxy (proxied) until Close. credential is the running code's proxy credential
+	// while its record is in the store, or one whose delete the store refused, which the next
+	// call tries again.
 	held       []held
 	recorded   bool
 	proxied    bool
