@@ -176,6 +176,49 @@ func (s *DataMoveSuite) TestImportingAnExportWritesTheRowsItCarried() {
 	}
 }
 
+// TestAnImportedConnectorNamingTheOperatorsClientIsRefused: what the API refuses to create as
+// a custom connector, an import refuses too, so the operator's client is never sent to a token
+// endpoint the file names. A connector the API would create imports as it is.
+func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientIsRefused() {
+	refused, taken := "custom_"+store.NewID(), "custom_"+store.NewID()
+
+	// full=true, so the first line's refusal is all that differs between the two imports: the
+	// second would otherwise be a 409 for an app that holds data here.
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(refused, `"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"],
+			"endpoints": {"mcp": "https://mcp.acme.example/mcp", "token": "https://acme.example/token"}`)}))
+	taking := s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(taken, `"client": {"registration": ["customer"], "auth_method": "client_secret_post"}, "schemes": ["oauth2_code"],
+			"endpoints": {"mcp": "https://mcp.acme.example/mcp"}, "scopes": {"list": ["read"]}, "category": "CRM", "description": "Acme's CRM"`)}), nil)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "client.registration cannot be operator for a custom connector")
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
+	s.Equal(http.StatusOK, taking)
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+taken, nil, nil))
+}
+
+// The operator rule reads the whole registration list, not its first entry.
+func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnotherIsRefused() {
+	refused := "custom_" + store.NewID()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(refused, `"client": {"registration": ["customer", "operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"],
+			"endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "client.registration cannot be operator for a custom connector")
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
+}
+
+// importedConnector is an export's line of a custom definition id whose manifest has fields,
+// JSON members, beside its id, name and MCP source.
+func (s *DataMoveSuite) importedConnector(id, fields string) dataLine {
+	return dataLine{Table: "connector_definitions", Row: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme",
+		"category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": {"id": "` + id + `", "revision": 1,
+		"name": "Acme", "sources": [{"kind": "mcp", "endpoint": "mcp"}], ` + fields + `}}`)}
+}
+
 func (s *DataMoveSuite) TestAnExportIsNotWrittenOverAnAppThatHoldsData() {
 	agent := s.data.createAgentConfig()
 	exported := s.export()

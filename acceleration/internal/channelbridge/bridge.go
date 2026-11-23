@@ -1038,7 +1038,7 @@ func (b *Bridge) send(ctx context.Context, thread store.ChannelThread, text stri
 	if err != nil {
 		return err
 	}
-	resolved, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	resolved, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return stack.Wrap(err)
 	}

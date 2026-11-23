@@ -1607,6 +1607,183 @@ func (s *DataMoveSuite) TestACustomConnectorDefinitionMovesAndABuiltInDoesNot() 
 	s.Require().Len(definitions, 1)
 	s.Equal("custom_acme", definitions[0]["id"])
 	s.Equal("moved", definitions[0]["customer_id"])
+	var sent map[string]any
+	s.Require().NoError(json.Unmarshal([]byte(customAcme), &sent))
+	s.Equal(sent, definitions[0]["manifest"], "a manifest the API would store arrives as it was")
+}
+
+// TestAnImportedDefinitionNamingTheOperatorsClientIsRefused: the API refuses a custom connector
+// with registration operator, which would send the operator's client named by client.env to the
+// token endpoint the manifest names. An import refuses it too, and writes nothing.
+func (s *DataMoveSuite) TestAnImportedDefinitionNamingTheOperatorsClientIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"],
+		"endpoints": {"mcp": "https://mcp.acme.example/mcp", "authorize": "https://acme.example/authorize", "token": "https://acme.example/token"}`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "client.registration cannot be operator")
+	s.Zero(s.definitionsNamed(id))
+}
+
+func (s *DataMoveSuite) TestAnImportedDefinitionNamingTheOperatorsVariablesIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"client": {"registration": ["customer"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
+}
+
+func (s *DataMoveSuite) TestAnImportedDefinitionWithItsOwnTokenEndpointIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"client": {"registration": ["customer"]}, "schemes": ["oauth2_code"],
+		"endpoints": {"mcp": "https://mcp.acme.example/mcp", "token": "https://acme.example/token"}`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAnImportedDefinitionWhoseManifestNamesABuiltInIsRefused: a manifest whose own id is a
+// built-in's would look up the clients the app keeps for that built-in.
+func (s *DataMoveSuite) TestAnImportedDefinitionWhoseManifestNamesABuiltInIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customAcme, `"id": "custom_acme"`, `"id": "github"`, 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
+}
+
+func (s *DataMoveSuite) TestAnImportedDefinitionWithoutAManifestIsRefused() {
+	id, err := s.importDefinitionRow(`"manifest": null`)
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
+}
+
+func (s *DataMoveSuite) TestAnImportedDefinitionWhoseManifestIsNoObjectIsRefused() {
+	id, err := s.importDefinitionRow(`"manifest": "custom_acme"`)
+
+	s.ErrorContains(err, "read the manifest of imported connector definition")
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAnImportedDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead: a key no field of the
+// manifest reads could be one a later release does, so it is not kept.
+func (s *DataMoveSuite) TestAnImportedDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead() {
+	id, err := s.importDefinition(customManifestWith(`"later": {"env": "GOOGLE"}`))
+
+	s.Require().NoError(err)
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	var manifest map[string]any
+	s.Require().NoError(json.Unmarshal([]byte(stored), &manifest))
+	s.NotContains(manifest, "later")
+	s.Equal(id, manifest["id"])
+}
+
+// TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused: the manifest's own checks
+// (core.Manifest.Validate) hold for an import as for the API.
+func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"endpoints": {"mcp": "http://mcp.acme.example/mcp"}`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "https")
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestALaterRevisionOfADefinitionImports: the store numbers revisions, so a manifest's own
+// revision is not one the API's rules set.
+func (s *DataMoveSuite) TestALaterRevisionOfADefinitionImports() {
+	id, err := s.importDefinition(customManifestWith(`"revision": 2`))
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+}
+
+func (s *DataMoveSuite) TestAnImportedDefinitionRowThatIsNoObjectIsRefused() {
+	err := s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(`["custom_acme"]`))
+
+	s.ErrorContains(err, "read an imported connector definition")
+}
+
+func (s *DataMoveSuite) TestAnImportedDefinitionWhoseIDIsNoStringIsRefused() {
+	err := s.destination.ImportRow(s.ctx, "moved", "connector_definitions",
+		json.RawMessage(`{"id": 7, "revision": 1, "name": "Acme", "manifest": `+customAcme+`}`))
+
+	s.ErrorContains(err, "read an imported connector definition's id")
+}
+
+func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused() {
+	id := "custom_" + newID()
+	manifest := strings.Replace(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`),
+		"custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
+// taking a bearer token.
+const customAcme = `{"id": "custom_acme", "revision": 1, "name": "Acme", "endpoints": {"mcp": "https://mcp.acme.example/mcp"},
+	"schemes": ["bearer"], "sources": [{"kind": "mcp", "endpoint": "mcp"}]}`
+
+// customManifestWith is customAcme with fields, JSON members, added or written over.
+func customManifestWith(fields string) string {
+	return strings.TrimSuffix(customAcme, "}") + ", " + fields + "}"
+}
+
+// importDefinition imports a row of a new custom definition with manifest, under customer
+// moved: its id, and the import's error. The manifest's id is made the row's.
+func (s *DataMoveSuite) importDefinition(manifest string) (string, error) {
+	return s.importDefinitionWith(func(id string) string {
+		return `"manifest": ` + strings.Replace(manifest, `"id": "custom_acme"`, `"id": "`+id+`"`, 1)
+	})
+}
+
+// importDefinitionRow is importDefinition with the row's manifest member written as manifest.
+func (s *DataMoveSuite) importDefinitionRow(manifest string) (string, error) {
+	return s.importDefinitionWith(func(string) string { return manifest })
+}
+
+func (s *DataMoveSuite) importDefinitionWith(manifest func(id string) string) (string, error) {
+	id := "custom_" + newID()
+	row := `{"customer_id": "moved", "id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", ` + manifest(id) + `}`
+	return id, s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row))
+}
+
+// definitionsNamed is how many revisions of id the destination holds.
+func (s *DataMoveSuite) definitionsNamed(id string) int {
+	var count int
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM connector_definitions WHERE id = ?", id).Scan(&count))
+	return count
+}
+
+// replicate passes customerID "" until a row names one (cmd/router/replicate.go), and a
+// definition written under "" is a built-in every app shares.
+func (s *DataMoveSuite) TestAnImportUnderTheBuiltinCustomerDoesNotWriteABuiltInDefinition() {
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES ('', 'github', 1, 'GitHub', ?::jsonb)",
+		`{"id": "github", "revision": 1, "name": "GitHub", "endpoints": {"mcp": "https://api.githubcopilot.com/mcp/"}, "schemes": ["oauth2_code"], "client": {"registration": ["customer", "operator"], "env": "GITHUB"}, "sources": [{"kind": "mcp", "endpoint": "mcp"}]}`)
+	s.Require().NoError(err)
+	row := `{"id": "github", "revision": 999, "name": "GitHub", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z",
+	  "manifest": {"id": "github", "revision": 999, "name": "GitHub", "endpoints": {"mcp": "https://attacker.example/mcp"}, "schemes": ["oauth2_code"],
+	  "client": {"registration": ["customer"]}, "sources": [{"kind": "mcp", "endpoint": "mcp"}]}}`
+
+	err = s.destination.ImportRow(s.ctx, BuiltinCustomer, "connector_definitions", json.RawMessage(row))
+
+	s.Require().ErrorIs(err, ErrNotACustomConnector)
+	s.Contains(err.Error(), "--as")
+	latest, lerr := s.destination.ConnectorDefinitions.LatestBuiltin(s.ctx, "github")
+	s.Require().NoError(lerr)
+	s.Equal(1, latest.Revision, "the built-in is the one this deployment seeded")
+}
+
+// The operator rule reads the whole registration list, not its first entry.
+func (s *DataMoveSuite) TestADefinitionNamingTheOperatorClientAfterAnotherRegistrationIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"client": {"registration": ["customer", "operator"]}, "schemes": ["oauth2_code"]`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
 }
 
 func (s *DataMoveSuite) TestAChangeToAConnectorConnectionLeavesItsCredentialsBehind() {
@@ -2657,8 +2834,8 @@ func (s *DataMoveSuite) assertArrivedWithoutCredentials(id, owner string) {
 // sealed credentials under key version 1 and an expiry, the state a credentials write leaves.
 func (s *DataMoveSuite) seedConnectorConnection(store *Store, customerID string) string {
 	_, err := store.GlobalDB().ExecContext(s.ctx,
-		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES (?, 'custom_acme', 1, 'Acme', '{}')",
-		customerID)
+		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES (?, 'custom_acme', 1, 'Acme', ?::jsonb)",
+		customerID, customAcme)
 	s.Require().NoError(err)
 	id := newID()
 	_, err = store.GlobalDB().ExecContext(s.ctx,

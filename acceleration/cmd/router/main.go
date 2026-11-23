@@ -176,6 +176,10 @@ const (
 	// and logged in full; what a kill at the end of the pod's termination grace period finds
 	// queued first is lost without a log line.
 	usageDrainTimeout = 15 * time.Second
+	// serverCloseTimeout bounds waiting for the API server's background work once it is
+	// cancelled. Nothing in it waits on anything but the cancel, so this only bounds a Redis
+	// client that does not let go of a subscription; short, on sentryFlushTimeout's reasoning.
+	serverCloseTimeout = 2 * time.Second
 )
 
 // usage is what the binary does besides serving.
@@ -1641,6 +1645,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Deferred here, it runs once stopServing below has stopped the HTTP servers, and before
+	// Redis is closed.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), serverCloseTimeout)
+		defer cancel()
+		if err := server.Close(ctx); err != nil {
+			logger.Warn("the API server's background work did not end in time", "error", err)
+		}
+	}()
 	// Every router runs the worker that writes the queued inbound messages and hands each to
 	// the agent; a message is taken by one router at a time. The hand-off is the server's
 	// (AnswerQueued), and the server is built with the bridge (options.ChannelBridge), so the
