@@ -230,7 +230,12 @@ func (s *StoreSuite) TestAWriteThatWaitsOutThePriceListsLockIsBusy() {
 
 func (s *StoreSuite) TestACancelThatWaitedPastTheChangesTimeIsRefused() {
 	s.seeded(priced("a", 1))
-	soon := time.Now().Add(1500 * time.Millisecond)
+	// The change's time is read off the database's clock, which Cancel checks it against; read
+	// is the router's clock at that moment, to wait from.
+	const lead = 1500 * time.Millisecond
+	var soon time.Time
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT clock_timestamp() + ?::interval", lead.String()).Scan(&soon))
+	read := time.Now()
 	write := apiChange("soon", "key-soon", priced("a", 0.5))
 	write.EffectiveAt = &soon
 	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
@@ -247,7 +252,7 @@ func (s *StoreSuite) TestACancelThatWaitedPastTheChangesTimeIsRefused() {
 		cancelled <- err
 	}()
 	// The cancel's transaction starts before the change's time and waits for the lock past it.
-	time.Sleep(time.Until(soon) + 300*time.Millisecond)
+	time.Sleep(time.Until(read.Add(lead + 300*time.Millisecond)))
 	s.Require().Empty(cancelled, "the cancel is still waiting for the lock")
 	s.Require().NoError(held.Rollback())
 
