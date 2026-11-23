@@ -843,6 +843,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### Deleting a user's connections also deletes their MCP event subscriptions
+
+The subscriptions of a deleted user's connections kept their sealed secrets and callback tokens. They now go in the same transaction as the connections.
+
 ### A customer can no longer list or speak in another customer's cloned voice
 
 Clones made through `/v1/agents/voices` sit in the deployment's shared provider account, which lists them all as its own. A voice id that another customer's voice was prepared as is now refused, whether it is the session's voice or the `voice_id` of TTS overwrites. The voice library lists only the caller's own clones besides the provider's published voices, previews another customer's clone as not found, and no longer suggests one as the closest voice.
