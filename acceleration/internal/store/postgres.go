@@ -42,7 +42,7 @@ func Transient(err error) bool {
 	var refused pgdriver.Error
 	if errors.As(err, &refused) {
 		switch code := refused.Field('C'); code {
-		// 57014 is a statement statement_timeout or an operator's pg_cancel_backend stopped.
+		// 57014 is a statement that statement_timeout or an operator's pg_cancel_backend stopped.
 		// The driver sends no cancel of its own: a context that ran out is a net timeout.
 		case "25006", "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
 			return true

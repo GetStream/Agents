@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -47,6 +49,19 @@ func TestTransientTellsAFailureAnotherTryCanPassFromOneItCannot(t *testing.T) {
 	t.Run("a server that never answers", func(t *testing.T) {
 		err := pingPostgres(t, silentServer(t), 200*time.Millisecond)
 		require.Error(t, err)
+		require.True(t, Transient(err), "%v", err)
+	})
+	// A context that ran out is what the pool answers a caller left waiting for a connection.
+	for _, cut := range []error{driver.ErrBadConn, io.EOF, io.ErrUnexpectedEOF, context.DeadlineExceeded} {
+		t.Run(cut.Error(), func(t *testing.T) {
+			err := fmt.Errorf("write: %w", cut)
+			require.True(t, Transient(err), "%v", err)
+		})
+	}
+	t.Run("a port nobody listens on", func(t *testing.T) {
+		err := pingPostgres(t, "127.0.0.1:1", 2*time.Second)
+		var dial *net.OpError
+		require.ErrorAs(t, err, &dial)
 		require.True(t, Transient(err), "%v", err)
 	})
 	t.Run("a closed pool", func(t *testing.T) {
