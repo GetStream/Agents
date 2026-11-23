@@ -61,8 +61,12 @@ func (s *AgentSuite) TestAYesRunsTheCallOnceWithItsOwnID() {
 var askedLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "error_code", "level", "msg",
 	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
-// connectorLineKeys are the keys main logs a connector's call with: one that asks nothing, and
-// the confirmation that ran one that asked.
+// confirmationLineKeys are the keys the confirmation's line has: the run it approved has its
+// own line, with the connector and the error.
+var confirmationLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "level", "msg",
+	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
+
+// connectorLineKeys are the keys main logs a connector's call with that asks nothing.
 var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "customer", "duration_ms", "error_code",
 	"level", "msg", "outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
@@ -119,8 +123,9 @@ func (s *AgentSuite) TestAnApprovedCallIsLoggedUnderItsOwnName() {
 
 		s.Equal(confirmTool, confirmed["tool"])
 		s.Equal("call-2", confirmed["tool_call"])
-		s.Equal("github", confirmed["connector"], "the confirmation is logged as on main")
-		s.Equal(connectorLineKeys, slices.Sorted(maps.Keys(confirmed)))
+		s.Equal(true, confirmed["success"])
+		s.Equal("ok", confirmed["outcome"])
+		s.Equal(confirmationLineKeys, slices.Sorted(maps.Keys(confirmed)), "the connector is on the run's line only")
 
 		okAfter, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "ok")
 		refusedAfter, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "refused")
@@ -147,8 +152,11 @@ func (s *AgentSuite) TestAnApprovedCallThatFailedIsLoggedAsFailed() {
 		s.Equal("customer_auth", ran["error_code"])
 		s.Equal("the token was refused", ran["error"])
 		s.NotContains(fmt.Sprint(ran), "/orders/12/refund", "the returned error is not logged")
-		s.Equal("customer_auth", confirmed["error_code"], "the confirmation is logged as on main")
+		s.Equal(false, confirmed["success"])
+		s.Equal("error", confirmed["outcome"])
+		s.Equal(confirmationLineKeys, slices.Sorted(maps.Keys(confirmed)), "the error is on the run's line only")
 		s.NotContains(fmt.Sprint(confirmed), "/orders/12/refund")
+		s.NotContains(fmt.Sprint(confirmed), "the token was refused")
 	})
 }
 

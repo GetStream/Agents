@@ -754,7 +754,13 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		// Answered with its question, the call is not run here: the confirmation runs it.
 		approval = []any{"approval", "asked"}
 	}
-	a.logToolBack(requested.Call, *report, err, took, outcome, approval...)
+	// The confirmation's line is about the answer; the approved run's own line carries the
+	// connector and the error, so a count by either does not count a run twice.
+	fields := a.loggedTool(*report, err)
+	if requested.Call.Name == confirmTool {
+		fields = a.loggedAnswer(err)
+	}
+	a.logToolBack(requested.Call, fields, took, outcome, approval...)
 
 	a.emitter.Send(ToolRan{
 		ID:        requested.Call.ID,
@@ -863,10 +869,16 @@ func (a *Agent) loggedTool(report ToolReport, err error) []any {
 	return fields
 }
 
+// loggedAnswer is loggedTool for a confirmation: who, and whether the answer failed; no
+// connector, error_code or error, which belong to the line of the run it approved.
+func (a *Agent) loggedAnswer(err error) []any {
+	return []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID, "success", err == nil}
+}
+
 // logToolBack writes "a tool call came back" for call, which ran in its TurnID for took and
-// ended as outcome, with more fields after the ones every such line has.
-func (a *Agent) logToolBack(call llm.ToolCall, report ToolReport, err error, took time.Duration, outcome string, more ...any) {
-	fields := append(a.loggedTool(report, err), "tool", call.Name, "tool_call", call.ID, "turn", call.TurnID,
+// ended as outcome, with more fields after the identity and result fields every such line has.
+func (a *Agent) logToolBack(call llm.ToolCall, identity []any, took time.Duration, outcome string, more ...any) {
+	fields := append(identity, "tool", call.Name, "tool_call", call.ID, "turn", call.TurnID,
 		"duration_ms", took.Milliseconds(), "outcome", outcome)
 	a.logger.Info("a tool call came back", append(fields, more...)...)
 }

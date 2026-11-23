@@ -271,14 +271,11 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	began := time.Now()
 	runCtx, report := WithToolReport(ctx)
 	parts, err := a.options.ToolRunner.Run(WithApproval(runCtx), call)
-	// The confirmation's own line still says what the runner reported, as it did before the
-	// run had a line of its own.
-	ReportTool(ctx, *report)
 	a.mu.Lock()
 	hold := a.toolHolds[confirmation.ID]
 	answered := hold != nil && hold.answered
 	a.mu.Unlock()
-	a.logToolBack(call, *report, err, time.Since(began), toolOutcome(ctx.Err() != nil, err != nil, false, answered),
+	a.logToolBack(call, a.loggedTool(*report, err), time.Since(began), toolOutcome(ctx.Err() != nil, err != nil, false, answered),
 		"approval", "allowed", "confirmation", confirmation.ID)
 	return parts, err
 }
