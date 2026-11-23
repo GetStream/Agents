@@ -32,6 +32,48 @@ func (s *StoreSuite) TestCodesReservedAtOnceFromOneNumberStopAtItsCount() {
 	s.Equal(5, s.linkFailures(line, window), "a refused code counts nothing")
 }
 
+// A router that reserves a code while another has the line's count uncommitted waits for it, and
+// is then refused on the count it left: it never reserves on a total the other had not finished.
+func (s *StoreSuite) TestACodeIsReservedOnlyOnceAnotherRoutersCountOfTheLineIsCommitted() {
+	line, window := newID(), s.linkWindow()
+	other, err := Open(s.dsn)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(other.Close()) })
+
+	tx, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = tx.Rollback() })
+	s.Require().NoError(lockUntilCommit(s.ctx, tx, line, channelLinkFailureLockSeed))
+	_, err = tx.NewInsert().Model(&channelLinkFailure{AccountID: line, FromAddress: "+15550001", WindowStart: window, Failures: 20}).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	type reservation struct {
+		reserved bool
+		err      error
+	}
+	done := make(chan reservation, 1)
+	go func() {
+		reserved, err := other.ChannelLinkFailures.Reserve(s.ctx, line, "+15550002", window, window, 5, 20)
+		done <- reservation{reserved, err}
+	}()
+
+	select {
+	case got := <-done:
+		s.Failf("reserved before the count was committed", "reserved %v, error %v", got.reserved, got.err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	s.Require().NoError(tx.Commit())
+	select {
+	case got := <-done:
+		s.Require().NoError(got.err)
+		s.False(got.reserved, "the committed count is the line's twentieth")
+	case <-time.After(10 * time.Second):
+		s.Fail("still waiting after the count was committed")
+	}
+	s.Equal(20, s.linkFailures(line, window))
+}
+
 // A line's count is its own and its window's: another line, or the next window, starts at none.
 func (s *StoreSuite) TestALinkCodeIsCountedOnItsOwnLineAndWindow() {
 	line, other, window := newID(), newID(), s.linkWindow()
