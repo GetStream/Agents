@@ -112,11 +112,20 @@ func (r *Buckets) Rollup(ctx context.Context, granularity Granularity, from, to 
 
 // wholeBuckets is a rollup's WHERE on column: the whole buckets [from, to) touches, taking
 // from and to as its two parameters. Postgres keeps timestamps to the microsecond, so to
-// less one is the window's last instant.
+// less one is the window's last instant. A bucket's length is a fixed interval: '1 day'
+// would be a calendar day in the session's zone, an hour short or long across a DST change.
 func wholeBuckets(granularity Granularity, column string) string {
 	return fmt.Sprintf("%[1]s >= date_trunc('%[2]s', ?::timestamptz, 'UTC') AND %[1]s < "+
-		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond', 'UTC') + interval '1 %[2]s'",
-		column, granularity.truncateUnit())
+		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond', 'UTC') + interval '%[3]s'",
+		column, granularity.truncateUnit(), granularity.length())
+}
+
+// length is one bucket of the granularity as a fixed Postgres interval.
+func (g Granularity) length() string {
+	if g == Daily {
+		return "24 hours"
+	}
+	return "1 hour"
 }
 
 func (r *Buckets) rollup(ctx context.Context, granularity Granularity, from, to time.Time) (int64, error) {

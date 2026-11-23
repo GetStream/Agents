@@ -3,8 +3,12 @@
 package store
 
 import (
+	"fmt"
+	"net/url"
+	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 )
 
@@ -220,10 +224,20 @@ func (s *StoreSuite) TestDailyRollupOverAnHourRecomputesTheWholeDay() {
 func (s *StoreSuite) TestADayIsAUTCDayWhateverTheDatabasesTimeZone() {
 	// 03:00 UTC is the evening before in Denver, and 10:00 UTC the same morning.
 	early, late := time.Date(2026, 3, 1, 3, 0, 0, 0, time.UTC), s.base
-	s.record("acme", early, 1000, 100, true)
-	s.record("acme", late, 2000, 100, true)
+	project := map[string]string{"project": "support"}
+	s.tagged("acme", early, 1000, project)
+	s.tagged("acme", late, 2000, project)
 	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(early, 100)))
 	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(late, 100)))
+	for i, at := range []time.Time{early, late} {
+		session := s.opened(fmt.Sprintf("session-%d", i), "acme", at, nil)
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+			ID: session.ID + "-1", SessionID: session.ID, CustomerID: "acme", CreatedAt: at,
+		}))
+		call := &Call{ID: fmt.Sprintf("call-%d", i), CustomerID: "acme", CallID: fmt.Sprintf("c-%d", i), AgentID: "a-1", StartedAt: at}
+		s.Require().NoError(s.store.Calls.Start(s.ctx, call))
+		s.Require().NoError(s.store.Calls.Finish(s.ctx, "acme", call.ID, at.Add(time.Minute)))
+	}
 	denver := s.inTimeZone("America/Denver")
 	day := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	from, to := day.Add(-24*time.Hour), day.Add(48*time.Hour)
@@ -234,11 +248,23 @@ func (s *StoreSuite) TestADayIsAUTCDayWhateverTheDatabasesTimeZone() {
 	s.Equal(day, requests[0].Bucket.UTC())
 	s.EqualValues(3000, requests[0].AudioMsTotal)
 
+	spend, err := denver.Requests.Spend(s.ctx, "acme", "modality", Daily, from, to, 6, nil, UsageFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(spend, 1)
+	s.Equal(day, spend[0].Bucket.UTC())
+	s.EqualValues(2, spend[0].RequestCount)
+
 	turns, err := denver.TurnBuckets.Select(s.ctx, "acme", TurnBucketFilter{Granularity: Daily, From: from, To: to})
 	s.Require().NoError(err)
 	s.Require().Len(turns, 1)
 	s.Equal(day, turns[0].Bucket.UTC())
 	s.EqualValues(2, turns[0].TurnCount)
+
+	activity, err := denver.CustomerActivity(s.ctx, "acme", ActivityDaily, from, to)
+	s.Require().NoError(err)
+	s.Require().Len(activity, 1, "sessions, messages, calls and people all fall in the one UTC day")
+	s.Equal(day, activity[0].Bucket.UTC())
+	s.Equal(ActivityBucket{Bucket: activity[0].Bucket, ActiveUsers: 1, Sessions: 2, Messages: 2, Calls: 2, VoiceMinutes: 2}, activity[0])
 
 	_, err = denver.Buckets.Rollup(s.ctx, Daily, day.Add(time.Hour), day.Add(2*time.Hour))
 	s.Require().NoError(err)
@@ -246,27 +272,55 @@ func (s *StoreSuite) TestADayIsAUTCDayWhateverTheDatabasesTimeZone() {
 	s.Require().Len(rolled, 1)
 	s.Equal(day, rolled[0].Bucket.UTC())
 	s.EqualValues(3000, rolled[0].AudioMsTotal, "the rollup's day is the UTC day too")
+
+	tagged, err := denver.TagBuckets.Select(s.ctx, "acme", TagBucketFilter{Modality: "stt", Key: "project", Granularity: Daily, From: from, To: to})
+	s.Require().NoError(err)
+	s.Require().Len(tagged, 1)
+	s.Equal(day, tagged[0].Bucket.UTC())
+	s.EqualValues(3000, tagged[0].AudioMsTotal, "so is the label rollup's")
+}
+
+func (s *StoreSuite) TestADailyRollupOnTheDayTheClocksChangeKeepsTheWholeUTCDay() {
+	// Denver moves to summer time on 2026-03-08, so that day is 23 hours long there.
+	day := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
+	s.record("acme", day.Add(time.Hour), 1000, 100, true)
+	s.record("acme", day.Add(23*time.Hour+30*time.Minute), 2000, 100, true)
+	// Midday the day before, which Denver's day holding midnight UTC also holds.
+	s.record("acme", day.Add(-12*time.Hour), 4000, 100, true)
+	denver := s.inTimeZone("America/Denver")
+
+	_, err := denver.Buckets.Rollup(s.ctx, Daily, day, day.Add(24*time.Hour))
+	s.Require().NoError(err)
+
+	rolled := s.rolledUp("stats_daily", "acme")
+	s.Require().Len(rolled, 1)
+	s.Equal(day, rolled[0].Bucket.UTC())
+	s.EqualValues(3000, rolled[0].AudioMsTotal, "the request in the day's last half hour is in it, and the day before is not touched")
 }
 
 // inTimeZone is another router on the suite's databases whose connections are in zone, as a
-// server whose default is not UTC gives them. The zone is the shard database's until the test
-// ends.
+// server whose default is not UTC gives them. The zone is a startup parameter of its DSNs, which
+// pgdriver passes on, so nothing outlives the test.
 func (s *StoreSuite) inTimeZone(zone string) *Store {
-	var database string
-	s.Require().NoError(s.store.shard.QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
-	_, err := s.store.shard.ExecContext(s.ctx, "ALTER DATABASE ? SET timezone = ?", bun.Ident(database), zone)
-	s.Require().NoError(err)
-	s.T().Cleanup(func() {
-		_, err := s.store.shard.ExecContext(s.ctx, "ALTER DATABASE ? RESET timezone", bun.Ident(database))
-		s.NoError(err)
-	})
-	router, err := s.openRouter()
+	router, err := OpenShards(Options{DSN: inZone(s.T(), s.dsn, zone), ShardDSN: inZone(s.T(), s.shardDSN, zone)})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(router.Close()) })
-	var current string
-	s.Require().NoError(router.shard.QueryRowContext(s.ctx, "SHOW timezone").Scan(&current))
-	s.Require().Equal(zone, current)
+	for _, db := range []*bun.DB{router.global, router.shard} {
+		var current string
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SHOW timezone").Scan(&current))
+		s.Require().Equal(zone, current)
+	}
 	return router
+}
+
+// inZone is dsn with its connections' timezone set to zone.
+func inZone(t *testing.T, dsn, zone string) string {
+	parsed, err := url.Parse(dsn)
+	require.NoError(t, err)
+	query := parsed.Query()
+	query.Set("timezone", zone)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 // rolledUp is what a rollup table holds for a customer, oldest first.
