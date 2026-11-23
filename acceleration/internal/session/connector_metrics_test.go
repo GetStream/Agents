@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -95,7 +96,7 @@ func (s *ConnectorMetricsSuite) TestACallIsTimedInSecondsFromItsStart() {
 
 // recordOf records one call of connector that started at started and ended as kind.
 func (s *ConnectorMetricsSuite) recordOf(connector string, started time.Time, kind string) {
-	s.d.record(route{binding: store.ConnectorBinding{Name: "crm", ConnectorID: connector}, tool: "whoami"},
+	s.d.record(context.Background(), route{binding: store.ConnectorBinding{Name: "crm", ConnectorID: connector}, tool: "whoami"},
 		llm.ToolCall{Name: "crm__whoami", Arguments: "{}"}, started, failure{kind: kind}, nil)
 }
 
