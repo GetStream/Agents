@@ -116,16 +116,17 @@ var encodedCredential = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_]|%(?:25)*[0-9
 // vendorKeyMessage is a provider's refusal that names the key it was sent, with no = or : to
 // say so: "Invalid API key <32 hex>", "Incorrect API key provided: <key>", invalid_api_key, or
 // the same for an API token. The key is the 16 characters or more of the key alphabet, base64
-// (+ / =) and base64url (- _) included, after the phrase, so a request id of 8 hex digits after
-// "Invalid API key." stays. A quote before the key, or a quote escaped as a JSON body has it
+// (+ /, and = only as the padding at its end) and base64url (- _) included, after the phrase,
+// so a request id of 8 hex digits after "Invalid API key." stays, and so does a glued
+// name=value after it (model=..., request_id=...). A quote before the key, or a quote escaped as a JSON body has it
 // (\"), stays with the phrase. The phrase stays and the key is taken out, unless it is a word
 // (see redactVendorKeyMessage).
-var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*(?:\\?["\x27])?)([A-Za-z0-9_+/=-]{16,})()`)
+var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})()`)
 
 // vendorKeyBefore is the same refusal with the key before the verdict: "The API key '<key>' is
 // invalid", with single quotes, double quotes (raw or JSON-escaped) or none. The key has the
 // same 16 character floor, and the phrase around it stays.
-var vendorKeyBefore = regexp.MustCompile(`(?i)\b(api[\s_-]?(?:key|token)\s+(?:\\?["\x27])?)([A-Za-z0-9_+/=-]{16,})((?:\\?["\x27])?\s+(?:is|was)\s+(?:invalid|incorrect)\b)`)
+var vendorKeyBefore = regexp.MustCompile(`(?i)\b(api[\s_-]?(?:key|token)\s+(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})((?:\\?["\x27])?\s+(?:is|was)\s+(?:invalid|incorrect)\b)`)
 
 // encodedAuthorization is an authorization or cookie header (proxy-authorization and
 // set-cookie end in those names) written into a URL: the name, an optional encoded quote
