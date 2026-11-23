@@ -51,7 +51,7 @@ func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string)
 		return routing.ProviderConfig{}, routing.Endpoint{}, err
 	}
 
-	endpoint := routing.Endpoint{BaseURL: stored.BaseURL, Model: stored.Model, Client: m.client}
+	endpoint := routing.Endpoint{BaseURL: stored.BaseURL, Model: stored.Model, ContextWindow: stored.ContextWindow, Client: m.client}
 	if len(stored.APIKeySealed) > 0 {
 		if m.secrets == nil {
 			return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(
