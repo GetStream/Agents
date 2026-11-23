@@ -247,6 +247,18 @@ func (s *SocketCloseLogSuite) TestARelayedCloseCommandIsTheCallersClose() {
 	s.Contains(s.closeLine(id), " close_reason=client_closed close_code=1000 ")
 }
 
+func (s *SocketCloseLogSuite) TestARelayedCloseCommandSentTwiceIsTheCallersClose() {
+	// Catches the second close, which finds the session already gone, clearing the first.
+	_, connection, id := s.watched(s.other)
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "close"}))
+	_ = connection.WriteJSON(map[string]any{"type": "close"})
+	_ = connection.WriteJSON(map[string]any{"type": "close"})
+	_, _ = s.socketEnd(connection)
+
+	s.Contains(s.closeLine(id), " close_reason=client_closed close_code=1000 ")
+}
+
 func (s *SocketCloseLogSuite) TestARelayedSocketLogsTheCallersClose() {
 	_, connection, id := s.watched(s.other)
 

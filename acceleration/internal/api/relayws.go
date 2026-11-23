@@ -466,7 +466,9 @@ func (s *Server) runRelayedCommands(found *session.Session, proxy *proxyWatcher)
 		sender := routing.Caller{UserID: proxy.owner.UserID, ServerSide: proxy.owner.Kind == auth.KindServer,
 			Verified: proxy.owner.UserID != "" && proxy.owner.Kind.Verified()}
 		if command.Type == "close" {
-			proxy.closing.Store(s.closesSession(found, proxy.seat.Owner))
+			if s.closesSession(found, proxy.seat.Owner) {
+				proxy.closing.Store(true)
+			}
 		}
 		s.applyCommand(found, proxy.seat, sender, command)
 	}
