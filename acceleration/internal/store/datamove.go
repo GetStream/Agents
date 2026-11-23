@@ -236,9 +236,12 @@ func isSecret(column string) bool {
 // oauthSecrets are an OAuth grant's tokens and the state of one under way.
 var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
 
-// retiredTables are tables an export from an older release may carry that this schema dropped
-// (20270112000100_drop_plugin_tables.sql). An import skips their rows, inserts and deletes alike.
-var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
+// retiredTables are tables an export from an older release may carry that this one no longer moves:
+// the four plugin tables, which this schema dropped (20270112000100_drop_plugin_tables.sql), and
+// voice_samples and voice_bindings, which it keeps but leaves behind (see dataTables). An import
+// skips their rows, inserts and deletes alike.
+var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries",
+	"voice_samples", "voice_bindings"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -424,9 +427,9 @@ WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 // a write that was open when the capture started and commits after the snapshot.
 //
 // What is not here: the audio behind a voice sample and a call recording, which live in
-// an object bucket rather than in Postgres. The rows naming them come across, and copying
+// an object bucket rather than in Postgres. A call recording's row comes across, and copying
 // the bucket is a copy between two object stores that neither deployment should be in the
-// middle of.
+// middle of. A voice sample's row stays behind with its audio (dataTables).
 func (s *Store) ExportCustomer(ctx context.Context, customerID string, write func(table string, row json.RawMessage) error) (int64, error) {
 	if customerID == "" {
 		return 0, errors.New("store: a customer id is required")
