@@ -341,6 +341,24 @@ func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
 	s.NotContains(string(body), "deadline")
 }
 
+// The hash was stored with the config, before the skills: a sync whose skills then failed was
+// found unchanged when sent again, and its skills were never written.
+func (s *SyncSuite) TestASyncWhoseSkillsFailedOnceWritesThemWhenSentAgain() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "skills": []map[string]string{
+		{"config_id": "", "name": "refund", "description": "work out a refund", "instructions": "Read the policy."},
+	}}
+	s.failQueries(`INSERT INTO "skills"`)
+	status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/sync", declaration)
+	s.Require().Equal(http.StatusInternalServerError, status)
+	s.failing.value.Store(nil)
+
+	again := s.sync(declaration)
+
+	s.False(again.Unchanged, "the first sync did not finish, so this one has work to do")
+	s.Equal("Read the policy.", s.skillNamed(again.Config.Id, "refund").Instructions)
+	s.Equal("v1", value(again.Config.SyncHash))
+}
+
 // A sync wrote every setting from the copy of the config it read, which can come from the
 // cache, so a model saved since that the directory does not declare went back to what the copy
 // held. The update below goes past the store, as a save the cache has not heard of yet.

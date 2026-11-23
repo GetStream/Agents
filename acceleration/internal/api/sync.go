@@ -414,7 +414,9 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	config.UIInstructions = value(body.UiInstructions)
 	config.Skills = named
 	config.KnowledgeNamespace = namespace
-	config.SyncHash = hash
+	// The hash is written last, after the skills and simulations: written here, a sync whose
+	// skills then failed was found unchanged when sent again, and never wrote them.
+	config.SyncHash = ""
 
 	var was any
 	if found {
@@ -443,6 +445,15 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 		if err := s.replaceSimulations(ctx, customerID, config.ID, *body.Simulations); err != nil {
 			return nil, err
 		}
+	}
+	// Only onto the config as this sync left it: one saved since no longer holds what the
+	// directory says, and is written again by the next sync of it.
+	marked := config
+	marked.SyncHash = hash
+	if _, err := s.store.AgentConfigs.Save(ctx, config, &marked, config.UpdatedAt); err == nil {
+		config = marked
+	} else if !errors.Is(err, store.ErrAgentConfigChanged) {
+		return nil, err
 	}
 	// Recorded last, after the skills the directory brought with it, because what it marks
 	// is the moment the whole directory and the whole stored agent agreed. An entry written
