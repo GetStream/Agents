@@ -479,11 +479,11 @@ func (s *InboundSuite) TestAWorkerThatLostItsLeaseGivesNothingUp() {
 	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 1").
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, "m-1").Exec(s.ctx)
 	s.Require().NoError(err)
-	stale, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Millisecond))
+	stale, err := s.store.ChannelInbounds.Claim(s.ctx, 1, time.Millisecond)
 	s.Require().NoError(err)
 	s.Require().Len(stale, 1)
 	time.Sleep(5 * time.Millisecond)
-	taken, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Hour))
+	taken, err := s.store.ChannelInbounds.Claim(s.ctx, 1, time.Hour)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "another worker took it once the lease ran out")
 
@@ -521,7 +521,7 @@ func (s *InboundSuite) TestAStopPastItsWaitsIsDueAgainAfterTheLastWait() {
 	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = 2").
 		Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, "m-1").Exec(s.ctx)
 	s.Require().NoError(err)
-	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
+	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, 1, time.Minute)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -563,7 +563,7 @@ func (s *InboundSuite) TestAStopWithinItsWaitsIsRetriedWithoutAWarning() {
 		_, err = s.store.GlobalDB().NewUpdate().Model((*store.ChannelInbound)(nil)).Set("attempts = ?", tried).
 			Where("channel_id = ? AND provider_message_id = ?", thread.ChannelID, id).Exec(s.ctx)
 		s.Require().NoError(err)
-		claimed, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(time.Minute))
+		claimed, err := s.store.ChannelInbounds.Claim(s.ctx, 1, time.Minute)
 		s.Require().NoError(err)
 		s.Require().Len(claimed, 1)
 		before := warnings()
@@ -631,7 +631,7 @@ func (s *InboundSuite) TestAMessageAStoppedWorkerLeftIsWrittenByTheNextOne() {
 func (s *InboundSuite) TestAMessageALeaseHeldIsWrittenWhenTheLeaseRunsOut() {
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
-	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, time.Now(), 1, time.Now().Add(300*time.Millisecond))
+	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, 1, 300*time.Millisecond)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 

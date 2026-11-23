@@ -299,18 +299,18 @@ const (
 
 // takeThreadTurn waits for a thread channel's turn and leases it to holder for threadTurnLease.
 func (s *Server) takeThreadTurn(ctx context.Context, thread store.ChannelThread, holder string) error {
-	return takeTurn(ctx, func(ctx context.Context, until time.Time) (bool, error) {
+	return takeTurn(ctx, func(ctx context.Context) (bool, error) {
 		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: thread.StreamAppPK,
-			CID: chatlog.ChannelType + ":" + thread.ChannelID, LeasedBy: holder, LeaseUntil: until})
+			CID: chatlog.ChannelType + ":" + thread.ChannelID, LeasedBy: holder, Lease: threadTurnLease})
 	})
 }
 
-// takeTurn waits for a channel's turn, asking take for a lease until threadTurnLease from now
-// every threadTurnWait: a thread channel's (takeThreadTurn) or a chat channel's
+// takeTurn waits for a channel's turn, asking take for a lease of threadTurnLease every
+// threadTurnWait: a thread channel's (takeThreadTurn) or a chat channel's
 // (answerChatChannel).
-func takeTurn(ctx context.Context, take func(context.Context, time.Time) (bool, error)) error {
+func takeTurn(ctx context.Context, take func(context.Context) (bool, error)) error {
 	for {
-		taken, err := take(ctx, time.Now().Add(threadTurnLease))
+		taken, err := take(ctx)
 		if err != nil || taken {
 			return err
 		}

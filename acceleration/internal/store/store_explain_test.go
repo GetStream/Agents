@@ -497,11 +497,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "ImageJobs.Claim", index: "image_jobs_undecided", inOrder: true, run: func(ctx context.Context, store *Store) error {
-			_, err := store.ImageJobs.Claim(ctx, s.base, 10, s.base, false)
+			_, err := store.ImageJobs.Claim(ctx, 10, 0, false)
 			return err
 		}},
 		{name: "ImageJobs.Claim decided", index: "image_jobs_decided", inOrder: true, run: func(ctx context.Context, store *Store) error {
-			_, err := store.ImageJobs.Claim(ctx, s.base, 10, s.base, true)
+			_, err := store.ImageJobs.Claim(ctx, 10, 0, true)
 			return err
 		}},
 		{name: "ImageJobs.NextDue", index: "image_jobs_undecided", run: func(ctx context.Context, store *Store) error {

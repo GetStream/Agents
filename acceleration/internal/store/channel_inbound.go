@@ -291,18 +291,18 @@ const channelInboundColumns = `cti.seq, cti.channel_id, cti.provider_message_id,
 cti.provider_unit_id, cti.thread_key, cti.config_id, cti.config_name, cti.author_id, cti.text, cti.media, cti.raw,
 cti.forward, cti.state, cti.keyword_answered, cti.attempts, cti.next_attempt_at, cti.created_at, cti.finished_at`
 
-// Claim takes at most limit messages due at now, oldest due first, and moves each one's next
-// attempt to leaseUntil, so no other worker takes it while this one writes it. Rows another
+// Claim takes at most limit messages due now, oldest due first, and moves each one's next
+// attempt to the end of lease, so no other worker takes it while this one writes it. Rows another
 // worker is claiming at the same moment are skipped, not waited for. It takes only the oldest
 // queued message of a thread channel (queuedChannelInbound).
-func (r *ChannelInbounds) Claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ChannelInbound, error) {
-	return r.claim(ctx, now, limit, leaseUntil, nil)
+func (r *ChannelInbounds) Claim(ctx context.Context, limit int, lease time.Duration) ([]ChannelInbound, error) {
+	return r.claim(ctx, limit, lease, nil)
 }
 
 // claim is Claim with head narrowing the heads it reads, as queuedChannelInbound takes it.
-func (r *ChannelInbounds) claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time,
+func (r *ChannelInbounds) claim(ctx context.Context, limit int, lease time.Duration,
 	head func(*bun.SelectQuery) *bun.SelectQuery) ([]ChannelInbound, error) {
-	return claim[ChannelInbound](ctx, r.store.global, channelInbounds, now, leaseUntil, limit,
+	return claim[ChannelInbound](ctx, r.store.global, channelInbounds, lease, limit,
 		queuedChannelInbound(r.store.global, head), channelInboundColumns)
 }
 
