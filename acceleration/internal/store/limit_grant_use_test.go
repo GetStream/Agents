@@ -69,6 +69,34 @@ func (s *StoreSuite) TestAWrittenRowCountsOnlyTowardItsOwnOrganizationsGrant() {
 	s.EqualValues(50, s.used(grant.ID), "a row of another organization, or of none, naming the grant counts nothing")
 }
 
+// unresolved is a request row of the app naming the grant, written without its organization,
+// as an app in none has it and as the writer leaves a row it could not look the app up for.
+func (s *StoreSuite) unresolved(app string, cost int64, grant int64) Request {
+	return Request{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: app, Provider: "openai", Model: "m",
+		StartedAt: s.base, CostMicros: cost, Billable: true, Success: true, LimitGrants: []int64{grant},
+	}
+}
+
+// member records the app as seen under the organization.
+func (s *StoreSuite) member(app, organization string) {
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: organization}))
+}
+
+func (s *StoreSuite) TestARowWithoutItsOrganizationCountsTowardItsAppsGrants() {
+	own := s.grant(LimitGrant{OrganizationID: "app-alone", AmountMicros: 10_000})
+	theirs := s.grant(LimitGrant{AmountMicros: 10_000})
+	s.member("app-1", "org-1")
+	s.member("org-1", "org-2")
+
+	s.writeAsTheWriter(s.store, s.unresolved("app-alone", 100, own.ID), s.unresolved("app-1", 20, theirs.ID),
+		s.unresolved("app-2", 3_000, own.ID), s.unresolved("app-2", 3_000, theirs.ID), s.unresolved("org-1", 3_000, theirs.ID))
+
+	s.EqualValues(100, s.used(own.ID), "an app in no organization keeps its grants under its own id")
+	s.EqualValues(20, s.used(theirs.ID), "a row of the organization's app counts; one of another app, or of an app of "+
+		"another organization whose id is this one's, does not")
+}
+
 func (s *StoreSuite) TestARowWrittenTwiceCountsOnceTowardItsGrant() {
 	grant := s.grant(LimitGrant{AmountMicros: 10_000})
 	row := s.grantRow(s.store, []int64{grant.ID}, 300, true)
@@ -191,6 +219,21 @@ func (s *ShardedStoreSuite) TestAReconcileCountsARowOnlyTowardItsOwnOrganization
 
 	s.Equal(1, s.reconcile(), "only the row of the grant's own organization")
 	s.EqualValues(70, s.used(grant.ID))
+}
+
+func (s *ShardedStoreSuite) TestAReconcileCountsARowWithoutItsOrganizationTowardItsAppsGrants() {
+	own := s.grant(LimitGrant{OrganizationID: "app-alone", AmountMicros: 10_000})
+	theirs := s.grant(LimitGrant{AmountMicros: 10_000})
+	s.member("app-1", "org-1")
+	for _, row := range []Request{s.unresolved("app-alone", 100, own.ID), s.unresolved("app-1", 20, theirs.ID), s.unresolved("app-2", 3_000, own.ID)} {
+		s.Require().NoError(prepareRequest(&row))
+		_, err := s.other.ShardDB().NewInsert().Model(&row).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+
+	s.Equal(2, s.reconcile(), "the rows of the grants' own apps")
+	s.EqualValues(100, s.used(own.ID))
+	s.EqualValues(20, s.used(theirs.ID))
 }
 
 func (s *ShardedStoreSuite) TestAReconcileReadsOnlyTheRowsSinceTheLastLessItsOverlap() {
