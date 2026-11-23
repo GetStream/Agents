@@ -54,16 +54,15 @@ func TestChatLoginsSuite(t *testing.T) {
 	runSuite(t, new(ChatLoginsSuite))
 }
 
-// SetupSuite builds oauth2_code against the fake with the operator's client in the
-// environment, as AuthorizationsSuite does, and bearer for the twin, with the mcp source.
+// SetupSuite builds oauth2_code against the fake with the router's own client lookup, where each
+// connector has the fake's client as the app's own, and bearer for the twin, with the mcp source.
 func (s *ChatLoginsSuite) SetupSuite() {
 	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
 	s.provider.AllowRedirect(consentPublicURL + ConnectorCallbackPath)
-	environment := map[string]string{"FAKE_MCP_CLIENT_ID": s.provider.ClientID, "FAKE_MCP_CLIENT_SECRET": s.provider.ClientSecret}
 	code, err := oauth2code.New(oauth2code.Config{
 		HTTP: s.provider.Client(),
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, func(string) string { return "" })(ctx, ref, m, registration)
 		},
 		PublicEndpoint: loopbackOrPublic,
 	})
@@ -607,13 +606,20 @@ func (s *ChatLoginsSuite) connectorWithoutTwin() string {
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	s.define(id, oauth2code.Name, `
 client:
-  registration: [operator]
+  registration: [customer]
   auth_method: client_secret_post
-  env: FAKE
 scopes:
   list: [chat:write]
 `)
-	return id
+	return s.withFakeClient(id)
+}
+
+// withFakeClient puts the fake's preregistered client as the app's own client of connector: a
+// custom connector never takes the operator's.
+func (s *ChatLoginsSuite) withFakeClient(connector string) string {
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPut, oauthClientPath(connector),
+		ConnectorOAuthClientRequest{ClientID: s.provider.ClientID, ClientSecret: s.provider.ClientSecret}, nil))
+	return connector
 }
 
 // pinsOf are the schema digests connection's tools are pinned at.
@@ -676,10 +682,12 @@ func (s *ChatLoginsSuite) connectorOf(schemes, extra string) (string, map[string
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	s.define(id, schemes, `
 client:
-  registration: [operator]
+  registration: [customer]
   auth_method: client_secret_post
-  env: FAKE
 `+extra)
+	if strings.Contains(schemes, oauth2code.Name) {
+		s.withFakeClient(id)
+	}
 	twin := id + "twin"
 	s.define(twin, bearer.Name, "")
 	var created Connection

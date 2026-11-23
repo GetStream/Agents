@@ -846,6 +846,9 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### A Swift typed tool no longer crashes the app on deeply nested arguments
 
 An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
+### A custom connector never gets the deployment's own OAuth client
+
+Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

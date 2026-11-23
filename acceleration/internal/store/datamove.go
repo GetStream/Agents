@@ -16,6 +16,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -23,6 +24,10 @@ import (
 // still recorded, so there is no way to tell what happened in between. The answer is to
 // export again rather than to carry on from a number nothing can honour.
 var ErrChangesExpired = errors.New("store: the changes since that cursor are no longer kept")
+
+// ErrNotACustomConnector is an imported connector definition whose manifest the API would
+// have refused for a custom connector (importableDefinition).
+var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
 // dataTable is one table a customer's rows live in.
 //
@@ -720,6 +725,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			return err
 		}
 	}
+	if table == "connector_definitions" {
+		if row, err = importableDefinition(row); err != nil {
+			return err
+		}
+	}
 	shape, err := s.shapeOf(ctx, table)
 	if err != nil {
 		return err
@@ -1337,6 +1347,41 @@ WHERE customer_id <> ? AND released_at IS NULL AND vendor <> 'sip_trunk' AND %s 
 		return stack.Wrap(fmt.Errorf("%w: %s", ErrNumberHeldElsewhere, e164.String))
 	}
 	return nil
+}
+
+// importableDefinition refuses an imported definition the API would not have stored, and
+// gives the row the manifest as the API would have stored it, so no field this release does
+// not read arrives for one that does. Every imported definition is a custom one, since the
+// customer is forced onto the row (identity), and only the API's rules keep a custom manifest
+// from naming the operator's client or anything else the router would trust a built-in with
+// (core.Manifest.AsCustom).
+func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
+	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
+	// key in another case, which the insert then leaves out.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, fmt.Errorf("store: read an imported connector definition: %w", err)
+	}
+	var id string
+	if raw, ok := fields["id"]; ok {
+		if err := json.Unmarshal(raw, &id); err != nil {
+			return nil, fmt.Errorf("store: read an imported connector definition's id: %w", err)
+		}
+	}
+	var manifest core.Manifest
+	if raw, ok := fields["manifest"]; ok {
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return nil, fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err)
+		}
+	}
+	custom, err := manifest.AsCustom(id)
+	if err != nil {
+		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
+	}
+	if fields["manifest"], err = json.Marshal(custom); err != nil {
+		return nil, stack.Wrap(err)
+	}
+	return json.Marshal(fields)
 }
 
 // identity is what the importing deployment overwrites on every row of this table, which
