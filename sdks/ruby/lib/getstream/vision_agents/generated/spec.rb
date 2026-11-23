@@ -2707,6 +2707,10 @@ module GetStream
           properties: %w[cached_input_tokens cost_micros input_parts input_tokens modality model output_tokens provider requests].freeze,
           required: %w[cached_input_tokens cost_micros input_parts input_tokens modality model output_tokens provider requests].freeze, open: false
         }.freeze,
+        "ModelVoice" => {
+          properties: %w[default description gender id name].freeze,
+          required: %w[id name].freeze, open: false
+        }.freeze,
         "NumberSearchResult" => {
           properties: %w[numbers skipped].freeze,
           required: %w[numbers skipped].freeze, open: false
@@ -2852,7 +2856,7 @@ module GetStream
           required: %w[at entries upcoming].freeze, open: false
         }.freeze,
         "Provider" => {
-          properties: %w[benchmark description health languages model price provider realtime region supports tier usage_share].freeze,
+          properties: %w[benchmark description health languages model price provider realtime region supports tier usage_share voices].freeze,
           required: %w[health languages model provider realtime region tier].freeze, open: false
         }.freeze,
         "ProviderBenchmark" => {

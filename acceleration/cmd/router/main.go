@@ -187,6 +187,7 @@ const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
   keys create           mint a credential for an app, printing the secret once
+  keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
   prices                read and check the price list (router prices for its commands)
