@@ -84,7 +84,7 @@ func (t *stageTrace) observe(config routing.ProviderConfig) stamps {
 
 // observeStream records the stream stage of a settled response: from the first byte of the
 // response to its first token, on the clock first output is measured on (the stream's own,
-// which starts when Create returned). A response that never said anything has none.
+// which starts at createdAt). A response that never said anything has none.
 func (s stamps) observeStream(config routing.ProviderConfig, createdAt time.Time, response llm.Response) {
 	if s.firstByte.IsZero() || response.TimeToFirstTokenMs <= 0 {
 		return

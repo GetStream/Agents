@@ -75,6 +75,11 @@ type StreamOptions struct {
 	ResponseID string
 	Provider   string
 	Model      string
+	// StartedAt is when the request was sent, which time to first token and the duration are
+	// measured from. It defaults to when the stream was made, for a provider whose stream
+	// exists before anything is waited on; one that returns its stream only once the response
+	// headers are in sets it, since a server can hold those back until its first token.
+	StartedAt time.Time
 }
 
 // NewStream returns the stream a provider produces by advancing the given puller.
@@ -83,11 +88,15 @@ func NewStream(options StreamOptions, puller Puller) *Stream {
 		options.ResponseID = fmt.Sprintf("resp-%d", time.Now().UnixNano())
 	}
 
+	if options.StartedAt.IsZero() {
+		options.StartedAt = time.Now()
+	}
+
 	stream := &Stream{puller: puller}
 	stream.writer = &ResponseWriter{
 		stream:    stream,
 		options:   options,
-		startedAt: time.Now(),
+		startedAt: options.StartedAt,
 		status:    StatusCompleted,
 		calls:     map[int64]*partialCall{},
 	}
@@ -99,6 +108,10 @@ func NewStream(options StreamOptions, puller Puller) *Stream {
 	})
 	return stream
 }
+
+// StartedAt is when the response's clock started (StreamOptions.StartedAt), zero for a
+// replayed one.
+func (s *Stream) StartedAt() time.Time { return s.writer.startedAt }
 
 // Replay returns a Stream over events that have already happened, for a caller standing in
 // for a provider.

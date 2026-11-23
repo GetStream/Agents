@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -111,6 +113,23 @@ type Options struct {
 	// as a user message, for a server whose chat template refuses a system turn anywhere but
 	// first, or lifts it into the system prompt, which would change the prefix every turn.
 	SystemTurnsAsUser bool
+	// StrictRoles shapes the conversation for a server that renders the weights' own chat
+	// template as it stands, such as vLLM or llama.cpp serving whatever a customer trained:
+	// there is one system message, first, with any others before the conversation joined into
+	// it and any after it sent as the user's (SystemTurnsAsUser); user turns that would follow
+	// one another are joined into one; and a turn that called tools always carries content,
+	// empty when the model said nothing. Mistral's templates refuse the conversation otherwise:
+	// Mistral 7B v0.3's raises on a system message after the first and on two user turns in a
+	// row, and Mistral Small 3.2's reads the content of every assistant turn.
+	StrictRoles bool
+	// Keyless lets APIKey be empty, for an endpoint that takes no key. Nothing is sent in the
+	// Authorization header then, not even the OPENAI_API_KEY the SDK would otherwise read from
+	// the router's own environment.
+	Keyless bool
+	// FirstTokenTimeout bounds the wait for the first token, from the moment the request is
+	// sent: headers, prompt processing and all. A server that hangs then fails the turn there,
+	// rather than after the whole Timeout in silence. Zero is no bound but Timeout.
+	FirstTokenTimeout time.Duration
 	// ResultsFollowCalls is set for a server that refuses a conversation in which anything
 	// comes between a tool call and its results, as MiniMax's does with a 400: what the
 	// caller said while a tool ran is moved after the results (StrictToolOrder).
@@ -152,7 +171,7 @@ func New(options Options) (*LLM, error) {
 		return nil, stack.Wrap(errors.New("openaicompat: model is required"))
 	}
 	keys := keypool.FromEnv(options.APIKey)
-	if keys.Len() == 0 {
+	if keys.Len() == 0 && !options.Keyless {
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: api key is required", options.Provider))
 	}
 	options.APIKey = keys.Peek()
@@ -164,6 +183,9 @@ func New(options Options) (*LLM, error) {
 	}
 	if options.Timeout == 0 {
 		options.Timeout = defaultTimeout
+	}
+	if options.StrictRoles {
+		options.SystemTurnsAsUser = true
 	}
 	if options.Logger == nil {
 		options.Logger = slog.Default()
@@ -214,17 +236,29 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: provider is closed", l.options.Provider))
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, l.options.Timeout)
+	requestCtx, firstToken, cancel := l.firstTokenDeadline(requestCtx, cancel)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
 	l.mu.Unlock()
 
+	// The caller has been waiting since the request was sent, not since its headers came
+	// back: llama.cpp and Ollama send none before the first token.
+	sentAt := time.Now()
+	var response *http.Response
 	upstream := l.client.Chat.Completions.NewStreaming(
-		requestCtx, l.params(params), l.requestOptions(params)...,
+		requestCtx, l.params(params), append(l.requestOptions(params), option.WithResponseInto(&response))...,
 	)
-	if err := upstream.Err(); err != nil {
+	err := upstream.Err()
+	if err == nil {
+		err = l.notAStream(response)
+	}
+	if err != nil {
 		_ = upstream.Close()
 		cancel()
 		l.forget(id)
+		if late := context.Cause(requestCtx); errors.Is(late, errNoFirstToken) {
+			err = late
+		}
 		return nil, stack.Wrap(withBody(err))
 	}
 	return llm.NewStream(
@@ -232,12 +266,57 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 			ResponseID: params.ID,
 			Provider:   l.options.Provider,
 			Model:      l.options.StatsModel,
+			StartedAt:  sentAt,
 		},
 		&puller{
-			llm: l, id: id, turn: params.ID, upstream: upstream, cancel: cancel,
-			channel: l.channelSplitter(), toolText: l.toolCallSplitter(params),
+			llm: l, id: id, turn: params.ID, upstream: upstream, cancel: cancel, ctx: requestCtx,
+			firstToken: firstToken,
+			channel:    l.channelSplitter(), toolText: l.toolCallSplitter(params),
 		},
 	), nil
+}
+
+// errNoFirstToken is the cause a request is cancelled with when FirstTokenTimeout passes
+// before its first token. It is a deadline, so it reads as a timeout and as transient.
+var errNoFirstToken = fmt.Errorf("openaicompat: no first token in time: %w", context.DeadlineExceeded)
+
+// firstTokenDeadline arms FirstTokenTimeout on a request's context. The timer it returns is
+// stopped once the first token arrives, and the cancel it returns releases everything.
+func (l *LLM) firstTokenDeadline(ctx context.Context, cancel context.CancelFunc) (context.Context, *time.Timer, context.CancelFunc) {
+	if l.options.FirstTokenTimeout <= 0 {
+		return ctx, nil, cancel
+	}
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	timer := time.AfterFunc(l.options.FirstTokenTimeout, func() { cancelCause(errNoFirstToken) })
+	return ctx, timer, func() {
+		timer.Stop()
+		cancelCause(context.Canceled)
+		cancel()
+	}
+}
+
+// notAStream refuses a 200 whose body is not an event stream, such as a proxy's HTML page or
+// a server that ignored stream:true and answered with JSON. The SDK finds no events in either
+// and ends the stream cleanly, which would settle the turn as an empty answer. A response
+// that names no type is let through, since Go would sniff an event stream as text/plain.
+func (l *LLM) notAStream(response *http.Response) error {
+	if response == nil {
+		return nil
+	}
+	contentType := response.Header.Get("Content-Type")
+	if contentType == "" {
+		return nil
+	}
+	media, _, err := mime.ParseMediaType(contentType)
+	if err == nil && media == "text/event-stream" {
+		return nil
+	}
+	var body []byte
+	if response.Body != nil {
+		body, _ = io.ReadAll(io.LimitReader(response.Body, 256))
+	}
+	return &llm.ProviderFailure{Err: fmt.Errorf("openaicompat: %s: answered a streaming request with %q rather than an event stream: %s",
+		l.options.Provider, contentType, bytes.TrimSpace(body))}
 }
 
 // named keeps what a provider said about a failure it sent inside a stream, as an `error`
@@ -356,6 +435,13 @@ type puller struct {
 	turn     string
 	upstream *ssestream.Stream[openai.ChatCompletionChunk]
 	cancel   context.CancelFunc
+	// ctx is the request's, whose cause says whether FirstTokenTimeout ended it, and
+	// firstToken the timer that would, nil when there is none.
+	ctx        context.Context
+	firstToken *time.Timer
+	// chunks counts what the upstream streamed, so a stream that ended without a single chunk
+	// is a failure rather than an empty answer.
+	chunks int
 	// channel takes the thought channel out of the answer, when the model writes one.
 	channel *channelSplitter
 	// toolText takes tool calls written as text out of the answer, and textCalls counts them.
@@ -384,6 +470,10 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 	}
 
 	chunk := p.upstream.Current()
+	p.chunks++
+	if p.firstToken != nil && said(chunk) {
+		p.firstToken.Stop()
+	}
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 		// Some providers repeat a cumulative usage frame on every chunk rather than
 		// sending one at the end, so the writer keeps the last one it is told.
@@ -491,6 +581,18 @@ func (p *puller) slot(index int64, id string) int64 {
 	return slot
 }
 
+// said reports whether a chunk carries any of the answer: text, thinking or a tool call. A
+// chunk with only the assistant role, which vLLM sends before the prompt is processed, does
+// not.
+func said(chunk openai.ChatCompletionChunk) bool {
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != "" || len(choice.Delta.ToolCalls) > 0 || reasoning(choice.Delta.JSON.ExtraFields) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // Err is the provider failure that ended the stream, if there was one.
 func (p *puller) Err() error { return stack.Wrap(p.err) }
 
@@ -521,7 +623,18 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 		}
 	}
 
-	switch err := p.upstream.Err(); {
+	err := p.upstream.Err()
+	if late := context.Cause(p.ctx); err != nil && errors.Is(late, errNoFirstToken) {
+		err = late
+	}
+	switch {
+	case err == nil && p.chunks == 0:
+		// The server closed the stream without a single chunk, not even the [DONE] that
+		// ends an answer of nothing, which is a dropped connection rather than a reply.
+		p.err = &llm.ProviderFailure{
+			Err:       fmt.Errorf("openaicompat: %s: the stream ended before anything was sent", p.llm.options.Provider),
+			Transient: true,
+		}
 	case err == nil:
 	case errors.Is(err, context.Canceled):
 		// A cancelled stream is barge-in or shutdown, not a provider failure.
@@ -585,6 +698,9 @@ func (l *LLM) params(request llm.ResponseParams) openai.ChatCompletionNewParams 
 
 	if len(pendingImages) > 0 {
 		messages = append(messages, openai.UserMessage(pendingImages))
+	}
+	if l.options.StrictRoles {
+		messages = strictRoles(messages)
 	}
 	if prefill := l.prefill(request); prefill != "" {
 		messages = append(messages, openai.AssistantMessage(prefill))
