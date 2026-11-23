@@ -4,7 +4,10 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -1010,6 +1013,259 @@ func (s *StoreSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMissed() {
 		"a config with no active task left pauses nothing")
 }
 
+func (s *StoreSuite) TestPausingAConfigsTasksLeavesAHeldTaskNoLease() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.held("one", time.Now().Add(8*time.Hour))
+
+	s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Empty(task.LeasedBy)
+	s.Nil(task.LeaseUntil, "a task resumed later is claimed at once, not after the hold's eight hours")
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAPauseIsRefused() {
+	s.task("one", nil)
+	stale, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	pause, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	pause.State = ScheduledTaskPaused
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &pause))
+
+	stale.Title = "Stretch twice"
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, &stale), ErrScheduledTaskChanged)
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(ScheduledTaskPaused, task.State)
+	s.Equal("Stretch", task.Title)
+}
+
+// dueRepeat stores a daily task due a minute ago and returns a copy read before anything else
+// writes to it.
+func (s *StoreSuite) dueRepeat() ScheduledTask {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt, task.RRule = &due, "FREQ=DAILY" })
+	read, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	return read
+}
+
+// claimOne claims the one due task.
+func (s *StoreSuite) claimOne() ClaimedScheduledTask {
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	return claimed[0]
+}
+
+// refusesStale saves a copy read before a worker's write and expects the save refused.
+func (s *StoreSuite) refusesStale(stale ScheduledTask) {
+	stale.Title = "Stretch twice"
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, &stale), ErrScheduledTaskChanged)
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal("Stretch", task.Title)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAClaimIsRefused() {
+	stale := s.dueRepeat()
+	s.claimOne()
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAHoldIsRefused() {
+	s.dueRepeat()
+	claim := s.claimOne()
+	stale, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claim.Run.ID, claim.LeasedBy, time.Now().Add(2*time.Hour))
+	s.Require().NoError(err)
+	s.Require().True(held)
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeItsSessionWasSetIsRefused() {
+	stale := s.dueRepeat()
+	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "one", "session-2"))
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAFinishIsRefused() {
+	s.dueRepeat()
+	claim := s.claimOne()
+	stale, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	next := s.base.Add(24 * time.Hour)
+	finished, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claim.Run.ID, claim.LeasedBy, ScheduledTaskOutcome{
+		RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
+		NextRunAt: &next, State: ScheduledTaskActive,
+	})
+	s.Require().NoError(err)
+	s.Require().True(finished)
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASavedCopyCanBeSavedAgain() {
+	task := s.task("one", nil)
+	task.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, task), "the copy a create wrote is the stored one")
+	task.Title = "Stretch three times"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, task), "the copy a save wrote is the stored one")
+}
+
+func (s *StoreSuite) TestASaveOfADeletedTaskSaysItIsNotThere() {
+	task := s.task("one", nil)
+	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "one"))
+
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, task), ErrNoScheduledTask)
+}
+
+func (s *StoreSuite) TestCreatesAtOnceStopAtTheActiveLimit() {
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 20 {
+		wg.Go(func() {
+			errs <- s.store.ScheduledTasks.Insert(s.ctx, &ScheduledTask{
+				ID: fmt.Sprintf("task-%d", i), CustomerID: "acme", ConfigID: "config-1", UserID: "sam",
+				CallerKind: "authenticated", Title: "Stretch", Instructions: "Remind Sam to stretch.",
+				StartLocal: s.base, Timezone: "UTC",
+			}, 5)
+		})
+	}
+	wg.Wait()
+	close(errs)
+	created, refused := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, ErrTooManyScheduledTasks):
+			refused++
+		default:
+			s.Require().NoError(err)
+		}
+	}
+	s.Equal(5, created)
+	s.Equal(15, refused)
+	active, err := s.store.ScheduledTasks.CountActive(s.ctx, "acme", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(5, active)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeARenewalIsKept() {
+	s.dueRepeat()
+	claim := s.claimOne()
+	read, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	renewed, err := s.store.ScheduledTasks.Renew(s.ctx, "acme", "one", claim.LeasedBy, time.Minute)
+	s.Require().NoError(err)
+	s.Require().True(renewed)
+	read.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &read), "a renewal is not a change the edit undoes")
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal("Stretch twice", task.Title)
+}
+
+// limitedConfig stores a config of acme's whose users may hold limit active tasks.
+func (s *StoreSuite) limitedConfig(limit int) AgentConfig {
+	config := &AgentConfig{CustomerID: "acme", Name: "agent-" + newID(), Scheduling: AgentScheduling{MaxTasksPerUser: limit}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+	return *config
+}
+
+func (s *StoreSuite) TestResumesAtOnceStopAtTheConfigsActiveLimit() {
+	config := s.limitedConfig(5)
+	for i := range 20 {
+		s.task(fmt.Sprintf("task-%d", i), func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskPaused })
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 20 {
+		wg.Go(func() {
+			task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", fmt.Sprintf("task-%d", i))
+			if err != nil {
+				errs <- err
+				return
+			}
+			task.State = ScheduledTaskActive
+			errs <- s.store.ScheduledTasks.Update(s.ctx, &task)
+		})
+	}
+	wg.Wait()
+	close(errs)
+	resumed, refused := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			resumed++
+		case errors.Is(err, ErrTooManyScheduledTasks):
+			refused++
+		default:
+			s.Require().NoError(err)
+		}
+	}
+	s.Equal(5, resumed)
+	s.Equal(15, refused)
+	active, err := s.store.ScheduledTasks.CountActive(s.ctx, "acme", "sam", config.ID)
+	s.Require().NoError(err)
+	s.Equal(5, active)
+}
+
+func (s *StoreSuite) TestAnEditOfAnActiveTaskAtTheLimitIsSaved() {
+	config := s.limitedConfig(1)
+	task := s.task("one", func(task *ScheduledTask) { task.ConfigID = config.ID })
+	task.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, task), "the task is counted already, not one more")
+	paused := s.task("two", func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskPaused })
+	paused.Title = "Walk"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, paused), "a task left paused takes no room")
+	paused.State = ScheduledTaskActive
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, paused), ErrTooManyScheduledTasks)
+}
+
+// sleptThrough stores a paused one-shot whose time passed, and the missed run a resume records.
+func (s *StoreSuite) sleptThrough() (ScheduledTask, *ScheduledTaskRun) {
+	due := s.base.Add(-time.Hour)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt, task.State = &due, ScheduledTaskPaused })
+	read, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	read.State, read.NextRunAt = ScheduledTaskCompleted, nil
+	reason, finished := scheduledTaskRunPaused, time.Now().UTC()
+	return read, &ScheduledTaskRun{TaskID: "one", CustomerID: "acme", ScheduledFor: due,
+		State: ScheduledTaskRunMissed, Error: &reason, FinishedAt: &finished}
+}
+
+func (s *StoreSuite) TestClosingATaskRecordsTheOccurrenceItSleptThrough() {
+	task, missed := s.sleptThrough()
+	s.Require().NoError(s.store.ScheduledTasks.Close(s.ctx, &task, missed))
+
+	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "one"})
+	s.Require().NoError(err)
+	s.Require().Len(runs, 1)
+	s.Equal(ScheduledTaskRunMissed, runs[0].State)
+	closed, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(ScheduledTaskCompleted, closed.State)
+}
+
+func (s *StoreSuite) TestAClosingRefusedAsChangedRecordsNoRun() {
+	stale, missed := s.sleptThrough()
+	edit, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	edit.Title = "Stretch twice"
+	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &edit))
+
+	s.ErrorIs(s.store.ScheduledTasks.Close(s.ctx, &stale, missed), ErrScheduledTaskChanged)
+	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "one"})
+	s.Require().NoError(err)
+	s.Empty(runs, "the refused resume left no run behind")
+}
+
 func (s *StoreSuite) TestATaskOnADeletedConfigIsRefused() {
 	deleted := s.boundConfig("acme")
 	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme", deleted.ID))
@@ -1201,8 +1457,8 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 		Title: "Stretch", Instructions: "Remind Sam to stretch.", StartLocal: s.base, Timezone: "Europe/Amsterdam",
 		State: ScheduledTaskActive, CreatedBy: "api"}
 
-	// The transaction, the config locked, the user's active tasks counted and the insert.
-	s.Equal(5, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, added, 25)) }), "Insert")
+	// The transaction, the config locked, the limit locked, the user's active tasks counted and the insert.
+	s.Equal(6, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, added, 25)) }), "Insert")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "st-new")
 		s.Require().NoError(err)
@@ -1266,8 +1522,8 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1"))
 	}), "DeleteForSession")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
-	// One batch of runs and one of tasks, with nothing to prune.
-	s.Equal(2, s.countQueries(func() {
+	// The lost runs by hand settled, then one batch of runs and one of tasks, with nothing to prune.
+	s.Equal(3, s.countQueries(func() {
 		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
 		s.Require().NoError(err)
 	}), "Prune")

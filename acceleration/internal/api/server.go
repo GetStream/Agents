@@ -1112,8 +1112,9 @@ func answeredHealthy(routes *chi.Mux, r *http.Request, status int, failure *requ
 
 // maxLoggedValue caps a value the caller chose, a header or an anonymous caller's user id, on
 // the access line. net/http admits up to 1 MiB of headers (http.DefaultMaxHeaderBytes), which
-// would otherwise land on one line. The clients the router knows by X-Stream-Client are short
-// words (store.AuditSource), and 256 bytes is enough to tell user agents apart.
+// would otherwise land on one line. The clients the router knows by X-Stream-Client are a word
+// or an SDK's name and release (store.AuditSource), well under it, and 256 bytes is enough to
+// tell user agents apart.
 const maxLoggedValue = 256
 
 // accessFields are the access line's fields named as the Stream platform's access logs name

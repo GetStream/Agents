@@ -84,6 +84,10 @@ type ScheduledTaskRuns struct {
 // or a missed occurrence. A scheduled occurrence that already has its run is
 // left as it is.
 func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) error {
+	return stack.Wrap(insertScheduledTaskRun(ctx, r.store.global, run))
+}
+
+func insertScheduledTaskRun(ctx context.Context, db bun.IDB, run *ScheduledTaskRun) error {
 	if run.ID == "" {
 		run.ID = newID()
 	}
@@ -97,13 +101,10 @@ func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) e
 		run.State = ScheduledTaskRunRunning
 	}
 	if err := run.Validate(); err != nil {
-		return stack.Wrap(err)
+		return err
 	}
-	_, err := r.store.global.NewInsert().Model(run).
-		On("CONFLICT DO NOTHING").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: insert scheduled task run: %w", err))
+	if _, err := db.NewInsert().Model(run).On("CONFLICT DO NOTHING").Exec(ctx); err != nil {
+		return fmt.Errorf("store: insert scheduled task run: %w", err)
 	}
 	return nil
 }
@@ -229,6 +230,40 @@ func (r *ScheduledTaskRuns) ReleaseCall(ctx context.Context, customerID, runID, 
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: release scheduled task run call: %w", err))
+	}
+	return nil
+}
+
+// TakeText records on a run that its words are about to be texted on channel, and
+// reports false when they were already: an earlier attempt, or a worker that
+// stopped, sent them there, so the person is not texted twice.
+func (r *ScheduledTaskRuns) TakeText(ctx context.Context, customerID, runID, channel string) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("texted = array_append(texted, ?)", channel).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Where("NOT (? = ANY(texted))", channel).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: take scheduled task run text: %w", err))
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: take scheduled task run text: %w", err))
+	}
+	return affected > 0, nil
+}
+
+// ReleaseText gives back a text TakeText took and could not send, so a later
+// attempt may.
+func (r *ScheduledTaskRuns) ReleaseText(ctx context.Context, customerID, runID, channel string) error {
+	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("texted = array_remove(texted, ?)", channel).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: release scheduled task run text: %w", err))
 	}
 	return nil
 }

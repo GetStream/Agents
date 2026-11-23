@@ -190,18 +190,13 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 // Link mints a code somebody signed in may text from their phone to claim it. It is how an
 // agent that keeps something personal learns which end user a number belongs to.
 func (s *Service) Link(ctx context.Context, customerID, configID, userID string) (store.ChannelLink, error) {
-	code, err := linkCode()
-	if err != nil {
-		return store.ChannelLink{}, err
-	}
 	link := store.ChannelLink{
-		Code:       code,
 		CustomerID: customerID,
 		ConfigID:   configID,
 		UserID:     userID,
 		ExpiresAt:  time.Now().UTC().Add(LinkValidFor),
 	}
-	if err := s.store.ChannelLinks.Insert(ctx, &link); err != nil {
+	if err := s.store.ChannelLinks.Insert(ctx, &link, linkCode); err != nil {
 		return store.ChannelLink{}, err
 	}
 	return link, nil
@@ -545,7 +540,7 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
-		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, strings.TrimSpace(message.Text))
+		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
 		if err != nil {
 			if errors.Is(err, store.ErrUnknownChannelLink) {
 				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
@@ -554,11 +549,6 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 			}
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
-				answering(account.CustomerID, ""))
-			return store.ContactMapEntry{}, false
-		}
-		if link.ConfigID != config.ID {
-			s.say(ctx, line, provider, message, Reply{Text: "That code is for another agent."},
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
