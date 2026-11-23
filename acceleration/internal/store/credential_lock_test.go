@@ -417,7 +417,7 @@ func (s *StoreSuite) assertTheWaitEnded(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(false) == 0 }, 2*time.Second, 10*time.Millisecond,
 		"the server stops waiting for the lock on behalf of a caller that gave up")
 	s.Equal(1, s.credentialLocks(true), "the holder keeps the lock")
-	s.Eventually(func() bool { return waiter.GlobalDB().Stats().InUse == 0 }, 2*time.Second, 10*time.Millisecond,
+	s.Eventually(func() bool { return waiter.locks.Stats().InUse == 0 }, 2*time.Second, 10*time.Millisecond,
 		"the waiter's connection goes back")
 }
 
@@ -426,5 +426,60 @@ func (s *StoreSuite) assertTheWaitEnded(waiter *Store) {
 func (s *StoreSuite) assertNothingIsHeld(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(true) == 0 && s.credentialLocks(false) == 0 },
 		2*time.Second, 10*time.Millisecond, "no credential lock is left behind")
-	s.Zero(waiter.GlobalDB().Stats().InUse)
+	s.Zero(waiter.locks.Stats().InUse)
+}
+
+func (s *StoreSuite) TestCredentialLocksHeldAtOnceFillTheirOwnPoolAndLeaveTheServingOneFree() {
+	router := s.router()
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	var inside atomic.Int32
+	finished := make(chan error, maxConns)
+	// As many lockers as the serving pool has connections, each reading through the store
+	// inside its lock, as the resolver does: holding their locks on the serving pool, they
+	// would take all of it and wait for one more.
+	for range maxConns {
+		connection := s.connection("acme-app", nil)
+		go func() {
+			finished <- router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+				func(locked *ConnectorConnection, _ func() error) (bool, error) {
+					if _, err := router.ConnectorConnections.Get(s.ctx, "acme-app", locked.ID); err != nil {
+						return false, err
+					}
+					inside.Add(1)
+					<-release
+					return false, nil
+				})
+		}()
+	}
+	s.Require().Eventually(func() bool {
+		return inside.Load() == lockConns && router.locks.Stats().WaitCount == maxConns-lockConns
+	}, 5*time.Second, 10*time.Millisecond, "lockConns locks are held and the lockers past them wait for a lock connection")
+	s.Equal(lockConns, s.credentialLocks(true))
+
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	defer cancel()
+	_, _, err := router.Server(ctx)
+	s.Require().NoError(err, "a query outside the locks gets a serving connection while every lock connection is held")
+
+	unblock()
+	for range maxConns {
+		s.Require().NoError(<-finished)
+	}
+	s.Equal(int32(maxConns), inside.Load(), "every locker past the pool waited its turn and ran")
+	s.Zero(router.locks.Stats().InUse)
+}
+
+func (s *StoreSuite) TestClosingTheStoreClosesItsLockPool() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	connection := s.connection("acme-app", nil)
+	s.Require().NoError(router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	s.Require().Equal(1, router.locks.Stats().OpenConnections, "the lock's connection stays open in the lock pool")
+
+	s.Require().NoError(router.Close())
+
+	s.Zero(router.locks.Stats().OpenConnections)
 }
