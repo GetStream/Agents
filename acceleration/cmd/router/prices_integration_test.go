@@ -374,7 +374,7 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	seed := changes[0]
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router dev", seed.Source)
-	upcoming, err := pgStore.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := pgStore.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming, "the scheduled change went with the rest")
 	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())

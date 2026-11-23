@@ -330,12 +330,8 @@ func ReleaseName(release string) string {
 	return notInName.ReplaceAllString(strings.ToLower(release), "_")
 }
 
-// NextAt is when the next change not cancelled takes effect after after, and
+// nextPriceChangeAt is when the next change not cancelled takes effect after after, and
 // whether one is scheduled, so a list in memory can switch at that moment.
-func (r *PriceChanges) NextAt(ctx context.Context, after time.Time) (time.Time, bool, error) {
-	return nextPriceChangeAt(ctx, r.store.global, after)
-}
-
 func nextPriceChangeAt(ctx context.Context, db bun.IDB, after time.Time) (time.Time, bool, error) {
 	var next sql.NullTime
 	err := db.NewSelect().Model((*PriceChange)(nil)).ColumnExpr("min(effective_at)").
