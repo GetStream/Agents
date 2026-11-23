@@ -112,7 +112,7 @@ func (s *Session) Activate(ctx context.Context, responseID string) (Activated, e
 		return Activated{}, err
 	}
 	customer := s.spec.CustomerID
-	target, err := s.tree.SessionResponse(ctx, customer, s.id, responseID)
+	target, err := s.tree.Responses.Get(ctx, customer, s.id, responseID)
 	if err != nil {
 		return Activated{}, err
 	}
@@ -209,7 +209,7 @@ func (s *Session) Activate(ctx context.Context, responseID string) (Activated, e
 // alternatives now, as an activation would send them again. A response on the conversation is
 // what the channel shows, so active is set and nothing is returned.
 func BranchShown(ctx context.Context, tree *store.Store, customerID, sessionID, responseID string) (active bool, shown []store.AgentBranchMessage, err error) {
-	target, err := tree.SessionResponse(ctx, customerID, sessionID, responseID)
+	target, err := tree.Responses.Get(ctx, customerID, sessionID, responseID)
 	if err != nil {
 		return false, nil, err
 	}
@@ -269,7 +269,7 @@ func (s *Session) branch(ctx context.Context, id, responseID, text, clientID str
 		return Branched{}, stack.Wrap(err)
 	}
 	customer := s.spec.CustomerID
-	replaced, err := s.tree.SessionResponse(ctx, customer, s.id, responseID)
+	replaced, err := s.tree.Responses.Get(ctx, customer, s.id, responseID)
 	if err != nil {
 		return Branched{}, err
 	}
@@ -419,7 +419,7 @@ func (s *Session) rewindKept(ctx context.Context, keptID string) error {
 		return stack.Wrap(err)
 	}
 	customer := s.spec.CustomerID
-	kept, err := s.tree.SessionResponse(ctx, customer, s.id, keptID)
+	kept, err := s.tree.Responses.Get(ctx, customer, s.id, keptID)
 	if err != nil {
 		return err
 	}
@@ -429,7 +429,7 @@ func (s *Session) rewindKept(ctx context.Context, keptID string) error {
 	if kept.RewoundAt != nil {
 		return stack.Wrap(fmt.Errorf("%w: response %s is not on the conversation; activate its branch first", persistent.ErrBranchConflict, keptID))
 	}
-	next, after, err := s.tree.ActiveChild(ctx, customer, s.id, keptID)
+	next, after, err := s.tree.Responses.ActiveChild(ctx, customer, s.id, keptID)
 	if err != nil {
 		return err
 	}
@@ -533,7 +533,7 @@ func (s *Session) heal(ctx context.Context) error {
 	if err != nil {
 		return stack.Wrap(errors.Join(ErrSwitchUnfinished, err))
 	}
-	leaf, err := s.tree.ActiveLeaf(ctx, s.spec.CustomerID, s.id)
+	leaf, err := s.tree.Responses.ActiveLeaf(ctx, s.spec.CustomerID, s.id)
 	if err != nil {
 		return stack.Wrap(errors.Join(ErrSwitchUnfinished, err))
 	}
@@ -564,7 +564,7 @@ func (s *Session) settle(ctx context.Context, target persistent.RewindTarget, ch
 	if !carried {
 		// A switch still journaled is one whose rewind may land later: the next turn looks
 		// again (checkSettled) rather than answering from a conversation Chat may have cut.
-		if unfinished, err := s.tree.UnfinishedBranchSwitches(ctx, s.spec.CustomerID, s.id); err == nil &&
+		if unfinished, err := s.tree.BranchSwitches.Unfinished(ctx, s.spec.CustomerID, s.id); err == nil &&
 			slices.ContainsFunc(unfinished, func(sw store.AgentBranchSwitch) bool { return sw.ID == target.SwitchID }) {
 			s.unsettled = target.SwitchID
 		}
@@ -584,7 +584,7 @@ func (s *Session) moveActivePath(ctx context.Context, leaf string, sw store.Agen
 	if sw.ID == "" {
 		until = now
 	}
-	if err := s.tree.MoveActivePathUntil(ctx, s.spec.CustomerID, s.id, leaf, now, until); err != nil {
+	if err := s.tree.Responses.MoveActivePathUntil(ctx, s.spec.CustomerID, s.id, leaf, now, until); err != nil {
 		if sw.ID != "" {
 			s.unsettled = sw.ID
 		}
@@ -618,7 +618,7 @@ func (s *Session) branchDocuments(ctx context.Context, replaced store.AgentRespo
 	if edit {
 		until = replaced.ParentResponseID
 	}
-	documents, err := s.tree.ConversationDocuments(ctx, s.spec.CustomerID, s.documentScope(until))
+	documents, err := s.tree.ConversationDocuments.Select(ctx, s.spec.CustomerID, s.documentScope(until))
 	if err != nil || until != "" {
 		return documents, err
 	}
@@ -636,7 +636,7 @@ func (s *Session) branchDocuments(ctx context.Context, replaced store.AgentRespo
 // leaves the turn answered and says so in the log, as keepDocument does.
 func (s *Session) carryQuestionDocuments(ctx context.Context, replacedID, responseID string) {
 	// The turn is running whether or not the caller is still there to hear it started.
-	err := s.tree.CopyResponseDocuments(context.WithoutCancel(ctx), s.spec.CustomerID, s.id, replacedID, responseID)
+	err := s.tree.ConversationDocuments.CopyResponse(context.WithoutCancel(ctx), s.spec.CustomerID, s.id, replacedID, responseID)
 	if err != nil {
 		s.logger.Error("could not keep the files of a regenerated question", "session", s.id, "response", responseID, "error", err)
 	}
@@ -648,7 +648,7 @@ func (s *Session) carryQuestionDocuments(ctx context.Context, replacedID, respon
 // files rather than with the abandoned branch's, and says so in the log, as an opening session
 // does.
 func (s *Session) pinActivatedDocuments(ctx context.Context) {
-	documents, err := s.tree.ConversationDocuments(ctx, s.spec.CustomerID, s.documentScope(""))
+	documents, err := s.tree.ConversationDocuments.Select(ctx, s.spec.CustomerID, s.documentScope(""))
 	if err != nil {
 		s.logger.Error("could not read the documents of an activated branch", "session", s.id, "error", err)
 	}
@@ -685,7 +685,7 @@ func (s *Session) refuseBranches(ctx context.Context) error {
 // point for an edit.
 func (s *Session) replacing(ctx context.Context, replaced store.AgentResponse, edit bool) (persistent.Turn, error) {
 	customer := s.spec.CustomerID
-	questions, err := s.tree.Siblings(ctx, customer, s.id, replaced.ID, store.SiblingsOfQuestion)
+	questions, err := s.tree.Responses.Siblings(ctx, customer, s.id, replaced.ID, store.SiblingsOfQuestion)
 	if err != nil {
 		return persistent.Turn{}, err
 	}
@@ -696,7 +696,7 @@ func (s *Session) replacing(ctx context.Context, replaced store.AgentResponse, e
 		turn.Question = placeOf(len(questions)+1, len(questions)+1)
 		return turn, nil
 	}
-	replies, err := s.tree.Siblings(ctx, customer, s.id, replaced.ID, store.SiblingsOfReply)
+	replies, err := s.tree.Responses.Siblings(ctx, customer, s.id, replaced.ID, store.SiblingsOfReply)
 	if err != nil {
 		return persistent.Turn{}, err
 	}
@@ -731,7 +731,7 @@ func (s *Session) carryOnFrom(history []llm.Message) {
 // countRanges records how many hidden ranges Chat keeps for the conversation now, and warns
 // as it nears the cap. A count that cannot be read costs the metric, not the switch.
 func (s *Session) countRanges(ctx context.Context, kind string) {
-	count, err := s.tree.MergedRangeCount(ctx, s.spec.CustomerID, s.id)
+	count, err := s.tree.BranchSwitches.MergedRangeCount(ctx, s.spec.CustomerID, s.id)
 	if err != nil {
 		s.logger.Warn("could not count the conversation's hidden ranges", "session", s.id, "error", err)
 		return
@@ -757,7 +757,7 @@ const rewindPrefix = "rw"
 // unfinishedRewind is a rewind that hides target and that an earlier try left unfinished; the
 // zero switch for none.
 func (s *Session) unfinishedRewind(ctx context.Context, target string) (store.AgentBranchSwitch, error) {
-	unfinished, err := s.tree.UnfinishedBranchSwitches(ctx, s.spec.CustomerID, s.id)
+	unfinished, err := s.tree.BranchSwitches.Unfinished(ctx, s.spec.CustomerID, s.id)
 	if err != nil {
 		return store.AgentBranchSwitch{}, err
 	}
@@ -777,7 +777,7 @@ const keptQuestionPrefix = "aq"
 // unfinishedSwitch is the switch id an earlier try left unfinished, when it replaces target;
 // the zero switch for none.
 func (s *Session) unfinishedSwitch(ctx context.Context, id, target string) (store.AgentBranchSwitch, error) {
-	unfinished, err := s.tree.UnfinishedBranchSwitches(ctx, s.spec.CustomerID, s.id)
+	unfinished, err := s.tree.BranchSwitches.Unfinished(ctx, s.spec.CustomerID, s.id)
 	if err != nil {
 		return store.AgentBranchSwitch{}, err
 	}
@@ -792,7 +792,7 @@ func (s *Session) unfinishedSwitch(ctx context.Context, id, target string) (stor
 // unfinishedActivation is the activation of target an earlier try left unfinished, so it is
 // finished rather than sent again beside it; the zero switch for none.
 func (s *Session) unfinishedActivation(ctx context.Context, target string) (store.AgentBranchSwitch, error) {
-	unfinished, err := s.tree.UnfinishedBranchSwitches(ctx, s.spec.CustomerID, s.id)
+	unfinished, err := s.tree.BranchSwitches.Unfinished(ctx, s.spec.CustomerID, s.id)
 	if err != nil {
 		return store.AgentBranchSwitch{}, err
 	}
@@ -819,7 +819,7 @@ func branchOf(ctx context.Context, tree *store.Store, target store.AgentResponse
 		if top.ParentResponseID == "" {
 			break
 		}
-		parent, err := tree.SessionResponse(ctx, customer, session, top.ParentResponseID)
+		parent, err := tree.Responses.Get(ctx, customer, session, top.ParentResponseID)
 		if err != nil {
 			return store.AgentResponse{}, nil, err
 		}
@@ -829,7 +829,7 @@ func branchOf(ctx context.Context, tree *store.Store, target store.AgentResponse
 		above = append(above, parent)
 		top = parent
 	}
-	below, err := tree.BranchTail(ctx, customer, session, target.ID)
+	below, err := tree.Responses.BranchTail(ctx, customer, session, target.ID)
 	if err != nil {
 		return store.AgentResponse{}, nil, err
 	}
@@ -859,7 +859,7 @@ func chosenFor(ctx context.Context, tree *store.Store, target store.AgentRespons
 			ids = append(ids, q)
 		}
 	}
-	copies, err := tree.BranchMessages(ctx, customer, session, ids)
+	copies, err := tree.BranchMessages.Select(ctx, customer, session, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -951,7 +951,7 @@ func marksOf(ctx context.Context, tree *store.Store, customer, session string, r
 		}
 		row, ok := rows[m.ResponseID]
 		if !ok {
-			read, err := tree.SessionResponse(ctx, customer, session, m.ResponseID)
+			read, err := tree.Responses.Get(ctx, customer, session, m.ResponseID)
 			if err != nil {
 				return nil, err
 			}
@@ -963,7 +963,7 @@ func marksOf(ctx context.Context, tree *store.Store, customer, session string, r
 		}
 		at, ok := places[group{row.ID, of}]
 		if !ok {
-			siblings, err := tree.Siblings(ctx, customer, session, row.ID, of)
+			siblings, err := tree.Responses.Siblings(ctx, customer, session, row.ID, of)
 			if err != nil {
 				return nil, err
 			}
@@ -1002,7 +1002,7 @@ func resentFromOf(m store.AgentBranchMessage) string {
 func switchHooks(tree *store.Store) persistent.SwitchHooks {
 	return persistent.SwitchHooks{
 		Chosen: func(ctx context.Context, sw store.AgentBranchSwitch) ([]store.AgentBranchMessage, error) {
-			target, err := tree.SessionResponse(ctx, sw.CustomerID, sw.SessionID, sw.TargetResponseID)
+			target, err := tree.Responses.Get(ctx, sw.CustomerID, sw.SessionID, sw.TargetResponseID)
 			if err != nil {
 				return nil, err
 			}
@@ -1017,20 +1017,20 @@ func switchHooks(tree *store.Store) persistent.SwitchHooks {
 		Switched: func(ctx context.Context, sw store.AgentBranchSwitch) error {
 			leaf := ""
 			if sw.Kind == store.SwitchActivate {
-				tail, err := tree.BranchTail(ctx, sw.CustomerID, sw.SessionID, sw.TargetResponseID)
+				tail, err := tree.Responses.BranchTail(ctx, sw.CustomerID, sw.SessionID, sw.TargetResponseID)
 				if err != nil {
 					return err
 				}
 				leaf = tail[len(tail)-1].ID
 			} else {
-				target, err := tree.SessionResponse(ctx, sw.CustomerID, sw.SessionID, sw.TargetResponseID)
+				target, err := tree.Responses.Get(ctx, sw.CustomerID, sw.SessionID, sw.TargetResponseID)
 				if err != nil {
 					return err
 				}
 				leaf = target.ParentResponseID
 			}
 			// The turns asked after the switch began are on the conversation the person sees.
-			return tree.MoveActivePathUntil(ctx, sw.CustomerID, sw.SessionID, leaf, time.Now().UTC(), sw.CreatedAt)
+			return tree.Responses.MoveActivePathUntil(ctx, sw.CustomerID, sw.SessionID, leaf, time.Now().UTC(), sw.CreatedAt)
 		},
 	}
 }

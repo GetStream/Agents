@@ -63,7 +63,7 @@ func (s *CustomModelRecorderSuite) recorded(config routing.ProviderConfig, stat 
 	s.recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", stat.CustomerID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", stat.CustomerID).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	return rows[0]
 }

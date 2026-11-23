@@ -63,10 +63,10 @@ func (s *StreamAppsCLISuite) SetupTest() {
 
 func (s *StreamAppsCLISuite) TestLegacyCountsOtherCustomersWorkInTheDeploymentApp() {
 	other := "someone-" + s.customer
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: uuid.NewString(), CustomerID: other, AgentID: "agent", UserID: "user",
 	}))
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: uuid.NewString(), CustomerID: "1", AgentID: "agent", UserID: "user",
 	}))
 	var out bytes.Buffer

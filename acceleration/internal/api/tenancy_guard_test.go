@@ -70,7 +70,7 @@ func (s *TenancyGuardSuite) drive(customer tenant) {
 		ClaimGuestRequest{GuestId: guest.Id, UserId: "account-" + s.utils.uuid()}, nil))
 
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "text"}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 	body := fmt.Sprintf(`{"type": "message.new", "channel_id": %q, "channel_type": "agent", "created_at": %q,
   "channel_custom": {%q: %q}, "message": {"id": %q, "text": "hello", "user": {"id": "sam"}}}`,
 		"chat-"+s.utils.uuid(), time.Now().UTC().Format(time.RFC3339Nano), ConfigField, config.ID, "message-"+s.utils.uuid())
@@ -121,7 +121,7 @@ func (s *TenancyGuardSuite) TestTheDeploymentAppsHooksStartNothingForACustomerOn
 	s.chat.SetAppFor(suiteStreamKey, chattest.App{ID: suiteStreamApp})
 	s.useApp(s.numberedApp(streamAppID()))
 	agent := "chat-" + s.utils.uuid()
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &store.Call{
 		ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(), AgentID: agent,
 		StartedAt: time.Now().UTC(),
 	}))

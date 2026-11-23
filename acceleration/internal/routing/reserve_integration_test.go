@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -75,9 +74,8 @@ func (s *ReserveSuite) SetupSuite() {
 func (s *ReserveSuite) SetupTest() {
 	stamp := time.Now().UnixNano()
 	s.app, s.org = fmt.Sprintf("app-%d", stamp), fmt.Sprintf("org-%d", stamp)
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, s.app, s.org))
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: s.service.URL, Token: s.service.Token})
 	s.Require().NoError(err)
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -131,7 +129,7 @@ func (s *ReserveSuite) rows(want int) []store.Request {
 	var rows []store.Request
 	s.Eventually(func() bool {
 		rows = nil
-		s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.app).Scan(s.ctx))
+		s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.app).Scan(s.ctx))
 		return len(rows) == want
 	}, 5*time.Second, 10*time.Millisecond)
 	return rows

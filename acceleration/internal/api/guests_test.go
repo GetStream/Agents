@@ -451,13 +451,13 @@ func (s *GuestsSuite) TestAClaimMovesTheGuestsScheduledTasks() {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	account := s.utils.uuid()
 
 	s.claim(guest, account)
 
-	moved, err := s.store.ScheduledTask(ctx, s.customerID(), task.ID)
+	moved, err := s.store.ScheduledTasks.Get(ctx, s.customerID(), task.ID)
 	s.Require().NoError(err)
 	s.Equal(account, moved.UserID, "the task follows up for the account the guest turned out to be")
 }
@@ -504,7 +504,7 @@ func (s *GuestsSuite) TestAClaimLeavesWhatAnAnonymousNamesakeSaidWhereItWas() {
 	s.Contains(s.chat.Members(s.transcriptOf(genuine)), account.userID, "the account reads what the guest said")
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheGuestsName)), account.userID)
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheAccountsName)), account.userID)
-	left, err := s.store.ScheduledTask(context.Background(), s.customerID(), task)
+	left, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task)
 	s.Require().NoError(err)
 	s.Equal(guestID, left.UserID, "the namesake's task is not moved")
 }
@@ -517,7 +517,7 @@ func (s *GuestsSuite) TestAClaimDoesNotLetTheAccountIntoAnotherAppsChannel() {
 	foreign := s.transcriptOf(s.talkedAs(otherUser))
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -551,7 +551,7 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -664,15 +664,15 @@ func (s *GuestsSuite) scheduledFor(userID string, kind auth.Kind) string {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	return task.ID
 }
 
 // transcriptOf is the Stream Chat channel the session's words were written to.
 func (s *GuestsSuite) transcriptOf(sessionID string) string {
 	var row store.AgentSession
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
 	channel := transcriptChannel(row)
 	_, kept := s.chat.Channel(channel)
 	s.Require().True(kept, "the session wrote a transcript")
@@ -684,7 +684,7 @@ func (s *GuestsSuite) transcriptOf(sessionID string) string {
 // a name would put the name in its channel, so the row is moved under it afterwards.
 func (s *GuestsSuite) underTheName(name string) string {
 	talked := s.talkedAs(s.data.createAnonymous())
-	_, err := s.store.DB().NewUpdate().Model((*store.AgentSession)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentSession)(nil)).
 		Set("user_id = ?", name).Where("id = ?", talked).Exec(context.Background())
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), name)

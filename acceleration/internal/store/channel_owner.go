@@ -8,6 +8,8 @@ import (
 	"slices"
 
 	"github.com/uptrace/bun"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // DraftOfTag is the tag that marks an agent config as a test copy: a temporary copy the
@@ -151,4 +153,85 @@ func lockChannelOwner(ctx context.Context, tx bun.Tx, customerID, id string) (st
 		return "", false, fmt.Errorf("store: channel connection owner: %w", err)
 	}
 	return connection.ConnectorID, true, nil
+}
+
+// AppConnectionByAccount returns the customer's live app-owned connection of a connector whose
+// account id is accountID: the connection of the provider unit a provider app's event names,
+// such as the bot token of the Slack workspace the app is installed in, whose identity is the
+// team alone.
+func (s *Store) AppConnectionByAccount(ctx context.Context, customerID, connectorID, accountID string) (ConnectorConnection, error) {
+	if customerID == "" || connectorID == "" || accountID == "" {
+		return ConnectorConnection{}, stack.Wrap(errors.New("store: a customer, a connector and an account id are required"))
+	}
+	var connection ConnectorConnection
+	err := s.global.NewSelect().Model(&connection).
+		Where("customer_id = ?", customerID).
+		Where("connector_id = ?", connectorID).
+		Where("owner_type = ?", OwnerApp).
+		Where("account_id = ?", accountID).
+		Where("deleted_at IS NULL").
+		Order("created_at DESC", "id DESC").
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConnectorConnection{}, stack.Wrap(fmt.Errorf("%w: %s account %s", ErrNoConnectorConnection, connectorID, accountID))
+	}
+	if err != nil {
+		return ConnectorConnection{}, stack.Wrap(fmt.Errorf("store: app connection by account: %w", err))
+	}
+	return connection, nil
+}
+
+// bindsFixedConnection is the WHERE clause that finds the agent configs that bind a connection
+// as their fixed connection, matched as boundByConfig matches them.
+const bindsFixedConnection = "connectors @> jsonb_build_array(jsonb_build_object('connection', jsonb_build_object('type', 'fixed', 'connection_id', ?::text)))"
+
+// AgentConfigsBindingConnection returns the customer's live agent configs that bind the
+// connection as their fixed connection, oldest first: the agents that answer on the provider
+// unit the connection is, matched as boundByConfig matches them. A test copy (DraftOfTag) is
+// left out: it answers no channel message and subscribes to no event (AI-1049, AI-1048). The
+// first is the connection's owner, which refuseSecondChannelAgent keeps the only one on a
+// channel connection.
+func (s *Store) AgentConfigsBindingConnection(ctx context.Context, customerID, connectionID string) ([]AgentConfig, error) {
+	if customerID == "" || connectionID == "" {
+		return nil, stack.Wrap(errors.New("store: a customer and a connection id are required"))
+	}
+	var configs []AgentConfig
+	err := s.global.NewSelect().Model(&configs).
+		Where("customer_id = ?", customerID).
+		Where("deleted_at IS NULL").
+		Where(notTestCopy).
+		Where(bindsFixedConnection, connectionID).
+		Order("created_at", "id").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: agent configs binding connection: %w", err))
+	}
+	return configs, nil
+}
+
+// ConfigOnChannel is the agent reachable on a number, and false when none is.
+//
+// It answers both questions there are about a line: which agent a message to it is for, and
+// whether another agent has already claimed it. Two agents on one number would both answer
+// every message, so the second one to ask for it is refused.
+func (s *Store) ConfigOnChannel(ctx context.Context, customerID, kind, number string) (AgentConfig, bool, error) {
+	if customerID == "" || kind == "" || number == "" {
+		return AgentConfig{}, false, nil
+	}
+
+	var config AgentConfig
+	err := s.global.NewSelect().Model(&config).
+		Where("customer_id = ?", customerID).
+		Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+		Where("deleted_at IS NULL").
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AgentConfig{}, false, nil
+	}
+	if err != nil {
+		return AgentConfig{}, false, stack.Wrap(fmt.Errorf("store: config on channel: %w", err))
+	}
+	return config, true, nil
 }

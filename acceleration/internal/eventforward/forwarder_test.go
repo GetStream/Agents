@@ -51,9 +51,9 @@ func (s *ForwarderSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.store = db
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.sealer, err = auth.NewSealerWithKeyring(1, map[int]string{1: "test key one"})
@@ -177,13 +177,13 @@ func (s *ForwarderSuite) TestAnAttemptWithinTheProvidersWindowCarriesItsSignatur
 // forwarding after its look at start until a lease (1 min) has passed. The worker before it
 // claimed once each poll: at this suite's 10 ms, about 50 claims in the 500 ms watched here.
 func (s *ForwarderSuite) TestAForwarderWithNothingQueuedSendsNoQuery() {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
 	s.Require().NoError(err)
 	own, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
 	queries := &queryCount{}
-	own.DB().AddQueryHook(queries)
+	own.GlobalDB().AddQueryHook(queries)
 	forwarder, err := New(Options{Store: own, Secrets: s.sealer, Poll: 10 * time.Millisecond})
 	s.Require().NoError(err)
 
@@ -217,7 +217,7 @@ func (s *ForwarderSuite) TestAForwardQueuedBeforeTheForwarderStartedIsSent() {
 // again a lease after its last look and sends it. Here the lease is 200 ms; the bound, 2 s, is
 // far over that and the 10 ms poll, and far under forever, which is what B waited before.
 func (s *ForwarderSuite) TestAnIdleRouterSendsAForwardAnotherRouterLeftQueued() {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
 	s.Require().NoError(err)
 	var hits atomic.Int32
 	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
@@ -235,15 +235,16 @@ func (s *ForwarderSuite) TestAnIdleRouterSendsAForwardAnotherRouterLeftQueued() 
 // The same with a retry queued an hour out: B waits a lease, not the hour, before it looks
 // again and finds what router A left.
 func (s *ForwarderSuite) TestARouterWaitingOnALaterRetryStillSendsAForwardAnotherRouterLeft() {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries")
 	s.Require().NoError(err)
 	var hits atomic.Int32
 	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
 	stopped, err := New(Options{Store: s.store, Secrets: s.sealer, HTTP: target.Client()})
 	s.Require().NoError(err)
 	later := s.destinationOf(stopped, target.URL)
-	_, err = s.store.QueueEventDeliveries(s.ctx, later, "slack_bot", []string{store.ForwardAll},
+	_, err = s.store.EventDeliveries.Queue(s.ctx, later, "slack_bot", []string{store.ForwardAll},
 		store.EventDelivery{ID: "msg_later", Body: []byte(`{"later":1}`), NextAttemptAt: time.Now().Add(time.Hour)})
+
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.dropForwards(later) })
 	s.routerAfterItsFirstLook(target.Client())
@@ -262,7 +263,7 @@ func (s *ForwarderSuite) TestACustomerWithoutDestinationsQueuesNothing() {
 	s.Require().NoError(forwarder.Forward(s.ctx, Event{CustomerID: "nobody-" + uuid.NewString(), ConnectorID: "slack_bot", Body: []byte(`{}`)}))
 
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
 		"JOIN connector_event_destinations t ON t.id = d.destination_id WHERE t.customer_id LIKE 'nobody-%'").Scan(&rows))
 	s.Zero(rows)
 }
@@ -282,20 +283,21 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	})
 	forwarder := s.forwarder(target.Client())
 	organization, app := "organization-"+uuid.NewString(), "customer-"+uuid.NewString()
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, app, organization))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: app, OrganizationID: organization}))
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: app, ConnectorID: store.StreamSource, URL: target.URL, Forward: store.ForwardAll,
 	}
 	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
-	notice := store.BalanceNotice{OrganizationID: organization, Kind: store.NoticeBalanceLow, GrantedMicros: 10, BalanceMicros: 4, ThresholdMicros: 5}
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
+	notice, err := store.BalanceNotice{OrganizationID: organization, Kind: store.NoticeBalanceLow, GrantedMicros: 10, BalanceMicros: 4, ThresholdMicros: 5}.Notice()
+	s.Require().NoError(err)
 	delivery := store.EventDelivery{
 		ID: "balance:" + organization + ":balance_low:10", Headers: map[string]string{"Content-Type": "application/json"}, NextAttemptAt: time.Now(),
 	}
 
-	sent, queued, err := s.store.NoteBalance(s.ctx, notice, delivery, func(appID string) ([]byte, error) {
+	sent, queued, err := s.store.Notices.InsertQueued(s.ctx, &notice, delivery, func(appID string) ([]byte, error) {
 		return []byte(`{"type":"account.balance_low","data":{"app_id":"` + appID + `"}}`), nil
 	})
 	s.Require().NoError(err)
@@ -318,7 +320,7 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	s.Require().NoError(err)
 	s.Equal(signed, arrived.header.Get(headerSignature), "signed with the destination's own secret")
 
-	again, queued, err := s.store.NoteBalance(s.ctx, notice, delivery, func(string) ([]byte, error) { return []byte(`{}`), nil })
+	again, queued, err := s.store.Notices.InsertQueued(s.ctx, &notice, delivery, func(string) ([]byte, error) { return []byte(`{}`), nil })
 	s.Require().NoError(err)
 	s.False(again, "the same warning is written once")
 	s.Zero(queued)
@@ -347,7 +349,7 @@ func (s *ForwarderSuite) destinationOf(forwarder *Forwarder, url string) string 
 	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	return destination.CustomerID
 }
 
@@ -391,7 +393,7 @@ func (s *ForwarderSuite) routerAfterItsFirstLook(client *http.Client) {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
 	queries := &queryCount{}
-	own.DB().AddQueryHook(queries)
+	own.GlobalDB().AddQueryHook(queries)
 	router, err := New(Options{Store: own, Secrets: s.sealer, HTTP: client, Poll: 10 * time.Millisecond, Lease: 200 * time.Millisecond})
 	s.Require().NoError(err)
 	router.Start()
@@ -401,7 +403,7 @@ func (s *ForwarderSuite) routerAfterItsFirstLook(client *http.Client) {
 
 // dropForwards deletes the forwards of a customer not yet done with.
 func (s *ForwarderSuite) dropForwards(customer string) {
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries d USING connector_event_destinations t "+
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM connector_event_deliveries d USING connector_event_destinations t "+
 		"WHERE t.id = d.destination_id AND t.customer_id = ?", customer)
 	s.Require().NoError(err)
 }
@@ -418,7 +420,7 @@ func (q *queryCount) AfterQuery(context.Context, *bun.QueryEvent) { q.Add(1) }
 // pending is how many forwards of a customer are not done with.
 func (s *ForwarderSuite) pending(customer string) int {
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM connector_event_deliveries d "+
 		"JOIN connector_event_destinations t ON t.id = d.destination_id WHERE t.customer_id = ?", customer).Scan(&rows))
 	return rows
 }

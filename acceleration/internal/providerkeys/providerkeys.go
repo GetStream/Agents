@@ -98,16 +98,15 @@ func Hint(key string) string {
 	return string(runes[len(runes)-4:])
 }
 
-// Source is where a customer's sealed keys are read: an *appconfig.Store, through its cache, or
-// a *store.Store.
+// Source is where a customer's sealed keys are read: *store.ProviderKeys, through its cache.
 type Source interface {
-	ProviderKeys(ctx context.Context, customerID string) ([]store.ProviderKey, error)
+	SelectAll(ctx context.Context, customerID string) ([]store.ProviderKey, error)
 }
 
 // Keyring opens the keys customers keep, for the work routed on them. It is a
 // routing.CustomerKeys.
 //
-// It holds no opened key. Each is read through its source, which for an *appconfig.Store is the
+// It holds no opened key. Each is read through its source, which for an *store.Store is the
 // copy rueidis keeps in this process, dropped on every replica when a key is put or deleted,
 // and opened when work is routed on it: a cached read and one AES-GCM open per vendor and region
 // a request could go to.
@@ -127,7 +126,7 @@ func (k *Keyring) CustomerKey(ctx context.Context, customerID, provider, region 
 	if customerID == "" {
 		return "", false, nil
 	}
-	keys, err := k.source.ProviderKeys(ctx, customerID)
+	keys, err := k.source.SelectAll(ctx, customerID)
 	if err != nil {
 		return "", false, err
 	}

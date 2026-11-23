@@ -16,7 +16,7 @@ import (
 )
 
 // recordQueueSize bounds how far the session writer may fall behind before rows are
-// dropped. Larger than the call queue because items arrive per turn rather than per call.
+// dropped.
 const recordQueueSize = 1024
 
 // recordWriteTimeout bounds a single write so a stuck database cannot wedge the writer.
@@ -62,8 +62,14 @@ type recordWrite struct {
 	described *described
 	// sawVideo is the session whose user's video the agent saw.
 	sawVideo string
-	// voiced is the session voice was started on, and the call it joined.
-	voiced *voiced
+	// voiced is the session voice was started on.
+	voiced string
+	// callStarted is a call that began and callChanged one that moved onto other models,
+	// nil otherwise. callEnded is the call that ended, callEndedAt when.
+	callStarted *store.Call
+	callChanged *store.Call
+	callEnded   string
+	callEndedAt time.Time
 	// chose is a connection a login in the conversation chose for a binding, nil otherwise.
 	chose *chose
 	// timed is a running session given a new tool_timeout_ms, nil otherwise.
@@ -85,8 +91,8 @@ type recorder interface {
 	Described(customerID, id, title, description string, custom map[string]any)
 	// SawVideo says the agent saw the user's video.
 	SawVideo(id string)
-	// Voiced says voice was started on the session, on the call named.
-	Voiced(id, callID, callType string)
+	// Voiced says voice was started on the session.
+	Voiced(id string)
 	// Chose says a login in the conversation chose a connection for the binding called name.
 	Chose(customerID, id, name, connectionID string)
 	// ToolTimeout says the session was given a new tool_timeout_ms while it ran, by a caller
@@ -108,10 +114,10 @@ type sessionRecords interface {
 	Close()
 }
 
-// sessionRecorder writes sessions, turns and items to Postgres off the conversation's path.
+// sessionRecorder writes sessions, their calls, turns and items to Postgres off the
+// conversation's path.
 //
-// Same trade as the call recorder and for the same reason: a caller must never wait on a
-// database to be answered, and a conversation must not fail to happen because the row
+// A caller must never wait on a database to be answered, and a conversation must not fail to happen because the row
 // recording it could not be written. So recording is asynchronous and rows are what gets
 // dropped when the writer cannot keep up.
 //
@@ -200,14 +206,9 @@ func (r *sessionRecorder) SawVideo(id string) {
 	r.queueWrite(recordWrite{sawVideo: id})
 }
 
-// voiced is a session voice was started on.
-type voiced struct {
-	id, callID, callType string
-}
-
 // Voiced queues that voice was started on a session, behind the row it changes.
-func (r *sessionRecorder) Voiced(id, callID, callType string) {
-	r.queueWrite(recordWrite{voiced: &voiced{id, callID, callType}})
+func (r *sessionRecorder) Voiced(id string) {
+	r.queueWrite(recordWrite{voiced: id})
 }
 
 // Responding queues a turn that has just begun.
@@ -376,32 +377,32 @@ func (r *sessionRecorder) write(write recordWrite) {
 
 	switch {
 	case write.session != nil:
-		if err := r.store.SaveSession(ctx, write.session); err != nil {
+		if err := r.store.Sessions.Upsert(ctx, write.session); err != nil {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
-		if err := r.store.SaveSessionTools(ctx, write.session.ID, write.tools); err != nil {
+		if err := r.store.SessionTools.Upsert(ctx, write.session.ID, write.tools); err != nil {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.offered != "":
-		if err := r.store.SaveSessionTools(ctx, write.offered, write.tools); err != nil {
+		if err := r.store.SessionTools.Upsert(ctx, write.offered, write.tools); err != nil {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.closed != "":
-		if err := r.store.CloseSession(ctx, write.closed, write.closedAt, write.endReason); err != nil {
+		if err := r.store.Sessions.Close(ctx, write.closed, write.closedAt, write.endReason); err != nil {
 			r.logger.Error("could not record the session ending", "error", err)
 		}
 	case write.response != nil:
-		if err := r.store.StartResponse(ctx, write.response); err != nil {
+		if err := r.store.Responses.Insert(ctx, write.response); err != nil {
 			r.logger.Error("could not record the turn starting", "error", err)
 		}
 	case write.finished != "":
-		if err := r.store.FinishResponse(ctx, write.finished, write.status, write.failure, write.finishedAt); err != nil {
+		if err := r.store.Responses.Finish(ctx, write.finished, write.status, write.failure, write.finishedAt); err != nil {
 			r.logger.Error("could not record the turn ending", "error", err)
 		}
 	case write.described != nil:
 		d := write.described
-		err := r.store.DescribeSession(ctx, d.customerID, d.id, d.title, d.description, d.custom)
+		err := r.store.Sessions.Describe(ctx, d.customerID, d.id, d.title, d.description, d.custom)
 		if errors.Is(err, store.ErrNoSession) {
 			// The conversation is named after it ran, so the customer may have deleted it by
 			// then. Nothing is lost: the title had nothing left to name.
@@ -411,22 +412,33 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.chose != nil:
 		c := write.chose
-		if err := r.store.ChooseSessionConnection(ctx, c.customerID, c.id, c.name, c.connectionID); err != nil {
+		if err := r.store.Sessions.ChooseConnection(ctx, c.customerID, c.id, c.name, c.connectionID); err != nil {
 			r.logger.Error("could not record the connection a login chose", "session", c.id, "error", err)
 		}
 	case write.timed != nil:
 		t := write.timed
-		if err := r.store.SetSessionToolTimeout(ctx, t.id, t.kind, t.milliseconds); err != nil {
+		if err := r.store.Sessions.SetToolTimeout(ctx, t.id, t.kind, t.milliseconds); err != nil {
 			r.logger.Error("could not record the session's tool timeout", "session", t.id, "error", err)
 		}
 	case write.sawVideo != "":
-		if err := r.store.SawVideo(ctx, write.sawVideo); err != nil {
+		if err := r.store.Sessions.SawVideo(ctx, write.sawVideo); err != nil {
 			r.logger.Error("could not record the session's video", "session", write.sawVideo, "error", err)
 		}
-	case write.voiced != nil:
-		v := write.voiced
-		if err := r.store.SessionVoiced(ctx, v.id, v.callID, v.callType); err != nil {
-			r.logger.Error("could not record the session's call", "session", v.id, "error", err)
+	case write.voiced != "":
+		if err := r.store.Sessions.Voiced(ctx, write.voiced); err != nil {
+			r.logger.Error("could not record the session's voice", "session", write.voiced, "error", err)
+		}
+	case write.callStarted != nil:
+		if err := r.store.Calls.Start(ctx, write.callStarted); err != nil {
+			r.logger.Error("could not record the call starting", "error", err)
+		}
+	case write.callChanged != nil:
+		if err := r.store.Calls.ChangeModels(ctx, write.callChanged); err != nil {
+			r.logger.Error("could not record the call changing models", "error", err)
+		}
+	case write.callEnded != "":
+		if err := r.store.Calls.Finish(ctx, write.callEnded, write.callEndedAt); err != nil {
+			r.logger.Error("could not record the call ending", "error", err)
 		}
 	}
 }
@@ -441,7 +453,7 @@ func (r *sessionRecorder) writeItems(items []store.AgentResponseItem) {
 	// The slice is copied because the caller reuses its buffer, and the write outlives the
 	// call that handed it over only by as long as this statement takes.
 	batch := append([]store.AgentResponseItem(nil), items...)
-	if err := r.store.AppendResponseItems(ctx, batch); err != nil {
+	if err := r.store.ResponseItems.InsertMany(ctx, batch); err != nil {
 		r.logger.Error("could not record what a turn did", "error", err, "items", len(batch))
 	}
 }
@@ -461,8 +473,6 @@ func sessionRow(created *Session) store.AgentSession {
 		AgentName:       spec.AgentName,
 		AgentID:         spec.AgentID,
 		ConversationID:  spec.ConversationID,
-		CallID:          spec.CallID,
-		CallType:        spec.CallType,
 		Title:           spec.Title,
 		Description:     spec.Description,
 		Project:         spec.Project,

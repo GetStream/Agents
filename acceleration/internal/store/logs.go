@@ -2,70 +2,14 @@ package store
 
 import (
 	"bytes"
-	"context"
-	"database/sql"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/getsentry/sentry-go"
-	"github.com/uptrace/bun"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
+
+	"github.com/getsentry/sentry-go"
 )
-
-type AgentLog struct {
-	Cursor        string `bun:"-" json:"cursor"`
-	bun.BaseModel `bun:"table:agent_logs,alias:l" json:"-"`
-	ID            int64          `bun:"id,pk,autoincrement" json:"id,string"`
-	CustomerID    string         `json:"-"`
-	ConfigID      string         `json:"config_id"`
-	AgentID       string         `json:"agent_id"`
-	SessionID     string         `json:"session_id"`
-	UserID        string         `json:"user_id,omitempty"`
-	Source        string         `json:"source"`
-	Severity      string         `json:"severity"`
-	EventType     string         `json:"event_type"`
-	Message       string         `json:"message"`
-	OccurredAt    time.Time      `json:"occurred_at"`
-	IngestedAt    time.Time      `json:"ingested_at"`
-	Details       map[string]any `bun:"details,type:jsonb" json:"details,omitempty"`
-}
-
-// severityOrder is the levels a log is written at, least serious first. A
-// filter names the least serious level it wants and gets that one and everything
-// above it, so asking for warnings is asking to be shown the problems without
-// the running commentary.
-var severityOrder = []string{"info", "warn", "error"}
-
-// severitiesFrom is the levels a filter admits. An empty filter admits all of
-// them, and so does one naming a level nothing is written at, which is the
-// reading that shows too much rather than too little.
-func severitiesFrom(least string) []string {
-	if least == "" {
-		return nil
-	}
-	for i, level := range severityOrder {
-		if level == least {
-			return severityOrder[i:]
-		}
-	}
-	return nil
-}
-
-type LogFilter struct {
-	// Severity is the least serious level to show, not the only one: see
-	// severitiesFrom.
-	CustomerID, ConfigID, SessionID, UserID, Severity, Search string
-	Sources                                                   []string
-	From, To                                                  time.Time
-	Before, After                                             int64
-	Limit                                                     int
-	Forward                                                   bool
-}
 
 // bearerCredential and credentialText take their unquoted value only when it is not a word
 // (see redactUnlessWord): the prose of our own errors and a WWW-Authenticate challenge put a
@@ -374,116 +318,4 @@ func safeLogDetails(details map[string]any) map[string]any {
 		}
 	}
 	return out
-}
-
-// agentLogLockSeed seeds the advisory lock every writer of a customer's logs draws its id under.
-const agentLogLockSeed = 731
-
-func (s *Store) RecordAgentLog(ctx context.Context, entry *AgentLog) error {
-	if entry.CustomerID == "" {
-		return errors.New("log customer required")
-	}
-	entry.Message = SafeLogText(entry.Message)
-	entry.Details = safeLogDetails(entry.Details)
-	if entry.OccurredAt.IsZero() {
-		entry.OccurredAt = time.Now().UTC()
-	}
-	entry.IngestedAt = time.Now().UTC()
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := lockUntilCommit(ctx, tx, entry.CustomerID, agentLogLockSeed); err != nil {
-			return err
-		}
-		_, err := tx.NewInsert().Model(entry).Exec(ctx)
-		return err
-	})
-}
-func (s *Store) LogHighWater(ctx context.Context, customer string) (int64, error) {
-	var id int64
-	err := s.db.NewSelect().Table("agent_logs").ColumnExpr("COALESCE(MAX(id),0)").Where("customer_id = ?", customer).Scan(ctx, &id)
-	return id, err
-}
-func (s *Store) AgentLogs(ctx context.Context, f LogFilter) ([]AgentLog, error) {
-	if f.CustomerID == "" {
-		return nil, errors.New("log customer required")
-	}
-	rows := []AgentLog{}
-	q := s.db.NewSelect().Model(&rows).ExcludeColumn("details").Where("customer_id = ?", f.CustomerID)
-	if f.ConfigID != "" {
-		q = q.Where("config_id = ?", f.ConfigID)
-	}
-	if f.SessionID != "" {
-		q = q.Where("session_id = ?", f.SessionID)
-	}
-	if f.UserID != "" {
-		q = q.Where("user_id = ?", f.UserID)
-	}
-	if levels := severitiesFrom(f.Severity); len(levels) > 0 {
-		q = q.Where("severity IN (?)", bun.In(levels))
-	}
-	if len(f.Sources) > 0 {
-		q = q.Where("source IN (?)", bun.In(f.Sources))
-	}
-	if f.Search != "" {
-		q = q.Where("message ILIKE ?", "%"+likeEscaper.Replace(f.Search)+"%")
-	}
-	if !f.From.IsZero() {
-		q = q.Where("occurred_at >= ?", f.From)
-	}
-	if !f.To.IsZero() {
-		q = q.Where("occurred_at < ?", f.To)
-	}
-	if f.Before > 0 {
-		q = q.Where("id < ?", f.Before)
-	}
-	if f.After > 0 {
-		q = q.Where("id > ?", f.After)
-	}
-	order := "id DESC"
-	if f.Forward {
-		order = "id ASC"
-	}
-	err := q.Order(order).Limit(min(max(f.Limit, 1), 251)).Scan(ctx)
-	for i := range rows {
-		rows[i].Cursor = base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(rows[i].ID, 10)))
-	}
-	return rows, err
-}
-func (s *Store) AgentLog(ctx context.Context, customer string, id int64) (*AgentLog, error) {
-	if customer == "" {
-		return nil, sql.ErrNoRows
-	}
-	var row AgentLog
-	err := s.db.NewSelect().Model(&row).Where("customer_id = ? AND id = ?", customer, id).Scan(ctx)
-	if err != nil {
-		return &row, err
-	}
-	// The log row's own details carry the error since 20260914175000_agent_log_failures.sql,
-	// and are the answer. A request's id is only unique in the database that numbered it, with
-	// shards or after a data move, which gives a moved request an id of its new deployment's, so
-	// an older row's request is found by that number only when it also started when the row
-	// says it happened, for the same agent: both writers log a request at its started_at.
-	_, carried := row.Details["error_code"]
-	if row.EventType == "provider_request" && !s.Sharded() && !carried {
-		rawID, _ := row.Details["request_id"].(string)
-		requestID, parseErr := strconv.ParseInt(rawID, 10, 64)
-		if parseErr == nil && requestID > 0 {
-			var request Request
-			lookup := s.db.NewSelect().Model(&request).Column("error_code", "error_message").
-				Where("customer_id = ? AND id = ?", customer, requestID).
-				Where("started_at = ? AND agent_id = ?", row.OccurredAt, row.AgentID).
-				Scan(ctx)
-			if lookup != nil && !errors.Is(lookup, sql.ErrNoRows) {
-				return nil, lookup
-			}
-			if lookup == nil {
-				if request.ErrorCode != "" {
-					row.Details["error_code"] = SafeLogText(request.ErrorCode)
-				}
-				if request.ErrorMessage != "" {
-					row.Details["error_message"] = SafeLogText(request.ErrorMessage)
-				}
-			}
-		}
-	}
-	return &row, nil
 }

@@ -31,7 +31,7 @@ func newLogRecorder(db *store.Store, logger *slog.Logger) *logRecorder {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(writerCtx, 3*time.Second)
-			err := db.RecordAgentLog(ctx, &entry)
+			err := db.AgentLogs.Insert(ctx, &entry)
 			cancel()
 			if err != nil {
 				db.LogDrops.Add(1)

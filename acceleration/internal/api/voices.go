@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -48,7 +49,7 @@ func (s *Server) listVoices(ctx context.Context, _ *listVoicesRequest) (*listVoi
 		return nil, errNoVoices
 	}
 
-	stored, err := s.store.CustomerVoices(ctx, customerID)
+	stored, err := s.store.Voices.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +103,7 @@ func (s *Server) getVoice(ctx context.Context, request *getVoiceRequest) (*getVo
 		return nil, errNoVoices
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, errUnknownVoice
 	}
@@ -136,7 +137,7 @@ func (s *Server) updateVoice(ctx context.Context, request *updateVoiceRequest) (
 		Name:        request.Body.Name,
 		Description: text(request.Body.Description),
 	}
-	if err := s.configs.UpdateVoice(ctx, &voice); err != nil {
+	if err := s.store.Voices.Update(ctx, &voice); err != nil {
 		if errors.Is(err, store.ErrNoVoice) {
 			return nil, errUnknownVoice
 		}
@@ -195,7 +196,7 @@ func (s *Server) addVoiceSample(ctx context.Context, request *addVoiceSampleRequ
 		return nil, invalidRequest(err.Error())
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +229,7 @@ func (s *Server) prepareVoice(ctx context.Context, request *prepareVoiceRequest)
 		return nil, invalidRequest(err.Error())
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +252,12 @@ func (s *Server) listVoiceProviders(ctx context.Context, _ *listVoiceProvidersRe
 }
 
 // listLibraryVoices returns the voices the speech providers themselves offer.
+//
+// The deployment's provider accounts hold every customer's clones, and a provider lists them
+// all as its account's own, so of those only the caller's are listed.
 func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoicesRequest) (*listLibraryVoicesResponse, error) {
-	if _, ok := CustomerFrom(ctx); !ok {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
 		return nil, errMissingCustomer
 	}
 	if s.library == nil {
@@ -270,8 +275,23 @@ func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoic
 		s.logger.Warn("a voice library could not be read", "error", err)
 	}
 
+	var mine map[string]bool
+	if s.store != nil {
+		bindings, err := s.store.VoiceBindings.SelectByCustomer(ctx, customerID)
+		if err != nil {
+			return nil, err
+		}
+		mine = make(map[string]bool, len(bindings))
+		for _, binding := range bindings {
+			mine[binding.Provider+"/"+binding.ExternalID] = true
+		}
+	}
+
 	listed := make([]LibraryVoice, 0, len(found))
 	for _, voice := range found {
+		if voice.Own && mine != nil && !mine[voice.Provider+"/"+voice.ID] {
+			continue
+		}
 		listed = append(listed, LibraryVoice{
 			Provider:    voice.Provider,
 			Id:          voice.ID,
@@ -303,11 +323,21 @@ func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoic
 
 // previewLibraryVoice hands back the sample a provider published for one of its voices.
 func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibraryVoiceRequest) (*previewLibraryVoiceResponse, error) {
-	if _, ok := CustomerFrom(ctx); !ok {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
 		return nil, errMissingCustomer
 	}
 	if s.library == nil {
 		return nil, errNoLibrary
+	}
+	if s.store != nil {
+		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, request.Voice)
+		if err != nil {
+			return nil, err
+		}
+		if elsewhere {
+			return nil, notFound(fmt.Sprintf("voices: %s has no voice %q", request.Provider, request.Voice))
+		}
 	}
 
 	spoken, err := s.library.Preview(ctx, request.Provider, request.Voice)
@@ -331,7 +361,7 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 	if request.Body == nil || strings.TrimSpace(request.Body.Provider) == "" {
 		return nil, invalidRequest("name the provider to hear the voice through")
 	}
-	if _, err := s.configs.Voice(ctx, customerID, request.Id); err != nil {
+	if _, err := s.store.Voices.Get(ctx, customerID, request.Id); err != nil {
 		return nil, errUnknownVoice
 	}
 

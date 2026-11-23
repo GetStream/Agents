@@ -38,8 +38,8 @@ func (s *ReviewsSuite) reviewed(score int, at time.Duration) string {
 		AgentID:    "agent-" + s.utils.uuid(),
 		StartedAt:  s.base.Add(at),
 	}
-	s.Require().NoError(s.store.StartCall(ctx, &call))
-	s.Require().NoError(s.store.ReviewCall(ctx, s.customerID(), call.ID,
+	s.Require().NoError(s.store.Calls.Start(ctx, &call))
+	s.Require().NoError(s.store.Calls.Review(ctx, s.customerID(), call.ID,
 		"Asked for a refund.", &score, "The agent did not know the refund policy."))
 	return call.ID
 }

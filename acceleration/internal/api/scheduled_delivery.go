@@ -690,7 +690,7 @@ func (s *Server) withOccurrence(ctx context.Context, claimed store.ClaimedSchedu
 	if task.RRule != "" || claimed.Run.Trigger != store.ScheduledTaskTriggerSchedule || readsAsStart(task, claimed.Run.ScheduledFor) {
 		return claimed
 	}
-	runs, err := s.store.ScheduledTaskRuns(ctx, task.CustomerID, task.ID, 0, nil)
+	runs, err := s.store.ScheduledTaskRuns.Select(ctx, task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID})
 	if err != nil {
 		s.logger.Warn("could not read a re-dued scheduled task's runs", "task", task.ID, "error", err)
 		return claimed
@@ -901,14 +901,14 @@ var errNotHandedOff = errors.New("the hand-off does not match the stored task an
 // one names the task's owner and session and a running run of that task. A task or run
 // gone since is refused too; the asker's scheduler tries again later.
 func (s *Server) handedOccurrence(ctx context.Context, handOff scheduledHandOff) (store.ClaimedScheduledTask, error) {
-	task, err := s.store.ScheduledTask(ctx, handOff.CustomerID, handOff.TaskID)
+	task, err := s.store.ScheduledTasks.Get(ctx, handOff.CustomerID, handOff.TaskID)
 	if err != nil {
 		return store.ClaimedScheduledTask{}, err
 	}
 	if !ownsTask(handOff, task) {
 		return store.ClaimedScheduledTask{}, errNotHandedOff
 	}
-	run, err := s.store.ScheduledTaskRun(ctx, handOff.CustomerID, handOff.TaskID, handOff.RunID)
+	run, err := s.store.ScheduledTaskRuns.Get(ctx, handOff.CustomerID, handOff.TaskID, handOff.RunID)
 	if err != nil {
 		return store.ClaimedScheduledTask{}, err
 	}
@@ -955,7 +955,7 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 	if s.store == nil {
 		return nil, errors.New("this router has no store to open a scheduled task's session from")
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return nil, err
 	}
@@ -973,7 +973,7 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 		return nil, err
 	}
 	delivery.SessionID = created.ID()
-	if err := s.store.SetScheduledTaskSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
+	if err := s.store.ScheduledTasks.SetSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
 		// The conversation exists and the follow-up still lands; the next
 		// occurrence opening a second one is the cost of losing this.
 		s.logger.Error("could not record the session a scheduled task opened",
@@ -1004,7 +1004,7 @@ func (s *Server) deliverByPhone(ctx context.Context, delivery scheduledDelivery,
 		return "", "", errors.New("this router has no store to ring from")
 	}
 	sessionID := uuid.NewString()
-	took, rang, err := s.store.TakeScheduledTaskRunCall(ctx, delivery.CustomerID, delivery.RunID, sessionID)
+	took, rang, err := s.store.ScheduledTaskRuns.TakeCall(ctx, delivery.CustomerID, delivery.RunID, sessionID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1014,7 +1014,7 @@ func (s *Server) deliverByPhone(ctx context.Context, delivery scheduledDelivery,
 	spec, err := s.placeCall(ctx, delivery, found, sessionID)
 	if err != nil {
 		// A call that was not placed rang nobody, so a later attempt may.
-		if err := s.store.ReleaseScheduledTaskRunCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, sessionID); err != nil {
+		if err := s.store.ScheduledTaskRuns.ReleaseCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, sessionID); err != nil {
 			s.logger.Error("could not give back a scheduled task's call", "run", delivery.RunID, "error", err)
 		}
 		return "", "", err
@@ -1035,7 +1035,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if found.Voicing() {
 		return session.Spec{}, undelivered(scheduling.ReasonOnACall, errors.New("the user is on a call"))
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return session.Spec{}, err
 	}
@@ -1043,7 +1043,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if err != nil {
 		return session.Spec{}, err
 	}
-	from := config.Channels.Lines()["sms"]
+	from := config.Channels.Lines.Lines()["sms"]
 	if from == "" {
 		return session.Spec{}, undelivered(scheduling.ReasonNoLine, errors.New("the agent has no number to call from"))
 	}
@@ -1099,7 +1099,7 @@ func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery,
 	if err != nil {
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonFailed, err))
 	}
-	if err := s.store.SetScheduledTaskSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
+	if err := s.store.ScheduledTasks.SetSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
 		s.logger.Error("could not record the session a scheduled task rang into",
 			"task", delivery.TaskID, "session", created.ID(), "error", err)
 	}
@@ -1123,7 +1123,7 @@ func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, call
 	if !errors.As(err, &failure) {
 		return err
 	}
-	if err := s.store.SetScheduledTaskRunCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
+	if err := s.store.ScheduledTaskRuns.SetCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
 		s.logger.Error("could not record how a scheduled task's call ended", "run", delivery.RunID, "error", err)
 	}
 	return err
@@ -1133,8 +1133,8 @@ func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, call
 // text this agent from. A number they only use on WhatsApp is not rung: a
 // person who chose to write there agreed to no call.
 func (s *Server) callableNumber(ctx context.Context, delivery scheduledDelivery) (string, error) {
-	identity, err := s.store.ChannelIdentityByUser(ctx, delivery.CustomerID, delivery.ConfigID, "sms", delivery.UserID)
-	if errors.Is(err, store.ErrUnknownChannelIdentity) {
+	identity, err := s.store.ContactMapEntries.GetByUser(ctx, delivery.CustomerID, delivery.ConfigID, "sms", delivery.UserID)
+	if errors.Is(err, store.ErrNoContact) {
 		return "", undelivered(scheduling.ReasonNoNumber, errors.New("the user has no number to call: they have never texted this agent"))
 	}
 	if err != nil {

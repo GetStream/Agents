@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/custom"
@@ -19,25 +18,25 @@ import (
 // CustomModels resolves the models customers serve themselves, which a session names as
 // custom/<name>.
 type CustomModels struct {
-	store   *appconfig.Store
+	store   *store.Store
 	secrets *auth.Sealer
 	client  *http.Client
 }
 
-// NewCustomModels reads models from the configuration store. secrets opens their keys and
+// NewCustomModels reads models from the store. secrets opens their keys and
 // may be nil on a deployment that stores none. private lets an endpoint sit on a private
 // address, which only a router nobody else's tenants share should allow.
-func NewCustomModels(configs *appconfig.Store, secrets *auth.Sealer, private bool) *CustomModels {
+func NewCustomModels(models *store.Store, secrets *auth.Sealer, private bool) *CustomModels {
 	client := egress.NewClient(0, nil)
 	if private {
 		client = &http.Client{}
 	}
-	return &CustomModels{store: configs, secrets: secrets, client: client}
+	return &CustomModels{store: models, secrets: secrets, client: client}
 }
 
 // CustomModel returns how to route to the customer's model of that name.
 func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string) (routing.ProviderConfig, routing.Endpoint, error) {
-	stored, err := m.store.CustomModelNamed(ctx, customerID, name)
+	stored, err := m.store.CustomModels.GetByName(ctx, customerID, name)
 	if errors.Is(err, store.ErrNoCustomModel) {
 		return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(
 			fmt.Errorf("routing: %q is not one of this customer's models", routing.CustomProvider+"/"+name))

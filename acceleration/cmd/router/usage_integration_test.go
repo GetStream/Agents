@@ -49,9 +49,9 @@ func (s *UsageCommandsSuite) SetupTest() {
 	empty, err := store.Open(own)
 	s.Require().NoError(err)
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(empty.Migrate(s.ctx))
 	s.store = empty
@@ -162,7 +162,7 @@ func (s *UsageCommandsSuite) recorded(ago time.Duration, change func(*store.Requ
 		StartedAt: time.Now().UTC().Add(-ago), Success: true,
 	}
 	change(&request)
-	_, err := s.store.RecordRequests(s.ctx, []store.Request{request})
+	_, err := s.store.Requests.InsertMany(s.ctx, []store.Request{request})
 	s.Require().NoError(err)
 	return request.UsageID
 }

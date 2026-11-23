@@ -74,7 +74,7 @@ func (s *SpeculationBillingSuite) replies(want int) []store.Request {
 	var rows []store.Request
 	s.Require().Eventually(func() bool {
 		rows = nil
-		s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+		s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 			Where("agent_id = ?", s.agents.agentID).
 			Where("purpose = ?", "reply").
 			Order("started_at").Scan(s.ctx))

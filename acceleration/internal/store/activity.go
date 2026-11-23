@@ -33,6 +33,22 @@ type ActivityDelta struct {
 	LastAt          time.Time
 }
 
+// Validate refuses a delta that names no row: without an app, an area, a client or a day.
+func (d *ActivityDelta) Validate() error {
+	return validate("activity").
+		required("app_id", d.AppID).
+		required("area", d.Area).
+		required("client", d.Client).
+		check(!d.Day.IsZero(), "day", "is required").
+		done()
+}
+
+// Activities are what each app did in each area of the API, from each client, on each UTC day
+// (customer_activity), in the shared database.
+type Activities struct {
+	store *Store
+}
+
 // activityKey is what one customer_activity row is known by.
 type activityKey struct {
 	appID, area, client, day string
@@ -44,12 +60,17 @@ type activityKey struct {
 // leave room to spare.
 const activityBatch = 1000
 
-// RecordActivity adds deltas to the rows they name, making the ones that are not there yet.
+// Add adds deltas to the rows they name, making the ones that are not there yet.
 // A delta naming no organization, such as a hook's or a forward's, which name only the app, is
 // the organization app_organizations holds for its app, when it holds one. Counts are added,
 // the first and last times widen, and a refusal later than the one the row holds replaces it.
 // Deltas naming the same row are summed first: one statement cannot update a row twice.
-func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) error {
+func (r *Activities) Add(ctx context.Context, deltas []ActivityDelta) error {
+	for i := range deltas {
+		if err := deltas[i].Validate(); err != nil {
+			return stack.Wrap(err)
+		}
+	}
 	folded := make(map[activityKey]*ActivityDelta, len(deltas))
 	order := make([]activityKey, 0, len(deltas))
 	for _, delta := range deltas {
@@ -72,7 +93,7 @@ func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) erro
 
 	// One transaction, so a failed write wrote nothing and the caller can keep the deltas
 	// for its next try without counting any of them twice.
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for start := 0; start < len(order); start += activityBatch {
 			if err := writeActivity(ctx, tx, folded, order[start:min(start+activityBatch, len(order))]); err != nil {
 				return err
@@ -81,7 +102,7 @@ func (s *Store) RecordActivity(ctx context.Context, deltas []ActivityDelta) erro
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("store: record activity: %w", err)
+		return stack.Wrap(fmt.Errorf("store: record activity: %w", err))
 	}
 	return nil
 }
@@ -178,11 +199,11 @@ type ActivityAreaDay struct {
 	Day  time.Time `bun:"day"`
 }
 
-// ActivityFirstAnswered is, by area, the first UTC day apps, at least one, had a request
-// answered, not refused, over every day recorded. An area with no request answered is absent.
-func (s *Store) ActivityFirstAnswered(ctx context.Context, apps []string) ([]ActivityAreaDay, error) {
+// FirstAnswered is, by area, the first UTC day apps, at least one, had a request answered,
+// not refused, over every day recorded. An area with no request answered is absent.
+func (r *Activities) FirstAnswered(ctx context.Context, apps []string) ([]ActivityAreaDay, error) {
 	var days []ActivityAreaDay
-	err := s.db.NewSelect().
+	err := r.store.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("area, MIN(day) AS day").
 		Where("app_id IN (?)", bun.In(apps)).
@@ -196,11 +217,11 @@ func (s *Store) ActivityFirstAnswered(ctx context.Context, apps []string) ([]Act
 	return days, nil
 }
 
-// ActivityAreas sums the activity of apps, at least one, from the UTC day of since on, by area
+// Areas sums the activity of apps, at least one, from the UTC day of since on, by area
 // and client. The record keeps days, so the day since falls on is read whole.
-func (s *Store) ActivityAreas(ctx context.Context, apps []string, since time.Time) ([]ActivityArea, error) {
+func (r *Activities) Areas(ctx context.Context, apps []string, since time.Time) ([]ActivityArea, error) {
 	var areas []ActivityArea
-	err := s.db.NewSelect().
+	err := r.store.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("area, client, MIN(first_at) AS first_at, MAX(last_at) AS last_at").
 		ColumnExpr("SUM(requests) AS requests, SUM(refused) AS refused").
@@ -217,11 +238,11 @@ func (s *Store) ActivityAreas(ctx context.Context, apps []string, since time.Tim
 	return areas, nil
 }
 
-// ActivityDays is how many UTC days from the day of since on apps had a request answered, not
+// Days is how many UTC days from the day of since on apps had a request answered, not
 // refused, in any of areas.
-func (s *Store) ActivityDays(ctx context.Context, apps []string, since time.Time, areas []string) (int, error) {
+func (r *Activities) Days(ctx context.Context, apps []string, since time.Time, areas []string) (int, error) {
 	var days int
-	err := s.db.NewSelect().
+	err := r.store.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("COUNT(DISTINCT day)").
 		Where("app_id IN (?)", bun.In(apps)).
@@ -235,67 +256,112 @@ func (s *Store) ActivityDays(ctx context.Context, apps []string, since time.Time
 	return days, nil
 }
 
-// MeterUse is what some apps' work of one modality came to. Requests leaves out the sliced
-// time of runtime and sandboxes, which DurationMs measures instead.
-type MeterUse struct {
-	Modality     string `bun:"modality"`
-	Requests     int64  `bun:"requests"`
-	InputTokens  int64  `bun:"input_tokens"`
-	OutputTokens int64  `bun:"output_tokens"`
-	AudioMs      int64  `bun:"audio_ms"`
-	Characters   int64  `bun:"characters"`
-	DurationMs   int64  `bun:"duration_ms"`
-	CostMicros   int64  `bun:"cost_micros"`
+// OrganizationDayArea is what one organization's apps did in one area of the API from one
+// client on one UTC day.
+type OrganizationDayArea struct {
+	OrganizationID string `bun:"organization_id"`
+	// FirstDay says the organization has no activity on any earlier day.
+	FirstDay bool `bun:"first_day"`
+	ActivityArea
 }
 
-// MeterShards names the shards MeterUses reads, this one's first: those in Options.Shards, or
-// this shard alone, named by a digest of its DSN, when that is unset.
-func (s *Store) MeterShards() []string { return slices.Clone(s.shardNames) }
-
-// MeterUses sums the requests apps, at least one, made from since on by modality, over every
-// shard, in the order of their modality.
-func (s *Store) MeterUses(ctx context.Context, apps []string, since time.Time) ([]MeterUse, error) {
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]MeterUse, error) {
-		var used []MeterUse
-		err := db.NewSelect().
-			TableExpr("requests").
-			ColumnExpr("modality").
-			ColumnExpr(requestCount+" AS requests").
-			ColumnExpr("COALESCE(SUM(input_tokens), 0) AS input_tokens").
-			ColumnExpr("COALESCE(SUM(output_tokens), 0) AS output_tokens").
-			ColumnExpr("COALESCE(SUM(audio_ms), 0) AS audio_ms").
-			ColumnExpr("COALESCE(SUM(characters), 0) AS characters").
-			ColumnExpr("COALESCE(SUM(duration_ms), 0)::bigint AS duration_ms").
-			ColumnExpr("COALESCE(SUM(cost_micros), 0) AS cost_micros").
-			Where("customer_id IN (?)", bun.In(apps)).
-			Where("started_at >= ?", since).
-			Group("modality").
-			Scan(ctx, &used)
-		return used, err
-	})
+// Day is what every organization's apps did on day, a UTC day, by organization, area
+// and client in that order. Rows that name no organization are left out: they are an app's
+// whose organization app_organizations did not hold when the row was written.
+func (r *Activities) Day(ctx context.Context, day time.Time) ([]OrganizationDayArea, error) {
+	date := day.UTC().Format(time.DateOnly)
+	var areas []OrganizationDayArea
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity AS ca").
+		ColumnExpr("ca.organization_id, ca.area, ca.client, MIN(ca.first_at) AS first_at, MAX(ca.last_at) AS last_at").
+		ColumnExpr("SUM(ca.requests) AS requests, SUM(ca.refused) AS refused").
+		ColumnExpr("COALESCE((array_agg(ca.last_refusal_code ORDER BY ca.last_refusal_at DESC)"+
+			" FILTER (WHERE ca.last_refusal_at IS NOT NULL))[1], '') AS last_refusal_code").
+		ColumnExpr("NOT EXISTS (SELECT 1 FROM customer_activity AS earlier"+
+			" WHERE earlier.organization_id = ca.organization_id AND earlier.day < ?::date) AS first_day", date).
+		Where("ca.day = ?::date", date).
+		Where("ca.organization_id <> ''").
+		Group("ca.organization_id", "ca.area", "ca.client").
+		Order("ca.organization_id", "ca.area", "ca.client").
+		Scan(ctx, &areas)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: meter uses: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("store: day activity: %w", err))
 	}
-	// Sorted first, so the rows of one modality from every shard are next to each other.
-	var all []MeterUse
-	for _, list := range lists {
-		all = append(all, list...)
+	return areas, nil
+}
+
+// FirstAnswer is an organization whose apps had a request of an area answered for the first
+// time on a day.
+type FirstAnswer struct {
+	OrganizationID string `bun:"organization_id"`
+	// Days is how many days before that day the organization's apps made their first request,
+	// of any area, refused ones included.
+	Days int `bun:"days"`
+}
+
+// FirstAnswers are the organizations whose apps had a request of area answered, not refused,
+// on day, a UTC day, and on no earlier day, by organization. Rows that name no organization
+// are left out, as in Day.
+func (r *Activities) FirstAnswers(ctx context.Context, area string, day time.Time) ([]FirstAnswer, error) {
+	date := day.UTC().Format(time.DateOnly)
+	var answers []FirstAnswer
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity AS ca").
+		ColumnExpr("ca.organization_id").
+		ColumnExpr("?::date - (SELECT MIN(any_area.day) FROM customer_activity AS any_area"+
+			" WHERE any_area.organization_id = ca.organization_id) AS days", date).
+		Where("ca.day = ?::date", date).
+		Where("ca.area = ?", area).
+		Where("ca.requests > ca.refused").
+		Where("ca.organization_id <> ''").
+		Where("NOT EXISTS (SELECT 1 FROM customer_activity AS earlier"+
+			" WHERE earlier.organization_id = ca.organization_id AND earlier.area = ca.area"+
+			" AND earlier.day < ca.day AND earlier.requests > earlier.refused)").
+		Group("ca.organization_id").
+		Order("ca.organization_id").
+		Scan(ctx, &answers)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: first answers: %w", err))
 	}
-	slices.SortStableFunc(all, func(a, b MeterUse) int { return cmp.Compare(a.Modality, b.Modality) })
-	var uses []MeterUse
-	for _, used := range all {
-		if last := len(uses) - 1; last >= 0 && uses[last].Modality == used.Modality {
-			held := &uses[last]
-			held.Requests += used.Requests
-			held.InputTokens += used.InputTokens
-			held.OutputTokens += used.OutputTokens
-			held.AudioMs += used.AudioMs
-			held.Characters += used.Characters
-			held.DurationMs += used.DurationMs
-			held.CostMicros += used.CostMicros
-			continue
-		}
-		uses = append(uses, used)
+	return answers, nil
+}
+
+// ActiveOrganizations is how many organizations' apps made a request on day, a UTC day,
+// refused ones included.
+func (r *Activities) ActiveOrganizations(ctx context.Context, day time.Time) (int, error) {
+	var active int
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("COUNT(DISTINCT organization_id)").
+		Where("day = ?::date", day.UTC().Format(time.DateOnly)).
+		Where("organization_id <> ''").
+		Scan(ctx, &active)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: active organizations: %w", err))
 	}
-	return uses, nil
+	return active, nil
+}
+
+// activityKeepDays is how many UTC days back from today customer_activity and activity_digests
+// keep rows for: 13 months and a margin, so staff can compare a month with the same month a year
+// before. Rows are kept no longer than that need, as GDPR's storage limitation principle asks
+// (Art. 5(1)(e), https://eur-lex.europa.eu/eli/reg/2016/679/oj).
+const activityKeepDays = 400
+
+// Prune deletes the activity rows of the UTC days more than activityKeepDays before now's, and
+// returns how many it deleted.
+func (r *Activities) Prune(ctx context.Context, now time.Time) (int, error) {
+	return pruneDays(ctx, r.store.global, "customer_activity", now)
+}
+
+// pruneDays deletes the rows of table whose day is more than activityKeepDays before now's UTC
+// day, and returns how many it deleted.
+func pruneDays(ctx context.Context, db bun.IDB, table string, now time.Time) (int, error) {
+	before := now.UTC().AddDate(0, 0, -activityKeepDays).Format(time.DateOnly)
+	result, err := db.NewDelete().TableExpr(table).Where("day < ?::date", before).Exec(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: prune %s: %w", table, err))
+	}
+	deleted, _ := result.RowsAffected()
+	return int(deleted), nil
 }

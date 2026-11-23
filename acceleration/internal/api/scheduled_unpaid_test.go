@@ -88,7 +88,7 @@ func (s *TelnyxUnpaidSuite) threadTask(channel string) store.ScheduledTask {
 		CallerKind: "server", APIKey: s.RouterSuite.app.key, ChannelThread: channel, Title: "Stretch",
 		Instructions: "Remind them to stretch.", StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next,
 		Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 	return task
 }
 
@@ -107,11 +107,11 @@ func (s *TelnyxUnpaidSuite) settledByTheWorker(task store.ScheduledTask) (store.
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	worker.Kick()
 	var settled store.ScheduledTaskRun
 	s.Require().Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), task.CustomerID, task.ID, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false
@@ -183,10 +183,10 @@ func (s *TelnyxUnpaidSuite) TestAReplyOfASuspendedOrganizationIsNotSentAndLogsNo
 func (s *TelnyxUnpaidSuite) spentAfterOpening() (*testClient, Session) {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
@@ -207,7 +207,7 @@ func (s *TelnyxUnpaidSuite) userTask(user *testClient, sessionID string, channel
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, SessionID: sessionID, UserID: user.userID,
 		CallerKind: "authenticated", APIKey: s.RouterSuite.app.key, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next, Channels: channels}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 	return task
 }
 
@@ -233,11 +233,11 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskOfAnOrganizationWithNoCreditIsNotRetrie
 func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTurnIsNotRetried() {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
@@ -250,7 +250,7 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTu
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, SessionID: opened.Id, UserID: user.userID,
 		CallerKind: "authenticated", APIKey: s.RouterSuite.app.key, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next, Channels: []string{"sms"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	model := s.holding
 	model.mu.Lock()
@@ -443,8 +443,8 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForMoneyInAnOpenSessionIsFinal() {
 func (s *TelnyxUnpaidSuite) TestATurnRefusedWhileMoneyCannotBeCheckedIsRetried() {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
 	s.Require().Eventually(func() bool {
@@ -469,7 +469,7 @@ func (s *TelnyxUnpaidSuite) teamed() {
 		s.config.Tags = map[string]string{}
 	}
 	s.config.Tags[session.TeamTag] = "finance"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 
 // teamSpent tags the config with a team and spends the team's weekly limit. The text gate admits
@@ -517,8 +517,8 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionCannotOpenForATeamLimitIs
 // A turn on which the session reports a failure that is not about money, such as a tool's error,
 // still carries the reply the agent then gives: only a refusal for money ends the capture.
 func (s *TelnyxUnpaidSuite) TestATurnThatReportsAFailureNotAboutMoneyStillCarriesItsReply() {
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
 	s.Require().Eventually(func() bool {
@@ -583,10 +583,10 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseTurnIsRefusedForATeamLimitIsNotR
 func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChannel() {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
-	s.config.Channels = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
 	s.teamed()
 	user := s.data.createUser()
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
@@ -611,8 +611,8 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChann
 func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 	person := "+1347" + digits(s.utils.uuid())
 	channel := s.creditedThread(person)
-	s.config.LLM = "holding/holding-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = "holding/holding-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	kept := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
 	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
 	s.Require().True(running)
@@ -640,7 +640,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 	}()
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	worker.Kick()
 	s.Require().Eventually(func() bool {
 		model.mu.Lock()
@@ -653,7 +653,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 
 	var settled store.ScheduledTaskRun
 	s.Require().Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), task.CustomerID, task.ID, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false

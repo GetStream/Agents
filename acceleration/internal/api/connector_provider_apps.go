@@ -265,12 +265,12 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 	}
 
 	var answer *providerAppResponse
-	err = s.store.WithConnectorProviderAppLock(ctx, customerID, manifest.ID, func() error {
+	err = s.store.ConnectorConfigTokens.WithProviderAppLock(ctx, customerID, manifest.ID, func() error {
 		token, err := s.configToken(ctx, customerID, manifest.ID, request.Body.ConfigRefreshToken)
 		if err != nil {
 			return err
 		}
-		existing, err := s.store.ConnectorOAuthClient(ctx, customerID, manifest.ID)
+		existing, err := s.store.ConnectorOAuthClients.Get(ctx, customerID, manifest.ID)
 		switch {
 		case err == nil && existing.Registration != core.ClientManaged:
 			return conflict(fmt.Sprintf("the app's OAuth client for %s is of registration %s, not one the router created; remove it first", manifest.ID, existing.Registration))
@@ -292,9 +292,8 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 		if err != nil {
 			return s.deleteOrphan(ctx, token, created.AppID, err)
 		}
-		// Detached: an app Slack made is recorded, or deleted below, whether or not the caller
-		// is still waiting.
-		_, err = s.store.PutConnectorOAuthClient(context.WithoutCancel(ctx), record)
+
+		_, err = s.store.ConnectorOAuthClients.Upsert(context.WithoutCancel(ctx), record)
 		if err != nil {
 			return s.deleteOrphan(ctx, token, created.AppID, providerAppPutFailure(err))
 		}
@@ -304,6 +303,7 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 		answer = &providerAppResponse{Status: http.StatusCreated, Body: providerAppOf(*record)}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -323,8 +323,8 @@ func (s *Server) deleteConnectorProviderApp(ctx context.Context, request *delete
 	if s.connectorSecrets == nil || s.slackApps == nil {
 		return nil, notConfigured("provider apps cannot be deleted: connectors are not enabled on this deployment")
 	}
-	err := s.store.WithConnectorProviderAppLock(ctx, customerID, request.ID, func() error {
-		record, err := s.store.ConnectorOAuthClient(ctx, customerID, request.ID)
+	err := s.store.ConnectorConfigTokens.WithProviderAppLock(ctx, customerID, request.ID, func() error {
+		record, err := s.store.ConnectorOAuthClients.Get(ctx, customerID, request.ID)
 		if errors.Is(err, store.ErrNoConnectorOAuthClient) || err == nil && record.Registration != core.ClientManaged {
 			return notFound(noManagedApp)
 		}
@@ -335,18 +335,18 @@ func (s *Server) deleteConnectorProviderApp(ctx context.Context, request *delete
 		if err != nil {
 			return err
 		}
-		// An app deleted in Slack's own settings is already what this asks for.
+
 		if err := s.slackApps.Delete(ctx, token, record.ProviderAppID); err != nil && !errors.Is(err, slackapps.ErrAppNotFound) {
 			return slackFailure(err)
 		}
-		// Detached: the app is gone at Slack, so its record goes whether or not the caller
-		// is still waiting.
+
 		detached := context.WithoutCancel(ctx)
-		if err := s.store.DeleteConnectorOAuthClient(detached, customerID, request.ID, core.ClientManaged); err != nil {
+		if err := s.store.ConnectorOAuthClients.Delete(detached, customerID, request.ID, core.ClientManaged); err != nil {
 			return err
 		}
-		return s.store.DeleteConnectorConfigToken(detached, customerID, request.ID)
+		return s.store.ConnectorConfigTokens.Delete(detached, customerID, request.ID)
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +361,7 @@ func (s *Server) setOperatorProviderApp(ctx context.Context, request *operatorPr
 	if s.connectorSecrets == nil || s.operatorApps == nil {
 		return nil, notConfigured("operator apps cannot be set: connectors are not enabled on this deployment")
 	}
-	definition, err := s.store.LatestBuiltinConnectorDefinition(ctx, request.ID)
+	definition, err := s.store.ConnectorDefinitions.LatestBuiltin(ctx, request.ID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, notFound("no such built-in connector")
 	}
@@ -393,7 +393,7 @@ func (s *Server) setOperatorProviderApp(ctx context.Context, request *operatorPr
 	if err := s.sealProviderApp(record, app.ClientSecret, app.SigningSecret); err != nil {
 		return nil, err
 	}
-	created, err := s.store.PutConnectorOAuthClient(ctx, record)
+	created, err := s.store.ConnectorOAuthClients.Upsert(ctx, record)
 	if err != nil {
 		return nil, providerAppPutFailure(err)
 	}
@@ -409,7 +409,7 @@ func (s *Server) deleteOperatorProviderApp(ctx context.Context, request *operato
 	if s.store == nil {
 		return nil, errNoConnectors
 	}
-	err := s.store.DeleteConnectorOAuthClient(ctx, request.CustomerID, request.ID, core.ClientOperator)
+	err := s.store.ConnectorOAuthClients.Delete(ctx, request.CustomerID, request.ID, core.ClientOperator)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		return nil, notFound("the customer has no record of this deployment's app for this connector")
 	}
@@ -422,7 +422,7 @@ func (s *Server) deleteOperatorProviderApp(ctx context.Context, request *operato
 // managedConnector is the customer's latest definition of a connector the router can create a
 // Slack app for, or why it cannot.
 func (s *Server) managedConnector(ctx context.Context, customerID, id string) (core.Manifest, error) {
-	definition, err := s.store.LatestConnectorDefinition(ctx, customerID, id)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return core.Manifest{}, notFound("no such connector")
 	}
@@ -537,7 +537,7 @@ type configTokenBlob struct {
 func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent string) (string, error) {
 	refresh := sent
 	if refresh == "" {
-		stored, err := s.store.ConnectorConfigToken(ctx, customerID, connectorID)
+		stored, err := s.store.ConnectorConfigTokens.Get(ctx, customerID, connectorID)
 		if errors.Is(err, store.ErrNoConnectorConfigToken) {
 			return "", invalidRequest("no app configuration token is kept for this connector: send config_refresh_token")
 		}
@@ -576,10 +576,11 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 	if err != nil {
 		return "", err
 	}
-	err = s.store.PutConnectorConfigToken(detached, &store.ConnectorConfigToken{
+	err = s.store.ConnectorConfigTokens.Upsert(detached, &store.ConnectorConfigToken{
 		CustomerID: customerID, ConnectorID: connectorID,
 		TokensSealed: sealed, KEKVersion: s.connectorSecrets.CurrentVersion(), ExpiresAt: rotated.ExpiresAt,
 	})
+
 	if err != nil {
 		return "", err
 	}

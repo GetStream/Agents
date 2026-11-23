@@ -38,7 +38,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -75,7 +74,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 )
 
 // tracer records the spans this package opens around work a route pattern does not say.
@@ -134,13 +132,6 @@ type Options struct {
 	// providers alone.
 	Billable []pricing.Item
 	Store    *store.Store
-	// Configs reads and writes the tenant's configuration -- keys, policies, agent and
-	// router configs, voices -- through whatever cache is in front of Postgres. Built
-	// over Store when it is not given, in which case every read is a query.
-	Configs *appconfig.Store
-	// Users writes down the end users each app is seen acting for. Built over Store when
-	// it is not given, in which case it caches in this process alone.
-	Users *users.Recorder
 	// Activity counts every request an app makes, by area and client. A deployment without
 	// one keeps no activity record.
 	Activity *activity.Recorder
@@ -356,8 +347,7 @@ type Server struct {
 	prices             *pricing.Active
 	billable           []pricing.Item
 	store              *store.Store
-	configs            *appconfig.Store
-	users              *users.Recorder
+	configs            *store.Store
 	activity           *activity.Recorder
 	live               *live.Client
 	phone              *phone.Service
@@ -481,6 +471,12 @@ type Server struct {
 	// workers to another one.
 	draining  chan struct{}
 	drainOnce sync.Once
+
+	// stopBackground ends the work the server runs for as long as it lives, the relay's
+	// subscriptions and the expiry of its watchers, and background is that work, which Close
+	// waits for.
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 }
 
 // Option adjusts the options a server is built from. It exists for the settings a
@@ -538,20 +534,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	configs := options.Configs
-	if configs == nil && options.Store != nil {
-		var err error
-		if configs, err = appconfig.New(appconfig.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
-	recorder := options.Users
-	if recorder == nil && options.Store != nil {
-		var err error
-		if recorder, err = users.New(users.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
+	configs := options.Store
 	pricer := options.Pricer
 	if pricer == nil && options.Prices != nil {
 		pricer = options.Prices
@@ -574,7 +557,6 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		billable:           options.Billable,
 		store:              options.Store,
 		configs:            configs,
-		users:              recorder,
 		activity:           options.Activity,
 		live:               options.Live,
 		phone:              options.Phone,
@@ -673,11 +655,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	}
 	server.serverSide = serverSide
 
-	// The subscriptions outlive every request, so they are held against the process
-	// rather than against a context a handler brought with it. Closing the Redis client
-	// is what ends them, which is what shutting the deployment down already does.
+	// The subscriptions outlive every request, so they are held against the server rather
+	// than against a context a handler brought with it. Close is what ends them.
+	background, stopBackground := context.WithCancel(context.Background())
+	server.stopBackground = stopBackground
 	if options.Relay != nil {
-		if server.relayed, err = server.newRelayed(context.Background(), options.Relay); err != nil {
+		if server.relayed, err = server.newRelayed(background, options.Relay); err != nil {
+			stopBackground()
 			return nil, fmt.Errorf("api: subscribe to the session relay: %w", err)
 		}
 	}
@@ -730,6 +714,25 @@ func (s *Server) kickScheduled() {
 // closed normally stops waiting for work at all.
 func (s *Server) Drain() {
 	s.drainOnce.Do(func() { close(s.draining) })
+}
+
+// Close ends the work the server runs in the background, the relay's subscriptions among it,
+// and waits for it until ctx is done, returning ctx's error if it had not ended by then. A
+// watcher on another node is not served once it is called, so it comes after the HTTP
+// servers have stopped.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopBackground()
+	ended := make(chan struct{})
+	go func() {
+		s.background.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // methodNotAllowed is the answer to a method a route does not serve.
@@ -1435,7 +1438,7 @@ func (s *Server) vouchedKey(r *http.Request, principal auth.Principal) string {
 // caller asked for, and refusing the request they did ask for because of it would be the
 // wrong trade.
 func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
-	if s.users == nil || principal.UserID == "" {
+	if s.store == nil || principal.UserID == "" {
 		return
 	}
 	var err error
@@ -1443,11 +1446,11 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	case auth.KindAnonymous:
 		return
 	case auth.KindAuthenticated:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
 	case auth.KindGuest:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
 	default:
-		err = s.users.Named(ctx, principal.AppID, principal.UserID)
+		err = s.store.Users.Named(ctx, principal.AppID, principal.UserID)
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
@@ -1457,14 +1460,14 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 
 // recordEmail keeps the address a backend said its user signs in with (auth.EmailHeader),
 // which a consent for a connector whose manifest sets owner_email is checked against. Only a
-// server-side caller has one (auth.Principal.Email), and users.Recorder.Email does nothing
+// server-side caller has one (auth.Principal.Email), and store.Users.Email does nothing
 // without one or without a user, nor for the address it last wrote. A failure is logged, as
 // recordUser's is: the consent it would have served then finds no address and is refused.
 func (s *Server) recordEmail(ctx context.Context, principal auth.Principal) {
-	if s.users == nil {
+	if s.store == nil {
 		return
 	}
-	if err := s.users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
+	if err := s.store.Users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
 		s.logger.Error("could not record an end user's email", "customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
@@ -1811,8 +1814,8 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerStats(
-		ctx, string(request.Modality), customerID, granularity, request.From, request.To, tags)
+	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
 	}
@@ -1854,8 +1857,8 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTagStats(ctx, string(request.Modality), customerID,
-		request.Key, granularity, request.From, request.To)
+	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
@@ -1902,8 +1905,8 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTurnStats(
-		ctx, customerID, agentID, granularity, request.From, request.To)
+	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
 	}
@@ -1953,7 +1956,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	if scope := request.Scope.ptr(); scope != nil && *scope == spendScopeOrganization {
 		// An app in no organization is its own.
 		if organization := OrganizationFrom(ctx); organization != "" {
-			apps, err := s.store.OrganizationApps(ctx, organization)
+			apps, err := s.store.AppOrganizations.Apps(ctx, organization)
 			if err != nil {
 				return nil, err
 			}
@@ -1973,7 +1976,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		limit = *request.Limit.ptr()
 	}
 
-	buckets, err := s.store.CustomerSpend(ctx, customerID, groupBy,
+	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
@@ -2034,7 +2037,7 @@ func (s *Server) getTagKeys(ctx context.Context, request *getTagKeysRequest) (*g
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
-	found, err := s.store.CustomerTagKeys(ctx, customerID, request.From, request.To, tags)
+	found, err := s.store.Requests.TagKeys(ctx, customerID, request.From, request.To, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -2111,7 +2114,7 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 
 	configID := value(request.Agent.ptr())
 	if configID != "" {
-		if _, err := s.configs.AgentConfig(ctx, customerID, configID); err != nil {
+		if _, err := s.store.AgentConfigs.Get(ctx, customerID, configID); err != nil {
 			return nil, errUnknownConfig
 		}
 	}
@@ -2183,7 +2186,7 @@ func (s *Server) runRollup(ctx context.Context, request *runRollupRequest) (*run
 	}
 
 	granularity := granularityOf(request.Body.Granularity)
-	written, err := s.store.Rollup(ctx, granularity, request.Body.From, request.Body.To)
+	written, err := s.store.Buckets.Rollup(ctx, granularity, request.Body.From, request.Body.To)
 	if err != nil {
 		return nil, err
 	}

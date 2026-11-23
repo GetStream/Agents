@@ -267,14 +267,21 @@ import os
   private struct Booking: Decodable {
     let location: String
     let guests: Int
+    let notes: RawJSON?
   }
 
   /// A typed tool runs with the model's arguments decoded, and arguments missing a field reach
   /// the model as the tool failing, naming the field, rather than running it with a blank.
+  /// Arguments nested deeper than a tool needs fail the same way, in a field the type reads or
+  /// not, rather than overflowing the stack of the thread the tool runs on.
   @Test(arguments: [
     (#"{"location":"Boulder","guests":4}"#, "Booked Boulder for 4", ""),
     (#"{"guests":4}"#, nil, #""location""#),
     (#"{"location":"Boulder","guests":"four"}"#, nil, #""guests""#),
+    (#"{"location":"Boulder","guests":4,"notes":\#(nested(20, open: "[", close: "]"))}"#, "Booked Boulder for 4", ""),
+    (#"{"location":"Boulder","guests":4,"notes":"\"\#(String(repeating: "{[", count: 100))"}"#, "Booked Boulder for 4", ""),
+    (#"{"location":"Boulder","guests":4,"extra":\#(nested(300, open: "{\"a\":", close: "}"))}"#, nil, "levels deep"),
+    (#"{"location":"Boulder","guests":4,"notes":\#(nested(500, open: "[", close: "]"))}"#, nil, "levels deep"),
   ])
   func aTypedToolGetsItsArgumentsDecoded(arguments: String, output: String?, error: String) async throws {
     let server = try ToolEventServer(remoteTool: "server_lookup", arguments: arguments)
@@ -506,6 +513,11 @@ import os
     #expect(request.method == method)
     #expect(request.path == "/v1/agents/sessions/s1/voice")
   }
+}
+
+/// A JSON value nested `depth` times, such as `{"a":{"a":1}}`.
+private func nested(_ depth: Int, open: String, close: String) -> String {
+  String(repeating: open, count: depth) + "1" + String(repeating: close, count: depth)
 }
 
 /// A real WebSocket peer broadcasting one remote tool and one locally owned tool.

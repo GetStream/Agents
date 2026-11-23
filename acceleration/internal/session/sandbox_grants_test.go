@@ -71,7 +71,7 @@ sandbox:
   hosts: [api.crm.example, "*.crm.example"]
 `))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }
@@ -87,7 +87,7 @@ sandbox:
     - {host: api.crm.example, method: POST, path: /search}
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	return manifest.Sandbox.Reads
 }
@@ -413,9 +413,9 @@ func (s *SandboxGrantsSuite) TestARequiredBindingOnTheSandboxRevisionIsGranted()
 // openBinding reads them before sandboxGrant reads the latest revision.
 func (s *SandboxGrantsSuite) pinnedRead() (store.ConnectorConnection, core.ResolvedManifest) {
 	s.sandboxRevision()
-	connection, err := s.store.ConnectorConnection(s.ctx, s.customerID, s.connection("", "primary"))
+	connection, err := s.store.ConnectorConnections.Get(s.ctx, s.customerID, s.connection("", "primary"))
 	s.Require().NoError(err)
-	definition, err := s.store.ConnectorDefinition(s.ctx, s.customerID, s.connectorID, connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(s.ctx, s.customerID, s.connectorID, connection.DefinitionRevision)
 	s.Require().NoError(err)
 	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	s.Require().NoError(err)
@@ -429,7 +429,7 @@ func (s *SandboxGrantsSuite) pinnedRead() (store.ConnectorConnection, core.Resol
 // open with a 500.
 func (s *SandboxGrantsSuite) TestAConnectorDeletedAfterThePinnedReadGivesTheSandboxNothing() {
 	connection, manifest := s.pinnedRead()
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, s.customerID, s.connectorID, true)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, s.customerID, s.connectorID, true)
 	s.Require().NoError(err)
 	optional, needed := &dispatcher{}, &dispatcher{}
 
@@ -605,7 +605,7 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerSendsTheSandboxThroughTheProxy() 
 	s.Require().NoError(err)
 	s.Equal(tokenOf("primary"), token)
 
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, s.customerID, id))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, s.customerID, id))
 	_, err = box.Run(s.ctx, "print(1)", nil)
 	s.Require().NoError(err)
 	s.Contains(s.logs.String(), "credential is withdrawn from the sandbox")
@@ -732,7 +732,7 @@ func (s *SandboxGrantsSuite) TestADeletedConnectionIsWithdrawnBeforeTheNextRun()
 	s.Require().NoError(err)
 	s.Require().True(api.offered("CRM_TOKEN"))
 
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, s.customerID, id))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, s.customerID, id))
 	_, err = box.Run(s.ctx, "print(1)", nil)
 
 	s.Require().NoError(err)
@@ -789,7 +789,7 @@ func (s *SandboxGrantsSuite) TestABindingTheConfigNoLongerHoldsAsOpenedGivesNoCr
 
 	s.rebind(config, s.fixed("crm", id, "whoami"))
 	s.ErrorIs(SandboxBound(s.ctx, s.store, grant), sandbox.ErrNoCredential, "sandbox unset")
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, s.customerID, config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, s.customerID, config.ID))
 	s.ErrorIs(SandboxBound(s.ctx, s.store, grant), sandbox.ErrNoCredential, "config deleted")
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
@@ -1164,7 +1164,7 @@ func (s *SandboxGrantsSuite) TestALoginOnARevisionWithOtherHostsLeavesTheGrantUn
 			mine := s.pending("alice", "primary")
 			manifest, err := core.ParseManifest([]byte(s.crmManifest(s.connectorID, 3) + "\nsandbox:\n" + block))
 			s.Require().NoError(err)
-			_, err = s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+			_, err = s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 			s.Require().NoError(err)
 			box, d := s.chatSandbox(s.config(sandboxed(s.chosen("crm", "whoami"))), consent(mine))
 			_, err = s.call(d, "crm__list_tools", `{}`)
@@ -1269,7 +1269,7 @@ func (s *SandboxGrantsSuite) TestALoginWithoutSandboxOrABlockGivesTheSandboxNoth
 	s.sandboxRevision()
 	unset, _ := s.chatSandbox(s.config(s.chosen("crm", "whoami")), Consent{})
 	gone := s.config(sandboxed(s.chosen("crm", "whoami")))
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, s.customerID, s.connectorID, true)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, s.customerID, s.connectorID, true)
 	s.Require().NoError(err)
 	deleted, d := s.chatSandbox(gone, Consent{})
 

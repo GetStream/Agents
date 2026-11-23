@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -52,8 +51,7 @@ func Start(t testing.TB, name string, change ...func(*policy.Settings)) *Money {
 	service := usagetest.Start(t, usagetest.Options{
 		DSN: usagetest.Database(t, "usage_"+name), ManageKey: "manage-" + uuid.NewString(), Logger: discard,
 	})
-	configs, err := appconfig.New(appconfig.Options{Store: opened})
-	require.NoError(t, err)
+	configs := opened
 	client, err := usage.NewClient(usage.ClientOptions{URL: service.URL, Token: service.Token})
 	require.NoError(t, err)
 	settings := policy.Settings{
@@ -82,7 +80,7 @@ func (m *Money) Owner(t testing.TB, credit int64) routing.Owner {
 	t.Helper()
 	stamp := time.Now().UnixNano()
 	app, organization := fmt.Sprintf("app-%d", stamp), fmt.Sprintf("org-%d", stamp)
-	require.NoError(t, m.Store.JoinOrganization(context.Background(), app, organization))
+	require.NoError(t, m.Store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
 	if credit > 0 {
 		m.Usage.Credit(t, organization, credit)
 	}

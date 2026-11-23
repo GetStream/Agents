@@ -62,7 +62,8 @@ func Open(options Options) (*Ledger, error) {
 		options.Now = time.Now
 	}
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(options.DSN)))
-	return &Ledger{db: bun.NewDB(sqldb, pgdialect.New()), mirror: options.Mirror, now: options.Now}, nil
+	// A release rolled back past a migration that added a column still reads the row.
+	return &Ledger{db: bun.NewDB(sqldb, pgdialect.New(), bun.WithDiscardUnknownColumns()), mirror: options.Mirror, now: options.Now}, nil
 }
 
 // DB is the database, for what the ledger does not wrap.

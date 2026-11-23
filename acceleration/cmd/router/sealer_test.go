@@ -27,7 +27,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -674,13 +673,12 @@ func (s *ConnectorSealerSuite) TestWithoutAKMSKeyNoCloudKMSClientIsOpened() {
 
 // apiKeyConfigs is the store api_key mode looks keys up in. Nothing here looks one up, and
 // opening a store connects to nothing until a query runs, so no database is needed.
-func (s *ConnectorSealerSuite) apiKeyConfigs() *appconfig.Store {
+func (s *ConnectorSealerSuite) apiKeyConfigs() *store.Store {
 	s.settings.Auth.Mode = string(auth.APIKey)
 	pg, err := store.Open("postgres://nobody@127.0.0.1:1/unused?sslmode=disable")
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { pg.Close() })
-	configs, err := appconfig.New(appconfig.Options{Store: pg})
-	s.Require().NoError(err)
+	configs := pg
 	return configs
 }
 

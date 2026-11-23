@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -160,7 +159,7 @@ type openTurn struct {
 	answer      string
 	interrupted bool
 	// guardrail is the guardrail's check of the turn, nil when nothing screened it.
-	guardrail *live.GuardrailCheck
+	guardrail *store.GuardrailCheck
 	// why is why the reply was abandoned, set with interrupted.
 	why interruption
 	// marks is what the edge reports queuedAt and pulledAt to.
@@ -379,7 +378,7 @@ func (t *turnTracker) begin(turnID string, participant stt.Participant, readyAt,
 }
 
 // screened keeps the guardrail's check of a turn, to be reported with it.
-func (t *turnTracker) screened(turnID string, check *live.GuardrailCheck) {
+func (t *turnTracker) screened(turnID string, check *store.GuardrailCheck) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if current := t.open[turnID]; current != nil {
@@ -701,18 +700,17 @@ func leg(from, to time.Time) float64 {
 // turnRecorder writes finished turns off the conversation's path: the turn to Redis for
 // the hour somebody may read the call back in, and its counts to Postgres for the stats.
 // A conversation must never wait on a database, so recording is asynchronous and turns
-// are what gets dropped when the writer cannot keep up. Either side may be nil.
+// are what gets dropped when the writer cannot keep up.
 type turnRecorder struct {
 	store  *store.Store
-	live   *live.Client
 	owner  routing.Owner
 	logger *slog.Logger
 
-	queue chan live.Turn
+	queue chan store.Turn
 	done  chan struct{}
 
 	// write stores one row; it is the store and Redis unless a test says otherwise.
-	write func(ctx context.Context, row live.Turn) error
+	write func(ctx context.Context, row store.Turn) error
 
 	// ctx is the writer's, cancelled when Close gives up on what is still queued.
 	ctx          context.Context
@@ -729,18 +727,17 @@ type turnRecorder struct {
 	dropped   atomic.Int64
 }
 
-func newTurnRecorder(pgStore *store.Store, liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *turnRecorder {
-	return buildTurnRecorder(pgStore, liveClient, owner, logger).start()
+func newTurnRecorder(pgStore *store.Store, owner routing.Owner, logger *slog.Logger) *turnRecorder {
+	return buildTurnRecorder(pgStore, owner, logger).start()
 }
 
 // buildTurnRecorder is a recorder that has not started writing, so a test can swap how.
-func buildTurnRecorder(pgStore *store.Store, liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *turnRecorder {
+func buildTurnRecorder(pgStore *store.Store, owner routing.Owner, logger *slog.Logger) *turnRecorder {
 	r := &turnRecorder{
 		store:        pgStore,
-		live:         liveClient,
 		owner:        owner,
 		logger:       logger,
-		queue:        make(chan live.Turn, turnQueueSize),
+		queue:        make(chan store.Turn, turnQueueSize),
 		done:         make(chan struct{}),
 		drainTimeout: turnDrainTimeout,
 		writeTimeout: turnWriteTimeout,
@@ -757,7 +754,7 @@ func (r *turnRecorder) start() *turnRecorder {
 
 // Record queues a finished turn, dropping it if the writer is too far behind.
 func (r *turnRecorder) Record(turn Turn) {
-	row := live.Turn{
+	row := store.Turn{
 		CustomerID:           r.owner.CustomerID,
 		AgentID:              r.owner.AgentID,
 		CallID:               r.owner.CallID,
@@ -836,16 +833,14 @@ func (r *turnRecorder) run() {
 }
 
 // persist writes a row to Redis and to Postgres, logging what fails.
-func (r *turnRecorder) persist(ctx context.Context, row live.Turn) error {
+func (r *turnRecorder) persist(ctx context.Context, row store.Turn) error {
 	var failures []error
-	if r.live != nil {
-		if err := r.live.RecordTurn(ctx, row); err != nil {
-			r.logger.Error("could not record turn", "error", err)
-			failures = append(failures, err)
-		}
+	if err := r.store.Turns.Insert(ctx, row); err != nil {
+		r.logger.Error("could not record turn", "error", err)
+		failures = append(failures, err)
 	}
 	if r.store != nil {
-		if err := r.store.RecordTurnStats(ctx, sampleOf(row)); err != nil {
+		if err := r.store.TurnBuckets.Add(ctx, sampleOf(row)); err != nil {
 			r.logger.Error("could not count turn", "error", err)
 			failures = append(failures, err)
 		}
@@ -853,7 +848,7 @@ func (r *turnRecorder) persist(ctx context.Context, row live.Turn) error {
 	return errors.Join(failures...)
 }
 
-func sampleOf(turn live.Turn) store.TurnSample {
+func sampleOf(turn store.Turn) store.TurnSample {
 	sample := store.TurnSample{
 		CustomerID:   turn.CustomerID,
 		AgentID:      turn.AgentID,

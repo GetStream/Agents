@@ -84,7 +84,7 @@ func (s *Service) Poll(ctx context.Context) {
 	if s.registrar == nil {
 		return
 	}
-	useCases, err := s.store.UseCasesInStatus(ctx, VendorPending, 0, nil)
+	useCases, err := s.store.UseCases.SelectInStatus(ctx, VendorPending, 0, nil)
 	if err != nil {
 		s.logger.Error("could not list the use cases a vendor holds", "error", err)
 		return
@@ -99,7 +99,7 @@ func (s *Service) Poll(ctx context.Context) {
 // Create records a new draft use case and the numbers that send as it.
 func (s *Service) Create(ctx context.Context, useCase *store.UseCase, numbers []string) error {
 	useCase.Status = Draft
-	if err := s.store.CreateUseCase(ctx, useCase); err != nil {
+	if err := s.store.UseCases.Insert(ctx, useCase); err != nil {
 		return err
 	}
 	return s.assign(ctx, *useCase, numbers)
@@ -111,7 +111,7 @@ func (s *Service) Update(ctx context.Context, useCase *store.UseCase, numbers []
 	if !Editable(useCase.Status) {
 		return stack.Wrap(fmt.Errorf("%w: a %s use case cannot be edited", ErrLocked, useCase.Status))
 	}
-	if err := s.store.UpdateUseCase(ctx, useCase); err != nil {
+	if err := s.store.UseCases.Update(ctx, useCase); err != nil {
 		return err
 	}
 	if numbers == nil {
@@ -121,7 +121,7 @@ func (s *Service) Update(ctx context.Context, useCase *store.UseCase, numbers []
 }
 
 func (s *Service) assign(ctx context.Context, useCase store.UseCase, numbers []string) error {
-	if err := s.store.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers); err != nil {
+	if err := s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers); err != nil {
 		return stack.Wrap(fmt.Errorf("%w: %w", ErrInvalid, err))
 	}
 	return nil
@@ -129,26 +129,26 @@ func (s *Service) assign(ctx context.Context, useCase store.UseCase, numbers []s
 
 // Delete removes a use case the vendor does not hold.
 func (s *Service) Delete(ctx context.Context, customerID, id string) error {
-	useCase, err := s.store.UseCase(ctx, customerID, id)
+	useCase, err := s.store.UseCases.Get(ctx, customerID, id)
 	if err != nil {
 		return err
 	}
 	if !Deletable(useCase.Status) {
 		return stack.Wrap(fmt.Errorf("%w: a %s use case cannot be deleted", ErrLocked, useCase.Status))
 	}
-	return s.store.DeleteUseCase(ctx, customerID, id)
+	return s.store.UseCases.Delete(ctx, customerID, id)
 }
 
 // Submit sends a use case to Stream's review, once it and the app's profile are complete.
 func (s *Service) Submit(ctx context.Context, customerID, id string) (store.UseCase, error) {
-	useCase, err := s.store.UseCase(ctx, customerID, id)
+	useCase, err := s.store.UseCases.Get(ctx, customerID, id)
 	if err != nil {
 		return store.UseCase{}, err
 	}
 	if !Editable(useCase.Status) {
 		return store.UseCase{}, stack.Wrap(fmt.Errorf("%w: a %s use case cannot be submitted", ErrLocked, useCase.Status))
 	}
-	profile, err := s.store.BusinessProfile(ctx, customerID)
+	profile, err := s.store.BusinessProfiles.Get(ctx, customerID)
 	if errors.Is(err, store.ErrNoBusinessProfile) {
 		return store.UseCase{}, stack.Wrap(fmt.Errorf("%w: save a business profile first", ErrInvalid))
 	}
@@ -173,14 +173,14 @@ func (s *Service) Submit(ctx context.Context, customerID, id string) (store.UseC
 	from := useCase.Status
 	now := time.Now().UTC()
 	useCase.Status, useCase.SubmittedAt = Submitted, &now
-	err = s.store.MoveUseCase(ctx, &useCase, from, &store.ReviewLog{Actor: ActorApp, SubmittedAt: &now})
+	err = s.store.UseCases.Move(ctx, &useCase, from, &store.ReviewLog{Actor: ActorApp, SubmittedAt: &now})
 	return useCase, err
 }
 
 // Review records Stream's decision on a submitted use case. Approving sends it to the
 // vendor, or approves it outright with no vendor to send it to.
 func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer string) (store.UseCase, error) {
-	useCase, err := s.store.UseCaseByID(ctx, id)
+	useCase, err := s.store.UseCases.GetByID(ctx, id)
 	if err != nil {
 		return store.UseCase{}, err
 	}
@@ -203,7 +203,7 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 	default:
 		return store.UseCase{}, stack.Wrap(fmt.Errorf("%w: decision %q", ErrInvalid, decision))
 	}
-	if err := s.store.MoveUseCase(ctx, &useCase, Submitted, log); err != nil {
+	if err := s.store.UseCases.Move(ctx, &useCase, Submitted, log); err != nil {
 		return store.UseCase{}, err
 	}
 	if useCase.Status != VendorPending {
@@ -214,7 +214,7 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 		// is no reason to make the reviewer decide twice.
 		s.logger.Error("could not register a use case with its vendor", "use_case", id, "error", err)
 	}
-	return s.store.UseCaseByID(ctx, id)
+	return s.store.UseCases.GetByID(ctx, id)
 }
 
 // Hook takes a vendor's report on a brand or a campaign, verified, and moves whichever use
@@ -229,7 +229,7 @@ func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) err
 	}
 	campaignID, brandID := s.registrar.HookSubject(body)
 	if campaignID != "" {
-		useCase, err := s.store.UseCaseByCampaign(ctx, s.registrar.Name(), campaignID)
+		useCase, err := s.store.UseCases.GetByCampaign(ctx, s.registrar.Name(), campaignID)
 		if errors.Is(err, store.ErrUnknownUseCase) {
 			return nil
 		}
@@ -279,7 +279,7 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 		}
 		useCase.VendorStatus = campaign.Status
 	}
-	if err := s.store.MoveUseCase(ctx, &useCase, VendorPending, log); err != nil {
+	if err := s.store.UseCases.Move(ctx, &useCase, VendorPending, log); err != nil {
 		return err
 	}
 	// Counted once the move is stored: a report and the poller reading the same rejection
@@ -296,7 +296,7 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 // register registers the app's brand if it has none, and the campaign once the brand is
 // verified. A brand the vendor refused leaves nothing to register the campaign under.
 func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
-	profile, err := s.store.BusinessProfile(ctx, useCase.CustomerID)
+	profile, err := s.store.BusinessProfiles.Get(ctx, useCase.CustomerID)
 	if err != nil {
 		return err
 	}
@@ -320,7 +320,7 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		return err
 	}
 	if brand.ID != profile.VendorBrandID || brand.Status != profile.BrandStatus {
-		if err := s.store.SetBrand(ctx, useCase.CustomerID, brand.ID, brand.Status); err != nil {
+		if err := s.store.BusinessProfiles.SetBrand(ctx, useCase.CustomerID, brand.ID, brand.Status); err != nil {
 			return err
 		}
 	}
@@ -332,7 +332,7 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 	case Failed:
 		useCase.Status, useCase.VendorStatus = VendorRejected, brand.Status
 		log.Notes, log.VendorPayload = "The vendor refused the brand: "+brand.Status+".", brand.Raw
-		return s.store.MoveUseCase(ctx, &useCase, VendorPending, log)
+		return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
 	}
 	booked, err := s.book(ctx, useCase.CustomerID, s.campaignFees(ctx, useCase))
 	if err != nil {
@@ -355,13 +355,13 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 	// A registrar charges a campaign's first months when it registers it.
 	s.billUpfront(useCase, s.now().UTC())
 	log.Notes, log.VendorPayload = registeredNote+campaign.ID+".", campaign.Raw
-	return s.store.MoveUseCase(ctx, &useCase, VendorPending, log)
+	return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
 }
 
 // assignAtVendor tells the vendor which of its numbers send as the campaign. A number from
 // another vendor is not the registrar's to assign.
 func (s *Service) assignAtVendor(ctx context.Context, useCase store.UseCase) error {
-	numbers, err := s.store.UseCaseNumbers(ctx, useCase)
+	numbers, err := s.store.UseCases.Numbers(ctx, useCase)
 	if err != nil {
 		return err
 	}

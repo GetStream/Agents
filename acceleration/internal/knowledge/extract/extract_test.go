@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"image"
 	"image/jpeg"
@@ -201,6 +202,93 @@ func (s *ExtractSuite) TestReadingStopsAtTheDeadline() {
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 }
 
+func (s *ExtractSuite) TestReadingEveryFormatStopsAtTheDeadline() {
+	hurried := New(Options{Timeout: time.Nanosecond})
+	defer hurried.Close()
+
+	for _, name := range []string{"handbook.docx", "handbook.odt", "handbook.rtf", "policies.doc", "menu.xlsx"} {
+		_, err := hurried.Extract(context.Background(), name, s.fixture(name))
+
+		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+		_, ok := ReasonOf(err)
+		s.False(ok, "%s: a file stopped at the deadline is not called corrupt", name)
+	}
+}
+
+// paddedJPEG is a JPEG a model could be shown, followed by padding to size bytes. Only its
+// header is read, and the padding compresses a thousand times.
+func (s *ExtractSuite) paddedJPEG(size int, fill byte) []byte {
+	var b bytes.Buffer
+	s.Require().NoError(jpeg.Encode(&b, image.NewRGBA(image.Rect(0, 0, 200, 200)), nil))
+	return append(b.Bytes(), bytes.Repeat([]byte{fill}, size-b.Len())...)
+}
+
+// wordWithPictures is figures.docx with a body that places each of ids in turn, and
+// with the parts given, each named in its relationships by its file name.
+func (s *ExtractSuite) wordWithPictures(ids []string, parts map[string][]byte) []byte {
+	data := s.fixture("figures.docx")
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	s.Require().NoError(err)
+	rels, err := zipFile(archive, "word/_rels/document.xml.rels")
+	s.Require().NoError(err)
+	var added strings.Builder
+	replaced := map[string][]byte{}
+	for name, part := range parts {
+		id := strings.TrimSuffix(name, ".jpeg")
+		added.WriteString(`<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Id="` + id + `" Target="media/` + name + `" />`)
+		replaced["word/media/"+name] = part
+	}
+	replaced["word/_rels/document.xml.rels"] = bytes.Replace(rels, []byte("</Relationships>"), []byte(added.String()+"</Relationships>"), 1)
+	var body strings.Builder
+	body.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Photos.</w:t></w:r>`)
+	for _, id := range ids {
+		body.WriteString(`<w:r><a:blip r:embed="` + id + `"/></w:r>`)
+	}
+	body.WriteString(`</w:p></w:body></w:document>`)
+	replaced["word/document.xml"] = []byte(body.String())
+	return s.rezip(data, replaced)
+}
+
+func (s *ExtractSuite) TestTheKeptPicturesOfADocumentStopAtTheirByteBudget() {
+	parts := map[string][]byte{}
+	var ids []string
+	for n := range 8 {
+		id := "big" + strconv.Itoa(n)
+		parts[id+".jpeg"] = s.paddedJPEG(9<<20, byte(n))
+		ids = append(ids, id)
+	}
+	data := s.wordWithPictures(ids, parts)
+	s.Less(len(data), 1<<20, "eight 9 MiB pictures pack into a small file")
+
+	document, err := s.extractor.Extract(context.Background(), "photos.docx", data)
+
+	s.Require().NoError(err)
+	s.Equal(7, len(document.Pictures), "the eighth would take the pictures past the budget")
+	size := 0
+	for _, picture := range document.Pictures {
+		size += len(picture.Data)
+	}
+	s.LessOrEqual(size, maxKeptBytes)
+}
+
+func (s *ExtractSuite) TestAPictureNamedOverAndOverIsUnpackedOnce() {
+	// Too large to send, so it is never kept, and each time it is named it would be
+	// unpacked again: a body naming it thousands of times would read for minutes.
+	ids := make([]string, 5000)
+	for i := range ids {
+		ids[i] = "huge"
+	}
+	data := s.wordWithPictures(ids, map[string][]byte{"huge.jpeg": s.paddedJPEG(60<<20, 0)})
+	hurried := New(Options{Timeout: 10 * time.Second})
+	defer hurried.Close()
+
+	document, err := hurried.Extract(context.Background(), "named.docx", data)
+
+	s.Require().NoError(err)
+	s.Empty(document.Pictures)
+	s.Contains(document.Pages[0].Text, "Photos.")
+}
+
 func (s *ExtractSuite) TestAWordDocumentKeepsItsHeadingsListsTablesAndPages() {
 	document := s.extract("handbook.docx")
 
@@ -301,6 +389,57 @@ func (s *ExtractSuite) TestALegacyWordDocumentKeepsItsParagraphsListsAndTables()
 	s.Contains(text, "Store Policies\n\nOpening hours are 6am to 10pm.")
 	s.Contains(text, "- Wash hands\n- Wear gloves")
 	s.Contains(text, "| Item | Price |\n| --- | --- |\n| Sandwich | 4.50 |\n| Lemonade | 2.25 |\n\nRefunds are given within 30 days with a receipt.")
+}
+
+func (s *ExtractSuite) TestALegacyWordDocumentReadsItsPiecesInOrderOnce() {
+	word, table := s.wordStream("Opening hours are 6am to 10pm.", []uint32{0, 13, 30})
+
+	text, err := docText(context.Background(), word, table)
+
+	s.Require().NoError(err)
+	s.Equal("Opening hours are 6am to 10pm.", string(text))
+}
+
+// A piece table that goes back to the start a thousand times would hold the text a
+// thousand times over.
+func (s *ExtractSuite) TestALegacyWordDocumentWhosePiecesGoBackIsRefused() {
+	cps := []uint32{0}
+	for range 1000 {
+		cps = append(cps, 30, 0)
+	}
+	word, table := s.wordStream("Opening hours are 6am to 10pm.", cps)
+
+	text, err := docText(context.Background(), word, table)
+
+	s.Require().Error(err)
+	s.Empty(text)
+}
+
+// wordStream is the WordDocument and table streams of a .doc holding text as one-byte
+// characters, its piece table cut at the character positions cps, every piece reading
+// from the start of the text.
+func (s *ExtractSuite) wordStream(text string, cps []uint32) (word, table []byte) {
+	const lw = fibCsw + 4
+	word = make([]byte, lw+4*4+2+(clxIndex+1)*8)
+	binary.LittleEndian.PutUint16(word[fibCsw+2:], 4)
+	binary.LittleEndian.PutUint32(word[lw+12:], uint32(len(text)))
+	textAt := len(word)
+	word = append(word, text...)
+
+	pieces := len(cps) - 1
+	table = []byte{0x02}
+	table = binary.LittleEndian.AppendUint32(table, uint32(12*pieces+4))
+	for _, cp := range cps {
+		table = binary.LittleEndian.AppendUint32(table, cp)
+	}
+	for _, cp := range cps[:pieces] {
+		table = binary.LittleEndian.AppendUint16(table, 0)
+		table = binary.LittleEndian.AppendUint32(table, 0x40000000|uint32(textAt+int(cp))*2)
+		table = binary.LittleEndian.AppendUint16(table, 0)
+	}
+	pair := lw + 4*4 + 2 + clxIndex*8
+	binary.LittleEndian.PutUint32(word[pair+4:], uint32(len(table)))
+	return word, table
 }
 
 func (s *ExtractSuite) TestAWorkbookIsATablePerSheetWithItsValuesAsTheSheetShowsThem() {

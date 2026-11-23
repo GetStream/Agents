@@ -270,7 +270,7 @@ func ConnectorConsents(records *store.Store, registry core.Registry, secrets *au
 		if err != nil {
 			return session.Consent{}, err
 		}
-		definition, err := records.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+		definition, err := records.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 		if err != nil {
 			return session.Consent{}, err
 		}
@@ -299,7 +299,7 @@ func (c consents) connectionFor(ctx context.Context, request session.ConsentRequ
 			connection.ConnectorID == request.ConnectorID
 	}
 	if request.ConnectionID != "" {
-		connection, err := c.store.ConnectorConnection(ctx, request.CustomerID, request.ConnectionID)
+		connection, err := c.store.ConnectorConnections.Get(ctx, request.CustomerID, request.ConnectionID)
 		if err != nil {
 			return store.ConnectorConnection{}, err
 		}
@@ -308,9 +308,10 @@ func (c consents) connectionFor(ctx context.Context, request session.ConsentRequ
 		}
 		return connection, nil
 	}
-	held, err := c.store.ConnectorConnectionsByOwner(ctx, request.CustomerID, store.ConnectionFilter{
+	held, err := c.store.ConnectorConnections.Select(ctx, request.CustomerID, store.ConnectionFilter{
 		OwnerType: store.OwnerUser, OwnerID: request.UserID, ConnectorID: request.ConnectorID,
 	})
+
 	if err != nil {
 		return store.ConnectorConnection{}, err
 	}
@@ -330,7 +331,7 @@ func (c consents) connectionFor(ctx context.Context, request session.ConsentRequ
 			return connection, nil
 		}
 	}
-	definition, err := c.store.LatestConnectorDefinition(ctx, request.CustomerID, request.ConnectorID)
+	definition, err := c.store.ConnectorDefinitions.Latest(ctx, request.CustomerID, request.ConnectorID)
 	if err != nil {
 		return store.ConnectorConnection{}, err
 	}
@@ -354,7 +355,7 @@ func (c consents) connectionFor(ctx context.Context, request session.ConsentRequ
 		CustomerID: request.CustomerID, ConnectorID: definition.ID, DefinitionRevision: definition.Revision,
 		OwnerType: store.OwnerUser, OwnerID: request.UserID, AuthScheme: scheme, Inputs: profile.Inputs,
 	}
-	if err := c.store.CreateConnectorConnection(ctx, c.registry, &connection); err != nil {
+	if err := c.store.ConnectorConnections.Insert(ctx, c.registry, &connection); err != nil {
 		return store.ConnectorConnection{}, err
 	}
 	return connection, nil
@@ -383,7 +384,7 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 	// since, gets the fixed manifest. The connection moves to it only once the consent
 	// connects it (completeConsent), so a consent denied, failed or for another account
 	// leaves it reading what its grant was made with.
-	latest, err := c.store.LatestConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID)
+	latest, err := c.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
 	if err != nil {
 		return Authorization{}, err
 	}
@@ -446,7 +447,7 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 		return Authorization{}, err
 	}
 	expires := time.Now().UTC().Add(attemptLifetime).Truncate(time.Microsecond)
-	err = c.store.CreateConnectorAuthorizationAttempt(ctx, &store.ConnectorAuthorizationAttempt{
+	err = c.store.ConnectorAuthorizationAttempts.Insert(ctx, &store.ConnectorAuthorizationAttempt{
 		ID:            id,
 		CustomerID:    connection.CustomerID,
 		ConnectionID:  connection.ID,
@@ -456,6 +457,7 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 		KEKVersion:    c.secrets.CurrentVersion(),
 		ExpiresAt:     expires,
 	})
+
 	// Deleted between the read above and the insert.
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return Authorization{}, errNoSuchConnection
@@ -694,7 +696,7 @@ func (s *Server) handOffConnectorLaunch(w http.ResponseWriter, r *http.Request) 
 		writeFailure(w, r, err)
 		return
 	}
-	err = s.store.HandOffConnectorAuthorizationAttempt(r.Context(), row.ID, row.AttemptSealed, resealed, s.connectorSecrets.CurrentVersion())
+	err = s.store.ConnectorAuthorizationAttempts.HandOff(r.Context(), row.ID, row.AttemptSealed, resealed, s.connectorSecrets.CurrentVersion())
 	if errors.Is(err, store.ErrNoAuthorizationAttempt) {
 		writeError(w, errNoAttempt)
 		return
@@ -751,7 +753,7 @@ func (s *Server) finishConnectorConsent(w http.ResponseWriter, r *http.Request) 
 		writeError(w, forbidden("finish the consent in the browser that started it"))
 		return
 	}
-	consumed, err := s.store.ConsumeConnectorAuthorizationAttempt(ctx, states[0])
+	consumed, err := s.store.ConnectorAuthorizationAttempts.Consume(ctx, states[0])
 	if errors.Is(err, store.ErrNoAuthorizationAttempt) || err == nil && consumed.ID != row.ID {
 		writeError(w, errNoAttempt)
 		return
@@ -802,7 +804,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 		s.logger.Error("a consent finished for a scheme this deployment no longer has", "scheme", sealed.Scheme)
 		return consentFailed
 	}
-	connection, err := s.store.ConnectorConnection(ctx, row.CustomerID, row.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(ctx, row.CustomerID, row.ConnectionID)
 	if err != nil {
 		s.logger.Error("could not read the connection a consent finished for", "connection", row.ConnectionID,
 			"connector", sealed.ConnectorID, "error", err)
@@ -911,7 +913,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 	// does: one a disconnect or a long wait dropped is made again. The consent itself is done,
 	// so a failure here is logged and the next validate tries again.
 	if s.mcpEvents != nil {
-		connected, err := s.store.ConnectorConnection(ctx, row.CustomerID, row.ConnectionID)
+		connected, err := s.store.ConnectorConnections.Get(ctx, row.CustomerID, row.ConnectionID)
 		if err == nil {
 			err = s.mcpEvents.Reconcile(ctx, connected)
 		}
@@ -961,10 +963,11 @@ func (s *Server) recordRefusal(ctx context.Context, connection store.ConnectorCo
 	if code == "unauthorized_client" {
 		reason += " " + fmt.Sprintf(unauthorizedClientHint, connectorCallbackURL(s.publicURL))
 	}
-	err := s.store.PutConnectorConnectionValidation(ctx, &store.ConnectorConnectionValidation{
-		ConnectionID: connection.ID, Revision: connection.Revision, Status: validationFailed,
+	err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, store.ConnectorConnectionValidation{
+		Revision: connection.Revision, Status: validationFailed,
 		Code: codeConsentRefused, Error: reason, CheckedAt: time.Now().UTC(),
 	})
+
 	if err != nil {
 		s.logger.Error("could not record why a consent was refused", "connection", connection.ID, "error", err)
 	}
@@ -1092,7 +1095,7 @@ func (s *Server) connectionManifest(ctx context.Context, connection store.Connec
 // not capture. At the connection's own revision every value is one it captured, so nothing
 // is left out.
 func connectionManifest(ctx context.Context, records *store.Store, connection store.ConnectorConnection, revision int) (core.ResolvedManifest, error) {
-	definition, err := records.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, revision)
+	definition, err := records.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, revision)
 	if err != nil {
 		return core.ResolvedManifest{}, err
 	}
@@ -1116,12 +1119,12 @@ func (s *Server) openAttemptByID(ctx context.Context, id string) (store.Connecto
 	if id == "" {
 		return store.ConnectorAuthorizationAttempt{}, attempt{}, store.ErrNoAuthorizationAttempt
 	}
-	row, err := s.store.ConnectorAuthorizationAttemptByID(ctx, id)
+	row, err := s.store.ConnectorAuthorizationAttempts.Get(ctx, id)
 	return s.openedAttempt(row, err)
 }
 
 func (s *Server) openAttemptByState(ctx context.Context, state string) (store.ConnectorAuthorizationAttempt, attempt, error) {
-	row, err := s.store.ConnectorAuthorizationAttemptByState(ctx, state)
+	row, err := s.store.ConnectorAuthorizationAttempts.GetByState(ctx, state)
 	return s.openedAttempt(row, err)
 }
 

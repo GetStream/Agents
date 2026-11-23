@@ -49,7 +49,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return nil, err
 	}
 	if id != "" {
-		found, err := s.configs.AgentConfig(ctx, customerID, id)
+		found, err := s.store.AgentConfigs.Get(ctx, customerID, id)
 		if err != nil {
 			return nil, errUnknownConfig
 		}
@@ -59,15 +59,15 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return &found, nil
 	}
 
-	found, exists, err := s.configs.AgentConfigByName(ctx, customerID, named)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
-	}
-	if !exists {
+	found, err := s.store.AgentConfigs.GetByName(ctx, customerID, named)
+	if errors.Is(err, store.ErrNoAgentConfig) {
 		// Refused rather than started unconfigured. A typo in a name would otherwise get a
 		// working session with default instructions, which is far harder to notice than an
 		// error: the agent answers, just not as the agent that was asked for.
 		return nil, notFound("there is no agent called " + named)
+	}
+	if err != nil {
+		return nil, invalidRequest(err.Error())
 	}
 	if teams.refuses(found) {
 		return nil, notFound("there is no agent called " + named)
@@ -208,7 +208,18 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 // getSessionTokens says what the session's models read and wrote, and what their prompts
 // were made of, while it runs and after.
 func (s *Server) getSessionTokens(ctx context.Context, request *getSessionTokensRequest) (*getSessionTokensResponse, error) {
-	spent, err := s.tokensOf(ctx, request.Id, errUnknownSession)
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
+		return nil, errMissingCustomer
+	}
+	if s.store == nil {
+		return nil, errNoCalls
+	}
+	row, err := s.store.Sessions.Get(ctx, customerID, request.Id)
+	if err != nil {
+		return nil, errUnknownSession
+	}
+	spent, err := s.tokensOf(ctx, customerID, sessionSpan(row))
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +227,7 @@ func (s *Server) getSessionTokens(ctx context.Context, request *getSessionTokens
 }
 
 // getSession returns one session, running or ended. A backend is also told what was made of
-// it and what it spent, from the call row every session is recorded under.
+// it, from the review on its latest call, and what all of it spent.
 func (s *Server) getSession(ctx context.Context, request *getSessionRequest) (*getSessionResponse, error) {
 	found, failure := s.storedOrLiveSession(ctx, request.Id)
 	if failure == nil && found.Live != nil && !canReadSession(ctx, found.Live.Spec()) {
@@ -231,15 +242,28 @@ func (s *Server) getSession(ctx context.Context, request *getSessionRequest) (*g
 		rendered = sessionOf(ctx, found.Live)
 		rendered.PinnedAt = s.livePinnedAt(ctx, found.Live)
 	} else {
-		rendered = storedSessionOf(*found.Stored)
+		call, err := s.latestCall(ctx, *found.Stored)
+		if err != nil {
+			return nil, err
+		}
+		rendered = storedSessionOf(*found.Stored, call)
 	}
 	if KindFrom(ctx) != auth.KindServer || s.store == nil || value(rendered.Incognito) {
 		return &getSessionResponse{Body: rendered}, nil
 	}
 	rendered.CallOutcome = s.callOutcome(ctx, request.Id)
-	call, err := s.store.Call(ctx, OwnerFrom(ctx).CustomerID, request.Id)
+	row := found.Stored
+	if row == nil {
+		written, err := s.store.Sessions.Get(ctx, OwnerFrom(ctx).CustomerID, request.Id)
+		if err != nil {
+			s.logger.Warn("could not read a session's row", "session", request.Id, "error", err)
+			return &getSessionResponse{Body: rendered}, nil
+		}
+		row = &written
+	}
+	call, err := s.latestCall(ctx, *row)
 	if err != nil {
-		s.logger.Warn("could not read the call a session is recorded under", "session", request.Id, "error", err)
+		s.logger.Warn("could not read a session's latest call", "session", request.Id, "error", err)
 		return &getSessionResponse{Body: rendered}, nil
 	}
 	if call.Summary != "" {
@@ -250,7 +274,7 @@ func (s *Server) getSession(ctx context.Context, request *getSessionRequest) (*g
 	}
 	rendered.ReviewScore = call.ReviewScore
 	var record Call
-	s.attachUsage(ctx, OwnerFrom(ctx).CustomerID, call, &record)
+	s.attachUsage(ctx, OwnerFrom(ctx).CustomerID, sessionSpan(*row), &record)
 	rendered.Usage = record.Usage
 	return &getSessionResponse{Body: rendered}, nil
 }
@@ -389,7 +413,7 @@ func (s *Server) rewindSession(ctx context.Context, request *rewindSessionReques
 	}
 	defer sent()
 
-	err := found.Rewind(ctx, s.store, request.Body.ResponseId)
+	err := found.Rewind(ctx, session.RecordedIn(s.store), request.Body.ResponseId)
 	// A conversation kept in Chat is rewound the way an edit is, and refused the same ways.
 	if refused := branchRefused(err); refused != nil {
 		return nil, refused
@@ -553,14 +577,14 @@ func (s *Server) storedOrLiveSession(ctx context.Context, id string) (session.Fo
 // yet: on a miss it waits for the writer and reads again. A row already there is answered at
 // once, so a stalled writer holds up only a read that missed.
 func (s *Server) storedSession(ctx context.Context, customerID, id string) (store.AgentSession, error) {
-	row, err := s.store.StoredSession(ctx, customerID, id)
+	row, err := s.store.Sessions.Get(ctx, customerID, id)
 	if err == nil || s.sessions == nil {
 		return row, err
 	}
 	if flushErr := s.sessions.FlushRecords(ctx); flushErr != nil {
 		return store.AgentSession{}, flushErr
 	}
-	return s.store.StoredSession(ctx, customerID, id)
+	return s.store.Sessions.Get(ctx, customerID, id)
 }
 
 // reopenSettleGap is how long a reopened conversation's agent stays quiet, with nothing left
@@ -749,8 +773,12 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	// Its team too: the one it was opened under is in those categories, and a team the config
 	// was tagged with since does not move a conversation already under way.
 	spec.Team = ""
-	// The row keeps the call voice was last on, which voice goes back to once started.
-	return spec.Holding(session.Call{Type: row.CallType, ID: row.CallID}), nil
+	// Voice goes back to the Stream call it was last on once started.
+	call, err := s.store.Calls.LastVoiced(ctx, row.CustomerID, row.ID)
+	if err != nil && !errors.Is(err, store.ErrNoCall) {
+		return session.Spec{}, err
+	}
+	return spec.Holding(session.Call{Type: call.CallType, ID: call.CallID}), nil
 }
 
 // selectionsOf are the connections a stored session's caller chose for its session bindings.
@@ -786,9 +814,30 @@ func holdUntilAnswered(reopened *session.Session, events <-chan session.Event, d
 	}
 }
 
+// latestCalls is the latest call of each session found only as a row, by session id.
+func (s *Server) latestCalls(ctx context.Context, found []session.Found) (map[string]store.Call, error) {
+	var ids []string
+	for _, one := range found {
+		if one.Live == nil && one.Stored != nil {
+			ids = append(ids, one.Stored.ID)
+		}
+	}
+	if len(ids) == 0 || s.store == nil {
+		return nil, nil
+	}
+	return s.store.Calls.Latest(ctx, OwnerFrom(ctx).CustomerID, ids)
+}
+
+// latestCall is the latest call of one stored session, zero when it has none.
+func (s *Server) latestCall(ctx context.Context, row store.AgentSession) (store.Call, error) {
+	calls, err := s.latestCalls(ctx, []session.Found{{Stored: &row}})
+	return calls[row.ID], err
+}
+
 // sessionsOf renders a query's results, taking the live half where there is one: a session
-// in flight knows what routing resolved its models to, which the row does not carry.
-func sessionsOf(ctx context.Context, found []session.Found) []Session {
+// in flight knows what routing resolved its models to, which the row does not carry. calls
+// is the latest call of each session found only as a row.
+func sessionsOf(ctx context.Context, found []session.Found, calls map[string]store.Call) []Session {
 	listed := make([]Session, 0, len(found))
 	for _, one := range found {
 		switch {
@@ -801,7 +850,7 @@ func sessionsOf(ctx context.Context, found []session.Found) []Session {
 			}
 			listed = append(listed, rendered)
 		case one.Stored != nil:
-			listed = append(listed, storedSessionOf(*one.Stored))
+			listed = append(listed, storedSessionOf(*one.Stored, calls[one.Stored.ID]))
 		}
 	}
 	return listed
@@ -1052,16 +1101,17 @@ func describe(rendered *Session, spec session.Spec) {
 	}
 }
 
-// storedSessionOf renders a session that ended, from the row that outlived it.
+// storedSessionOf renders a session that ended, from the row that outlived it and its latest
+// call.
 //
 // The resolved models are absent rather than guessed. The row carries what the session was
 // asked to use, not what routing picked on each turn, and reporting the request as though it
 // were the answer would have a caller reading a failover that happened as a model that ran.
-func storedSessionOf(row store.AgentSession) Session {
+func storedSessionOf(row store.AgentSession, call store.Call) Session {
 	rendered := Session{
 		Id:        row.ID,
-		CallId:    row.CallID,
-		CallType:  row.CallType,
+		CallId:    call.CallID,
+		CallType:  call.CallType,
 		UserId:    row.UserID,
 		AgentId:   row.AgentID,
 		State:     Live,
@@ -1070,8 +1120,8 @@ func storedSessionOf(row store.AgentSession) Session {
 	if row.State == store.SessionClosed {
 		rendered.State = Ended
 	}
-	// A session with no call was held in writing, which is what the absence of one means.
-	if row.CallID == "" {
+	// A session whose latest call had no Stream call was held in writing.
+	if call.CallID == "" {
 		text := true
 		rendered.Text = &text
 	}
@@ -1342,7 +1392,7 @@ func (s *Server) recordedHistory(ctx context.Context, parent session.Found, requ
 			return nil, err
 		}
 	}
-	exchanges, err := s.store.Exchanges(ctx, OwnerFrom(ctx).CustomerID, parent.ID(), responseID)
+	exchanges, err := s.store.Responses.Exchanges(ctx, OwnerFrom(ctx).CustomerID, parent.ID(), responseID)
 	if err != nil {
 		return nil, err
 	}
@@ -1369,7 +1419,7 @@ func (s *Server) forkedDocuments(ctx context.Context, parent session.Found, unti
 	case parent.Stored != nil:
 		scope.ConversationID = parent.Stored.ConversationID
 	}
-	documents, err := s.store.ConversationDocuments(ctx, OwnerFrom(ctx).CustomerID, scope)
+	documents, err := s.store.ConversationDocuments.Select(ctx, OwnerFrom(ctx).CustomerID, scope)
 	if err != nil {
 		s.logger.Error("could not read the files a fork carries", "session", parent.ID(), "error", err)
 		return nil
