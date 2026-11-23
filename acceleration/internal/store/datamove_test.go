@@ -1771,11 +1771,19 @@ func (s *DataMoveSuite) TestAnImportUnderTheBuiltinCustomerDoesNotWriteABuiltInD
 
 	err = s.destination.ImportRow(s.ctx, BuiltinCustomer, "connector_definitions", json.RawMessage(row))
 
-	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Require().ErrorIs(err, ErrNotACustomConnector)
 	s.Contains(err.Error(), "--as")
 	latest, lerr := s.destination.ConnectorDefinitions.LatestBuiltin(s.ctx, "github")
 	s.Require().NoError(lerr)
 	s.Equal(1, latest.Revision, "the built-in is the one this deployment seeded")
+}
+
+// The operator rule reads the whole registration list, not its first entry.
+func (s *DataMoveSuite) TestADefinitionNamingTheOperatorClientAfterAnotherRegistrationIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"client": {"registration": ["customer", "operator"]}, "schemes": ["oauth2_code"]`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.Zero(s.definitionsNamed(id))
 }
 
 func (s *DataMoveSuite) TestAChangeToAConnectorConnectionLeavesItsCredentialsBehind() {

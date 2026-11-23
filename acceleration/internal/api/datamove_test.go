@@ -198,6 +198,19 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientIsRefused
 	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+taken, nil, nil))
 }
 
+// The operator rule reads the whole registration list, not its first entry.
+func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnotherIsRefused() {
+	refused := "custom_" + store.NewID()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(refused, `"client": {"registration": ["customer", "operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"],
+			"endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "client.registration cannot be operator for a custom connector")
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
+}
+
 // importedConnector is an export's line of a custom definition id whose manifest has fields,
 // JSON members, beside its id, name and MCP source.
 func (s *DataMoveSuite) importedConnector(id, fields string) dataLine {
