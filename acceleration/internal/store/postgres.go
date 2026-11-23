@@ -26,6 +26,16 @@ func isViolation(err error, code string) bool {
 	return errors.As(err, &refused) && refused.Field('C') == code
 }
 
+// constraint is the name of the unique constraint an error violated, empty for anything
+// else.
+func constraint(err error) string {
+	var failure pgdriver.Error
+	if errors.As(err, &failure) && failure.Field('C') == uniqueViolation {
+		return failure.Field('n')
+	}
+	return ""
+}
+
 // IsForeignKeyViolation reports whether err is Postgres refusing a row whose parent row is
 // missing.
 func IsForeignKeyViolation(err error) bool {

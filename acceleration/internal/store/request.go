@@ -449,8 +449,7 @@ func Unwritable(err error) bool {
 // row carried in with its own id leaves behind. InsertMany has moved the sequence past it by
 // then, so trying again at once writes the rows.
 func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
+	return constraint(err) == requestsPrimaryKey
 }
 
 // callsOf is the call each request happened in, in their order: the agent's latest call of the
