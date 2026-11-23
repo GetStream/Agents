@@ -3698,8 +3698,10 @@ func (s *ScheduledTasksSuite) TestACallNobodyPicksUpIsNotAnswered() {
 	found, live := s.router.sessions.Get(opened.Id, s.ownerOf(user))
 	s.Require().True(live)
 
+	started := time.Now()
 	err := s.router.holdCall(context.Background(), found, scheduledDelivery{})
 	s.Equal(scheduling.ReasonNotAnswered, scheduling.ReasonOf(err), "the ring ran out: %v", err)
+	s.Less(time.Since(started), deliveryWait, "the ring was the router's 50 ms, not the default 90 s")
 	s.True(s.failure(err).Final, "the user is not rung again")
 
 	s.router.phoneWindow = time.Minute
