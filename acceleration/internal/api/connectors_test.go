@@ -475,7 +475,8 @@ func (s *ConnectorsSuite) TestACreateThatIsNoSyncClearsTheHash() {
 func (s *ConnectorsSuite) TestAConnectorNoSyncWroteShowsNoHash() {
 	id := s.customID()
 	var created map[string]any
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/connectors", s.customConnector(id), &created))
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodPost, "/v1/agents/connectors", s.customConnector(id), &created))
 	s.NotContains(created, "sync_hash")
 	for _, read := range []string{id, "github"} {
 		var answered map[string]any
@@ -485,7 +486,8 @@ func (s *ConnectorsSuite) TestAConnectorNoSyncWroteShowsNoHash() {
 }
 
 func (s *ConnectorsSuite) TestASyncHashThatIsNotPrintableASCIIOrTooLongIsRefused() {
-	s.Equal(strings.Repeat("f", 128), s.create(s.synced(s.customConnector(s.customID()), strings.Repeat("f", 128))).SyncHash)
+	longest := strings.Repeat("f", 128)
+	s.Equal(longest, s.create(s.synced(s.customConnector(s.customID()), longest)).SyncHash)
 	for name, hash := range map[string]string{
 		"a space":      "hash one",
 		"a NUL":        "hash\x00",

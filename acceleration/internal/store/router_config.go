@@ -30,18 +30,19 @@ type RouterConfig struct {
 	// The option blocks, one per routed modality. They are the routing package's own
 	// types rather than copies of them, so what is stored and what reaches a provider
 	// cannot drift apart.
-	STT    options.STT    `bun:"stt,type:jsonb"`
-	TTS    options.TTS    `bun:"tts,type:jsonb"`
-	LLM    options.LLM    `bun:"llm,type:jsonb"`
-	STS    options.STS    `bun:"sts,type:jsonb"`
-	Search options.Search `bun:"search,type:jsonb"`
+	STT       options.STT    `bun:"stt,type:jsonb"`
+	TTS       options.TTS    `bun:"tts,type:jsonb"`
+	LLM       options.LLM    `bun:"llm,type:jsonb"`
+	STS       options.STS    `bun:"sts,type:jsonb"`
+	Search    options.Search `bun:"search,type:jsonb"`
+	CreatedAt time.Time      `bun:"created_at,notnull"`
+	UpdatedAt time.Time      `bun:"updated_at,notnull"`
+	DeletedAt *time.Time     `bun:"deleted_at"`
 	// SyncHash is a fingerprint of the file the CLI last synced onto this config
 	// (20270201000800_connector_router_sync_hash.sql), as AgentConfig.SyncHash is for a
-	// directory. Empty if it was never synced, or was written since by anything that is not a sync.
-	SyncHash  string     `bun:"sync_hash,notnull"`
-	CreatedAt time.Time  `bun:"created_at,notnull"`
-	UpdatedAt time.Time  `bun:"updated_at,notnull"`
-	DeletedAt *time.Time `bun:"deleted_at"`
+	// directory. Empty if it was never synced, or was written since by anything that is not a
+	// sync.
+	SyncHash string `bun:"sync_hash,notnull"`
 }
 
 // Validate refuses a config the table would refuse.
