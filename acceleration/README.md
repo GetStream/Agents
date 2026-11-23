@@ -2155,7 +2155,8 @@ rather than a time to respond and its status is the `101` of the upgrade. A sess
 | `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`) |
 | `server_error` | `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read. The caller is sent `1008` |
 | `shutdown` | The router stopped a resumable socket's session on its way down (`1012`) |
- A `5xx` is logged
+
+A `5xx` is logged
 at error instead, because an access log at a busy deployment is the one stream nobody reads
 all of. A preflight is not logged, nor is a `/health` probe answered below `400` with no error:
 the load balancer and kubelet ask every few seconds. A probe that fails is logged. The query
