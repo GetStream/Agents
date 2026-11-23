@@ -141,3 +141,13 @@ func (s *MeteringSuite) TestAVerifiedOrganizationBuysANumber() {
 
 	s.Require().NoError(err)
 }
+
+func (s *MeteringSuite) TestAnOrganizationWithNoTierBuysANumber() {
+	_, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationTier = ""
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().NoError(err, "a router not behind stream-accelerate names no tier and is not gated")
+}
