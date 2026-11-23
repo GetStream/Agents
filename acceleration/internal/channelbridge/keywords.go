@@ -47,7 +47,7 @@ var (
 )
 
 // What a keyword is answered with when the line's 10DLC use case says nothing
-// (store.UseCaseForNumber: the use case its number is assigned to, else the customer's
+// (store.UseCases.GetForNumber: the use case its number is assigned to, else the customer's
 // default): internal/channels/keywords.go's texts, so a person reads the same answer on either
 // line. The CTIA's 5.1.3 asks for «one final opt-out confirmation message»; no other message
 // follows it (Bridge.reply).
@@ -70,7 +70,7 @@ const optOutSource = "keyword"
 // again. A store that fails fails the worker's attempt, which runs the row again: an opt-out is
 // never lost, since the worker never gives its row up (optsOut). The answer is sent at most
 // once, whatever the attempts: the row records it before it is sent
-// (store.MarkChannelInboundKeywordAnswered), as a reply is claimed before it is sent.
+// (store.ChannelInbounds.MarkKeywordAnswered), as a reply is claimed before it is sent.
 func (b *Bridge) keyword(ctx context.Context, thread store.ChannelThread, queued store.ChannelInbound) (bool, error) {
 	message := queued.Message()
 	source := episodeSources[message.ConnectorID]
@@ -198,7 +198,7 @@ func telnyxAnswered(raw []byte) bool {
 }
 
 // detached is ctx without its cancellation, bounded by queueTimeout, for the transaction that
-// claims and queues a message (store.AcceptChannelInbound): a provider that hangs up cancels
+// claims and queues a message (store.ChannelInbounds.Accept): a provider that hangs up cancels
 // the request's context (net/http), and the message is queued all the same.
 func (b *Bridge) detached(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), b.queueTimeout)
