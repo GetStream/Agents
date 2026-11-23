@@ -353,12 +353,19 @@ func (s *Session) observe(event tts.Event) {
 
 // logTiming writes the "speech synthesis timing" line for a row just recorded: a synthesis,
 // or a failure of the session that no synthesis settles. A failover is a session of its own,
-// so each voice asked has its own line.
+// so each voice asked has its own line. A failure of the session has no synthesis, so no
+// operation and nothing timed: those fields are left out rather than logged as zero.
 func (s *Session) logTiming(stat routing.Stat, message string) {
-	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, s.config), "operation", stat.OperationID,
-		"characters", stat.Characters, "audio_ms", stat.AudioMs,
-		"ttfb_ms", stat.LatencyMs, "duration_ms", stat.DurationMs,
-		"cost_micros", s.recorder.QuoteStat(s.config, stat).CostMicros,
+	logged := routing.LoggedCall(s.owner.CallID, s.owner, s.config)
+	synthesis := stat.OperationID != ""
+	if synthesis {
+		logged = append(logged, "operation", stat.OperationID)
+	}
+	logged = append(logged, "characters", stat.Characters, "audio_ms", stat.AudioMs)
+	if synthesis {
+		logged = append(logged, "ttfb_ms", stat.LatencyMs, "duration_ms", stat.DurationMs)
+	}
+	logged = append(logged, "cost_micros", s.recorder.QuoteStat(s.config, stat).CostMicros,
 		"success", stat.Success, "error_code", stat.ErrorCode)
 	if message != "" {
 		logged = append(logged, "error", store.SafeLogText(message))

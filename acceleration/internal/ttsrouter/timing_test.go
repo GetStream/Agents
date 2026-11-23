@@ -126,6 +126,11 @@ func (s *TTSRouterSuite) TestAFailureNoSynthesisSettlesIsLoggedOnItsOwn() {
 	s.Equal(false, lines[0]["success"])
 	s.Equal("connect", lines[0]["error_code"])
 	s.Equal("voice unreachable", lines[0]["error"])
+	for _, unknown := range []string{"operation", "ttfb_ms", "duration_ms"} {
+		s.NotContains(lines[0], unknown, "no synthesis was timed, so a percentile over the lines counts no zero")
+	}
+	s.EqualValues(0, lines[0]["characters"])
+	s.EqualValues(0, lines[0]["cost_micros"])
 }
 
 func (s *TTSRouterSuite) TestAFailureWithNoErrorUnderItIsLoggedWithoutOne() {
