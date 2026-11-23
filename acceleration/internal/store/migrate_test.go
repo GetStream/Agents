@@ -243,7 +243,7 @@ func (s *StoreSuite) TestAMigrationThatWaitsPastTheReadTimeoutFinishes() {
 // A session a router of the release before commits while the old columns are dropped keeps its
 // call: the drop waits for it, and the catch-up after the wait sees it.
 func (s *StoreSuite) TestASessionWrittenWhileTheOldColumnsAreDroppedKeepsItsCall() {
-	split := s.shardTo("sessions_racing", 20270127000300-1)
+	split := s.shardTo("sessions_racing", 20270127000500-1)
 	defer split.Close()
 	writing, err := split.global.BeginTx(s.ctx, nil)
 	s.Require().NoError(err)

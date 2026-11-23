@@ -4,7 +4,7 @@
 -- two tables' locks for a moment: the key is checked on new rows at once and on the rows already
 -- there later (20270127000200), the backfill runs in batches (20270127000000), the indexes are
 -- built without stopping writes (20270127000100) and the columns this replaces are dropped last
--- (20270127000300). The lock waits at most 5 s behind a running query, past which the migration
+-- (20270127000500). The lock waits at most 5 s behind a running query, past which the migration
 -- fails and the router's next start tries again.
 SET LOCAL lock_timeout = '5s';
 
