@@ -175,10 +175,11 @@ Read the task, then its runs, then the logs, in that order.
 | `next_run_at`, `upcoming` | same | In the task's zone. Wrong hour: the zone (below) |
 | `schedule.timezone` | same | Resolved at create from the call, the session, `users.timezone`, then `default_timezone`. A session opened with a zone moves `users.timezone` (`internal/api/session_create.go:76`) |
 | `quiet_hours` | same | An occurrence due inside them is held to their end: its run stays `running` with nothing sent. A run by hand is never held |
-| The runs | `GET /v1/agents/scheduled-tasks/{id}/runs` | No run at all: the occurrence was never claimed (worker logs). `running` long after `scheduled_for`: held, or a worker is on it |
+| The runs | `GET /v1/agents/scheduled-tasks/{id}/runs` | No run at all: the occurrence was never claimed (worker logs). `running` long after `scheduled_for`: held, or a worker is on it; a run by hand whose router stopped stays `running` until the daily prune writes it `missed`, a day after it started |
 | Run `state` `missed` | same | Too late: a one-shot over 24 h, a repeat over 1 h (`scheduler.go:51`), a call over 15 min (a run by hand too), or with under 11.5 min of the occurrence left. Or `error` `task_paused`: a one-shot resumed after its time, or an occurrence a move's cut-over skipped whose run the source had started |
 | Run `error` | same | See the reason table below |
-| Limit | create answers 409 `too_many_tasks` | The user holds `max_tasks_per_user` active tasks on this config |
+| Limit | create or resume answers 409 `too_many_tasks` | The user holds `max_tasks_per_user` active tasks on this config |
+| Edit refused | update, pause or resume answers 409 `task_changed` | The task changed between the request's read and its save (another edit or pause, or a worker's claim, hold, finish or session write; a lease renewal is not a change): nothing was saved, so read it again and retry. The agent's `update_scheduled_task` is refused the same way |
 | The tools | the model never calls `schedule_task` | `scheduling.enabled` off, incognito, a guest or anonymous caller, or a `noauth` router |
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay |
 | Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it (`internal/api/session_delete.go:47`) |

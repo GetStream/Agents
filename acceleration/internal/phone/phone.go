@@ -63,6 +63,9 @@ var ErrDestinationRefused = errors.New("phone: calls to this number are refused"
 // ErrSuspended is an app Stream staff stopped from using the phone. Why stays with Stream.
 var ErrSuspended = errors.New("phone: this app's telephony is suspended; contact Stream support")
 
+// ErrVerificationRequired is a number asked for by an organization Stream has not verified (KYC).
+var ErrVerificationRequired = errors.New("phone: the organization must be verified to buy a number")
+
 // ErrNotDialable is a number no call may be placed to: not a full E.164 number, or one refused
 // as a destination. A caller that holds a list of numbers can tell it from a failed call.
 var ErrNotDialable = errors.New("phone: not dialable")
