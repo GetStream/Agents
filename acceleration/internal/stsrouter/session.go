@@ -70,9 +70,6 @@ type Session struct {
 	// lease holds a minute of the conversation while it runs, so the other routers count it
 	// before its replies are recorded.
 	lease *routing.Lease
-	// spent adds up what the session's rows cost, its side rows included, as they are recorded;
-	// they still add to what the socket that opened it spent.
-	spent *routing.Spent
 	// timing is what the session's "speech-to-speech timing" line says of it.
 	timing timing
 
@@ -120,6 +117,8 @@ func newSession(
 	owner routing.Owner,
 	recorder, backend *routing.Recorder,
 ) *Session {
+	// The session's rows, its side rows included, add up on a Spent of its own for its timing
+	// line, and still to what the socket that opened it spent.
 	owner.Spent = owner.Spent.Part()
 	session := &Session{
 		provider: provider,
@@ -133,7 +132,6 @@ func newSession(
 		settled:  map[string]struct{}{},
 		billed:   map[string]struct{}{},
 		openedAt: time.Now(),
-		spent:    owner.Spent,
 	}
 	session.lease = routing.StartLeaseEvery(recorder, config, owner, "sts", session.id, leaseMinute, leaseRenew, 3*leaseRenew)
 	go session.forward()
@@ -305,7 +303,7 @@ func (s *Session) forward() {
 // work to included. Its operation is the session's id, which its rows carry too. With no
 // reply, nothing was waited for, so the wait is left out rather than logged as zero.
 func (s *Session) logTiming() {
-	costMicros, _, _ := s.spent.Total()
+	costMicros, _, _ := s.owner.Spent.Total()
 	s.mu.Lock()
 	timed := s.timing
 	s.mu.Unlock()
