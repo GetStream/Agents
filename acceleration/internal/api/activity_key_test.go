@@ -65,18 +65,20 @@ func (s *ActivityKeySuite) TestTheOpsKeyStillReadsBothActivityRoutes() {
 // Defect: a key that is not one of the two, or one the router took from another header,
 // reading activity. The 401 names both headers the routes take.
 func (s *ActivityKeySuite) TestOnlyAnActivityKeyInItsOwnHeaderReadsActivity() {
-	for _, caller := range map[string]*testClient{
+	for name, caller := range map[string]*testClient{
 		"another key":                 s.holding(activityKeyHeader, "not-"+suiteActivityKey),
 		"the activity key as ops key": s.holding(opsKeyHeader, suiteActivityKey),
 		"the ops key as activity key": s.holding(activityKeyHeader, suiteOpsKey),
 		"the manage key":              s.holding(activityKeyHeader, suiteManageKey),
 		"no key":                      s.holding(activityKeyHeader, ""),
 		"the previous key as ops key": s.holding(opsKeyHeader, suitePreviousActivityKey),
-		"the activity key, an app's":  s.serverClient.with(activityKeyHeader, suiteActivityKey).with(opsKeyHeader, ""),
+		"an app's backend":            s.serverClient,
 	} {
-		for _, path := range s.activityPaths() {
-			s.refused(caller, http.MethodGet, path, "X-Ops-Key or X-Activity-Key")
-		}
+		s.Run(name, func() {
+			for _, path := range s.activityPaths() {
+				s.refused(caller, http.MethodGet, path, "X-Ops-Key or X-Activity-Key")
+			}
+		})
 	}
 }
 
