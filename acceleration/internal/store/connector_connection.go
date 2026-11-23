@@ -78,10 +78,6 @@ type ConnectorConnection struct {
 	AccountID     string            `bun:"account_id,notnull"`
 	Status        string            `bun:"status,notnull"`
 	GrantedScopes []string          `bun:"granted_scopes,type:jsonb,notnull"`
-	// ProviderUnitID is the routing key of a shared webhook, such as a WhatsApp
-	// phone_number_id: empty unless ConnectorConnections.SetProviderUnit wrote it, and emptied
-	// when the connection stops being connected (saveAtRevision).
-	ProviderUnitID string `bun:"provider_unit_id,nullzero"`
 	// Revision advances with every new stored credentials, which are sealed against it.
 	Revision int `bun:"revision,notnull"`
 	// CredentialsSealed is core.StoredCredentials sealed under CredentialsKEKVersion, with
@@ -186,11 +182,6 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 	// The stored credentials' AAD binds the connection id, which does not exist until this returns.
 	if len(connection.CredentialsSealed) > 0 {
 		return stack.Wrap(errors.New("store: credentials are saved onto a connection after it exists, not with it"))
-	}
-	// A unit routes another customer's events away once it is stored, so only a write that
-	// checks the connector routes by it stores one.
-	if connection.ProviderUnitID != "" {
-		return stack.Wrap(errors.New("store: a provider unit is set on a connection after consent, not with it"))
 	}
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the connection is stored, so a delete of it waits
@@ -792,16 +783,8 @@ func (r *ConnectorConnections) saveAtRevision(ctx context.Context, conn bun.ICon
 	if connection.GrantedScopes == nil {
 		connection.GrantedScopes = []string{}
 	}
-	// A save that leaves the connection anything but connected frees its provider unit
-	// (SetProviderUnit says why); one that keeps it connected, such as a
-	// refresh, keeps the unit the row holds. The row's, not the caller's copy, which may
-	// predate the unit.
-	if connection.Status != ConnectionConnected {
-		connection.ProviderUnitID = ""
-	}
 	result, err := r.store.global.NewUpdate().Conn(conn).Model(connection).
 		Column(credentialColumns...).
-		Set("provider_unit_id = CASE WHEN ? = ? THEN cc.provider_unit_id END", connection.Status, ConnectionConnected).
 		Where("id = ?", connection.ID).
 		Where("customer_id = ?", connection.CustomerID).
 		Where("revision = ?", expected).
