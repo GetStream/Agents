@@ -85,7 +85,8 @@ type Request struct {
 	Meters pricing.Quantities `bun:"meters,type:jsonb,nullzero"`
 	// Attributes chose the price (a service tier, a country) or explain the row.
 	Attributes map[string]string `bun:"attributes,type:jsonb,nullzero"`
-	LatencyMs  *float64          `bun:"latency_ms"`
+	// LatencyMs is nil for a request that failed before reaching the provider: it has none.
+	LatencyMs *float64 `bun:"latency_ms"`
 	// CostMicros is millionths of a dollar: what the work is charged at its entry's prices.
 	CostMicros int64 `bun:"cost_micros,notnull"`
 	// OutputCostMicros is the part of CostMicros the generated tokens were priced at.
