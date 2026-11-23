@@ -2422,14 +2422,14 @@ const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "
 	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
 	"method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
 
-func (s *DataMoveSuite) TestAnImportedHTTPDefinitionArrivesAsItWasSent() {
+// TestAnImportedHTTPDefinitionIsRefused: a definition the API would store for an http connector
+// is refused, and writes nothing, until AI-3676 lifts it (importableDefinition).
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionIsRefused() {
 	id, err := s.importDefinition(customWeather)
 
-	s.Require().NoError(err)
-	var stored string
-	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
-	s.JSONEq(strings.Replace(customWeather, "custom_acme", id, 1), stored)
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "an http connector cannot be imported yet")
+	s.Zero(s.definitionsNamed(id))
 }
 
 // TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
