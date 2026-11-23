@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
@@ -28,6 +29,11 @@ type Service struct {
 	booker    routing.Booker
 	clock     func() time.Time
 	logger    *slog.Logger
+
+	// pollAfter is where the next Poll starts, set when the last pass stopped at its page cap.
+	// The ticker in Run and a brand report both poll, so it is guarded.
+	pollMu    sync.Mutex
+	pollAfter *store.CreatedPosition
 }
 
 // Options configures a Service. Without a registrar Stream's approval is the last word,
@@ -79,22 +85,50 @@ func (s *Service) Run(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Poll asks the vendor where the use cases it holds stand, a page of them, those that
-// moved longest ago first. One that moves goes to the back of the queue.
+// pollPageSize is how many use cases Poll reads at a time, and pollPages how many pages
+// one pass asks the vendor about at most.
+const (
+	pollPageSize = 200
+	pollPages    = 10
+)
+
+// Poll asks the vendor where the use cases it holds stand, those that moved longest ago
+// first, page after page. A poll that finds nothing new writes nothing, so the order never
+// changes: a pass the page cap cuts short leaves a cursor for the next one to carry on from,
+// or the use cases past the cap would never be asked about.
 func (s *Service) Poll(ctx context.Context) {
 	if s.registrar == nil {
 		return
 	}
-	useCases, err := s.store.UseCases.SelectInStatus(ctx, VendorPending, 0, nil)
-	if err != nil {
-		s.logger.Error("could not list the use cases a vendor holds", "error", err)
-		return
-	}
-	for _, useCase := range useCases {
-		if err := s.refresh(ctx, useCase, nil); err != nil {
-			s.logger.Error("could not refresh a use case", "use_case", useCase.ID, "error", err)
+	limit := store.DLCLimit(pollPageSize)
+	s.pollMu.Lock()
+	after := s.pollAfter
+	s.pollMu.Unlock()
+	for range pollPages {
+		useCases, err := s.store.UseCases.SelectInStatus(ctx, VendorPending, limit, after)
+		if err != nil {
+			s.logger.Error("could not list the use cases a vendor holds", "error", err)
+			return
 		}
+		last := len(useCases) <= limit
+		if !last {
+			useCases = useCases[:limit]
+		}
+		for _, useCase := range useCases {
+			if err := s.refresh(ctx, useCase, nil); err != nil {
+				s.logger.Error("could not refresh a use case", "use_case", useCase.ID, "error", err)
+			}
+		}
+		if last {
+			after = nil
+			break
+		}
+		end := useCases[len(useCases)-1]
+		after = &store.CreatedPosition{At: end.UpdatedAt, ID: end.ID}
 	}
+	s.pollMu.Lock()
+	s.pollAfter = after
+	s.pollMu.Unlock()
 }
 
 // Create records a new draft use case and the numbers that send as it.
