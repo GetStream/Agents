@@ -200,6 +200,40 @@ func (r *ScheduledTaskRuns) ReleaseCall(ctx context.Context, customerID, runID, 
 	return nil
 }
 
+// TakeText records on a run that its words are about to be texted on channel, and
+// reports false when they were already: an earlier attempt, or a worker that
+// stopped, sent them there, so the person is not texted twice.
+func (r *ScheduledTaskRuns) TakeText(ctx context.Context, customerID, runID, channel string) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("texted = array_append(texted, ?)", channel).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Where("NOT (? = ANY(texted))", channel).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: take scheduled task run text: %w", err))
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: take scheduled task run text: %w", err))
+	}
+	return affected > 0, nil
+}
+
+// ReleaseText gives back a text TakeText took and could not send, so a later
+// attempt may.
+func (r *ScheduledTaskRuns) ReleaseText(ctx context.Context, customerID, runID, channel string) error {
+	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("texted = array_remove(texted, ?)", channel).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: release scheduled task run text: %w", err))
+	}
+	return nil
+}
+
 // Get returns the run by id of a customer's task.
 func (r *ScheduledTaskRuns) Get(ctx context.Context, customerID, taskID, id string) (ScheduledTaskRun, error) {
 	if customerID == "" || taskID == "" || id == "" {

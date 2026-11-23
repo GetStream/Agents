@@ -42,6 +42,15 @@ VALUES (?, ?, ?, now() - interval '400 days' + make_interval(secs => ?), ?, ?, ?
 	s.Require().NoError(err)
 }
 
+// startedFor stores a run of a task, still running, that started age ago.
+func (s *StoreSuite) startedFor(id, task, trigger string, age time.Duration) {
+	_, err := s.store.global.ExecContext(s.ctx, `
+INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, started_at)
+VALUES (?, ?, 'acme', now() - make_interval(secs => ?), ?, 'running', now() - make_interval(secs => ?))`,
+		id, task, age.Seconds()+float64(occurrence.Add(1)), trigger, age.Seconds())
+	s.Require().NoError(err)
+}
+
 func (s *StoreSuite) ids(query string) []string {
 	var ids []string
 	s.Require().NoError(s.store.global.NewRaw(query).Scan(s.ctx, &ids))
@@ -127,6 +136,24 @@ func (s *StoreSuite) TestPruneKeepsAnOldCompletedTaskWhileARunOfItIsUnfinishedOr
 	s.EqualValues(2, tasks)
 	s.Equal([]string{"acme/in-flight", "acme/yesterday", "globex/other-customer"}, s.taskIDs())
 	s.Equal([]string{"recent", "running", "theirs"}, s.runIDs())
+}
+
+// Only the router that took a run by hand finishes it, so one that stopped mid-delivery left it
+// running, and its task, kept while a run of it is unfinished, could never be pruned. A run by
+// hand still being delivered, and an occurrence a worker holds, stay running.
+func (s *StoreSuite) TestPruneWritesMissedARunByHandItsRouterLeftRunning() {
+	s.aged("t", "acme", ScheduledTaskCompleted, 100*day)
+	s.startedFor("lost", "t", ScheduledTaskTriggerManual, scheduledTaskManualRunLost+time.Minute)
+	s.startedFor("delivering", "t", ScheduledTaskTriggerManual, time.Hour)
+	s.startedFor("held", "t", ScheduledTaskTriggerSchedule, 2*day)
+
+	_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+
+	s.Require().NoError(err)
+	s.Equal([]string{"delivering=running", "held=running", "lost=missed"},
+		s.ids("SELECT id || '=' || state FROM scheduled_task_runs ORDER BY 1"))
+	s.Equal([]string{"lost"}, s.ids("SELECT id FROM scheduled_task_runs WHERE finished_at IS NOT NULL"),
+		"a run written missed has finished, so its task is pruned once the run is")
 }
 
 // backlog stores a batch and one more of old completed tasks, done-1 on, and of old runs of
@@ -286,6 +313,7 @@ func (s *StoreSuite) TestPruneReadsItsIndexes() {
 	}{
 		{"runs", pruneScheduledTaskRunsSQL, scheduledTaskRunsPruned, "scheduled_task_runs_finished_idx", "(finished_at <", "Index Cond: (id = ANY ("},
 		{"tasks", pruneScheduledTasksSQL, scheduledTasksPruned, "scheduled_tasks_pruned_idx", "(updated_at <", ""},
+		{"lost runs by hand", settleLostManualRunsSQL, 0, "scheduled_task_runs_finished_idx", "(finished_at IS NULL)", ""},
 	} {
 		var plan []string
 		err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
