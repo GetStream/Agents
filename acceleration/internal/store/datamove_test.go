@@ -1391,30 +1391,70 @@ func (s *DataMoveSuite) ageChange(id string) {
 }
 
 func (s *DataMoveSuite) TestChildRowsFollowTheirParent() {
-	voice := s.seedVoice(s.source, "acme", "narrator")
-	_, err := s.source.GlobalDB().ExecContext(s.ctx,
-		"INSERT INTO voice_samples (id, voice_id, object_key) VALUES (?, ?, ?)",
-		newID(), voice, "voices/acme/1.wav")
+	campaign := s.seedCampaign("acme", Draft)
+	_, _, err := s.source.CampaignContacts.InsertMany(s.ctx, campaign, []Contact{{ToNumber: "+15550101"}})
 	s.Require().NoError(err)
 
 	s.move("acme", "acme")
 
-	s.Len(s.exportFrom(s.destination, "acme").of("voice_samples"), 1)
+	s.Len(s.exportFrom(s.destination, "acme").of("campaign_contacts"), 1)
 }
 
 func (s *DataMoveSuite) TestAChildRowCannotBeImportedOntoSomebodyElsesParent() {
-	voice := s.seedVoice(s.destination, "resident", "narrator")
-	sample, err := json.Marshal(map[string]any{
-		"id": newID(), "voice_id": voice, "object_key": "voices/theirs/1.wav",
+	campaign := &Campaign{CustomerID: "resident", Name: "Renewals", ConfigID: "config-1", FromNumber: "+15550100"}
+	s.Require().NoError(s.destination.Campaigns.Insert(s.ctx, campaign))
+	contact, err := json.Marshal(map[string]any{
+		"id": newID(), "campaign_id": campaign.ID, "to_number": "+15550101", "stage": Enrolled,
 	})
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.destination.ImportRow(s.ctx, "intruder", "voice_samples", sample))
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "intruder", "campaign_contacts", contact))
 
 	var count int
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT count(*) FROM voice_samples WHERE voice_id = ?", voice).Scan(&count))
+		"SELECT count(*) FROM campaign_contacts WHERE campaign_id = ?", campaign.ID).Scan(&count))
 	s.Zero(count, "a row is only written where its parent belongs to the importing customer")
+}
+
+// countOf counts the rows of a table a voice holds on a deployment.
+func (s *DataMoveSuite) countOf(store *Store, table, voice string) int {
+	var count int
+	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM "+table+" WHERE voice_id = ?", voice).Scan(&count))
+	return count
+}
+
+func (s *DataMoveSuite) TestAMovedVoiceArrivesWithoutItsSamplesOrBindings() {
+	voice := s.seedVoice(s.source, "acme", "narrator")
+	s.Require().NoError(s.source.VoiceSamples.Insert(s.ctx, &VoiceSample{VoiceID: voice, ObjectKey: "voices/acme/1.wav"}))
+	s.Require().NoError(s.source.VoiceBindings.Upsert(s.ctx, &VoiceBinding{
+		VoiceID: voice, Provider: "elevenlabs", ExternalID: "provider-voice-1", State: VoiceReady,
+	}))
+
+	s.move("acme", "moved")
+
+	voices := s.exportFrom(s.destination, "moved").of("voices")
+	s.Require().Len(voices, 1)
+	s.Equal(voice, voices[0]["id"])
+	s.Equal("narrator", voices[0]["name"])
+	s.Zero(s.countOf(s.destination, "voice_samples", voice), "the audio is in the source's bucket")
+	s.Zero(s.countOf(s.destination, "voice_bindings", voice), "the clone is in the source's account at the provider")
+}
+
+func (s *DataMoveSuite) TestAnImportOfAVoiceSampleOrBindingIsRefused() {
+	voice := s.seedVoice(s.destination, "moved", "narrator")
+	rows := map[string]map[string]any{
+		"voice_samples":  {"id": newID(), "voice_id": voice, "object_key": "voices/moved/1.wav"},
+		"voice_bindings": {"id": newID(), "voice_id": voice, "provider": "elevenlabs", "external_id": "provider-voice-1", "state": VoiceReady},
+	}
+	for table, row := range rows {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+
+		s.ErrorContains(s.destination.ImportRow(s.ctx, "moved", table, encoded), "not a table an export carries", table)
+
+		s.Zero(s.countOf(s.destination, table, voice), table)
+	}
 }
 
 // importEdited imports the source's one row of a table, edited first, as the given customer.
@@ -1448,21 +1488,6 @@ func (s *DataMoveSuite) TestAnImportedConfigOverTheSandboxLimitsIsRefused() {
 	s.Empty(s.exportFrom(s.destination, "moved").of("agent_configs"))
 }
 
-func (s *DataMoveSuite) TestAnImportedVoiceBindingArrivesToBeMadeAgain() {
-	voice := s.seedVoice(s.source, "acme", "narrator")
-	s.Require().NoError(s.source.VoiceBindings.Upsert(s.ctx, &VoiceBinding{
-		VoiceID: voice, Provider: "elevenlabs", ExternalID: "provider-voice-1", State: VoiceReady,
-	}))
-
-	s.move("acme", "moved")
-
-	bindings, err := s.destination.VoiceBindings.Select(s.ctx, voice)
-	s.Require().NoError(err)
-	s.Require().Len(bindings, 1)
-	s.Empty(bindings[0].ExternalID, "the provider's id for the voice is the provider's word to this deployment")
-	s.Equal(VoicePending, bindings[0].State)
-}
-
 func (s *DataMoveSuite) TestAnImportedRequestIsNotBilledAndCountsAgainstTheAppsOwnOrganization() {
 	s.Require().NoError(s.destination.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "acme", OrganizationID: "acme-org"}))
 	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
@@ -1473,6 +1498,27 @@ func (s *DataMoveSuite) TestAnImportedRequestIsNotBilledAndCountsAgainstTheAppsO
 
 	s.Equal(false, moved["billable"])
 	s.Equal("acme-org", moved["organization_id"])
+}
+
+func (s *DataMoveSuite) TestAnImportedRequestOfAnAppRegisteredButUnseenHereCountsAgainstItsOrganization() {
+	// A move's destination has seen no request of the app yet, but registered it.
+	org := Organization{Name: "moving"}
+	s.Require().NoError(s.destination.Organizations.Insert(s.ctx, &org))
+	app := App{OrganizationID: org.ID, Name: "moving"}
+	s.Require().NoError(s.destination.Apps.Insert(s.ctx, &app))
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
+		CustomerID: app.ID, OrganizationID: "another-org", Provider: "deepgram", Model: "flux",
+		StartedAt: time.Now().UTC(), Success: true}))
+	exported := s.export(app.ID).of("requests")
+	s.Require().Len(exported, 1)
+	encoded, err := json.Marshal(exported[0])
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, app.ID, "requests", encoded))
+
+	moved := s.exportFrom(s.destination, app.ID).of("requests")
+	s.Require().Len(moved, 1)
+	s.Equal(org.ID, moved[0]["organization_id"])
 }
 
 func (s *DataMoveSuite) TestOnlyTheAppsOwnPolicyMoves() {

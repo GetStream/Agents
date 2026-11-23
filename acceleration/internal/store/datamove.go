@@ -98,7 +98,11 @@ func (t dataTable) rollup() bool {
 // moves to pins its tools again on first use. And chat_inbound, Stream
 // Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes. And
 // call_bridges, an answer parked for seconds at this deployment's URL: its key is the token
-// that authenticates the fetch, and it holds the trunk's password in the clear.
+// that authenticates the fetch, and it holds the trunk's password in the clear. And
+// voice_samples and voice_bindings: a sample's audio is in this deployment's bucket and a
+// binding's clone in this deployment's account at the provider, so like a knowledge file's,
+// neither means anything where the customer moves. A voice arrives with its name and
+// description, to be given a recording and prepared again.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -113,10 +117,6 @@ var dataTables = []dataTable{
 	}},
 	{name: "router_configs", customer: "customer_id"},
 	{name: "voices", customer: "customer_id"},
-	{name: "voice_samples", parent: "voices", parentColumn: "voice_id"},
-	// The id a provider knows a voice by, and whether it is ready, are what the provider told
-	// this deployment: a binding arrives to be made again.
-	{name: "voice_bindings", parent: "voices", parentColumn: "voice_id", vouched: []string{"external_id", "state"}},
 	{name: "sip_trunks", customer: "customer_id"},
 	{name: "phone_numbers", customer: "customer_id"},
 	{name: "knowledge_urls", customer: "customer_id"},
@@ -799,12 +799,13 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	args := []any{string(row), customerID}
 	if table == "requests" {
 		// The organization a request counts against is the app's here, whatever the row says.
-		// It is in the shared database and requests in this shard's, so it is read first.
-		membership, err := s.AppOrganizations.Get(ctx, customerID)
+		// It is in the shared database and requests in this shard's, so it is read first. An app
+		// this deployment neither saw nor registered has none here, and its requests keep none.
+		organization, err := s.AppOrganizations.OrganizationOf(ctx, customerID)
 		if err != nil {
 			return err
 		}
-		args = append(args, membership.OrganizationID)
+		args = append(args, organization)
 	}
 	read := args
 	if spec.customer == "" {
@@ -870,8 +871,6 @@ var importedModels = map[string]func() validated{
 	"connector_connections":  func() validated { return &ConnectorConnection{} },
 	"router_configs":         func() validated { return &RouterConfig{} },
 	"voices":                 func() validated { return &Voice{} },
-	"voice_samples":          func() validated { return &VoiceSample{} },
-	"voice_bindings":         func() validated { return &VoiceBinding{} },
 	"sip_trunks":             func() validated { return &SIPTrunk{} },
 	"knowledge_urls":         func() validated { return &KnowledgeURL{} },
 	"knowledge_documents":    func() validated { return &KnowledgeDocument{} },
