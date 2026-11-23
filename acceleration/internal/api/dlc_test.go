@@ -331,7 +331,7 @@ func (s *dlcRegistration) held(customerID string, n int, provisioned ...int) []s
 	ctx := context.Background()
 	forget := func() {
 		_, err := s.store.GlobalDB().NewDelete().Model((*store.UseCase)(nil)).
-			Where("name LIKE 'held %'").Where("updated_at < ?", heldSince.AddDate(1, 0, 0)).Exec(context.Background())
+			Where("name LIKE 'held %'").Where("created_at < ?", heldSince.AddDate(1, 0, 0)).Exec(context.Background())
 		s.NoError(err)
 	}
 	if !s.holding {

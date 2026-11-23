@@ -120,6 +120,10 @@ func (s *Service) Poll(ctx context.Context) {
 func (s *Service) poll(ctx context.Context, after *store.CreatedPosition) *store.CreatedPosition {
 	limit := store.DLCLimit(s.pollPage)
 	for range s.pollPages {
+		// A stopping router ends the pass quietly, where it got to.
+		if ctx.Err() != nil {
+			return after
+		}
 		useCases, err := s.store.UseCases.SelectInStatus(ctx, VendorPending, limit, after)
 		if err != nil {
 			s.logger.Error("could not list the use cases a vendor holds", "error", err)
@@ -130,7 +134,9 @@ func (s *Service) poll(ctx context.Context, after *store.CreatedPosition) *store
 			useCases = useCases[:limit]
 		}
 		for i, useCase := range useCases {
-			// A stopping router ends the pass here, rather than logging every use case left.
+			err := s.refresh(ctx, useCase, nil)
+			// A stopping router ends the pass here, rather than logging every use case left,
+			// and the next pass starts with the one it cut off.
 			if ctx.Err() != nil {
 				if i == 0 {
 					return after
@@ -138,7 +144,7 @@ func (s *Service) poll(ctx context.Context, after *store.CreatedPosition) *store
 				end := useCases[i-1]
 				return &store.CreatedPosition{At: end.UpdatedAt, ID: end.ID}
 			}
-			if err := s.refresh(ctx, useCase, nil); err != nil {
+			if err != nil {
 				s.logger.Error("could not refresh a use case", "use_case", useCase.ID, "error", err)
 			}
 		}
