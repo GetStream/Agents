@@ -3134,7 +3134,7 @@ module GetStream
           required: %w[text].freeze, open: false
         }.freeze,
         "SpendBucket" => {
-          properties: %w[bucket cost_micros_total request_count value].freeze,
+          properties: %w[bucket cost_micros_total other request_count value].freeze,
           required: %w[bucket cost_micros_total request_count value].freeze, open: false
         }.freeze,
         "SpendHardLimit" => {

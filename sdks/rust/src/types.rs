@@ -12797,8 +12797,11 @@ pub struct SpendBucket {
     pub bucket: ::std::string::String,
     ///Millionths of a dollar, priced from the configured rates.
     pub cost_micros_total: i64,
+    ///True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub other: ::std::option::Option<bool>,
     pub request_count: i64,
-    ///The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+    ///The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
     pub value: ::std::string::String,
 }
 ///`SpendHardLimit`

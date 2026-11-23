@@ -14995,11 +14995,17 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("cost_micros_total")]
         public long CostMicrosTotal { get; set; } = default!;
 
+        /// <summary>
+        /// True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("other")]
+        public bool? Other { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("request_count")]
         public long RequestCount { get; set; } = default!;
 
         /// <summary>
-        /// The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+        /// The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("value")]
         public string Value { get; set; } = default!;
