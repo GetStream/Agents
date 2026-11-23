@@ -139,19 +139,28 @@ var ErrShardUnanswered = errors.New("store: a shard that may hold it did not ans
 // callers here are a vendor and Stream waiting on a call.
 const peerReadTimeout = 2 * time.Second
 
+// claimReadTimeout bounds a bridge claim's read of another shard, longer than peerReadTimeout.
+// The claim deletes what it reads, and a peer that commits the delete after the caller stopped
+// waiting has spent the bridge with nobody to hand it to. The longer bound narrows that to a
+// peer slower than pgdriver's own 5 s dial timeout, which is one that is down; a vendor's fetch
+// is one per answered call, so holding a peer connection that long is not load.
+const claimReadTimeout = 5 * time.Second
+
 // answeringShards reads every shard's database at once, as everyShard does, for a read one
 // shard's answer can settle: it returns what each shard answered and, apart, how each that
 // did not answer failed, this shard's first. A shard down then costs only what is on it.
 //
-// Another shard's read is given peerReadTimeout. Once an answer settles the read it returns,
-// without waiting for the others: their entries stay zero. They are not cancelled, so a shard
-// that is down still fails within its bound and is logged as read, rather than being cut off
-// unseen, and a claim's delete on a peer is not abandoned halfway. Each shard that failed a
-// read that was settled is logged (settledWithout).
-func answeringShards[T any](ctx context.Context, s *Store, read string, settles func(T) bool, query func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
+// Another shard's read is given bound. Once an answer settles the read, the others are
+// cancelled and not waited for, so a slow peer gives its pool connection back at once: their
+// entries stay zero. Each shard that failed before the answer settled is logged
+// (settledWithout); one cut off by the settle is not known to be down, and a shard that is
+// down fails the reads that do need it.
+func answeringShards[T any](ctx context.Context, s *Store, read string, bound time.Duration, settles func(T) bool, query func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
 	all := s.shards()
 	found := make([]T, len(all))
 	failed := make([]error, len(all))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	type answer struct {
 		shard int
 		found T
@@ -164,17 +173,15 @@ func answeringShards[T any](ctx context.Context, s *Store, read string, settles 
 		go func() {
 			readCtx := ctx
 			if i > 0 {
-				// Detached from the caller, which may be gone before the read ends: a read cut
-				// off by that would be logged as the shard failing.
 				var stop context.CancelFunc
-				readCtx, stop = context.WithTimeout(context.WithoutCancel(ctx), peerReadTimeout)
+				readCtx, stop = context.WithTimeout(ctx, bound)
 				defer stop()
 			}
 			found, err := query(readCtx, db)
 			answers <- answer{shard: i, found: found, err: err}
 		}()
 	}
-	for answered := range all {
+	for range all {
 		got := <-answers
 		found[got.shard], failed[got.shard] = got.found, got.err
 		if got.err != nil || !settles(got.found) {
@@ -183,23 +190,16 @@ func answeringShards[T any](ctx context.Context, s *Store, read string, settles 
 		for shard, err := range failed {
 			s.settledWithout(ctx, read, shard, err)
 		}
-		if late := len(all) - answered - 1; late > 0 {
-			go func() {
-				for range late {
-					got := <-answers
-					s.settledWithout(ctx, read, got.shard, got.err)
-				}
-			}()
-		}
 		break
 	}
 	return found, failed
 }
 
 // settledWithout logs a shard that failed a read the others' answers settled, at most once a
-// minute a shard: a shard that is down fails every call's reads until it is back.
+// minute a shard: a shard that is down fails every call's reads until it is back. A read the
+// caller cancelled says nothing of its shard.
 func (s *Store) settledWithout(ctx context.Context, read string, shard int, err error) {
-	if err != nil && s.shardsDown.due(s.shardNames[shard], time.Now()) {
+	if err != nil && !errors.Is(err, context.Canceled) && s.shardsDown.due(s.shardNames[shard], time.Now()) {
 		slog.Default().WarnContext(ctx, "a shard did not answer, settled on the others", "read", read, "shard", s.shardNames[shard], "error", err)
 	}
 }

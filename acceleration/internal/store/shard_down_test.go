@@ -4,11 +4,15 @@ package store
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // goneShardDSN is a shard whose database nothing answers on: the dial is refused at once.
@@ -29,7 +33,7 @@ func (s *StoreSuite) withAShardDown() (*Store, *syncBuffer) {
 }
 
 func (s *StoreSuite) TestABridgeOnAShardThatAnswersIsClaimedWhileAnotherIsDown() {
-	down, logged := s.withAShardDown()
+	down, _ := s.withAShardDown()
 	token := newID()
 	s.Require().NoError(s.store.CallBridges.Insert(s.ctx, &CallBridge{Token: token, CustomerID: "acme", Vendor: "plivo",
 		TrunkURI: "sip:x@example.com", CallID: "call", ExpiresAt: time.Now().Add(time.Hour)}))
@@ -37,9 +41,6 @@ func (s *StoreSuite) TestABridgeOnAShardThatAnswersIsClaimedWhileAnotherIsDown()
 	claimed, err := down.CallBridges.Claim(s.ctx, token)
 	s.Require().NoError(err)
 	s.Equal("sip:x@example.com", claimed.TrunkURI)
-	// Logged as it fails, which may be after the answer that settled the read.
-	s.Eventually(func() bool { return strings.Contains(logged.String(), "shard=gone") }, 5*time.Second, 10*time.Millisecond,
-		"the shard that did not answer is logged")
 	_, err = down.CallBridges.Claim(s.ctx, token)
 	s.Error(err, "a token still works once")
 }
@@ -55,7 +56,7 @@ func (s *StoreSuite) TestABridgeNoAnsweringShardHoldsIsNotClaimedWhileAnotherIsD
 }
 
 func (s *StoreSuite) TestACallPlacedOnAShardThatAnswersIsFoundWhileAnotherIsDown() {
-	down, logged := s.withAShardDown()
+	down, _ := s.withAShardDown()
 	callID := newID()
 	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
 		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: callID, CustomerID: "acme",
@@ -65,16 +66,7 @@ func (s *StoreSuite) TestACallPlacedOnAShardThatAnswersIsFoundWhileAnotherIsDown
 	s.Require().NoError(err)
 	s.Require().Len(placed, 1)
 	s.Equal("trunk-1", placed[0].TrunkID)
-	// Logged as it fails, which may be after the answer that settled the read.
-	s.Eventually(func() bool { return strings.Contains(logged.String(), "shard=gone") }, 5*time.Second, 10*time.Millisecond,
-		"the shard that did not answer is logged")
 
-	_, err = down.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", callID)
-	s.Require().NoError(err)
-	// The second read's failure is logged, if at all, as the first was: by then it has had
-	// time to.
-	s.Never(func() bool { return strings.Count(logged.String(), "shard=gone") > 1 }, 200*time.Millisecond, 10*time.Millisecond,
-		"a shard still down is logged once a minute, not on every call")
 }
 
 func (s *StoreSuite) TestACallNoAnsweringShardPlacedIsNotAnsweredWhileAnotherIsDown() {
@@ -138,25 +130,38 @@ func (s *StoreSuite) TestABridgeNoShardHoldsIsRefusedOnceASilentShardRunsOutOfTi
 	began := time.Now()
 	_, err := down.CallBridges.Claim(s.ctx, newID())
 	s.Require().Error(err)
-	s.Less(time.Since(began), peerReadTimeout+time.Second, "the silent shard was waited on past its read's bound")
+	s.Less(time.Since(began), claimReadTimeout+time.Second, "the silent shard was waited on past its read's bound")
 }
 
-// A peer that never answers fails after the answer that settled the read, and is still logged.
-func (s *StoreSuite) TestASilentShardIsLoggedAfterTheReadItDidNotHoldUp() {
-	down := s.withAShardThatNeverAnswers()
-	logged := &syncBuffer{}
-	before := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	s.T().Cleanup(func() { slog.SetDefault(before) })
-	callID := newID()
-	s.Require().NoError(s.store.CallResources.Insert(s.ctx, &CallResource{
-		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default", CallID: callID, CustomerID: "acme",
-	}))
+// A shard that failed before the answer settled the read is logged, once a minute; one the
+// settle cut off is not, since it was not known to be down.
+func (s *StoreSuite) TestOnlyAShardThatFailedBeforeTheReadSettledIsLogged() {
+	down, logged := s.withAShardDown()
+	failedFirst := func(ctx context.Context, db bun.IDB) (bool, error) {
+		if db == bun.IDB(down.shard) {
+			time.Sleep(50 * time.Millisecond)
+			return true, nil
+		}
+		return false, errors.New("refused")
+	}
+	for range 2 {
+		_, failed := answeringShards(s.ctx, down, "test", peerReadTimeout, func(ok bool) bool { return ok }, failedFirst)
+		s.Error(failed[1])
+	}
+	s.Equal(1, strings.Count(logged.String(), "shard=gone"), "logged, and once a minute rather than on every read")
 
-	_, err := down.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", callID)
-	s.Require().NoError(err)
-	s.Eventually(func() bool { return strings.Contains(logged.String(), "shard=silent") }, peerReadTimeout+2*time.Second, 20*time.Millisecond,
-		"the silent shard is logged once its read runs out of time")
+	cutOff := &syncBuffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(cutOff, nil)))
+	_, failed := answeringShards(s.ctx, down, "test", peerReadTimeout, func(ok bool) bool { return ok },
+		func(ctx context.Context, db bun.IDB) (bool, error) {
+			if db == bun.IDB(down.shard) {
+				return true, nil
+			}
+			<-ctx.Done()
+			return false, ctx.Err()
+		})
+	s.NoError(failed[1], "a read still running when the answer settled is not waited for")
+	s.NotContains(cutOff.String(), "shard=", "a read the settle cut off is not logged")
 }
 
 // syncBuffer is a log the store's other goroutines may write to at the same time.
