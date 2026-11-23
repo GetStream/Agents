@@ -178,7 +178,8 @@ var dataTables = []dataTable{
 // one by its own token or by the app's backend, or comes back as a new guest.
 //
 // isSecret is the one list: the export, the import and the record_data_change trigger
-// (watchDataChanges) all read it.
+// (watchDataChanges) all read it. A trigger attached before the list was passed applies the
+// same rule in SQL (20270117000400_record_data_change_secrets.sql): change both together.
 func isSecret(column string) bool {
 	return strings.HasSuffix(column, "_sealed") || strings.HasSuffix(column, "_secret_hash") ||
 		slices.Contains(oauthSecrets, column)

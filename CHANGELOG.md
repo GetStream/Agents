@@ -897,6 +897,10 @@ In a channel an agent config answers through `chat_channels`, a call of a tool y
 
 When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
 
+### The migrations after the baseline run on a live database without holding up its writes
+
+Every migration run in a transaction gives up a lock it waits more than 5 s for, so the router's next start tries again rather than queueing every write behind it. The move of calls onto sessions adds its key unchecked, backfills a thousand sessions a transaction, builds its indexes concurrently and checks the key, keeping the old session columns for the release before. A write through a data change trigger attached by the release before is recorded without its secrets rather than refused until the triggers are attached again. A leg two placed calls match goes to the one with its vendor call id, then to the nearest in time. A database that ran a migration the sets do not have is refused rather than adopted. The router and the usage service migrate on a pool with no read timeout, and the first shared migrations have Down sections (AI-3488).
+
 ### An SMS reply sets its price aside before it is sent
 
 A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what Telnyx will bill for it, its link and each MMS of up to ten files included, before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).

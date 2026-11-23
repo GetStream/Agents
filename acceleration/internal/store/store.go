@@ -43,6 +43,9 @@ type Store struct {
 	global *bun.DB
 	shard  *bun.DB
 	peers  []*bun.DB
+	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
+	// migration runs on.
+	globalDSN, shardDSN string
 	// cache is the shared Redis, holding copies of rows read on every request, and redis the
 	// shard's, holding the state of its running calls. Both are nil without Redis.
 	cache rueidisaside.CacheAsideClient

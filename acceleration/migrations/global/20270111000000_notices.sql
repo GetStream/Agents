@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- One table for every notice an organization is sent once (store.Notice): the first router to
 -- write an organization's row of a kind and key is the one that sends it. dedupe_key is what
