@@ -953,7 +953,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if table == "connector_connections" {
 		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
 	}
-	// A number bought here and still held is this deployment's, whatever row names its id.
+	// A number bought here, held or given back, is this deployment's, whatever row names its id.
 	if table == "phone_numbers" {
 		conflict += " AND NOT " + boughtHere("phone_numbers")
 	}
@@ -1623,10 +1623,11 @@ func importableNumber(ctx context.Context, db bun.IDB, customerID string, row js
 	return true, nil
 }
 
-// boughtHere is the condition that a number, as the given relation names it, was bought here
-// and is still held: no import writes one (importableNumber), so none may update or delete it.
+// boughtHere is the condition that a number, as the given relation names it, was bought here,
+// held or given back: no import writes one (importableNumber), so none may update or delete it.
+// A given-back one is billing history, which a live trunk number would hide from billing.
 func boughtHere(relation string) string {
-	return fmt.Sprintf("(%[1]s.released_at IS NULL AND %[1]s.vendor <> '%[2]s')", relation, sipTrunkVendor)
+	return fmt.Sprintf("(%s.vendor <> '%s')", relation, sipTrunkVendor)
 }
 
 // importableDefinition refuses an imported definition the API would not have stored, and gives the row the manifest as
