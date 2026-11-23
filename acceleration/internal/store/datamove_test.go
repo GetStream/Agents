@@ -4245,7 +4245,7 @@ func (s *DataMoveSuite) TestAMovedBoughtNumberDoesNotArrive() {
 	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000126", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000126", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.source, "acme", "+15550000126", time.Time{}))
 
 	s.move("acme", "acme")
 	s.move("acme", "acme")
@@ -4462,7 +4462,7 @@ func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALin
 
 func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGaveBack() {
 	attached := s.numberAttachedHere("+15550000135")
-	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000135", time.Now()))
+	s.Require().NoError(giveBack(s.ctx, s.source, "acme", "+15550000135", time.Now()))
 
 	s.move("acme", "acme")
 
@@ -4584,7 +4584,7 @@ func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.destination.PhoneNumbers.Release(s.ctx, "acme", "+15550000115", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.destination, "acme", "+15550000115", time.Time{}))
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
 	}))

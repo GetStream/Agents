@@ -1123,9 +1123,18 @@ func (s *MeteringSuite) TestANumberWithNoPriceIsBillableWorkWithNoPrice() {
 	s.Zero(month.CostMicros)
 }
 
+// release gives one of the suite's customer's numbers back at at, as Service.Release does: in
+// its trunk group's transaction.
+func (s *MeteringSuite) release(e164 string, at time.Time) error {
+	group := store.TrunkGroup{CustomerID: s.customer, Vendor: s.vendor.vendor}
+	return s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(e164, at)
+	})
+}
+
 func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	// The suite's own number, which has no price, is not the one under test.
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
 	s.Require().NoError(err)
 	s.row(ModelNumber)
@@ -1149,7 +1158,7 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	s.Equal(OriginNumberRental, months[1].APIKey)
 	s.Equal(next, months[1].StartedAt.UTC())
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, bought.E164, next.Add(2*time.Hour)))
+	s.Require().NoError(s.release(bought.E164, next.Add(2*time.Hour)))
 	_, err = rentals.Bill(s.ctx, from, monthAfter(bought.PurchasedAt, 2).Add(time.Hour))
 	s.Require().NoError(err)
 	time.Sleep(300 * time.Millisecond)
@@ -1157,7 +1166,7 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 }
 
 func (s *MeteringSuite) TestAnImportedRequestNamingANumbersComingMonthDoesNotStopItBeingBilled() {
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
 	s.Require().NoError(err)
 	s.row(ModelNumber)
@@ -1224,7 +1233,7 @@ func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 }
 
 func (s *MeteringSuite) TestAMovedCustomersBoughtNumberIsNotBilledAgainHere() {
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	now := time.Now().UTC().Truncate(time.Second)
 	// The month that began three days ago is the source's to bill, which held the number then.
 	row, err := json.Marshal(map[string]any{

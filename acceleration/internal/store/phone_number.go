@@ -203,17 +203,6 @@ func (r *PhoneNumbers) InsertOnSIPTrunk(ctx context.Context, number *PhoneNumber
 	return err
 }
 
-// Release marks a number as given back. The row stays, because what it cost while it was
-// held is still part of that month's bill.
-func (r *PhoneNumbers) Release(ctx context.Context, customerID, e164 string, at time.Time) error {
-	if customerID == "" || e164 == "" {
-		return stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return releaseNumber(ctx, tx, customerID, e164, at)
-	})
-}
-
 // Attach records which SIP trunk calls to a number arrive on and which Stream call they
 // land in.
 //
@@ -477,7 +466,8 @@ func (r *PhoneNumbers) HeldSince(ctx context.Context, since time.Time) ([]PhoneN
 	return held, nil
 }
 
-// releaseNumber marks a number as given back, in db.
+// releaseNumber marks a number as given back, in db. The row stays, because what it cost
+// while it was held is still part of that month's bill.
 func releaseNumber(ctx context.Context, db bun.IDB, customerID, e164 string, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
