@@ -799,8 +799,9 @@ func (s *TelnyxUnpaidSuite) followUpIn(user *testClient, opened Session, channel
 }
 
 // failedBefore runs delivery's turn in found as an attempt cut short once it began the turn
-// does, such as one a draining router stops, and waits until the turn's reply has failed. The
-// attempt after it watches none of the turn's events: it can only read how the turn ended.
+// does, such as one whose context is cancelled, and waits until the turn's reply has failed. The
+// attempt after it, in the same open session, watches none of the turn's events: it can only read
+// how the turn ended.
 func (s *TelnyxUnpaidSuite) failedBefore(found *session.Session, delivery scheduledDelivery) {
 	s.Require().NoError(s.router.followUpWithin(scheduledOwnerContext(context.Background(), delivery), found, delivery))
 	s.Require().Eventually(func() bool {
