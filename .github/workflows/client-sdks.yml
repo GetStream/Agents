@@ -257,4 +257,6 @@ jobs:
 
 concurrency:
   group: ci-client-sdks-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  # A run on main is never cancelled: only a finished push run saves the Swift package cache (#2235,
+  # #2225), and a newer push queues behind it. A pull request run still cancels the one before it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
