@@ -1417,6 +1417,64 @@ func (s *DataMoveSuite) TestAChildRowCannotBeImportedOntoSomebodyElsesParent() {
 	s.Zero(count, "a row is only written where its parent belongs to the importing customer")
 }
 
+// importEdited imports the source's one row of a table, edited first, as the given customer.
+func (s *DataMoveSuite) importEdited(table, customerID string, edit func(map[string]any)) error {
+	rows := s.export("acme").of(table)
+	s.Require().Len(rows, 1)
+	edit(rows[0])
+	encoded, err := json.Marshal(rows[0])
+	s.Require().NoError(err)
+	return s.destination.ImportRow(s.ctx, customerID, table, encoded)
+}
+
+func (s *DataMoveSuite) TestAnImportedCampaignAboveTheConcurrencyCapIsRefused() {
+	s.seedCampaign("acme", Draft)
+
+	err := s.importEdited("campaigns", "moved", func(row map[string]any) { row["concurrency"] = 100000 })
+
+	s.ErrorContains(err, "concurrency")
+	s.Empty(s.exportFrom(s.destination, "moved").of("campaigns"))
+}
+
+func (s *DataMoveSuite) TestAnImportedConfigOverTheSandboxLimitsIsRefused() {
+	s.seedAgentConfig(s.source, "acme", "coder")
+
+	err := s.importEdited("agent_configs", "moved", func(row map[string]any) {
+		row["sandbox_provider"] = SandboxDaytona
+		row["sandbox_options"] = map[string]any{"cpu": 64}
+	})
+
+	s.ErrorContains(err, "sandbox_options.cpu")
+	s.Empty(s.exportFrom(s.destination, "moved").of("agent_configs"))
+}
+
+func (s *DataMoveSuite) TestAnImportedVoiceBindingArrivesToBeMadeAgain() {
+	voice := s.seedVoice(s.source, "acme", "narrator")
+	s.Require().NoError(s.source.VoiceBindings.Upsert(s.ctx, &VoiceBinding{
+		VoiceID: voice, Provider: "elevenlabs", ExternalID: "provider-voice-1", State: VoiceReady,
+	}))
+
+	s.move("acme", "moved")
+
+	bindings, err := s.destination.VoiceBindings.Select(s.ctx, voice)
+	s.Require().NoError(err)
+	s.Require().Len(bindings, 1)
+	s.Empty(bindings[0].ExternalID, "the provider's id for the voice is the provider's word to this deployment")
+	s.Equal(VoicePending, bindings[0].State)
+}
+
+func (s *DataMoveSuite) TestAnImportedRequestIsNotBilledAndCountsAgainstTheAppsOwnOrganization() {
+	s.Require().NoError(s.destination.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "acme", OrganizationID: "acme-org"}))
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
+		CustomerID: "acme", OrganizationID: "another-org", Billable: true, CostMicros: -5_000_000,
+		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
+
+	moved := s.movedRequest(false)
+
+	s.Equal(false, moved["billable"])
+	s.Equal("acme-org", moved["organization_id"])
+}
+
 func (s *DataMoveSuite) TestOnlyTheAppsOwnPolicyMoves() {
 	_, err := s.source.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO policies (scope, scope_id, document, updated_at)"+

@@ -856,6 +856,9 @@ An `AgentTool` declared with a `Decodable` arguments type decodes it from the ar
 ### A custom connector never gets the deployment's own OAuth client
 
 Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
+### An imported row is held to what the API holds it to
+
+`POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. An imported voice binding arrives pending and without its provider's voice id, to be prepared again. An imported request is never billable here and counts against the importing app's own organization.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

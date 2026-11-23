@@ -114,7 +114,9 @@ var dataTables = []dataTable{
 	{name: "router_configs", customer: "customer_id"},
 	{name: "voices", customer: "customer_id"},
 	{name: "voice_samples", parent: "voices", parentColumn: "voice_id"},
-	{name: "voice_bindings", parent: "voices", parentColumn: "voice_id"},
+	// The id a provider knows a voice by, and whether it is ready, are what the provider told
+	// this deployment: a binding arrives to be made again.
+	{name: "voice_bindings", parent: "voices", parentColumn: "voice_id", vouched: []string{"external_id", "state"}},
 	{name: "sip_trunks", customer: "customer_id"},
 	{name: "phone_numbers", customer: "customer_id"},
 	{name: "knowledge_urls", customer: "customer_id"},
@@ -794,6 +796,23 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if spec.copied != "" {
 		where = " WHERE NOT " + spec.copiedBefore(shape, columns)
 	}
+	args := []any{string(row), customerID}
+	if table == "requests" {
+		// The organization a request counts against is the app's here, whatever the row says.
+		// It is in the shared database and requests in this shard's, so it is read first.
+		membership, err := s.AppOrganizations.Get(ctx, customerID)
+		if err != nil {
+			return err
+		}
+		args = append(args, membership.OrganizationID)
+	}
+	read := args
+	if spec.customer == "" {
+		read = args[:1]
+	}
+	if err := validateImported(ctx, db, spec, shape, columns, picked, subject, read); err != nil {
+		return fmt.Errorf("store: import %s: %w", table, err)
+	}
 
 	// A row nobody may update is one whose primary key is all it has, and writing it
 	// again would be the same row. Doing nothing is both the right answer and a legal
@@ -803,7 +822,6 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// it. Primary keys are carried across as they are, so without this an import could
 	// name a row it happened to know the id of and overwrite another customer's.
 	conflict := "DO NOTHING"
-	args := []any{string(row), customerID}
 	if len(assignments) > 0 {
 		conflict = "DO UPDATE SET " + strings.Join(assignments, ", ") + " WHERE " + spec.owned(spec.name)
 		args = append(args, customerID)
@@ -837,6 +855,70 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	return nil
+}
+
+// validated is a model that refuses a row the API would not store.
+type validated interface{ Validate() error }
+
+// importedModels are the models of the tables an import writes, for those that have a Validate,
+// so an imported row is held to what the API holds the same row to. A phone number is checked
+// by importableNumber instead, which takes one given back in the form it was held in then.
+var importedModels = map[string]func() validated{
+	"agent_configs":          func() validated { return &AgentConfig{} },
+	"skills":                 func() validated { return &Skill{} },
+	"connector_definitions":  func() validated { return &ConnectorDefinition{} },
+	"connector_connections":  func() validated { return &ConnectorConnection{} },
+	"router_configs":         func() validated { return &RouterConfig{} },
+	"voices":                 func() validated { return &Voice{} },
+	"voice_samples":          func() validated { return &VoiceSample{} },
+	"voice_bindings":         func() validated { return &VoiceBinding{} },
+	"sip_trunks":             func() validated { return &SIPTrunk{} },
+	"knowledge_urls":         func() validated { return &KnowledgeURL{} },
+	"knowledge_documents":    func() validated { return &KnowledgeDocument{} },
+	"campaigns":              func() validated { return &Campaign{} },
+	"campaign_contacts":      func() validated { return &Contact{} },
+	"campaign_attempts":      func() validated { return &CampaignAttempt{} },
+	"simulations":            func() validated { return &Simulation{} },
+	"simulation_runs":        func() validated { return &SimulationRun{} },
+	"simulation_cases":       func() validated { return &SimulationCase{} },
+	"scheduled_tasks":        func() validated { return &ScheduledTask{} },
+	"scheduled_task_runs":    func() validated { return &ScheduledTaskRun{} },
+	"recordings":             func() validated { return &Recording{} },
+	"agent_sessions":         func() validated { return &AgentSession{} },
+	"agent_session_tools":    func() validated { return &agentSessionTools{} },
+	"calls":                  func() validated { return &Call{} },
+	"agent_responses":        func() validated { return &AgentResponse{} },
+	"agent_response_items":   func() validated { return &AgentResponseItem{} },
+	"conversation_documents": func() validated { return &ConversationDocument{} },
+	"agent_branch_switches":  func() validated { return &AgentBranchSwitch{} },
+	"agent_branch_messages":  func() validated { return &AgentBranchMessage{} },
+	"agent_logs":             func() validated { return &AgentLog{} },
+	"requests":               func() validated { return &Request{} },
+	"policies":               func() validated { return &Policy{} },
+}
+
+// validateImported reads the row as the import would write it, with what it forces and fills
+// in, and refuses it when its model's Validate does. A column the import leaves out is read as
+// the row sent it.
+func validateImported(ctx context.Context, db bun.IDB, spec dataTable, shape shape, columns, picked []string, subject string, args []any) error {
+	model, found := importedModels[spec.name]
+	if !found {
+		return nil
+	}
+	read := make([]string, 0, len(shape.columns))
+	for _, column := range shape.columns {
+		expression := "r." + column
+		if i := slices.Index(columns, column); i >= 0 {
+			expression = picked[i]
+		}
+		read = append(read, expression+" AS "+column)
+	}
+	row := model()
+	if err := db.NewRaw(fmt.Sprintf("SELECT %s FROM jsonb_populate_record(NULL::%s, %s) AS r",
+		strings.Join(read, ", "), spec.name, subject), args...).Scan(ctx, row); err != nil {
+		return stack.Wrap(fmt.Errorf("read the row: %w", err))
+	}
+	return row.Validate()
 }
 
 // The gap an import reserves ahead of the ids it writes, at most. Once a row's id comes
@@ -1424,8 +1506,11 @@ func (t dataTable) identity() string {
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
 	// this one shipped or had refused leaves it alone.
+	// Nor is it billed here, and it counts against the importing app's organization alone.
 	if t.name == "requests" {
-		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '')"
+		return "jsonb_build_object('customer_id', ?::text, 'to_ship', false, 'shipped_at', NULL, 'ship_error', '')" +
+			" || jsonb_build_object('billable', false)" +
+			" || jsonb_build_object('organization_id', ?::text)"
 	}
 	return fmt.Sprintf("jsonb_build_object('%s', ?::text)", t.customer)
 }
