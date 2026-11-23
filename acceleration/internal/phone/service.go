@@ -1039,10 +1039,18 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
-	if err != nil && !sent {
+	if err != nil && !sent && !lasting(err) {
 		return Placed{}, notDialed{err}
 	}
 	return placed, err
+}
+
+// lasting reports whether a call failed before it was sent for a reason that placing it again
+// would meet again: the request itself, a number the app does not hold, or the router's own
+// setup. Such a failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+func lasting(err error) bool {
+	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) ||
+		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall)
 }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
@@ -1539,8 +1547,9 @@ func callBridgeAAD(customerID, token string) []byte {
 // was rung.
 var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
 
-// ErrNotDialed is a call that failed before the vendor was asked to dial it: nobody was rung.
-// It marks the failure, whose own text and kind are kept.
+// ErrNotDialed is a call that failed before the vendor was asked to dial it, for a reason that
+// may not be met again, such as a database blip: nobody was rung. It marks the failure, whose
+// own text and kind are kept.
 var ErrNotDialed = errors.New("phone: the call failed before it was dialed")
 
 type notDialed struct{ err error }
