@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -769,4 +771,20 @@ func thinkingBlock(index int, thinking, signature string) string {
 
 func stop(reason string, outputTokens int) string {
 	return fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%q},"usage":{"output_tokens":%d}}`, reason, outputTokens)
+}
+
+func (s *AnthropicSuite) TestAProviderWithNoEndpointAsksAnthropicsOwnMessagesURL() {
+	s.T().Setenv(compatEnvVar, "")
+	provider, err := New(Options{APIKey: "test", Model: "claude-opus-5-5"})
+	s.Require().NoError(err)
+	var asked string
+	stopped := errors.New("stop before the network")
+	_, err = provider.(*LLM).Client().Messages.New(s.T().Context(), anthropic.MessageNewParams{Model: "claude-opus-5-5", MaxTokens: 1},
+		option.WithMaxRetries(0),
+		option.WithMiddleware(func(request *http.Request, _ option.MiddlewareNext) (*http.Response, error) {
+			asked = request.URL.String()
+			return nil, stopped
+		}))
+	s.Require().ErrorIs(err, stopped)
+	s.Equal("https://api.anthropic.com/v1/messages", asked)
 }
