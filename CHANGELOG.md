@@ -925,10 +925,6 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 
 A request row's cost is added to a grant it names only when the grant belongs to the row's organization or to its app's (the organization the app is in, or the app itself for an app in none), both as the row is written and when the grant uses are reconciled. A grant scoped to an app, or to its key or user, counts only that app's rows. A use refused because the grant is not the row's is counted on `/metrics` as `router_usage_grant_uses_refused_total`. An imported request names no grant: it was drawn from the grants of the deployment that recorded it.
 
-### A dropped database connection no longer loses a conversation's record
-
-The session recorder now tries a write again, for up to 10 seconds and in queue order, when it fails for a reason that can pass: a dropped or refused connection, a timeout on either side, a server shutting down, a write reaching a primary a failover made read-only, or a serialization failure or deadlock. Before, one such failure lost the session or turn row and with it every later row of the conversation. Items of a turn that was never stored no longer stop the items of other turns written in the same batch, in the same session or another. A session or call end that still cannot be stored, or that the full queue dropped, is counted in `router_session_records_lost_total{write}`, as are items dropped because their turn was never stored.
-
 ### A customer can no longer list or speak in another customer's cloned voice
 
 Clones made through `/v1/agents/voices` sit in the deployment's shared provider account, which lists them all as its own. A voice id that another customer's voice was prepared as is now refused, whether it is the session's voice or the `voice_id` of TTS overwrites. The voice library lists only the caller's own clones besides the provider's published voices, previews another customer's clone as not found, and no longer suggests one as the closest voice.
