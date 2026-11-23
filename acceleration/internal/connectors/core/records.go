@@ -58,7 +58,7 @@ type Exchange struct {
 	// scopeRequired is the provider asking for more access than the grant has, nil when no
 	// answer did.
 	scopeRequired *Outcome
-	// redact is Redact's redaction for the last request that left, nil when none did. A
+	// redact is Redact's redaction for every request that left, nil when none did. A
 	// function, so that %v of an Exchange prints no secret (AGENTS.md «Secrets never print»).
 	redact func(string) string
 }
@@ -118,8 +118,9 @@ func (e *Exchange) ErrorBody() string {
 }
 
 // Redact is text, such as the error a tool source returned for the call, with what ErrorBody
-// takes out of a body taken out of it: the last request's path and query, together and apart,
-// and each string of the credential it was sent with (redactionOf). Text is unchanged when no
+// takes out of a body taken out of it, for every request that left: its path and query,
+// together and apart, and each string of the credential it was sent with (redactionOf). A
+// redirect's answer may name the path the call was first sent to. Text is unchanged when no
 // request left. Example: the MCP client's error for a JSON-RPC error that says
 // "invalid token <the token> for /primary/mcp" says "invalid token [redacted] for [redacted]".
 func (e *Exchange) Redact(text string) string {
@@ -185,7 +186,9 @@ func (e *Exchange) refused(err error) {
 }
 
 // sending records that a request to host is leaving with a credential, and what of it and
-// that credential Redact takes out (redaction).
+// that credential Redact takes out (redaction), besides what it took out for the requests
+// before it. Those go first: a redirect to a prefix of the first path would otherwise cut that
+// path apart before it is matched whole.
 func (e *Exchange) sending(host string, redact redaction) {
 	if e == nil {
 		return
@@ -193,7 +196,13 @@ func (e *Exchange) sending(host string, redact redaction) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sent, e.host = true, host
-	e.redact = func(text string) string { return redact.apply(text, true) }
+	earlier := e.redact
+	e.redact = func(text string) string {
+		if earlier != nil {
+			text = earlier(text)
+		}
+		return redact.apply(text, true)
+	}
 }
 
 // answered records how a request that left ended: with the provider's status, or with err.

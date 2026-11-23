@@ -4,7 +4,15 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"slices"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -218,6 +226,113 @@ func (s *DispatcherSuite) TestACallTheTimeoutCutsOffIsAnUnknownOutcome() {
 	s.Require().NoError(err, "not an error the model would retry")
 	s.Contains(said, "outcome_unknown: crm__slow did not answer in time")
 	s.Equal(1, s.provider.calls("primary"))
+}
+
+// TestACallThatCannotReachItsServerFailsWithoutTheEndpointsPath: a hosted MCP server's path can
+// hold its access secret, so the error the model and the session's events are given keeps the
+// endpoint to its host, and still says what failed underneath.
+func (s *DispatcherSuite) TestACallThatCannotReachItsServerFailsWithoutTheEndpointsPath() {
+	secret := uuid.NewString()
+	hosted := s.hostedEndpoint("/hosted/"+secret+"/mcp", "")
+	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
+	s.Require().NoError(err)
+	hosted.Close()
+
+	_, err = s.call(d, "crm__whoami", "{}")
+
+	s.Require().Error(err)
+	s.NotContains(err.Error(), secret)
+	s.Contains(err.Error(), hosted.URL, "the host is still named")
+	s.ErrorIs(err, syscall.ECONNREFUSED)
+}
+
+// TestAProvidersErrorThatEchoesItsPathFailsWithoutIt: a provider's own error message may quote
+// the path it was sent to, with no scheme or host before it, and name another endpoint whole.
+func (s *DispatcherSuite) TestAProvidersErrorThatEchoesItsPathFailsWithoutIt() {
+	path, moved := "/hosted/"+uuid.NewString()+"/mcp", uuid.NewString()
+	s.hostedEndpoint(path, "")
+	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
+	s.Require().NoError(err)
+	s.provider.answerRPC("primary", http.StatusBadRequest,
+		`"error":{"code":-32600,"message":"no server at `+path+`, it moved to https://mcp.example/hosted/`+moved+`/mcp"}`)
+
+	_, err = s.call(d, "crm__whoami", "{}")
+
+	s.Require().ErrorContains(err, "no server at")
+	s.Contains(err.Error(), "it moved to https://mcp.example")
+	s.NotContains(err.Error(), path)
+	s.NotContains(err.Error(), moved)
+}
+
+// TestAToolsOwnLongErrorReachesTheModelWholeWithoutTheEndpointsPath: an isError is the tool's
+// words for the model to act on, so a long one is not cut to a log line and a record it names
+// by URL keeps its path; the endpoint's path and the call's token are still taken out.
+func (s *DispatcherSuite) TestAToolsOwnLongErrorReachesTheModelWholeWithoutTheEndpointsPath() {
+	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
+	s.Require().NoError(err)
+	issue := "Issue https://tracker.example/acme/repo/issues/12 is closed."
+	words := issue + strings.Repeat(" Reopen it before you comment.", 100) +
+		" Asked as " + tokenOf("primary") + " at /primary/mcp. That is all."
+	s.provider.answerRPC("primary", http.StatusOK, `"result":{"content":[{"type":"text","text":"`+words+`"}],"isError":true}`)
+
+	_, err = s.call(d, "crm__whoami", "{}")
+
+	s.Require().Error(err)
+	s.True(strings.HasPrefix(err.Error(), issue), err.Error())
+	s.True(strings.HasSuffix(err.Error(), "Asked as [redacted] at [redacted]. That is all."), err.Error())
+	s.NotContains(err.Error(), tokenOf("primary"))
+}
+
+// TestAProvidersErrorAfterARedirectFailsWithoutTheFirstPath: the endpoint redirects the call
+// within its origin, and the answer there quotes the path the call was first sent to. That
+// path is taken out as well as the one the answer came from, which is a prefix of it.
+func (s *DispatcherSuite) TestAProvidersErrorAfterARedirectFailsWithoutTheFirstPath() {
+	secret := uuid.NewString()
+	s.hostedEndpoint("/hosted/"+secret+"/mcp", "/hosted")
+	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
+	s.Require().NoError(err)
+	s.provider.answer("primary", http.StatusTemporaryRedirect, http.Header{"Location": {"/hosted"}}, "")
+
+	_, err = s.call(d, "crm__whoami", "{}")
+
+	s.Require().ErrorContains(err, "no server at")
+	s.NotContains(err.Error(), secret)
+}
+
+// hostedEndpoint has the test's connector reach the provider's primary account through a
+// server of its own at path, which the test may close, and returns that server. At moved,
+// unless it is "", the server answers a 400 whose JSON-RPC error quotes path.
+func (s *DispatcherSuite) hostedEndpoint(path, moved string) *httptest.Server {
+	target, err := url.Parse(s.provider.URL)
+	s.Require().NoError(err)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport, proxy.FlushInterval = s.provider.Client().Transport, -1
+	hosted := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if moved != "" && r.URL.Path == moved {
+			var message struct {
+				ID json.RawMessage `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&message)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(message.ID)+`,"error":{"code":-32600,"message":"no server at `+path+`"}}`)
+			return
+		}
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		r.URL.Path = "/primary/mcp"
+		proxy.ServeHTTP(w, r)
+	}))
+	s.T().Cleanup(hosted.Close)
+	manifest, err := core.ParseManifest([]byte(strings.Replace(s.crmManifest(s.connectorID, s.revision+1),
+		s.provider.URL+"/{account}/mcp", hosted.URL+path, 1)))
+	s.Require().NoError(err)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
+	s.Require().NoError(err)
+	s.revision = definition.Revision
+	return hosted
 }
 
 // TestACallTheConnectionsClientCutsOffIsAnUnknownOutcome: a binding may wait longer than the

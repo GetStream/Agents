@@ -4,11 +4,17 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -87,6 +93,78 @@ func (s *SessionConnectorsSuite) TestAModelsToolCallReachesTheProviderWithTheCon
 	s.Equal(connectorEchoText, ran["result"])
 	s.Empty(ran["error"])
 	s.Greater(s.provider.Hits(fakeprovider.PathMCP), before)
+}
+
+// TestAToolCallThatCannotReachItsServerReachesTheDeviceWithoutTheEndpointsPath: a hosted MCP
+// server's path can hold its access secret. tool_ran's result is the text the model was given
+// for the call, so neither the model nor the device reads the path.
+func (s *SessionConnectorsSuite) TestAToolCallThatCannotReachItsServerReachesTheDeviceWithoutTheEndpointsPath() {
+	secret := s.utils.uuid()
+	hosted, events, opened := s.hostedSession("/hosted/"+secret+"/mcp", new(atomic.Bool))
+	hosted.Close()
+
+	ran := s.toolRanOn(s.serverClient.actingFor(s.client), events, opened)
+
+	s.Equal(connectorEcho, ran["tool"])
+	s.Contains(ran["result"], "That did not work: ")
+	s.Contains(ran["result"], hosted.URL, "the host is still named")
+	s.NotContains(ran["result"], secret)
+}
+
+// TestAToolCallsErrorThatQuotesItsPathReachesTheDeviceWithoutIt: the provider's own error is
+// one tool_ran.error says, unlike a network failure's, and it reads it without the path.
+func (s *SessionConnectorsSuite) TestAToolCallsErrorThatQuotesItsPathReachesTheDeviceWithoutIt() {
+	secret := s.utils.uuid()
+	quoting := new(atomic.Bool)
+	_, events, opened := s.hostedSession("/hosted/"+secret+"/mcp", quoting)
+	quoting.Store(true)
+
+	ran := s.toolRanOn(s.serverClient.actingFor(s.client), events, opened)
+
+	s.Equal(connectorEcho, ran["tool"])
+	s.Contains(ran["error"], "no server at [redacted]")
+	s.Contains(ran["result"], "no server at [redacted]")
+	s.NotContains(ran["error"], secret)
+	s.NotContains(ran["result"], secret)
+}
+
+// hostedSession is a session of the client's own connection to a custom connector whose MCP
+// endpoint is a server of the test's at path, in front of the fake, with its events open. The
+// server is returned so the test may close it. While quoting holds, the server answers every
+// request with a 400 whose JSON-RPC error quotes path.
+func (s *SessionConnectorsSuite) hostedSession(path string, quoting *atomic.Bool) (*httptest.Server, *websocket.Conn, string) {
+	target, err := url.Parse(s.provider.URL)
+	s.Require().NoError(err)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport, proxy.FlushInterval = s.provider.Client().Transport, -1
+	hosted := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		if quoting.Load() {
+			var message struct {
+				ID json.RawMessage `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&message)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(message.ID)+`,"error":{"code":-32600,"message":"no server at `+path+`"}}`)
+			return
+		}
+		r.URL.Path = fakeprovider.PathMCP
+		proxy.ServeHTTP(w, r)
+	}))
+	s.T().Cleanup(hosted.Close)
+	connector := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	manifest, err := core.ParseManifest([]byte(strings.NewReplacer("custom_crm", connector,
+		s.provider.URL+fakeprovider.PathMCP, hosted.URL+path).Replace(s.manifest())))
+	s.Require().NoError(err)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+	s.Require().NoError(err)
+	mine, echo := s.connection(s.client, connector)
+	opened := s.client.createSession(s.session(s.config(s.binding("crm", connector, "session", "", echo)), map[string]string{"crm": mine}))
+	return hosted, s.client.opens("/v1/agents/sessions/" + opened.Id + "/events"), opened.Id
 }
 
 // TestAToolCallAnswered400KeepsAStaticTokenConnected is a control for AI-1052: only a validate

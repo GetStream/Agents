@@ -477,7 +477,13 @@ func (d *dispatcher) send(ctx context.Context, deadline time.Time, r route, call
 				return llm.TextParts(text), failed(ctx, exchange), nil
 			}
 		}
-		return nil, failed(ctx, exchange), err
+		said := core.LoggedMessage(err, exchange.Redact)
+		if tool, ok := errors.AsType[*core.ToolError](err); ok {
+			// The tool's own words are for the model to act on, already cut to MaxResultBytes
+			// by the source, and may name a record by its URL.
+			said = exchange.Redact(tool.Message)
+		}
+		return nil, failed(ctx, exchange), sourceError{text: said, err: err}
 	}
 	// A source cuts its own results; the cap holds whichever source answered.
 	if text := llm.TextOf(result.Parts); len(text) > core.MaxResultBytes {
@@ -485,6 +491,19 @@ func (d *dispatcher) send(ctx context.Context, deadline time.Time, r route, call
 	}
 	return result.Parts, failure{}, nil
 }
+
+// sourceError is a tool source's error as the model and the session's events read it: without
+// what the call's Exchange redacts, since an MCP endpoint's path can hold its access secret,
+// and, unless it is a tool's own words (core.ToolError), with every URL kept to its host. errors.Is
+// and errors.As still reach the source's own error.
+type sourceError struct {
+	text string
+	err  error
+}
+
+func (e sourceError) Error() string { return e.text }
+
+func (e sourceError) Unwrap() error { return e.err }
 
 // failed is how a call that failed before the binding's deadline failed, from what its
 // requests saw (core.Exchange): a tool source's error does not say whether anything was sent,
