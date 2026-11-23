@@ -871,7 +871,7 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ### One sandbox holds at most 256 tunnels open through the egress proxy
 
-Sandbox code could open any number of CONNECT tunnels through the router's sandbox egress proxy, and an idle one stays open up to 4 minutes, so one sandbox could hold thousands of the router's file descriptors that every other sandbox on it shares. A sandbox now holds at most 256 tunnels open on one router, to granted hosts and allowed domains together: 256 is the most connections Chromium lets one profile open through a proxy. The next CONNECT gets a 429, «egress: too many open tunnels», before anything is dialed, counted as `decision="denied_tunnels"` in `router_sandbox_egress_requests_total`. A tunnel that closes, either end or its idle timeout, makes room for the next one. Other sandboxes are not affected (AI-3461).
+Sandbox code could open any number of CONNECT tunnels through the router's sandbox egress proxy, and an idle one stays open up to 4 minutes, so one sandbox could hold thousands of the router's file descriptors that every other sandbox on it shares. A sandbox now holds at most 256 tunnels open on one router, to granted hosts and allowed domains together: 256 is the most connections Chromium lets one profile open through a proxy. The next CONNECT gets a 429, «egress: too many open tunnels», before anything is dialed, counted as `decision="denied_tunnels"` in `router_sandbox_egress_requests_total`. A tunnel that closes, either end or its idle timeout, makes room for the next one. Other sandboxes are not affected (#2311).
 
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
