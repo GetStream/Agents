@@ -229,6 +229,9 @@ type ToolReport struct {
 	// Error is what the failure said, with what the runner redacts already taken out. The line
 	// logs it in place of the returned error's text, which can echo a token.
 	Error string
+	// Client is set when the caller's own code ran the tool and failed it. What it said of the
+	// failure is the caller's, and can carry its users' data, so the line leaves it out.
+	Client bool
 }
 
 type toolReportKey struct{}
@@ -829,8 +832,9 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 // the tool belongs to, and whether it failed and how. A call fails when it returned err or
 // its runner reported a failure (ToolReport); error_code is the runner's, else timeout or
 // cancelled for a context that ended, else error. The error a connector call returned is
-// never logged, only what its runner reported, redacted. What a call was asked and answered
-// is not logged: it is the caller's and its users'.
+// never logged, only what its runner reported, redacted; nor is the one a caller's own tool
+// failed with (ToolReport.Client). What a call was asked and answered is not logged: it is the
+// caller's and its users'.
 func (a *Agent) loggedTool(report ToolReport, err error) []any {
 	fields := []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID}
 	if report.Connector != "" {
@@ -846,7 +850,7 @@ func (a *Agent) loggedTool(report ToolReport, err error) []any {
 	default:
 		code = "error"
 	}
-	if err != nil && report.Connector == "" {
+	if err != nil && report.Connector == "" && !report.Client {
 		message = err.Error()
 	}
 	fields = append(fields, "success", code == "", "error_code", code)

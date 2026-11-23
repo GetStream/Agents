@@ -307,6 +307,20 @@ func (s *AgentSuite) TestAConnectorCallsErrorIsWhatItsRunnerReported() {
 	s.NotContains(fmt.Sprint(back), "/orders/12/refund", "the returned error is not logged")
 }
 
+// A caller's own tool fails in words of its own, which can carry its users' data: the line
+// says it failed and how, and leaves the words out.
+func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
+	back := s.reportedBy(&reportingTool{report: ToolReport{Client: true},
+		err: errors.New("no order for ana@example.com, call +1 555 010 0199")})
+
+	s.Equal("error", back["outcome"])
+	s.Equal(false, back["success"])
+	s.Equal("error", back["error_code"])
+	s.NotContains(back, "error")
+	s.NotContains(fmt.Sprint(back), "example.com")
+	s.NotContains(fmt.Sprint(back), "555")
+}
+
 // interruptsATool has the caller interrupt while a tool runs, the tool asking policy of the
 // agent, then lets the tool return.
 func (s *AgentSuite) interruptsATool(policy ToolPolicy, runner ToolRunner, began <-chan struct{}) {

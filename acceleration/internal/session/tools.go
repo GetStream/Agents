@@ -164,6 +164,7 @@ func (b *bridge) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 	select {
 	case result := <-answer:
 		if result.failure != "" {
+			agent.ReportTool(ctx, agent.ToolReport{Client: true})
 			return nil, errors.New(result.failure)
 		}
 		return result.parts, nil
