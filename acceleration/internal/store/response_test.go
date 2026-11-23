@@ -440,7 +440,6 @@ func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
 		},
 		"Calls.Finish":       func() error { return s.store.Calls.Finish(s.ctx, "", "one", at) },
 		"Calls.ChangeModels": func() error { return s.store.Calls.ChangeModels(s.ctx, &Call{ID: "one", LLM: "openai/gpt-5"}) },
-		"Recordings.Start":   func() error { return s.store.Recordings.Start(s.ctx, "", "one", "deepgram", "nova-3") },
 		"Recordings.Finish": func() error {
 			return s.store.Recordings.Finish(s.ctx, "", "one", "deepgram", "nova-3", nil, "")
 		},

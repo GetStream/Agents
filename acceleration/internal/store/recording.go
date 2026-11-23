@@ -102,25 +102,6 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 	return nil
 }
 
-// Start marks a job as at the provider and records which one took it.
-func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model string) error {
-	if customerID == "" || id == "" {
-		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
-	}
-	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
-		Set("status = ?", RecordingRunning).
-		Set("provider = ?", provider).
-		Set("model = ?", model).
-		Set("updated_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: start recording: %w", err))
-	}
-	return nil
-}
-
 // Finish writes the result a job produced, or, when reason is set, that it failed and why.
 // The caller reads reason back, so it is one written for them, RecordingFailure unless the
 // failure is theirs to correct.
