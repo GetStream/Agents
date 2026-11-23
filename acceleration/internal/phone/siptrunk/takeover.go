@@ -686,7 +686,7 @@ func (p *Provider) take(id, raw string) {
 	if held == nil {
 		return
 	}
-	p.running.Go(func() { p.hold(id, held, changed, log, report) })
+	p.running.Go(func() { p.hold(context.WithoutCancel(p.ctx), id, held, changed, log, report) })
 }
 
 // giveBack lets go of a claim won on a call this node failed to take over before it sent

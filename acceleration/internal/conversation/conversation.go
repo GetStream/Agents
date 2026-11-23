@@ -254,7 +254,10 @@ type known struct {
 	customer, cid string
 }
 type Conversation struct {
-	mu sync.Mutex
+	// ctx is the context of the request that opened the conversation, without its
+	// cancellation: the writes its own loop sends to Stream are traced under it.
+	ctx context.Context
+	mu  sync.Mutex
 	// sendMu is held across each stored write flush sends, from reading the head of Pending to
 	// taking it off, and by anything else that takes ops off Pending: mu is released while
 	// Stream is asked, so without it a write taken off meanwhile would make flush take off the
@@ -579,8 +582,8 @@ func (s *Service) opens(key known) func() {
 		s.mu.Unlock()
 	}
 }
-func (s *Service) make(d ledger) *Conversation {
-	c := &Conversation{service: s, data: d, turns: map[string]string{}, created: map[string]bool{}, hidden: map[string]bool{}, stopped: make(chan struct{}), done: make(chan struct{})}
+func (s *Service) make(ctx context.Context, d ledger) *Conversation {
+	c := &Conversation{ctx: context.WithoutCancel(ctx), service: s, data: d, turns: map[string]string{}, created: map[string]bool{}, hidden: map[string]bool{}, stopped: make(chan struct{}), done: make(chan struct{})}
 	s.all[known{d.Customer, d.CID}] = c
 	go c.run()
 	return c
@@ -789,7 +792,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		s.mu.Unlock()
 		return nil, nil, false, stack.Wrap(errors.New("conversation service is closed"))
 	}
-	c := s.make(ledger{CID: cid, Customer: customer, Agent: agentID, Owner: caller, Commands: commandsIn(page.Messages), StreamApp: pin})
+	c := s.make(ctx, ledger{CID: cid, Customer: customer, Agent: agentID, Owner: caller, Commands: commandsIn(page.Messages), StreamApp: pin})
 	s.mu.Unlock()
 	// Nobody here holds the conversation, so a reply Stream still shows as running was
 	// left by a process that stopped.
@@ -2461,7 +2464,7 @@ func (c *Conversation) flushOne() (bool, *FinishedReply, error) {
 	}
 	visible := c.data.VisibleTools
 	c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	err := c.send(ctx, op, false, visible)
 	cancel()
 	c.mu.Lock()
@@ -2621,7 +2624,7 @@ func (c *Conversation) run() {
 			c.indicate(next)
 			if live {
 				c.lived = now
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 				err := c.send(ctx, operation{Message: *m, reasoning: window, live: &snapshot}, true, visible)
 				cancel()
 				// A refused or slow live update holds back every update after it, so the reply
@@ -2700,7 +2703,7 @@ func (c *Conversation) indicate(next indication) {
 // sendIndicator sends ai_indicator.update with state, or ai_indicator.clear without one.
 func (c *Conversation) sendIndicator(messageID, state string) {
 	event := IndicatorEvent(c.data.Agent, messageID, state)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 	defer cancel()
 	client, err := c.chat(ctx)
 	if err != nil {

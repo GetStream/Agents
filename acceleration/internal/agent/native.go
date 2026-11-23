@@ -809,7 +809,7 @@ func (a *Agent) nativeTools(delegating bool) ([]llm.Tool, error) {
 	}), nil
 }
 
-func (a *Agent) nativeDelegate(call llm.ToolCall) ([]llm.ContentPart, bool, error) {
+func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var arguments struct {
 		Skill  string `json:"skill"`
 		Prompt string `json:"prompt"`
@@ -831,7 +831,7 @@ func (a *Agent) nativeDelegate(call llm.ToolCall) ([]llm.ContentPart, bool, erro
 			history = append(history, message)
 		}
 	}
-	charged := a.chargedLocked(context.Background(), a.toolScheduled[call.ID])
+	charged := a.chargedLocked(context.WithoutCancel(ctx), a.toolScheduled[call.ID])
 	a.mu.Unlock()
 	id, err := a.harness.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
 	if err != nil {

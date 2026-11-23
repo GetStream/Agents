@@ -189,9 +189,9 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 
 	gone := make(chan error, 1)
 	go func() {
-		gone <- s.readRelayedCommands(connection, state, watcher, id)
+		gone <- s.readRelayedCommands(r.Context(), connection, state, watcher, id)
 	}()
-	s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load))
+	s.writeRelayedEvents(r.Context(), connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load))
 	return true
 }
 
@@ -202,6 +202,7 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 // direction: this socket is still being read, and the watcher standing for it elsewhere
 // is still wanted.
 func (s *Server) writeRelayedEvents(
+	ctx context.Context,
 	connection *websocket.Conn,
 	state *relayed,
 	socket *remoteSocket,
@@ -241,7 +242,7 @@ func (s *Server) writeRelayedEvents(
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
-			if err := state.bus.Publish(context.Background(), state.bus.Commands(), relay.Request{
+			if err := state.bus.Publish(ctx, state.bus.Commands(), relay.Request{
 				Type: relay.Refresh, Node: state.bus.Node(), Session: id, Watcher: watcher,
 			}); err != nil {
 				s.logger.Debug("could not refresh a relayed watcher", "session", id, "error", err)
@@ -259,7 +260,7 @@ func (s *Server) writeRelayedEvents(
 //
 // It returns errUnreadableFrame for a frame that is not a command, and the read's own error
 // when the connection ended.
-func (s *Server) readRelayedCommands(connection *websocket.Conn, state *relayed, watcher, id string) error {
+func (s *Server) readRelayedCommands(ctx context.Context, connection *websocket.Conn, state *relayed, watcher, id string) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -279,7 +280,7 @@ func (s *Server) readRelayedCommands(connection *websocket.Conn, state *relayed,
 			return errUnreadableFrame
 		}
 
-		if err := state.bus.Publish(context.Background(), state.bus.Commands(), relay.Request{
+		if err := state.bus.Publish(ctx, state.bus.Commands(), relay.Request{
 			Type:    relay.Command,
 			Node:    state.bus.Node(),
 			Session: id,
@@ -386,7 +387,7 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 		return
 	}
 
-	go s.runRelayedCommands(found, proxy)
+	go s.runRelayedCommands(ctx, found, proxy)
 	go s.publishSessionEvents(ctx, state, events, request.Watcher, request.Session, key, found.Halted)
 }
 
@@ -441,7 +442,7 @@ func (s *Server) publishSessionEvents(
 
 // runRelayedCommands carries out what the socket on the other node sends, one at a time,
 // through the same switch a local socket's commands go through.
-func (s *Server) runRelayedCommands(found *session.Session, proxy *proxyWatcher) {
+func (s *Server) runRelayedCommands(ctx context.Context, found *session.Session, proxy *proxyWatcher) {
 	for payload := range proxy.commands {
 		var command watcherCommand
 		if err := json.Unmarshal(payload, &command); err != nil {
@@ -451,7 +452,7 @@ func (s *Server) runRelayedCommands(found *session.Session, proxy *proxyWatcher)
 		// The other node holds the socket's address, so only its user is counted here.
 		sender := routing.Caller{UserID: proxy.owner.UserID, ServerSide: proxy.owner.Kind == auth.KindServer,
 			Verified: proxy.owner.UserID != "" && proxy.owner.Kind.Verified()}
-		s.applyCommand(found, proxy.seat, sender, command)
+		s.applyCommand(ctx, found, proxy.seat, sender, command)
 	}
 }
 

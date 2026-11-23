@@ -173,7 +173,7 @@ func (p *Provider) StreamLeg() phone.StreamLeg { return phone.StreamLegShared }
 // Dial starts the call and returns before anyone answers, as every vendor's API does. What
 // happens after, including a call that never connects, is in the logs under its
 // vendor_call_id.
-func (p *Provider) Dial(_ context.Context, outbound phone.Outbound) (phone.Dialed, error) {
+func (p *Provider) Dial(ctx context.Context, outbound phone.Outbound) (phone.Dialed, error) {
 	if outbound.Trunk == nil {
 		return phone.Dialed{}, stack.Wrap(errors.New("phone: a call through a customer's sip trunk needs the trunk"))
 	}
@@ -211,16 +211,17 @@ func (p *Provider) Dial(_ context.Context, outbound phone.Outbound) (phone.Diale
 	p.running.Add(1)
 	p.mu.Unlock()
 
-	go p.run(id, config, outbound.Connected, outbound.Ended, outbound.Resume)
+	go p.run(context.WithoutCancel(ctx), id, config, outbound.Connected, outbound.Ended, outbound.Resume)
 	return phone.Dialed{VendorCallID: id, Status: "queued"}, nil
 }
 
-// run holds one call from dialling to its end. It uses the node's context, never the
-// request's: the request is answered, and its context cancelled, while the phone still rings.
+// run holds one call from dialling to its end, traced under the request that placed it. It
+// is cancelled with the node, never with the request: the request is answered, and its
+// context cancelled, while the phone still rings.
 // connected, when set, is told where each side's audio comes from once the call is up, and
 // ended, when set, how the call ended. ref, when set, is what another node needs to
 // continue the call.
-func (p *Provider) run(id string, config sipbridge.Config, connected func(sipbridge.MediaAddrs), ended func(phone.CallStatus), ref *phone.TrunkCallRef) {
+func (p *Provider) run(ctx context.Context, id string, config sipbridge.Config, connected func(sipbridge.MediaAddrs), ended func(phone.CallStatus), ref *phone.TrunkCallRef) {
 	defer p.running.Done()
 	log := config.Logger
 	if ended == nil {
@@ -240,7 +241,10 @@ func (p *Provider) run(id string, config sipbridge.Config, connected func(sipbri
 		config.OnChange = notify(changed)
 	}
 
-	bridged, err := p.dial(p.ctx, config)
+	dialing, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(p.ctx, cancel)()
+	bridged, err := p.dial(dialing, config)
 	if err != nil {
 		log.Warn("call through a customer's sip trunk did not connect", "error", err)
 		report(err)
@@ -252,7 +256,7 @@ func (p *Provider) run(id string, config sipbridge.Config, connected func(sipbri
 		p.running.Go(func() { connected(bridged.Media()) })
 	}
 	if held := p.adopt(id, bridged, ref, time.Duration(postDialDelay.Load()), false, log); held != nil {
-		p.hold(id, held, changed, log, func() { report(nil) })
+		p.hold(ctx, id, held, changed, log, func() { report(nil) })
 	}
 }
 
@@ -295,7 +299,7 @@ func (p *Provider) adopt(id string, bridged call, ref *phone.TrunkCallRef, postD
 
 // hold keeps an adopted call until it ends or this node lets it go, and reports its end.
 // changed is told when the call's dialogs changed, so its record is written again.
-func (p *Provider) hold(id string, held *heldCall, changed <-chan struct{}, log *slog.Logger, report func()) {
+func (p *Provider) hold(ctx context.Context, id string, held *heldCall, changed <-chan struct{}, log *slog.Logger, report func()) {
 	bridged := held.call
 	defer func() {
 		p.mu.Lock()
@@ -366,8 +370,8 @@ func (p *Provider) hold(id string, held *heldCall, changed <-chan struct{}, log 
 				stopping = nil
 				continue
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), hangupTimeout)
-			err := bridged.Hangup(ctx)
+			hangingUp, cancel := context.WithTimeout(ctx, hangupTimeout)
+			err := bridged.Hangup(hangingUp)
 			cancel()
 			// Hangup returns at once when something else is already ending the call, and Err is set
 			// only once Done is closed.

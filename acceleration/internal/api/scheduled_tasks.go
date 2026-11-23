@@ -602,15 +602,14 @@ func (s *Server) runScheduledTask(ctx context.Context, request *runScheduledTask
 	if err := s.store.ScheduledTaskRuns.Insert(ctx, &run); err != nil {
 		return nil, err
 	}
-	go s.deliverManualRun(task, run)
+	go s.deliverManualRun(context.WithoutCancel(ctx), task, run)
 	return &runScheduledTaskResponse{Body: scheduledTaskRunOf(task, run)}, nil
 }
 
 // deliverManualRun delivers a run made by hand and records how it landed: a
 // delivery too late to make, such as a call that would ring long after the
 // run was asked for, is missed, as a scheduled occurrence's is.
-func (s *Server) deliverManualRun(task store.ScheduledTask, run store.ScheduledTaskRun) {
-	ctx := context.Background()
+func (s *Server) deliverManualRun(ctx context.Context, task store.ScheduledTask, run store.ScheduledTaskRun) {
 	deliveredTo, sessionID, err := s.DeliverScheduledTask(ctx, store.ClaimedScheduledTask{Task: task, Run: run})
 	state := store.ScheduledTaskRunDelivered
 	failure := ""

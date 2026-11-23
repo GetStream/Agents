@@ -469,7 +469,7 @@ func (h *Harness) Respond(ctx context.Context, turn Turn) (*llm.Stream, error) {
 		return nil, errors.New("harness: no text conversation model")
 	}
 	h.history = WithoutNotes(turn.History)
-	h.charged = chargedAs(context.Background(), ctx)
+	h.charged = context.WithoutCancel(ctx)
 	model := session.Capabilities()
 	instructions, carried, transient := h.prompt(turn, working)
 	// A colleague asks only for what the caller alone can say, so a reply carrying its
@@ -750,11 +750,11 @@ func (h *Harness) DropUnoffered(turnID string, calls []llm.ToolCall) []llm.ToolC
 }
 
 // Decide asks the fast flow controller what to do with an evolving transcript.
-func (h *Harness) Decide(turn FlowTurn) error {
+func (h *Harness) Decide(ctx context.Context, turn FlowTurn) error {
 	if h.flow == nil {
 		return stack.Wrap(errors.New("harness: a flow controller is required"))
 	}
-	return h.flow.Decide(turn)
+	return h.flow.Decide(ctx, turn)
 }
 
 // CancelDecision abandons a flow decision whose transcript changed.

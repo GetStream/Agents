@@ -228,7 +228,7 @@ func newFlow(model *llmrouter.Session, emitter *Emitter, logger *slog.Logger) *f
 	}
 }
 
-func (f *flow) Decide(turn FlowTurn) error {
+func (f *flow) Decide(ctx context.Context, turn FlowTurn) error {
 	if strings.TrimSpace(turn.ID) == "" {
 		return stack.Wrap(errors.New("harness: a flow candidate id is required"))
 	}
@@ -240,7 +240,7 @@ func (f *flow) Decide(turn FlowTurn) error {
 	if turn.Unfinished && turn.Speaking {
 		deadline = overlapDeadline
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
 	asked := &candidate{turn: turn, askedAt: time.Now(), ctx: ctx, cancel: cancel}
 
 	f.mu.Lock()

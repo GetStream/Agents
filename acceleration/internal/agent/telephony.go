@@ -588,10 +588,7 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	cancels := telephonyTool(requested.Call.Name) || requested.Call.Name == toolEndCall ||
 		a.options.ToolPolicy != nil && a.options.ToolPolicy(a.approvedName(requested.Call)).Cancels
 	a.mu.Lock()
-	parent := a.ctx
-	if parent == nil {
-		parent = context.Background()
-	}
+	parent := a.ctxLocked()
 	if requester := a.requesterLocked(); requester != (Requester{}) {
 		parent = WithRequester(parent, requester)
 	}
@@ -908,7 +905,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 		return nil, false, err
 	}
 	if a.native() && (call.Name == delegateSkill || call.Name == cancelSkill) {
-		return a.nativeDelegate(call)
+		return a.nativeDelegate(ctx, call)
 	}
 
 	if telephonyTool(call.Name) {

@@ -353,12 +353,13 @@ func (m *Manager) startRuntime(spec Spec) *routing.Slices {
 
 // newSession is the session spec opens, timed from now by runtime, which every session is
 // given so that none is open unbilled.
-func (m *Manager) newSession(spec Spec, conv *persistent.Conversation, skills harness.Skills, opening time.Time, runtime *routing.Slices) *Session {
+func (m *Manager) newSession(ctx context.Context, spec Spec, conv *persistent.Conversation, skills harness.Skills, opening time.Time, runtime *routing.Slices) *Session {
 	// The files a fork carried are pinned and kept below, and are not the session's to hand
 	// on: a spec read off it (a fork, a reopen) reads its own files by their owner.
 	held := spec
 	held.Documents = nil
 	created := &Session{
+		ctx:       context.WithoutCancel(ctx),
 		logs:      m.logs,
 		persisted: conv,
 		id:        spec.ID,
@@ -678,7 +679,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			runtime.Cancel()
 		}
 	}()
-	created := m.newSession(spec, conv, skills, opening, runtime)
+	created := m.newSession(ctx, spec, conv, skills, opening, runtime)
 	created.loading = loading
 	// A session held ends where it closes (Session.counted); one never held ends here,
 	// unless it was turned away for a router shutting down or for a session already held
@@ -1125,7 +1126,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// otherwise be renewed for a session nobody holds. One reopened under the id since
 		// holds its own.
 		if !present {
-			m.release(created.id)
+			m.release(created)
 		}
 		return nil, err
 	}
@@ -1194,7 +1195,7 @@ func (m *Manager) supersede(spec Spec) {
 	m.mu.Unlock()
 
 	for _, found := range left {
-		m.release(found.id)
+		m.release(found)
 	}
 
 	for _, found := range left {
@@ -1293,7 +1294,7 @@ func (m *Manager) takeOver(customer, cid string, thread bool) {
 	m.mu.Unlock()
 
 	for _, found := range left {
-		m.release(found.id)
+		m.release(found)
 		m.logger.Info("reopening a conversation nobody was watching",
 			"session", found.id, "conversation", cid)
 		found.abandon()
@@ -1697,7 +1698,7 @@ func (m *Manager) Close(id string, owner Owner) (bool, error) {
 		}()
 	}
 	m.mu.Unlock()
-	m.release(id)
+	m.release(found)
 
 	return true, found.Close()
 }
@@ -1712,7 +1713,7 @@ func (m *Manager) end(found *Session, reason EndReason) {
 		return
 	}
 	defer done()
-	m.release(found.id)
+	m.release(found)
 
 	found.noteEnd(reason)
 	m.logger.Info("ending the session", "session", found.id, "reason", reason)
@@ -1730,7 +1731,7 @@ func (m *Manager) hangUp(found *Session, reason EndReason) {
 	found.noteEnd(reason)
 	go func() {
 		defer done()
-		m.release(found.id)
+		m.release(found)
 		m.logger.Info("ending the session", "session", found.id, "reason", reason)
 		if err := found.Close(); err != nil {
 			m.logger.Warn("could not close the session its agent hung up", "session", found.id, "error", err)
@@ -1818,7 +1819,7 @@ func (m *Manager) Machine(customerID, id string, machine phone.Machine) bool {
 // hangs up. A session that began closing meanwhile, its call hung up, is left to close.
 func (m *Manager) leaveVoicemail(found *Session, spec Spec, message string) {
 	if message != "" && !found.closingNow() {
-		ctx, cancel := context.WithTimeout(context.Background(), voicemailWithin)
+		ctx, cancel := context.WithTimeout(found.ctx, voicemailWithin)
 		// Whatever the agent was saying to the greeting is not for the recording.
 		found.Interrupt()
 		if err := found.Say(ctx, message); err != nil && !found.closingNow() {
@@ -1831,7 +1832,7 @@ func (m *Manager) leaveVoicemail(found *Session, spec Spec, message string) {
 	}
 	// Leaving the call alone would leave the machine recording until it gives up.
 	if spec.Phone.Number != "" && !found.closingNow() {
-		ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+		ctx, cancel := context.WithTimeout(found.ctx, hangUpTimeout)
 		if err := m.options.Phone.EndCall(ctx, spec.CustomerID, spec.StreamApp, spec.CallType, spec.CallID); err != nil {
 			m.logger.Warn("could not end the call of a voicemail left", "session", found.id, "error", err)
 		}
@@ -1850,7 +1851,7 @@ func (m *Manager) hangUpRinging(created *Session, spec Spec) {
 	m.ended.Add(1)
 	go func() {
 		defer m.ended.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+		ctx, cancel := context.WithTimeout(created.ctx, hangUpTimeout)
 		defer cancel()
 		if err := m.options.Phone.HangUpUnanswered(ctx, spec.CustomerID, spec.CallID); err != nil {
 			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "customer", spec.CustomerID, "error", err)
@@ -1867,15 +1868,15 @@ const hangUpTimeout = 5 * time.Second
 const releaseTimeout = 2 * time.Second
 
 // release stops telling this deployment's other nodes that a session is here.
-func (m *Manager) release(id string) {
+func (m *Manager) release(found *Session) {
 	if m.options.Directory == nil {
 		return
 	}
 	// Not the caller's context: a session is let go of on paths that have none, and one
 	// cancelled the moment the answer is written would leave the claim behind.
-	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+	ctx, cancel := context.WithTimeout(found.ctx, releaseTimeout)
 	defer cancel()
-	m.options.Directory.Release(ctx, id)
+	m.options.Directory.Release(ctx, found.id)
 }
 
 // Running reports whether this process is running a session, whoever it belongs to.

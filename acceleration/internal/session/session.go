@@ -161,6 +161,10 @@ type ToolConversation struct {
 
 // Session is one conversation this process is running on somebody's behalf.
 type Session struct {
+	// ctx is the context of the request that opened the session, without its cancellation:
+	// the work the session starts on its own (a hang-up, a voicemail, its close) is traced
+	// and attributed under it.
+	ctx     context.Context
 	logs    *logRecorder
 	id      string
 	spec    Spec
@@ -1345,7 +1349,7 @@ func (s *Session) Command(id string) (persistent.CommandReceipt, error) {
 	if s.persisted == nil {
 		return persistent.CommandReceipt{}, stack.Wrap(persistent.ErrCommandNotFound)
 	}
-	if err := s.persisted.CheckCaller(context.Background(), s.spec.Caller.UserID); err != nil {
+	if err := s.persisted.CheckCaller(s.ctx, s.spec.Caller.UserID); err != nil {
 		return persistent.CommandReceipt{}, err
 	}
 	return s.persisted.Command(id)
@@ -1360,7 +1364,7 @@ func (s *Session) InterruptCommand(id string) (persistent.CommandReceipt, error)
 	if s.persisted == nil {
 		return persistent.CommandReceipt{}, stack.Wrap(persistent.ErrCommandNotFound)
 	}
-	if err := s.persisted.CheckCaller(context.Background(), s.spec.Caller.UserID); err != nil {
+	if err := s.persisted.CheckCaller(s.ctx, s.spec.Caller.UserID); err != nil {
 		return persistent.CommandReceipt{}, stack.Wrap(err)
 	}
 	receipt, err := s.persisted.Command(id)
@@ -1916,7 +1920,7 @@ func (s *Session) close() error {
 
 	// Hanging up mid-sentence is rude, and leaving is what throws away the audio that has
 	// not been heard yet, so the last utterance is given a moment to land first.
-	finishing, cancel := context.WithTimeout(context.Background(), finishWithin)
+	finishing, cancel := context.WithTimeout(s.ctx, finishWithin)
 	if err := s.current().Finish(finishing); err != nil {
 		s.logger.Debug("the agent was still talking when the session ended", "error", err)
 	}

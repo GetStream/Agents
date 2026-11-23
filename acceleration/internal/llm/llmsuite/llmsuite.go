@@ -90,7 +90,7 @@ func (s *Suite) AskOn(provider llm.LLM, params llm.ResponseParams) (llm.Response
 	if params.MaxOutputTokens == 0 {
 		params.MaxOutputTokens = s.MaxOutputTokens
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 	defer cancel()
 
 	stream, err := provider.Create(ctx, params)

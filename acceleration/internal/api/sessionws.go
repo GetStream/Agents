@@ -177,7 +177,7 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 	// requires: two goroutines writing to one socket interleave frames.
 	gone := make(chan error, 1)
 	go func() {
-		gone <- s.readCommands(connection, found, seat, CallerFrom(r.Context()))
+		gone <- s.readCommands(r.Context(), connection, found, seat, CallerFrom(r.Context()))
 	}()
 	s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
 }
@@ -368,7 +368,7 @@ type watcherCommand struct {
 //
 // It returns nil once a command closed the session, errUnreadableFrame for a frame that is not
 // a command, and the read's own error when the connection ended.
-func (s *Server) readCommands(connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller) error {
+func (s *Server) readCommands(ctx context.Context, connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -388,7 +388,7 @@ func (s *Server) readCommands(connection *websocket.Conn, found *session.Session
 			return errUnreadableFrame
 		}
 
-		if !s.applyCommand(found, seat, sender, command) {
+		if !s.applyCommand(ctx, found, seat, sender, command) {
 			return nil
 		}
 	}
@@ -429,8 +429,9 @@ func refuseUnreadable(connection *websocket.Conn) {
 // here on the bus, and a watcher on either node must be able to do the same things.
 //
 // seat is who the socket's caller is and what it runs; sender is the same caller, whose day
-// a turn it sends is counted on.
-func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+// a turn it sends is counted on. What a command starts outlives the socket that sent it.
+func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+	ctx = context.WithoutCancel(ctx)
 	owner := seat.Owner
 	if command.CommandID == "" {
 		command.CommandID = command.LegacyCommandID
@@ -504,7 +505,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		found.IgnoreApproval(command.ToolCallID, command.CommandID, command.TurnID, errNoApprovalWaits)
 
 	case "say":
-		if err := found.Say(context.Background(), command.Text); err != nil {
+		if err := found.Say(ctx, command.Text); err != nil {
 			s.logger.Debug("could not say it", "session", found.ID(), "error", err)
 		}
 
@@ -514,7 +515,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 				found.Report(errors.New("this agent hands what is written to its server, which takes text only"), "dispatch")
 				return true
 			}
-			if _, err := s.dispatchText(context.Background(), found, dispatch.Message{
+			if _, err := s.dispatchText(ctx, found, dispatch.Message{
 				Text: command.Text, CommandID: command.CommandID, UserID: owner.UserID,
 			}, ""); err != nil {
 				found.Report(err, "dispatch")
@@ -527,12 +528,12 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 			return true
 		}
 		if command.CommandID != "" && found.Durable() {
-			if _, _, err := found.RespondCommand(routing.WithCaller(context.Background(), sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
+			if _, _, err := found.RespondCommand(routing.WithCaller(ctx, sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
 				found.Report(err, "llm")
 			}
 			return true
 		}
-		if _, err := found.Respond(routing.WithCaller(context.Background(), sender), command.Text, images, options.LLM{}, images...); err != nil {
+		if _, err := found.Respond(routing.WithCaller(ctx, sender), command.Text, images, options.LLM{}, images...); err != nil {
 			found.Report(err, "llm")
 		}
 

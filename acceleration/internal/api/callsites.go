@@ -220,10 +220,10 @@ func (s *Server) endedPhoneCall(r *http.Request, origin hookOrigin, event callEv
 
 // logCallSites reads where Stream ran an ended phone call and keeps it as a call_sites row.
 // It runs after the webhook is answered: Stream's stats take a while to fill.
-func (s *Server) logCallSites(call endedCall) {
+func (s *Server) logCallSites(ctx context.Context, call endedCall) {
 	read, waits := s.readCallStats, s.callStatsWaits
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 
 		sites, err := s.fetchSites(ctx, call, read, waits)

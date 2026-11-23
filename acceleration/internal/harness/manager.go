@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/emit"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -248,9 +250,13 @@ func (m *manager) Create(
 }
 
 // chargedAs returns ctx marked with who sent the turn asked, and as scheduled when a
-// scheduled task fired it (llmrouter Session.charged). Nothing else of asked is kept, its
-// cancellation least of all: delegated work outlives the turn that asked for it.
+// scheduled task fired it (llmrouter Session.charged), traced under the turn's span. Nothing
+// else of asked is kept, its cancellation least of all: delegated work outlives the turn that
+// asked for it.
 func chargedAs(ctx, asked context.Context) context.Context {
+	if span := trace.SpanFromContext(asked); span.SpanContext().IsValid() {
+		ctx = trace.ContextWithSpan(ctx, span)
+	}
 	if sender, ok := routing.CallerFrom(asked); ok {
 		ctx = routing.WithCaller(ctx, sender)
 	}

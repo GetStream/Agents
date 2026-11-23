@@ -332,7 +332,7 @@ func (l *Log) Start(ctx context.Context) error {
 	}
 
 	l.started.Store(true)
-	go l.run()
+	go l.run(context.WithoutCancel(ctx))
 	return nil
 }
 
@@ -473,10 +473,10 @@ func (l *Log) Close() {
 	})
 }
 
-func (l *Log) run() {
+func (l *Log) run(ctx context.Context) {
 	defer close(l.done)
 
-	writer := newWriter(l)
+	writer := newWriter(ctx, l)
 
 	ticker := time.NewTicker(streamInterval)
 	defer ticker.Stop()
@@ -527,6 +527,8 @@ type reply struct {
 // writer is the state behind the queue. The writer goroutine is the only one that touches
 // it, so it needs no lock of its own.
 type writer struct {
+	// ctx is Log.Start's, without its cancellation: what the writer sends is traced under it.
+	ctx           context.Context
 	log           *Log
 	known         map[string]struct{}
 	writing       map[string]*reply
@@ -569,8 +571,9 @@ type writer struct {
 	now func() time.Time
 }
 
-func newWriter(l *Log) *writer {
+func newWriter(ctx context.Context, l *Log) *writer {
 	return &writer{
+		ctx: ctx,
 		log: l,
 		// Server-side sends name their author, so a user the app has never seen has to
 		// exist before their first message.
@@ -739,7 +742,7 @@ func (w *writer) rememberHeard(line, text, messageID string) {
 // follows is interrupted. It is apart from the spoken transcript, and its id comes from the
 // tool call, so a repeated delivery is the same card rather than a second one.
 func (w *writer) storeArtifacts(queued message) {
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 	id := fmt.Sprintf("voice-artifact-%x", sha256.Sum256([]byte(w.log.channel+"\x00"+queued.turnID+"\x00"+queued.receiptID)))
 	_, err := w.log.client.Chat().SendMessage(ctx, w.log.channelType, w.log.channel, &getstream.SendMessageRequest{
@@ -774,7 +777,7 @@ func (w *writer) showOne(writing *reply, source string, key, id string) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 	ui := writing.uiMap(false)
 	var err error
@@ -838,7 +841,7 @@ func (w *writer) retract(key string) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 	hard := true
 	if _, err := w.log.client.Chat().DeleteMessage(ctx, listening.messageID,
@@ -881,7 +884,7 @@ func (w *writer) settle(turnID, text string) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 
 	// The pieces were ephemeral, so this is the write that leaves the reply behind.
@@ -990,7 +993,7 @@ func (w *writer) patch(writing *reply, text string, interrupted bool, source str
 
 // patchWith is patch, setting the fields in more as well in the same write.
 func (w *writer) patchWith(writing *reply, text string, interrupted bool, source string, more map[string]any) {
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 	set := map[string]any{
 		"text": text, generatingField: false, interruptedField: interrupted, SourceField: source,
@@ -1096,7 +1099,7 @@ func (w *writer) indicate(final bool) {
 // sendIndicator sends ai_indicator.update with state, or ai_indicator.clear without one, as
 // the agent.
 func (w *writer) sendIndicator(messageID, state string) {
-	ctx, cancel := context.WithTimeout(context.Background(), indicatorTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, indicatorTimeout)
 	defer cancel()
 	event := conversation.IndicatorEvent(w.log.agent.ID, messageID, state)
 	if _, err := w.log.client.Chat().SendEvent(ctx, w.log.channelType, w.log.channel,
@@ -1174,7 +1177,7 @@ func (w *writer) annotate(turnID string, held *turnRecord) {
 	if held.reply.text != "" {
 		text = held.reply.text + conversation.TimingsGap + text
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 	_, err := w.log.client.Chat().UpdateMessagePartial(ctx, held.reply.id,
 		&getstream.UpdateMessagePartialRequest{
@@ -1193,7 +1196,7 @@ func (w *writer) store(author User, text, source string, interrupted bool, named
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
 	defer cancel()
 
 	id, err := w.send(ctx, author, text, false, interrupted, source, named)

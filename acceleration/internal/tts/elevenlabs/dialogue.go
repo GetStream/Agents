@@ -87,6 +87,9 @@ type Dialogue struct {
 	keys    *keypool.Pool
 	logger  *slog.Logger
 	emitter *tts.Emitter
+	// ctx is Start's, without its cancellation: a reopen is traced under the session that
+	// started the voice.
+	ctx context.Context
 
 	// done stops the keepalive when the session ends.
 	done     chan struct{}
@@ -150,6 +153,7 @@ func (d *Dialogue) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("elevenlabs: already started"))
 	}
 	d.started = true
+	d.ctx = context.WithoutCancel(ctx)
 	d.mu.Unlock()
 
 	if err := d.dial(ctx); err != nil {
@@ -233,7 +237,7 @@ func (d *Dialogue) Interrupt() error {
 
 	// The call is still going, so the voice is opened again rather than left for whoever
 	// next tries to speak through it.
-	if err := d.dial(context.Background()); err != nil {
+	if err := d.dial(d.ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("elevenlabs: reopen after interrupt: %w", err))
 	}
 	return nil
