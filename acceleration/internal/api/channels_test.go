@@ -428,6 +428,32 @@ func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	s.ErrorIs(err, store.ErrNoContact)
 }
 
+// A code texted to another agent's line of the app is answered as such and not spent: the
+// number still claims it on the line of the agent it was minted for.
+func (s *ChannelsSuite) TestACodeTextedToAnotherAgentsLineStillClaimsTheNumberOnItsOwn() {
+	ownNumber, otherNumber := s.number(), s.number()
+	own, other := s.connect(ownNumber), s.connect(otherNumber)
+	config := s.agentOn(ownNumber, store.ChannelIdentityLink)
+	otherConfig := s.agentOn(otherNumber, store.ChannelIdentityLink)
+	owner := s.utils.uuid()
+	writer := s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: owner}, &minted))
+	s.Regexp(`^[0-9]{6}$`, minted.Code)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, writer, "msg-"+s.utils.uuid(), minted.Code))
+	s.Equal("That code is for another agent.", s.reply(writer, 1))
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), otherConfig.Id, "whatsapp", "+"+writer)
+	s.Require().ErrorIs(err, store.ErrNoContact)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(own, writer, "msg-"+s.utils.uuid(), minted.Code))
+	s.Equal("This number is yours now. What can I do for you?", s.reply(writer, 2))
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	s.Require().NoError(err)
+	s.Equal(owner, held.UserID)
+}
+
 // A code is six digits, so a number that may text guesses without end finds one.
 func (s *ChannelsSuite) TestANumberThatTextsWrongCodesCannotClaimEvenTheRightOne() {
 	number := s.number()

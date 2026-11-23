@@ -288,7 +288,7 @@ TABLE channel_links
     expires_at timestamp with time zone NOT NULL
     used_at timestamp with time zone
     user_id text NOT NULL
-    CONSTRAINT channel_links_pkey PRIMARY KEY (code)
+    CONSTRAINT channel_links_pkey PRIMARY KEY (customer_id, code)
 
 TABLE channel_thread_inbound
     attempts integer NOT NULL DEFAULT 0
