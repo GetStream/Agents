@@ -221,6 +221,8 @@ from .contact_input import ContactInput
 from .contact_input_variables import ContactInputVariables
 from .contact_page import ContactPage
 from .contact_stage import ContactStage
+from .contact_update_request import ContactUpdateRequest
+from .contact_update_request_variables import ContactUpdateRequestVariables
 from .contact_variables import ContactVariables
 from .cost_source import CostSource
 from .create_opt_out_request import CreateOptOutRequest
@@ -891,6 +893,8 @@ __all__ = (
     "ContactInputVariables",
     "ContactPage",
     "ContactStage",
+    "ContactUpdateRequest",
+    "ContactUpdateRequestVariables",
     "ContactVariables",
     "CostSource",
     "CreateOptOutRequest",

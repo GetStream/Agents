@@ -2986,7 +2986,7 @@ impl ::std::convert::TryFrom<::std::string::String> for CampaignTimeZoneMode {
         value.parse()
     }
 }
-///What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+///What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 #[derive(
     ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
@@ -4840,6 +4840,25 @@ impl ::std::convert::TryFrom<::std::string::String> for ContactStage {
         value.parse()
     }
 }
+///`ContactUpdateRequest`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+pub struct ContactUpdateRequest {
+    ///What to say to this person. Empty clears it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub instructions: ::std::option::Option<::std::string::String>,
+    ///An IANA zone. Empty clears it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub time_zone: ::std::option::Option<::std::string::String>,
+    ///With or without a country code.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub to_number: ::std::option::Option<::std::string::String>,
+    ///Replace all of the contact's variables. Same rules as on add.
+    #[serde(
+        default,
+        skip_serializing_if = ":: std :: collections :: BTreeMap::is_empty"
+    )]
+    pub variables: ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+}
 ///`ContentPart`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(untagged)]
@@ -4938,13 +4957,13 @@ pub struct CreateResponseRequest {
     ///How long the model may think before this answer, and the replies that finish it after its tools. One of the efforts the session's model accepts, such as none, minimal, low, medium, high or max; any other is a 400. Omitted keeps the session's.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub reasoning_effort: ::std::option::Option<::std::string::String>,
-    ///An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
+    ///An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub replaces: ::std::option::Option<::std::string::String>,
     ///Generated and sent by the SDKs, one per question, so a retry of the same question is answered once. Required for personal persistent text conversations, and ignored by a session not kept in Stream Chat. With one, images are data URIs, at most 8, uploaded to the conversation's channel and shown on the person's message, a voice note is uploaded and shown there too, and the frames of videos are shown to the model alone. A retry with the same id, text, images and voice note starts no second turn, returns no id and does not fetch its videos again: videos are not part of what a retry is matched on. On a session a dispatch worker opened for a message handed out from a channel, that message is already there: nothing is written or uploaded for it, and a reused id is answered as a duplicate even with other text or images.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub request_id: ::std::option::Option<::std::string::String>,
-    ///What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
+    ///What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
     pub text: ::std::string::String,
     ///What the person did in the generated UI of an earlier reply, such as tapping a place or submitting a form, which the text says in their words: an object naming the reply (message_id), the UI's format and the action (name), with what it carries (payload), of at most 8 KB as JSON. Their message carries it as custom.ai_ui_action, and the model is told it after the text.
     #[serde(default, skip_serializing_if = "::serde_json::Map::is_empty")]

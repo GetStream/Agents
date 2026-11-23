@@ -319,6 +319,45 @@ impl Client {
         )
         .await
     }
+    /// Change one contact of a draft
+    ///
+    /// `PATCH /v1/agents/campaigns/{id}/contacts/{contact_id}` (`updateCampaignContact`).
+    pub async fn update_campaign_contact(
+        &self,
+        id: &str,
+        contact_id: &str,
+        body: &types::ContactUpdateRequest,
+    ) -> Result<types::Contact> {
+        self.send(
+            Method::PATCH,
+            &format!(
+                "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+                id = segment(id),
+                contact_id = segment(contact_id)
+            ),
+            None::<&()>,
+            Some(body),
+            "updateCampaignContact",
+        )
+        .await
+    }
+    /// Remove one contact of a draft
+    ///
+    /// `DELETE /v1/agents/campaigns/{id}/contacts/{contact_id}` (`deleteCampaignContact`).
+    pub async fn delete_campaign_contact(&self, id: &str, contact_id: &str) -> Result<()> {
+        self.send(
+            Method::DELETE,
+            &format!(
+                "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+                id = segment(id),
+                contact_id = segment(contact_id)
+            ),
+            None::<&()>,
+            None::<&()>,
+            "deleteCampaignContact",
+        )
+        .await
+    }
     /// Ring a contact no more
     ///
     /// `POST /v1/agents/campaigns/{id}/contacts/{contact_id}/stop` (`stopCampaignContact`).
