@@ -279,8 +279,8 @@ func (s *ShardedStoreSuite) TestASessionOpenInTwoShardsAtOnceIsOneInThePeak() {
 	s.opened("chat", "app", s.base, nil)
 	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
-	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "chat", s.base.Add(20*time.Minute), ""))
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base.Add(30*time.Minute), ""))
+	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(20*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(30*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "app", s.base.Add(-time.Hour), s.base.Add(time.Hour))
 	s.Require().NoError(err)
@@ -333,7 +333,7 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfIts
 func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfItsActivity() {
 	session := s.opened("chat", "app", s.base, nil)
 	s.turned(session, "chat-1", s.base, nil)
-	s.carriedOn("chat", s.base.Add(time.Minute))
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
 	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
 	s.opened("another", "app", s.base.Add(time.Minute), nil)
 
@@ -349,7 +349,7 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnIsCountedOnTheDayItBeganWhateve
 	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
 	session := s.opened("chat", "app", dayOne, nil)
 	s.turned(session, "chat-1", dayOne, nil)
-	s.carriedOn("chat", dayTwo)
+	s.carriedOnAt("chat", dayTwo)
 	s.turnedThere("chat", "chat-2", "chat-1", dayTwo, nil)
 
 	second, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, dayTwo, dayTwo.Add(24*time.Hour))
@@ -370,7 +370,7 @@ func (s *ShardedStoreSuite) TestADayHoldingOnlyACarriedOnRowIsNotListed() {
 	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
 	session := s.opened("chat", "app", dayOne, nil)
 	s.turned(session, "chat-1", dayOne, nil)
-	s.carriedOn("chat", dayTwo)
+	s.carriedOnAt("chat", dayTwo)
 	s.turnedThere("chat", "chat-2", "chat-1", dayTwo.Add(24*time.Hour), nil)
 
 	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, dayTwo, dayTwo.Add(24*time.Hour))
@@ -382,7 +382,7 @@ func (s *ShardedStoreSuite) TestATurnRewoundInTheOtherShardIsNotCountedBeforeATo
 	session := s.opened("chat", "app", s.base, nil)
 	s.turned(session, "chat-1", s.base, nil)
 	s.turned(session, "chat-2", s.base.Add(time.Minute), answeredAfter("chat-1"))
-	s.carriedOn("chat", s.base.Add(2*time.Minute))
+	s.carriedOnAt("chat", s.base.Add(2*time.Minute))
 	rewound := s.base.Add(3 * time.Minute)
 	s.turnedThere("chat", "chat-gone", "chat-2", s.base.Add(2*time.Minute), &rewound)
 	s.turnedThere("chat", "chat-3", "chat-2", s.base.Add(3*time.Minute), nil)
@@ -404,7 +404,7 @@ func (s *ShardedStoreSuite) TestTurnsAtTheSameInstantInTwoShardsAreOrderedById()
 	s.turned(session, "x", at, answeredAfter("chat-1"))
 	s.turned(session, "z", at, answeredAfter("x"))
 	s.calledTool(session, "z", "refund", at, map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
-	s.carriedOn("chat", at)
+	s.carriedOnAt("chat", at)
 	s.turnedThere("chat", "w", "chat-1", at, nil)
 	s.turnedThere("chat", "y", "w", at, nil)
 	s.calledToolThere("chat", "y", "refund", at)
@@ -416,8 +416,8 @@ func (s *ShardedStoreSuite) TestTurnsAtTheSameInstantInTwoShardsAreOrderedById()
 	s.InDelta(3.0, *tools[0].AvgTurnsBeforeUse, 0.001)
 }
 
-// carriedOn writes the row a session carried on in the other shard has there.
-func (s *ShardedStoreSuite) carriedOn(id string, at time.Time) {
+// carriedOnAt writes the row a session carried on in the other shard has there.
+func (s *ShardedStoreSuite) carriedOnAt(id string, at time.Time) {
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", AgentName: "docs",
 		ConfigID: "cfg-docs", UserID: "jlahey", CallerKind: "user", CreatedAt: at}))
 }
@@ -441,12 +441,12 @@ func (s *ShardedStoreSuite) calledToolThere(sessionID, responseID, tool string, 
 
 func (s *ShardedStoreSuite) TestASessionAwayFromOneShardWhileAnotherRanIsNotOpenThroughTheGap() {
 	s.opened("chat", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(10*time.Minute), ""))
 	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base.Add(20 * time.Minute)}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
-	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "chat", s.base.Add(30*time.Minute), ""))
+	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "chat", s.base.Add(20*time.Minute), s.base.Add(30*time.Minute), ""))
 	s.opened("between", "app", s.base.Add(12*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "between", s.base.Add(18*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "between", s.base.Add(12*time.Minute), s.base.Add(18*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "app", s.base.Add(-time.Hour), s.base.Add(time.Hour))
 	s.Require().NoError(err)
