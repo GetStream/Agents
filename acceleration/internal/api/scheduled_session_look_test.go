@@ -11,9 +11,12 @@ import (
 	"net/http/httptest"
 	"time"
 
+	"github.com/redis/rueidis"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
 
 // beforeItsLook is how long a delivery that waits scheduledPoll = an hour is watched for answering
@@ -211,6 +214,47 @@ func (s *ScheduledTasksSuite) TestADeliveryThatCannotReadTheDirectoryWhileWaitin
 		s.False(answered.handed, "the peer took nothing")
 	case <-time.After(beforeItsLook):
 		s.FailNow("the delivery kept waiting for a peer whose entry it cannot read")
+	}
+}
+
+// A delivery whose peer did not take it, and whose directory cannot be reached when it looks again,
+// goes on here rather than waiting out a peer it cannot see. The directory reads through a Redis
+// client of its own, closed once the peer has refused: the first look is answered and the next is a
+// transport error with no reply, which is waited out, not returned.
+func (s *ScheduledTasksSuite) TestADeliveryThatCannotReachTheDirectoryWhileWaitingForAPeerGoesOnHere() {
+	s.looksEvery(10 * time.Millisecond)
+	s.Require().Equal(30*time.Second, s.router.scheduledPeerWait, "the peer wait's default")
+	wait := s.router.scheduledPeerWait
+	s.router.scheduledPeerWait = 5 * time.Second
+	s.T().Cleanup(func() { s.router.scheduledPeerWait = wait })
+	sessionID := rand.Text()
+	asked, _ := s.refusingPeer(sessionID)
+	redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.shardRedisAddr}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(redis.Close)
+	here := httptest.NewUnstartedServer(nil)
+	s.T().Cleanup(here.Close)
+	directory, err := node.NewDirectory(node.DirectoryOptions{
+		Redis: redis, Address: here.Listener.Addr().String(), Prefix: s.relayPrefix, Shard: s.shard,
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	held := s.router.directory
+	s.router.directory = directory
+	s.T().Cleanup(func() { s.router.directory = held })
+	done := s.handingOff(context.Background(), sessionID)
+	s.Require().Eventually(func() bool { return len(asked) > 0 }, deliveryWait, 10*time.Millisecond,
+		"the peer was never asked")
+
+	redis.Close()
+
+	select {
+	case answered := <-done:
+		s.NoError(answered.err)
+		s.False(answered.handed, "the peer took nothing")
+	case <-time.After(beforeItsLook):
+		s.FailNow("the delivery kept waiting for a peer whose directory it cannot reach")
 	}
 }
 
