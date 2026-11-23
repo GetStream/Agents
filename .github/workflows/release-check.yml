@@ -64,9 +64,17 @@ jobs:
           fails .github/scripts/check-release-version.sh 99.0.0 dist
           fails .github/scripts/check-release-version.sh v99.0.0-rc1 dist
           wheels=(dist/*.whl)
-          mkdir wrong empty
-          cp "${wheels[0]}" "wrong/$(basename "${wheels[0]}" | sed 's/-99\.0\.0-/-99.0.1-/')"
-          fails .github/scripts/check-release-version.sh "$TAG" wrong
+          sdists=(dist/*.tar.gz)
+          wrong_wheel=$(basename "${wheels[0]}" | sed 's/-99\.0\.0-/-99.0.1-/')
+          wrong_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.1.tar/')
+          mkdir empty wheel-wrong sdist-wrong
+          # One wrong file of a kind, beside a right file of the other kind.
+          cp "${wheels[0]}" "wheel-wrong/$wrong_wheel"
+          cp "${sdists[0]}" wheel-wrong/
+          cp "${sdists[0]}" "sdist-wrong/$wrong_sdist"
+          cp "${wheels[0]}" sdist-wrong/
+          fails .github/scripts/check-release-version.sh "$TAG" wheel-wrong
+          fails .github/scripts/check-release-version.sh "$TAG" sdist-wrong
           fails .github/scripts/check-release-version.sh "$TAG" empty
 
       # Metadata PyPI refuses, such as a long description that does not render.
