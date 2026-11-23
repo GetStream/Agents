@@ -233,3 +233,18 @@ func (s *ResolverSuite) TestAFailedSaveWithoutACheckpointIsNotRetried() {
 	s.Nil(stored.ExpiresAt, "the expiry the first resolve would have written")
 	s.NotContains(s.f.logs.String(), "could not save a connector credential refresh")
 }
+
+func (s *ResolverSuite) TestARetriedSaveKeepsTheGrantsConnectedAt() {
+	ref := s.f.connected()
+	began := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	s.f.update(ref, func(state *core.CredentialState) { state.ConnectedAt = began })
+	s.f.due()
+
+	_, err := s.f.routerSaving(s.f.srv.Client(), firstFails(dropped, false)).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.Require().NoError(err)
+	s.Require().NotNil(s.f.stored(ref).ConnectedAt)
+	s.True(s.f.stored(ref).ConnectedAt.Equal(began), "a renewal begins no grant")
+	s.Require().NoError(s.f.router(s.f.srv.Client()).Revoke(s.f.ctx, ref, core.SignalRevoked,
+		time.Now().Add(-30*time.Minute).Truncate(time.Second)))
+	s.Equal(store.ConnectionNeedsReauthorization, s.f.stored(ref).Status, "the provider ended this grant")
+}
