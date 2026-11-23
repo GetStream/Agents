@@ -774,7 +774,6 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 	// shared database, so the step never waits on a second connection of the pool it holds one of.
 	// Otherwise the insert commits on the shard before the lock's transaction does.
 	shared := r.store.shard == r.store.global
-	inserted := false
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
 			return err
@@ -802,18 +801,16 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 		if open >= atOnce.Limit {
 			return ErrCallsAtOnce
 		}
-		if _, err := own.NewInsert().Model(leg).Returning("id").Exec(ctx); err != nil {
-			return err
-		}
-		inserted = true
-		return nil
+		_, err := own.NewInsert().Model(leg).Returning("id").Exec(ctx)
+		return err
 	})
 	if errors.Is(err, ErrCallsAtOnce) {
 		return stack.Wrap(ErrCallsAtOnce)
 	}
-	if err != nil && inserted && !shared {
-		// The shard kept the leg but the lock's commit failed, so the caller dials nothing: the
-		// leg would hold a call of the organization's for as long as it could ring.
+	if err != nil && !shared {
+		// The shard may have kept the leg, its insert's answer lost or the lock's commit failed
+		// after it, and the caller dials nothing: the leg would hold a call of the organization's
+		// for as long as it could ring. Deleting a leg the shard never kept deletes nothing.
 		gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
 		if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
 			err = errors.Join(err, derr)
