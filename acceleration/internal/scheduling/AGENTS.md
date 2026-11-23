@@ -203,6 +203,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestTelnyxUnpaidSuite/TestATextTurnFailedNotForMoneyIsNotRunAgainByTheWorkerTakingItOver`,
   `TestSchedulerSuite/TestAWorkerTakingARunOverReadsTheReasonItsLastAttemptFailedUnder`,
   `TestSchedulerSuite/TestAWorkerTakingARunOverAfterItsCallReadsHowTheCallEnded`,
+  `TestSchedulerSuite/TestAWorkerClosedAsItsAttemptFailsStillRecordsTheReason`,
   `TestStoreSuite/TestAnAttemptsReasonIsReadByTheWorkerTakingTheRunOver`,
   `TestStoreSuite/TestAnAttemptsReasonLeavesTheReasonAPlacedCallEndedUnder`,
   `TestStoreSuite/TestAFinishedRunTakesNoAttemptsReason`,

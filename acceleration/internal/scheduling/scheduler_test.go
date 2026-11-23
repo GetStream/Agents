@@ -995,25 +995,26 @@ func (s *SchedulerSuite) TestADrainStopsARetryWaitAndLeavesTheRunToItsLease() {
 
 // lostDuringItsRetryWait has a worker fail task's first attempt with failure, then stops it while
 // it waits to retry, as a router that crashes or loses its lease leaves the run. Before the
-// failure, first runs on the attempt's claim. It returns the deliveries a second worker made once
-// the run went stale and it took the run over.
-func (s *SchedulerSuite) lostDuringItsRetryWait(task store.ScheduledTask, failure error, first func(store.ClaimedScheduledTask)) []store.ClaimedScheduledTask {
+// failure, first runs with that worker and the attempt's claim. It returns the deliveries a second
+// worker made once the run went stale and it took the run over.
+func (s *SchedulerSuite) lostDuringItsRetryWait(task store.ScheduledTask, failure error, first func(*Scheduler, store.ClaimedScheduledTask)) []store.ClaimedScheduledTask {
+	var lost *Scheduler
 	var attempts atomic.Int32
-	lost := NewScheduler(s.db, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+	lost = NewScheduler(s.db, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		if claimed.Task.ID != task.ID {
 			return "conversation", claimed.Task.SessionID, nil
 		}
 		attempts.Add(1)
 		if first != nil {
-			first(claimed)
+			first(lost, claimed)
 		}
 		return "", "", failure
 	}, slog.New(slog.DiscardHandler))
 	lost.retries = []time.Duration{time.Hour}
 	lost.Start(s.ctx)
 	s.Require().Eventually(func() bool {
-		return attempts.Load() == 1 && lost.Running() == 1
-	}, 10*time.Second, 10*time.Millisecond, "the first attempt failed and the delivery waits to retry")
+		return attempts.Load() == 1
+	}, 10*time.Second, 10*time.Millisecond, "the first attempt was made")
 	lost.Close()
 	runs := s.runs(task)
 	s.Require().Len(runs, 1)
@@ -1054,11 +1055,22 @@ func (s *SchedulerSuite) TestAWorkerTakingARunOverReadsTheReasonItsLastAttemptFa
 	s.Nil(s.runs(task)[0].Error, "a delivered run says nothing failed")
 }
 
+func (s *SchedulerSuite) TestAWorkerClosedAsItsAttemptFailsStillRecordsTheReason() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+	// The router closes as the attempt fails: what it was given to work under has ended.
+	closing := func(lost *Scheduler, _ store.ClaimedScheduledTask) { lost.cancel() }
+
+	calls := s.lostDuringItsRetryWait(task, &Failure{Reason: ReasonOnACall, Err: errors.New("the user is on a call")}, closing)
+
+	s.Require().NotNil(calls[0].Run.Error, "the reason is recorded after the close")
+	s.Equal(ReasonOnACall, *calls[0].Run.Error)
+}
+
 func (s *SchedulerSuite) TestAWorkerTakingARunOverAfterItsCallReadsHowTheCallEnded() {
 	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
 	// A [phone, whatsapp] task: nobody answered the call, and WhatsApp failed too. It runs on the
 	// worker's goroutine, so it checks without stopping the test there.
-	called := func(claimed store.ClaimedScheduledTask) {
+	called := func(_ *Scheduler, claimed store.ClaimedScheduledTask) {
 		call := "call-" + uuid.NewString()
 		took, _, err := s.db.ScheduledTaskRuns.TakeCall(s.ctx, task.CustomerID, claimed.Run.ID, call)
 		s.NoError(err)
