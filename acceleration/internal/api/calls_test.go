@@ -5,6 +5,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -298,11 +299,18 @@ func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
 		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
 	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
 
-	decided := []CallEvent{}
-	s.Require().Equal(http.StatusOK,
-		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil, &decided))
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Require().Equal(http.StatusOK, response.StatusCode)
+	// A 500 for this request would log its access line at ERROR; the line names the request id.
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=INFO", "the request was answered 200, so it is not an ERROR")
+
+	var decided []CallEvent
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&decided))
 	s.Empty(decided)
-	s.Empty(s.errorsAbout(call.ID))
 }
 
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
