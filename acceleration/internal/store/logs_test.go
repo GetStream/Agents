@@ -148,7 +148,10 @@ func TestSafeLogTextTakesAnEncodedKeyAndAVendorRefusalOut(t *testing.T) {
 	_, err := rand.Read(raw)
 	require.NoError(t, err)
 	secret := hex.EncodeToString(raw)
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0." + secret
 	for name, tc := range map[string]struct{ in, want string }{
+		"jwt after the phrase":                  {"Invalid API token " + jwt, "Invalid API token [redacted]"},
+		"jwt after the phrase and a colon":      {"Invalid API key: " + jwt, "Invalid API key: [redacted]"},
 		"key":                                   {"key%3D" + secret, "key%3D[redacted]"},
 		"api_key":                               {"api_key%3D" + secret, "api_key%3D[redacted]"},
 		"token":                                 {"token%3D" + secret, "token%3D[redacted]"},

@@ -196,15 +196,17 @@ func holdsWord(text string, words []string) bool {
 	return false
 }
 
-// redactCredentials is RedactLogText with no check first.
+// redactCredentials is RedactLogText with no check first. The shaped rules run first, so a
+// rule after them that takes only a part of a shaped token, as vendorKeyMessage takes a JWT
+// up to its first dot, does not leave the rest of it in a shape no rule matches.
 func redactCredentials(text string) string {
-	if holdsLegacyWord(text) {
-		text = redactLegacyCredentials(text)
-	}
 	for _, shaped := range shapedCredentials {
 		if shaped.mayMatch(text) {
 			text = shaped.rule.ReplaceAllString(text, "${1}[redacted]")
 		}
+	}
+	if holdsLegacyWord(text) {
+		text = redactLegacyCredentials(text)
 	}
 	return text
 }
