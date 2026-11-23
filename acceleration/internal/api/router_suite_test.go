@@ -252,6 +252,9 @@ type RouterSuite struct {
 	// limitsMode is the suite's ROUTER_LIMITS_MODE, for a suite to set before it starts the
 	// harness. Empty is enforce.
 	limitsMode config.LimitsMode
+	// privateModels lets the suite's custom models sit on a private address, as a self-hosted
+	// router's models.private_endpoints does; a suite sets it before it starts the harness.
+	privateModels bool
 	// owned are the apps the suite made or used, whose rows must all name a key.
 	ownedMu sync.Mutex
 	owned   []string
@@ -815,6 +818,7 @@ func (s *RouterSuite) SetupSuite() {
 		Episodes:              episodes,
 		SlackApps:             s.slackApps,
 		OperatorProviderApps:  s.operatorApps,
+		PrivateModelEndpoints: s.privateModels,
 	})
 	listener.Config.Handler = server.Handler()
 	listener.Start()

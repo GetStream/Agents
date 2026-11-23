@@ -201,8 +201,10 @@ func (s *Server) fillCustomModel(ctx context.Context, model *store.CustomModel, 
 // a self-hosted one that allows private endpoints takes any http or https URL.
 func (s *Server) endpointComplaint(ctx context.Context, raw string) error {
 	if !s.privateModels {
+		// One answer for every refusal: egress's own errors tell a name that does not resolve
+		// from one that resolves to a private address.
 		if err := egress.ValidatePublicHTTPSURL(ctx, raw); err != nil {
-			return invalidRequest("base_url must be a public https URL: " + err.Error())
+			return invalidRequest("base_url must be a public https URL without userinfo, query or fragment")
 		}
 		return nil
 	}

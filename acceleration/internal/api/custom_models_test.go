@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -94,6 +95,53 @@ func (s *CustomModelsSuite) TestAPrivateEndpointIsRefusedOnASharedRouter() {
 	s.Contains(failure, "public https URL")
 }
 
+// TestEveryRefusalOfABaseURLIsOneAnswer has a name that does not resolve and a private address
+// answered alike, in every field of the error: otherwise the answer tells a caller which names the router's
+// resolver knows, and which of them sit on a private network.
+func (s *CustomModelsSuite) TestEveryRefusalOfABaseURLIsOneAnswer() {
+	refused := []string{
+		"https://no-such-host.invalid/v1",
+		"https://10.0.0.7/v1",
+		"https://127.0.0.1/v1",
+		"https://[fe80::1%25eth0]/v1",
+		"http://8.8.8.8/v1",
+		"https://user:secret@8.8.8.8/v1",
+		"https://8.8.8.8/v1?key=1",
+		"https://8.8.8.8/v1#part",
+	}
+	var first ErrorResponse
+	for _, base := range refused {
+		status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/models", map[string]any{
+			"name": "refused", "base_url": base, "model": "a",
+		})
+		s.Equal(http.StatusBadRequest, status, base)
+		var answered ErrorResponse
+		s.Require().NoError(json.Unmarshal(payload, &answered), base)
+		s.Equal("invalid_request", answered.Error.Code, base)
+		s.Equal("base_url must be a public https URL without userinfo, query or fragment", answered.Error.Message, base)
+		s.NotContains(string(payload), "egress", base)
+		if first.Error.Message == "" {
+			first = answered
+		}
+		s.Equal(first.Error, answered.Error, base)
+	}
+}
+
+// TestAnUpdateToAPrivateBaseURLGetsTheSameAnswer is the second caller of the check: the answer
+// of an update does not depend on the reason either.
+func (s *CustomModelsSuite) TestAnUpdateToAPrivateBaseURLGetsTheSameAnswer() {
+	created := s.createModel(map[string]any{"name": "moved", "base_url": "https://8.8.8.8/v1", "model": "a"})
+	answers := map[string]bool{}
+	for _, base := range []string{"https://no-such-host.invalid/v1", "https://10.0.0.7/v1"} {
+		status, failure := s.serverClient.failure(http.MethodPut, "/v1/agents/models/"+created.Id, map[string]any{
+			"name": "moved", "base_url": base, "model": "a",
+		})
+		s.Equal(http.StatusBadRequest, status, base)
+		answers[failure] = true
+	}
+	s.Equal(map[string]bool{"base_url must be a public https URL without userinfo, query or fragment": true}, answers)
+}
+
 func (s *CustomModelsSuite) TestHalfADataPolicyIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/models", map[string]any{
 		"name": "half", "base_url": "https://8.8.8.8/v1", "model": "a", "trains_on_data": "no",
@@ -144,4 +192,42 @@ func (s *CustomModelsSuite) createModel(body map[string]any) CustomModel {
 	var created CustomModel
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/models", body, &created))
 	return created
+}
+
+// PrivateCustomModelsSuite is a self-hosted router that allows private endpoints.
+type PrivateCustomModelsSuite struct {
+	RouterSuite
+}
+
+func TestPrivateCustomModelsSuite(t *testing.T) {
+	runSuite(t, new(PrivateCustomModelsSuite))
+}
+
+func (s *PrivateCustomModelsSuite) SetupSuite() {
+	s.privateModels = true
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *PrivateCustomModelsSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+func (s *PrivateCustomModelsSuite) TestAPrivateEndpointIsStored() {
+	for _, base := range []string{"https://10.0.0.7/v1", "http://10.0.0.7:8000/v1"} {
+		var created CustomModel
+		s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/models", map[string]any{
+			"name": "vllm-" + s.utils.uuid(), "base_url": base, "model": "a",
+		}, &created), base)
+		s.Equal(base, created.BaseUrl, base)
+	}
+}
+
+func (s *PrivateCustomModelsSuite) TestWhatIsNotAnHTTPURLIsRefused() {
+	for _, base := range []string{"ftp://10.0.0.7/v1", "10.0.0.7/v1", "https://", "https://10.0.0.7:port/v1"} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/models", map[string]any{
+			"name": "refused", "base_url": base, "model": "a",
+		})
+		s.Equal(http.StatusBadRequest, status, base)
+		s.Equal("base_url must be an http or https URL", failure, base)
+	}
 }
