@@ -455,7 +455,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 		at := ended.Add(classifyDelay)
 		classifyAfter = &at
 	}
-	if err := r.store.CampaignAttempts.End(written, attempt.ID, string(dialed.Result), string(dialed.Outcome), dialed.CallID, dialed.VendorCallID, ended, classifyAfter); err != nil {
+	if err := r.store.CampaignAttempts.End(written, campaign.CustomerID, attempt.ID, string(dialed.Result), string(dialed.Outcome), dialed.CallID, dialed.VendorCallID, ended, classifyAfter); err != nil {
 		return Dialed{}, err
 	}
 	return dialed, nil
@@ -506,7 +506,7 @@ func (r *Runner) recover(ctx context.Context, claimed store.Claimed) error {
 		if dialed.answered() {
 			classifyAfter = &now
 		}
-		if err := r.store.CampaignAttempts.End(ctx, latest.ID, "", string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
+		if err := r.store.CampaignAttempts.End(ctx, campaign.CustomerID, latest.ID, "", string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
 			return err
 		}
 	}

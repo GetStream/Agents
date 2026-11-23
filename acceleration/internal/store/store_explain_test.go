@@ -309,7 +309,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				AgentID: "agent-7", CallType: "default", CallID: "stream-7", StartedAt: s.base})
 		}},
 		{name: "Calls.Finish", index: "calls_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Calls.Finish(ctx, "seeded-call-100", s.base)
+			return store.Calls.Finish(ctx, "customer-100", "seeded-call-100", s.base)
 		}},
 		{name: "Calls.ChangeModels", index: "calls_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Calls.ChangeModels(ctx, &Call{ID: "seeded-call-7", CustomerID: "customer-7", LLM: "gpt"})
@@ -459,16 +459,16 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				UserID: "user-7", CallerKind: "user", CreatedAt: s.base})
 		}},
 		{name: "Sessions.SetToolTimeout", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.SetToolTimeout(ctx, "seeded-session-7", "search", 1000)
+			return store.Sessions.SetToolTimeout(ctx, "customer-7", "seeded-session-7", "search", 1000)
 		}},
 		{name: "Sessions.Close", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.Close(ctx, "seeded-session-100", s.base, "left")
+			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, "left")
 		}},
 		{name: "Sessions.SawVideo", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.SawVideo(ctx, "seeded-session-7")
+			return store.Sessions.SawVideo(ctx, "customer-7", "seeded-session-7")
 		}},
 		{name: "Sessions.Voiced", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.Voiced(ctx, "seeded-session-7")
+			return store.Sessions.Voiced(ctx, "customer-7", "seeded-session-7")
 		}},
 		{name: "Sessions.Describe", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Describe(ctx, "customer-7", "seeded-session-7", "call 7", "", nil)
@@ -579,7 +579,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Responses.Finish", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Responses.Finish(ctx, "explained-response", ResponseCompleted, "", s.base)
+			return store.Responses.Finish(ctx, "customer-7", "explained-response", ResponseCompleted, "", s.base)
 		}},
 		{name: "Responses.Replies", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Responses.Replies(ctx, "customer-7", "conversation-7", []string{"turn-7"})

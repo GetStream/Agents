@@ -102,13 +102,14 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 }
 
 // Start marks a job as at the provider and records which one took it.
-func (r *Recordings) Start(ctx context.Context, id, provider, model string) error {
+func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model string) error {
 	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
 		Set("status = ?", RecordingRunning).
 		Set("provider = ?", provider).
 		Set("model = ?", model).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: start recording: %w", err))
@@ -117,7 +118,7 @@ func (r *Recordings) Start(ctx context.Context, id, provider, model string) erro
 }
 
 // Finish writes the result a job produced, or the reason it produced none.
-func (r *Recordings) Finish(ctx context.Context, id, provider, model string, result json.RawMessage, failure error) error {
+func (r *Recordings) Finish(ctx context.Context, customerID, id, provider, model string, result json.RawMessage, failure error) error {
 	now := time.Now().UTC()
 	status := RecordingCompleted
 	reason := ""
@@ -136,6 +137,7 @@ func (r *Recordings) Finish(ctx context.Context, id, provider, model string, res
 		Set("updated_at = ?", now).
 		Set("completed_at = ?", now).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: finish recording: %w", err))

@@ -320,6 +320,20 @@ func (s *RecordFlushSuite) TestATitleForASessionThatIsThereIsStored() {
 	s.NotContains(logged.String(), "level=ERROR")
 }
 
+func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOpen() {
+	row := s.row()
+	s.records.Opened(row, nil)
+
+	s.records.Closed("other-"+s.customer, row.ID, time.Now().UTC(), TimeoutHangup)
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	got, err := s.store.Sessions.Get(s.ctx, s.customer, row.ID)
+	s.Require().NoError(err)
+	s.Nil(got.ClosedAt, "the session is still open")
+	s.Equal(store.SessionRunning, got.State)
+	s.Empty(got.EndReason)
+}
+
 func (s *RecordFlushSuite) TestATitleTheStoreCouldNotWriteStillLogsAnError() {
 	logged := &syncBuffer{}
 	broken, err := store.Open(s.dsn)

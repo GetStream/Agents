@@ -4,6 +4,22 @@ package store
 
 import "time"
 
+func (s *StoreSuite) TestAnotherCustomersEndOfADialIdChangesNothing() {
+	campaign := s.runningCampaign(5, "+15550001")
+	contact := s.claimDue("a", s.base, 10)[0].Contact
+	attempt := CampaignAttempt{CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: s.base}
+	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &attempt))
+	before, _, err := s.store.CampaignAttempts.Latest(s.ctx, contact.ID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, "somebody-else", attempt.ID, "", "completed", "their-call", "", s.base.Add(time.Minute), nil))
+
+	after, found, err := s.store.CampaignAttempts.Latest(s.ctx, contact.ID)
+	s.Require().NoError(err)
+	s.Require().True(found)
+	s.Equal(before, after, "the campaign's dial is still being placed")
+}
+
 func (s *StoreSuite) TestCampaignAttemptQueryBudgets() {
 	campaigns := make([]Campaign, 3)
 	var held []Claimed
@@ -18,7 +34,7 @@ func (s *StoreSuite) TestCampaignAttemptQueryBudgets() {
 		s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &attempts[i])) }), "Insert")
 		classifyAfter := s.base.Add(time.Minute)
 		s.Equal(1, s.countQueries(func() {
-			s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, attempts[i].ID, "", "completed", "call-"+attempts[i].ID, "", s.base, &classifyAfter))
+			s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, claim.Campaign.CustomerID, attempts[i].ID, "", "completed", "call-"+attempts[i].ID, "", s.base, &classifyAfter))
 		}), "End")
 		s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", claim.Contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1}))
 	}

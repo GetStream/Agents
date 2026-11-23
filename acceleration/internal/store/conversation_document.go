@@ -72,9 +72,21 @@ func (r *ConversationDocuments) Insert(ctx context.Context, document *Conversati
 	if document.CreatedAt.IsZero() {
 		document.CreatedAt = time.Now().UTC()
 	}
-	_, err := r.store.shard.NewInsert().Model(document).On("CONFLICT (id) DO NOTHING").Exec(ctx)
+	// As Responses.Insert: a retry matches its own row, another customer's id none.
+	result, err := r.store.shard.NewInsert().Model(document).
+		On("CONFLICT (id) DO UPDATE").
+		Set("id = EXCLUDED.id").
+		Where("cd.customer_id = EXCLUDED.customer_id").
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: add conversation document: %w", err))
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: add conversation document: %w", err))
+	}
+	if written == 0 {
+		return stack.Wrap(fmt.Errorf("%w: conversation document %s", ErrIDTaken, document.ID))
 	}
 	return nil
 }

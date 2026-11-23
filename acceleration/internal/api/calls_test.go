@@ -248,7 +248,7 @@ func (s *CallsSuite) TestACallAnotherAppHoldsCannotBeJoined() {
 func (s *CallsSuite) TestTheRunningCallsAreTheOnesThatHaveNotEnded() {
 	running := s.started(store.Call{StartedAt: s.base})
 	finished := s.started(store.Call{StartedAt: s.base.Add(-time.Hour)})
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), finished.ID, s.base))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), finished.CustomerID, finished.ID, s.base))
 
 	var listed []Call
 	s.Require().Equal(http.StatusOK,
@@ -291,7 +291,7 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 			StartedAt: s.base.Add(time.Second), Success: true,
 		}))
 	}
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.CustomerID, call.ID, s.base.Add(time.Minute)))
 
 	var rendered Call
 	s.Require().Equal(http.StatusOK,
@@ -313,7 +313,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf
 		InputTokens: 900, CachedInputTokens: 400, OutputTokens: 150,
 		CostMicros: 2500, Success: true,
 	}))
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.CustomerID, call.ID, s.base.Add(time.Minute)))
 
 	var rendered Call
 	s.Require().Equal(http.StatusOK,
@@ -700,7 +700,7 @@ func (s *CallsSuite) TestTheCampaignDialerReadsOnlyItsOwnCustomersTranscript() {
 	conversation := "support-" + s.utils.uuid()
 	earlier := s.inSession("agent:"+conversation, store.Call{StartedAt: s.base.Add(-time.Hour)})
 	ended := s.base.Add(-50 * time.Minute)
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), earlier.ID, ended))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), earlier.CustomerID, earlier.ID, ended))
 	call := s.started(store.Call{SessionID: earlier.SessionID, AgentID: earlier.AgentID})
 	s.inChannel(conversation, s.customerID(), earlier.StartedAt.Add(time.Minute), "said on the earlier call")
 	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(time.Minute), "said on the call")

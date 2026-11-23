@@ -741,15 +741,16 @@ type ConnectorConnectionClient struct {
 
 // PutClient records the client a consent of the connection used, replacing
 // the one an earlier consent recorded.
-func (r *ConnectorConnections) PutClient(ctx context.Context, connectionID string, client ConnectorConnectionClient) error {
-	if connectionID == "" || client.ClientID == "" {
-		return stack.Wrap(errors.New("store: a connection client needs a connection and a client id"))
+func (r *ConnectorConnections) PutClient(ctx context.Context, customerID, connectionID string, client ConnectorConnectionClient) error {
+	if customerID == "" || connectionID == "" || client.ClientID == "" {
+		return stack.Wrap(errors.New("store: a connection client needs a customer, a connection and a client id"))
 	}
 	_, err := r.store.global.NewUpdate().Model((*ConnectorConnection)(nil)).
 		Set("client_registration = ?", client.Registration).
 		Set("client_id = ?", client.ClientID).
 		Set("client_updated_at = ?", time.Now().UTC().Truncate(time.Microsecond)).
 		Where("id = ?", connectionID).
+		Where("customer_id = ?", customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: put connection client: %w", err))
@@ -797,9 +798,9 @@ type ConnectorConnectionValidation struct {
 // earlier validate recorded. Of two validates at once, the one of the later revision stays,
 // and of two of the same revision the one that ran later, whichever writes last: a validate
 // of credentials replaced while it ran never covers one of the new credentials.
-func (r *ConnectorConnections) PutValidation(ctx context.Context, connectionID string, validation ConnectorConnectionValidation) error {
-	if connectionID == "" || validation.Status == "" || validation.CheckedAt.IsZero() {
-		return stack.Wrap(errors.New("store: a connection validation needs a connection, a status and a time"))
+func (r *ConnectorConnections) PutValidation(ctx context.Context, customerID, connectionID string, validation ConnectorConnectionValidation) error {
+	if customerID == "" || connectionID == "" || validation.Status == "" || validation.CheckedAt.IsZero() {
+		return stack.Wrap(errors.New("store: a connection validation needs a customer, a connection, a status and a time"))
 	}
 	_, err := r.store.global.NewUpdate().Model((*ConnectorConnection)(nil)).
 		Set("validation_revision = ?", validation.Revision).
@@ -808,6 +809,7 @@ func (r *ConnectorConnections) PutValidation(ctx context.Context, connectionID s
 		Set("validation_error = ?", validation.Error).
 		Set("validation_checked_at = ?", validation.CheckedAt).
 		Where("id = ?", connectionID).
+		Where("customer_id = ?", customerID).
 		Where("validation_checked_at IS NULL OR (validation_revision, validation_checked_at) <= (?, ?)",
 			validation.Revision, validation.CheckedAt).
 		Exec(ctx)

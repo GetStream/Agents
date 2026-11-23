@@ -411,7 +411,7 @@ func (s *OrganizationActivitySuite) openedAs(agent, appID string, at time.Time, 
 		ID: id, CustomerID: appID, AgentName: agent, Modality: store.ModalityVoice, CreatedAt: at,
 	}))
 	if !running {
-		s.Require().NoError(s.store.Sessions.Close(context.Background(), id, at.Add(time.Minute), reason))
+		s.Require().NoError(s.store.Sessions.Close(context.Background(), appID, id, at.Add(time.Minute), reason))
 	}
 	return id
 }

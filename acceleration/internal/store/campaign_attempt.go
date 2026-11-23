@@ -84,7 +84,7 @@ func (r *CampaignAttempts) Insert(ctx context.Context, attempt *CampaignAttempt)
 // End records how a dial ended: its result, and callOutcome, the phone outcome of the call
 // it placed, empty for none. A classifyAfter marks an answered call whose outcome is to be read
 // from its transcript once it is written. A dial deleted with its campaign is nothing to end.
-func (r *CampaignAttempts) End(ctx context.Context, id string, result, callOutcome, callID, vendorCallID string, endedAt time.Time, classifyAfter *time.Time) error {
+func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, result, callOutcome, callID, vendorCallID string, endedAt time.Time, classifyAfter *time.Time) error {
 	classify := ""
 	if classifyAfter != nil {
 		classify = classifyPending
@@ -98,6 +98,8 @@ func (r *CampaignAttempts) End(ctx context.Context, id string, result, callOutco
 		Set("classify_state = ?", classify).
 		Set("classify_after = ?", classifyAfter).
 		Where("id = ?", id).
+		// A dial has no customer of its own: it is its campaign's.
+		Where("campaign_id IN (SELECT id FROM campaigns WHERE customer_id = ?)", customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: end dial: %w", err))
