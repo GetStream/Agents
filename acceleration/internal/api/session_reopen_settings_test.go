@@ -254,6 +254,7 @@ func (s *SessionReopenSettingsSuite) TestAResumeNamingOneToolTwiceIsRefusedAsABa
 
 	s.Equal(http.StatusBadRequest, status, string(body))
 	s.Contains(string(body), `"type":"invalid_request"`)
+	s.Contains(string(body), `"code":"invalid_request"`)
 	s.Contains(string(body), "tool book_flight is declared twice")
 }
 
@@ -277,6 +278,7 @@ func (s *SessionReopenSettingsSuite) TestAMessageToAConversationWhoseConfigCanno
 
 	s.Equal(http.StatusBadRequest, status, string(body))
 	s.Contains(string(body), `"type":"invalid_request"`)
+	s.Contains(string(body), `"code":"invalid_request"`)
 	s.Contains(string(body), `there is no harness called \"gone\"`)
 }
 
