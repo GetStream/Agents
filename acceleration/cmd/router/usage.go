@@ -44,7 +44,9 @@ const usageCommands = `usage: router usage <command>
                              or carried in by a data move. Writes the database
   forget-user --app id --user id --actor who [--dry-run] [--settle 2m] [--replacement id]
                              replace an app's end user id in the usage records with forgotten:
-                             and 32 random hex characters, in order: the requests of every shard;
+                             and 32 random hex characters, in order, after deleting their
+                             scheduled tasks with their runs, so none runs again, and turning
+                             the changes recorded of them into deletes: the requests of every shard;
                              the usage service's events and windows, and again after --settle
                              for a batch shipped in between; the user's spend counters, holds
                              and quota buckets in Redis, by name; and in the shared database
@@ -56,9 +58,9 @@ const usageCommands = `usage: router usage <command>
                              the counts and changes nothing. Every step is safe to repeat: to
                              finish a run that stopped, pass the replacement it printed as
                              --replacement, and only what still names the id is rewritten,
-                             under that one replacement. It covers usage records only:
-                             sessions, conversation history and agent_logs have their own
-                             retention. Needs ROUTER_USAGE_URL and ROUTER_USAGE_MANAGE_KEY.
+                             under that one replacement. Sessions, conversation history and
+                             agent_logs stay as they are. Needs ROUTER_USAGE_URL and
+                             ROUTER_USAGE_MANAGE_KEY.
                              Writes the database
   storage [--hour time]      record an hour of every knowledge base's size: the last hour to have
                              ended, or the RFC 3339 hour given. One storage row per knowledge base
@@ -468,6 +470,10 @@ func forgetRedis(settings config.Config) ([]rueidis.Client, error) {
 
 // count prints what forget would change, and changes nothing.
 func (f forgetting) count(ctx context.Context) error {
+	tasks, err := f.store.CountUserTasks(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
 	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
 	if err != nil {
 		return err
@@ -498,21 +504,30 @@ func (f forgetting) count(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f.out, "dry run, nothing is changed\nrequests: %d rows\nbranch snapshots: %d messages to delete\n"+
+	_, err = fmt.Fprintf(f.out, "dry run, nothing is changed\nscheduled tasks: %d to delete, %d recorded changes to redact\n"+
+		"requests: %d rows\nbranch snapshots: %d messages to delete\n"+
 		"usage service: %d events, %d windows\nredis: %d keys\n"+
 		"shared database: %d policies and %d limits to delete; %d resets, %d grants and %d campaigns to rewrite\n",
-		requests, branches, service.Events, service.Windows, keys,
+		tasks.Tasks, tasks.Changes, requests, branches, service.Events, service.Windows, keys,
 		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns)
 	return err
 }
 
-// forget replaces the id, in the order each step needs: the shards first, so nothing ships the
-// id again, and with them the snapshots of messages a rewind hid, which hold the user's words;
+// forget replaces the id, in the order each step needs, once the user's scheduled tasks are
+// deleted, so none runs and records the id again meanwhile: the shards first, so nothing ships
+// the id again, and with them the snapshots of messages a rewind hid, which hold the user's words;
 // the usage service twice, the second after settle, for a batch read before the
 // shards were rewritten; Redis once the service writes no counter of the id any more; and the
 // shared database last, with the audit row in the same transaction.
 func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if _, err := fmt.Fprintf(f.out, "replacing the user's id with %s\n", f.replacement); err != nil {
+		return err
+	}
+	tasks, err := f.store.ForgetUserTasks(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f.out, "scheduled tasks: %d deleted, %d recorded changes redacted\n", tasks.Tasks, tasks.Changes); err != nil {
 		return err
 	}
 	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
@@ -574,6 +589,7 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 			{Field: "windows", After: first.Windows + second.Windows}, {Field: "redis_keys", After: keys},
 		},
 	}
+	entry.Changes = append(entry.Changes, tasks.AuditChanges()...)
 	settings, err := f.store.ForgetUserSettings(ctx, f.app, f.user, f.replacement, entry)
 	if err != nil {
 		return err

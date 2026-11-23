@@ -151,3 +151,96 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 	}
 	return counts, nil
 }
+
+// UserTasks are what forgetting an app's end user does to their scheduled tasks: the tasks it
+// deletes, with their runs, and the changes recorded of those rows that it redacts.
+type UserTasks struct {
+	Tasks   int64 `bun:"tasks"`
+	Changes int64 `bun:"changes"`
+}
+
+// AuditChanges are the counts as an audit entry records them.
+func (u UserTasks) AuditChanges() []AuditChange {
+	return []AuditChange{{Field: "tasks_deleted", After: u.Tasks}, {Field: "task_changes_redacted", After: u.Changes}}
+}
+
+// userTaskChanges picks, as dc, the recorded inserts and updates of an app's end user's tasks
+// and runs, by what their payload holds, taking the app and then the user twice. A run is the user's when the latest change
+// of a task by its id before the run's names them, or, with none kept, when the task by that id
+// here is theirs: an id freed by a delete can be another user's task later.
+const userTaskChanges = `dc.customer_id = ? AND (
+	(dc.table_name = 'scheduled_tasks' AND dc.payload->>'user_id' = ?)
+	OR (dc.table_name = 'scheduled_task_runs' AND COALESCE(
+		(SELECT t.payload->>'user_id' FROM data_changes AS t
+		WHERE t.customer_id = dc.customer_id AND t.table_name = 'scheduled_tasks' AND t.payload->>'id' = dc.payload->>'task_id' AND t.seq < dc.seq
+		ORDER BY t.seq DESC LIMIT 1),
+		(SELECT st.user_id FROM scheduled_tasks AS st WHERE st.customer_id = dc.customer_id AND st.id = dc.payload->>'task_id')) = ?))`
+
+// CountUserTasks counts what ForgetUserTasks would change.
+func (s *Store) CountUserTasks(ctx context.Context, appID, userID string) (UserTasks, error) {
+	var counts UserTasks
+	err := s.global.NewRaw(`SELECT
+		(SELECT count(*) FROM scheduled_tasks WHERE customer_id = ? AND user_id = ?) AS tasks,
+		(SELECT count(*) FROM data_changes AS dc WHERE `+userTaskChanges+`) AS changes`,
+		appID, userID, appID, userID, userID).
+		Scan(ctx, &counts)
+	if err != nil {
+		return UserTasks{}, stack.Wrap(fmt.Errorf("store: count user tasks: %w", err))
+	}
+	return counts, nil
+}
+
+// ForgetUserTasks deletes an app's end user's scheduled tasks, and their runs by cascade, so
+// none runs for them again. The changes recorded of those rows hold the user's id and words, so
+// each becomes a delete of its row, with no payload, under its own number: deleting it would
+// raise the oldest number kept, and expire the cursors of other apps' moves.
+func (s *Store) ForgetUserTasks(ctx context.Context, appID, userID string) (UserTasks, error) {
+	var counts UserTasks
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		// A write to a task that commits while this waits on its row recorded a change the
+		// redaction would not see: waiting here first lets the next statement see it.
+		var locked []string
+		if err := tx.NewSelect().Model((*ScheduledTask)(nil)).Column("id").
+			Where("customer_id = ? AND user_id = ?", appID, userID).For("UPDATE").Scan(ctx, &locked); err != nil {
+			return err
+		}
+		redacted, err := tx.NewUpdate().TableExpr("data_changes AS dc").Set("op = ?", ChangeDelete).Set("payload = NULL").
+			Where(userTaskChanges, appID, userID, userID).Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if counts.Changes, err = redacted.RowsAffected(); err != nil {
+			return err
+		}
+		deleted, err := tx.NewDelete().Model((*ScheduledTask)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx)
+		if err != nil {
+			return err
+		}
+		counts.Tasks, err = deleted.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return UserTasks{}, stack.Wrap(fmt.Errorf("store: forget user tasks: %w", err))
+	}
+	return counts, nil
+}
+
+// forgottenUserTables are the tables with a user_id column that forgetting a user reaches: the
+// requests of every shard (Requests.RenameUser), the tasks ForgetUserTasks deletes and the rows
+// ForgetUserSettings deletes or rewrites.
+var forgottenUserTables = []string{"requests", "limits", "usage_resets", "limit_grants", "campaigns", "scheduled_tasks"}
+
+// keptUserTables are the tables with a user_id column that forgetting a user leaves as they are,
+// each with why.
+var keptUserTables = map[string]string{
+	"agent_sessions": "the user's conversations, which the app deletes one by one (DELETE /v1/agents/sessions/{id}), " +
+		"their tasks with them",
+	"agent_logs": "the app's log of what its agents did; nothing deletes or rewrites it, forget included",
+	"call_legs":  "the legs of phone calls as billed, with the numbers on them; forget does not rewrite them",
+	"channel_links": "one-time codes that tie a number texting in to the user, spent once (used_at) " +
+		"or expired (expires_at), and kept after",
+	"contact_map": "the addresses the app's agents reach people at and the conversation each carries on, " +
+		"one linked to the user among them; forget does not clear the link",
+	"user_phones":        "the number the app linked to the user, which it unlinks (PUT /v1/agents/users/{user_id})",
+	"user_phone_history": "when a link of user_phones began, deleted with it",
+}
