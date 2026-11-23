@@ -2774,6 +2774,31 @@ func utcTaskRequest(config string) CreateScheduledTaskRequest {
 	return body
 }
 
+func (s *ScheduledTasksSuite) TestARunningRunBetweenAttemptsListsNoReasonUntilItSettles() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	between := s.createTask(user, utcTaskRequest(config))
+	called := s.createTask(user, utcTaskRequest(config))
+	now := time.Now().UTC().Truncate(time.Second)
+	retry, ended := "spend_check_unavailable", scheduling.ReasonNoReply
+	for _, run := range []store.ScheduledTaskRun{
+		{TaskID: between.Id, State: store.ScheduledTaskRunRunning, Attempts: 1, Error: &retry},
+		{TaskID: called.Id, State: store.ScheduledTaskRunRunning, Attempts: 1, SessionID: "call-1", Error: &ended},
+	} {
+		run.CustomerID, run.ScheduledFor, run.StartedAt = s.customerID(), now, &now
+		s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
+	}
+
+	var page ScheduledTaskRunPage
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+between.Id+"/runs", nil, &page))
+	s.Require().Len(page.Items, 1)
+	s.Nil(page.Items[0].Error, "the reason an attempt failed under is kept for a takeover, not listed while the run runs")
+
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+called.Id+"/runs", nil, &page))
+	s.Require().Len(page.Items, 1)
+	s.Equal(&ended, page.Items[0].Error, "how a placed call ended is listed, as before")
+}
+
 func (s *ScheduledTasksSuite) TestRunningATaskByHandDeliversWithoutMovingTheSchedule() {
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
