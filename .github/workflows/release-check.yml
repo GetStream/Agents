@@ -45,9 +45,18 @@ jobs:
           git tag --list
 
       - name: Build all distributions
+        id: build
         uses: ./.github/actions/build-python-packages
         with:
           tag: ${{ env.TAG }}
+
+      # The action's output is what release.yml hands to the install check, so it must be the
+      # tag's version. This fails if the action no longer runs the version check or no longer
+      # reports its result.
+      - name: The build reports the tag's version
+        run: |
+          echo "build output: '${{ steps.build.outputs.version }}', tag: '$TAG'"
+          test "${{ steps.build.outputs.version }}" = "${TAG#v}"
 
       # Each wrong input must fail the version check. If one passes, the check no longer guards
       # the upload.
@@ -67,7 +76,10 @@ jobs:
           sdists=(dist/*.tar.gz)
           wrong_wheel=$(basename "${wheels[0]}" | sed 's/-99\.0\.0-/-99.0.1-/')
           wrong_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.1.tar/')
-          mkdir empty wheel-wrong sdist-wrong
+          four_wheel=$(basename "${wheels[0]}" | sed 's/-99\.0\.0-/-99.0.0.1-/')
+          four_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.0.1.tar/')
+          post_sdist=$(basename "${sdists[0]}" | sed 's/-99\.0\.0\.tar/-99.0.0.post1.tar/')
+          mkdir empty wheel-wrong sdist-wrong four post stray
           # One wrong file of a kind, beside a right file of the other kind.
           cp "${wheels[0]}" "wheel-wrong/$wrong_wheel"
           cp "${sdists[0]}" wheel-wrong/
@@ -76,6 +88,18 @@ jobs:
           fails .github/scripts/check-release-version.sh "$TAG" wheel-wrong
           fails .github/scripts/check-release-version.sh "$TAG" sdist-wrong
           fails .github/scripts/check-release-version.sh "$TAG" empty
+          # A version that merely starts with the tag's must fail. So must a tag that is not
+          # vX.Y.Z even when the files carry its version: hatch-vcs builds 99.0.0.1 from v99.0.0.1.
+          cp "${wheels[0]}" "post/${wheels[0]##*/}"
+          cp "${sdists[0]}" "post/$post_sdist"
+          fails .github/scripts/check-release-version.sh "$TAG" post
+          cp "${wheels[0]}" "four/$four_wheel"
+          cp "${sdists[0]}" "four/$four_sdist"
+          fails .github/scripts/check-release-version.sh v99.0.0.1 four
+          # `uv publish` uploads every file in dist, so a file that is no wheel or sdist must fail.
+          cp "${wheels[0]}" "${sdists[0]}" stray/
+          touch stray/notes.zip
+          fails .github/scripts/check-release-version.sh "$TAG" stray
 
       # Metadata PyPI refuses, such as a long description that does not render.
       - name: Check the package metadata

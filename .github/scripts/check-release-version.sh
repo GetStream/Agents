@@ -21,8 +21,16 @@ fail() {
 [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "release tag '$tag' is not vX.Y.Z"
 want=${tag#v}
 
-shopt -s nullglob
-files=("$dist"/*.whl "$dist"/*.tar.gz)
+# `uv publish` uploads everything in the directory, so every file there must be checked.
+shopt -s nullglob dotglob
+files=()
+for f in "$dist"/*; do
+  case $(basename "$f") in
+    .gitignore) ;;
+    *.whl | *.tar.gz) files+=("$f") ;;
+    *) fail "$f is neither a wheel nor an sdist, and 'uv publish' would upload it" ;;
+  esac
+done
 (( ${#files[@]} > 0 )) || fail "no wheel or sdist in $dist"
 for f in "${files[@]}"; do
   name=$(basename "$f")
