@@ -97,21 +97,20 @@ func (s *StoreSuite) TestTwoAppsHoldOneCodeAtOnce() {
 	s.Equal("first-app-user", claimed.UserID)
 }
 
-// Texting a code to another agent's line of the app says so and leaves the code to claim.
+// Texting a code to another agent's line of the app is texting no code, and leaves the code to claim.
 func (s *StoreSuite) TestACodeForAnotherAgentIsNotSpent() {
 	link := minted(newID(), newID(), "on-call-engineer")
 	s.insertCode(&link)
 
 	_, err := s.store.ChannelLinks.Claim(s.ctx, link.CustomerID, newID(), link.Code)
-	s.ErrorIs(err, ErrChannelLinkElsewhere)
+	s.ErrorIs(err, ErrUnknownChannelLink)
 
 	claimed, err := s.store.ChannelLinks.Claim(s.ctx, link.CustomerID, link.ConfigID, link.Code)
 	s.Require().NoError(err)
 	s.Equal("on-call-engineer", claimed.UserID)
 }
 
-// Another agent's code that could not be claimed there either is no code at all, not one to
-// send to the other line.
+// Another agent's code that could not be claimed there either is no code at all.
 func (s *StoreSuite) TestAnotherAgentsSpentOrLapsedCodeIsNoCode() {
 	used := minted(newID(), newID(), "on-call-engineer")
 	at := time.Now().UTC()
@@ -232,9 +231,9 @@ func (s *StoreSuite) TestChannelLinkQueryBudgets() {
 	draw, _ := draws(link.Code)
 
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ChannelLinks.Insert(s.ctx, &link, draw)) }), "Insert")
-	s.Equal(2, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ChannelLinks.Claim(s.ctx, link.CustomerID, newID(), link.Code)
-		s.Require().ErrorIs(err, ErrChannelLinkElsewhere)
+		s.Require().ErrorIs(err, ErrUnknownChannelLink)
 	}), "Claim of another agent's code")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ChannelLinks.Claim(s.ctx, link.CustomerID, link.ConfigID, link.Code)

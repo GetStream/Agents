@@ -40,10 +40,6 @@ func (l *ChannelLink) Validate() error {
 // ErrUnknownChannelLink is a code nobody was given, one already spent, or one past its time.
 var ErrUnknownChannelLink = errors.New("store: there is no such code")
 
-// ErrChannelLinkElsewhere is a code of the app that was given for another of its agents. It
-// is not spent, so it still claims the number on that agent's line.
-var ErrChannelLinkElsewhere = errors.New("store: the code is for another agent")
-
 // channelLinkDraws is how many codes Insert draws before it gives up. A draw is taken only when
 // the app already holds the code drawn, which for six digits and ten thousand codes held at
 // once is one draw in a hundred: four in a row taken means the draw is broken, and looping on
@@ -92,8 +88,8 @@ func (r *ChannelLinks) Insert(ctx context.Context, link *ChannelLink, draw func(
 
 // Claim spends a code by deleting it. A code already spent or past its time is no code at all,
 // so a number cannot be claimed twice over by somebody who saw the message go by. A code of
-// another of the app's agents is ErrChannelLinkElsewhere and stays, so texting it to the wrong
-// line does not spend it.
+// another of the app's agents is no code here either, and stays, so texting it to the wrong
+// line does not spend it and does not tell the sender it is a live one.
 func (r *ChannelLinks) Claim(ctx context.Context, customerID, configID, code string) (ChannelLink, error) {
 	if customerID == "" || configID == "" || code == "" {
 		return ChannelLink{}, stack.Wrap(ErrUnknownChannelLink)
@@ -117,18 +113,5 @@ func (r *ChannelLinks) Claim(ctx context.Context, customerID, configID, code str
 		return claimed[0], nil
 	}
 
-	// The delete takes a code of this agent, so a code of the app still to claim is another agent's.
-	elsewhere, err := r.store.global.NewSelect().Model((*ChannelLink)(nil)).
-		Where("customer_id = ?", customerID).
-		Where("code = ?", code).
-		Where("used_at IS NULL").
-		Where("expires_at > ?", now).
-		Exists(ctx)
-	if err != nil {
-		return ChannelLink{}, stack.Wrap(fmt.Errorf("store: claim channel link: %w", err))
-	}
-	if elsewhere {
-		return ChannelLink{}, stack.Wrap(ErrChannelLinkElsewhere)
-	}
 	return ChannelLink{}, stack.Wrap(ErrUnknownChannelLink)
 }

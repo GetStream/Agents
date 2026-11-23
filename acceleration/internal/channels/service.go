@@ -518,11 +518,6 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 			return store.ContactMapEntry{}, false
 		}
 		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
-		if errors.Is(err, store.ErrChannelLinkElsewhere) {
-			s.say(ctx, line, provider, message, Reply{Text: "That code is for another agent."},
-				answering(account.CustomerID, ""))
-			return store.ContactMapEntry{}, false
-		}
 		if err != nil {
 			if errors.Is(err, store.ErrUnknownChannelLink) {
 				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
