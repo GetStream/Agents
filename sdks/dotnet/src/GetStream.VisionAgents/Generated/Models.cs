@@ -7114,7 +7114,7 @@ namespace GetStream.VisionAgents.Models
         public string BaseUrl { get; set; } = default!;
 
         /// <summary>
-        /// Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+        /// Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("context_window")]
         public long? ContextWindow { get; set; } = default!;

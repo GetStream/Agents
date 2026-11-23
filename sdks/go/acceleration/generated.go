@@ -6534,7 +6534,7 @@ type CustomModelRequest struct {
 	// Example: https://model-abc123.api.baseten.co/environments/production/sync/v1
 	BaseUrl string `json:"base_url"`
 
-	// ContextWindow Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+	// ContextWindow Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
 	ContextWindow *int64 `json:"context_window,omitempty"`
 
 	// InputModalities Input kinds beyond text the model accepts, e.g. image.

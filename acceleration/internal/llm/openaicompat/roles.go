@@ -42,29 +42,42 @@ func strictRoles(messages []openai.ChatCompletionMessageParamUnion) []openai.Cha
 			out = append(out, openai.AssistantMessage(""), message)
 		case isAssistantText(message) && onlySystem(out):
 			out = opened(out, assistantText(message.OfAssistant))
+		case message.OfAssistant != nil && len(message.OfAssistant.ToolCalls) > 0 && onlySystem(out):
+			// A call before anybody spoke, such as a lookup of who is calling, cannot open the
+			// conversation either, and what follows its results has to stay after them. An
+			// empty user turn ahead of it is what happened: nobody had said anything yet.
+			out = append(out, openai.UserMessage(""))
+			out = append(out, called(message.OfAssistant, ""))
 		case isAssistantText(message) && last >= 0 && isAssistantText(out[last]):
 			out[last] = openai.AssistantMessage(joinText(assistantText(out[last].OfAssistant), assistantText(message.OfAssistant)))
 		case message.OfAssistant != nil && len(message.OfAssistant.ToolCalls) > 0:
-			assistant := *message.OfAssistant
-			said := ""
-			if assistant.Content.OfString.Valid() {
-				said = assistant.Content.OfString.Value
-			}
+			before := ""
 			if last >= 0 && isAssistantText(out[last]) {
-				said = joinText(assistantText(out[last].OfAssistant), said)
+				before = assistantText(out[last].OfAssistant)
 				out = out[:last]
 			}
-			// Always set, empty when nothing was said: OpenAI takes "" beside tool calls, and a
-			// template that reads the content of every assistant turn finds one.
-			if said != "" || !hasContent(&assistant) {
-				assistant.Content = openai.ChatCompletionAssistantMessageParamContentUnion{OfString: param.NewOpt(said)}
-			}
-			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
+			out = append(out, called(message.OfAssistant, before))
 		default:
 			out = append(out, message)
 		}
 	}
 	return out
+}
+
+// called is a turn of calls, sent with what the model said just before them, before.
+func called(message *openai.ChatCompletionAssistantMessageParam, before string) openai.ChatCompletionMessageParamUnion {
+	assistant := *message
+	said := ""
+	if assistant.Content.OfString.Valid() {
+		said = assistant.Content.OfString.Value
+	}
+	said = joinText(before, said)
+	// Always set, empty when nothing was said: OpenAI takes "" beside tool calls, and a
+	// template that reads the content of every assistant turn finds one.
+	if said != "" || !hasContent(&assistant) {
+		assistant.Content = openai.ChatCompletionAssistantMessageParamContentUnion{OfString: param.NewOpt(said)}
+	}
+	return openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant}
 }
 
 const (
@@ -180,6 +193,17 @@ func shortCallIDs(messages []openai.ChatCompletionMessageParamUnion) {
 			}
 		case message.OfTool != nil && renamed[message.OfTool.ToolCallID] != "":
 			message.OfTool.ToolCallID = renamed[message.OfTool.ToolCallID]
+		case message.OfUser != nil:
+			// The images a result returned are labelled with its call's id, which has to be the
+			// one the call is sent with.
+			for i, part := range message.OfUser.Content.OfArrayOfContentParts {
+				if part.OfText == nil {
+					continue
+				}
+				if id, labelled := strings.CutPrefix(part.OfText.Text, imagesFrom); labelled && renamed[id] != "" {
+					message.OfUser.Content.OfArrayOfContentParts[i] = openai.TextContentPart(imagesFrom + renamed[id])
+				}
+			}
 		}
 	}
 }

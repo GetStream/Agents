@@ -5315,7 +5315,7 @@ pub struct CustomModelRequest {
     pub api_key: ::std::option::Option<::std::string::String>,
     ///The endpoint root, up to and including /v1, that chat completions are posted under.
     pub base_url: ::std::string::String,
-    ///Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+    ///Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub context_window: ::std::option::Option<i64>,
     ///Input kinds beyond text the model accepts, e.g. image.

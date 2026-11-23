@@ -3,6 +3,7 @@ package openaicompat
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -542,11 +543,65 @@ func (s *OpenAICompatSuite) TestAnEmptyBodyUnderAnotherTypeEndsAsAnEmptyStreamDo
 	s.ErrorContains(stream.Err(), "ended before anything was sent")
 }
 
-func (s *OpenAICompatSuite) TestStrictRolesKeepsWhatTheModelSaidAfterACallBeforeTheCallerSpoke() {
-	messages := s.strictly(weatherCall, weatherSaid, llm.Message{Role: llm.Assistant, Content: "It is 18C."})
+func (s *OpenAICompatSuite) TestStrictRolesOpensOnAnEmptyUserTurnBeforeACallNobodyAskedFor() {
+	// The agent looked up who is calling, then greeted them, before they said anything.
+	messages := s.strictly(weatherCall, weatherSaid,
+		llm.Message{Role: llm.Assistant, Content: "Hi Dana."},
+		llm.Message{Role: llm.User, Content: "hi"},
+	)
 
-	s.Equal([]string{"system", "assistant", "tool", "assistant"}, roles(messages))
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant", "user"}, roles(messages))
+	s.Equal("", messages[1]["content"], "nobody had said anything yet")
 	s.Equal("Be terse.", messages[0]["content"], "only a reply before anything else is an opening line")
+	s.Equal("Hi Dana.", messages[4]["content"], "the greeting stays after the result it read")
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesOpensOnAnEmptyUserTurnWhileTheCallIsAllThereIs() {
+	messages := s.strictly(weatherCall, weatherSaid)
+
+	s.Equal([]string{"system", "user", "assistant", "tool"}, roles(messages))
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesOpensOnAnEmptyUserTurnBeforeWordsSentWithACall() {
+	messages := s.strictly(
+		llm.Message{Role: llm.Assistant, Content: "One moment."}, weatherCall, weatherSaid,
+		llm.Message{Role: llm.User, Content: "hi"},
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant", "user"}, roles(messages))
+	s.Equal("Be terse.\n\nYou opened the conversation by saying: \"One moment.\"", messages[0]["content"],
+		"words before anything else are still the opening line")
+}
+
+func (s *OpenAICompatSuite) TestAToolResultsImagesAreLabelledWithTheIDItsCallIsSentWith() {
+	s.frames = []string{textFrame("ok"), usageFrame(5, 0, 1, 0, "stop")}
+	image := &llm.ImagePart{MIME: "image/png", Data: []byte("png")}
+	provider := s.provider(Options{StrictRoles: true, ResultsFollowCalls: true,
+		Capabilities: llm.Capabilities{InputModalities: []string{llm.ModalityImage}}})
+
+	s.ask(provider, llm.ResponseParams{Input: []llm.Message{
+		{Role: llm.User, Content: "what do the cameras show?"},
+		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{
+			{ID: "call_front_door", Name: "camera", Arguments: `{}`},
+			{ID: "call_back_door", Name: "camera", Arguments: `{}`},
+		}},
+		{Role: llm.ToolResult, ToolCallID: "call_front_door", Parts: []llm.ContentPart{{Text: "front"}, {Image: image}}},
+		{Role: llm.ToolResult, ToolCallID: "call_back_door", Parts: []llm.ContentPart{{Text: "back"}, {Image: image}}},
+	}})
+
+	messages := s.sentMessages(0)
+	ids := callIDs(messages)
+	s.Require().Len(ids, 4)
+	var labels []any
+	for _, message := range messages {
+		parts, _ := message["content"].([]any)
+		for _, part := range parts {
+			if text, ok := part.(map[string]any)["text"].(string); ok && strings.HasPrefix(text, imagesFrom) {
+				labels = append(labels, text)
+			}
+		}
+	}
+	s.Equal([]any{imagesFrom + ids[0], imagesFrom + ids[1]}, labels)
 }
 
 func (s *OpenAICompatSuite) TestStrictRolesQuotesAnOpeningLineAsItWasSaid() {

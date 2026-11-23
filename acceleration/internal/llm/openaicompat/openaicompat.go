@@ -280,6 +280,10 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 	), nil
 }
 
+// imagesFrom labels the images a tool result returned, which follow the results as a user turn
+// of their own, with the id of the call they answer.
+const imagesFrom = "Images from tool result "
+
 // errNoFirstToken is the cause a request is cancelled with when FirstTokenTimeout passes
 // before its first token. It is a deadline, so it reads as a timeout and as transient.
 var errNoFirstToken = fmt.Errorf("openaicompat: no first token in time: %w", context.DeadlineExceeded)
@@ -792,7 +796,7 @@ func (l *LLM) params(request llm.ResponseParams) openai.ChatCompletionNewParams 
 		case llm.ToolResult:
 			messages = append(messages, openai.ToolMessage(messageText(message), message.ToolCallID))
 			if message.HasImage() {
-				pendingImages = append(pendingImages, openai.TextContentPart("Images from tool result "+message.ToolCallID))
+				pendingImages = append(pendingImages, openai.TextContentPart(imagesFrom+message.ToolCallID))
 				pendingImages = append(pendingImages, chatImages(message.Parts)...)
 			}
 		default:
