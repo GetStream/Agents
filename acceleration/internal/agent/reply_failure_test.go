@@ -78,5 +78,8 @@ func (s *AgentSuite) TestAFailureLineKeepsTheProvidersReasonAndNotTheKeyItEchoed
 	s.eventually(func() bool { return len(s.logs.records("agent failure")) == 1 }, "the failure was never logged")
 	failure := s.logs.records("agent failure")[0]
 	s.Contains(failure["error"], "502 Bad Gateway: upstream error: failed to connect to local service\nrequest headers: [redacted]")
-	s.NotContains(s.logs.buf.String(), key)
+	s.logs.mu.Lock()
+	logged := s.logs.buf.String()
+	s.logs.mu.Unlock()
+	s.NotContains(logged, key)
 }
