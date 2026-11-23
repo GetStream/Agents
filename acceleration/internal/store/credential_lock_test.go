@@ -600,3 +600,29 @@ func (s *StoreSuite) TestACustomersLockSlotIsGivenBackHoweverItsLockEnds() {
 	s.ErrorContains(err, "credential lock connection")
 	s.Zero(closed.lockSlots.callersOf("acme-app"), "a lock that got no connection gives its slot back")
 }
+
+// deadlinePassedUnsaid is a context whose deadline has passed but which does not say so yet:
+// a context.WithDeadline whose timer has not run, as on a busy machine.
+type deadlinePassedUnsaid struct{ context.Context }
+
+func (deadlinePassedUnsaid) Deadline() (time.Time, bool) {
+	return time.Now().Add(-time.Millisecond), true
+}
+
+func (s *StoreSuite) TestALockCutByItsDeadlineBeforeTheContextSaysSoFailsWithTheDeadline() {
+	connection := s.connection("acme-app", nil)
+	locked := func(router *Store) error {
+		return router.ConnectorConnections.WithLocked(deadlinePassedUnsaid{s.ctx}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) {
+				s.Fail("a lock past its deadline never runs the callback")
+				return false, nil
+			})
+	}
+
+	warm := s.router()
+	s.Require().NoError(warm.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	s.Require().Equal(1, warm.locks.Stats().Idle, "the next lock reuses this connection")
+	s.ErrorIs(locked(warm), context.DeadlineExceeded, "a pg_try_advisory_lock cut by the deadline")
+	s.assertNothingIsHeld(warm)
+}

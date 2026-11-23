@@ -185,8 +185,8 @@ func (s *Store) tryCredentialLock(ctx context.Context, namespace, key int32) (bu
 			// The lock may have been granted with the answer lost; closing the connection
 			// ends the session, which releases it.
 			discard(conn)
-			if ctx.Err() != nil {
-				return bun.Conn{}, fmt.Errorf("store: wait for credential lock: %w", context.Cause(ctx))
+			if cause := ended(ctx); cause != nil {
+				return bun.Conn{}, fmt.Errorf("store: wait for credential lock: %w", cause)
 			}
 			return bun.Conn{}, fmt.Errorf("store: acquire credential lock: %w", err)
 		}
@@ -203,6 +203,21 @@ func (s *Store) tryCredentialLock(ctx context.Context, namespace, key int32) (bu
 		}
 		pause = min(2*pause, credentialRetryMost)
 	}
+}
+
+// ended is why ctx is done, or context.DeadlineExceeded once its deadline has passed but
+// before ctx says so. The driver sets a socket's deadline to ctx's (Conn.deadline in
+// github.com/uptrace/bun/driver/pgdriver v1.2.18, driver.go), so a statement it cuts can fail
+// before the timer that ends ctx has run, which a busy machine delays; that failure
+// is ctx's deadline, not a broken connection.
+func ended(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // releaseCredentialLock unlocks and hands the connection back to the lock pool.
