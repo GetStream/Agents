@@ -329,6 +329,55 @@ func (s *ChannelsSuite) TestSomebodyWhoTextsStopIsNotWrittenToAgain() {
 	s.Len(s.meta.to(writer), 1)
 }
 
+// A STOP the store could not record fails its delivery and is taken when the provider delivers
+// it again; once taken, a further delivery of it is neither recorded nor answered again. A
+// trigger refuses the app's opt-outs for the first delivery.
+func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	writer, id := s.writer(), "msg-"+s.utils.uuid()
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+		CREATE FUNCTION channels_suite_refuse_opt_out() RETURNS trigger AS $$
+			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER channels_suite_refuse_opt_out BEFORE INSERT ON opt_outs FOR EACH ROW
+			WHEN (NEW.customer_id = '`+s.customerID()+`') EXECUTE FUNCTION channels_suite_refuse_opt_out();
+		COMMIT`)
+	s.Require().NoError(err)
+	refusing := true
+	allow := func() {
+		if !refusing {
+			return
+		}
+		refusing = false
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+			DROP TRIGGER channels_suite_refuse_opt_out ON opt_outs;
+			DROP FUNCTION channels_suite_refuse_opt_out();
+			COMMIT`)
+		s.Require().NoError(err)
+	}
+	defer allow()
+
+	s.Equal(http.StatusInternalServerError, s.deliver(line, writer, id, "Stop"),
+		"a STOP not recorded is the provider's to deliver again")
+	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.False(optedOut)
+	allow()
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "Stop"))
+	optedOut, err = s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut, "the STOP delivered again is recorded")
+	s.Contains(s.answer(writer), "unsubscribed")
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "Stop"))
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
+	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 2))
+	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once, however often it is delivered")
+}
+
 func (s *ChannelsSuite) TestTextingStartAfterStopIsAnsweredAgain() {
 	number := s.number()
 	line := s.connect(number)

@@ -54,6 +54,18 @@ func (r *ChannelDeliveries) Claim(ctx context.Context, accountID, messageID, fro
 	return affected == 1, nil
 }
 
+// Release gives back a message claimed but not taken, so the provider's next delivery of it
+// claims it again.
+func (r *ChannelDeliveries) Release(ctx context.Context, accountID, messageID string) error {
+	_, err := r.store.global.NewDelete().Model((*channelDelivery)(nil)).
+		Where("account_id = ? AND message_id = ?", accountID, messageID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: release channel message: %w", err))
+	}
+	return nil
+}
+
 // LastAt is when somebody last wrote to a line, or the zero time when they never have.
 // WhatsApp's window for writing first is counted from it.
 func (r *ChannelDeliveries) LastAt(ctx context.Context, accountID, from string) (time.Time, error) {

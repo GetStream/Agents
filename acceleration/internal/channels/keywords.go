@@ -24,38 +24,38 @@ const (
 	helpReply    = "Reply STOP to unsubscribe."
 )
 
-// keyword obeys STOP, START and HELP before any agent sees the message, and reports whether
-// the message was one. The confirmation goes out past the gate: telling somebody they are
-// unsubscribed is the one message they are still owed.
-func (s *Service) keyword(ctx context.Context, account store.ChannelAccount, line Account, provider Provider, message Message) bool {
+// keyword obeys STOP, START and HELP before any agent sees the message, and answers what the
+// message is confirmed with, or "" when it is none. It runs before the delivery is answered,
+// so a keyword the store could not record is the provider's to deliver again.
+func (s *Service) keyword(ctx context.Context, account store.ChannelAccount, message Message) (string, error) {
 	word := strings.ToUpper(strings.TrimSpace(message.Text))
 	stop, start, help := slices.Contains(stopWords, word), slices.Contains(startWords, word), slices.Contains(helpWords, word)
 	if !stop && !start && !help {
-		return false
+		return "", nil
 	}
 
 	useCase, err := s.store.UseCases.GetForNumber(ctx, account.CustomerID, account.E164)
 	if err != nil && !errors.Is(err, store.ErrUnknownUseCase) {
 		s.logger.Error("could not find what a line sends as", "number", account.E164, "error", err)
 	}
-	var reply string
-	var recorded error
 	switch {
 	case stop:
-		recorded = s.store.OptOuts.Insert(ctx, &store.OptOut{
+		err := s.store.OptOuts.Insert(ctx, &store.OptOut{
 			CustomerID: account.CustomerID, Recipient: message.From, Channel: account.Kind, Source: "keyword",
 		})
-		reply = cmp.Or(useCase.OptOutMessage, stoppedReply)
+		return cmp.Or(useCase.OptOutMessage, stoppedReply), err
 	case start:
-		recorded = s.store.OptOuts.RevokeAll(ctx, account.CustomerID, message.From, account.Kind)
-		reply = cmp.Or(useCase.OptInMessage, startedReply)
+		err := s.store.OptOuts.RevokeAll(ctx, account.CustomerID, message.From, account.Kind)
+		return cmp.Or(useCase.OptInMessage, startedReply), err
 	default:
-		reply = cmp.Or(useCase.HelpMessage, helpReply)
+		return cmp.Or(useCase.HelpMessage, helpReply), nil
 	}
-	if recorded != nil {
-		s.logger.Error("could not record a keyword", "keyword", word, "channel", account.Kind, "error", recorded)
-		return true
-	}
-	s.say(ctx, line, provider, message, Reply{Text: reply}, answering(account.CustomerID, ""))
-	return true
+}
+
+// confirm writes back what a keyword is answered with. It goes out past the gate: telling
+// somebody they are unsubscribed is the one message they are still owed.
+func (s *Service) confirm(account store.ChannelAccount, line Account, provider Provider, message Message, confirmation string) {
+	ctx, cancel := context.WithTimeout(s.ctx, runTimeout)
+	defer cancel()
+	s.say(ctx, line, provider, message, Reply{Text: confirmation}, answering(account.CustomerID, ""))
 }
