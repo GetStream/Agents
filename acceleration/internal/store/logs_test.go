@@ -191,6 +191,8 @@ func TestSafeLogTextTakesAnEncodedKeyAndAVendorRefusalOut(t *testing.T) {
 		"double-quoted key after the phrase":     {`Invalid API key "` + secret + `"`, `Invalid API key "[redacted]"`},
 		"json-escaped quote after the phrase":    {`{"message":"Invalid API key: \"` + secret + `\""}`, `{"message":"Invalid API key: \"[redacted]\""}`},
 		"json-escaped quotes before the verdict": {`{"detail":"The API key \"` + secret + `\" is invalid"}`, `{"detail":"The API key \"[redacted]\" is invalid"}`},
+		"base64 key":                             {"Invalid API key Ab" + secret[:10] + "+/" + secret[10:] + "==", "Invalid API key [redacted]"},
+		"base64 key before the verdict":          {"The API key '" + secret[:16] + "+/" + secret[16:] + "=' is invalid", "The API key '[redacted]' is invalid"},
 		"key of 16 before the verdict":           {"API key '" + secret[:16] + "' is invalid for model m", "API key '[redacted]' is invalid for model m"},
 	} {
 		t.Run(name, func(t *testing.T) {
