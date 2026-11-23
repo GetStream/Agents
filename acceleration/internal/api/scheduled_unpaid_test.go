@@ -878,3 +878,17 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskOverTheTiersLimitsIsATierLimitReached
 	s.Equal("tier_limit_reached", *run.Error)
 	s.Len(s.telnyx().sent(), 1, "only the answer to hi")
 }
+
+// A conversation turn the user stops while it runs is delivered, as it always was: the turn is
+// over, and nothing in it was a refusal for money.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnTheUserStopsIsDelivered() {
+	found, done := s.heldConversationTurn(context.Background())
+	found.Interrupt()
+
+	select {
+	case err := <-done:
+		s.NoError(err)
+	case <-time.After(deliveryWait):
+		s.Fail("the delivery never settled once the turn was stopped")
+	}
+}
