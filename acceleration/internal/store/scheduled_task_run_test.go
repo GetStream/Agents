@@ -28,7 +28,7 @@ func (s *StoreSuite) TestARunTakesOneCallUntilItIsGivenBack() {
 	s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseCall(s.ctx, "acme", run.ID, "call-1"))
 	s.True(take("acme", "call-3"), "a call given back may be placed again")
 
-	s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.ID, ScheduledTaskRunFailed, "", "call-3", "not_answered"))
+	s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.CustomerID, run.ID, ScheduledTaskRunFailed, "", "call-3", "not_answered"))
 	s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseCall(s.ctx, "acme", run.ID, "call-3"))
 	s.Require().NoError(s.store.ScheduledTaskRuns.SetCallReason(s.ctx, "acme", run.ID, "call-3", "delivery_failed"))
 	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "one", Limit: 25})
@@ -37,8 +37,25 @@ func (s *StoreSuite) TestARunTakesOneCallUntilItIsGivenBack() {
 	s.Equal("call-3", runs[0].SessionID, "a finished run keeps the call it made")
 	s.Equal("not_answered", *runs[0].Error, "and its outcome: a call ending late writes no reason over it")
 
-	s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.ID, ScheduledTaskRunFailed, "", "", "delivery_failed"))
+	s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.CustomerID, run.ID, ScheduledTaskRunFailed, "", "", "delivery_failed"))
 	s.False(take("acme", "call-4"), "a finished run places no call")
+}
+
+func (s *StoreSuite) TestAnotherCustomersFinishOfARunIdChangesNothing() {
+	s.task("one", nil)
+	run := ScheduledTaskRun{
+		TaskID: "one", CustomerID: "acme", ScheduledFor: s.base, Trigger: ScheduledTaskTriggerManual,
+		Prompt: "Remind Sam to stretch.", State: ScheduledTaskRunRunning, Attempts: 1, StartedAt: &s.base,
+	}
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(s.ctx, &run))
+	before, err := s.store.ScheduledTaskRuns.Get(s.ctx, "acme", "one", run.ID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, "globex", run.ID, ScheduledTaskRunFailed, "", "their-session", "delivery_failed"))
+
+	after, err := s.store.ScheduledTaskRuns.Get(s.ctx, "acme", "one", run.ID)
+	s.Require().NoError(err)
+	s.Equal(before, after, "acme's run is still running")
 }
 
 func (s *StoreSuite) TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingItOver() {
@@ -136,7 +153,7 @@ func (s *StoreSuite) TestScheduledTaskRunQueryBudgets() {
 		s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseCall(s.ctx, "acme", run.ID, "call-1"))
 	}), "ReleaseCall")
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.ID, ScheduledTaskRunDelivered, "conversation", "session-1", ""))
+		s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.CustomerID, run.ID, ScheduledTaskRunDelivered, "conversation", "session-1", ""))
 	}), "FinishManual")
 	s.Equal(1, s.countQueries(func() {
 		finished, err := s.store.ScheduledTaskRuns.LastFinishedAt(s.ctx, "acme", []string{task.ID})

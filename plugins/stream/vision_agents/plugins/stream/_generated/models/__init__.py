@@ -14,6 +14,8 @@ from .activity_meter import ActivityMeter
 from .activity_session import ActivitySession
 from .activity_sessions import ActivitySessions
 from .activity_step import ActivityStep
+from .activity_step_day import ActivityStepDay
+from .activity_step_day_step import ActivityStepDayStep
 from .add_contacts_request import AddContactsRequest
 from .add_contacts_response import AddContactsResponse
 from .add_session_tools_request import AddSessionToolsRequest
@@ -367,6 +369,7 @@ from .model_overwrites import ModelOverwrites
 from .model_overwrites_thinking import ModelOverwritesThinking
 from .model_overwrites_verbosity import ModelOverwritesVerbosity
 from .model_tokens import ModelTokens
+from .model_voice import ModelVoice
 from .number_search_result import NumberSearchResult
 from .ocr_error_code import OcrErrorCode
 from .ocr_options import OcrOptions
@@ -682,6 +685,8 @@ __all__ = (
     "ActivitySession",
     "ActivitySessions",
     "ActivityStep",
+    "ActivityStepDay",
+    "ActivityStepDayStep",
     "AddContactsRequest",
     "AddContactsResponse",
     "AddSessionToolsRequest",
@@ -1029,6 +1034,7 @@ __all__ = (
     "ModelOverwritesThinking",
     "ModelOverwritesVerbosity",
     "ModelTokens",
+    "ModelVoice",
     "NumberSearchResult",
     "OcrErrorCode",
     "OcrOptions",

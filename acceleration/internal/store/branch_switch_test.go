@@ -15,6 +15,27 @@ func (s *StoreSuite) switched(into *Store, id string, from, at time.Time, state 
 	}))
 }
 
+func (s *StoreSuite) TestAnotherCustomersSwitchUnderASwitchIdIsRefused() {
+	s.opened("one", "app", s.base, nil)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	s.switched(s.store, "one", s.base, s.base.Add(time.Minute), "")
+
+	err := s.store.BranchSwitches.Insert(s.ctx, &AgentBranchSwitch{
+		ID: "one", SessionID: "theirs", CustomerID: "somebody-else", Kind: SwitchEdit, TargetResponseID: "theirs",
+		ForkMessageID: "m-theirs", HiddenFrom: s.base, State: SwitchDone, CreatedAt: s.base.Add(time.Hour),
+	})
+
+	s.ErrorIs(err, ErrIDTaken, "the writer is told the id is not its own")
+	unfinished, err := s.store.BranchSwitches.Unfinished(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Require().Len(unfinished, 1)
+	s.Equal(SwitchSnapshotted, unfinished[0].State, "app's switch is as it was")
+	s.Equal("m-one", unfinished[0].ForkMessageID)
+	theirs, err := s.store.BranchSwitches.Unfinished(s.ctx, "somebody-else", "theirs")
+	s.Require().NoError(err)
+	s.Empty(theirs)
+}
+
 func (s *StoreSuite) TestASwitchOnlyMovesForward() {
 	s.opened("one", "app", s.base, nil)
 	s.switched(s.store, "switch", s.base, s.base.Add(time.Minute), "")

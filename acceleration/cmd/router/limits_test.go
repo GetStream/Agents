@@ -94,9 +94,27 @@ func (s *LimitsSuite) TestTheCostAnomalyCheckRunsWhereThereIsAChannelAndPostgres
 	s.Nil(costAnomalies(nil, noticeSender(s.settings, db, logger), logger), "no Postgres to read the spend from")
 	s.settings.Limits.SlackToken = " "
 	s.Nil(noticeSender(s.settings, db, logger), "no token")
-	s.Nil(costAnomalies(db, noticeSender(s.settings, db, logger), logger), "no token")
 	s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "xoxb-test", ""
 	s.Nil(noticeSender(s.settings, db, logger), "no channel")
+}
+
+// Defect: the retention ran only where Slack was set, so a deployment without it kept every row.
+func (s *LimitsSuite) TestTheCheckRunsWithoutSlackAndPostsNothing() {
+	logger := slog.New(slog.DiscardHandler)
+	db := &store.Store{}
+	for name, set := range map[string]func(){
+		"no token":   func() { s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = " ", "C123" },
+		"no channel": func() { s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "xoxb-test", "" },
+		"neither":    func() { s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "", "" },
+	} {
+		set()
+		sender := noticeSender(s.settings, db, logger)
+		options, ok := costAnomalyOptions(db, sender, logger)
+		s.Require().True(ok, name)
+		s.Nil(options.Sender, name)
+		s.False(options.Digest, name)
+		s.NotNil(costAnomalies(db, sender, logger), name)
+	}
 }
 
 // The message names its environment and links to the app and staff pages, so an operator reading
@@ -114,4 +132,15 @@ func (s *LimitsSuite) TestTheNoticesNameTheirEnvironmentAndLinkTheStaffPage() {
 	s.Equal("staging-test", options.Environment)
 	s.Equal(s.settings.Limits.StaffURL, options.Links.Staff)
 	s.Equal(s.settings.Limits.AppURL, options.Links.App)
+}
+
+// Defect: the router's check left the activity digest off, so no router posts it.
+func (s *LimitsSuite) TestTheCostAnomalyCheckPostsTheActivityDigest() {
+	s.settings.Limits.SlackToken, s.settings.Limits.SlackChannel = "xoxb-test", "C123"
+
+	db, logger := &store.Store{}, slog.New(slog.DiscardHandler)
+	options, ok := costAnomalyOptions(db, noticeSender(s.settings, db, logger), logger)
+
+	s.Require().True(ok)
+	s.True(options.Digest)
 }

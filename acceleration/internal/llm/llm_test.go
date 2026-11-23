@@ -868,3 +868,19 @@ func (s *LLMSuite) TestAStreamReadToItsEndBeforeTheGraceIsNotDrainedAgain() {
 
 	s.Equal(2, watched)
 }
+
+func (s *LLMSuite) TestHostOfIsTheHostAndPortAlone() {
+	for name, test := range map[string]struct{ baseURL, host string }{
+		"a plain endpoint":            {"https://api.example.test/v1", "api.example.test"},
+		"a port":                      {"http://127.0.0.1:8443/v1", "127.0.0.1:8443"},
+		"an ipv6 address and port":    {"https://[::1]:8443/v1", "[::1]:8443"},
+		"credentials, path and query": {"https://user:secret@eu.example.test:8443/a/b?key=secret#frag", "eu.example.test:8443"},
+		"a url that does not parse":   {"http://[::1", ""},
+		"nothing":                     {"", ""},
+		"an address with no scheme":   {"api.example.test/v1", ""},
+	} {
+		s.Run(name, func() {
+			s.Equal(test.host, HostOf(test.baseURL))
+		})
+	}
+}

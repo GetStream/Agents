@@ -16,7 +16,7 @@ func (s *StoreSuite) replied(sessionID, responseID, said string, at time.Time, i
 		items[i].At = at.Add(time.Duration(i) * time.Second)
 	}
 	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, items))
-	s.Require().NoError(s.store.Responses.Finish(s.ctx, responseID, ResponseCompleted, "", at.Add(time.Minute)))
+	s.Require().NoError(s.store.Responses.Finish(s.ctx, "app", responseID, ResponseCompleted, "", at.Add(time.Minute)))
 }
 
 func answer(turn, text string) AgentResponseItem {

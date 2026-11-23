@@ -207,11 +207,10 @@ a synchronous update would double the writes of a busy one.
 
 ## Not done
 
-- **Nothing creates a key but a database call.** `CreateOrganization`, `CreateApp`,
-  `CreateAPIKey`, `ListAPIKeys` and `RevokeAPIKey` are all there and nothing outside a test
-  calls them: no endpoints, no dashboard page, no bootstrap command. This is the gap that
-  makes `api_key` mode awkward to actually adopt, and it is now the gap that makes the
-  default awkward to adopt.
+- **Keys are managed from the command line only.** `router keys create` mints a key and
+  `router keys revoke --app <id> --key <id>` stops one of an app's keys, on every router at
+  once when the command has the routers' Redis and within a minute (the key cache's TTL)
+  when it has none. There are no endpoints and no dashboard page for either.
 - **Nothing writes app settings either.** The column and the struct are there and are read
   on every request; turning a level off means an UPDATE by hand.
 - **Permissions stop at the session.** Everything else a client-side caller may reach is

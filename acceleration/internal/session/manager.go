@@ -1046,7 +1046,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// The turns held until now, the greeting's among them, are written after it.
 	if created.records != nil {
 		created.closers = append(created.closers, func() {
-			m.records.Closed(created.id, time.Now().UTC(), created.kept())
+			m.records.Closed(spec.CustomerID, created.id, time.Now().UTC(), created.kept())
 		})
 		m.records.Opened(sessionRow(created), toolRows(created))
 		created.startRecording()
@@ -1066,7 +1066,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		created.nextCall(started)
 		created.closers = append(created.closers, func() {
 			id, _ := created.callRow()
-			m.calls.Ended(id, time.Now().UTC())
+			m.calls.Ended(spec.CustomerID, id, time.Now().UTC())
 			// The review runs on a model rather than in this closer, so it is started
 			// here and lands on the row whenever it comes back.
 			if !spec.NoReview {
@@ -1894,6 +1894,11 @@ func (m *Manager) Running(id string) bool {
 // sandbox in a region with no Daytona target here is refused as it is written.
 func (m *Manager) SandboxesIn(region string) bool {
 	return m.options.Sandboxes.Serves(region)
+}
+
+// SpeaksNative reports whether this deployment's sessions can run a speech-to-speech model.
+func (m *Manager) SpeaksNative() bool {
+	return m.options.STS != nil
 }
 
 // Len is how many sessions this process is running, which is what a draining router waits

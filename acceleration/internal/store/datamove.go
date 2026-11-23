@@ -97,12 +97,12 @@ func (t dataTable) rollup() bool {
 // credentials sealed under its own key. And connector_tool_pins: the deployment a connection
 // moves to pins its tools again on first use. And chat_inbound, Stream
 // Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes. And
-// call_bridges, an answer parked for seconds at this deployment's URL: its key is the token
-// that authenticates the fetch, and it holds the trunk's password in the clear. And
-// voice_samples and voice_bindings: a sample's audio is in this deployment's bucket and a
-// binding's clone in this deployment's account at the provider, so like a knowledge file's,
-// neither means anything where the customer moves. A voice arrives with its name and
-// description, to be given a recording and prepared again.
+// call_bridges, an answer parked for seconds at this deployment's URL: its key is the hash of
+// the token that authenticates the fetch, and its trunk password is sealed under this
+// deployment's key. And voice_samples and voice_bindings: a sample's audio is in this
+// deployment's bucket and a binding's clone in this deployment's account at the provider, so
+// like a knowledge file's, neither means anything where the customer moves. A voice arrives
+// with its name and description, to be given a recording and prepared again.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},

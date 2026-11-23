@@ -31,6 +31,7 @@ func TestConfigsSuite(t *testing.T) {
 // idempotent, so suites running beside this one see the same rows.
 func (s *ConfigsSuite) SetupSuite() {
 	s.connectors = core.Registry{Schemes: map[string]core.Scheme{"oauth2_code": namedScheme("oauth2_code")}}
+	s.speechToSpeech = true
 	s.RouterSuite.SetupSuite()
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
@@ -2771,4 +2772,57 @@ func (s *ConfigsSuite) TestCallsWhenIsCountedInCharactersNotBytes() {
 	status, _ := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		map[string]any{"calls": map[string]any{"end_call": map[string]any{"when": strings.Repeat("a", 1001)}}})
 	s.Equal(http.StatusBadRequest, status)
+}
+
+func (s *ConfigsSuite) TestANewVoiceConfigDefaultsToSTSFast() {
+	created := s.createConfig(map[string]any{"name": "live-default-" + s.utils.uuid()})
+	s.Equal(stsDefaultTarget, value(created.Sts))
+	s.Equal(stsDefaultTarget, value(s.read(created.Id).Sts))
+}
+
+func (s *ConfigsSuite) TestATextConfigDoesNotDefaultToSTS() {
+	created := s.createConfig(map[string]any{"name": "text-" + s.utils.uuid(), "mode": "text"})
+	s.Nil(created.Sts)
+	s.Nil(s.read(created.Id).Sts)
+}
+
+func (s *ConfigsSuite) TestAnExplicitEmptySTSSelectsTheCascade() {
+	created := s.createConfig(map[string]any{"name": "cascade-opt-in-" + s.utils.uuid(), "sts": ""})
+	s.Nil(created.Sts)
+	s.Nil(s.read(created.Id).Sts)
+}
+
+func (s *ConfigsSuite) TestAVoiceConfigWithCascadeSettingsStaysCascaded() {
+	withSTT := s.createConfig(map[string]any{"name": "with-stt-" + s.utils.uuid(), "stt": "stub/stub-model"})
+	s.Nil(withSTT.Sts)
+
+	withTTS := s.createConfig(map[string]any{"name": "with-tts-" + s.utils.uuid(), "tts": "stub/stub-voice"})
+	s.Nil(withTTS.Sts)
+
+	withLLM := s.createConfig(map[string]any{"name": "with-llm-" + s.utils.uuid(), "llm": "stub/stub-model"})
+	s.Nil(withLLM.Sts)
+
+	withFallbacks := s.createConfig(map[string]any{"name": "with-fb-" + s.utils.uuid(), "llm_fallbacks": []string{"stub/stub-model"}})
+	s.Nil(withFallbacks.Sts)
+
+	withKeyterms := s.createConfig(map[string]any{"name": "with-kt-" + s.utils.uuid(), "keyterms": []string{"Stream"}})
+	s.Nil(withKeyterms.Sts)
+
+	withFloorControl := s.createConfig(map[string]any{
+		"name":          "with-fc-" + s.utils.uuid(),
+		"floor_control": map[string]any{"model": "flow-controller"},
+	})
+	s.Nil(withFloorControl.Sts)
+
+	withGuardrail := s.createConfig(map[string]any{
+		"name":      "with-gr-" + s.utils.uuid(),
+		"guardrail": webhookGuardrail("https://example.com/check"),
+	})
+	s.Nil(withGuardrail.Sts)
+}
+
+func (s *ConfigsSuite) TestAVoiceConfigInARegionWithoutSTSFastStaysCascaded() {
+	// The suite's stub STS router only serves us, so an eu config has no sts-fast to default to.
+	created := s.createConfig(map[string]any{"name": "eu-voice-" + s.utils.uuid(), "region": "eu"})
+	s.Nil(created.Sts)
 }

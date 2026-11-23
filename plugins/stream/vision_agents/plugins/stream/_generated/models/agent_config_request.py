@@ -127,7 +127,9 @@ class AgentConfigRequest:
         skills (list[str] | Unset): Skill names, either the customer's own or one of the built-in think, recall and
             explain. Omit for the built-in set.
         sts (str | Unset): A speech-to-speech target: one native audio model that hears the caller and speaks back.
-            Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+            Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no
+            cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast
+            where available. An empty string explicitly selects the cascade.
         stt (str | Unset): A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores
             it.
         subagent (str | Unset): The slower model a voice agent hands its skills to, while the voice model keeps talking.
