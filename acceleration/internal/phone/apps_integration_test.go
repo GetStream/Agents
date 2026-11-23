@@ -2874,3 +2874,13 @@ func (s *AppsSuite) TestACallFromANumberLinedInAnotherAppMovesItsLine() {
 	s.Equal([]string{s.e164}, s.own.TrunkNumbers(trunks[0]))
 	s.Equal(int64(4242), s.number().StreamAppPK)
 }
+
+func (s *AppsSuite) TestNoNumberIsGivenOutTwice() {
+	given := make(map[string]bool)
+	for range 20_000 {
+		number := aNumber()
+		s.Require().Regexp(`^\+1512[2-9]\d{6}$`, number)
+		s.Require().False(given[number], "%s was given out twice", number)
+		given[number] = true
+	}
+}
