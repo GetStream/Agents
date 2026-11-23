@@ -218,6 +218,24 @@ func (s *ShardedStoreSuite) TestASupersedeTriedAgainAfterAShardFailedTakesWhatTh
 	s.True(*found.Remembers, "deleting it still forgets what its first run taught the memory store")
 }
 
+func (s *ShardedStoreSuite) TestASessionHereIsFoundWhileAnotherShardIsDown() {
+	s.opened("chat", "app", s.base, nil)
+
+	found, err := s.withAShardDown(s.shardDSN, s.other.shardDSN).Sessions.Get(s.ctx, "app", "chat")
+	s.Require().NoError(err, "a shard that does not hold the session failed its read")
+	s.Equal("chat", found.ID)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnInAShardThatIsDownIsFoundAsItLeftHere() {
+	s.opened("chat", "app", s.base, nil)
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(time.Minute), "left"))
+	s.carriedOn("chat", s.base.Add(time.Hour))
+
+	found, err := s.withAShardDown(s.shardDSN).Sessions.Get(s.ctx, "app", "chat")
+	s.Require().NoError(err, "a session of the caller's own read as nobody's")
+	s.Equal(SessionClosed, found.State, "as it was when it left here")
+}
+
 // withAShardDown is a router of the shard own that reads the shards up and one more, which is
 // down: nothing listens on port 1.
 func (s *ShardedStoreSuite) withAShardDown(own string, up ...string) *Store {

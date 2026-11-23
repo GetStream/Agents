@@ -1185,7 +1185,7 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 			return s.store.Sessions.ChooseConnection(s.ctx, "app", row.ID, "crm", "connection")
 		}},
 		{"Exists", 1, 0, func() error { _, err := s.store.Sessions.Exists(s.ctx, row.ID); return err }},
-		{"Get", 0, 1, func() error { _, err := s.store.Sessions.Get(s.ctx, "app", row.ID); return err }},
+		{"Get", 1, 0, func() error { _, err := s.store.Sessions.Get(s.ctx, "app", row.ID); return err }},
 		{"ConversationPin", 0, 1, func() error {
 			_, _, err := s.store.Sessions.ConversationPin(s.ctx, "app", "conversation")
 			return err

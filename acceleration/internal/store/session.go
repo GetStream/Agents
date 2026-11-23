@@ -589,38 +589,34 @@ func (r *Sessions) Exists(ctx context.Context, id string) (bool, error) {
 }
 
 // Get returns one session a customer ran. A session carried on in another shard has a row in
-// each, so every shard is read for the row that says what it is now: the one not superseded,
-// and of two not superseded, which a peer that could not be reached leaves, the one written
-// last.
+// each, and the one not superseded says what it is now. The row in this shard answers unless it
+// is superseded or missing; only then are the other shards read, so a shard that is down fails
+// no read of a session it does not hold. While the shard a session was carried on in is down,
+// its superseded row here answers, as it was when the session left.
 func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession, error) {
 	if customerID == "" || id == "" {
 		return AgentSession{}, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
+	sessions, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
 		var sessions []AgentSession
 		err := db.NewSelect().Model(&sessions).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
 			Scan(ctx)
+		// Read past a superseded row, to the shard the session was carried on in.
+		if err == nil && (len(sessions) == 0 || sessions[0].SupersededAt != nil) {
+			err = sql.ErrNoRows
+		}
 		return sessions, err
 	})
-	if err != nil {
-		return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
+	if len(sessions) > 0 {
+		return sessions[0], nil
 	}
-	superseded := func(session AgentSession) int {
-		if session.SupersededAt != nil {
-			return 1
-		}
-		return 0
-	}
-	current := merged(lists, func(a, b AgentSession) int {
-		return cmp.Or(cmp.Compare(superseded(a), superseded(b)), b.UpdatedAt.Compare(a.UpdatedAt))
-	}, 1)
-	if len(current) == 0 {
+	if errors.Is(err, sql.ErrNoRows) {
 		return AgentSession{}, unknownStoredSession(id)
 	}
-	return current[0], nil
+	return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
 }
 
 // ConversationPin is the Stream app a customer's conversation was kept in, read off the
