@@ -294,22 +294,18 @@ func (s *StoreSuite) TestTurnsBeforeAToolIsUsedAreTheConversationsOwn() {
 	first := s.opened("first", "acme", s.base, nil)
 	s.turned(first, "first-1", s.base, nil)
 	rewound := s.base.Add(2 * time.Minute)
-	s.turned(first, "first-gone", s.base.Add(time.Minute), func(response *AgentResponse) { response.RewoundAt = &rewound })
-	s.turned(first, "first-2", s.base.Add(2*time.Minute), nil)
-	s.turned(first, "first-task", s.base.Add(3*time.Minute), func(response *AgentResponse) {
-		response.ParentResponseID = "first-2"
+	s.turned(first, "first-gone", s.base.Add(time.Minute), func(response *AgentResponse) {
+		response.ParentResponseID, response.RewoundAt = "first-1", &rewound
 	})
-	s.turned(first, "first-3", s.base.Add(4*time.Minute), nil)
-	s.calledTool(first, "first-3", "lookup_order", s.base.Add(4*time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
-	s.turned(first, "first-4", s.base.Add(5*time.Minute), nil)
-	s.calledTool(first, "first-4", "lookup_order", s.base.Add(5*time.Minute), map[string]any{"call_id": "c2"}, map[string]any{"call_id": "c2"})
+	s.turned(first, "first-2", s.base.Add(2*time.Minute), answeredAfter("first-1"))
+	s.turned(first, "first-3", s.base.Add(3*time.Minute), answeredAfter("first-2"))
+	s.calledTool(first, "first-3", "lookup_order", s.base.Add(3*time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	s.turned(first, "first-4", s.base.Add(4*time.Minute), answeredAfter("first-3"))
+	s.calledTool(first, "first-4", "lookup_order", s.base.Add(4*time.Minute), map[string]any{"call_id": "c2"}, map[string]any{"call_id": "c2"})
 
 	second := s.opened("second", "acme", s.base, nil)
 	s.turned(second, "second-1", s.base, nil)
-	s.turned(second, "second-task", s.base.Add(time.Minute), func(response *AgentResponse) {
-		response.ParentResponseID = "second-1"
-	})
-	s.calledTool(second, "second-task", "lookup_order", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	s.calledTool(second, "second-1", "lookup_order", s.base, map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
 
 	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -317,14 +313,67 @@ func (s *StoreSuite) TestTurnsBeforeAToolIsUsedAreTheConversationsOwn() {
 	s.EqualValues(3, tools[0].Calls)
 	s.EqualValues(2, tools[0].Sessions)
 	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
-	// Two turns before the first session's first call, none before the second's: a call in a
-	// delegated task is the turn that delegated it's.
+	// Two turns before the first session's first call, the rewound one not among them, and
+	// none before the second's.
 	s.InDelta(1.0, *tools[0].AvgTurnsBeforeUse, 0.001)
 	s.Nil(overall.AvgTurnsBeforeUse)
 
 	turns, err := s.store.CustomerTurns(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Equal(SessionTurns{Sessions: 2, Turns: 5}, turns)
+}
+
+func (s *StoreSuite) TestASessionOfFiveTurnsIsFiveTurnsPerSession() {
+	session := s.opened("five", "acme", s.base, nil)
+	parent := ""
+	for i := range 5 {
+		id := fmt.Sprintf("five-%d", i)
+		s.turned(session, id, s.base.Add(time.Duration(i)*time.Minute), answeredAfter(parent))
+		parent = id
+	}
+
+	turns, err := s.store.CustomerTurns(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Equal(SessionTurns{Sessions: 1, Turns: 5}, turns)
+}
+
+func (s *StoreSuite) TestAToolUsedOnTheFourthTurnHadThreeTurnsBeforeIt() {
+	session := s.opened("late", "acme", s.base, nil)
+	parent := ""
+	for i := range 4 {
+		id := fmt.Sprintf("late-%d", i)
+		s.turned(session, id, s.base.Add(time.Duration(i)*time.Minute), answeredAfter(parent))
+		parent = id
+	}
+	s.calledTool(session, "late-3", "lookup_order", s.base.Add(3*time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(3.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+}
+
+func (s *StoreSuite) TestATextSessionAddsNothingToCallsOrVoiceMinutes() {
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{
+		ID: "typed", CustomerID: "acme", AgentID: "a-1", StartedAt: s.base,
+	}))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "acme", "typed", s.base.Add(30*time.Minute)))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{
+		ID: "spoken", CustomerID: "acme", CallID: "c-1", AgentID: "a-1", StartedAt: s.base.Add(time.Minute),
+	}))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "acme", "spoken", s.base.Add(3*time.Minute)))
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Calls, "only the stretch that had a call")
+	s.InDelta(2, buckets[0].VoiceMinutes, 0.001)
+}
+
+// answeredAfter is a turn answered after parent, as every turn but a session's first is.
+func answeredAfter(parent string) func(*AgentResponse) {
+	return func(response *AgentResponse) { response.ParentResponseID = parent }
 }
 
 func (s *StoreSuite) TestToolUsageReportsTheLatestDefinitionAToolWasOfferedWith() {

@@ -279,7 +279,7 @@ With tracing on, each LLM model call has a `chat <model>` span with `gen_ai.oper
 
 ### The Kotlin SDK is published to Stream's Maven repository
 
-`io.getstream:stream-agents-android-core` is published to `https://stream-io-repo.com` by `publish-sdk-kotlin.yml`, from `release-kotlin-*` branches only, with `version` in `sdks/kotlin/gradle.properties` matching the branch. Each push to `release-kotlin-X.Y.Z-SNAPSHOT` publishes a 7-day snapshot, `X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT`. A pull request from `release-kotlin-X.Y.Z` fails unless the version is newer than the last release and not already published, and merging it publishes that release and tags the commit `sdk-kotlin-vX.Y.Z`. Other merges into `accelerate` publish nothing. No GitHub release is made, so the Python release does not start. The first release is 0.2.0.
+`io.getstream:stream-agents-android-core` is published to `https://stream-io-repo.com` by `publish-sdk-kotlin.yml`, from `release-kotlin-*` branches, with `version` in `sdks/kotlin/gradle.properties` matching the branch. Each push to `release-kotlin-X.Y.Z-SNAPSHOT` publishes a 7-day snapshot, `X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT`. A pull request from `release-kotlin-X.Y.Z` fails unless the version is newer than the last release and not already published, and merging it publishes that release and tags the commit `sdk-kotlin-vX.Y.Z`. Other merges into `main` publish nothing. Each GitHub release of the whole repository, tagged `vX.Y.Z` or `X.Y.Z` on a commit on `main`, publishes Kotlin `X.Y.Z` from that commit and tags it too, unless `X.Y.Z` is not newer than the last Kotlin release or already published; pre-releases and other tags publish nothing. The first release is 0.2.0.
 
 ### Juno on Flutter
 
@@ -710,6 +710,10 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### The Go SDK reads no items for a turn with no id
+
+`AgentResponse.Items`, on the handle `Responses.Create` returns, fails with `client.ErrUnnamedTurn` when the turn has no id: the router names none for an incognito session, a speech-to-speech session or the retry of a `request_id` already taken. It used to read every turn in the session instead, passed off as this turn's; a caller that relied on that now gets the error, and reads `Session.Responses.Items` for the whole session or follows `Session.Events` (AI-3571).
+
 ### A call has an id of its own and names its session
 
 A call's `id` was its session's id; it is now the call's own, and a session starts a new call each time voice is started or stopped on it (an incognito session keeps none). `Call` gains `session_id`, absent once the session is deleted, and loses `config_id` and `user_id`, which are the session's. `GET /v1/agents/calls?session_id=` lists one session's calls, newest first. A read of `/v1/agents/calls/{id}` and its `transcript`, `timeline`, `events` and `tokens` with a session id now answers 404 `call_not_found`: list the session's calls for the call id. A call from before keeps the id it had, its session's. The Go SDK's `Sessions.Timeline` and `Sessions.Decisions` read the session's newest call this way, and fail with `client.ErrNoCall` for a session that has none. The other SDKs and the Volt dashboard still read a session id as a call id.
@@ -896,6 +900,10 @@ In a channel an agent config answers through `chat_channels`, a call of a tool y
 ### A connection keeps a rotated token when saving it fails once
 
 When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
+
+### The migrations after the baseline run on a live database without holding up its writes
+
+Every migration run in a transaction gives up a lock it waits more than 5 s for, so the router's next start tries again rather than queueing every write behind it. The move of calls onto sessions adds its key unchecked, backfills a thousand sessions a transaction, builds its indexes concurrently and checks the key, keeping the old session columns for the release before. A write through a data change trigger attached by the release before is recorded without its secrets rather than refused until the triggers are attached again. A leg two placed calls match goes to the one with its vendor call id, then to the nearest in time. A database that ran a migration the sets do not have is refused rather than adopted. The router and the usage service migrate on a pool with no read timeout, and the first shared migrations have Down sections (AI-3488).
 
 ### An SMS reply sets its price aside before it is sent
 

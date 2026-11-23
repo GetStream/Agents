@@ -13,10 +13,13 @@ export const API_SECRET_ENV = "STREAM_API_SECRET";
 export const AUTHENTICATE_ENV = "STREAM_ACCELERATION_AUTHENTICATE";
 
 /**
- * This SDK's release, the version in package.json. It is written here by hand at each release,
- * and a test fails while the two differ.
+ * Written in by the build, `vite.config.ts`, from package.json. Undefined where the source runs
+ * without it, as in the tests.
  */
-export const VERSION = "0.4.3";
+declare const __SDK_VERSION__: string | undefined;
+
+/** This SDK's release, the version npm published. */
+export const VERSION: string = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-development";
 
 /** How long a token minted here lasts. */
 const TOKEN_VALIDITY_SECONDS = 60 * 60;
@@ -1070,8 +1073,10 @@ function runsOnNode(): boolean {
 }
 
 /**
- * What every request says this SDK is: the router counts a call that says `sdk` as the SDK's
- * rather than the API's, and logs the User-Agent with the release that made it.
+ * What every request says this SDK is: `X-Stream-Client` names the SDK, its release and where it
+ * runs, in the shape stream-chat-js sends (`stream-chat-js-v<version>-<node|browser>`). The router
+ * counts a client starting `stream-agents-` as the SDK's rather than the API's, and logs both
+ * headers with the release that made the call.
  *
  * A browser sends `X-Stream-Client` alone. It names its own User-Agent, and both the router's
  * and the proxy's CORS lists allow `X-Stream-Client` and not `User-Agent`, so a page that set
@@ -1079,8 +1084,8 @@ function runsOnNode(): boolean {
  */
 function clientHeaders(): Record<string, string> {
   return runsOnNode()
-    ? { "X-Stream-Client": "sdk", "User-Agent": `stream-agents-js/${VERSION}` }
-    : { "X-Stream-Client": "sdk" };
+    ? { "X-Stream-Client": `stream-agents-js-v${VERSION}-node`, "User-Agent": `stream-agents-js/${VERSION}` }
+    : { "X-Stream-Client": `stream-agents-js-v${VERSION}-browser` };
 }
 
 /**

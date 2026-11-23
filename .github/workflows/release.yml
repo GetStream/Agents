@@ -24,41 +24,31 @@ jobs:
     if: startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     environment: pypi
+    # Not gated on `integration`, by decision: a provider outage must not hold back a release, so
+    # this run can end `failure` after a good publish. Check this job, not the run's conclusion.
     # The OIDC token is this job's alone, so the integration job, which holds every
     # provider secret, cannot mint one.
     permissions:
       contents: read
       id-token: write       # REQUIRED for PyPI Trusted Publishing (OIDC)
     outputs:
-      version: ${{ steps.get_version.outputs.version }}
+      version: ${{ steps.build.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      # No dependency cache in a job that holds an OIDC token: a cache poisoned by another
-      # run would hand that token to whatever it planted.
-      - uses: ./.github/actions/python-uv-setup
-        with:
-          enable-cache: "false"
-
-      - name: Clean dist directory
-        run: |
-          rm -rf dist
-
+      # Builds every package and fails, before anything is uploaded, unless each file carries the
+      # tag's version. release-check.yml runs the same steps without the PyPI environment.
       - name: Build all distributions
-        env:
-          UV_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-build-constraints.txt
-        run: |
-          uv build --all
+        id: build
+        uses: ./.github/actions/build-python-packages
+        with:
+          tag: ${{ github.event.release.tag_name }}
 
-      - name: Extract package version (hatch via uv)
-        id: get_version
-        working-directory: sdks/python
-        run: |
-          VERSION=$(uvx -q --from 'hatch==1.18.2' hatch version)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
+      # `always`: the default, `automatic`, carries on without credentials when uv cannot get a
+      # token. Each PyPI project must list this workflow file and the `pypi` environment as a
+      # trusted publisher.
       - name: Publish to PyPI (Trusted Publishing)
-        run: uv publish
+        run: uv publish --trusted-publishing always
 
   test-core-index:
     name: Verify PIP install works

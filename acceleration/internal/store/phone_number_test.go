@@ -43,7 +43,20 @@ func (s *StoreSuite) TestANumberSomebodyElseHoldsCannotBeReleased() {
 
 	err := s.store.PhoneNumbers.Release(s.ctx, "globex", "+15125551234", s.base)
 
-	s.ErrorContains(err, "is not a number globex holds")
+	s.ErrorIs(err, ErrNoNumber)
+	s.EqualError(err, "store: +15125551234 is not a number globex holds")
+}
+
+func (s *StoreSuite) TestANumberSomebodyElseHoldsCannotBeAttached() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125551234", Vendor: "twilio", Country: "US",
+		CustomerID: "acme", PurchasedAt: s.base,
+	}))
+
+	err := s.store.PhoneNumbers.Attach(s.ctx, "globex", "+15125551234", NumberAttachment{TrunkID: "trunk-1", CallType: "default"})
+
+	s.ErrorIs(err, ErrNoNumber)
+	s.EqualError(err, "store: +15125551234 is not a number globex holds")
 }
 
 func (s *StoreSuite) TestANumberIsRecordedOnlyInE164Form() {

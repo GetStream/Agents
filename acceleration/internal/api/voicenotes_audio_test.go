@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -293,6 +294,28 @@ func (s *VoiceNoteAudioSuite) TestARouterFetchesAVoiceNoteOnlyFromAPublicAddress
 
 	s.ErrorContains(err, "non-public address", "the suite's CDN is on loopback")
 	s.Zero(s.fetches.Load(), "the note is refused before it is fetched")
+	s.Nil(heard.recording.Audio, "nothing is heard")
+}
+
+func (s *VoiceNoteAudioSuite) TestAVoiceNoteOnAHostThatDoesNotResolveIsRefusedNamingNeitherHostNorResolver() {
+	server, err := NewServer(Options{
+		Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Auth: auth.Func(func(context.Context, *http.Request) (auth.Principal, error) {
+			return auth.Principal{}, nil
+		}),
+		AuthMode: auth.Custom,
+	})
+	s.Require().NoError(err)
+	heard := &heardTranscriber{}
+	server.streams = &Streams{Transcriptions: s.recordings(heard)}
+
+	_, err = server.hearVoiceNote(context.Background(), session.Spec{CustomerID: "acme"}, "https://notes.invalid/note.wav", "")
+
+	refusal, refused := errors.AsType[APIError](err)
+	s.Require().True(refused, "a note nobody can fetch is the caller's to change: %v", err)
+	s.Equal(ErrorTypeInvalidRequest, refusal.Type)
+	s.NotContains(refusal.Message, "notes.invalid")
+	s.NotContains(refusal.Message, "lookup")
 	s.Nil(heard.recording.Audio, "nothing is heard")
 }
 

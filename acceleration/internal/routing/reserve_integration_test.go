@@ -215,6 +215,39 @@ func (s *ReserveSuite) TestAFailedCallReleasesItsReservation() {
 	s.False(s.rows(1)[0].Success)
 }
 
+func (s *ReserveSuite) TestARecordedHookIsToldOnlyOnceTheReservationIsReleased() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	var held error
+	told := false
+	meter.Recorded = func(routing.Stat, int64) { held, told = s.spend(), true }
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		return nil, errors.New("vendor down")
+	})
+
+	s.Require().Error(err)
+	s.True(told)
+	s.NoError(held, "the hook runs after the reservation is let go, so work it does holds no money")
+}
+
+func (s *ReserveSuite) TestAPanickingRecordedHookStillReleasesTheReservation() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	meter.Recorded = func(routing.Stat, int64) { panic("hook fell over") }
+
+	s.PanicsWithValue("hook fell over", func() {
+		_, _ = routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+			return nil, errors.New("vendor down")
+		})
+	})
+
+	s.NoError(s.spend(), "a failed call holds nothing, though its hook panicked")
+	s.False(s.rows(1)[0].Success, "and the row was queued before the hook ran")
+}
+
 func (s *ReserveSuite) TestWorkThatNamesItsOwnIDReleasesTheReservation() {
 	s.credit(2_000_000)
 	meter := s.meter()

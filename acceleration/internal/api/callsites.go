@@ -234,7 +234,8 @@ func (s *Server) logCallSites(ctx context.Context, call endedCall) {
 		}
 		logged := append([]any{"session_id", call.callID}, attributesOf(details)...)
 		if err != nil {
-			details["error_message"] = err.Error()
+			// The row is the customer's to read; the error, naming Stream's hosts, is the log's.
+			details["error_message"] = callSitesUnread
 			s.logger.Warn("could not read a phone call's sites", append(logged, "error", err)...)
 		} else {
 			s.logger.Info("phone call sites", logged...)
@@ -242,6 +243,9 @@ func (s *Server) logCallSites(ctx context.Context, call endedCall) {
 		s.recordCallSites(ctx, call, details)
 	}()
 }
+
+// callSitesUnread is why a call_sites row names no SFUs.
+const callSitesUnread = "the call's stats could not be read from Stream"
 
 func (s *Server) fetchSites(ctx context.Context, call endedCall, read readCallStats, waits []time.Duration) (callSites, error) {
 	bound, err := s.streamForApp(ctx, call.customer, call.app, true)

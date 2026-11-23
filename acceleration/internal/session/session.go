@@ -146,6 +146,14 @@ type ToolApprovalIgnored struct {
 	Reason    string
 }
 
+// ToolResultIgnored is a tool_result no call took, with the ids it named and why.
+type ToolResultIgnored struct {
+	ID        string
+	CommandID string
+	TurnID    string
+	Reason    string
+}
+
 // ToolUser is who a tool call was made for.
 type ToolUser struct {
 	ID   string
@@ -1181,11 +1189,13 @@ func (s *Session) AwaitCommand(ctx context.Context, id, text, clientID string) (
 	return receipt, nil
 }
 
-// Report publishes a failure the watcher should see, without ending the session.
+// Report publishes a failure the watcher should see, without ending the session. It logs the
+// failure, since what the turns it fails keep says only which part failed.
 func (s *Session) Report(err error, context string) {
 	if err == nil {
 		return
 	}
+	s.logger.Warn("a failure reported to the session's watchers", "session", s.id, "context", context, "error", err)
 	s.broadcast(agent.Error{Err: err, Context: context})
 }
 
@@ -1193,6 +1203,12 @@ func (s *Session) Report(err error, context string) {
 // its sender can tell which of its answers it is.
 func (s *Session) IgnoreApproval(id, commandID, turnID string, reason error) {
 	s.broadcast(ToolApprovalIgnored{ID: id, CommandID: commandID, TurnID: turnID, Reason: reason.Error()})
+}
+
+// IgnoreToolResult tells the watchers a tool_result reached no call, naming the ids it sent so
+// its sender can tell which of its results it is.
+func (s *Session) IgnoreToolResult(id, commandID, turnID string, reason error) {
+	s.broadcast(ToolResultIgnored{ID: id, CommandID: commandID, TurnID: turnID, Reason: reason.Error()})
 }
 
 // WaitsForResult reports whether the call id waits for a watcher's tool_result.
@@ -2308,10 +2324,15 @@ func (s *Session) abandonTurns() {
 // failTurns records a failure against every turn still in flight and closes them. The turn
 // the prompt injection screen refused, with every reply that continued it, is closed as
 // refused, so what it asked is never replayed to a model; the others failed with it.
+// Callers read the reason back, so it names the part that failed and never the cause's text,
+// which whoever reported it logged.
 func (s *Session) failTurns(where string, cause error, refusedTurn string) {
-	reason := cause.Error()
+	reason := "the turn failed"
 	if where != "" {
-		reason = where + ": " + reason
+		reason = where + " failed"
+	}
+	if errors.Is(cause, policy.ErrPromptInjection) {
+		reason = policy.ErrPromptInjection.Error()
 	}
 
 	s.turnsMu.Lock()

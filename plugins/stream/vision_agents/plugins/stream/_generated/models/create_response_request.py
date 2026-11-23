@@ -24,9 +24,9 @@ T = TypeVar("T", bound="CreateResponseRequest")
 class CreateResponseRequest:
     """
     Attributes:
-        text (str): What to answer, as though it had been said. May be empty when images or audio carry the question.
-            Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data
-            URIs, at most 8, with or without a request_id.
+        text (str): What to answer, as though it had been said. May be empty when images or audio carry the question, or
+            with replaces to answer the replaced response's question again. Images with no text are shown on the person's
+            message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
         audio (AudioSource | Unset):
         images (list[ImageSource] | Unset):
         max_output_tokens (int | Unset): Caps this answer, reasoning included, and the replies that finish it after its
@@ -57,9 +57,9 @@ class CreateResponseRequest:
             in a person's own conversation: refused in a thread, in a channel others write in, in a session a worker opened
             for a channel's message, and by a speech-to-speech session. Not with a voice note. Refused before any turn
             starts when it cannot be read, is too large, or reads as a prompt injection under the organization's policy.
-        replaces (str | Unset): An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no
-            text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes
-            no images, audio, videos, files or ui_action.
+        replaces (str | Unset): An earlier response of a conversation kept in Stream Chat to regenerate or edit. With
+            text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text,
+            the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
     """
 
     text: str

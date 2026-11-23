@@ -345,7 +345,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Calls.Select(ctx, "customer-7", CallFilter{AgentID: "agent-7"})
 			return err
 		}},
-		{name: "Calls.Select by campaign", index: "calls_campaign_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Calls.Select by campaign", index: "calls_customer_campaign_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Calls.Select(ctx, "customer-10", CallFilter{CampaignID: "campaign-10"})
 			return err
 		}},
@@ -712,6 +712,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		}},
 		{name: "Buckets.Select", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Buckets.Select(ctx, "customer-7", BucketFilter{Modality: "llm", Granularity: Hourly, From: since, To: until})
+			return err
+		}},
+		{name: "TagBuckets.Select", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.TagBuckets.Select(ctx, "customer-7", TagBucketFilter{Modality: "llm", Key: "project", Granularity: Hourly, From: since, To: until})
 			return err
 		}},
 		{name: "Sandboxes.Usage", index: "requests_started_idx", run: func(ctx context.Context, store *Store) error {

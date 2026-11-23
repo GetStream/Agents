@@ -131,7 +131,8 @@ type task struct {
 	bundle map[string]string
 	// rounds is how many times this task has run code.
 	rounds int
-	// broken is what went wrong with the last code it ran, empty once code runs cleanly.
+	// broken is what went wrong with the last code it ran, empty once code runs cleanly. It
+	// becomes the task's error, which watchers are sent, so it never holds the sandbox's text.
 	broken string
 	// files are what its code handed back and was published, the latest of each name.
 	files []sandbox.Attachment
@@ -826,13 +827,13 @@ func (m *manager) ran(running *task, call llm.ToolCall) string {
 
 	if err := m.writeBundle(running); err != nil {
 		m.logger.Error("could not put the skill's files in the sandbox", "skill", running.skill, "error", err)
-		m.setBroken(running, "the skill's files could not be put in the sandbox: "+err.Error())
+		m.setBroken(running, "the skill's files could not be put in the sandbox")
 		return "The skill's files could not be put in the sandbox: " + err.Error()
 	}
 	result, err := m.box.Run(running.ctx, arguments.Code, arguments.Files)
 	if err != nil {
 		m.logger.Error("could not run code", "error", err)
-		m.setBroken(running, "the code could not be run: "+err.Error())
+		m.setBroken(running, "the code could not be run")
 		return "The code could not be run: " + err.Error()
 	}
 	m.setBroken(running, "")

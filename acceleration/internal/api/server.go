@@ -389,9 +389,15 @@ type Server struct {
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
+	exportLineWait     time.Duration
+	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
 	connectors         core.Registry
+	// exporting holds the customers with an export running on this router, one each, and
+	// exports a place for each export running on it, of maxExports.
+	exporting sync.Map
+	exports   chan struct{}
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -589,6 +595,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		authMode:           authMode,
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
+		exportLineWait:     exportLineWait,
+		exportWait:         exportWait,
+		exports:            make(chan struct{}, maxExports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
@@ -1046,7 +1055,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		}
 
 		// A socket reports the life of the connection rather than a time to respond,
-		// since it is logged once it has closed.
+		// since it is logged once it has closed, and why it closed (socketEnd).
 		fields := []any{
 			"method", r.Method,
 			"path", loggedPath(routes, r),
@@ -1058,6 +1067,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		if recorder.written > 0 {
 			fields = append(fields, "bytes", recorder.written)
 		}
+		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
 			fields = append(fields, "error", failure.err.Error())
 		}
@@ -1102,8 +1112,9 @@ func answeredHealthy(routes *chi.Mux, r *http.Request, status int, failure *requ
 
 // maxLoggedValue caps a value the caller chose, a header or an anonymous caller's user id, on
 // the access line. net/http admits up to 1 MiB of headers (http.DefaultMaxHeaderBytes), which
-// would otherwise land on one line. The clients the router knows by X-Stream-Client are short
-// words (store.AuditSource), and 256 bytes is enough to tell user agents apart.
+// would otherwise land on one line. The clients the router knows by X-Stream-Client are a word
+// or an SDK's name and release (store.AuditSource), well under it, and 256 bytes is enough to
+// tell user agents apart.
 const maxLoggedValue = 256
 
 // accessFields are the access line's fields named as the Stream platform's access logs name
@@ -1344,6 +1355,16 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
 			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A credential that could not be checked (the key store down, a key that would not
+		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+		// runs after this.
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			s.logger.Error("could not check a credential", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+				"error", err, "stack", stack.Trace(err))
+			writeError(w, internalError())
 			return
 		}
 		if err == nil && principal.AppID != "" {
@@ -2643,7 +2664,7 @@ type AgentStats struct {
 	PeakConcurrentSessions int64       `json:"peak_concurrent_sessions" doc:"The most sessions open at the same time, each one an agent running. A session still open counts up to now."`
 	PeakAt                 *time.Time  `json:"peak_at" nullable:"true" doc:"When that peak was first reached. Null when no session was open in the window."`
 	Sessions               int64       `json:"sessions" doc:"Sessions that took a turn in the window: what a tool's session_share is out of."`
-	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one."`
+	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one."`
 	ToolCalls              ToolStats   `json:"tool_calls" doc:"Every tool call in the window, as one. Its tool is empty."`
 	Tools                  []ToolStats `json:"tools" nullable:"false" doc:"One row per tool, most called first."`
 }

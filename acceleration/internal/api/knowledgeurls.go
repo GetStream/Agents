@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -78,8 +79,11 @@ func (s *Server) addKnowledgeUrl(ctx context.Context, request *addKnowledgeUrlRe
 	}
 
 	page, err := s.pages.Add(ctx, customerID, wanted)
-	if err != nil {
+	if errors.Is(err, urls.ErrRefused) {
 		return nil, invalidRequest(err.Error())
+	}
+	if err != nil {
+		return nil, err
 	}
 	subscribed := knowledgeURLOf(page)
 	s.audit(ctx, auditRecord{

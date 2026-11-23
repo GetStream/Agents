@@ -100,13 +100,18 @@ func (s *ClassifySuite) TestAClassifierAskedTooOftenSaysToComeBack() {
 	status, failure := s.refused(s.allThree("rate limited"))
 
 	s.Equal(http.StatusTooManyRequests, status)
-	s.Contains(failure, "429")
+	s.Contains(failure, "try again shortly")
+	s.NotContains(failure, "typesafe", "what the provider said is for the log")
+	s.NotContains(failure, "429")
 }
 
 func (s *ClassifySuite) TestAClassifierThatIsDownIsAServiceUnavailable() {
-	status, _ := s.refused(s.allThree("unavailable"))
+	status, failure := s.refused(s.allThree("unavailable"))
 
 	s.Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, "try again shortly")
+	s.NotContains(failure, "typesafe", "what the provider said is for the log")
+	s.NotContains(failure, "529")
 }
 
 func (s *ClassifySuite) TestATargetNobodyRoutesIsNotFound() {

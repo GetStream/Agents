@@ -234,8 +234,10 @@ func (s *MirrorSuite) TestARedisThatIsDownAtStartDelaysOnlyTheMirror() {
 
 func (s *MirrorSuite) TestAFailedWriteIsGivenUpAfterAMinuteAndTheNextWriteRepairsIt() {
 	clock := &fakeClock{now: time.Now()}
+	logs := &lockedBuffer{}
 	mirror, err := ledger.NewMirror(ledger.MirrorOptions{
 		URL: "redis://" + s.relay.address + "/" + strconv.Itoa(usagetest.RedisDB), Timeout: 200 * time.Millisecond, Now: clock.read,
+		Logger: slog.New(slog.NewTextHandler(logs, nil)),
 	})
 	s.Require().NoError(err)
 	defer mirror.Close()
@@ -243,6 +245,7 @@ func (s *MirrorSuite) TestAFailedWriteIsGivenUpAfterAMinuteAndTheNextWriteRepair
 	now := time.Now()
 	s.False(mirror.Write(s.ctx, []ledger.UsageWindow{s.window(usage.Daily, now, 40)}))
 	s.Equal(1, mirror.Pending())
+	s.Empty(logs.String(), "a write that is retried logs nothing")
 	givenUp := testutil.ToFloat64(ledger.MirrorGivenUp)
 
 	clock.add(time.Minute)
@@ -251,6 +254,8 @@ func (s *MirrorSuite) TestAFailedWriteIsGivenUpAfterAMinuteAndTheNextWriteRepair
 	go mirror.Run(ctx)
 	s.Eventually(func() bool { return mirror.Pending() == 0 }, 3*time.Second, 20*time.Millisecond)
 	s.Equal(givenUp+1, testutil.ToFloat64(ledger.MirrorGivenUp))
+	s.Contains(logs.String(), `level=ERROR msg="gave up mirroring window totals to redis`)
+	s.Contains(logs.String(), "organization="+s.organization+" counters=1")
 
 	s.relay.open(s.T())
 	mirror.Write(s.ctx, []ledger.UsageWindow{s.window(usage.Daily, now, 41)})

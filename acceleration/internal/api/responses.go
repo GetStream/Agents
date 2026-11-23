@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -145,6 +147,14 @@ func (s *Server) createResponse(ctx context.Context, request *createResponseRequ
 	}
 	for index, sent := range videos {
 		frames, length, err := video.Frames(ctx, sent.Url, value(sent.MaxFrames))
+		if _, fetching := errors.AsType[*url.Error](err); fetching {
+			// The failure names the URL, and the addresses and DNS server it was dialled with.
+			recordFailure(ctx, withoutURL(err), "")
+			return nil, invalidRequest(fmt.Sprintf("video %d could not be fetched", index+1))
+		}
+		if _, local := errors.AsType[*fs.PathError](err); local {
+			return nil, err
+		}
 		if err != nil {
 			return nil, invalidRequest(err.Error())
 		}
@@ -606,10 +616,10 @@ type CreateResponseRequest struct {
 	Files           *[]FileSource   `json:"files,omitempty" doc:"A file to answer questions about: a PDF or a Word document. The router reads it as text before the turn starts, and the agent answers from it on this turn and on every turn of the conversation after it, including a conversation carried on later or forked by the same person. In a conversation kept in Stream Chat the person's message shows the file. At most 100 pages, and at most 120,000 characters of text together with the files the conversation already holds, or a quarter of what the model reads at once. Only in a person's own conversation: refused in a thread, in a channel others write in, in a session a worker opened for a channel's message, and by a speech-to-speech session. Not with a voice note. Refused before any turn starts when it cannot be read, is too large, or reads as a prompt injection under the organization's policy." maxItems:"1"`
 	Audio           *AudioSource    `json:"audio,omitempty" doc:"A voice note to answer. The router transcribes it and answers what was said, after text when both are sent; text may then be empty. In a conversation kept in Stream Chat the person's message carries the transcript and shows the voice note. Refused before any turn starts when it is not audio, has no words in it, or the deployment transcribes nothing in the agent's region."`
 	Images          *[]ImageSource  `json:"images,omitempty"`
-	Replaces        *string         `json:"replaces,omitempty" doc:"An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action."`
+	Replaces        *string         `json:"replaces,omitempty" doc:"An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as \"\", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action."`
 	MaxOutputTokens *int            `json:"max_output_tokens,omitempty" doc:"Caps this answer, reasoning included, and the replies that finish it after its tools. Omitted keeps the session's." minimum:"1"`
 	ReasoningEffort *string         `json:"reasoning_effort,omitempty" doc:"How long the model may think before this answer, and the replies that finish it after its tools. One of the efforts the session's model accepts, such as none, minimal, low, medium, high or max; any other is a 400. Omitted keeps the session's."`
-	Text            string          `json:"text" doc:"What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id."`
+	Text            string          `json:"text" doc:"What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id."`
 	UiAction        *map[string]any `json:"ui_action,omitempty" doc:"What the person did in the generated UI of an earlier reply, such as tapping a place or submitting a form, which the text says in their words: an object naming the reply (message_id), the UI's format and the action (name), with what it carries (payload), of at most 8 KB as JSON. Their message carries it as custom.ai_ui_action, and the model is told it after the text."`
 	Videos          *[]VideoSource  `json:"videos,omitempty" doc:"Recorded clips to show the agent. The router samples evenly spaced frames from each and hands them to the vision skill with their timestamps, which is how every vision model is shown a video, since none of the ones routed here take one whole." maxItems:"2"`
 }

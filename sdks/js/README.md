@@ -1059,7 +1059,11 @@ git tag sdk-js-v0.2.0 && git push origin sdk-js-v0.2.0
 then on npmjs.com, under the package's settings, add GitHub Actions as a trusted publisher:
 `GetStream/Agents`, workflow `release-sdk-js.yml`. From then on the version in
 `package.json` is not maintained: semantic-release writes the next one into the package it
-publishes and nothing is committed back.
+publishes and nothing is committed back, so the committed one is the placeholder
+`0.0.0-development`. The release is the newest `sdk-js-v*` tag, and npm.
 
-A version bump committed to `package.json` also sets `VERSION` in `src/backend.ts`, the release
-every request from Node names in its `User-Agent`; `npm test` fails while the two differ.
+`prepublishOnly` runs `npm run build`: Vite (`vite.config.ts`) builds `dist/`, one module per
+source file, and `tsc` writes the declarations beside them. The build writes the version in
+`package.json`, which semantic-release has just set, into `VERSION`, the release every request
+from Node names in its `User-Agent`. The source names it `__SDK_VERSION__`; run through `tsc`
+alone, as the tests and examples are, `VERSION` is `0.0.0-development`.

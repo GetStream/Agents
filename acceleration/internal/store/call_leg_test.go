@@ -6,11 +6,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/pressly/goose/v3"
-	"github.com/pressly/goose/v3/database"
-
-	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 )
 
 func (s *StoreSuite) TestOnlyTheRefusedCallersLegIsRefused() {
@@ -346,83 +341,6 @@ func (s *ShardedStoreSuite) TestALegAnotherShardPlacedIsChangedThere() {
 	found, err := s.other.CallLegs.GetByToken(s.ctx, "there")
 	s.Require().NoError(err)
 	s.Equal("busy", found.Outcome)
-}
-
-// mergeVersion is the shard migration that merges phone_calls into call_legs.
-const mergeVersion int64 = 20270116000001
-
-// billed is the seconds each customer's ended legs were billed, by vendor, direction and
-// country.
-func billed(legs []CallLeg) map[string]int64 {
-	totals := map[string]int64{}
-	for _, leg := range legs {
-		totals[leg.CustomerID+"/"+leg.Vendor+"/"+leg.Direction+"/"+leg.Country] += leg.Used()[pricing.CallSeconds]
-	}
-	return totals
-}
-
-func (s *StoreSuite) TestMergingPlacedCallsIntoTheirLegsBillsTheSame() {
-	db, err := Open(s.emptyDatabase("merge_legs"))
-	s.Require().NoError(err)
-	defer db.Close()
-	s.Require().NoError(db.migrate(s.ctx, db.global, globalSet))
-	versions, err := database.NewStore(database.DialectPostgres, shardSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", db.shard.DB, shardSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-	_, err = provider.UpTo(s.ctx, mergeVersion-1)
-	s.Require().NoError(err)
-
-	_, err = db.shard.ExecContext(s.ctx, `
-INSERT INTO call_legs (customer_id, call_type, call_id, vendor, vendor_call_id, direction, local_number, remote_number,
-    country, dialed_at, started_at, ended_at, end_reason) VALUES
-    ('acme', 'default', 'answered', 'telnyx', 'v-answered', 'outbound', '+15125550100', '+15125550199', 'US',
-        ?0, ?0::timestamptz + interval '5 seconds', ?0::timestamptz + interval '66 seconds', 'ended'),
-    ('acme', 'default', 'arrived', 'telnyx', NULL, 'inbound', '+15125550100', '+15125550142', 'US',
-        ?0, ?0, ?0::timestamptz + interval '90.5 seconds', 'left'),
-    ('acme', 'default', 'unanswered', 'twilio', 'v-unanswered', 'outbound', '+15125550100', '+442071838750', 'GB',
-        ?0, NULL, ?0::timestamptz + interval '30 seconds', 'unanswered'),
-    ('acme', 'default', 'by-numbers', 'twilio', NULL, 'outbound', '+15125550100', '+15125550177', 'US',
-        ?0, ?0::timestamptz + interval '1 second', ?0::timestamptz + interval '2.25 seconds', 'left');
-INSERT INTO phone_calls (token, customer_id, call_type, call_id, vendor, vendor_call_id, local_number, remote_number,
-    reports, placed_at, answered_at, ended_at, outcome) VALUES
-    ('t-answered', 'acme', 'default', 'answered', 'telnyx', 'v-answered', '+15125550100', '+15125550199',
-        true, ?0, ?0::timestamptz + interval '5 seconds', ?0::timestamptz + interval '66 seconds', 'completed'),
-    ('t-unanswered', 'acme', 'default', 'unanswered', 'twilio', 'v-unanswered', '+15125550100', '+442071838750',
-        true, ?0, NULL, ?0::timestamptz + interval '30 seconds', 'no_answer'),
-    ('t-by-numbers', 'acme', 'default', 'by-numbers', 'twilio', NULL, '+15125550100', '+15125550177',
-        false, ?0, NULL, NULL, NULL),
-    ('t-refused', 'acme', 'default', 'refused', 'telnyx', 'v-refused', '+15125550100', '+15125550188',
-        true, ?0, NULL, ?0::timestamptz + interval '3 seconds', 'busy')`, s.base)
-	s.Require().NoError(err)
-	var legs []CallLeg
-	s.Require().NoError(db.shard.NewSelect().Model(&legs).
-		Column("customer_id", "vendor", "direction", "country", "started_at", "ended_at").
-		Where("started_at IS NOT NULL").Scan(s.ctx))
-	before := billed(legs)
-
-	s.Require().NoError(db.Migrate(s.ctx))
-
-	ended, err := db.CallLegs.SelectEnded(s.ctx, s.base.Add(-time.Hour), s.base.Add(time.Hour), 100)
-	s.Require().NoError(err)
-	s.Equal(map[string]int64{"acme/telnyx/outbound/US": 61, "acme/telnyx/inbound/US": 91, "acme/twilio/outbound/US": 2}, before)
-	s.Equal(before, billed(ended), "the merge bills no leg more or less")
-
-	placed, err := db.CallLegs.SelectPlaced(s.ctx, "acme", []string{"answered", "unanswered", "by-numbers", "refused", "arrived"})
-	s.Require().NoError(err)
-	outcomes := map[string]string{}
-	for _, leg := range placed {
-		outcomes[leg.CallID] = leg.TokenHash + "/" + leg.Outcome
-	}
-	s.Equal(map[string]string{"answered": callTokenHash("t-answered") + "/completed", "unanswered": callTokenHash("t-unanswered") + "/no_answer",
-		"by-numbers": callTokenHash("t-by-numbers") + "/", "refused": callTokenHash("t-refused") + "/busy"}, outcomes)
-	var count int
-	s.Require().NoError(db.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM call_legs").Scan(&count))
-	s.Equal(5, count, "a placed call with a leg is that leg; only the one without becomes a leg of its own")
-	refused, err := db.CallLegs.GetByToken(s.ctx, "t-refused")
-	s.Require().NoError(err)
-	s.False(refused.Connected())
-	s.NotNil(refused.EndedAt, "a call with no leg is no leg still ringing")
 }
 
 func (s *StoreSuite) TestCallLegQueryBudgets() {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
@@ -120,11 +121,28 @@ func (s *Service) Update(ctx context.Context, useCase *store.UseCase, numbers []
 	return s.assign(ctx, *useCase, numbers)
 }
 
+// assign sends numbers as the use case. A number the app does not hold, or one named twice,
+// is the caller's to correct; a store failure is not.
 func (s *Service) assign(ctx context.Context, useCase store.UseCase, numbers []string) error {
-	if err := s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers); err != nil {
-		return stack.Wrap(fmt.Errorf("%w: %w", ErrInvalid, err))
+	if len(numbers) > 0 {
+		held, err := s.store.PhoneNumbers.Select(ctx, useCase.CustomerID, store.PhoneNumberFilter{})
+		if err != nil {
+			return err
+		}
+		holds := make(map[string]bool, len(held))
+		for _, number := range held {
+			holds[number.E164] = true
+		}
+		for i, number := range numbers {
+			if !holds[number] {
+				return stack.Wrap(fmt.Errorf("%w: %s is not a number this app holds", ErrInvalid, number))
+			}
+			if slices.Contains(numbers[:i], number) {
+				return stack.Wrap(fmt.Errorf("%w: %s is named twice", ErrInvalid, number))
+			}
+		}
 	}
-	return nil
+	return s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers)
 }
 
 // Delete removes a use case the vendor does not hold.

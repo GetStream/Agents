@@ -1688,10 +1688,8 @@ Writes go to this shard's database. Reads of one call, session or recording look
 shard, and lists merge every shard's rows, so a session carried on in another region is
 still one session. Each database runs the migration set it holds: `migrations/global` on the
 global one and `migrations/shard` on each shard's, both on the one database of a single node
-(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A database migrated
-before the sets were split kept every table; once every router runs a release with two sets,
-`router schema drop-strays` drops the empty ones of the other set. A socket for a session held in
-another shard is proxied to the node holding it, since that shard's relay is not this
+(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A socket for a session
+held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
@@ -2138,9 +2136,25 @@ is left out when the request has none:
 | `request_size` | The request's `Content-Length`. None for a chunked body |
 | `user_id` | The end user of a request from a user's device, cut to 256 bytes. None for a backend's request, even one that names a user |
 | `build_version` | The release the router was built from. None in a local build |
+| `close_reason` | Why a session socket closed: the events socket (`/v1/agents/sessions/{id}/events`) and `/v1/agents/socket`. None for any other request or socket. The values are below |
+| `close_code` | The code of the close frame the caller sent, or of the one the router sent. None for `client_gone` and `timeout` |
+| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it |
 
 A socket is logged once, when it closes, so its `duration` is how long the connection lived
-rather than a time to respond and its status is the `101` of the upgrade. A `5xx` is logged
+rather than a time to respond and its status is the `101` of the upgrade. A session socket's
+`close_reason` is one of these:
+
+| `close_reason` | When |
+| --- | --- |
+| `client_closed` | The caller sent a close frame, or a `close` command (a `stop` on `/v1/agents/socket`) that ended the session. A command sent once the session had ended is not counted: the line says `session_ended` |
+| `client_gone` | The connection broke with no close frame, or a write to the caller failed |
+| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` |
+| `session_ended` | The session ended for another reason. `end_reason` says which |
+| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`) |
+| `server_error` | `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read. The caller is sent `1008` |
+| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`) |
+
+A `5xx` is logged
 at error instead, because an access log at a busy deployment is the one stream nobody reads
 all of. A preflight is not logged, nor is a `/health` probe answered below `400` with no error:
 the load balancer and kubelet ask every few seconds. A probe that fails is logged. The query
@@ -2154,6 +2168,7 @@ is every call on a deployment with no ops key. They are tagged `Staff` in the sp
 
 | Route | What it is for |
 | ----- | -------------- |
+| `GET /v1/ops/activity` | Every organization's activity by UTC day, by cursor, with how far each got |
 | `GET /v1/ops/orgs/{org_id}/activity` | Whether an organization tried Agents, how far it got and how much it used |
 | `GET`, `PUT`, `DELETE /v1/ops/customers/{customer_id}/telephony-suspension` | Stop an app using the phone, and lift it |
 | `GET /v1/ops/use-cases`, `GET /v1/ops/use-cases/{id}`, `POST /v1/ops/use-cases/{id}/review` | Review 10DLC use cases |
@@ -2165,7 +2180,20 @@ An organization's activity reads `customer_activity` for every app of the organi
 out):
 
 ```bash
-curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
+```
+
+Every organization's activity is a list by cursor of `customer_activity`'s rows from `from` to
+`to`, UTC days, both included, at most 400 days apart (500 a page, `limit` up to 1000). Each page
+also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
+on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
+`app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+definitions of tried, API calls, production and churned:
+
+```bash
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
@@ -2218,9 +2246,10 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
-The router keeps activity for 400 days (`activityKeepDays` in `internal/store/activity_digest.go`).
+The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
 That is 13 months and a margin, so staff can compare a month with the same month a year before.
 GDPR asks that personal data is kept no longer than needed (Art. 5(1)(e)). The router that holds
 the cost anomaly lock deletes the older `customer_activity` and `activity_digests` rows once per
@@ -2343,10 +2372,19 @@ events `listUsage` answers, with its filters and cursor, without the organizatio
 `base_cost_micros`, `price_version` or `source`. The manage key opens none of them. The
 router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read them.
 
+**Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
+written. `router usage replay --from <log>` writes them from the log, once each. Each line
+holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
+text in the row is redacted and masked first. A user id that changes is left off, and the row
+bills to its app without that user. A line from before that holds the row as `row=` JSON the
+redaction rewrote, and cannot be recovered: replay counts it as could not be read.
+
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
 customer's users reaches the usage records. `router usage forget-user --app <app> --user <id>
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a
-hash of an email can be recomputed from it), in order: the requests of every shard; the usage
+hash of an email can be recomputed from it), in order, once their scheduled tasks are deleted
+with their runs, so none runs again, and the changes recorded of them made deletes: the
+requests of every shard; the usage
 service's events and the user's windows (`POST /v1/manage/users/forget`, one transaction, a
 window the replacement already has taking the forgotten one's spend), and again after
 `--settle` (2 minutes) for a batch a shipper read before the shards were rewritten; the user's
@@ -2357,9 +2395,10 @@ id on their resets, grants and campaigns. Usage and cost stay under the app. It 
 `forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
-that one replacement, with the run's own audit row. It covers
-the usage records only: sessions, conversation history and `agent_logs` have their own
-retention, and work recorded for the id afterwards carries it again.
+that one replacement, with the run's own audit row. Sessions, conversation history and
+`agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
+`keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
+that forgetting leaves alone.
 
 The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,

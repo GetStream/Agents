@@ -219,8 +219,10 @@ func (s *Server) createEventDestination(ctx context.Context, request *createEven
 		connectorID = definition.ID
 	}
 	sent := request.Body
+	// One answer for every refusal, as customManifest gives: egress's own errors tell a name
+	// that does not resolve from one that resolves to a private address.
 	if err := s.eventForwarder.CheckURL(ctx, sent.URL); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, invalidRequest("url must be a public https URL without userinfo, query or fragment")
 	}
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: customerID, ConnectorID: connectorID, URL: sent.URL, Forward: string(sent.Forward),

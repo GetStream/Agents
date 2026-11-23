@@ -122,12 +122,12 @@ func TestAPhoneFailureOfTheDeploymentsMissingSettingsIsNotConfigured(t *testing.
 		"no Stream app": {stack.Wrap(phone.ErrNoStream),
 			"phone lines are not available: this deployment has no Stream app to make them in"},
 		"a vendor without credentials": {stack.Wrap(phone.NotConfigured(errors.New("phone: twilio needs TWILIO_SID"))),
-			"phone: twilio needs TWILIO_SID"},
+			errPhoneNotConfigured.Message},
 		"every vendor without credentials": {stack.Wrap(phone.NotConfigured(errors.New("phone: no vendor has the credentials to be searched"))),
-			"phone: no vendor has the credentials to be searched"},
+			errPhoneNotConfigured.Message},
 		"a vendor without a setting it dials with": {stack.Wrap(fmt.Errorf("phone: dial: %w",
 			phone.NotConfigured(errors.New("telnyx: a connection id is required to place a call")))),
-			"phone: dial: telnyx: a connection id is required to place a call"},
+			errPhoneNotConfigured.Message},
 		"sip trunks off on this deployment": {stack.Wrap(phone.ErrSIPTrunksDisabled), phone.ErrSIPTrunksDisabled.Error()},
 	}
 	for name, want := range missing {
@@ -142,6 +142,24 @@ func TestAPhoneFailureOfTheDeploymentsMissingSettingsIsNotConfigured(t *testing.
 			require.Equal(t, want.message, got.Message, "%s: %s", answer, name)
 		}
 	}
+}
+
+// The settings a vendor lacks are named by the deployment's environment variables: the
+// operator reads them in the log, and the caller, who cannot set them, is not told them.
+func TestAPhoneVendorMissingASettingNamesNoEnvironmentVariable(t *testing.T) {
+	logged := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logged, nil))
+	failure := stack.Wrap(phone.NotConfigured(errors.New("phone: bandwidth needs BANDWIDTH_ACCOUNT_ID and BANDWIDTH_SITE_ID")))
+	handler, _ := served(t, func() error { return phoneFailure(logger, failure) })
+
+	response := postSync(handler, `{"name":"jean"}`)
+
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	require.Equal(t, codeNotConfigured, answered(t, response.Body.Bytes()).Code)
+	for _, setting := range []string{"BANDWIDTH_ACCOUNT_ID", "BANDWIDTH_SITE_ID", "phone:"} {
+		require.NotContains(t, response.Body.String(), setting)
+	}
+	require.Contains(t, logged.String(), "BANDWIDTH_ACCOUNT_ID and BANDWIDTH_SITE_ID", "the operator still learns what to set")
 }
 
 // What the gate or the store failed with is the router's: the client is told only that
@@ -260,6 +278,17 @@ func TestAVendorThatFailedIsAnsweredWithoutItsPathOrBody(t *testing.T) {
 	}
 }
 
+func TestASkippedVendorThatCouldNotBeReachedIsAnsweredWithoutTheNetworksWords(t *testing.T) {
+	logged := &bytes.Buffer{}
+	_, err := http.Get("http://numbers.vendor.invalid/search")
+	require.Error(t, err)
+
+	reason := skipReason(slog.New(slog.NewTextHandler(logged, nil)), phone.Skip{Vendor: "bird", Reason: err.Error(), Err: err})
+
+	require.Equal(t, "The phone vendor could not complete the request.", reason)
+	require.Contains(t, logged.String(), "numbers.vendor.invalid", "the log keeps what debugging needs")
+}
+
 func TestASkipForOurOwnReasonKeepsItsWords(t *testing.T) {
 	skip := phone.Skip{Vendor: "telnyx", Reason: "cannot search by region"}
 
@@ -269,10 +298,12 @@ func TestASkipForOurOwnReasonKeepsItsWords(t *testing.T) {
 func TestAVendorErrorSayingNotANumberIsNotTakenForANumberWeDoNotHold(t *testing.T) {
 	vendors := stack.Wrap(&phone.VendorError{Vendor: "twilio", Path: "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json",
 		Status: http.StatusNotFound, Message: "+15125551234 is not a number on this account"})
-	ours := stack.Wrap(errors.New("phone: +15125551234 is not a number you hold"))
+	ours := stack.Wrap(fmt.Errorf("phone: release +15125551234: %w", store.ErrNoNumber))
+	worded := stack.Wrap(errors.New("phone: +15125551234 is not a number you hold"))
 
 	require.False(t, isNumberNotHeld(vendors))
 	require.True(t, isNumberNotHeld(ours))
+	require.False(t, isNumberNotHeld(worded), "words alone are no answer of the store's")
 	require.False(t, isNumberNotHeld(nil))
 }
 
@@ -322,4 +353,17 @@ func TestAHookThatCannotBePointedIsAnsweredWithTryAgain(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.NotContains(t, response.Body.String(), "cmd/phone")
 	require.Contains(t, logged.String(), "level=ERROR")
+}
+
+func TestAnUnverifiedOrganizationIsToldToVerify(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	handler, _ := served(t, func() error { return phoneFailure(logger, stack.Wrap(phone.ErrVerificationRequired)) })
+
+	response := postSync(handler, `{"name":"jean"}`)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	answer := answered(t, response.Body.Bytes())
+	require.Equal(t, "verification_required", answer.Code)
+	require.Equal(t, "Verify your organization in the Stream dashboard to buy phone numbers. "+
+		"If you just did, try again in a minute.", answer.Message)
 }

@@ -172,7 +172,9 @@ func (s *Server) createAgentConfig(ctx context.Context, request *createAgentConf
 	if message, ok := toolsComplaint(config); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.channelsComplaint(ctx, config); !ok {
+	if message, ok, err := s.channelsComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.sandboxBindingsComplaint(ctx, customerID, config); err != nil {
@@ -336,7 +338,9 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 	if message, ok := toolsComplaint(config); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.channelsComplaint(ctx, config); !ok {
+	if message, ok, err := s.channelsComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.storedSkillSandboxComplaint(ctx, config); err != nil {

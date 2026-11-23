@@ -715,11 +715,14 @@ func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64
 	return total, nil
 }
 
-// RenameUser replaces an app's end user id with replacement on every shard's requests, and
-// answers how many rows it rewrote.
+// RenameUser replaces an app's end user id with replacement on every shard's requests, and in
+// the changes recorded of their requests in the same statement (renamedChanges), and answers
+// how many rows it rewrote. A request recorded after the statement keeps its change as it is.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
 	renamed, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*Request)(nil)).Set("user_id = ?", replacement).
+		// A data-modifying WITH runs to the end whether or not the statement reads it.
+		changes := renamedChanges(db, appID, "requests", userID, replacement)
+		return db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
 			Where("customer_id = ?", appID).Where("user_id = ?", userID).Exec(ctx)
 	})
 	if err != nil {
@@ -831,7 +834,7 @@ func (r *Requests) Spend(
 	// to keep in one shard may be the biggest once the others are added.
 	query := fmt.Sprintf(`
 SELECT
-    date_trunc('%s', started_at) AS bucket,
+    date_trunc('%s', started_at, 'UTC') AS bucket,
     %s AS value,
     COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
     %s AS request_count

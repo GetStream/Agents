@@ -4,16 +4,19 @@ package store
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math/big"
 	"math/rand/v2"
 	"net/url"
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -105,16 +108,43 @@ func (s *DataMoveSuite) SetupTest() {
 // move copies everything a customer has to the other deployment, the way the replicate
 // command does, and returns the cursor their changes carry on from.
 func (s *DataMoveSuite) move(from, to string) int64 {
+	return s.moveTo(s.destination, from, to)
+}
+
+// moveTo is move into the destination as the store given reads it.
+func (s *DataMoveSuite) moveTo(destination *Store, from, to string) int64 {
 	export := s.export(from)
-	reservation, err := s.destination.ReserveImportedIDs(s.ctx)
+	reservation, err := destination.ReserveImportedIDs(s.ctx)
 	s.Require().NoError(err)
 	for _, row := range export.rows {
 		encoded, err := json.Marshal(row.row)
 		s.Require().NoError(err)
 		s.Require().NoError(reservation.Cover(s.ctx, row.table, encoded))
-		s.Require().NoError(s.destination.ImportRow(s.ctx, to, row.table, encoded))
+		s.Require().NoError(destination.ImportRow(s.ctx, to, row.table, encoded))
 	}
 	return export.cursor
+}
+
+// cachedDestination is the destination as a router with Redis reads it, where a row once
+// served stays served until a write forgets it. Its customers need ids of their own, since
+// Redis keeps what an earlier test cached.
+func (s *DataMoveSuite) cachedDestination() *Store {
+	address := os.Getenv(redisAddressVar)
+	if address == "" {
+		s.T().Skipf("%s not set: the cache is what this test reads", redisAddressVar)
+	}
+	store, err := OpenShards(Options{DSN: elsewhere(os.Getenv(DSNEnvVar), "moved"), Redis: Redis{Address: address}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(store.Close()) })
+	return store
+}
+
+// replay applies to the destination given what changed at the source since a cursor.
+func (s *DataMoveSuite) replay(destination *Store, from, to string, cursor int64) {
+	changes, _, err := s.source.Changes(s.ctx, from, cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(changes)
+	s.Require().NoError(destination.ApplyChanges(s.ctx, to, changes))
 }
 
 // moveEdited is move with the rows of one table edited first, as a file the importer wrote
@@ -408,6 +438,20 @@ func (s *DataMoveSuite) TestChangesStopAtTheCustomerAskingForThem() {
 	s.Empty(changes)
 }
 
+func (s *DataMoveSuite) TestAPageCursorNeverPassesTheCustomersOwnLastChange() {
+	s.capture("acme")
+	s.capture("other")
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	_, ownCursor, err := s.source.Changes(s.ctx, "acme", 0, 100)
+	s.Require().NoError(err)
+	s.seedAgentConfig(s.source, "other", "not-yours")
+
+	_, cursor, err := s.source.Changes(s.ctx, "acme", 0, 100)
+
+	s.Require().NoError(err)
+	s.Equal(ownCursor, cursor)
+}
+
 func (s *DataMoveSuite) TestADeleteIsReplayedToo() {
 	s.capture("acme")
 	id := s.seedAgentConfig(s.source, "acme", "doomed")
@@ -423,6 +467,166 @@ func (s *DataMoveSuite) TestADeleteIsReplayedToo() {
 
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
 	s.Empty(s.exportFrom(s.destination, "acme").of("agent_configs"))
+}
+
+// Defect: opt_outs left out of what a move carries, so whoever texted STOP is reached again.
+func (s *DataMoveSuite) TestAMovedRecipientIsStillOptedOut() {
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550101", Channel: "sms", Source: "keyword"}))
+
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550101", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+}
+
+// Defect: a STOP or START at the source after the copy recorded no change, or replayed as
+// something else.
+func (s *DataMoveSuite) TestAStopAndAStartAfterTheCopyArriveThroughTheChanges() {
+	s.capture("acme")
+	cursor := s.move("acme", "moved")
+
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550102", Channel: "sms", Source: "keyword"}))
+	changes, cursor, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", changes))
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550102", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut, "the STOP")
+
+	s.Require().NoError(s.source.OptOuts.RevokeAll(s.ctx, "acme", "+12025550102", "sms"))
+	changes, _, err = s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", changes))
+	optedOut, err = s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550102", "sms")
+	s.Require().NoError(err)
+	s.False(optedOut, "the START")
+}
+
+// Defect: the source's opt-out for a recipient already opted out here breaks the one-live-row
+// index and fails the import, or replaces the one recorded here.
+func (s *DataMoveSuite) TestAnImportOverALiveOptOutLeavesIt() {
+	here := OptOut{CustomerID: "moved", Recipient: "+12025550103", Channel: "sms", Source: "keyword"}
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &here))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550103", Channel: "sms", Source: "api"}))
+
+	s.move("acme", "moved")
+
+	live, err := s.destination.OptOuts.Select(s.ctx, "moved", 10, nil)
+	s.Require().NoError(err)
+	s.Require().Len(live, 1)
+	s.Equal(here.ID, live[0].ID)
+	s.Equal("keyword", live[0].Source)
+}
+
+// Defect: a second copy read the source's new live opt-out before the revoked one it replaced,
+// so the import skipped it beside the old copy here, and the revoked row then lifted that copy.
+func (s *DataMoveSuite) TestASecondCopyAfterAStartAndAStopKeepsTheRecipientOptedOut() {
+	first := OptOut{CustomerID: "acme", Recipient: "+12025550105", Channel: "sms", Source: "keyword"}
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &first))
+	s.move("acme", "moved")
+
+	s.Require().NoError(s.source.OptOuts.RevokeAll(s.ctx, "acme", "+12025550105", "sms"))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550105", Channel: "sms", Source: "keyword"}))
+	// Store the rows newest first: an export may meet them in any order the table holds them.
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "CLUSTER opt_outs USING opt_outs_customer_idx")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550105", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+}
+
+// Defect: a START at the source, replayed here, lifts the opt-out recorded here for the same
+// recipient.
+func (s *DataMoveSuite) TestAnImportedRevokedOptOutDoesNotLiftOneRecordedHere() {
+	here := OptOut{CustomerID: "moved", Recipient: "+12025550104", Channel: "sms", Source: "keyword"}
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &here))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550104", Channel: "sms", Source: "keyword"}))
+	s.capture("acme")
+	cursor := s.move("acme", "moved")
+
+	s.Require().NoError(s.source.OptOuts.RevokeAll(s.ctx, "acme", "+12025550104", "sms"))
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(changes)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", changes))
+
+	live, err := s.destination.OptOuts.Select(s.ctx, "moved", 10, nil)
+	s.Require().NoError(err)
+	s.Require().Len(live, 1)
+	s.Equal(here.ID, live[0].ID)
+	s.Len(s.exportFrom(s.destination, "moved").of("opt_outs"), 2, "the revoked copy is kept beside it as history")
+}
+
+// Defect: a live opt-out here on another channel kept the source's one out.
+func (s *DataMoveSuite) TestAnOptOutHereOnAnotherChannelDoesNotKeepOneOut() {
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "moved", Recipient: "+12025550107", Channel: "voice", Source: "keyword"}))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550107", Channel: "sms", Source: "keyword"}))
+
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550107", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+}
+
+// Defect: a live opt-out here for another recipient kept the source's one out.
+func (s *DataMoveSuite) TestAnOptOutHereForAnotherRecipientDoesNotKeepOneOut() {
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "moved", Recipient: "+12025550108", Channel: "sms", Source: "keyword"}))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550109", Channel: "sms", Source: "keyword"}))
+
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550109", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+}
+
+// Defect: another app's live opt-out here for the same recipient kept the source's one out.
+func (s *DataMoveSuite) TestAnotherAppsOptOutHereDoesNotKeepOneOut() {
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "other", Recipient: "+12025550110", Channel: "sms", Source: "keyword"}))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550110", Channel: "sms", Source: "keyword"}))
+
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550110", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+}
+
+// Defect: an imported row under the id of an opt-out recorded here, for another recipient or
+// channel, moved that opt-out off what it was recorded for, or lifted it.
+func (s *DataMoveSuite) TestAnImportedRowUnderTheIdOfAnOptOutHereLeavesItsRecipientOptedOut() {
+	here := OptOut{CustomerID: "moved", Recipient: "+12025550111", Channel: "sms", Source: "keyword"}
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &here))
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550112", Channel: "sms", Source: "keyword"}))
+
+	s.Require().NoError(s.importEdited("opt_outs", "moved", func(row map[string]any) { row["id"] = here.ID }))
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550111", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut, "a live row for another recipient")
+
+	s.Require().NoError(s.importEdited("opt_outs", "moved", func(row map[string]any) {
+		row["id"] = here.ID
+		row["recipient"] = here.Recipient
+		row["channel"] = "voice"
+		row["revoked_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	}))
+	optedOut, err = s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550111", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut, "a revoked row for another channel")
+}
+
+// Defect: an imported opt-out that names no recipient was stored, one the API refuses.
+func (s *DataMoveSuite) TestAnImportedOptOutWithoutARecipientIsRefused() {
+	s.Require().NoError(s.source.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme", Recipient: "+12025550106", Channel: "sms", Source: "keyword"}))
+
+	err := s.importEdited("opt_outs", "moved", func(row map[string]any) { row["recipient"] = "" })
+
+	s.ErrorContains(err, "recipient")
+	s.Empty(s.exportFrom(s.destination, "moved").of("opt_outs"))
 }
 
 // The columns a move copies are read from the catalog, so the bindings come with the
@@ -451,8 +655,10 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, ?, ?, ?)",
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
+	row, err := json.Marshal(s.export("acme").of("agent_configs")[0])
+	s.Require().NoError(err)
 
-	s.move("acme", "intruder")
+	s.ErrorIs(s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row), ErrAnotherCustomersRow)
 
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
@@ -474,7 +680,10 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", changes))
+	s.ErrorIs(s.destination.ApplyChanges(s.ctx, "intruder", changes), ErrAnotherCustomersRow, "the insert is refused")
+	deletes := slices.DeleteFunc(changes, func(change DataChange) bool { return change.Op != ChangeDelete })
+	s.Require().NotEmpty(deletes)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", deletes))
 
 	var count int
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
@@ -1538,6 +1747,418 @@ func (s *DataMoveSuite) TestOnlyTheAppsOwnPolicyMoves() {
 	s.Equal("app", policies[0]["scope"])
 }
 
+// A scheduled task is keyed by its customer and its id, and the customer in a delete's key is
+// the source's.
+func (s *DataMoveSuite) TestADeletedTaskIsReplayedUnderTheIDTheAppMovedTo() {
+	s.capture("acme")
+	s.seedScheduledTask("cancelled", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("kept", "acme", ScheduledTaskActive)
+	cursor := s.move("acme", "moved")
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM scheduled_tasks WHERE id = 'cancelled'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	var left []string
+	s.Require().NoError(s.destination.GlobalDB().NewSelect().Table("scheduled_tasks").Column("id").
+		Where("customer_id = 'moved'").Scan(s.ctx, &left))
+	s.Equal([]string{"kept"}, left)
+}
+
+// An organization's policy is recorded under its id, which can be an app's too.
+func (s *DataMoveSuite) TestAnOrganizationsPolicyIsNotReplayedOverTheAppsOfTheSameID() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+	s.move("acme", "acme")
+
+	// As a source from before Changes left such a change out records it.
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "policies", Op: ChangeInsert, At: time.Now(),
+		Key:     json.RawMessage(`{"scope": "organization", "scope_id": "acme"}`),
+		Payload: json.RawMessage(`{"scope": "organization", "scope_id": "acme", "document": {"prompt_injection": false}, "updated_at": "2026-11-23T00:00:00Z"}`),
+	}}))
+
+	document, err := s.destination.Policies.Get(s.ctx, ScopeApp, "acme")
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection)
+	s.True(*document.PromptInjection)
+}
+
+// A change whose key names no scope is no app's either.
+func (s *DataMoveSuite) TestAPolicyChangeNamingNoScopeIsNotReplayed() {
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "policies", Op: ChangeUpdate, At: time.Now(), Key: json.RawMessage(`{}`),
+		Payload: json.RawMessage(`{"scope": "organization", "scope_id": "acme", "document": {"prompt_injection": false}, "updated_at": "2026-11-23T00:00:00Z"}`),
+	}}))
+
+	document, err := s.destination.Policies.Get(s.ctx, ScopeApp, "acme")
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection)
+	s.True(*document.PromptInjection)
+}
+
+// The organization's policy is left out before the limit, so the page still holds the app's
+// own change after it, and a follower is not told it caught up early.
+// The organization's policy is still one of the app's rows in the feed, so pruning it would expire
+// a cursor left behind it.
+func (s *DataMoveSuite) TestACursorPastAnOrganizationsPolicyLeftOutIsNotExpiredByItsPruning() {
+	s.capture("acme")
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('organization', 'acme', ?, now())",
+		`{"prompt_injection": false}`)
+	s.Require().NoError(err)
+	_, cursor, err := s.source.Changes(s.ctx, "acme", 0, 100)
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_changes SET at = at - interval '8 days'")
+	s.Require().NoError(err)
+	_, err = s.source.PruneDataChanges(s.ctx, 7*day)
+	s.Require().NoError(err)
+
+	_, _, err = s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.NoError(err)
+}
+
+// A full page may end before the customer's last change, so its cursor is its own last change.
+func (s *DataMoveSuite) TestAFullPageOfChangesResumesAfterItsLastChange() {
+	s.capture("acme")
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	s.seedAgentConfig(s.source, "acme", "welcomer")
+
+	first, cursor, err := s.source.Changes(s.ctx, "acme", 0, 1)
+	s.Require().NoError(err)
+	s.Require().Len(first, 1)
+	rest, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+
+	s.Require().NoError(err)
+	s.Require().Len(rest, 1)
+	var config struct {
+		Name string `json:"name"`
+	}
+	s.Require().NoError(json.Unmarshal(rest[0].Payload, &config))
+	s.Equal("welcomer", config.Name)
+}
+
+func (s *DataMoveSuite) TestChangesCarryNoOrganizationsPolicyOfTheAppsID() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('organization', 'acme', ?, now())",
+		`{"prompt_injection": false}`)
+	s.Require().NoError(err)
+	s.seedAgentConfig(s.source, "acme", "greeter")
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 1)
+
+	s.Require().NoError(err)
+	s.Require().Len(changes, 1)
+	s.Equal("agent_configs", changes[0].Table)
+}
+
+func (s *DataMoveSuite) TestAnAppsPolicyChangeIsReplayed() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE policies SET document = ? WHERE scope = 'app' AND scope_id = 'acme'", `{"prompt_injection": false}`)
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	document, err := s.destination.Policies.Get(s.ctx, ScopeApp, "moved")
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection)
+	s.False(*document.PromptInjection)
+}
+
+// Before the move the destination had no such config, and said so to whoever asked.
+func (s *DataMoveSuite) TestAnImportedConfigIsServedRightAfterTheImport() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	_, err := destination.AgentConfigs.GetByName(s.ctx, app, "greeter")
+	s.Require().ErrorIs(err, ErrNoAgentConfig)
+
+	s.moveTo(destination, "acme", app)
+
+	config, err := destination.AgentConfigs.GetByName(s.ctx, app, "greeter")
+	s.Require().NoError(err)
+	s.Equal("be brief", config.Instructions)
+}
+
+func (s *DataMoveSuite) TestAReplayedConfigChangeIsServedRightAfterIt() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	id := s.seedAgentConfig(s.source, "acme", "greeter")
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.AgentConfigs.Get(s.ctx, app, id)
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET instructions = 'be thorough' WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	config, err := destination.AgentConfigs.Get(s.ctx, app, id)
+	s.Require().NoError(err)
+	s.Equal("be thorough", config.Instructions)
+}
+
+func (s *DataMoveSuite) TestAConfigRenamedByAReplayIsNoLongerServedByItsOldName() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	id := s.seedAgentConfig(s.source, "acme", "greeter")
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.AgentConfigs.GetByName(s.ctx, app, "greeter")
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET name = 'welcomer' WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.AgentConfigs.GetByName(s.ctx, app, "greeter")
+	s.ErrorIs(err, ErrNoAgentConfig)
+}
+
+func (s *DataMoveSuite) TestAConfigDeletedByAReplayIsNoLongerServed() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.AgentConfigs.GetByName(s.ctx, app, "greeter")
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_configs WHERE name = 'greeter'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.AgentConfigs.GetByName(s.ctx, app, "greeter")
+	s.ErrorIs(err, ErrNoAgentConfig)
+}
+
+func (s *DataMoveSuite) TestARouterConfigImportedIsServedRightAfterTheImport() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name) VALUES (?, 'acme', 'fast')", newID())
+	s.Require().NoError(err)
+	_, err = destination.RouterConfigs.GetByName(s.ctx, app, "fast")
+	s.Require().ErrorIs(err, ErrNoRouterConfig)
+
+	s.moveTo(destination, "acme", app)
+
+	_, err = destination.RouterConfigs.GetByName(s.ctx, app, "fast")
+	s.NoError(err)
+}
+
+func (s *DataMoveSuite) TestAVoiceImportedIsServedRightAfterTheImport() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.seedVoice(s.source, "acme", "narrator")
+	_, err := destination.Voices.GetByName(s.ctx, app, "narrator")
+	s.Require().ErrorIs(err, ErrNoVoice)
+
+	s.moveTo(destination, "acme", app)
+
+	_, err = destination.Voices.GetByName(s.ctx, app, "narrator")
+	s.NoError(err)
+}
+
+func (s *DataMoveSuite) TestAReplayedSkillChangeIsServedRightAfterIt() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	config := s.seedAgentConfig(s.source, "acme", "greeter")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO skills (id, customer_id, config_id, name, description, instructions) VALUES (?, 'acme', ?, 'greet', 'greets', 'wave')",
+		newID(), config)
+	s.Require().NoError(err)
+	cursor := s.moveTo(destination, "acme", app)
+	_, err = destination.Skills.GetByNames(s.ctx, app, config, []string{"greet"})
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE skills SET instructions = 'bow' WHERE name = 'greet'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	skills, err := destination.Skills.GetByNames(s.ctx, app, config, []string{"greet"})
+	s.Require().NoError(err)
+	s.Require().Len(skills, 1)
+	s.Equal("bow", skills[0].Instructions)
+}
+
+func (s *DataMoveSuite) TestAnImportedPolicyIsServedRightAfterTheImport() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+	document, err := destination.Policies.Get(s.ctx, ScopeApp, app)
+	s.Require().NoError(err)
+	s.Require().Nil(document.PromptInjection)
+
+	s.moveTo(destination, "acme", app)
+
+	document, err = destination.Policies.Get(s.ctx, ScopeApp, app)
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection)
+	s.True(*document.PromptInjection)
+}
+
+// What decides an app's requests is cached apart from its own document (Policies.OfApp).
+func (s *DataMoveSuite) TestAnImportedPolicyDecidesTheAppsRequestsRightAfterTheImport() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+	policies, err := destination.Policies.OfApp(s.ctx, app)
+	s.Require().NoError(err)
+	s.Require().Nil(policies.App.PromptInjection)
+
+	s.moveTo(destination, "acme", app)
+
+	policies, err = destination.Policies.OfApp(s.ctx, app)
+	s.Require().NoError(err)
+	s.Require().NotNil(policies.App.PromptInjection)
+	s.True(*policies.App.PromptInjection)
+}
+
+func (s *DataMoveSuite) TestAPolicyDeletedByAReplayIsNoLongerServed() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+	cursor := s.moveTo(destination, "acme", app)
+	_, err = destination.Policies.Get(s.ctx, ScopeApp, app)
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM policies WHERE scope = 'app' AND scope_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	document, err := destination.Policies.Get(s.ctx, ScopeApp, app)
+	s.Require().NoError(err)
+	s.Nil(document.PromptInjection)
+}
+
+// A name is a text column, which an imported row can carry as a number.
+func (s *DataMoveSuite) TestAConfigImportedWithANumericNameIsServedRightAfterTheImport() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	name := rand.Int64N(1 << 50)
+	_, err := destination.AgentConfigs.GetByName(s.ctx, app, strconv.FormatInt(name, 10))
+	s.Require().ErrorIs(err, ErrNoAgentConfig)
+
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	exported := s.export("acme").of("agent_configs")[0]
+	exported["name"] = name
+	row, err := json.Marshal(exported)
+	s.Require().NoError(err)
+	s.Require().NoError(destination.ImportRow(s.ctx, app, "agent_configs", row))
+
+	_, err = destination.AgentConfigs.GetByName(s.ctx, app, strconv.FormatInt(name, 10))
+	s.NoError(err)
+}
+
+func (s *DataMoveSuite) TestAReplayedRouterConfigChangeIsServedRightAfterIt() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	id := newID()
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name) VALUES (?, 'acme', 'fast')", id)
+	s.Require().NoError(err)
+	cursor := s.moveTo(destination, "acme", app)
+	_, err = destination.RouterConfigs.Get(s.ctx, app, id)
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE router_configs SET name = 'slow' WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	config, err := destination.RouterConfigs.Get(s.ctx, app, id)
+	s.Require().NoError(err)
+	s.Equal("slow", config.Name)
+}
+
+func (s *DataMoveSuite) TestASkillMovedByAReplayLeavesItsOldConfig() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	from := s.seedAgentConfig(s.source, "acme", "greeter")
+	to := s.seedAgentConfig(s.source, "acme", "welcomer")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO skills (id, customer_id, config_id, name, description, instructions) VALUES (?, 'acme', ?, 'greet', 'greets', 'wave')",
+		newID(), from)
+	s.Require().NoError(err)
+	cursor := s.moveTo(destination, "acme", app)
+	skills, err := destination.Skills.GetByNames(s.ctx, app, from, []string{"greet"})
+	s.Require().NoError(err)
+	s.Require().Len(skills, 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE skills SET config_id = ? WHERE name = 'greet'", to)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	skills, err = destination.Skills.GetByNames(s.ctx, app, from, []string{"greet"})
+	s.Require().NoError(err)
+	s.Empty(skills)
+}
+
+func (s *DataMoveSuite) TestAVoiceRenamedByAReplayIsNoLongerServedByItsOldName() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	id := s.seedVoice(s.source, "acme", "narrator")
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.Voices.GetByName(s.ctx, app, "narrator")
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE voices SET name = 'announcer' WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.Voices.GetByName(s.ctx, app, "narrator")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+func (s *DataMoveSuite) TestAReplayedVoiceChangeIsServedRightAfterIt() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	id := s.seedVoice(s.source, "acme", "narrator")
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.Voices.Get(s.ctx, app, id)
+	s.Require().NoError(err)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE voices SET name = 'announcer' WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	voice, err := destination.Voices.Get(s.ctx, app, id)
+	s.Require().NoError(err)
+	s.Equal("announcer", voice.Name)
+}
+
 func (s *DataMoveSuite) seedAgentConfig(store *Store, customerID, name string) string {
 	id := newID()
 	_, err := store.GlobalDB().ExecContext(s.ctx,
@@ -2516,7 +3137,18 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigIsAnotherCustomersHe
 	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-1', 'resident', 'theirs', 'be brief')")
 	s.Require().NoError(err)
-	s.move("acme", "moved")
+	reservation, err := s.destination.ReserveImportedIDs(s.ctx)
+	s.Require().NoError(err)
+	for _, row := range s.export("acme").rows {
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		if row.table == "agent_configs" {
+			s.Require().ErrorIs(s.destination.ImportRow(s.ctx, "moved", row.table, encoded), ErrAnotherCustomersRow)
+			continue
+		}
+		s.Require().NoError(reservation.Cover(s.ctx, row.table, encoded))
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", row.table, encoded))
+	}
 
 	resumed, skipped, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
 
@@ -3582,6 +4214,59 @@ func (s *DataMoveSuite) TestAMovedRequestNeverOverwritesTheDestinationsRowWithIt
 	}
 }
 
+func (s *DataMoveSuite) TestARequestWhoseIDsAnotherCustomerHoldsHereLandsBesideTheirs() {
+	// Far from where either sequence draws, as a row of another deployment's would be.
+	id := time.Now().UnixNano() % 1_000_000_000_000
+	moved := s.takenRequest(s.source, id)
+	held := s.takenRequest(s.destination, id)
+	_, err := s.destination.ShardDB().ExecContext(s.ctx, "UPDATE requests SET customer_id = 'resident', usage_id = ? WHERE usage_id = ?", moved.UsageID, held.UsageID)
+	s.Require().NoError(err)
+
+	s.move("acme", "acme")
+	s.move("acme", "acme")
+
+	var owner string
+	s.Require().NoError(s.destination.ShardDB().QueryRowContext(s.ctx,
+		"SELECT customer_id FROM requests WHERE usage_id = ?", moved.UsageID).Scan(&owner))
+	s.Equal("resident", owner, "the other customer's row is left as it was")
+	rows := s.requestsByUsage()
+	s.Require().Len(rows, 1, "the moved row, once however often it is imported")
+	s.NotContains(rows, moved.UsageID.String(), "under a usage id of the destination's")
+}
+
+func (s *DataMoveSuite) TestALogTakenBackWhereItCameFromIsNotRefusedOverAnotherAppsLogWithItsCopysID() {
+	s.seedLog("acme", "copied")
+	// The destination has drawn ids of its own, so the copy's is not the one it came from.
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "SELECT setval('agent_logs_id_seq', nextval('agent_logs_id_seq') + 1000)")
+	s.Require().NoError(err)
+	s.move("acme", "acme")
+	copied := s.logsHere("acme")
+	s.Require().Len(copied, 1)
+	for id := range copied {
+		// The copy's id here is another app's log's back where it came from.
+		_, err = s.source.GlobalDB().ExecContext(s.ctx, `
+INSERT INTO agent_logs (id, customer_id, source, severity, event_type, message) VALUES (?, 'resident', 'agent', 'info', 'turn', 'theirs')`, id)
+		s.Require().NoError(err)
+	}
+
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_logs") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.NoError(s.source.ImportRow(s.ctx, "acme", "agent_logs", encoded), "the log is the one it was copied from")
+	}
+}
+
+func (s *DataMoveSuite) TestReimportingTheImportersOwnRowsIsTheSameAsImportingThemOnce() {
+	s.seedAgentConfig(s.source, "acme", "mine")
+	s.takenRequest(s.source, 3)
+
+	s.move("acme", "acme")
+	s.move("acme", "acme")
+
+	s.Len(s.exportFrom(s.destination, "acme").of("agent_configs"), 1)
+	s.Len(s.requestsByUsage(), 1)
+}
+
 func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
 	s.capture("acme")
 	id := time.Now().UnixNano() % 1_000_000_000_000
@@ -3693,6 +4378,29 @@ func (s *DataMoveSuite) TestARequestMovedOnFromACopyIsOneRowWhereverItLands() {
 	s.move("acme", "acme")
 
 	s.Len(s.requestsByUsage(), 1, "a copy of a copy is the copy already here")
+}
+
+func (s *DataMoveSuite) TestARequestMovedOnTwiceAndBackIsOneRowWhereItWasRecorded() {
+	id, err := cryptorand.Int(cryptorand.Reader, big.NewInt(1_000_000_000_000))
+	s.Require().NoError(err)
+	home := s.takenRequest(s.source, id.Int64())
+	s.move("acme", "acme")
+
+	// A third holder: the destination's copy, sent on to another customer there.
+	for _, row := range s.exportFrom(s.destination, "acme").of("requests") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "globex", "requests", encoded))
+	}
+	for _, row := range s.exportFrom(s.destination, "globex").of("requests") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "requests", encoded))
+	}
+
+	rows := s.exportFrom(s.source, "acme").of("requests")
+	s.Require().Len(rows, 1, "a copy of a copy of a copy is the row it was copied from")
+	s.Equal(home.UsageID.String(), rows[0]["usage_id"])
 }
 
 // drewNothing restarts the sequence behind a column, so the store has drawn nothing from it yet.
