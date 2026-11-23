@@ -1268,7 +1268,11 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 
 // carryOutAnswered sends the task as the first turn of a call somebody
 // picked up, and stays on it until it ends, or until scheduledCallLimit,
-// when the agent hangs up.
+// when the agent hangs up. A turn the organization may not pay for, refused
+// before the agent answered anything on the call, leaves the agent silent:
+// the attempt fails under the money (turnRefusal), final unless the money
+// could not be checked, and the agent hangs up. A refusal after the agent
+// answered is a later turn's: the task was said.
 func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session, delivery scheduledDelivery, events <-chan session.Event) error {
 	// The call's turn has an id of its own: a channel tried before the call
 	// left its turn in the conversation under the run's, which would be taken
@@ -1279,13 +1283,20 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 	}
 	limit := time.NewTimer(scheduledCallLimit)
 	defer limit.Stop()
+	answered := false
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case _, open := <-events:
+		case event, open := <-events:
 			if !open {
 				return nil
+			}
+			if refusal := turnRefusal(event); refusal != nil && !answered {
+				return refusal
+			}
+			if reply, ok := event.(agent.Responded); ok && reply.Purpose != agent.PurposeGreeting {
+				answered = true
 			}
 		case <-limit.C:
 			return nil
