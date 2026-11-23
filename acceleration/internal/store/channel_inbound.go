@@ -28,9 +28,8 @@ const channelInboundDoneKeep = channelMessageKeep
 // for someone to find why it was never answered. 30 days is a choice, not a measurement.
 const channelInboundFailedKeep = 30 * 24 * time.Hour
 
-// ChannelInbound is one inbound message queued to be written into its thread channel
-// (20261205120000_channel_thread_inbound.sql), with what writing it and opening its episode
-// card take.
+// ChannelInbound is one inbound message queued to be written into its thread channel, with
+// what writing it and opening its episode card take.
 type ChannelInbound struct {
 	bun.BaseModel `bun:"table:channel_thread_inbound,alias:cti"`
 

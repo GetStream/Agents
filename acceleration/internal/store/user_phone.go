@@ -17,8 +17,7 @@ import (
 // one person, so it is never two users of one app.
 var ErrPhoneTaken = errors.New("store: the number is linked to another user of the app")
 
-// UserPhone says a Stream user of a customer's app and a phone number are one person
-// (20261212100000_user_phones.sql).
+// UserPhone says a Stream user of a customer's app and a phone number are one person.
 type UserPhone struct {
 	bun.BaseModel `bun:"table:user_phones,alias:up"`
 

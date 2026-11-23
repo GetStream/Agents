@@ -12,21 +12,20 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// How a person is known to the contact map (20261007042000_contact_map.sql).
+// How a person is known to the contact map.
 const (
 	// ContactPhone is an E.164 number: a call, an SMS, a WhatsApp message or an iMessage.
 	ContactPhone = "phone"
 	// ContactSlack is a Slack user in one workspace, «<team id>:<user id>».
 	ContactSlack = "slack"
 	// ContactStreamUser is a Stream user of the app chat in one Stream app, by the user id
-	// Stream signed, «<app pk>:<user id>» (StreamUserAddress, 20261212090000_chat_episodes.sql).
+	// Stream signed, «<app pk>:<user id>» (StreamUserAddress).
 	ContactStreamUser = "stream_user"
 )
 
 // ContactMapEntry is one address a person is reached at, for one agent of a customer: the
-// omni-channel their episode cards go to (20261007042000_contact_map.sql), or, for a channel
-// line's sender, the end user they are and the conversation the next message carries on
-// (20270115000100_contact_map_channel_identities.sql).
+// omni-channel their episode cards go to, or, for a channel line's sender, the end user they
+// are and the conversation the next message carries on.
 type ContactMapEntry struct {
 	bun.BaseModel `bun:"table:contact_map,alias:cm"`
 

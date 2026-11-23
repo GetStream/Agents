@@ -25,8 +25,8 @@ const (
 	imageJobFailedKeep = chatInboundFailedKeep
 )
 
-// ImageJob is one picture an agent was asked to draw (20261230090000_image_jobs.sql): what to
-// draw, who pays, where it is posted and how far it got.
+// ImageJob is one picture an agent was asked to draw: what to draw, who pays, where it is
+// posted and how far it got.
 type ImageJob struct {
 	bun.BaseModel `bun:"table:image_jobs,alias:ij"`
 

@@ -228,7 +228,7 @@ func (s *StoreSuite) TestAThreadOfALinkThePreviousReleaseMadeAgainIsCutAtItsTime
 
 // previousCards is the previous release's EpisodeCards (ba2c5e912 episodes.go:384-412) for anya's
 // agent: the rows at the omni-channel, less what a linked number said before its link's time.
-// Its agent_config_id is config_id since 20270115000100_contact_map_channel_identities.sql.
+// Its agent_config_id has since been renamed config_id.
 func (s *StoreSuite) previousCards(omni string) []string {
 	var found []string
 	s.Require().NoError(s.store.global.NewRaw(`SELECT ep.id FROM episodes AS ep JOIN contact_map AS cm ON cm.id = ep.contact_id
