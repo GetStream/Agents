@@ -47,9 +47,10 @@ func (s *StoreSuite) TestARevokedKeyStopsWorkingButItsRowSurvives() {
 	app := s.app()
 	s.key(app.ID, "vak_live_bbbbbbbbbbbbbbbb00000000", nil)
 
-	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_bbbbbbbbbbbbbbbb00000000", "thierry"))
+	_, err := s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_bbbbbbbbbbbbbbbb00000000", "thierry")
+	s.Require().NoError(err)
 
-	_, err := s.store.APIKeys.GetLive(s.ctx, "vak_live_bbbbbbbbbbbbbbbb00000000")
+	_, err = s.store.APIKeys.GetLive(s.ctx, "vak_live_bbbbbbbbbbbbbbbb00000000")
 	s.ErrorIs(err, ErrNoAPIKey)
 
 	// The audit trail of which key made which call has to outlive the key.
@@ -64,8 +65,10 @@ func (s *StoreSuite) TestRevokingAKeyTwiceSaysItWasAlreadyGone() {
 	app := s.app()
 	s.key(app.ID, "vak_live_cccccccccccccccc00000000", nil)
 
-	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_cccccccccccccccc00000000", "thierry"))
-	s.ErrorIs(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_cccccccccccccccc00000000", "thierry"), ErrNoAPIKey)
+	_, err := s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_cccccccccccccccc00000000", "thierry")
+	s.Require().NoError(err)
+	_, err = s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_cccccccccccccccc00000000", "thierry")
+	s.ErrorIs(err, ErrNoAPIKey)
 }
 
 func (s *StoreSuite) TestAnExpiredKeyIsNotLive() {
@@ -127,7 +130,8 @@ func (s *StoreSuite) TestAKeyRevokedOnOneReplicaStopsWorkingOnTheOther() {
 		s.Require().NoError(err)
 	}
 
-	s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_4444444444444444aaaaaaaa", "thierry"))
+	_, err := s.store.APIKeys.Revoke(s.ctx, app.ID, "vak_live_4444444444444444aaaaaaaa", "thierry")
+	s.Require().NoError(err)
 
 	s.Eventually(func() bool {
 		_, err := replica.APIKeys.GetLive(s.ctx, "vak_live_4444444444444444aaaaaaaa")
@@ -170,9 +174,10 @@ func (s *StoreSuite) TestAnAppCannotRevokeAnotherAppsKey() {
 	owner, other := s.app(), s.app()
 	key := s.key(owner.ID, "vak_live_7777777777777777aaaaaaaa", nil)
 
-	s.ErrorIs(s.store.APIKeys.Revoke(s.ctx, other.ID, key.ID, "thierry"), ErrNoAPIKey)
+	_, err := s.store.APIKeys.Revoke(s.ctx, other.ID, key.ID, "thierry")
+	s.ErrorIs(err, ErrNoAPIKey)
 
-	_, err := s.store.APIKeys.GetLive(s.ctx, key.ID)
+	_, err = s.store.APIKeys.GetLive(s.ctx, key.ID)
 	s.NoError(err, "the key still works for the app that holds it")
 	keys, err := s.store.APIKeys.Select(s.ctx, owner.ID)
 	s.Require().NoError(err)
@@ -254,6 +259,9 @@ func (s *StoreSuite) TestAPIKeyQueryBudgets() {
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), "then the local cache answers")
 	}
 	s.Equal(1, s.countQueries(func() {
-		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.APIKeys.Revoke(s.ctx, app.ID, key.ID, "thierry")) }))
+		s.Equal(s.redisTrips(1), s.countRedis(func() {
+			_, err := s.store.APIKeys.Revoke(s.ctx, app.ID, key.ID, "thierry")
+			s.Require().NoError(err)
+		}))
 	}))
 }

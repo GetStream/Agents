@@ -162,14 +162,15 @@ type found[T any] struct {
 //
 // A deletion that does not land is logged rather than returned: the write it followed has
 // already happened, and refusing it afterwards would tell the caller their change was
-// rejected when it was not. The TTL is what covers the difference.
+// rejected when it was not. The TTL is what covers the difference. It reports whether the
+// deletion landed, false without Redis, for a caller that tells a person so.
 //
 // The deletion goes out even when the request has been cancelled since the write: rueidis
 // returns the context's error before it sends anything, so neither the DEL nor the PING would
 // reach Redis and every node would keep the old value until the TTL.
-func (s *Store) forget(ctx context.Context, names ...string) {
+func (s *Store) forget(ctx context.Context, names ...string) bool {
 	if s.cache == nil || len(names) == 0 {
-		return
+		return false
 	}
 	ctx = context.WithoutCancel(ctx)
 	client := s.cache.Client()
@@ -182,5 +183,7 @@ func (s *Store) forget(ctx context.Context, names ...string) {
 	replies := client.DoMulti(ctx, client.B().Del().Key(names...).Build(), client.B().Ping().Build())
 	if err := replies[0].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
 		slog.Default().Error("could not drop cached rows", "keys", names, "error", err)
+		return false
 	}
+	return true
 }

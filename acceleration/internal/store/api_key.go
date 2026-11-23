@@ -152,8 +152,9 @@ func (r *APIKeys) Touch(ctx context.Context, id string, interval time.Duration) 
 
 // Revoke stops one of an app's keys working, here and on every other replica. A key of
 // another app is ErrNoAPIKey. The row survives, because the audit trail of which key made
-// which call has to outlive the key.
-func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) error {
+// which call has to outlive the key. told says whether the replicas' cached copy was
+// dropped; when it was not, they take the key until that copy lapses.
+func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) (told bool, err error) {
 	now := time.Now().UTC()
 	result, err := r.store.global.NewUpdate().Model((*APIKey)(nil)).
 		Set("revoked_at = ?", now).
@@ -163,18 +164,18 @@ func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) error {
 		Where("revoked_at IS NULL").
 		Exec(ctx)
 	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
+		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
+		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
 	if affected == 0 {
-		return stack.Wrap(ErrNoAPIKey)
+		return false, stack.Wrap(ErrNoAPIKey)
 	}
-	r.store.forget(ctx, cacheKey("key", id))
+	told = r.store.forget(ctx, cacheKey("key", id))
 	r.touched.Delete(id)
-	return nil
+	return told, nil
 }
 
 // Select returns an app's keys, revoked ones included, newest first.

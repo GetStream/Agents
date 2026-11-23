@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,12 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
 
 // KeysCLISuite runs `router keys` against Postgres.
@@ -95,6 +98,33 @@ func (s *KeysCLISuite) seedKey(settings config.Config) (*store.Store, auth.Looku
 	return db, db.APIKeys.Lookup(sealer), app, id
 }
 
+func (s *KeysCLISuite) TestACreatedKeyRecordsTheVersionItWasSealedWith() {
+	keys := map[int]string{1: "first key", 2: "second key"}
+	previous := keysKeyring
+	s.T().Cleanup(func() { keysKeyring = previous })
+	keysKeyring = func(context.Context, config.Config, string) (*auth.Sealer, error) {
+		return auth.NewSealerWithKeyring(2, keys)
+	}
+	db, _, app, _ := s.seedKey(s.settings)
+
+	s.Require().NoError(runKeys([]string{"create", "--app-id", app.ID, "--key-name", "probe"}, s.settings, slog.New(slog.DiscardHandler)))
+
+	stored, err := db.APIKeys.Select(context.Background(), app.ID)
+	s.Require().NoError(err)
+	var probe store.APIKey
+	for _, key := range stored {
+		if key.Name == "probe" {
+			probe = key
+		}
+	}
+	s.Require().NotEmpty(probe.ID, "keys create stored no key named probe")
+	s.Equal(2, probe.KEKVersion)
+	rotated, err := auth.NewSealerWithKeyring(3, map[int]string{1: keys[1], 2: keys[2], 3: "third key"})
+	s.Require().NoError(err)
+	_, err = db.APIKeys.Lookup(rotated)(context.Background(), probe.ID)
+	s.NoError(err, "a key minted under version 2 stops authenticating once version 3 seals new ones")
+}
+
 func (s *KeysCLISuite) TestARevokedKeyStopsAuthenticatingOnARouterThatHadItCached() {
 	address := os.Getenv("ROUTER_REDIS_ADDR")
 	if address == "" {
@@ -118,13 +148,16 @@ func (s *KeysCLISuite) TestARevokedKeyStopsAuthenticatingOnARouterThatHadItCache
 func (s *KeysCLISuite) TestRevokeSaysWhenTheRoutersAreNotToldAndSoTakeTheKeyForAMinute() {
 	redisAddr := os.Getenv("ROUTER_REDIS_ADDR")
 	for _, c := range []struct {
-		name  string
-		redis bool
-		want  string
+		name        string
+		redis       bool
+		refusingDel bool
+		want        string
 	}{
-		{"with the routers' Redis", true, "revoked key %s of app %s\n"},
-		{"without Redis", false, "revoked key %s of app %s\n" +
+		{"with the routers' Redis", true, false, "revoked key %s of app %s\n"},
+		{"without Redis", false, false, "revoked key %s of app %s\n" +
 			"redis.addr is not set here, so the routers are not told: they drop it within a minute.\n"},
+		{"with a Redis that refuses the drop", true, true, "revoked key %s of app %s\n" +
+			"the routers' Redis did not take the change, so the routers are not told: they drop it within a minute.\n"},
 	} {
 		s.Run(c.name, func() {
 			settings := s.settings
@@ -133,6 +166,9 @@ func (s *KeysCLISuite) TestRevokeSaysWhenTheRoutersAreNotToldAndSoTakeTheKeyForA
 					s.T().Skip("ROUTER_REDIS_ADDR not set")
 				}
 				settings.Redis.Addr = redisAddr
+			}
+			if c.refusingDel {
+				settings.Redis.Username, settings.Redis.Password = s.redisUserWithoutDel(redisAddr)
 			}
 			_, _, app, key := s.seedKey(settings)
 			var out bytes.Buffer
@@ -157,6 +193,23 @@ func (s *KeysCLISuite) TestRevokeRefusesAKeyOfAnotherApp() {
 	s.EqualError(err, "app "+other.ID+" has no live key "+key)
 	_, err = lookup(ctx, key)
 	s.NoError(err, "the key still works for the app that holds it")
+}
+
+// redisUserWithoutDel adds a Redis user that may run every command but DEL, removed when the
+// test ends, and returns its name and password.
+func (s *KeysCLISuite) redisUserWithoutDel(address string) (string, string) {
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	name := "keys-cli-no-del"
+	password := rand.Text()
+	ctx := context.Background()
+	s.Require().NoError(client.Do(ctx, client.B().AclSetuser().Username(name).
+		Rule("reset", "on", ">"+password, "~*", "&*", "+@all", "-del").Build()).Error())
+	s.T().Cleanup(func() {
+		s.NoError(client.Do(context.Background(), client.B().AclDeluser().Username(name).Build()).Error())
+	})
+	return name, password
 }
 
 // clearKeySources empties every key source the shell running the test holds: a router

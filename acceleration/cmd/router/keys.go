@@ -29,7 +29,13 @@ const keysUsage = `usage: router keys create [flags]
   --app         the app the key belongs to
   --key         the key to stop. Every router stops taking it at once when this command
                 has the routers' Redis (redis.addr), and within a minute when it has none
+                or that Redis does not take the change
 `
+
+// keysKeyring is the keyring `router keys create` seals a new key's secret with. A test
+// swaps it for one whose current version is not 1, which loadKeyring reaches only with a
+// KMS.
+var keysKeyring = loadKeyring
 
 // runKeys mints the first credential a self-hosted router has.
 //
@@ -66,7 +72,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	}
 	defer pgStore.Close()
 
-	sealer, err := loadKeyring(ctx, settings, "minting a key needs")
+	sealer, err := keysKeyring(ctx, settings, "minting a key needs")
 	if err != nil {
 		return err
 	}
@@ -110,8 +116,8 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 // id pasted under the wrong app revokes nothing.
 //
 // Routers hold a key's owner in the cache for a minute. A command with the routers' Redis
-// drops it from every one at once; without Redis it cannot tell them, so it says the key
-// works for up to a minute longer.
+// drops it from every one at once; without Redis, or when the drop fails, it cannot tell
+// them, so it says the key works for up to a minute longer.
 func revokeKey(args []string, settings config.Config, logger *slog.Logger, out io.Writer) error {
 	flags := flag.NewFlagSet("keys revoke", flag.ContinueOnError)
 	appID := flags.String("app", "", "the app the key belongs to")
@@ -130,7 +136,7 @@ func revokeKey(args []string, settings config.Config, logger *slog.Logger, out i
 	}
 	defer pgStore.Close()
 
-	err = pgStore.APIKeys.Revoke(ctx, *appID, *keyID, "router keys revoke")
+	told, err := pgStore.APIKeys.Revoke(ctx, *appID, *keyID, "router keys revoke")
 	if errors.Is(err, store.ErrNoAPIKey) {
 		return fmt.Errorf("app %s has no live key %s", *appID, *keyID)
 	}
@@ -139,8 +145,11 @@ func revokeKey(args []string, settings config.Config, logger *slog.Logger, out i
 	}
 	logger.Info("revoked an api key", "app", *appID, "key", *keyID)
 	fmt.Fprintf(out, "revoked key %s of app %s\n", *keyID, *appID)
-	if settings.Redis.Addr == "" {
+	switch {
+	case settings.Redis.Addr == "":
 		fmt.Fprintln(out, "redis.addr is not set here, so the routers are not told: they drop it within a minute.")
+	case !told:
+		fmt.Fprintln(out, "the routers' Redis did not take the change, so the routers are not told: they drop it within a minute.")
 	}
 	return nil
 }
