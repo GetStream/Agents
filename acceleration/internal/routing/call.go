@@ -130,13 +130,14 @@ func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.
 		}
 		if !omitted {
 			meter.record(stat)
-			if meter.Recorded != nil {
-				meter.Recorded(stat, meter.cost(stat))
-			}
 		}
 		// A failure bills nothing, and work that names its own id settles under that one.
 		if reserved != uuid.Nil && (omitted || stat.UsageID != reserved) {
 			meter.Recorder.Release(reserved)
+		}
+		// Last, so a hook that panics leaves the row queued and the reservation let go.
+		if !omitted && meter.Recorded != nil {
+			meter.Recorded(stat, meter.cost(stat))
 		}
 	}()
 
