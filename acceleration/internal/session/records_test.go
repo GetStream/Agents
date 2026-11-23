@@ -314,6 +314,89 @@ func (s *RecordSuite) TestAnInterruptedTurnIsCancelledRatherThanFailed() {
 	s.Empty(s.held.finished[0].failure)
 }
 
+func (s *RecordSuite) TestAReplyStillBeingSaidEndsItsTurnOnceItHasBeen() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "when do you open"},
+		agent.Responded{TurnID: "turn-1", Text: "We open at nine.", Saying: true},
+	)
+	s.Empty(s.held.finished, "the answer is still being said")
+
+	s.took(agent.ReplySaid{TurnID: "turn-1"})
+
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(store.ResponseCompleted, s.held.finished[0].status)
+}
+
+func (s *RecordSuite) TestAReplyTalkedOverWhileBeingSaidIsCancelled() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "when do you open"},
+		agent.Responded{TurnID: "turn-1", Text: "We open at nine.", Saying: true},
+		agent.Interrupted{TurnID: "turn-1"},
+		agent.ReplySaid{TurnID: "turn-1"},
+	)
+
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(store.ResponseCancelled, s.held.finished[0].status)
+}
+
+func (s *RecordSuite) TestAReplyWhoseVoiceFailedWhileBeingSaidFailsItsTurn() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "when do you open"},
+		agent.Responded{TurnID: "turn-1", Text: "We open at nine.", Saying: true},
+		agent.Error{Context: "tts", Err: errors.New("the voice refused")},
+	)
+
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(store.ResponseFailed, s.held.finished[0].status)
+}
+
+func (s *RecordSuite) TestAReplyHandingWorkOnThatHasBeenSaidLeavesItsTurnOpen() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "work out the refund"},
+		agent.Responded{TurnID: "turn-1", Text: "Let me work that out.", PendingWork: true, Saying: true},
+		agent.ReplySaid{TurnID: "turn-1"},
+	)
+	s.Empty(s.held.finished, "the work handed on is still to come back")
+
+	s.took(
+		agent.Responding{TurnID: "follow-1", Continues: "turn-1"},
+		agent.Responded{TurnID: "follow-1", Text: "It is fourteen pounds.", Saying: true},
+	)
+	s.Empty(s.held.finished, "the answer is still being said")
+
+	s.took(agent.ReplySaid{TurnID: "follow-1"})
+
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(store.ResponseCompleted, s.held.finished[0].status)
+}
+
+func (s *RecordSuite) TestOnlyTheReplyStillBeingSaidIsCancelledWhenTheCallEmpties() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "work out the refund"},
+		agent.Responded{TurnID: "turn-1", Text: "Let me work that out.", PendingWork: true},
+		agent.Responding{TurnID: "turn-2", Prompt: "when do you open"},
+		agent.Responded{TurnID: "turn-2", Text: "We open at nine.", Saying: true},
+	)
+
+	s.session.cutUnheard()
+
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(s.held.responses[1].ID, s.held.finished[0].id)
+	s.Equal(store.ResponseCancelled, s.held.finished[0].status)
+}
+
+func (s *RecordSuite) TestAReplyStillBeingSaidWhenTheSessionEndsIsCancelled() {
+	s.took(
+		agent.Responding{TurnID: "turn-1", Prompt: "when do you open"},
+		agent.Responded{TurnID: "turn-1", Text: "We open at nine.", Saying: true},
+	)
+
+	s.session.abandonTurns()
+
+	s.Require().Len(s.held.finished, 1)
+	s.Equal(store.ResponseCancelled, s.held.finished[0].status)
+}
+
 func (s *RecordSuite) TestARefusedTurnIsRecordedAsTheRefusalItIs() {
 	s.took(
 		agent.Responding{TurnID: "turn-1", Prompt: "something against the policy"},

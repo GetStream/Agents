@@ -219,6 +219,13 @@ func (a *Agent) forgetUtterancesLocked() {
 	clear(a.heard)
 	clear(a.finished)
 	a.finishedOrder = a.finishedOrder[:0]
+	// A reply none of whose voice is left is never said in full: it ends with the call. One
+	// held for the voice replacing a lost one is still to be said.
+	for turnID := range a.beingSaid {
+		if !a.heldLocked(turnID) {
+			delete(a.beingSaid, turnID)
+		}
+	}
 }
 
 // unsaidUtterance is what a voice replacing a lost one is to be sent of an utterance: its

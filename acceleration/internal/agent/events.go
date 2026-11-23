@@ -202,8 +202,11 @@ func (UICompleted) isAgentEvent() {}
 type Responded struct {
 	// PendingWork says this model reply is followed by tools or delegated work.
 	PendingWork bool
-	TurnID      string
-	Text        string
+	// Saying says some of the reply is still to be said. ReplySaid follows once the last of
+	// it has been, unless it is cut off first (Interrupted) or its voice fails (Error).
+	Saying bool
+	TurnID string
+	Text   string
 	// Purpose is why the agent said it unasked, empty for an answer: PurposeCheckIn or
 	// PurposeUpdate. A watcher tells the caller why the agent spoke up.
 	Purpose string
@@ -212,6 +215,14 @@ type Responded struct {
 }
 
 func (Responded) isAgentEvent() {}
+
+// ReplySaid means the last of a reply that was still being said when it was written
+// (Responded.Saying) has been said.
+type ReplySaid struct {
+	TurnID string
+}
+
+func (ReplySaid) isAgentEvent() {}
 
 // ModelCall reports one provider attempt, including flow and delegated work.
 type ModelCall struct{ llm.CallTiming }

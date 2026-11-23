@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -54,6 +58,14 @@ type RuntimeSuite struct {
 	// edges are the calls the manager opened, in order.
 	edgesMu sync.Mutex
 	edges   []*quietEdge
+	// model answers the session's conversation, unless gated does instead, for a test that
+	// holds a reply open. voice speaks and ears hears the session's calls.
+	model *stubLLM
+	gated *gatedLLM
+	voice *stubTTS
+	ears  *stubSTT
+	// apps is the Stream apps sessions act in, when a test has the agent end its call.
+	apps *streamapp.Clients
 }
 
 func TestRuntimeSuite(t *testing.T) {
@@ -86,6 +98,8 @@ func (s *RuntimeSuite) SetupTest() {
 	s.refuses = false
 	s.manager = nil
 	s.edges = nil
+	s.gated = nil
+	s.apps = nil
 }
 
 // manages builds a manager over stub providers that keeps its sessions in Postgres.
@@ -93,14 +107,30 @@ func (s *RuntimeSuite) manages() {
 	logger := slog.New(slog.DiscardHandler)
 
 	transcription := sttrouter.NewRegistry()
-	transcription.Register("stub", func(routing.Spec) (stt.STT, error) { return &stubSTT{emitter: stt.NewEmitter(64)}, nil })
+	s.ears = &stubSTT{emitter: stt.NewEmitter(64)}
+	transcription.Register("stub", func(routing.Spec) (stt.STT, error) { return s.ears, nil })
 	transcriber, err := sttrouter.New(sttrouter.Options{Config: stubConfig(), Registry: transcription, Logger: logger})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
 
+	// The agent opens its conversation model first, then its flow controller, which has the
+	// caller's words over a reply stop it.
+	s.model = &stubLLM{reply: "Hello."}
+	var opened atomic.Int32
 	reasoning := llmrouter.NewRegistry()
-	reasoning.Register("stub", func(routing.Spec) (llmrouter.Provider, error) { return &stubLLM{reply: "Hello."}, nil },
-		routing.OverrideRegion)
+	reasoning.Register("stub", func(routing.Spec) (llmrouter.Provider, error) {
+		switch opened.Add(1) {
+		case 1:
+		case 2:
+			return &stubLLM{reply: `{"disposition":"respond","floor":"stop"}`}, nil
+		default:
+			return &stubLLM{reply: "Hello."}, nil
+		}
+		if s.gated != nil {
+			return s.gated, nil
+		}
+		return s.model, nil
+	}, routing.OverrideRegion)
 	// One instance in each region, so an eu session opens.
 	inRegions := stubConfig()
 	inEU := inRegions.Providers[0]
@@ -111,7 +141,8 @@ func (s *RuntimeSuite) manages() {
 	s.T().Cleanup(reasoner.Close)
 
 	speech := ttsrouter.NewRegistry()
-	speech.Register("stub", func(routing.Spec) (tts.TTS, error) { return &stubTTS{emitter: tts.NewEmitter(64)}, nil })
+	s.voice = &stubTTS{emitter: tts.NewEmitter(64)}
+	speech.Register("stub", func(routing.Spec) (tts.TTS, error) { return s.voice, nil })
 	speaker, err := ttsrouter.New(ttsrouter.Options{Config: stubConfig(), Registry: speech, Logger: logger})
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
@@ -122,6 +153,7 @@ func (s *RuntimeSuite) manages() {
 		TTS:    speaker,
 		Store:  s.store,
 		Pricer: s.prices,
+		Stream: s.apps,
 		Logger: logger,
 		Edge: func(context.Context, Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			edge := newQuietEdge()
@@ -366,4 +398,155 @@ func (s *RuntimeSuite) TestTheGreetingIsTheSessionsFirstRecordedTurn() {
 		return item.Kind == store.ItemAnswer && item.Text == "Hi, I'm listening."
 	})
 	s.GreaterOrEqual(said, 0, "the first turn is the greeting, said as written")
+}
+
+// speaks has the visitor say text into the session's call.
+func (s *RuntimeSuite) speaks(text string) {
+	s.edgesMu.Lock()
+	call := s.edges[len(s.edges)-1]
+	s.edgesMu.Unlock()
+	call.inbound <- agent.InboundAudio{Participant: visitor, Audio: audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1}}
+	s.ears.emitter.Send(stt.Transcript{Participant: visitor, Mode: stt.ModeFinal, Text: text, Language: "en", Confidence: 1})
+}
+
+// asked opens a voice session the visitor is in and has them ask something.
+func (s *RuntimeSuite) asked(spec Spec, question string) *Session {
+	created, err := s.opens(spec)
+	s.Require().NoError(err)
+	s.edgesMu.Lock()
+	call := s.edges[0]
+	s.edgesMu.Unlock()
+	call.arrives(visitor)
+	s.speaks(question)
+	return created
+}
+
+// firstTurn is the session's first recorded turn once it is written, with its items.
+func (s *RuntimeSuite) firstTurn(created *Session) (store.AgentResponse, []store.AgentResponseItem, error) {
+	if err := created.FlushRecords(s.ctx); err != nil {
+		return store.AgentResponse{}, nil, err
+	}
+	turns, err := s.store.Responses.Select(s.ctx, s.customer, created.ID(), store.ResponseFilter{Limit: 10})
+	if err != nil || len(turns) == 0 {
+		return store.AgentResponse{}, nil, err
+	}
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, created.ID(), store.ItemFilter{ResponseID: turns[0].ID, Limit: 10})
+	return turns[0], items, err
+}
+
+// answered waits until the first turn's answer is written down, and returns the turn.
+func (s *RuntimeSuite) answered(created *Session, answer string) store.AgentResponse {
+	var turn store.AgentResponse
+	s.Require().EventuallyWithT(func(c *assert.CollectT) {
+		var items []store.AgentResponseItem
+		var err error
+		turn, items, err = s.firstTurn(created)
+		require.NoError(c, err)
+		require.True(c, slices.ContainsFunc(items, func(item store.AgentResponseItem) bool {
+			return item.Kind == store.ItemAnswer && item.Text == answer
+		}))
+	}, settleFor, 10*time.Millisecond, "the answer was never written down")
+	return turn
+}
+
+// settled waits until the first turn has ended as status, and returns it.
+func (s *RuntimeSuite) settled(created *Session, status string) store.AgentResponse {
+	var turn store.AgentResponse
+	s.Require().EventuallyWithT(func(c *assert.CollectT) {
+		var err error
+		turn, _, err = s.firstTurn(created)
+		require.NoError(c, err)
+		require.Equal(c, status, turn.Status)
+	}, settleFor, 10*time.Millisecond, "the turn never ended as %s", status)
+	s.Require().NotNil(turn.FinishedAt)
+	return turn
+}
+
+func (s *RuntimeSuite) TestAnAnsweredVoiceTurnIsCompletedOnceItsReplyHasBeenSaid() {
+	s.manages()
+	release := s.voice.holds("Hello.")
+	s.T().Cleanup(release)
+	created := s.asked(Spec{}, "when do you open")
+
+	turn := s.answered(created, "Hello.")
+	s.Equal(store.ResponseRunning, turn.Status, "the reply is still being said")
+	s.Nil(turn.FinishedAt)
+
+	said := time.Now().Truncate(time.Microsecond)
+	release()
+
+	turn = s.settled(created, store.ResponseCompleted)
+	s.False(turn.FinishedAt.Before(said), "the turn ended before its reply had been said")
+	s.Require().NoError(created.Close())
+}
+
+func (s *RuntimeSuite) TestAVoiceTurnTalkedOverWhileItsReplyIsSaidIsCancelled() {
+	s.manages()
+	release := s.voice.holds("Hello.")
+	s.T().Cleanup(release)
+	created := s.asked(Spec{}, "when do you open")
+	s.answered(created, "Hello.")
+
+	s.speaks("actually, never mind")
+
+	s.settled(created, store.ResponseCancelled)
+	release()
+	s.Require().NoError(created.Close())
+}
+
+func (s *RuntimeSuite) TestAVoiceTurnWhoseCallerLeavesWhileItsReplyIsSaidIsCancelled() {
+	s.manages()
+	release := s.voice.holds("Hello.")
+	s.T().Cleanup(release)
+	created := s.asked(Spec{}, "when do you open")
+	s.answered(created, "Hello.")
+
+	s.edgesMu.Lock()
+	call := s.edges[0]
+	s.edgesMu.Unlock()
+	call.leaves(visitor)
+
+	s.settled(created, store.ResponseCancelled)
+	// The rest of the reply going out to an empty call changes nothing.
+	release()
+	s.Require().NoError(created.Close())
+	s.Equal(store.ResponseCancelled, s.settled(created, store.ResponseCancelled).Status)
+}
+
+func (s *RuntimeSuite) TestAVoiceTurnTalkedOverWhileItsReplyIsWrittenIsCancelled() {
+	s.gated = newGatedLLM()
+	s.manages()
+	s.T().Cleanup(func() {
+		for range 4 {
+			s.gated.allowed <- struct{}{}
+		}
+	})
+	created := s.asked(Spec{}, "when do you open")
+	select {
+	case <-s.gated.entered:
+	case <-time.After(settleFor):
+		s.FailNow("the model was never asked")
+	}
+
+	s.speaks("actually, never mind")
+
+	s.settled(created, store.ResponseCancelled)
+	s.Require().NoError(created.Close())
+}
+
+func (s *RuntimeSuite) TestTheGoodbyeOfACallTheAgentEndsIsCompleted() {
+	server := chattest.NewServer(s.T())
+	s.apps = streamapp.NewClients(streamapp.NewStatic(map[string]streamapp.Identity{
+		s.customer: {CustomerID: s.customer, StreamApp: 1, APIKey: "runtime-app", Secret: streamapp.NewSecret("runtime-app-secret"), BaseURL: server.URL},
+	}, streamapp.NewDeployment(streamapp.DeploymentOptions{APIKey: "deploy-key", Secret: "deploy-secret"})), streamapp.ClientsOptions{})
+	s.manages()
+	s.model.reply = "Goodbye."
+	s.model.calls = []llm.ToolCall{{ID: "call-1", Name: "end_call", Arguments: "{}"}}
+	created := s.asked(Spec{ConfigID: "cfg-1", Calls: endsCalls()}, "that is all, thanks")
+
+	s.Require().Eventually(func() bool { return created.State() == Ended && !s.manager.Running(created.ID()) },
+		settleFor, 10*time.Millisecond, "the agent never hung up")
+
+	turn := s.settled(created, store.ResponseCompleted)
+	s.Equal(store.ResponseCompleted, turn.Status, "the goodbye was said in full before the call ended")
 }

@@ -855,6 +855,8 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		unsaid[i].counted = false
 	}
 	outstanding := a.speakingTurn != "" && a.audioOutstandingLocked(a.speakingTurn)
+	speaking := a.speakingTurn
+	_, wasSaying := a.beingSaid[speaking]
 	// What the lost voice was saying will not be heard from it.
 	a.forgetUtterancesLocked()
 	replace := !a.closed && !a.switching.Load() &&
@@ -893,6 +895,10 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 			a.speakingTurn = ""
 			a.saying = ""
 		}
+	}
+	// A written reply the next voice says again is still being said.
+	if wasSaying && a.heldLocked(speaking) {
+		a.beingSaid[speaking] = struct{}{}
 	}
 	held, current := a.held, a.harness
 	a.mu.Unlock()

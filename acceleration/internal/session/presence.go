@@ -162,6 +162,9 @@ func (s *Session) observe(run *presence, event Event) {
 			return
 		}
 		delete(run.people, reported.Participant.ID)
+		if len(run.people) == 0 {
+			s.cutUnheard()
+		}
 		if run.settled && len(run.people) == 0 && s.callerSeen.Load() {
 			s.SetTimeout(hangupTimeout, TimeoutHangup)
 		}
