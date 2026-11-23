@@ -135,9 +135,9 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 	case UserKindAuthenticated:
 		err = r.store.RecordAccount(ctx, customerID, userID)
 	case namedUser:
-		err = r.store.RecordUser(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
+		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
 	default:
-		err = r.store.RecordUser(ctx, &User{CustomerID: customerID, ID: userID, Kind: sighting})
+		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: sighting})
 	}
 	if err != nil {
 		return err

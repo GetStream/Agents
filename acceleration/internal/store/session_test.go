@@ -956,7 +956,7 @@ func (s *StoreSuite) TestSettingAGuestsSecretReplacesTheOldOne() {
 }
 
 func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated}))
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated}))
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
@@ -990,7 +990,7 @@ func (s *StoreSuite) guestWithSecret(id string) (string, []byte) {
 func (s *StoreSuite) TestAnAccountIsNobodysToClaim() {
 	// Everybody is recorded now, so a user id being here no longer says anybody may be
 	// handed their conversations. Only a guest may.
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated, CreatedAt: s.base,
 	}))
 
@@ -1006,7 +1006,7 @@ func (s *StoreSuite) TestTheSameUserIdUnderTwoAppsIsTwoPeople() {
 	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Name: "Guest", CreatedAt: s.base,
 	}))
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
 		ID: "jlahey", CustomerID: "somebody-else", Kind: UserKindAuthenticated, CreatedAt: s.base,
 	}))
 
@@ -1020,7 +1020,7 @@ func (s *StoreSuite) TestTheSameUserIdUnderTwoAppsIsTwoPeople() {
 
 func (s *StoreSuite) TestAUserHasToSayWhichKindTheyAre() {
 	// Without it a row says somebody called, and nothing says whether anybody checked.
-	err := s.store.RecordUser(s.ctx, &User{ID: "jlahey", CustomerID: "app"})
+	err := s.store.Users.Insert(s.ctx, &User{ID: "jlahey", CustomerID: "app"})
 	s.Require().Error(err)
 }
 

@@ -12,8 +12,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// RecordUser stores an end user this app was seen acting for.
-func (s *Store) RecordUser(ctx context.Context, user *User) error {
+// Insert stores an end user this app was seen acting for.
+func (r *Users) Insert(ctx context.Context, user *User) error {
 	if user.ID == "" {
 		return stack.Wrap(errors.New("store: a user id is required"))
 	}
@@ -34,7 +34,7 @@ func (s *Store) RecordUser(ctx context.Context, user *User) error {
 	// coming back rather than a conflict. A row already here is left alone: a guest who
 	// signed up is claimed rather than overwritten, and overwriting would lose the kind
 	// the claim path reads.
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -108,7 +108,7 @@ func (s *Store) UserEmail(ctx context.Context, customerID, userID string) (strin
 func (s *Store) RecordGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
-	return s.RecordUser(ctx, guest)
+	return s.Users.Insert(ctx, guest)
 }
 
 // Guest returns one guest of a customer's. A user of some other kind is not one: an
