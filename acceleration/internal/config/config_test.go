@@ -791,6 +791,18 @@ func (s *ConfigSuite) TestAnActivityKeyIsNeverTheOpsOrTheManageKey() {
 	}
 }
 
+// Defect: the activity keys checked against the manage key only when an ops key is set.
+func (s *ConfigSuite) TestAnActivityKeyIsNeverTheManageKeyOnARouterWithNoOpsKey() {
+	s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", theManageKey)
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theManageKey)
+
+	_, _, err := Load("")
+
+	s.Require().ErrorContains(err, "auth.activity_key (")
+	s.ErrorContains(err, "auth.manage_key")
+	s.NotContains(err.Error(), "the-", "the error names the settings, never the key")
+}
+
 // Defect: a short activity key, which a guess can reach, or one that is the ops key and a
 // space, which net/http trims back to the ops key, taken.
 func (s *ConfigSuite) TestAnActivityKeyIsLongAndHasNoSpaceAtEitherEnd() {
