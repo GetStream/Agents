@@ -51,7 +51,7 @@ func OpenShards(options Options) (*Store, error) {
 		return nil, errors.New("store: dsn is required")
 	}
 	db := connect(options.DSN, maxConns)
-	s := &Store{global: db, shard: db}
+	s := &Store{global: db, shard: db, locks: connect(options.DSN, lockConns)}
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
 		s.shard = connect(options.ShardDSN, maxConns)
 	}

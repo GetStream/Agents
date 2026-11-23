@@ -42,7 +42,19 @@ const (
 	credentialRetryMost  = 100 * time.Millisecond
 )
 
-// withCredentialLock runs fn on one pool connection that holds the session-level advisory lock on
+// lockConns is how many connections the pool credential and provider app locks are held on
+// (Store.locks) keeps at most, so how many of those locks one router holds at once; one more
+// waits for a connection until its context ends. A lock keeps its connection for as long as it
+// is held, a refresh's provider round trip included (up to the resolver's retrieveTimeout,
+// 30 s), and the statements its callback runs through the store borrow a connection of the
+// serving pool (maxConns) for that one statement. On a pool of their own, locks stalled at a
+// provider can never take the serving pool, and a holder that asks for a serving connection
+// never waits on one another holder keeps. 16 lets that many refreshes stall at once before another
+// connection's credential has to wait, and adds that many to the 40 a router holds on the
+// shared database; idle ones close after 5 minutes (connect). A choice, not measured.
+const lockConns = 16
+
+// withCredentialLock runs fn on one lock pool connection that holds the session-level advisory lock on
 // the connection's credential state, and gives the lock and the connection back when fn returns.
 //
 // Session-level, not pg_advisory_xact_lock as connectors.go uses: checkpoint commits while
@@ -51,7 +63,8 @@ const (
 // and session-level requests "do not honor transaction semantics"
 // (https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS). That is also
 // why it lives on one dedicated connection: a lock taken on a pooled connection and not
-// released would stay with whoever borrows it next.
+// released would stay with whoever borrows it next. Statements fn runs on that connection
+// (conn) take no second one; any other statement takes one of the serving pool.
 func (s *Store) withCredentialLock(ctx context.Context, customerID, id string, fn func(bun.Conn) error) error {
 	key := credentialLockKey(customerID, id)
 	conn, err := s.acquireCredentialLock(ctx, credentialLockNamespace, key)
@@ -78,7 +91,7 @@ func (s *Store) withCredentialLock(ctx context.Context, customerID, id string, f
 func (s *Store) acquireCredentialLock(ctx context.Context, namespace, key int32) (bun.Conn, error) {
 	pause := credentialRetryFirst
 	for {
-		conn, err := s.global.Conn(ctx)
+		conn, err := s.locks.Conn(ctx)
 		if err != nil {
 			return bun.Conn{}, fmt.Errorf("store: credential lock connection: %w", err)
 		}
@@ -108,7 +121,7 @@ func (s *Store) acquireCredentialLock(ctx context.Context, namespace, key int32)
 	}
 }
 
-// releaseCredentialLock unlocks and hands the connection back to the pool. pg_advisory_unlock
+// releaseCredentialLock unlocks and hands the connection back to the lock pool. pg_advisory_unlock
 // returns false when the lock was not held
 // (https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS);
 // that, or an unlock that fails, closes the connection rather than return a session in a
