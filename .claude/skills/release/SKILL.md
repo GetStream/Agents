@@ -87,6 +87,12 @@ git worktree remove <scratch dir>
 It must print `X.Y.Z` exactly. If it does not, stop: delete the local tag (`git tag -d vX.Y.Z`)
 and do not publish. If it does, push the tag: `git push origin vX.Y.Z`.
 
+`release.yml` repeats the check on the runner, where the checkout holds only the release's tag:
+its build job runs `.github/scripts/check-release-version.sh`, which fails before the upload
+unless every wheel and sdist carries the version of the tag. The `Release check` workflow
+(Actions > Release check, also run on a pull request that changes the release files) builds every
+package at a local tag and runs that script, without the `pypi` environment, so it cannot publish.
+
 ## 5. Publish the GitHub release (ask first)
 
 ```bash
@@ -101,13 +107,21 @@ generated notes by using the `--notes` flag"). The CHANGELOG section is not copi
 
 ## 6. Check what was published
 
-- `gh run list -R GetStream/Agents --workflow release.yml --limit 1` must show the new tag with
-  `success`.
+- `gh run list -R GetStream/Agents --workflow release.yml --limit 1` shows the run of the new tag.
+  Do not read its conclusion: the `integration` job is in the same run and does not gate the
+  publish (a provider outage must not hold back a release), so a good publish can end `failure`.
+  `gh run view <run id> -R GetStream/Agents --json jobs --jq '.jobs[] | [.name, .conclusion]'` must
+  show `success` for `Build & Test Core SDK` (build, version check and upload) and for
+  `Verify PIP install works`.
 - `curl -s https://pypi.org/pypi/vision-agents/json | jq -r .info.version` must print `X.Y.Z`.
 - `gh run list -R GetStream/Agents --workflow publish-sdk-kotlin.yml --event release --limit 1`
   must show `success`. Its run says whether it published Kotlin `X.Y.Z` or why not.
 
 `release.yml` has never succeeded: of its 41 runs, 34 ended `failure`, 3 `startup_failure`, 3
 `cancelled` and 1 `skipped`. The packages of 0.6.5 to 0.6.9 reached PyPI outside it, and 0.6.9
-has no Trusted Publishing provenance (AI-3561). Until AI-3561 is fixed, step 6 is unverified. If the run does not succeed, the packages are not on PyPI. Report it
-on AI-3561, and do not upload by hand.
+has no Trusted Publishing provenance (AI-3561). The first run of the fixed workflow is the first
+check of PyPI's side, which the repo cannot read: every PyPI project of the 41 packages must list
+`GetStream/Agents`, `release.yml` and the environment `pypi` as a trusted publisher, and
+`vision-agents-plugins-omni` and `vision-agents-plugins-stream` are not on PyPI yet, so each needs a
+pending publisher. If the run does not succeed, some packages may be on PyPI and others not. Report
+it on AI-3561, and do not upload by hand.
