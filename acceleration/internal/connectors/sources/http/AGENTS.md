@@ -1,6 +1,6 @@
 # internal/connectors/sources/http
 
-The `core.ToolSource` for a connector whose manifest lists its own tools, registered as `http` (`Kind`, `core.SourceKindHTTP`), the name a manifest's `sources[].kind` gives it. Each tool in `sources[].http_tools` (`core.HTTPTool`, validated in `core/http_tools.go`) is one HTTP request to the source's endpoint. Callers, through `core.Registry.ToolSources` (`cmd/router/main.go`): `POST /v1/agents/connections/{id}/validate` (`Discover`, `internal/api/connection_tools.go`) and the session (`Open`, `internal/session/connector_tools.go`), whose dispatcher runs `Toolset.Call` and bounds it itself. No stored connector has kind `http` until the API takes one (AI-3676).
+The `core.ToolSource` for a connector whose manifest lists its own tools, registered as `http` (`Kind`, `core.SourceKindHTTP`), the name a manifest's `sources[].kind` gives it. Each tool in `sources[].http_tools` (`core.HTTPTool`, validated in `core/http_tools.go`) is one HTTP request to the source's endpoint. Callers, through `core.Registry.ToolSources` (`cmd/router/main.go`): `POST /v1/agents/connections/{id}/validate` (`Discover`, `internal/api/connection_tools.go`) and the session (`Open`, `internal/session/connector_tools.go`), whose dispatcher runs `Toolset.Call` and bounds it itself. No stored connector has kind `http` until the API takes one (AI-3676): an import refuses one too (`importableDefinition`, `internal/store/datamove.go`) until then.
 
 ## Flow
 
