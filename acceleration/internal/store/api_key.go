@@ -14,8 +14,8 @@ import (
 )
 
 // APIKey is one credential belonging to an app. Several may be live at once, because
-// rotation without downtime is: create the new key, deploy it, watch the old one go quiet,
-// revoke it. One key per app makes every rotation an outage, so rotation stops happening.
+// rotation without downtime is: create the new key, deploy it, watch the old one go quiet
+// (requests.api_key), revoke it. One key per app makes every rotation an outage, so rotation stops happening.
 type APIKey struct {
 	bun.BaseModel `bun:"table:api_keys,alias:k"`
 
