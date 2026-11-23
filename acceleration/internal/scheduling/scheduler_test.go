@@ -548,6 +548,39 @@ func (s *SchedulerSuite) TestAHeldTaskIsDeliveredWhenTheHoldEnds() {
 	s.Require().NotNil(runs[0].PostponedUntil, "the hold is on the run")
 }
 
+func (s *SchedulerSuite) TestAnOccurrenceHeldAfterAFailedAttemptIsDeliveredAfterTheHoldUnderThatReason() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+	var mu sync.Mutex
+	var calls []store.ClaimedScheduledTask
+	deliver := func(_ context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		if claimed.Task.ID != task.ID {
+			return "conversation", claimed.Task.SessionID, nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, claimed)
+		switch len(calls) {
+		case 1:
+			return "", "", &Failure{Reason: ReasonOnACall, Err: errors.New("the user is on a call")}
+		case 2:
+			return "", "", &Postponed{Until: time.Now().Add(300 * time.Millisecond)}
+		}
+		return "conversation", claimed.Task.SessionID, nil
+	}
+	s.started(deliver, func(scheduler *Scheduler) {
+		scheduler.retries = []time.Duration{10 * time.Millisecond}
+	})
+
+	s.Require().Eventually(func() bool {
+		return s.read(task).State == store.ScheduledTaskCompleted
+	}, 10*time.Second, 10*time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	s.Require().Len(calls, 3, "failed, held, then delivered after the hold")
+	s.Require().NotNil(calls[2].Run.Error, "the claim after the hold reads why the attempt before it failed")
+	s.Equal(ReasonOnACall, *calls[2].Run.Error)
+}
+
 func (s *SchedulerSuite) TestAHeldOccurrenceIsCountedFromTheHoldAndNotFromWhenItCameDue() {
 	now := time.Now().UTC().Truncate(time.Second)
 	scheduler := NewScheduler(s.db, nil, slog.New(slog.DiscardHandler))
