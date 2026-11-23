@@ -311,6 +311,27 @@ func (s *SocketCloseLogSuite) TestAVoiceSocketWithNoStartFrameIsARefusal() {
 	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
 }
 
+func (s *SocketCloseLogSuite) TestAVoiceSocketClosedBeforeItsStartFrameIsTheCallersClose() {
+	// Catches a caller that left before saying what it wanted logged as refused.
+	id := rand.Text()
+	connection := s.serverClient.withRequestID(id).opens("/v1/agents/socket")
+
+	s.closesWith(connection, 4003)
+
+	s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4003 ")
+}
+
+func (s *SocketCloseLogSuite) TestAVoiceSocketDroppedBeforeItsStartFrameIsClientGone() {
+	id := rand.Text()
+	connection := s.serverClient.withRequestID(id).opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.UnderlyingConn().Close())
+
+	line := s.closeLine(id)
+	s.Contains(line, " close_reason=client_gone ")
+	s.NotContains(line, "close_code=")
+}
+
 func (s *SocketCloseLogSuite) TestAVoiceSocketNamingACallIsARefusal() {
 	// Catches a refusal that names its failure's code (refuseWith) left unlogged.
 	id := rand.Text()
