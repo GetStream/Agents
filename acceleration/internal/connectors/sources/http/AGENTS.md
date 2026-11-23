@@ -43,7 +43,7 @@ Toolset.Call(call)
 - **Bounded.** One body is read up to 4 MiB (`maxResponseBytes`, the mcp source's cap); one result or tool error is at most `core.MaxResultBytes` (32 KiB), ending with `core.TruncatedMarker`. An opened toolset's client waits at least `callTimeout` (35 s), past the longest `timeout_ms` a binding may ask for (30 s), and `Binding.Timeout` bounds a call when set. Check: `go test -run 'TestHTTPSourceContract/TestAResultOverTheCap|TestSourceSuite/(TestABodyIsRead|TestAnOpenedToolsetWaits|TestTheBindingsTimeout)' ./internal/connectors/sources/http`.
 - **Every hardcoded value says where it comes from**, beside it: `Separator`, `defaultCallTimeout`, `maxResponseBytes`, `nonText`, `bodyMethods`.
 
-Not here yet (AI-3675, call-time safety): refusing an undeclared argument before sending (today it is dropped), refusing a `.` or `..` path value, refusing an override name at `Open`, redirect rules beyond egress's, and redacting arguments from log lines. A `sources[].tools[].needs_scopes` on an http source is not read: no tool is left out for a scope and validate reports none.
+Not here yet (AI-3675, call-time safety): refusing an undeclared argument before sending (today it is dropped), refusing a `.` or `..` path value, refusing an override name at `Open`, redirect rules beyond egress's, and redacting arguments from log lines. A manifest that sets `sources[].tools` (the `needs_scopes` rules) on an http source is refused (`checkHTTPSource`), as the source reads none: no tool is left out for a scope and validate reports none.
 
 ## Tests
 
