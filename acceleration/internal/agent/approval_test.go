@@ -152,6 +152,65 @@ func (s *AgentSuite) TestAnApprovedCallThatFailedIsLoggedAsFailed() {
 	})
 }
 
+// interruptedRun has the caller say yes to booking order 12, under a tool policy, and talk
+// over the run, and returns the line the run was logged with.
+func (s *AgentSuite) interruptedRun(policy ToolPolicy) map[string]any {
+	s.logs = &logLines{}
+	s.toolPolicy = func(string) ToolPolicy { return policy }
+	s.askedToApprove()
+	began, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	s.runner.run = func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+		close(began)
+		select {
+		case <-release:
+			return llm.TextParts("order 12 booked"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+	participant := stt.Participant{ID: "alice"}
+	s.says(participant, "yes please")
+	select {
+	case <-began:
+	case <-time.After(settleFor):
+		s.FailNow("the approved call never ran")
+	}
+	s.flow.then = []string{`{"disposition":"wait","floor":"stop"}`}
+	s.replyWentOut()
+
+	s.mutters(participant, "stop, hold on")
+
+	if !policy.Cancels {
+		s.eventually(func() bool { return strings.Contains(fmt.Sprint(s.history()), stillRunning) },
+			"the interrupted confirmation was not answered")
+		release <- struct{}{}
+	}
+	s.eventually(func() bool { return len(s.logs.records(toolBack)) == 3 }, "the run never came back")
+	return s.logs.records(toolBack)[1]
+}
+
+// A run the caller talked over is answered with stillRunning and let finish, as the
+// confirmation it ran inside is.
+func (s *AgentSuite) TestAnApprovedCallTheCallerTalkedOverIsLoggedAsStillRunning() {
+	s.onFakeClock(func() {
+		ran := s.interruptedRun(ToolPolicy{Waits: true})
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("still-running", ran["outcome"])
+	})
+}
+
+// A run of a tool that asks to be cancelled when talked over is logged as cancelled.
+func (s *AgentSuite) TestAnApprovedCallCancelledByTheCallerIsLoggedAsCancelled() {
+	s.onFakeClock(func() {
+		ran := s.interruptedRun(ToolPolicy{Cancels: true})
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("cancelled", ran["outcome"])
+		s.Equal("cancelled", ran["error_code"])
+	})
+}
+
 // A no runs nothing, so nothing is logged as run: only the question and the confirmation.
 func (s *AgentSuite) TestADeclinedCallLogsNoRun() {
 	s.onFakeClock(func() {
