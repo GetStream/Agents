@@ -103,6 +103,9 @@ func (s *CustomModelsSuite) TestEveryRefusalOfABaseURLIsOneAnswer() {
 		"https://no-such-host.invalid/v1",
 		"https://10.0.0.7/v1",
 		"https://127.0.0.1/v1",
+		"https://localhost/v1",
+		"https://8.8.8.8:0/v1",
+		"https://127.1/v1",
 		"https://[fe80::1%25eth0]/v1",
 		"http://8.8.8.8/v1",
 		"https://user:secret@8.8.8.8/v1",
@@ -132,7 +135,7 @@ func (s *CustomModelsSuite) TestEveryRefusalOfABaseURLIsOneAnswer() {
 func (s *CustomModelsSuite) TestAnUpdateToAPrivateBaseURLGetsTheSameAnswer() {
 	created := s.createModel(map[string]any{"name": "moved", "base_url": "https://8.8.8.8/v1", "model": "a"})
 	answers := map[string]bool{}
-	for _, base := range []string{"https://no-such-host.invalid/v1", "https://10.0.0.7/v1"} {
+	for _, base := range []string{"https://no-such-host.invalid/v1", "https://10.0.0.7/v1", "https://localhost/v1"} {
 		status, failure := s.serverClient.failure(http.MethodPut, "/v1/agents/models/"+created.Id, map[string]any{
 			"name": "moved", "base_url": base, "model": "a",
 		})
