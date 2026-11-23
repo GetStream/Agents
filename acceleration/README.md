@@ -116,7 +116,7 @@ the other commands that read them there.
 | `ROUTER_DEV_KEK`        | The key encryption key in plain text, for a laptop or CI only: version 1 of the keyring. The keyring unseals the stored key secrets, so `api_key` needs it, and it is what a node's peers prove they are this deployment's with, so a deployment of more than one node needs it. Refused beside `ROUTER_AUTH_KMS_KEY` or any `ROUTER_AUTH_KEK_V<n>_WRAPPED`. `ROUTER_AUTH_KEK`, a plain `ROUTER_AUTH_KEK_V<n>` and `auth.kek` are no longer read, and a start that sets one is refused |
 | `ROUTER_AUTH_KEK_V<n>_WRAPPED` | Version `n` of the keyring on a hosted router, as base64 ciphertext a KMS wrapped with the AAD `router-kek-v<n>`. The router unwraps it at startup with `ROUTER_AUTH_KMS_KEY`. Keep an old version until every row sealed under it is rewrapped |
 | `ROUTER_AUTH_KMS_KEY`   | The Cloud KMS key that unwraps every `ROUTER_AUTH_KEK_V<n>_WRAPPED`, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. The router calls Cloud KMS once at startup, with Application Default Credentials. See «The key encryption key in Cloud KMS» |
-| `ROUTER_AUTH_KEK_VERSION` | Which keyring version seals new connector credentials, defaults to `1`. Every `ROUTER_AUTH_KEK_V<n>_WRAPPED` that is set still opens its rows, so moving this back to an older version is safe |
+| `ROUTER_AUTH_KEK_VERSION` | Which keyring version seals new connector credentials and new API key secrets, defaults to `1`. Every `ROUTER_AUTH_KEK_V<n>_WRAPPED` that is set still opens its rows, so moving this back to an older version is safe |
 | `ROUTER_CONNECTORS_ENABLED` | `true` turns connectors on. The router then needs the keyring version `ROUTER_AUTH_KEK_VERSION` names, in every auth mode, and refuses to start without it. Off by default |
 | `ROUTER_CONNECTORS_PROXY_CALLS_PER_MINUTE` | Direct calls one app may send to one connector through the connection proxy in a minute, counted in Redis across routers, defaults to `60`. A call over it is a 429 with `Retry-After`. `0` turns it off, and so does a router with no Redis |
 | `ROUTER_RUNS_CONCURRENT_PER_APP` | Headless runs (`POST /v1/agents/runs`) one app may have in flight, counted in Redis across routers, defaults to `20`. A run over it is a 429 `concurrency_limited` with `Retry-After`. `0` turns it off, and so does a router with no Redis. The child agents a run calls take no slot: at most 8 run at once inside their parent's |
@@ -2645,7 +2645,8 @@ go run ./cmd/router keys create --org Acme --app-name "Acme production" --key-na
 
 `--app-id` keeps an id the customer already has, which is what makes an import land under
 something. Running it again for an existing app adds a second key rather than refusing.
-`keys revoke --app <id> --key <id>` stops one of the app's keys on every router at once.
+`keys revoke --app <id> --key <id>` stops one of the app's keys: on every router at once when the
+command has the routers' Redis (`ROUTER_REDIS_ADDR`), and within a minute when it has none.
 
 Three endpoints move a customer between two deployments, all server-side only:
 

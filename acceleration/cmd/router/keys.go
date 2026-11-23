@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -25,7 +27,8 @@ const keysUsage = `usage: router keys create [flags]
        router keys revoke --app <id> --key <id>
 
   --app         the app the key belongs to
-  --key         the key to stop, which stops working on every router at once
+  --key         the key to stop. Every router stops taking it at once when this command
+                has the routers' Redis (redis.addr), and within a minute when it has none
 `
 
 // runKeys mints the first credential a self-hosted router has.
@@ -41,7 +44,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	switch args[0] {
 	case "create":
 	case "revoke":
-		return revokeKey(args[1:], settings, logger)
+		return revokeKey(args[1:], settings, logger, os.Stdout)
 	default:
 		return fmt.Errorf("unknown keys command %q\n\n%s", args[0], keysUsage)
 	}
@@ -105,7 +108,11 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 
 // revokeKey stops one of an app's keys. The app is asked for as well as the key, so a key
 // id pasted under the wrong app revokes nothing.
-func revokeKey(args []string, settings config.Config, logger *slog.Logger) error {
+//
+// Routers hold a key's owner in the cache for a minute. A command with the routers' Redis
+// drops it from every one at once; without Redis it cannot tell them, so it says the key
+// works for up to a minute longer.
+func revokeKey(args []string, settings config.Config, logger *slog.Logger, out io.Writer) error {
 	flags := flag.NewFlagSet("keys revoke", flag.ContinueOnError)
 	appID := flags.String("app", "", "the app the key belongs to")
 	keyID := flags.String("key", "", "the key to revoke")
@@ -131,7 +138,10 @@ func revokeKey(args []string, settings config.Config, logger *slog.Logger) error
 		return err
 	}
 	logger.Info("revoked an api key", "app", *appID, "key", *keyID)
-	fmt.Printf("revoked key %s of app %s\n", *keyID, *appID)
+	fmt.Fprintf(out, "revoked key %s of app %s\n", *keyID, *appID)
+	if settings.Redis.Addr == "" {
+		fmt.Fprintln(out, "redis.addr is not set here, so the routers are not told: they drop it within a minute.")
+	}
 	return nil
 }
 

@@ -148,7 +148,9 @@ func (s *StoreSuite) TestAKeyCachedWhileLiveStopsWorkingWhenItLapses() {
 	}, 2*time.Second, 10*time.Millisecond, "a lapsed key read from the cache still works")
 }
 
-func (s *StoreSuite) TestAKeyRevokedInTheDatabaseStopsWorkingWithinAMinute() {
+// A key revoked where nothing deletes its cached owner stops working when the cached owner
+// expires, so that expiry is the bound on how long such a key keeps working.
+func (s *StoreSuite) TestAKeysCachedOwnerExpiresWithinAMinute() {
 	if s.store.cache == nil {
 		s.T().Skip("ROUTER_REDIS_ADDR not set: the cache is what this bounds")
 	}
@@ -156,15 +158,12 @@ func (s *StoreSuite) TestAKeyRevokedInTheDatabaseStopsWorkingWithinAMinute() {
 	key := s.key(app.ID, "vak_live_6666666666666666aaaaaaaa", nil)
 	_, err := s.store.APIKeys.GetLive(s.ctx, key.ID)
 	s.Require().NoError(err)
-	// Revoked where no deletion of the cached owner follows, so only its TTL ends it.
-	_, err = s.store.GlobalDB().NewUpdate().Model((*APIKey)(nil)).Set("revoked_at = now()").Where("id = ?", key.ID).Exec(s.ctx)
-	s.Require().NoError(err)
 
 	redis := s.store.sharedRedis()
 	ttl, err := redis.Do(s.ctx, redis.B().Pttl().Key(cacheKey("key", key.ID)).Build()).AsInt64()
 	s.Require().NoError(err)
 	s.Positive(ttl, "the owner is cached")
-	s.LessOrEqual(ttl, time.Minute.Milliseconds(), "a revoked key keeps working for as long as its owner is cached")
+	s.LessOrEqual(ttl, time.Minute.Milliseconds(), "a key revoked without telling the cache keeps working for as long as its owner is cached")
 }
 
 func (s *StoreSuite) TestAnAppCannotRevokeAnotherAppsKey() {

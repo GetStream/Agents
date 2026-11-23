@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -111,6 +113,35 @@ func (s *KeysCLISuite) TestARevokedKeyStopsAuthenticatingOnARouterThatHadItCache
 		_, err := lookup(ctx, key)
 		return errors.Is(err, auth.ErrUnauthenticated)
 	}, 2*time.Second, 10*time.Millisecond, "the router still takes a revoked key")
+}
+
+func (s *KeysCLISuite) TestRevokeSaysWhenTheRoutersAreNotToldAndSoTakeTheKeyForAMinute() {
+	redisAddr := os.Getenv("ROUTER_REDIS_ADDR")
+	for _, c := range []struct {
+		name  string
+		redis bool
+		want  string
+	}{
+		{"with the routers' Redis", true, "revoked key %s of app %s\n"},
+		{"without Redis", false, "revoked key %s of app %s\n" +
+			"redis.addr is not set here, so the routers are not told: they drop it within a minute.\n"},
+	} {
+		s.Run(c.name, func() {
+			settings := s.settings
+			if c.redis {
+				if redisAddr == "" {
+					s.T().Skip("ROUTER_REDIS_ADDR not set")
+				}
+				settings.Redis.Addr = redisAddr
+			}
+			_, _, app, key := s.seedKey(settings)
+			var out bytes.Buffer
+
+			s.Require().NoError(revokeKey([]string{"--app", app.ID, "--key", key}, settings, slog.New(slog.DiscardHandler), &out))
+
+			s.Equal(fmt.Sprintf(c.want, key, app.ID), out.String())
+		})
+	}
 }
 
 func (s *KeysCLISuite) TestRevokeRefusesAKeyOfAnotherApp() {

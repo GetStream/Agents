@@ -882,9 +882,10 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### Only a number on the customer's own trunk moves in an import
 
 `/v1/data/import`, and a change applied after it, writes a `phone_numbers` row only when its vendor is exactly `sip_trunk`; any other row is skipped without an error. A number bought at a vendor stays in the vendor account of the deployment that bought it, and its bills already move with the requests, so the destination neither holds it nor bills its months again. A customer that moves keeps a bought number by buying or porting it at the destination. A number bought here and still held is never updated or deleted by an imported row or a replayed change, whatever id it names. An imported `sip_trunk` number is held to the API's rules (E.164, a vendor, a cost that is not negative), and no imported number keeps its `dlc_use_case_id`, which names a use case of the source.
+
 ### An API key can be revoked, and a revoked key stops working within a minute
 
-`router keys revoke --app <id> --key <id>` stops one of an app's keys on every router at once; a key id that is not that app's revokes nothing and the command says so. A key's owner is cached for a minute rather than an hour, so a key revoked where the cache is not told stops authenticating within a minute. A key's secret is opened with the key version it was sealed under, so keys keep authenticating after the key that seals secrets is rotated, and `router keys create` records the version it sealed with.
+`router keys revoke --app <id> --key <id>` stops one of an app's keys: on every router at once when the command has the routers' Redis (`ROUTER_REDIS_ADDR`), and within a minute when it has none, which the command says. A key id that is not that app's revokes nothing and the command says so. A key's owner is cached for a minute rather than an hour, so a key revoked in the database alone stops authenticating within a minute. A key's secret is opened with the key version it was sealed under, so keys keep authenticating after the key that seals secrets is rotated, and `router keys create` records the version it sealed with. API keys created while `ROUTER_AUTH_KEK_VERSION` was not 1 were stored as version 1 and must be created again with `router keys create`.
 
 ### A request counts only toward its own organization's spend grants
 
