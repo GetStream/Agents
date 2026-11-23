@@ -4786,10 +4786,22 @@ export type components = {
             readonly running: number;
         };
         /**
-         * @description The furthest an organization got: none, dashboard_reads, agent_setup, conversations, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
+         * @description The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
          * @enum {string}
          */
-        readonly ActivityStep: "none" | "dashboard_reads" | "agent_setup" | "conversations" | "steady_use";
+        readonly ActivityStep: "none" | "dashboard_reads" | "agent_setup" | "workers" | "conversations" | "voice_video" | "phone_sms" | "steady_use";
+        readonly ActivityStepDay: {
+            /**
+             * Format: date
+             * @description The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on.
+             */
+            readonly first_answered: string;
+            /**
+             * @description The step, one of furthest_step's but none and steady_use.
+             * @enum {string}
+             */
+            readonly step: "dashboard_reads" | "agent_setup" | "workers" | "conversations" | "voice_video" | "phone_sms";
+        };
         readonly AddContactsRequest: {
             /** @description Up to 1,000. */
             readonly contacts: readonly components["schemas"]["ContactInput"][];
@@ -4897,7 +4909,7 @@ export type components = {
             readonly scheduling?: components["schemas"]["AgentScheduling"];
             readonly search?: string;
             readonly skills?: readonly string[];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade. */
             readonly sts?: string;
             readonly stt?: string;
             readonly subagent?: string;
@@ -5069,7 +5081,7 @@ export type components = {
             readonly search?: string;
             /** @description Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set. */
             readonly skills?: readonly string[];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade. */
             readonly sts?: string;
             /** @description A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it. */
             readonly stt?: string;
@@ -8432,6 +8444,25 @@ export type components = {
             /** Format: int64 */
             readonly requests: number;
         };
+        /** @description A built-in voice a native speech model accepts by id. */
+        readonly ModelVoice: {
+            /** @description True when this is the model's default voice. */
+            readonly default?: boolean;
+            /** @description Short description of the voice's tone, style or accent. */
+            readonly description?: string;
+            /** @description Voice presentation, such as female, male or neutral. */
+            readonly gender?: string;
+            /**
+             * @description The voice identifier the provider accepts in its voice field.
+             * @example marin
+             */
+            readonly id: string;
+            /**
+             * @description Display name for the voice.
+             * @example Marin
+             */
+            readonly name: string;
+        };
         readonly NumberSearchResult: {
             /** @description What the vendors are offering, cheapest first. */
             readonly numbers: readonly components["schemas"]["AvailableNumber"][];
@@ -8581,6 +8612,8 @@ export type components = {
              * @description The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
              */
             readonly since: string;
+            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused. */
+            readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
         };
         /**
          * @description What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.
@@ -9117,6 +9150,8 @@ export type components = {
              * @description This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
              */
             readonly usage_share?: number;
+            /** @description The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak. */
+            readonly voices?: readonly components["schemas"]["ModelVoice"][];
         };
         /** @description What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it. */
         readonly ProviderBenchmark: {
@@ -10721,7 +10756,7 @@ export type components = {
             /** @description The simulations the directory's simulations/*.yaml declare. Sent, they are the whole of the agent's simulations: each is found by name, and one no longer declared is deleted. Left out, the stored ones are left alone. */
             readonly simulations?: readonly components["schemas"]["SimulationDeclaration"][];
             readonly skills?: readonly components["schemas"]["SkillRequest"][];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade. */
             readonly sts?: string;
             readonly stt?: string;
             /** @description Only a voice agent names one: a text agent runs everything on its llm. */

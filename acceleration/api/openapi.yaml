@@ -394,14 +394,37 @@ components:
         - latest
       type: object
     ActivityStep:
-      description: 'The furthest an organization got: none, dashboard_reads, agent_setup, conversations, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.'
+      description: 'The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.'
       enum:
         - none
         - dashboard_reads
         - agent_setup
+        - workers
         - conversations
+        - voice_video
+        - phone_sms
         - steady_use
       type: string
+    ActivityStepDay:
+      properties:
+        first_answered:
+          description: The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on.
+          format: date
+          type: string
+        step:
+          description: The step, one of furthest_step's but none and steady_use.
+          enum:
+            - dashboard_reads
+            - agent_setup
+            - workers
+            - conversations
+            - voice_video
+            - phone_sms
+          type: string
+      required:
+        - step
+        - first_answered
+      type: object
     AddContactsRequest:
       properties:
         contacts:
@@ -606,7 +629,7 @@ components:
             type: string
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.'
           type: string
         stt:
           type: string
@@ -915,7 +938,7 @@ components:
             type: string
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.'
           type: string
         stt:
           description: A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it.
@@ -6775,6 +6798,30 @@ components:
         - provider
         - requests
       type: object
+    ModelVoice:
+      description: A built-in voice a native speech model accepts by id.
+      properties:
+        default:
+          description: True when this is the model's default voice.
+          type: boolean
+        description:
+          description: Short description of the voice's tone, style or accent.
+          type: string
+        gender:
+          description: Voice presentation, such as female, male or neutral.
+          type: string
+        id:
+          description: The voice identifier the provider accepts in its voice field.
+          example: marin
+          type: string
+        name:
+          description: Display name for the voice.
+          example: Marin
+          type: string
+      required:
+        - id
+        - name
+      type: object
     NumberSearchResult:
       properties:
         numbers:
@@ -7013,10 +7060,17 @@ components:
           description: The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
           format: date-time
           type: string
+        steps:
+          description: Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused.
+          items:
+            $ref: '#/components/schemas/ActivityStepDay'
+          nullable: true
+          type: array
       required:
         - organization_id
         - since
         - furthest_step
+        - steps
         - areas
         - meters
         - shards
@@ -7948,6 +8002,11 @@ components:
           description: This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
           format: double
           type: number
+        voices:
+          description: The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+          items:
+            $ref: '#/components/schemas/ModelVoice'
+          type: array
       required:
         - health
         - languages
@@ -10649,7 +10708,7 @@ components:
             $ref: '#/components/schemas/SkillRequest'
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.'
           type: string
         stt:
           type: string
@@ -23539,7 +23598,7 @@ paths:
   /v1/ops/orgs/{org_id}/activity:
     get:
       description: |-
-        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen and furthest_step come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use.
+        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
 
         Stream staff only: it needs the ops key.
       operationId: getOrganizationActivity

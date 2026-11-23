@@ -23,8 +23,8 @@ func (r *callRecorder) Changed(row store.Call) {
 }
 
 // Ended queues the time a call left.
-func (r *callRecorder) Ended(id string, at time.Time) {
-	r.records.queueWrite(recordWrite{callEnded: id, callEndedAt: at})
+func (r *callRecorder) Ended(customerID, id string, at time.Time) {
+	r.records.queueWrite(recordWrite{customerID: customerID, callEnded: id, callEndedAt: at})
 }
 
 // callRow is the id of the session's current call row and when it began.

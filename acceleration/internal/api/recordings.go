@@ -349,7 +349,7 @@ func (s *Server) finished(ctx context.Context, job store.Recording, provider, mo
 	if failure != nil {
 		s.logger.Error("a recording failed", "recording", job.ID, "modality", job.Modality, "error", failure)
 	}
-	if err := s.store.Recordings.Finish(ctx, job.ID, provider, model, result, failure); err != nil {
+	if err := s.store.Recordings.Finish(ctx, job.CustomerID, job.ID, provider, model, result, failure); err != nil {
 		s.logger.Error("could not write down a finished recording", "recording", job.ID, "error", err)
 		return
 	}

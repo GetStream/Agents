@@ -354,7 +354,7 @@ pub struct ActivitySessions {
     ///How many of them have not ended.
     pub running: i64,
 }
-///The furthest an organization got: none, dashboard_reads, agent_setup, conversations, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
+///The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
 #[derive(
     ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
@@ -365,8 +365,14 @@ pub enum ActivityStep {
     DashboardReads,
     #[serde(rename = "agent_setup")]
     AgentSetup,
+    #[serde(rename = "workers")]
+    Workers,
     #[serde(rename = "conversations")]
     Conversations,
+    #[serde(rename = "voice_video")]
+    VoiceVideo,
+    #[serde(rename = "phone_sms")]
+    PhoneSms,
     #[serde(rename = "steady_use")]
     SteadyUse,
     /// A value this SDK's spec does not list, as the router sent it.
@@ -379,7 +385,10 @@ impl ::std::fmt::Display for ActivityStep {
             Self::None => f.write_str("none"),
             Self::DashboardReads => f.write_str("dashboard_reads"),
             Self::AgentSetup => f.write_str("agent_setup"),
+            Self::Workers => f.write_str("workers"),
             Self::Conversations => f.write_str("conversations"),
+            Self::VoiceVideo => f.write_str("voice_video"),
+            Self::PhoneSms => f.write_str("phone_sms"),
             Self::SteadyUse => f.write_str("steady_use"),
             Self::Unlisted(ref value) => f.write_str(value),
         }
@@ -392,7 +401,10 @@ impl ::std::str::FromStr for ActivityStep {
             "none" => Ok(Self::None),
             "dashboard_reads" => Ok(Self::DashboardReads),
             "agent_setup" => Ok(Self::AgentSetup),
+            "workers" => Ok(Self::Workers),
             "conversations" => Ok(Self::Conversations),
+            "voice_video" => Ok(Self::VoiceVideo),
+            "phone_sms" => Ok(Self::PhoneSms),
             "steady_use" => Ok(Self::SteadyUse),
             _ => Err("invalid value".into()),
         }
@@ -405,6 +417,76 @@ impl ::std::convert::TryFrom<&str> for ActivityStep {
     }
 }
 impl ::std::convert::TryFrom<::std::string::String> for ActivityStep {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///`ActivityStepDay`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+pub struct ActivityStepDay {
+    ///The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on.
+    pub first_answered: ::std::string::String,
+    ///The step, one of furthest_step's but none and steady_use.
+    pub step: ActivityStepDayStep,
+}
+///The step, one of furthest_step's but none and steady_use.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum ActivityStepDayStep {
+    #[serde(rename = "dashboard_reads")]
+    DashboardReads,
+    #[serde(rename = "agent_setup")]
+    AgentSetup,
+    #[serde(rename = "workers")]
+    Workers,
+    #[serde(rename = "conversations")]
+    Conversations,
+    #[serde(rename = "voice_video")]
+    VoiceVideo,
+    #[serde(rename = "phone_sms")]
+    PhoneSms,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for ActivityStepDayStep {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::DashboardReads => f.write_str("dashboard_reads"),
+            Self::AgentSetup => f.write_str("agent_setup"),
+            Self::Workers => f.write_str("workers"),
+            Self::Conversations => f.write_str("conversations"),
+            Self::VoiceVideo => f.write_str("voice_video"),
+            Self::PhoneSms => f.write_str("phone_sms"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for ActivityStepDayStep {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "dashboard_reads" => Ok(Self::DashboardReads),
+            "agent_setup" => Ok(Self::AgentSetup),
+            "workers" => Ok(Self::Workers),
+            "conversations" => Ok(Self::Conversations),
+            "voice_video" => Ok(Self::VoiceVideo),
+            "phone_sms" => Ok(Self::PhoneSms),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for ActivityStepDayStep {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ActivityStepDayStep {
     type Error = self::error::ConversionError;
     fn try_from(
         value: ::std::string::String,
@@ -566,7 +648,7 @@ pub struct AgentConfig {
     pub search: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
-    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -815,7 +897,7 @@ pub struct AgentConfigRequest {
     ///Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
-    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
     ///A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it.
@@ -8388,6 +8470,23 @@ pub struct ModelTokens {
     pub provider: ::std::string::String,
     pub requests: i64,
 }
+///A built-in voice a native speech model accepts by id.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
+pub struct ModelVoice {
+    ///True when this is the model's default voice.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub default: ::std::option::Option<bool>,
+    ///Short description of the voice's tone, style or accent.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub description: ::std::option::Option<::std::string::String>,
+    ///Voice presentation, such as female, male or neutral.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub gender: ::std::option::Option<::std::string::String>,
+    ///The voice identifier the provider accepts in its voice field.
+    pub id: ::std::string::String,
+    ///Display name for the voice.
+    pub name: ::std::string::String,
+}
 ///`NumberSearchResult`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct NumberSearchResult {
@@ -8729,6 +8828,9 @@ pub struct OrganizationActivity {
     pub shards: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     ///The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
     pub since: ::std::string::String,
+    ///Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused.
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub steps: ::std::option::Option<::std::vec::Vec<ActivityStepDay>>,
 }
 ///What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.
 #[derive(
@@ -9622,6 +9724,9 @@ pub struct Provider {
     ///This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub usage_share: ::std::option::Option<f64>,
+    ///The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub voices: ::std::option::Option<::std::vec::Vec<ModelVoice>>,
 }
 ///What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
@@ -13296,7 +13401,7 @@ pub struct SyncAgentRequest {
     pub simulations: ::std::option::Option<::std::vec::Vec<SimulationDeclaration>>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<SkillRequest>>,
-    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+    ///A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]

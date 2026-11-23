@@ -134,12 +134,16 @@ TABLE call_bridges
     customer_id text NOT NULL
     expires_at timestamp with time zone NOT NULL
     initial_digits text
-    token text NOT NULL
+    token text
+    token_hash text
     trunk_password text
+    trunk_password_kek_version integer
+    trunk_password_sealed bytea
     trunk_uri text NOT NULL
     trunk_username text
     vendor text NOT NULL
-    CONSTRAINT call_bridges_pkey PRIMARY KEY (token)
+    CONSTRAINT call_bridges_token_hash_key UNIQUE (token_hash)
+    CONSTRAINT call_bridges_token_key UNIQUE (token)
     CREATE INDEX call_bridges_expires_idx ON public.call_bridges USING btree (expires_at)
 
 TABLE call_legs
@@ -170,6 +174,7 @@ TABLE call_legs
     stream_session_id text NOT NULL DEFAULT ''::text
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     token text
+    token_hash text
     usage_categories text[] NOT NULL DEFAULT '{}'::text[]
     user_id text NOT NULL DEFAULT ''::text
     vendor text NOT NULL
@@ -189,6 +194,8 @@ TABLE call_legs
     CREATE UNIQUE INDEX call_legs_participant_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), participant_session) WHERE (participant_session <> ''::text)
     CREATE INDEX call_legs_placed_call_idx ON public.call_legs USING btree (customer_id, call_id, id DESC) WHERE (placed_at IS NOT NULL)
     CREATE INDEX call_legs_ringing_idx ON public.call_legs USING btree (dialed_at) WHERE ((ended_at IS NULL) AND (started_at IS NULL))
+    CREATE UNIQUE INDEX call_legs_token_hash_key ON public.call_legs USING btree (token_hash)
+    CREATE INDEX call_legs_token_hash_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)

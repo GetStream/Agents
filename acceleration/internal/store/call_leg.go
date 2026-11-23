@@ -74,8 +74,10 @@ type CallLeg struct {
 
 	// The rest is kept for a leg the router placed (Place), whose outcome package outcome
 	// decides; the store only keeps it. Token is in the URL the vendor posts the call's status
-	// to, and the only thing proving the post is about this call; empty once swept.
-	Token string `bun:"token,nullzero"`
+	// to, and the only thing proving the post is about this call. Only its hash is kept
+	// (callTokenHash), empty once swept; a leg read back has no Token.
+	Token     string `bun:"-"`
+	TokenHash string `bun:"token_hash,nullzero"`
 	// Reports is whether the vendor posts a final status for the call.
 	Reports    bool       `bun:"reports,notnull"`
 	PlacedAt   *time.Time `bun:"placed_at"`
@@ -150,8 +152,8 @@ func (r *CallLegs) Open(ctx context.Context, leg *CallLeg) (bool, error) {
 	if leg.Token != "" {
 		var dialed []CallLeg
 		err := r.store.shard.NewUpdate().Model(leg).
-			ExcludeColumn("id", "token", "reports", "placed_at", "answered_at", "outcome_ended_at", "outcome", "vendor_status", "decided_at").
-			Where("token = ?", leg.Token).Where("dialed_at IS NULL").
+			ExcludeColumn("id", "token_hash", "reports", "placed_at", "answered_at", "outcome_ended_at", "outcome", "vendor_status", "decided_at").
+			Where("token_hash = ?", callTokenHash(leg.Token)).Where("dialed_at IS NULL").
 			Returning("*").Scan(ctx, &dialed)
 		if err != nil {
 			return false, stack.Wrap(fmt.Errorf("store: open placed call leg: %w", err))
@@ -159,7 +161,9 @@ func (r *CallLegs) Open(ctx context.Context, leg *CallLeg) (bool, error) {
 		if len(dialed) == 0 {
 			return false, stack.Wrap(ErrNoPlacedCall)
 		}
+		token := leg.Token
 		*leg = dialed[0]
+		leg.Token = token
 	} else {
 		result, err := r.store.shard.NewInsert().Model(leg).On("CONFLICT DO NOTHING").Returning("id").Exec(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -654,7 +658,7 @@ type PlacedWhere struct {
 
 func (w PlacedWhere) on(q *bun.SelectQuery) *bun.SelectQuery {
 	if w.Token != "" {
-		return q.Where("cl.token = ?", w.Token)
+		return q.Where("cl.token_hash = ?", callTokenHash(w.Token))
 	}
 	return q.Where("cl.customer_id = ?", w.CustomerID).
 		Where("cl.call_id = ?", w.CallID).
@@ -680,6 +684,7 @@ func (r *CallLegs) Place(ctx context.Context, leg *CallLeg) error {
 	if invalid != nil {
 		return stack.Wrap(invalid)
 	}
+	leg.TokenHash = callTokenHash(leg.Token)
 	if _, err := r.store.shard.NewInsert().Model(leg).Returning("id").Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
 	}
@@ -690,7 +695,7 @@ func (r *CallLegs) Place(ctx context.Context, leg *CallLeg) error {
 // dialled: one that never rang has no outcome and no minutes.
 func (r *CallLegs) Unplace(ctx context.Context, token string) error {
 	_, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*CallLeg)(nil)).Where("token = ?", token).Where("dialed_at IS NULL").Exec(ctx)
+		return db.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", callTokenHash(token)).Where("dialed_at IS NULL").Exec(ctx)
 	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: unplace call leg: %w", err))
@@ -796,8 +801,8 @@ func (r *CallLegs) SelectPlaced(ctx context.Context, customerID string, callIDs 
 // vendor's post for it is refused, and keeps the rows. Each shard clears its own.
 func (r *CallLegs) ClearTokens(ctx context.Context, placedBefore time.Time) (int64, error) {
 	result, err := r.store.shard.NewUpdate().Model((*CallLeg)(nil)).
-		Set("token = NULL").
-		Where("token IS NOT NULL").
+		Set("token_hash = NULL").
+		Where("token_hash IS NOT NULL").
 		Where("placed_at < ?", placedBefore).
 		Exec(ctx)
 	if err != nil {

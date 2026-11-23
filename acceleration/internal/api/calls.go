@@ -676,10 +676,14 @@ func (s *Server) getCallEvents(ctx context.Context, request *getCallEventsReques
 		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
-	stored, err := s.store.CallEvents.Select(
-		ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
-	if err != nil {
-		return nil, err
+	// A session held in writing has no Stream call, so it has no decisions kept under one.
+	var stored []store.CallEvent
+	if call.CallID != "" {
+		stored, err = s.store.CallEvents.Select(
+			ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	decisions := make([]CallEvent, 0, len(stored))
@@ -721,10 +725,14 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 	if err != nil {
 		return nil, err
 	}
-	// The checks, like the transcript, are worth having but not worth failing over.
-	checks, err := s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
-	if err != nil {
-		s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+	// The checks, like the transcript, are worth having but not worth failing over. A session
+	// held in writing has no Stream call, so it keeps none.
+	var checks []store.CallEvent
+	if call.CallID != "" {
+		checks, err = s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
+		if err != nil {
+			s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+		}
 	}
 
 	// The transcript is worth having but not worth failing over: the timings are the

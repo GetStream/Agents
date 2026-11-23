@@ -97,11 +97,21 @@ func (r *BranchSwitches) Insert(ctx context.Context, branchSwitch *AgentBranchSw
 	if branchSwitch.State == "" {
 		branchSwitch.State = SwitchSnapshotted
 	}
-	_, err := r.store.shard.NewInsert().Model(branchSwitch).
-		On("CONFLICT (id) DO NOTHING").
+	// As Responses.Insert: a retry matches its own row, another customer's id none.
+	result, err := r.store.shard.NewInsert().Model(branchSwitch).
+		On("CONFLICT (id) DO UPDATE").
+		Set("id = EXCLUDED.id").
+		Where("abs.customer_id = EXCLUDED.customer_id").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: start branch switch: %w", err))
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: start branch switch: %w", err))
+	}
+	if written == 0 {
+		return stack.Wrap(fmt.Errorf("%w: branch switch %s", ErrIDTaken, branchSwitch.ID))
 	}
 	return nil
 }

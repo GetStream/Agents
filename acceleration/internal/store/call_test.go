@@ -81,8 +81,8 @@ func (s *StoreSuite) TestACallKeepsTheTimeItFirstEnded() {
 		CallID: "call-1", AgentID: "agent-ended-once", StartedAt: s.base,
 	}
 	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
-	s.Require().NoError(s.store.Calls.Finish(s.ctx, call.ID, s.base.Add(time.Minute)))
-	s.Require().NoError(s.store.Calls.Finish(s.ctx, call.ID, s.base.Add(time.Hour)))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, call.CustomerID, call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, call.CustomerID, call.ID, s.base.Add(time.Hour)))
 
 	read, err := s.store.Calls.Get(s.ctx, "acme", call.ID)
 	s.Require().NoError(err)
@@ -201,7 +201,7 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 	s.withinQueryBudgets([]queryBudget{
 		{"Start", 1, 0, func() error { return s.store.Calls.Start(s.ctx, call) }},
 		{"ChangeModels", 1, 0, func() error { call.LLM = "stub-llm"; return s.store.Calls.ChangeModels(s.ctx, call) }},
-		{"Finish", 1, 0, func() error { return s.store.Calls.Finish(s.ctx, call.ID, end) }},
+		{"Finish", 1, 0, func() error { return s.store.Calls.Finish(s.ctx, call.CustomerID, call.ID, end) }},
 		{"Review", 0, 2, func() error { return s.store.Calls.Review(s.ctx, "app", call.ID, "Fine.", &score, "") }},
 		{"Get", 1, 0, func() error { _, err := s.store.Calls.Get(s.ctx, "app", call.ID); return err }},
 		{"Latest", 0, 1, func() error {
@@ -307,4 +307,28 @@ func (s *StoreSuite) TestTheLastVoicedCallSkipsTheTextAfterIt() {
 	s.ErrorIs(err, ErrNoCall)
 	_, err = s.store.Calls.LastVoiced(s.ctx, "somebody-else", "switched")
 	s.ErrorIs(err, ErrNoCall)
+}
+
+func (s *StoreSuite) TestAnotherCustomersWriteToACallIdChangesNothing() {
+	writes := map[string]func() error{
+		"Finish": func() error { return s.store.Calls.Finish(s.ctx, "somebody-else", "one", s.base.Add(time.Hour)) },
+		"ChangeModels": func() error {
+			return s.store.Calls.ChangeModels(s.ctx, &Call{ID: "one", CustomerID: "somebody-else", LLM: "their-llm", Voice: "their-voice"})
+		},
+	}
+	for name, write := range writes {
+		s.Run(name, func() {
+			s.SetupTest()
+			s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "one", CustomerID: "app", CallID: "call-1", AgentID: "agent",
+				LLM: "app-llm", Voice: "app-voice", StartedAt: s.base}))
+			before, err := s.store.Calls.Get(s.ctx, "app", "one")
+			s.Require().NoError(err)
+
+			s.Require().NoError(write())
+
+			after, err := s.store.Calls.Get(s.ctx, "app", "one")
+			s.Require().NoError(err)
+			s.Equal(before, after, "app's call is as it was")
+		})
+	}
 }
