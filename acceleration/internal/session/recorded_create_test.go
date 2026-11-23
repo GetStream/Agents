@@ -86,7 +86,7 @@ func (s *RecordedCreateSuite) TestTheStoredToolsKeepSearch() {
 	s.Require().NoError(created.Close())
 	s.Require().NoError(m.records.Flush(s.ctx))
 
-	stored, err := s.store.SessionTools.Get(s.ctx, created.ID())
+	stored, err := s.store.SessionTools.Get(s.ctx, s.customer, created.ID())
 	s.Require().NoError(err)
 	names := make([]string, 0, len(stored))
 	for _, tool := range stored {

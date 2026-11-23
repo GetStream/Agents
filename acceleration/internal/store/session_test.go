@@ -1165,12 +1165,15 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 			s.Len(latest, 10)
 			return err
 		}},
-		{"Ends", 1, 0, func() error { _, err := s.store.Sessions.Ends(s.ctx, []string{row.ID, "seeded-01"}, at); return err }},
+		{"Ends", 1, 0, func() error {
+			_, err := s.store.Sessions.Ends(s.ctx, []SessionKey{{"app", row.ID}, {"app", "seeded-01"}}, at)
+			return err
+		}},
 		{"Close", 1, 0, func() error {
 			return s.store.Sessions.Close(s.ctx, row.CustomerID, row.ID, at.Add(2*time.Minute), "hangup")
 		}},
 		{"SessionTools.Upsert", 1, 0, func() error { return s.store.SessionTools.Upsert(s.ctx, row.CustomerID, row.ID, tools) }},
-		{"SessionTools.Get", 1, 0, func() error { _, err := s.store.SessionTools.Get(s.ctx, row.ID); return err }},
+		{"SessionTools.Get", 1, 0, func() error { _, err := s.store.SessionTools.Get(s.ctx, row.CustomerID, row.ID); return err }},
 		{"Delete", 0, 2, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
 	})
 }
@@ -1219,6 +1222,51 @@ func (s *StoreSuite) TestAnotherCustomersWriteToASessionIdChangesNothing() {
 	}
 }
 
+// Two creates of one id can both find it free, and a reopen does not look: the second save
+// used to write its title, custom data, channel and state into the first customer's row.
+func (s *StoreSuite) TestAnotherCustomerSavingASessionUnderItsIdLeavesTheRowAlone() {
+	s.opened("one", "app", s.base, nil)
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	err = s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "somebody-else", Title: "theirs",
+		Custom: map[string]any{"order": "theirs"}, ConversationID: "agent:theirs", State: SessionClosed})
+
+	s.ErrorIs(err, ErrIDTaken)
+	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's session is as it was")
+}
+
+// A sandbox is swept once its session ended, and the sweep read whichever customer's row had
+// the session's id: another customer's that closed would end one still running.
+func (s *StoreSuite) TestASessionHasEndedOnlyWhenItsCustomersOwnRowSaysSo() {
+	s.opened("one", "app", s.base, nil)
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base.Add(time.Minute), "hangup"))
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{s.usageRow("somebody-else", func(request *Request) {
+		request.Modality, request.SessionID, request.StartedAt = RuntimeModality, "one", s.base.Add(2*time.Minute)
+	})})
+	s.Require().NoError(err)
+	theirs, mine := SessionKey{"app", "one"}, SessionKey{"somebody-else", "one"}
+
+	ends, err := s.store.Sessions.Ends(s.ctx, []SessionKey{theirs, mine}, s.base)
+
+	s.Require().NoError(err)
+	s.True(ends[theirs].Ended())
+	s.False(ends[mine].Ended(), "somebody-else's session is still recording runtime")
+}
+
+// The API read a row's tools only once it found the row was the caller's; the store handed
+// them to whoever named the id.
+func (s *StoreSuite) TestASessionsToolsAreReadOnlyByItsCustomer() {
+	s.opened("one", "app", s.base, nil)
+	s.Require().NoError(s.store.SessionTools.Upsert(s.ctx, "app", "one", []ToolDefinition{{Name: "lookup_order"}}))
+
+	_, err := s.store.SessionTools.Get(s.ctx, "somebody-else", "one")
+
+	s.ErrorIs(err, ErrNoSessionTools)
+}
+
 func (s *StoreSuite) TestAnotherCustomersToolsForASessionIdAreNotKept() {
 	for name, kept := range map[string][]ToolDefinition{
 		"replacing app's":    {{Name: "lookup_order", Description: "the session's own"}},
@@ -1234,7 +1282,7 @@ func (s *StoreSuite) TestAnotherCustomersToolsForASessionIdAreNotKept() {
 			err := s.store.SessionTools.Upsert(s.ctx, "somebody-else", "one", []ToolDefinition{{Name: "refund_order"}})
 			s.ErrorIs(err, ErrNoSession)
 
-			tools, err := s.store.SessionTools.Get(s.ctx, "one")
+			tools, err := s.store.SessionTools.Get(s.ctx, "app", "one")
 			if kept == nil {
 				s.ErrorIs(err, ErrNoSessionTools, "app's session still recorded no tools")
 				return

@@ -273,6 +273,7 @@ type Sessions struct {
 // running is findable and one the process died during is not simply lost. Saving the same
 // session twice updates the row: a retried write must not become a second conversation. It
 // also opens a text session that ended again, which is how one is carried on under its id.
+// Saving one under an id another customer's row has is ErrIDTaken, and leaves that row alone.
 //
 // Incognito sessions never get here. The manager does not call this for one, which is what
 // the flag means -- not a row that is hidden, but no row at all.
@@ -299,8 +300,10 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		session.ConnectorSelections = []SessionConnectorSelection{}
 	}
 
+	// The customer's own row is updated. Another customer's of the same id is no conflict here,
+	// so it fails on the primary key.
 	_, err := r.store.shard.NewInsert().Model(session).
-		On("CONFLICT (id) DO UPDATE").
+		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("title = EXCLUDED.title").
 		Set("description = EXCLUDED.description").
 		Set("custom = EXCLUDED.custom").
@@ -321,6 +324,9 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		// stays not known: NULL OR false is NULL.
 		Set("remembers = ?TableAlias.remembers OR EXCLUDED.remembers").
 		Exec(ctx)
+	if constraint(err) == "agent_sessions_pkey" {
+		return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
+	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
 	}
@@ -875,49 +881,72 @@ func (e SessionEnd) Ended() bool {
 	return e.ClosedAt != nil || !e.Known && !e.Running
 }
 
-// Ends is what this shard knows of whether each of ids is over, a session with no row
+// SessionKey is a session by its customer and id. The id is one the customer chose, so it
+// names a session only within that customer.
+type SessionKey struct {
+	CustomerID string
+	ID         string
+}
+
+// Ends is what this shard knows of whether each of keys is over, a session with no row
 // counting as running while it has recorded runtime since since.
-func (r *Sessions) Ends(ctx context.Context, ids []string, since time.Time) (map[string]SessionEnd, error) {
-	ends := map[string]SessionEnd{}
-	if len(ids) == 0 {
+func (r *Sessions) Ends(ctx context.Context, keys []SessionKey, since time.Time) (map[SessionKey]SessionEnd, error) {
+	ends := map[SessionKey]SessionEnd{}
+	if len(keys) == 0 {
 		return ends, nil
 	}
 	var sessions []struct {
-		ID       string     `bun:"id"`
-		ClosedAt *time.Time `bun:"closed_at"`
+		CustomerID string     `bun:"customer_id"`
+		ID         string     `bun:"id"`
+		ClosedAt   *time.Time `bun:"closed_at"`
 	}
-	if err := r.store.shard.NewSelect().TableExpr("agent_sessions").Column("id", "closed_at").
-		Where("id IN (?)", bun.In(ids)).Scan(ctx, &sessions); err != nil {
+	customers, ids := sessionKeyColumns(keys)
+	if err := r.store.shard.NewSelect().TableExpr("agent_sessions").Column("customer_id", "id", "closed_at").
+		Where("(customer_id, id) IN (SELECT * FROM unnest(?::text[], ?::text[]))", customers, ids).
+		Scan(ctx, &sessions); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: session ends: %w", err))
 	}
 	for _, session := range sessions {
-		ends[session.ID] = SessionEnd{Known: true, ClosedAt: session.ClosedAt}
+		ends[SessionKey{session.CustomerID, session.ID}] = SessionEnd{Known: true, ClosedAt: session.ClosedAt}
 	}
-	var unknown []string
-	for _, id := range ids {
-		if _, known := ends[id]; !known {
-			unknown = append(unknown, id)
+	var unknown []SessionKey
+	for _, key := range keys {
+		if _, known := ends[key]; !known {
+			unknown = append(unknown, key)
 		}
 	}
 	if len(unknown) == 0 {
 		return ends, nil
 	}
-	var running []string
-	err := r.store.shard.NewSelect().TableExpr("requests").ColumnExpr("DISTINCT session_id").
+	var running []struct {
+		CustomerID string `bun:"customer_id"`
+		SessionID  string `bun:"session_id"`
+	}
+	customers, ids = sessionKeyColumns(unknown)
+	err := r.store.shard.NewSelect().TableExpr("requests").ColumnExpr("DISTINCT customer_id, session_id").
 		Where("modality = ?", RuntimeModality).
-		Where("session_id IN (?)", bun.In(unknown)).
+		Where("(customer_id, session_id) IN (SELECT * FROM unnest(?::text[], ?::text[]))", customers, ids).
 		Where("started_at >= ?", since).
 		Scan(ctx, &running)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: session ends: %w", err))
 	}
-	for _, id := range unknown {
-		ends[id] = SessionEnd{}
+	for _, key := range unknown {
+		ends[key] = SessionEnd{}
 	}
-	for _, id := range running {
-		ends[id] = SessionEnd{Running: true}
+	for _, key := range running {
+		ends[SessionKey{key.CustomerID, key.SessionID}] = SessionEnd{Running: true}
 	}
 	return ends, nil
+}
+
+// sessionKeyColumns is keys as the two arrays an unnest pairs back up.
+func sessionKeyColumns(keys []SessionKey) (customers, ids any) {
+	customerIDs, sessionIDs := make([]string, len(keys)), make([]string, len(keys))
+	for i, key := range keys {
+		customerIDs[i], sessionIDs[i] = key.CustomerID, key.ID
+	}
+	return pgdialect.Array(customerIDs), pgdialect.Array(sessionIDs)
 }
 
 // jsonbOf renders a map for a jsonb comparison. A map that will not encode is sent as an

@@ -242,6 +242,9 @@ var usageIndexes = []struct{ set, name, create string }{
 		"WHERE campaign_id IS NOT NULL"},
 	// A response's alternatives, the responses sharing its parent.
 	{"shard", "agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
+	// What saving a session conflicts on: ON CONFLICT (customer_id, id) fails without it.
+	{"shard", "agent_sessions_customer_id_id_key", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_customer_id_id_key " +
+		"ON agent_sessions (customer_id, id)"},
 }
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed

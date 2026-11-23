@@ -229,6 +229,28 @@ func (s *StoreSuite) TestABatchLogsEachRowInItsOwnCall() {
 	s.Equal(map[string]string{id(batch[1]): "other/cfg-3"}, sessions("calls-b"))
 }
 
+// A row's log names the agent config of the call it happened in, which was read off whichever
+// customer's session had the call's session id.
+func (s *StoreSuite) TestARowsLogTakesNoAgentConfigFromAnotherCustomersSession() {
+	s.opened("borrowed", "calls-b", s.base, func(session *AgentSession) { session.ConfigID = "cfg-b" })
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "call-borrowed", SessionID: "borrowed", CallID: "stream-1",
+		CustomerID: "calls-a", AgentID: "agent", StartedAt: s.base}))
+	row := s.usageRow("calls-a", func(request *Request) {
+		request.AgentID, request.CallID, request.StartedAt = "agent", "stream-1", s.base.Add(time.Minute)
+	})
+
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{row})
+	s.Require().NoError(err)
+
+	logs, err := s.store.AgentLogs.Select(s.ctx, "calls-a", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(logs, 1)
+	logged, err := s.store.AgentLogs.Get(s.ctx, "calls-a", logs[0].ID)
+	s.Require().NoError(err)
+	s.Equal("borrowed", logged.SessionID)
+	s.Empty(logged.ConfigID, "calls-b's agent config is not calls-a's")
+}
+
 func (s *StoreSuite) TestBatchesNamingTheSameCustomersInAnotherOrderDoNotDeadlock() {
 	// The agent log trigger locks each customer it logs a row for until the batch commits.
 	batch := func(first, second string) []Request {

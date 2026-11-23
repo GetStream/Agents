@@ -720,7 +720,7 @@ func (s *RecordFlushSuite) sessionOf(id string) store.AgentSession {
 }
 
 func (s *RecordFlushSuite) toolsOf(id string) []store.ToolDefinition {
-	got, err := s.store.SessionTools.Get(s.ctx, id)
+	got, err := s.store.SessionTools.Get(s.ctx, s.customer, id)
 	s.Require().NoError(err)
 	return got
 }

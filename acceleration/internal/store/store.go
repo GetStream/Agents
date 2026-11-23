@@ -212,7 +212,7 @@ SELECT DISTINCT bucket, user_id FROM (
     UNION ALL
     SELECT date_trunc('%[1]s', a.created_at, 'UTC') AS bucket, s.user_id, s.caller_kind
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     WHERE a.customer_id = ? AND a.created_at >= ? AND a.created_at < ?
 ) AS seen
 WHERE user_id <> '' AND caller_kind <> 'anonymous'`, unit, originOnly)
@@ -533,7 +533,7 @@ WITH turns AS (
         a.created_at,
         ROW_NUMBER() OVER (PARTITION BY a.session_id ORDER BY a.created_at, a.id COLLATE "C") - 1 AS before
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     WHERE a.customer_id = ?3 AND (?6 = '' OR s.config_id = ?6) AND a.created_at < ?5
         AND a.rewound_at IS NULL
 ),
@@ -554,7 +554,7 @@ ran AS (
         (started.payload->>'definition_tokens')::bigint AS definition_tokens,
         (started.payload->>'summary_tokens')::bigint AS summary_tokens
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     JOIN agent_response_items AS r ON r.response_id = a.id AND r.kind = ?1
     LEFT JOIN turns AS t ON t.id = a.id
     LEFT JOIN LATERAL (
@@ -826,7 +826,7 @@ func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, 
 		q := db.NewSelect().Model((*AgentResponse)(nil)).
 			ColumnExpr("COUNT(DISTINCT ars.session_id) AS sessions, COUNT(*) AS turns").
 			ColumnExpr(sessionHashes+" AS session_hashes").
-			Join("JOIN agent_sessions AS asn ON asn.id = ars.session_id").
+			Join("JOIN agent_sessions AS asn ON asn.customer_id = ars.customer_id AND asn.id = ars.session_id").
 			Where("ars.customer_id = ?", customerID).
 			Where("ars.created_at >= ? AND ars.created_at < ?", from, to).
 			Where("ars.rewound_at IS NULL")

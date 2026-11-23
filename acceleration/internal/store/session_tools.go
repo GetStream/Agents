@@ -83,12 +83,15 @@ ON CONFLICT (session_id) DO UPDATE SET tools = EXCLUDED.tools, updated_at = EXCL
 	return nil
 }
 
-// Get is what a session's model was last offered. A session that recorded none is
-// ErrNoSessionTools.
-func (r *SessionTools) Get(ctx context.Context, sessionID string) ([]ToolDefinition, error) {
+// Get is what a session of the customer's model was last offered. A session that recorded
+// none, or that the customer does not have, is ErrNoSessionTools.
+func (r *SessionTools) Get(ctx context.Context, customerID, sessionID string) ([]ToolDefinition, error) {
 	stored, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (agentSessionTools, error) {
 		var stored agentSessionTools
-		err := db.NewSelect().Model(&stored).Where("session_id = ?", sessionID).Scan(ctx)
+		// The table has no customer: the session's row says whose the tools are.
+		err := db.NewSelect().Model(&stored).Where("session_id = ?", sessionID).
+			Where("EXISTS (SELECT 1 FROM agent_sessions AS s WHERE s.id = ?TableAlias.session_id AND s.customer_id = ?)", customerID).
+			Scan(ctx)
 		return stored, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {
