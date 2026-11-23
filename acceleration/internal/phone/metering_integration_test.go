@@ -751,6 +751,54 @@ func (s *MeteringSuite) TestALegThatCouldNotBeWrittenIsWrittenAndBilledByTheSwee
 		"the next sweep writes it no more")
 }
 
+// A leg written by the sweep after its call ended, its phone's leave never heard, ends when the
+// call did: it is billed to then, and no longer counts against the organization's calls.
+func (s *MeteringSuite) TestALegWrittenAfterItsCallEndedEndsWithTheCall() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+	s.arrived(callID)
+	s.clock.advance(90 * time.Second)
+	s.ended(defaultCallType, callID)
+	s.clock.advance(10 * time.Minute)
+
+	_, err := s.service.SweepLegs(s.ctx)
+
+	s.Require().NoError(err)
+	s.Empty(s.openLegs())
+	minutes := s.row(ModelCallMinutes)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 90}, minutes.Meters)
+	s.True(minutes.Billable)
+}
+
+// The legs the sweep still holds when the router stops get a last write, once the database is
+// back, and are billed as the sweep would have.
+func (s *MeteringSuite) TestALegKeptWhenTheRouterStopsIsWrittenOnceMore() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+	s.arrived(callID)
+	s.Require().Empty(s.openLegs())
+
+	s.service.StopLegSweep(s.ctx)
+
+	s.Len(s.openLegs(), 1)
+	s.Zero(s.logs.count("ERROR", "could not record a call leg"))
+}
+
+// A leg that cannot be written once the sweep has stopped is logged at ERROR, not kept for a
+// sweep that will never write it.
+func (s *MeteringSuite) TestALegThatCannotBeWrittenAfterTheSweepStoppedIsLogged() {
+	s.service.StopLegSweep(s.ctx)
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+
+	s.arrived(callID)
+
+	s.Equal(1, s.logs.count("ERROR", "could not record a call leg; its minutes are not billed"))
+	_, err := s.service.SweepLegs(s.ctx)
+	s.Require().NoError(err)
+	s.Empty(s.openLegs(), "nothing was kept to write")
+}
+
 func (s *MeteringSuite) TestEveryLegOfAnEndedCallCountsTowardTheSandboxsMinutes() {
 	s.withSandbox(dlc.Sandbox{Enabled: true})
 	s.Require().NoError(s.service.gate.SetRecipients(s.ctx, s.customer, []string{"+15125550123", "+15125550124"}))

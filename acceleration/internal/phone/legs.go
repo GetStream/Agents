@@ -97,7 +97,7 @@ func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.Ca
 		pause *= 2
 		opened, err = s.store.CallLegs.Open(ctx, &leg)
 	}
-	if err != nil && !opened && openAgain(err) && s.unopened.add(leg) {
+	if err != nil && !opened && openAgain(err) && s.unopened.add(unopenedLeg{leg: leg}) {
 		s.logger.Warn("could not record a call leg; the leg sweep records it", "call", leg.CallType+":"+leg.CallID,
 			"vendor", leg.Vendor, "direction", leg.Direction, "error", err)
 		return
@@ -230,7 +230,9 @@ func (s *Service) EndLegs(ctx context.Context, scope store.AppScope, callType, c
 	if s.store == nil {
 		return nil
 	}
-	ended, err := s.store.CallLegs.EndCall(ctx, scope, callType, callID, s.eventAt(at))
+	at = s.eventAt(at)
+	s.unopened.end(scope, callType, callID, at)
+	ended, err := s.store.CallLegs.EndCall(ctx, scope, callType, callID, at)
 	if err != nil {
 		return err
 	}
@@ -347,58 +349,90 @@ func (r *recently) forget(key string) {
 }
 
 // unopenedLegs are the legs whose row OpenLeg could not write, kept for the leg sweep, at most
-// unopenedMost of them.
+// unopenedMost of them, until the sweep writes them a last time (StopLegSweep).
 type unopenedLegs struct {
 	mu   sync.Mutex
-	legs []store.CallLeg
+	legs []unopenedLeg
+	// stopped refuses every leg once the sweep has stopped, so none is kept that nothing writes.
+	stopped bool
 }
 
-// add keeps leg, and reports false when unopenedMost are kept already.
-func (u *unopenedLegs) add(leg store.CallLeg) bool {
+// unopenedLeg is a leg kept for the sweep, and when its call ended, zero until this router
+// hears of it (EndLegs).
+type unopenedLeg struct {
+	leg   store.CallLeg
+	ended time.Time
+}
+
+// add keeps a leg, and reports false when unopenedMost are kept already or the sweep stopped.
+func (u *unopenedLegs) add(kept unopenedLeg) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if len(u.legs) >= unopenedMost {
+	if u.stopped || len(u.legs) >= unopenedMost {
 		return false
 	}
-	u.legs = append(u.legs, leg)
+	u.legs = append(u.legs, kept)
 	return true
 }
 
-// take hands over every leg kept.
-func (u *unopenedLegs) take() []store.CallLeg {
+// end says the call callType:callID of the scope's app ended at at, to the legs kept of it.
+func (u *unopenedLegs) end(scope store.AppScope, callType, callID string, at time.Time) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for i, kept := range u.legs {
+		inScope := (scope.App != 0 && kept.leg.StreamAppPK == scope.App) || (scope.Unpinned && kept.leg.StreamAppPK == 0)
+		if inScope && kept.leg.CallType == callType && kept.leg.CallID == callID && kept.ended.IsZero() {
+			u.legs[i].ended = at
+		}
+	}
+}
+
+// take hands over every leg kept, and with stop refuses any kept after.
+func (u *unopenedLegs) take(stop bool) []unopenedLeg {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	legs := u.legs
 	u.legs = nil
+	u.stopped = u.stopped || stop
 	return legs
 }
 
-// openUnopened writes the row of each leg OpenLeg could not, and follows it as OpenLeg would. A
-// write that fails in a way a retry may pass leaves it and those after it for the next sweep.
-func (s *Service) openUnopened(ctx context.Context) {
-	legs := s.unopened.take()
-	for i := range legs {
-		leg := legs[i]
+// openUnopened writes the row of each leg OpenLeg could not, and follows it as OpenLeg would.
+// A leg whose call ended meanwhile ends then, as EndLegs would have ended its row: its phone's
+// leave may never come. A write that fails in a way a retry may pass leaves it and those after
+// it for the next sweep, or, once the sweep has stopped, logs them.
+func (s *Service) openUnopened(ctx context.Context, stop bool) {
+	kept := s.unopened.take(stop)
+	for i := range kept {
+		leg := kept[i].leg
 		opened, err := s.store.CallLegs.Open(ctx, &leg)
 		if err != nil && !opened && openAgain(err) {
-			for _, left := range legs[i:] {
+			for _, left := range kept[i:] {
 				if !s.unopened.add(left) {
-					s.recorded(ctx, left, false, err)
+					s.recorded(ctx, left.leg, false, err)
 				}
 			}
 			return
 		}
 		s.recorded(ctx, leg, opened, err)
+		if opened && leg.EndedAt == nil && !kept[i].ended.IsZero() {
+			scope := store.AppScope{App: leg.StreamAppPK, Unpinned: leg.StreamAppPK == 0}
+			if err := s.EndLegs(ctx, scope, leg.CallType, leg.CallID, kept[i].ended); err != nil {
+				s.logger.Error("could not end a call leg written after its call ended; the sweep ends it at the longest a call lasts",
+					"call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor, "error", err)
+			}
+		}
 	}
 }
 
-// loseUnopened logs each leg still kept for the sweep when the sweep stops: its minutes are not
-// billed.
-func (s *Service) loseUnopened() {
-	for _, leg := range s.unopened.take() {
-		s.logger.Error("could not record a call leg before the router stopped; its minutes are not billed",
-			"call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor, "direction", leg.Direction)
+// StopLegSweep writes the legs OpenLeg could not, a last time, and logs at ERROR each it still
+// could not, and every leg OpenLeg cannot write from then on: their minutes are not billed. A
+// router calls it once what it serves has drained, after RunLegSweep's ctx ended.
+func (s *Service) StopLegSweep(ctx context.Context) {
+	if s.store == nil {
+		return
 	}
+	s.openUnopened(ctx, true)
 }
 
 // settleLegs bills the legs that ended whose phone joined. One that never connected was not
@@ -508,7 +542,7 @@ func (s *Service) SweepLegs(ctx context.Context) (int, error) {
 	if s.store == nil {
 		return 0, nil
 	}
-	s.openUnopened(ctx)
+	s.openUnopened(ctx, false)
 	now := s.now()
 	ended, err := s.store.CallLegs.Sweep(ctx, now, MaxCallLength, legSweepBatch)
 	if err != nil {
@@ -566,14 +600,14 @@ func (s *Service) rebill(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// RunLegSweep sweeps every interval until ctx ends, and then logs the legs it never wrote.
+// RunLegSweep sweeps every interval until ctx ends. The legs it has not written by then get a
+// last write from StopLegSweep.
 func (s *Service) RunLegSweep(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			s.loseUnopened()
 			return
 		case <-ticker.C:
 			if _, err := s.SweepLegs(ctx); err != nil {
