@@ -12,11 +12,11 @@ export const API_KEY_ENV = "STREAM_API_KEY";
 export const API_SECRET_ENV = "STREAM_API_SECRET";
 export const AUTHENTICATE_ENV = "STREAM_ACCELERATION_AUTHENTICATE";
 
-/**
- * This SDK's release, the version in package.json. It is written here by hand at each release,
- * and a test fails while the two differ.
- */
-export const VERSION = "0.4.3";
+/** Written in by the build, `vite.config.ts`, from package.json. */
+declare const __SDK_VERSION__: string;
+
+/** This SDK's release, the version npm published. */
+export const VERSION: string = __SDK_VERSION__;
 
 /** How long a token minted here lasts. */
 const TOKEN_VALIDITY_SECONDS = 60 * 60;
