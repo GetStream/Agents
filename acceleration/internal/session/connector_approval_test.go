@@ -93,6 +93,39 @@ func (s *ConnectorApprovalSuite) TestADeclinedCallIsNotSentAndTheModelIsTold() {
 	s.Equal("declined by the person", row.ErrorMessage)
 }
 
+// The line of a call the user declined names its connector and says it failed: the report
+// is kept on the call's own context.
+func (s *ConnectorApprovalSuite) TestADeclinedCallIsReportedToTheAgent() {
+	d, _ := s.holding("whoami")
+	ctx, report := agent.WithToolReport(s.ctx)
+
+	answer := s.callInBackground(ctx, d, "call-1", "crm__whoami", "{}")
+	s.Require().Eventually(func() bool { return s.questionOf("call-1") != nil }, 5*time.Second, 10*time.Millisecond)
+	s.NoError(d.answerApproval("call-1", "command-1", anyone, false, "Not now"))
+	s.answerOf(answer)
+
+	s.Equal(agent.ToolReport{Connector: s.connectorID, ErrorCode: store.InvocationDenied, Error: "declined by the person"}, *report)
+}
+
+// A call allowed after its connector was unbound is refused at the recheck, and its line
+// says so under the connector it was meant for.
+func (s *ConnectorApprovalSuite) TestACallUnboundWhileItWaitsIsReportedToTheAgent() {
+	d, _ := s.holding("whoami")
+	config, err := s.store.AgentConfigs.Get(s.ctx, s.customerID, d.spec.ConfigID)
+	s.Require().NoError(err)
+	ctx, report := agent.WithToolReport(s.ctx)
+
+	answer := s.callInBackground(ctx, d, "call-1", "crm__whoami", "{}")
+	s.Require().Eventually(func() bool { return s.questionOf("call-1") != nil }, 5*time.Second, 10*time.Millisecond)
+	s.rebind(config)
+	s.NoError(d.answerApproval("call-1", "command-1", anyone, true, ""))
+	s.answerOf(answer)
+
+	s.Equal(s.connectorID, report.Connector)
+	s.Equal(store.InvocationDenied, report.ErrorCode)
+	s.Contains(report.Error, "the agent config no longer binds it")
+}
+
 // An answer is matched on the call and on the command its reply answers, so an answer for
 // another command, or for a call that is not held, moves nothing; and a call is answered once.
 func (s *ConnectorApprovalSuite) TestAnAnswerNamingAnotherCommandOrCallIsRefused() {
