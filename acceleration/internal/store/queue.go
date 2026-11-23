@@ -87,14 +87,14 @@ func unclaim[T any](ctx context.Context, db bun.IDB, q queue, claimed []T) error
 	}
 	table := db.Dialect().Tables().Get(reflect.TypeFor[T]())
 	key, attempts := table.FieldMap[q.key], table.FieldMap["attempts"]
-	held := make([][]any, 0, len(claimed))
+	held := make([]bun.TupleValues, 0, len(claimed))
 	for i := range claimed {
 		row := reflect.ValueOf(&claimed[i]).Elem()
-		held = append(held, []any{key.Value(row).Interface(), attempts.Value(row).Interface()})
+		held = append(held, bun.Tuple([]any{key.Value(row).Interface(), attempts.Value(row).Interface()}))
 	}
 	_, err := db.NewUpdate().Model((*T)(nil)).
 		Set("next_attempt_at = now()").
-		Where("(?, attempts) IN (?)", bun.Ident(q.key), bun.In(held)).
+		Where("(?, attempts) IN (?)", bun.Ident(q.key), bun.List(held)).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("store: give back a claim of %s: %w", q.name, err)

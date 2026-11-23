@@ -12,6 +12,9 @@ func (s *StoreSuite) queuedImageJob() ImageJob {
 	job := ImageJob{
 		ID: "job-" + time.Now().Format("150405.000000000"), CustomerID: "acme", CID: "agent:a", AgentUser: "illustrator",
 		SessionID: "session-1", ToolCallID: "draw-1", RequestKey: "key-draw-1", Target: "image-fast", Attribution: json.RawMessage(`{}`), Prompt: "a field",
+		// Due a minute ago: a claim judges it by Postgres's clock, which may run a little
+		// behind this process's.
+		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	queued, err := s.store.ImageJobs.Queue(s.ctx, &job)
 	s.Require().NoError(err)

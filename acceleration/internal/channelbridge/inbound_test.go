@@ -1141,9 +1141,10 @@ func (s *InboundSuite) thread(connector string) store.ChannelThread {
 	return thread
 }
 
-// queue queues a message of U0000ALICE in thread, due now.
+// queue queues a message of U0000ALICE in thread, due now: a second ago on this process's
+// clock, since a claim judges it by Postgres's, which may run a little behind.
 func (s *InboundSuite) queue(thread store.ChannelThread, providerMessageID, text string, forward *store.ChannelInboundForward) {
-	s.queueAt(thread, providerMessageID, text, forward, time.Now())
+	s.queueAt(thread, providerMessageID, text, forward, time.Now().Add(-time.Second))
 }
 
 // queueAt queues a message of U0000ALICE in thread, due at due.
