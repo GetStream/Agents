@@ -695,7 +695,7 @@ func phoneFailure(logger *slog.Logger, err error) error {
 		return errNumberNeedsAddress
 	}
 	if errors.Is(err, phone.ErrNoSealerToCall) {
-		logger.Warn("a phone call cannot be placed without a keyring", "error", err)
+		logger.Warn("a phone call cannot be placed without a keyring", "error", phone.ErrNoSealerToCall)
 		return errCallNoKeyring
 	}
 	if errors.Is(err, phone.ErrNoSealer) {

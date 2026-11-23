@@ -1466,7 +1466,7 @@ func (s *Service) park(
 		if err != nil {
 			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
 		}
-		bridge.TrunkPasswordSealed, bridge.TrunkPasswordKEKVersion = sealed, s.sealer.CurrentVersion()
+		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
 	}
 	if err := s.store.CallBridges.Insert(ctx, bridge); err != nil {
 		return "", err
@@ -1503,7 +1503,7 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 		if s.sealer == nil {
 			return Plan{}, stack.Wrap(ErrNoSealer)
 		}
-		password, err = s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, callBridgeAAD(bridge.CustomerID, token), bridge.TrunkPasswordKEKVersion)
+		password, err = s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, callBridgeAAD(bridge.CustomerID, token), bridge.TrunkKEKVersion)
 		if err != nil {
 			return Plan{}, stack.Wrap(fmt.Errorf("phone: open a parked bridge's trunk password: %w", err))
 		}

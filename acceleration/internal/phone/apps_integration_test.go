@@ -328,7 +328,7 @@ func (s *AppsSuite) TestAParkedPasswordOpensOnlyForItsCustomerAndToken() {
 		return store.CallBridge{
 			Token: token, CustomerID: customerID, Vendor: parked.Vendor, TrunkURI: parked.TrunkURI,
 			TrunkUsername: parked.TrunkUsername, TrunkPasswordSealed: parked.TrunkPasswordSealed,
-			TrunkPasswordKEKVersion: parked.TrunkPasswordKEKVersion, CallID: parked.CallID, ExpiresAt: parked.ExpiresAt,
+			TrunkKEKVersion: parked.TrunkKEKVersion, CallID: parked.CallID, ExpiresAt: parked.ExpiresAt,
 		}
 	}
 

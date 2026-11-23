@@ -32,10 +32,10 @@ type CallBridge struct {
 	// TrunkURI is the SIP address the answered leg is transferred to.
 	TrunkURI string `bun:"trunk_uri,notnull"`
 	// TrunkUsername and the sealed TrunkPasswordSealed are the trunk's digest credentials,
-	// set only for a vendor that can send them.
-	TrunkUsername           string `bun:"trunk_username,nullzero"`
-	TrunkPasswordSealed     []byte `bun:"trunk_password_sealed,nullzero"`
-	TrunkPasswordKEKVersion int    `bun:"trunk_password_kek_version,nullzero"`
+	// set only for a vendor that can send them; TrunkKEKVersion is the key that sealed it.
+	TrunkUsername       string `bun:"trunk_username,nullzero"`
+	TrunkPasswordSealed []byte `bun:"trunk_password_sealed,nullzero"`
+	TrunkKEKVersion     int    `bun:"trunk_password_kek_version,nullzero"`
 	// InitialDigits are pressed at the person before the transfer.
 	InitialDigits string `bun:"initial_digits,nullzero"`
 	// CallID is the Stream call the leg is routed into, kept for the audit trail.
