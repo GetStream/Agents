@@ -289,8 +289,8 @@ func TestRedactLogTextTakesAValueThatIsNotAWord(t *testing.T) {
 		"sent Bearer " + secret + " and failed":               "sent [redacted] and failed",
 		"sent bearer " + strings.ToLower(secret) + "0 failed": "sent [redacted] failed",
 		"https://auth.example/token?client_secret=" + secret:  "https://auth.example/token?client_[redacted]",
-		`{"password":"` + secret + `"}`:                       `{"[redacted]}`,
-		`{"password":"word"}`:                                 `{"[redacted]}`,
+		`{"password":"` + secret + `"}`:                       `{"password":"[redacted]"}`,
+		`{"password":"word"}`:                                 `{"password":"[redacted]"}`,
 		"password: hunter2 rejected":                          "[redacted] rejected",
 		"secret: password: " + secret:                         "secret: [redacted]",
 		"bearer of Bearer " + secret:                          "bearer of [redacted]",
@@ -393,11 +393,11 @@ func TestRedactLogTextTakesAConnectorTokenShape(t *testing.T) {
 		"legacy encrypted pem block escaped":       `parse: "[redacted]" failed`,
 		"pem block cut before its end":             `parse: "[redacted]" failed`,
 		"id_token":                                 "oauth: bad [redacted] from the provider",
-		"id_token as json":                         `{"[redacted]}`,
+		"id_token as json":                         `{"id_token":"[redacted]"}`,
 		"id-token header":                          "x-[redacted]",
 		"prefixed id_token":                        "oauth: client[redacted] refused",
 		"auth_token":                               "request failed [redacted] refused",
-		"auth_token as json":                       `{"[redacted]}`,
+		"auth_token as json":                       `{"auth_token":"[redacted]"}`,
 		"x-auth-token":                             "x-[redacted]",
 		"oauth_token":                              "o[redacted]",
 		"private_key as json":                      `{"type":"service_account","[redacted],"client_email":"a@b.example"}`,
@@ -439,6 +439,227 @@ func TestRedactLogTextKeepsAJSONAnswerValidWhenItsTokenIsTakenOut(t *testing.T) 
 		require.NotContains(t, got, secret)
 		require.True(t, json.Valid([]byte(got)), got)
 		require.Contains(t, got, `"[redacted]"`)
+	}
+}
+
+// A text that is JSON is redacted as JSON: each row is a credential keyword as a key of an
+// object, with a value of each kind JSON has. The key stays, the value is "[redacted]", the
+// key after it is as it was, and the text is JSON still. An object or an array is taken out
+// whole, with what is in it.
+func TestRedactLogTextKeepsJSONValidForEveryCredentialKeyword(t *testing.T) {
+	secret := rand.Text()
+	values := map[string]string{
+		"string":          `"` + secret + `"`,
+		"a word":          `"word"`,
+		"string escapes":  `"` + secret + `\"` + secret + `\\"`,
+		"number":          `4815162342`,
+		"huge number":     `1e999`,
+		"object":          `{"a":"` + secret + `","b":["` + secret + `",{"c":1}]}`,
+		"array":           `["` + secret + `","` + secret + `"]`,
+		"empty object":    `{}`,
+		"nested password": `{"password":"` + secret + `"}`,
+	}
+	for _, name := range []string{
+		"api_key", "apikey", "api-key", "API_KEY", "x-api-key", "access_token", "refresh_token", "id_token", "x-id-token",
+		"auth_token", "private_key", "password", "client_secret", "secret", "authorization", "Authorization", "cookie", "Cookie",
+	} {
+		for kind, value := range values {
+			t.Run(name+"/"+kind, func(t *testing.T) {
+				text := `{"first":"a","` + name + `" : ` + value + `,"last":2}`
+				require.True(t, json.Valid([]byte(text)), text)
+				got := RedactLogText(text)
+				require.Equal(t, `{"first":"a","`+name+`" : "[redacted]","last":2}`, got)
+			})
+		}
+	}
+	for name, text := range map[string]string{
+		"array of objects":           `[{"password":"` + secret + `"},{"secret":["` + secret + `"]}]`,
+		"nested object":              `{"data":{"auth":{"api_key":"` + secret + `"}}}`,
+		"newlines around the colon":  "{\n  \"password\"\n  :\n  \"" + secret + "\"\n}",
+		"duplicate key":              `{"password":"a","password":"` + secret + `"}`,
+		"strings after a credential": `{"password":"` + secret + `","m":"password=` + secret + `","k":["Bearer ` + secret + `"]}`,
+		"a key after a credential":   `{"password":"` + secret + `","Bearer ` + secret + `":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, json.Valid([]byte(text)), text)
+			got := RedactLogText(text)
+			require.NotContains(t, got, secret)
+			require.True(t, json.Valid([]byte(got)), got)
+			require.Contains(t, got, `"[redacted]"`)
+		})
+	}
+}
+
+// A true, a false and a null hold no credential and stay, as a word does after a keyword in
+// plain text; a key that only starts with a keyword, or holds it before another word, is no
+// credential, and a "token" key with no string value keeps what it has.
+func TestRedactLogTextKeepsWhatIsNoCredentialInJSON(t *testing.T) {
+	for _, text := range []string{
+		`{"password":null,"secret":true,"api_key":false}`,
+		`{"a":"","password":null,"b":""}`,
+		`{"output":"[1,\"caf\\u00e9 \\/\"]","n":"{\\\"a\\\":\\\"\\\\/\\\"}","k":"key"}`,
+		`["password","secret",1,"authorization"]`,
+		`["password","x"]`,
+		`["a","b","password","x"]`,
+		`{"output":"[1,\u0022a\u0022]","k":"key"}`,
+		"{\"a\":\"line\u2028sep\",\"k\":\"key\"}",
+		`{"secretary":"office","passwords":["a"],"keyboard":"b","cookies":3,"secret_name":"s"}`,
+		`{"token":5,"token_count":"7","max_tokens":256}`,
+		`{"token":null,"a":"b"}`,
+		`{"token":["x"],"a":"password"}`,
+		`{"messages":[{"role":"user","content":"my secret is a word"}]}`,
+		"{\n  \"a\": \"caf\\u00e9 \\/ <b>\",\n  \"n\": [1, 2.50]\n}",
+		`"just a key"`,
+	} {
+		require.True(t, json.Valid([]byte(text)), text)
+		require.Equal(t, text, RedactLogText(text))
+	}
+	for _, text := range []string{`12345`, `true`, `null`, `"a string"`, `[1,2.5e3]`} {
+		require.Equal(t, text, redactCredentials(text))
+	}
+	secret := rand.Text()
+	require.Equal(t, `{"token":{"token":"[redacted]","n":1},"a":"b"}`, RedactLogText(`{"token":{"token":"`+secret+`","n":1},"a":"b"}`))
+	require.Equal(t, `{"token":["x"],"token":"[redacted]"}`, RedactLogText(`{"token":["x"],"token":"`+secret+`"}`))
+	require.Equal(t, "{\n  \"a\": \"caf\\u00e9 \\/ <b>\",\n  \"token\": \"[redacted]\"\n}",
+		RedactLogText("{\n  \"a\": \"caf\\u00e9 \\/ <b>\",\n  \"token\": \""+secret+"\"\n}"))
+}
+
+// Each rule that reads a string for a credential, run on a string of a JSON text, leaves the text
+// JSON and takes the secret out: the rules take the value that stands after a keyword to the next
+// space, comma or brace, or to the end of the line, where a string ends with a quote, which a
+// bearer value also takes along with the backslash of an escaped one. The row is the string, which
+// is written as JSON by the test, as a value, as a key, in an array, as the whole text and as a
+// JSON text inside a string.
+func TestRedactLogTextKeepsJSONValidWhenAStringHoldsACredential(t *testing.T) {
+	secret := rand.Text()
+	backslash := `\`
+	for name, inner := range map[string]string{
+		"bearer":                      "Bearer " + secret,
+		"bearer in escaped quotes":    `said "Bearer ` + secret + `" then`,
+		"bearer before a backslash":   `{\"a\":\"Bearer ` + secret + backslash + `"}`,
+		"authorization header":        "Authorization: Bearer " + secret,
+		"cookie header and a line":    "Set-Cookie: sid=" + secret + "\nnext: line",
+		"proxy authorization":         "Proxy-Authorization: Basic " + secret,
+		"password":                    "password=" + secret,
+		"password at the end":         "login failed, password: " + secret,
+		"secret in quotes":            `login failed "secret=` + secret + `"`,
+		"secret with quotes":          `secret="` + secret + `" failed`,
+		"secret with single quotes":   `secret='` + secret + `' failed`,
+		"json-style pair":             `password": "` + secret + `"`,
+		"api key pair":                `api_key=` + secret + `,model=m`,
+		"client secret in a url":      "https://auth.example/token?client_secret=" + secret,
+		"url with a password":         "https://user:" + secret + "@example.com/path",
+		"key in a query":              "wss://live.example/ws?alt=sse&key=" + secret,
+		"query at the start":          "key=" + secret + "&echo_status=404",
+		"token in a query":            "https://ipinfo.io/json?token=" + secret,
+		"encoded key":                 "redirect=https%3A%2F%2Flive.example%2Fws%3Fkey%3D" + secret,
+		"encoded authorization":       "h=Authorization%3A%20Bearer%20" + secret,
+		"encoded bearer":              "h=Bearer%20" + secret,
+		"vendor refusal":              "Incorrect API key provided: " + secret + secret,
+		"vendor refusal before":       "The API key '" + secret + secret + "' is invalid",
+		"vendor refusal with a quote": `{"error":"Invalid API key ` + secret + secret + `"}`,
+		"provider key":                "used sk-" + secret,
+		"slack token":                 "used xoxb-1234567890-" + secret,
+		"github token":                "used ghp_" + secret,
+		"jwt":                         "used eyJhbGciOiJIUzI1NiJ9.eyJ" + secret + "." + secret,
+		"pem in quotes":               `parse "` + pemLine("BEGIN", "") + "\nMIIE" + secret + "\n" + pemLine("END", "") + `" failed`,
+		"pem before a quote":          `parse "` + pemLine("BEGIN", "") + "\nMIIE" + secret + `"`,
+		"token pair":                  `got {"token":"` + secret + `"} back`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			quoted, err := json.Marshal(inner)
+			require.NoError(t, err)
+			for place, text := range map[string]string{
+				"value":  `{"m":` + string(quoted) + `,"n":1}`,
+				"key":    `{` + string(quoted) + `:"v","n":1}`,
+				"array":  `["a",` + string(quoted) + `,1]`,
+				"string": string(quoted),
+			} {
+				got := RedactLogText(text)
+				require.NotContains(t, got, secret, place)
+				require.True(t, json.Valid([]byte(got)), "%s: %s", place, got)
+				if place == "value" || place == "key" {
+					require.Contains(t, got, `"n":1}`, place)
+				}
+			}
+			nested, err := json.Marshal(string(quoted))
+			require.NoError(t, err)
+			got := RedactLogText(`{"result":` + string(nested) + `,"n":1}`)
+			require.NotContains(t, got, secret)
+			require.True(t, json.Valid([]byte(got)), got)
+		})
+	}
+}
+
+// A JSON text inside a string, as a tool's result is stored, is redacted as JSON too: the key of
+// the credential in it stays, and it reads back as JSON after the string is decoded.
+func TestRedactLogTextKeepsJSONInsideAStringValid(t *testing.T) {
+	secret := rand.Text()
+	inner := `{"password":"` + secret + `","list":["` + secret + `"],"api_key":12345,"ok":true}`
+	array, err := json.Marshal(`[{"secret":"` + secret + `"},1]`)
+	require.NoError(t, err)
+	require.Equal(t, `{"o":"[{\"secret\":\"[redacted]\"},1]"}`, RedactLogText(`{"o":`+string(array)+`}`))
+	quoted, err := json.Marshal(inner)
+	require.NoError(t, err)
+	got := RedactLogText(`{"output":` + string(quoted) + `,"n":1}`)
+	var read struct {
+		Output string `json:"output"`
+		N      int    `json:"n"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(got), &read), got)
+	require.Equal(t, 1, read.N)
+	require.Equal(t, `{"password":"[redacted]","list":["`+secret+`"],"api_key":"[redacted]","ok":true}`, read.Output)
+}
+
+// A string written again, because a rule cut an escape in it, has no escape for <, > and &, which the text had none for.
+func TestRedactLogTextWritesAChangedStringAsItWas(t *testing.T) {
+	require.Equal(t, `{"m":"<b>[redacted] <i> & more"}`, RedactLogText(`{"m":"<b>password=hunter2 <i> & more"}`))
+	require.Equal(t, `{"m":"<b>said \"[redacted]\" & more"}`, RedactLogText(`{"m":"<b>said \"Bearer hunter2\" & more"}`))
+}
+
+// A text that is not JSON, or is cut short, is read by the rules as it was before: a credential
+// is taken out, the shape of what is left is not promised.
+func TestRedactLogTextReadsATextThatIsNotJSONWithTheRules(t *testing.T) {
+	secret := rand.Text()
+	for text, want := range map[string]string{
+		`{"password":"` + secret + `"`:                `{"[redacted]`,
+		`{"api_key":"` + secret + `",}`:               `{"[redacted],}`,
+		`provider said {"password":"` + secret + `"}`: `provider said {"[redacted]}`,
+		`{"password":` + secret:                       `{"[redacted]`,
+		`{"a":"b"} {"password":"` + secret + `"}`:     `{"a":"b"} {"[redacted]}`,
+		"{\"password\":\"" + secret + "\nmore\"}":     "{\"[redacted]}",
+	} {
+		require.False(t, json.Valid([]byte(text)), text)
+		require.Equal(t, want, RedactLogText(text))
+	}
+}
+
+// A JSON text is read in linear time, as the rules are: a long list of credential keys with
+// containers, a string holding JSON inside itself over and over, and a single deep one.
+func TestRedactLogTextReadsALongJSONTextInTime(t *testing.T) {
+	if raceDetector {
+		t.Skip("a wall-clock bound does not hold under the race detector")
+	}
+	nested := `{"password":"x"}`
+	for range 14 {
+		quoted, err := json.Marshal(nested)
+		require.NoError(t, err)
+		nested = `{"output":` + string(quoted) + `}`
+	}
+	for name, text := range map[string]string{
+		"credential keys":    `[` + strings.Repeat(`{"password":{"a":["x",{"b":1}]},"m":"password=abc"},`, 40000) + `1]`,
+		"keys of one object": `{` + strings.Repeat(`"secret":["x"],`, 100000) + `"n":1}`,
+		"deep":               strings.Repeat(`{"a":`, 5000) + `{"password":"x"}` + strings.Repeat(`}`, 5000),
+		"string in string":   nested,
+		"long strings":       `["` + strings.Repeat(`password=abc `, 200000) + `"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, json.Valid([]byte(text)))
+			started := time.Now()
+			got := RedactLogText(text)
+			require.Less(t, time.Since(started), 5*time.Second)
+			require.True(t, json.Valid([]byte(got)))
+		})
 	}
 }
 
