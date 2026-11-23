@@ -53,8 +53,6 @@ In the root `CHANGELOG.md`:
 - Keep three sections, in this order: `## Breaking Changes`, `## New Features`, `## Bug Fixes`.
   Merge sections that appear twice or under another name (`## Features`). The `# Unreleased`
   written before AI-3557 has both problems.
-- A line that starts with `# ` inside the section is a stray heading, such as a YAML comment
-  outside a code fence (`# agents/customer_support/agent.yaml`). Put it in a fence or remove it.
 - Add an entry for each user-facing PR that has none: a `###` title and one or two sentences,
   ending with the PR number, e.g. `(#2207)`. Since AI-3557, PRs add only breaking-change lines,
   so most of the entries are written here. Skip docs-only, CI-only, test-only and skill-only PRs.
