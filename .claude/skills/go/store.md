@@ -93,6 +93,8 @@ A state change that is more than a column write gets a domain verb on the same r
 - Opening the database with `bun.WithDiscardUnknownColumns()` means a release that does not
   know a new column still reads the row. So add a column to the table that owns it, nullable
   or with a default; do not create a 1:1 side table to dodge a rollback.
+- Remove a column over two releases. First stop writing it and take it out of the model:
+  routers of the release before still name it in their SQL. Drop it in the next release.
 - A table of work routers claim (inbound messages, deliveries, jobs) is a `queue`
   (`queue.go`): `claim` leases due rows with `FOR UPDATE SKIP LOCKED` in one query,
   `nextDue` says when to look again, and every write after the claim goes through `heldBy`,
