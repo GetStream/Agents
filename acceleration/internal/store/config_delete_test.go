@@ -95,7 +95,8 @@ func (s *StoreSuite) TestADeleteWaitsForANumberBeingGivenTheConfig() {
 	go func() { deleted <- s.store.AgentConfigs.Delete(context.WithoutCancel(s.ctx), customerID, config.ID) }()
 	select {
 	case err := <-deleted:
-		s.Failf("the delete did not wait for the number", "it returned %v", err)
+		s.Require().NoError(tx.Rollback())
+		s.FailNowf("the delete did not wait for the number", "it returned %v", err)
 	case <-time.After(300 * time.Millisecond):
 	}
 	s.Require().NoError(tx.Commit())

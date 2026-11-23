@@ -284,3 +284,31 @@ func (s *StoreSuite) TestTwoConfigsSavedAtOnceNamingOneSMSNumberLeaveOneOnIt() {
 	s.Require().NoError(err)
 	s.Equal(1, on)
 }
+
+// A config naming a line waits for another save of the line to finish, and then sees it,
+// rather than both reading the line as free.
+func (s *StoreSuite) TestASaveNamingAnSMSNumberWaitsForAnotherSaveOfIt() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = tx.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))", customerID+"/sms/"+e164, channelLineLockSeed)
+	s.Require().NoError(err)
+	holder := smsAgent(customerID, e164)
+	holder.ID, holder.CreatedAt, holder.UpdatedAt = newID(), time.Now().UTC(), time.Now().UTC()
+	normalizeConfig(holder)
+	_, err = tx.NewInsert().Model(holder).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	saved := make(chan error, 1)
+	go func() { saved <- s.store.AgentConfigs.Insert(s.ctx, smsAgent(customerID, e164)) }()
+	select {
+	case err := <-saved:
+		s.Require().NoError(tx.Rollback())
+		s.FailNowf("the save did not wait for the line", "it returned %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	s.Require().NoError(tx.Commit())
+
+	_, taken := errors.AsType[*ChannelLineTakenError](<-saved)
+	s.True(taken, "the save that waited sees the config that held the line")
+}

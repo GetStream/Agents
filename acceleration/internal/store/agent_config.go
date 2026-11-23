@@ -498,6 +498,8 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 			return err
 		}
 		if len(answering) > 0 {
+			// Refused and rolled back: the cached config is still the live one.
+			name = ""
 			return &ConfigAnswersNumbersError{Numbers: answering}
 		}
 		return nil

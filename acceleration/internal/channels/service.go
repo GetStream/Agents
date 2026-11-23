@@ -508,12 +508,20 @@ func (s *Service) recordConversation(ctx context.Context, created *session.Sessi
 		return created, nil
 	}
 	// Another router opened one for this person's first message at the same time and recorded
-	// it first: this message goes on in that one, which is what continues.
+	// it first: this message goes on in that one, which is what continues. The one opened here
+	// is left empty, and closed only once the kept one is open: if that fails, the message is
+	// still answered here rather than dropped.
+	spec.ConversationID = identity.ConversationID
+	kept, err := s.sessions.Create(ctx, spec)
+	if err != nil {
+		logger.Error("could not open the conversation another router recorded first, answering in this one",
+			"agent", spec.AgentName, "error", err)
+		return created, nil
+	}
 	if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
 		logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
 	}
-	spec.ConversationID = identity.ConversationID
-	return s.sessions.Create(ctx, spec)
+	return kept, nil
 }
 
 // identify is who the number writing belongs to, and false when nobody is to be answered.
