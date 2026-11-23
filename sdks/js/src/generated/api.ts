@@ -4897,7 +4897,7 @@ export type components = {
             readonly scheduling?: components["schemas"]["AgentScheduling"];
             readonly search?: string;
             readonly skills?: readonly string[];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade. */
             readonly sts?: string;
             readonly stt?: string;
             readonly subagent?: string;
@@ -5069,7 +5069,7 @@ export type components = {
             readonly search?: string;
             /** @description Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set. */
             readonly skills?: readonly string[];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade. */
             readonly sts?: string;
             /** @description A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it. */
             readonly stt?: string;
@@ -8432,6 +8432,25 @@ export type components = {
             /** Format: int64 */
             readonly requests: number;
         };
+        /** @description A built-in voice a native speech model accepts by id. */
+        readonly ModelVoice: {
+            /** @description True when this is the model's default voice. */
+            readonly default?: boolean;
+            /** @description Short description of the voice's tone, style or accent. */
+            readonly description?: string;
+            /** @description Voice presentation, such as female, male or neutral. */
+            readonly gender?: string;
+            /**
+             * @description The voice identifier the provider accepts in its voice field.
+             * @example marin
+             */
+            readonly id: string;
+            /**
+             * @description Display name for the voice.
+             * @example Marin
+             */
+            readonly name: string;
+        };
         readonly NumberSearchResult: {
             /** @description What the vendors are offering, cheapest first. */
             readonly numbers: readonly components["schemas"]["AvailableNumber"][];
@@ -9117,6 +9136,8 @@ export type components = {
              * @description This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
              */
             readonly usage_share?: number;
+            /** @description The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak. */
+            readonly voices?: readonly components["schemas"]["ModelVoice"][];
         };
         /** @description What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it. */
         readonly ProviderBenchmark: {
@@ -10721,7 +10742,7 @@ export type components = {
             /** @description The simulations the directory's simulations/*.yaml declare. Sent, they are the whole of the agent's simulations: each is found by name, and one no longer declared is deleted. Left out, the stored ones are left alone. */
             readonly simulations?: readonly components["schemas"]["SimulationDeclaration"][];
             readonly skills?: readonly components["schemas"]["SkillRequest"][];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade. */
             readonly sts?: string;
             readonly stt?: string;
             /** @description Only a voice agent names one: a text agent runs everything on its llm. */

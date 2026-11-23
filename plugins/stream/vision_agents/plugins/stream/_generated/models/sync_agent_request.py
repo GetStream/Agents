@@ -132,7 +132,9 @@ class SyncAgentRequest:
                 deleted. Left out, the stored ones are left alone.
             skills (list[SkillRequest] | Unset):
             sts (str | Unset): A speech-to-speech target: one native audio model that hears the caller and speaks back.
-                Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+                Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice
+                config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it
+                keeps what is stored. An empty string explicitly selects the cascade.
             stt (str | Unset):
             subagent (str | Unset): Only a voice agent names one: a text agent runs everything on its llm.
             tags (SyncAgentRequestTags | Unset):
