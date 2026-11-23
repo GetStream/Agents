@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -212,10 +213,10 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 				a.mu.Unlock()
 			}
 			ctx, cancel := a.prepareTool(requested)
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				defer a.running.Done()
 				a.executeTool(ctx, cancel, requested)
-			}()
+			})
 			continue
 		case sts.ToolCancel:
 			a.mu.Lock()
@@ -293,11 +294,11 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			return
 		default:
 			a.fail(ErrPlaybackFull, "sts")
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after the playback fell behind", "error", err)
 				}
-			}()
+			})
 			return
 		}
 	}
@@ -397,7 +398,8 @@ func (a *Agent) consumeSTS(p *pipeline, speech *stsrouter.Session, events <-chan
 		}
 	}
 
-	go a.recoverNative(p, retry || (p.writeFailed.Load() && !cleanTerminal), retryErr)
+	retrying := retry || (p.writeFailed.Load() && !cleanTerminal)
+	goroutine.Go(a.ctx, func() { a.recoverNative(p, retrying, retryErr) })
 }
 
 // recoverNative replaces a failed native session while keeping the call and its harness.

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -115,6 +116,8 @@ type FlowTurn struct {
 }
 
 type flow struct {
+	// call is the context of the call (Options.Call). The decisions start under it.
+	call  context.Context
 	model *llmrouter.Session
 	// judge, when set, is asked in place of model.
 	judge Judge
@@ -262,7 +265,7 @@ func (f *flow) Decide(ctx context.Context, turn FlowTurn) error {
 	f.running.Add(1)
 	f.mu.Unlock()
 
-	go f.run(asked)
+	goroutine.Go(f.call, func() { f.run(asked) })
 	return nil
 }
 
@@ -348,7 +351,7 @@ func (f *flow) advance(turnID string) {
 	f.inFlight = next.turn.ID
 	f.running.Add(1)
 	f.mu.Unlock()
-	go f.run(next)
+	goroutine.Go(f.call, func() { f.run(next) })
 }
 
 // dropWaitingLocked forgets a turn that never reached Create, because newer words

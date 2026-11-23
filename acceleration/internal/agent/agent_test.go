@@ -23,6 +23,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -169,6 +170,9 @@ type stubSTT struct {
 	holdClose <-chan struct{}
 	// closes counts the times it was closed.
 	closes atomic.Int64
+	// panics, if set, is the value that a goroutine from Start panics with. It is like a bug
+	// in the read loop of a provider.
+	panics any
 }
 
 func newStubSTT() *stubSTT { return &stubSTT{emitter: stt.NewEmitter(64)} }
@@ -186,7 +190,15 @@ func (s *stubSTT) keyterms() []string {
 	return append([]string(nil), s.terms...)
 }
 
-func (s *stubSTT) Start(context.Context) error { return nil }
+func (s *stubSTT) Start(ctx context.Context) error {
+	s.mu.Lock()
+	panics := s.panics
+	s.mu.Unlock()
+	if panics != nil {
+		goroutine.Go(ctx, func() { panic(panics) })
+	}
+	return nil
+}
 
 func (s *stubSTT) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	s.mu.Lock()
@@ -304,6 +316,10 @@ type stubLLM struct {
 
 	// capabilities are what the model says it takes: text alone unless a test says more.
 	capabilities llm.Capabilities
+
+	// panics, if set, is the value that Create panics with. It is like a bug in a model
+	// adapter.
+	panics any
 }
 
 func newStubLLM() *stubLLM { return &stubLLM{scripts: map[string]*llmtest.Script{}} }
@@ -319,9 +335,12 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	sender, _ := routing.CallerFrom(ctx)
 	s.senders = append(s.senders, sender)
 	s.scheduled = append(s.scheduled, routing.ScheduledTurn(ctx))
-	hold, completion, refuses, breaks, screen, verdict := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict
+	hold, completion, refuses, breaks, screen, verdict, panics := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict, s.panics
 	s.mu.Unlock()
 
+	if panics != nil {
+		panic(panics)
+	}
 	if refuses != nil {
 		return nil, refuses
 	}
@@ -379,7 +398,7 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	// what lets a reply be caught mid-sentence.
 	if len(reply) == 0 && len(calls) == 0 {
 		if verdict != nil {
-			return script.Stream().Screen(verdict), nil
+			return script.Stream().Screen(ctx, verdict), nil
 		}
 		return screened(script.Stream(), screen, harness.WithoutNotes(params.Input)), nil
 	}
@@ -407,7 +426,7 @@ func screened(stream *llm.Stream, screen func([]llm.Message) error, input []llm.
 	}
 	verdict := make(chan error, 1)
 	verdict <- screen(input)
-	return stream.Screen(verdict)
+	return stream.Screen(context.Background(), verdict)
 }
 
 func (s *stubLLM) compose(params llm.ResponseParams) (*llm.Stream, error) {

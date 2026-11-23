@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -243,8 +244,9 @@ func (t *Transcriber) interim(participant stt.Participant, heard int64) {
 		return
 	}
 	t.interimOut.Store(true)
+	talked, last := t.talked, t.heard.Last(length)
 	t.running.Add(1)
-	go t.writeInterim(participant, utterance, heard, t.talked, t.heard.Last(length), languages, spoken)
+	goroutine.Go(t.call, func() { t.writeInterim(participant, utterance, heard, talked, last, languages, spoken) })
 }
 
 // writeInterim asks for the words of audio, the utterance so far, in languages, and sends

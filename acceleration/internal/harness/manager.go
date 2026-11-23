@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/emit"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -45,6 +46,9 @@ type manager struct {
 	// retired are subagents a swap replaced, kept open for the tasks still running on them.
 	retired []*opening
 	capture func(context.Context, CaptureRequest) ([]llm.ContentPart, error)
+	// call is the context of the call (Options.Call). The tasks and the subagent start under
+	// it.
+	call context.Context
 	// load reads a skill that was offered by name alone.
 	load    func(context.Context, string) (Loaded, error)
 	ctx     context.Context
@@ -246,7 +250,7 @@ func (m *manager) Create(
 
 	m.abandon(superseded)
 
-	go m.start(created)
+	goroutine.Go(m.call, func() { m.start(created) })
 	return created.id, nil
 }
 
