@@ -669,7 +669,8 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // customer inside every row it carries, and believing that would let anybody holding
 // credentials for one app write into another. For a row that belongs to a customer
 // through a parent there is no column to overwrite, so the parent is checked instead and
-// a row whose parent is somebody else's is silently not written.
+// a row whose parent is somebody else's is silently not written. A row whose key a row of
+// another customer holds here is refused (ErrAnotherCustomersRow).
 //
 // It upserts, so importing the same export twice is the same as importing it once, which
 // is what lets a move be resumed after it was interrupted.
@@ -865,11 +866,47 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		"%sINSERT INTO %s (%s) SELECT %s FROM %sjsonb_populate_record(NULL::%s, %s) AS r%s ON CONFLICT %s %s",
 		locked, spec.name, quoted, selected, through, spec.name, subject, where, spec.conflictTarget(shape), conflict)
 
-	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+	result, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
 		return fmt.Errorf("store: import %s: %w", table, err)
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	if written > 0 || spec.copied != "" {
+		return nil
+	}
+	// Nothing written is the importer's own row kept as it is here, or a row whose key another
+	// customer holds, which is refused rather than dropped. A copied row's key names its customer.
+	keys := shape.keys
+	if spec.across != "" {
+		keys = []string{spec.across}
+	}
+	keyed, held, imported := make([]string, 0, len(keys)), make([]string, 0, len(keys)), make([]string, 0, len(keys))
+	for _, key := range keys {
+		expression := "r." + key
+		if i := slices.Index(columns, key); i >= 0 {
+			expression = picked[i]
+		}
+		keyed = append(keyed, expression+" AS "+key)
+		held, imported = append(held, "h."+key), append(imported, "i."+key)
+	}
+	var taken bool
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT EXISTS (SELECT 1 FROM (SELECT %s FROM jsonb_populate_record(NULL::%s, %s) AS r) AS i JOIN %s AS h ON (%s) = (%s) WHERE NOT %s)",
+		strings.Join(keyed, ", "), spec.name, subject, spec.name, strings.Join(held, ", "), strings.Join(imported, ", "), spec.owned("h")),
+		append(slices.Clone(read), customerID)...).Scan(&taken); err != nil {
+		return fmt.Errorf("store: import %s: %w", table, err)
+	}
+	if taken {
+		return fmt.Errorf("store: import %s: %w", table, ErrAnotherCustomersRow)
 	}
 	return nil
 }
+
+// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
+var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
 
 // validated is a model that refuses a row the API would not store.
 type validated interface{ Validate() error }

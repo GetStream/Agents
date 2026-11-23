@@ -451,8 +451,10 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, ?, ?, ?)",
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
+	row, err := json.Marshal(s.export("acme").of("agent_configs")[0])
+	s.Require().NoError(err)
 
-	s.move("acme", "intruder")
+	s.ErrorIs(s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row), ErrAnotherCustomersRow)
 
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
@@ -474,7 +476,10 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", changes))
+	s.ErrorIs(s.destination.ApplyChanges(s.ctx, "intruder", changes), ErrAnotherCustomersRow, "the insert is refused")
+	deletes := slices.DeleteFunc(changes, func(change DataChange) bool { return change.Op != ChangeDelete })
+	s.Require().NotEmpty(deletes)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", deletes))
 
 	var count int
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
@@ -2516,7 +2521,18 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigIsAnotherCustomersHe
 	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-1', 'resident', 'theirs', 'be brief')")
 	s.Require().NoError(err)
-	s.move("acme", "moved")
+	reservation, err := s.destination.ReserveImportedIDs(s.ctx)
+	s.Require().NoError(err)
+	for _, row := range s.export("acme").rows {
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		if row.table == "agent_configs" {
+			s.Require().ErrorIs(s.destination.ImportRow(s.ctx, "moved", row.table, encoded), ErrAnotherCustomersRow)
+			continue
+		}
+		s.Require().NoError(reservation.Cover(s.ctx, row.table, encoded))
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", row.table, encoded))
+	}
 
 	resumed, skipped, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
 
@@ -3580,6 +3596,59 @@ func (s *DataMoveSuite) TestAMovedRequestNeverOverwritesTheDestinationsRowWithIt
 		s.NotEqualValues(id, row["id"], "the moved row is given an id of the destination's")
 		s.Equal(false, row["to_ship"])
 	}
+}
+
+func (s *DataMoveSuite) TestARequestWhoseIDsAnotherCustomerHoldsHereLandsBesideTheirs() {
+	// Far from where either sequence draws, as a row of another deployment's would be.
+	id := time.Now().UnixNano() % 1_000_000_000_000
+	moved := s.takenRequest(s.source, id)
+	held := s.takenRequest(s.destination, id)
+	_, err := s.destination.ShardDB().ExecContext(s.ctx, "UPDATE requests SET customer_id = 'resident', usage_id = ? WHERE usage_id = ?", moved.UsageID, held.UsageID)
+	s.Require().NoError(err)
+
+	s.move("acme", "acme")
+	s.move("acme", "acme")
+
+	var owner string
+	s.Require().NoError(s.destination.ShardDB().QueryRowContext(s.ctx,
+		"SELECT customer_id FROM requests WHERE usage_id = ?", moved.UsageID).Scan(&owner))
+	s.Equal("resident", owner, "the other customer's row is left as it was")
+	rows := s.requestsByUsage()
+	s.Require().Len(rows, 1, "the moved row, once however often it is imported")
+	s.NotContains(rows, moved.UsageID.String(), "under a usage id of the destination's")
+}
+
+func (s *DataMoveSuite) TestALogTakenBackWhereItCameFromIsNotRefusedOverAnotherAppsLogWithItsCopysID() {
+	s.seedLog("acme", "copied")
+	// The destination has drawn ids of its own, so the copy's is not the one it came from.
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "SELECT setval('agent_logs_id_seq', nextval('agent_logs_id_seq') + 1000)")
+	s.Require().NoError(err)
+	s.move("acme", "acme")
+	copied := s.logsHere("acme")
+	s.Require().Len(copied, 1)
+	for id := range copied {
+		// The copy's id here is another app's log's back where it came from.
+		_, err = s.source.GlobalDB().ExecContext(s.ctx, `
+INSERT INTO agent_logs (id, customer_id, source, severity, event_type, message) VALUES (?, 'resident', 'agent', 'info', 'turn', 'theirs')`, id)
+		s.Require().NoError(err)
+	}
+
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_logs") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.NoError(s.source.ImportRow(s.ctx, "acme", "agent_logs", encoded), "the log is the one it was copied from")
+	}
+}
+
+func (s *DataMoveSuite) TestReimportingTheImportersOwnRowsIsTheSameAsImportingThemOnce() {
+	s.seedAgentConfig(s.source, "acme", "mine")
+	s.takenRequest(s.source, 3)
+
+	s.move("acme", "acme")
+	s.move("acme", "acme")
+
+	s.Len(s.exportFrom(s.destination, "acme").of("agent_configs"), 1)
+	s.Len(s.requestsByUsage(), 1)
 }
 
 func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {

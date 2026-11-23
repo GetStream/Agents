@@ -88,9 +88,36 @@ func (s *Store) CountUserSettings(ctx context.Context, appID, userID string) (Us
 	return counts, nil
 }
 
+// dataChange is a row of data_changes, the changes recorded for a customer who is moving.
+type dataChange struct {
+	bun.BaseModel `bun:"table:data_changes,alias:dc"`
+
+	Seq int64 `bun:"seq,pk"`
+}
+
+// renamedChanges replaces an end user's id with replacement in the recorded changes of a
+// table's rows that name them in user_id, deleted rows' included.
+// Changes are rewritten rather than deleted: a follower is refused a cursor below the oldest
+// change kept of any customer (Changes), so dropping one would make every move copy again.
+func renamedChanges(db bun.IDB, customerID, table, userID, replacement string) *bun.UpdateQuery {
+	return db.NewUpdate().Model((*dataChange)(nil)).
+		Set("payload = jsonb_set(payload, '{user_id}', to_jsonb(?::text))", replacement).
+		Where("customer_id = ? AND table_name = ? AND payload->>'user_id' = ?", customerID, table, userID)
+}
+
+// forgottenCopies turns the recorded inserts and updates of a customer's copies of hidden
+// messages into deletes that carry nothing, for the caller to narrow to the copies it deletes.
+// They keep their numbers (renamedChanges), and the copy's own delete change stays after them.
+func forgottenCopies(db bun.IDB, customerID string) *bun.UpdateQuery {
+	return db.NewUpdate().Model((*dataChange)(nil)).Set("op = ?", ChangeDelete).Set("payload = NULL").
+		Where("customer_id = ? AND table_name = 'agent_branch_messages' AND op <> ?", customerID, ChangeDelete)
+}
+
 // ForgetUserSettings deletes an app's end user's own policy and user-level limits, so they fall
 // back to the app's, replaces their id with replacement on their resets, grants and campaigns,
-// and records entry, with these counts added to its changes, in the same transaction. A
+// and records entry, with these counts added to its changes, in the same transaction. The
+// changes recorded of their campaigns, deleted ones' included, name the replacement too
+// (renamedChanges). A
 // campaign's contacts and their attempts stay: they are the app's data about third parties,
 // not the user's.
 func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replacement string, entry *AuditEntry) (UserSettings, error) {
@@ -104,7 +131,8 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 			{&counts.Limits, tx.NewDelete().Model((*Limit)(nil)).Where("level = ? AND app_id = ? AND user_id = ?", LevelUser, appID, userID).Exec},
 			{&counts.Resets, tx.NewUpdate().Model((*UsageReset)(nil)).Set("user_id = ?", replacement).Where("app_id = ? AND user_id = ?", appID, userID).Exec},
 			{&counts.Grants, tx.NewUpdate().Model((*LimitGrant)(nil)).Set("user_id = ?", replacement).Where("app_id = ? AND user_id = ?", appID, userID).Exec},
-			{&counts.Campaigns, tx.NewUpdate().Model((*Campaign)(nil)).Set("user_id = ?", replacement).Where("customer_id = ? AND user_id = ?", appID, userID).Exec},
+			{&counts.Campaigns, tx.NewUpdate().With("renamed", renamedChanges(tx, appID, "campaigns", userID, replacement)).
+				Model((*Campaign)(nil)).Set("user_id = ?", replacement).Where("customer_id = ? AND user_id = ?", appID, userID).Exec},
 		} {
 			result, err := change.exec(ctx)
 			if err != nil {
