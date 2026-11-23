@@ -715,6 +715,60 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAga
 	s.Equal("completed", state)
 }
 
+// A thread task whose turn is refused because the money cannot be checked, and whose rerun is
+// refused too, ends the attempt after under the money, not as a reply that failed (AI-3183).
+func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedTwiceFailsUnderTheMoney() {
+	channel := s.creditedThread("+1347" + digits(s.utils.uuid()))
+	s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
+	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
+	s.Require().True(running)
+	s.sharing.stop()
+	s.Require().Eventually(func() bool {
+		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())))
+	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	task := s.threadTask(channel)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
+		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
+	ctx := scheduledOwnerContext(context.Background(), delivery)
+
+	var reasons []string
+	for range 3 {
+		_, _, err := s.router.deliverOnThread(ctx, delivery, channel)
+		s.Require().Error(err)
+		reason := scheduling.ReasonOf(err)
+		reasons = append(reasons, reason)
+		delivery.Earlier = reason
+	}
+
+	s.Equal([]string{codeSpendCheckUnavailable, codeSpendCheckUnavailable, codeSpendCheckUnavailable}, reasons)
+	rerun, _, _ := found.FollowUpReply("st_run" + rerunSuffix)
+	s.Equal("failed", rerun, "the retry ran the turn again, and it was refused again")
+}
+
+// A text channel's turn refused because the money cannot be checked, whose rerun is refused too,
+// ends the attempt after under the money, not as a reply that failed (AI-3183).
+func (s *TelnyxUnpaidSuite) TestATextTurnRefusedTwiceFailsUnderTheMoney() {
+	user, opened := s.uncheckableAfterOpening()
+	task := s.userTask(user, opened.Id, "sms")
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
+		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
+	ctx := scheduledOwnerContext(context.Background(), delivery)
+
+	var reasons []string
+	for range 3 {
+		_, _, err := s.router.captureReply(ctx, found, delivery)
+		s.Require().Error(err)
+		reason := scheduling.ReasonOf(err)
+		reasons = append(reasons, reason)
+		delivery.Earlier = reason
+	}
+
+	s.Equal([]string{codeSpendCheckUnavailable, codeSpendCheckUnavailable, codeSpendCheckUnavailable}, reasons)
+}
+
 // A text task whose turn fails for a reason that is not money reads that reply back on its
 // retries, as it always has: the turn is not run again, and the run fails as a reply that failed.
 func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainOnItsRetry() {

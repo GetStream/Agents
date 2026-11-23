@@ -477,6 +477,9 @@ func (s *Server) waitOutCall(ctx context.Context, found *session.Session, window
 // its words and files are read back.
 func (s *Server) captureReply(ctx context.Context, found *session.Session, delivery scheduledDelivery) (string, []sandbox.Attachment, error) {
 	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
+	if err := refusedAgain(found, delivery); err != nil {
+		return "", nil, err
+	}
 	if _, _, known := found.FollowUpReply(delivery.CommandID); known {
 		reply, err := s.readBackReply(ctx, found, delivery.CommandID)
 		return reply.Text, reply.Files, err
@@ -536,10 +539,10 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 // failed too, which left the user nothing again. That one fails the attempt under the earlier
 // reason, tried again until the run's attempts are spent, as a text channel's is.
 func (s *Server) followUpInConversation(ctx context.Context, found *session.Session, delivery scheduledDelivery) error {
-	state, _, known := found.FollowUpReply(delivery.CommandID)
-	if known && state == "failed" && moneyCode(delivery.Earlier) {
-		return undelivered(delivery.Earlier, turnRefused{errors.New("the turn run again after a refusal for money failed too")})
+	if err := refusedAgain(found, delivery); err != nil {
+		return err
 	}
+	_, _, known := found.FollowUpReply(delivery.CommandID)
 	events, detach := found.Watch()
 	defer detach()
 	if err := s.followUpWithin(ctx, found, delivery); err != nil || known {
@@ -632,6 +635,17 @@ func replyCommand(found *session.Session, id, earlier string) string {
 		return id + rerunSuffix
 	}
 	return id
+}
+
+// refusedAgain is the failure of a delivery whose rerun after a refusal for money (replyCommand)
+// failed too, which left the user nothing again: the attempt fails under the earlier reason, tried
+// again until the run's attempts are spent, on every channel that runs a turn. It is nil when the
+// delivery's turn is not a failed one, or its earlier reason is not about money.
+func refusedAgain(found *session.Session, delivery scheduledDelivery) error {
+	if state, _, known := found.FollowUpReply(delivery.CommandID); known && state == "failed" && moneyCode(delivery.Earlier) {
+		return undelivered(delivery.Earlier, turnRefused{errors.New("the turn run again after a refusal for money failed too")})
+	}
+	return nil
 }
 
 // readBackReply is the reply a follow-up already has, with its files, once it
