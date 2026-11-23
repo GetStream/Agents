@@ -9,6 +9,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/google/uuid"
 )
@@ -76,6 +77,8 @@ type utterance struct {
 	// errorCode is set when the provider reported a failure for this synthesis. It turns
 	// the completion into a failed row rather than adding a second one.
 	errorCode string
+	// errorMessage is what that failure said, for the synthesis's timing line.
+	errorMessage string
 }
 
 func newSession(
@@ -310,7 +313,7 @@ func (s *Session) observe(event tts.Event) {
 				s.warnMiscounted(typed.Characters, characters)
 			}
 		}
-		s.recorder.Record(s.config, routing.Stat{
+		stat := routing.Stat{
 			Owner:       s.owner,
 			UsageID:     settled.reserved,
 			StartedAt:   settled.startedAt,
@@ -326,25 +329,54 @@ func (s *Session) observe(event tts.Event) {
 			LatencyMs: typed.TimeToFirstByteMs,
 			Success:   settled.errorCode == "",
 			ErrorCode: settled.errorCode,
-		})
+		}
+		s.recorder.Record(s.config, stat)
+		s.logTiming(stat, settled.errorMessage)
 
 	case tts.Error:
 		// A failure that names an utterance is settled by that utterance's completion, so
 		// one synthesis is still one row. Anything else is a session-level failure.
-		if typed.SynthesisID != "" && s.fail(typed.SynthesisID, errorCode(typed)) {
+		message := errorMessage(typed)
+		if typed.SynthesisID != "" && s.fail(typed.SynthesisID, errorCode(typed), message) {
 			return
 		}
-		s.recorder.Record(s.config, routing.Stat{
+		stat := routing.Stat{
 			Owner:     s.owner,
 			StartedAt: time.Now().UTC(),
 			Success:   false,
 			ErrorCode: errorCode(typed),
-		})
+		}
+		s.recorder.Record(s.config, stat)
+		s.logTiming(stat, message)
 	}
 }
 
+// logTiming writes the "speech synthesis timing" line for a row just recorded: a synthesis,
+// or a failure of the session that no synthesis settles. A failover is a session of its own,
+// so each voice asked has its own line.
+func (s *Session) logTiming(stat routing.Stat, message string) {
+	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, s.config), "operation", stat.OperationID,
+		"characters", stat.Characters, "audio_ms", stat.AudioMs,
+		"ttfb_ms", stat.LatencyMs, "duration_ms", stat.DurationMs,
+		"cost_micros", s.recorder.QuoteStat(s.config, stat).CostMicros,
+		"success", stat.Success, "error_code", stat.ErrorCode)
+	if message != "" {
+		logged = append(logged, "error", store.SafeLogText(message))
+	}
+	s.logger.Info("speech synthesis timing", logged...)
+}
+
+// errorMessage is what a provider's failure said. An adapter may report one with no error
+// under it, which says nothing.
+func errorMessage(failure tts.Error) string {
+	if failure.Err == nil {
+		return ""
+	}
+	return failure.Err.Error()
+}
+
 // fail marks an utterance as failed, reporting whether it was still in flight.
-func (s *Session) fail(synthesisID, code string) bool {
+func (s *Session) fail(synthesisID, code, message string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -354,7 +386,7 @@ func (s *Session) fail(synthesisID, code string) bool {
 	}
 	// The first failure is the one that explains the utterance.
 	if current.errorCode == "" {
-		current.errorCode = code
+		current.errorCode, current.errorMessage = code, message
 	}
 	return true
 }
@@ -407,7 +439,7 @@ func (s *Session) settle(synthesisID string) (settled, bool) {
 	}
 	delete(s.inFlight, synthesisID)
 	return settled{
-		utterance:  utterance{startedAt: current.startedAt.UTC(), errorCode: current.errorCode},
+		utterance:  utterance{startedAt: current.startedAt.UTC(), errorCode: current.errorCode, errorMessage: current.errorMessage},
 		characters: characters,
 		sent:       sent,
 		reserved:   reserved,
