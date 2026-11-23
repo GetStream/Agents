@@ -38,7 +38,7 @@ and billing as a direct API call.
 | `internal/phone/twilio`, `internal/phone/telnyx` | The two vendors that also answer on a number |
 | `internal/phone/sinch`, `.../bandwidth`, `.../vonage`, `.../bird`, `.../plivo` | Five more that buy numbers and call out on them |
 | `internal/phone/didww`  | Sells numbers and cannot dial: it has no call control API at all    |
-| `internal/store`     | Postgres via bun, plus the goose migrations in `migrations/`        |
+| `internal/store`     | Postgres and Redis state, one repository per model; migrations in `migrations/global` and `migrations/shard` |
 | `internal/live`      | Redis via rueidis: provider health and live per-customer counters   |
 | `internal/api`       | HTTP layer: Huma operations on chi, rendered into `api/openapi.yaml` |
 | `cmd/router`         | Serves the HTTP API                                                 |
@@ -130,7 +130,7 @@ the other commands that read them there.
 | `ROUTER_CODE_SANDBOX_PROXY_PUBLIC_URL` | The proxy as a sandbox reaches it, `http://<public IPv4 address>:port`, for `ROUTER_CODE_SANDBOX_BROKER=proxy`. The router refuses to start with that broker and this, the CA certificate, the proxy address or the CA key missing, or with a host name or an IPv6 address here: the sandbox reaches that address alone and has no DNS. `https://` has the proxy serve TLS on `ROUTER_CODE_SANDBOX_PROXY_ADDR` with a certificate for that address the CA signs; the proxy broker refuses it until the sandbox has a local forwarder for TLS |
 | `<ENV>_MCP_CLIENT_ID`, `<ENV>_MCP_CLIENT_SECRET` | This deployment's own OAuth client for a connector whose manifest has `client.env: <ENV>` and lists `operator` in `client.registration`, such as `SLACK_MCP_CLIENT_ID` for `slack`. Read at each consent and refresh. An app's own client is put through `PUT /v1/agents/connectors/{id}/oauth-client` instead |
 | `ROUTER_LIMITS_MODE` | `enforce` (default), `shadow` or `off`: how much of credit, the spend hard limit and the customer's spend limits the router enforces. `shadow` works every refusal out, logs it as `would refuse` and admits the request; `off` refuses nothing for money, and work is still priced, recorded and shipped. Both log a warning at start. With limits on, the router refuses to start without `ROUTER_POSTGRES_DSN`, and in `proxy` mode without `ROUTER_USAGE_URL`. See [Admission](#admission) |
-| `ROUTER_LIMITS_SLACK_TOKEN`, `ROUTER_LIMITS_SLACK_CHANNEL` | A Slack bot token holding `chat:write`, and the id of a channel the bot is a member of, where the operator is told the first time each organization is refused at its credit, Stream's spend hard limit or one of its own spend limits, or would have been in `shadow`. Once per organization and kind of limit, across every router: the first to write its `limit_notices` row posts it, and a post that failed is retried by the next sweep. Either unset, or `ROUTER_LIMITS_MODE=off`: nobody is told. The same channel is told, once per organization and UTC day, when an organization's billable spend today reaches 5x its median day of the 7 before and a minimum spend (`anomalyMinSpendMicros` in `internal/limitnotice/anomaly.go`): one router of the deployment checks every hour under a Postgres advisory lock, and `cost_anomaly_notices` keeps what was posted. An organization that spent on fewer than 4 of the 7 days has no baseline and is not checked. This check runs in every limits mode |
+| `ROUTER_LIMITS_SLACK_TOKEN`, `ROUTER_LIMITS_SLACK_CHANNEL` | A Slack bot token holding `chat:write`, and the id of a channel the bot is a member of, where the operator is told the first time each organization is refused at its credit, Stream's spend hard limit or one of its own spend limits, or would have been in `shadow`. Once per organization and kind of limit, across every router: the first to write its `notices` row posts it, and a post that failed is retried by the next sweep. Either unset, or `ROUTER_LIMITS_MODE=off`: nobody is told. The same channel is told, once per organization and UTC day, when an organization's billable spend today reaches 5x its median day of the 7 before and a minimum spend (`anomalyMinSpendMicros` in `internal/limitnotice/anomaly.go`): one router of the deployment checks every hour under a Postgres advisory lock, and the same `notices` table keeps what was posted. An organization that spent on fewer than 4 of the 7 days has no baseline and is not checked. This check runs in every limits mode |
 | `ROUTER_LIMITS_APP_URL`, `ROUTER_LIMITS_STAFF_URL` | The pages each of those Slack notices links to: the app's own, and the operator's for the organization or app. `{organization}` and `{app}` in either stand for the notice's ids, such as `https://dashboard.example/{organization}/{app}`. A URL naming `{app}` is left out of a notice with no app. Unset: no link |
 | `ROUTER_USAGE_REDIS_URL` | The Redis the usage service mirrors every subject's spend to (its `USAGE_REDIS_URL`), which the customer's spend limits are read from every second. Needs `ROUTER_USAGE_URL`. Unset, they are read from the usage service itself every 5 s. See [Spend limits](#spend-limits) |
 | `ROUTER_USAGE_MANAGE_KEY` | The usage service's manage key (its `USAGE_MANAGE_KEY`), for `router usage forget-user` alone; the router never sends it. Unset, that command refuses to run. See [The usage service](#the-usage-service) |
@@ -1127,7 +1127,7 @@ no keys.
   walk and the LLM fallback move on to the deployment's instance of the model as to any next
   candidate. A key is looked up for the work's region alone: a key for `eu` is used only for `eu`
   work, and a key for `us` only for `us` work. A model the deployment holds no key
-  for is still served on the customer's. Keys are read through the appconfig cache (Redis, and the
+  for is still served on the customer's. Keys are read through the store's cache (Redis, and the
   copy rueidis keeps in each process, dropped on every replica when a key is put or deleted) and
   opened, one AES-GCM open, when work is routed.
 - **Health.** Work on a customer's key is counted for the customer and kept out of the vendor and
@@ -1686,7 +1686,11 @@ redis:
 
 Writes go to this shard's database. Reads of one call, session or recording look in every
 shard, and lists merge every shard's rows, so a session carried on in another region is
-still one session. Migrations run on every database. A socket for a session held in
+still one session. Each database runs the migration set it holds: `migrations/global` on the
+global one and `migrations/shard` on each shard's, both on the one database of a single node
+(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A database migrated
+before the sets were split kept every table; once every router runs a release with two sets,
+`router schema drop-strays` drops the empty ones of the other set. A socket for a session held in
 another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
@@ -2621,10 +2625,12 @@ go run ./cmd/phone list
 go run ./cmd/phone release -number +1719XXXXXXX
 ```
 
-`cmd/router` applies migrations on startup. To run them by hand:
+`cmd/router` applies migrations on startup: the global set and the shard set, each with its own
+goose version table (`goose_global_version`, `goose_shard_version`). After changing a migration,
+regenerate the schema description from `acceleration/`; a test fails while it is out of date:
 
 ```bash
-goose -dir migrations postgres "$ROUTER_POSTGRES_DSN" up
+go run ./cmd/schema
 ```
 
 ## Moving a customer
@@ -2824,7 +2830,7 @@ Postgres and Redis for local runs:
 
 ```bash
 docker run -d --name va-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=model_router \
-  -p 55432:5432 postgres:16-alpine
+  -p 55432:5432 postgres:19-alpine
 docker run -d --name va-redis -p 56379:6379 redis:7-alpine
 ```
 

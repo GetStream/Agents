@@ -2804,9 +2804,6 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("campaign_id")]
         public string? CampaignId { get; set; } = default!;
 
-        [System.Text.Json.Serialization.JsonPropertyName("config_id")]
-        public string? ConfigId { get; set; } = default!;
-
         [System.Text.Json.Serialization.JsonPropertyName("contact_id")]
         public string? ContactId { get; set; } = default!;
 
@@ -2825,9 +2822,6 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("from_number")]
         public string? FromNumber { get; set; } = default!;
 
-        /// <summary>
-        /// The session that ran the call, which is what it is held by.
-        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("id")]
         public string Id { get; set; } = default!;
 
@@ -2860,6 +2854,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("review_score")]
         public int? ReviewScore { get; set; } = default!;
+
+        /// <summary>
+        /// The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("session_id")]
+        public string? SessionId { get; set; } = default!;
 
         /// <summary>
         /// What the fast model could hand to the subagent. The instructions behind each name are in the skill registry.
@@ -2932,12 +2932,6 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("usage")]
         public CallUsage? Usage { get; set; } = default!;
-
-        /// <summary>
-        /// Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name.
-        /// </summary>
-        [System.Text.Json.Serialization.JsonPropertyName("user_id")]
-        public string? UserId { get; set; } = default!;
 
         /// <summary>
         /// The voice the call asked for, in the provider's own terms. Empty means the provider's default.

@@ -31,12 +31,10 @@ func (s *IncognitoSuite) TestARecordedSessionLeavesItsCallAndTurns() {
 	opened := s.converse(false)
 
 	ctx := context.Background()
+	s.Require().Eventually(func() bool { return s.sessionCall(opened.Id, nil) == http.StatusOK },
+		settleFor, 20*time.Millisecond, "the session's call was never recorded")
 	s.Require().Eventually(func() bool {
-		_, err := s.store.Call(ctx, s.customerID(), opened.Id)
-		return err == nil
-	}, settleFor, 20*time.Millisecond, "the session's call was never recorded")
-	s.Require().Eventually(func() bool {
-		turns, err := s.live.CallTurns(ctx, s.customerID(), opened.AgentId, started, nil)
+		turns, err := s.store.Turns.Select(ctx, s.customerID(), opened.AgentId, started, nil)
 		return err == nil && len(turns) > 0
 	}, settleFor, 20*time.Millisecond, "the session's turn was never timed")
 }
@@ -49,15 +47,12 @@ func (s *IncognitoSuite) TestAnIncognitoSessionLeavesNoCallAndNoTurns() {
 	recorded := s.converse(false)
 
 	ctx := context.Background()
-	s.Require().Eventually(func() bool {
-		_, err := s.store.Call(ctx, s.customerID(), recorded.Id)
-		return err == nil
-	}, settleFor, 20*time.Millisecond, "the recorded session's call was never written")
+	s.Require().Eventually(func() bool { return s.sessionCall(recorded.Id, nil) == http.StatusOK },
+		settleFor, 20*time.Millisecond, "the recorded session's call was never written")
 
-	_, err := s.store.Call(ctx, s.customerID(), hidden.Id)
-	s.ErrorContains(err, "there is no call", "an incognito session has no call row")
+	s.Equal(http.StatusNotFound, s.sessionCall(hidden.Id, nil), "an incognito session has no call row")
 	s.Never(func() bool {
-		turns, err := s.live.CallTurns(ctx, s.customerID(), hidden.AgentId, started, nil)
+		turns, err := s.store.Turns.Select(ctx, s.customerID(), hidden.AgentId, started, nil)
 		return err != nil || len(turns) > 0
 	}, time.Second, 50*time.Millisecond, "an incognito session has no turn timings")
 }

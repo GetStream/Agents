@@ -274,7 +274,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 	// read is fine, so a policy read and written again round-trips; changing it is refused.
 	if scope == store.ScopeOrganization {
 		if sent.RequireOwnStreamApp != nil {
-			existing, err := s.store.Policy(ctx, scope, id)
+			existing, err := s.store.Policies.Get(ctx, scope, id)
 			if err != nil {
 				return Policy{}, err
 			}
@@ -299,7 +299,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 		}
 	}
 	// Read before the write, so the entry can say what the setting was.
-	before, err := s.configs.Policy(ctx, scope, id)
+	before, err := s.configs.Policies.Get(ctx, scope, id)
 	if err != nil {
 		return Policy{}, err
 	}
@@ -315,7 +315,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 
 // policyOf reads a scope's policy.
 func (s *Server) policyOf(ctx context.Context, scope store.PolicyScope, id string) (Policy, error) {
-	document, err := s.configs.Policy(ctx, scope, id)
+	document, err := s.configs.Policies.Get(ctx, scope, id)
 	if err != nil {
 		return Policy{}, err
 	}

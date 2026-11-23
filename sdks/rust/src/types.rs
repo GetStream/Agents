@@ -2245,8 +2245,6 @@ pub struct Call {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub campaign_id: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub config_id: ::std::option::Option<::std::string::String>,
-    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub contact_id: ::std::option::Option<::std::string::String>,
     pub direction: CallDirection,
     ///Absent while the call is still running.
@@ -2254,7 +2252,6 @@ pub struct Call {
     pub ended_at: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub from_number: ::std::option::Option<::std::string::String>,
-    ///The session that ran the call, which is what it is held by.
     pub id: ::std::string::String,
     ///What the agent was told to be on this call.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -2272,6 +2269,9 @@ pub struct Call {
     ///How well the agent handled it, from 1 to 5.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_score: ::std::option::Option<i64>,
+    ///The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub session_id: ::std::option::Option<::std::string::String>,
     ///What the fast model could hand to the subagent. The instructions behind each name are in the skill registry.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub skills: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
@@ -2312,9 +2312,6 @@ pub struct Call {
     pub tts_used: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub usage: ::std::option::Option<CallUsage>,
-    ///Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name.
-    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub user_id: ::std::option::Option<::std::string::String>,
     ///The voice the call asked for, in the provider's own terms. Empty means the provider's default.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub voice: ::std::option::Option<::std::string::String>,

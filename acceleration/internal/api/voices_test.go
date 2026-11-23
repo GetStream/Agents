@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 )
 
 type VoicesSuite struct {
@@ -97,6 +98,50 @@ func (s *VoicesSuite) TestAProviderWithNoLibraryIsStillRefusedAsBefore() {
 	// As the base answered it (1b4404556).
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "voices: breeze publishes no voice library")
+}
+
+// The deployment's provider account lists every customer's clones as its own.
+func (s *VoicesSuite) TestAnotherCustomersCloneIsNeitherListedNorHeard() {
+	s.library.Register("elevenlabs", accountVoices{
+		{Provider: "elevenlabs", ID: "el-cloned", Name: "founder", Own: true},
+		{Provider: "elevenlabs", ID: "EXAVITQu4vr4xnSDxMaL", Name: "Sarah"},
+	})
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.record(created.Id, map[string]any{
+		"audio":    base64.StdEncoding.EncodeToString([]byte("pretend this is speech")),
+		"filename": "clip.wav",
+	})
+	s.prepare(created.Id)
+	s.Equal([]string{"el-cloned", "EXAVITQu4vr4xnSDxMaL"}, s.libraryIDs(), "its owner lists it")
+
+	s.useApp(s.data.createApp())
+
+	s.Equal([]string{"EXAVITQu4vr4xnSDxMaL"}, s.libraryIDs())
+	status, _ := s.serverClient.failure(http.MethodGet,
+		"/v1/agents/voices/library/elevenlabs/el-cloned/preview", nil)
+	s.Equal(http.StatusNotFound, status)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/voices/library/elevenlabs/EXAVITQu4vr4xnSDxMaL/preview", nil, nil))
+}
+
+func (s *VoicesSuite) libraryIDs() []string {
+	var listed LibraryVoices
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodGet, "/v1/agents/voices/library?provider=elevenlabs", nil, &listed))
+	ids := make([]string, 0, len(listed.Voices))
+	for _, voice := range listed.Voices {
+		ids = append(ids, voice.Id)
+	}
+	return ids
+}
+
+// accountVoices is a provider account's library: what it lists, and a preview of any of it.
+type accountVoices []voices.Library
+
+func (a accountVoices) List(context.Context) ([]voices.Library, error) { return a, nil }
+
+func (a accountVoices) Preview(context.Context, string) (voices.Speech, error) {
+	return voices.Speech{Audio: []byte("sample"), ContentType: "audio/mpeg"}, nil
 }
 
 func (s *VoicesSuite) TestAVoiceWithNothingRecordedCannotBePrepared() {

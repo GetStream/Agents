@@ -303,7 +303,7 @@ func (d *dispatcher) openOrAsk(ctx context.Context, l *login, callID string) (*d
 // (account_mismatch) leaves connected_at as it was.
 func (d *dispatcher) openConnected(ctx context.Context, l *login) bool {
 	if l.connectionID != "" && d.store != nil {
-		connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, l.connectionID)
+		connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, l.connectionID)
 		if err == nil && connection.Status == store.ConnectionConnected &&
 			connection.ConnectorID == l.binding.ConnectorID && mayUse(d.spec, l.binding, connection) &&
 			(!l.asked || connectedSince(connection.ConnectedAt, l.connectedBefore)) &&
@@ -520,10 +520,10 @@ func (d *dispatcher) watchConsent(l *login, consent Consent) {
 			l.mu.Unlock()
 			// The attempt is read before the connection: a callback uses it up before it stores
 			// the connection, so one read after a connect finds it connected.
-			_, open := d.store.ConnectorAuthorizationAttemptByID(context.Background(), consent.AuthorizationID)
+			_, open := d.store.ConnectorAuthorizationAttempts.Get(context.Background(), consent.AuthorizationID)
 			// Connected anew since the consent began, as openConnected reads it; loginFinished
 			// checks the rest, and does nothing for a login already open.
-			connection, err := d.store.ConnectorConnection(context.Background(), d.spec.CustomerID, consent.ConnectionID)
+			connection, err := d.store.ConnectorConnections.Get(context.Background(), d.spec.CustomerID, consent.ConnectionID)
 			if err == nil && connectedSince(connection.ConnectedAt, before) {
 				d.logins.finished(context.Background(), d.spec.CustomerID, consent.ConnectionID, consent.AuthorizationID)
 				return
@@ -558,7 +558,7 @@ func (d *dispatcher) beginConsent(ctx context.Context, l *login) (Consent, bool)
 	}
 	if !l.asked {
 		l.asked = true
-		if connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, consent.ConnectionID); err == nil {
+		if connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, consent.ConnectionID); err == nil {
 			l.connectedBefore = connection.ConnectedAt
 		}
 	}
@@ -576,7 +576,7 @@ func (d *dispatcher) stillWaits(ctx context.Context, binding store.ConnectorBind
 	if d.store == nil {
 		return false
 	}
-	config, err := d.store.AgentConfig(ctx, d.spec.CustomerID, d.spec.ConfigID)
+	config, err := d.store.AgentConfigs.Get(ctx, d.spec.CustomerID, d.spec.ConfigID)
 	if err != nil {
 		return false
 	}

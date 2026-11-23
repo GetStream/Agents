@@ -27,7 +27,7 @@ func (s *UsersSuite) SetupTest() {
 // recorded is the kind a caller was written down as, and whether they were at all.
 func (s *UsersSuite) recorded(userID string) (string, bool) {
 	var kind string
-	err := s.store.DB().QueryRowContext(s.T().Context(),
+	err := s.store.GlobalDB().QueryRowContext(s.T().Context(),
 		"SELECT kind FROM users WHERE customer_id = ? AND id = ?", s.customerID(), userID).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false

@@ -69,7 +69,7 @@ func (s *RecordingSuite) classified(provider *stubClassifier) store.Request {
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	s.Require().Len(rows, 1, "one request is one row")
 	return rows[0]
 }

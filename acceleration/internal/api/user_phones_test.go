@@ -45,8 +45,8 @@ func (s *UserPhonesSuite) SetupSuite() {
 
 func (s *UserPhonesSuite) SetupTest() {
 	s.telnyxLine.SetupTest()
-	s.config.EpisodeCards, s.config.LLM = true, "recites/recites-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On, s.config.Models.LLM = true, "recites/recites-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.user, s.person = "user-"+s.utils.uuid(), s.utils.number()
 }
 
@@ -149,8 +149,8 @@ func (s *UserPhonesSuite) TestTheSameLinkAgainKeepsTheCardsWrittenSinceTheFirst(
 // SMS (AI-2856; the probe of this test at 3b7a53f97 answered one row and one episode), the link
 // is stored all the same, and the SMS after it is answered with no cards read.
 func (s *UserPhonesSuite) TestAConfigWithoutCardsLinksWithNoEpisodeOfTheNumber() {
-	s.config.EpisodeCards = false
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On = false
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, s.person, "hi"), time.Now()))
 	s.took(1)
 
@@ -160,7 +160,7 @@ func (s *UserPhonesSuite) TestAConfigWithoutCardsLinksWithNoEpisodeOfTheNumber()
 	s.NotContains(s.took(2)[1].text, "earlier episodes")
 	s.Zero(s.episodes())
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ?", s.customerID()).Scan(&rows))
 	s.Zero(rows)
 	s.Equal([]string{s.person}, s.links())
@@ -173,15 +173,15 @@ func (s *UserPhonesSuite) TestAConfigWithoutCardsLinksWithNoEpisodeOfTheNumber()
 func (s *UserPhonesSuite) TestCardsTurnedOnAfterTheLinkReadNoneOfTheNumbersSMSFromBeforeIt() {
 	s.textedBeforeTheLink()
 	s.chatCard()
-	s.config.EpisodeCards = false
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On = false
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.Require().Equal(http.StatusOK, s.put(s.user, `{"phone": "`+s.person+`"}`, nil))
 	var aside int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND address LIKE 'retired:%'", s.customerID()).Scan(&aside))
 	s.Require().Zero(aside, "nothing set aside under off")
-	s.config.EpisodeCards = true
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On = true
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 
 	s.Equal([]string{store.EpisodeChat}, s.chatReads(s.user), "the user's own chat card alone")
 	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, s.person, "is it still on?"), time.Now()))
@@ -326,7 +326,7 @@ func (s *UserPhonesSuite) TestAnotherCustomerLinksItsOwnUser() {
 
 	s.Equal([]string{s.person}, s.links())
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM user_phones WHERE customer_id = ?", first).Scan(&count))
 	s.Equal(1, count)
 }
@@ -349,7 +349,7 @@ func (s *UserPhonesSuite) TestTheSameUserInASecondStreamAppIsAnotherPerson() {
 	s.Equal(second, *got.Phone, "app 7102's link")
 
 	var apps []int64
-	s.Require().NoError(s.store.DB().NewSelect().Table("user_phones").Column("stream_app_pk").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("user_phones").Column("stream_app_pk").
 		Where("customer_id = ? AND user_id = ?", s.customerID(), s.user).Order("stream_app_pk").Scan(context.Background(), &apps))
 	s.Equal([]int64{7101, 7102}, apps)
 }
@@ -466,10 +466,10 @@ func (s *LinqSandboxSuite) SetupSuite() {
 
 func (s *LinqSandboxSuite) SetupTest() {
 	s.linqLine.SetupTest()
-	s.config.EpisodeCards = true
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On = true
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	s.person = s.utils.number()
-	s.Require().NoError(s.store.SetSandboxRecipients(context.Background(), s.customerID(), []string{s.person}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(context.Background(), s.customerID(), []string{s.person}))
 }
 
 // Catches a one-to-one chat under a config with episode_cards off, which opens no episode, whose
@@ -478,8 +478,8 @@ func (s *LinqSandboxSuite) SetupTest() {
 // (store.ChannelThreadStarter), as the sender admit checked. Its reply and a scheduled delivery
 // go out (AI-2856).
 func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswered() {
-	s.config.EpisodeCards = false
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On = false
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 
 	s.Require().Equal(http.StatusOK, s.deliver(s.received(chat, s.line, s.person, "hi"), time.Now()))
@@ -495,8 +495,8 @@ func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswere
 // config said (AI-2856 R1.1). Catches a group chat with no episode whose replies reach nobody,
 // so the sandbox holds them back.
 func (s *LinqSandboxSuite) TestAGroupChatUnderAConfigWithTheCardsOffIsAnswered() {
-	s.config.EpisodeCards = false
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.On = false
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 
 	s.Require().Equal(http.StatusOK, s.deliver(s.chatSays(s.received(chat, s.line, s.person, "hi"), true), time.Now()))
@@ -530,7 +530,7 @@ func (s *LinqSandboxSuite) TestAChatWhoseNumberIsLinkedMidConversationIsStillAns
 // rows is the count a query of the test's customer answers.
 func (s *LinqSandboxSuite) rows(query string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(), query, s.customerID()).Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), query, s.customerID()).Scan(&count))
 	return count
 }
 
@@ -564,7 +564,7 @@ func (s *UserPhonesSuite) textedBeforeTheLink() {
 // idle closes the test customer's open episodes, as the idle sweeper does an hour after their
 // last message, so the next message opens an episode of its own.
 func (s *UserPhonesSuite) idle() {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE episodes SET status = ?, ended_at = now() WHERE customer_id = ? AND status = 'in_progress'",
 		store.EpisodeEnded, s.customerID())
 	s.Require().NoError(err)
@@ -576,9 +576,9 @@ func (s *UserPhonesSuite) idle() {
 func (s *UserPhonesSuite) chatReads(user string) []string {
 	person, err := omnichannel.StreamUser(s.hookApp(), user)
 	s.Require().NoError(err)
-	contact, err := s.store.Contact(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
+	contact, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
 	s.Require().NoError(err)
-	cards, err := s.store.EpisodeCards(context.Background(), store.CardsQuery{
+	cards, err := s.store.Episodes.Cards(context.Background(), store.CardsQuery{
 		CustomerID: s.customerID(), AgentConfigID: s.config.ID, ConversationID: contact.ConversationID, Limit: 100,
 	})
 	s.Require().NoError(err)
@@ -597,7 +597,7 @@ func (s *UserPhonesSuite) put(user, body string, into any) int {
 // links are the numbers the test's customer has linked.
 func (s *UserPhonesSuite) links() []string {
 	var phones []string
-	s.Require().NoError(s.store.DB().NewSelect().Table("user_phones").Column("phone").
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("user_phones").Column("phone").
 		Where("customer_id = ?", s.customerID()).Scan(context.Background(), &phones))
 	return phones
 }
@@ -629,7 +629,7 @@ func (s *UserPhonesSuite) chatCardOf(user, summary string) string {
 		UserID: &omni, Set: map[string]any{"text": summary, "status": store.EpisodeSummarized},
 	})
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx, "UPDATE episodes SET status = ?, ended_at = now() WHERE id = ?",
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET status = ?, ended_at = now() WHERE id = ?",
 		store.EpisodeSummarized, opened.Episode.ID)
 	s.Require().NoError(err)
 	return omni
@@ -655,7 +655,7 @@ func (s *UserPhonesSuite) chatOmniChannel() string {
 func (s *UserPhonesSuite) chatOmniChannelOf(user string) string {
 	person, err := omnichannel.StreamUser(s.hookApp(), user)
 	s.Require().NoError(err)
-	contact, err := s.store.Contact(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
+	contact, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), s.config.ID, store.ContactStreamUser, person.Address)
 	s.Require().NoError(err)
 	return strings.TrimPrefix(contact.ConversationID, "agent:")
 }

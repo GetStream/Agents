@@ -101,7 +101,7 @@ func (s *MeteringSuite) withSandbox(sandbox dlc.Sandbox) {
 		Logger: slog.New(slog.NewTextHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: s.clock.now(),
 	}))
 }
@@ -401,7 +401,7 @@ func (s *MeteringSuite) TestAKeptJoinDoesNotMoveTheStartOfALegAnotherPhoneHas() 
 	s.joined(defaultCallType, callID, "human-1", "+15125550124")
 	started := s.legsOf(callID)[store.Outbound].StartedAt.UTC()
 	joined := s.clock.now().Add(-time.Minute)
-	s.Require().NoError(s.store.RecordParticipant(s.ctx, everyApp, store.CallParticipant{
+	s.Require().NoError(s.store.CallParticipants.Record(s.ctx, everyApp, store.CallParticipant{
 		CallType: defaultCallType, CallID: callID, ParticipantSession: "human-2", Number: "+15125550124",
 		JoinedAt: &joined,
 	}, s.clock.now()))
@@ -664,7 +664,7 @@ func (s *MeteringSuite) TestRecordingAnEndedLegAgainBillsNothing() {
 	placed := s.place()
 	s.answered(placed.CallType, placed.CallID, "phone-1")
 	s.clock.advance(time.Minute)
-	ended, err := s.store.EndCallLegs(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
+	ended, err := s.store.CallLegs.EndCall(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
 	s.Require().NoError(err)
 	s.Require().Len(ended, 1)
 
@@ -682,7 +682,7 @@ func (s *MeteringSuite) TestALegWhoseRowWasLostIsRecordedAgainByTheSweep() {
 	placed := s.place()
 	s.answered(placed.CallType, placed.CallID, "phone-1")
 	s.clock.advance(90 * time.Second)
-	_, err := s.store.EndCallLegs(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
+	_, err := s.store.CallLegs.EndCall(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
 	s.Require().NoError(err)
 	s.clock.advance(10 * time.Minute)
 
@@ -739,7 +739,7 @@ func (s *MeteringSuite) TestALegTheSweepEndedDoesNotCountTowardTheSandboxsMinute
 
 func (s *MeteringSuite) TestALegCarriesItsAppsOrganization() {
 	organization := "org-" + uuid.NewString()
-	_, err := s.store.DB().NewInsert().Model(&store.AppOrganization{
+	_, err := s.store.GlobalDB().NewInsert().Model(&store.AppOrganization{
 		AppID: s.customer, OrganizationID: organization, SeenAt: time.Now().UTC(),
 	}).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -788,7 +788,7 @@ func (s *MeteringSuite) TestANumberWithNoPriceIsBillableWorkWithNoPrice() {
 
 func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	// The suite's own number, which has no price, is not the one under test.
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
 	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
 	s.Require().NoError(err)
 	s.row(ModelNumber)
@@ -812,7 +812,7 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	s.Equal(OriginNumberRental, months[1].APIKey)
 	s.Equal(next, months[1].StartedAt.UTC())
 
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, s.customer, bought.E164, next.Add(2*time.Hour)))
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, bought.E164, next.Add(2*time.Hour)))
 	_, err = rentals.Bill(s.ctx, from, monthAfter(bought.PurchasedAt, 2).Add(time.Hour))
 	s.Require().NoError(err)
 	time.Sleep(300 * time.Millisecond)
@@ -822,7 +822,7 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 	now := time.Now().UTC().Truncate(time.Second)
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer,
 		MonthlyCostMicros: 1_000_000, PurchasedAt: now.AddDate(0, -1, -10),
 	}))

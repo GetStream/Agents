@@ -1,7 +1,7 @@
 // Package limitnotice tells the operator, in a Slack channel, the first time each organization
-// is refused at a kind of money limit, or would have been in shadow. A limit_notices row per
+// is refused at a kind of money limit, or would have been in shadow. A notices row per
 // organization and kind makes it once across every router: the router that writes the row posts
-// it, and a row whose post failed is posted by whichever router claims it next.
+// it, and a row whose post failed is posted by whichever router's Sender claims it next.
 package limitnotice
 
 import (
@@ -34,13 +34,6 @@ const (
 	sweepBatch = 20
 )
 
-// Store is where the notices are kept: *store.Store.
-type Store interface {
-	NoteLimit(ctx context.Context, notice store.LimitNotice) (bool, error)
-	ClaimUnpostedLimits(ctx context.Context, stale time.Duration, limit int) ([]store.LimitNotice, error)
-	MarkLimitPosted(ctx context.Context, organization, kind string) error
-}
-
 // Poster posts one message to the channel: *Slack.
 type Poster interface {
 	Post(ctx context.Context, text string) error
@@ -58,11 +51,8 @@ type Links struct {
 
 // Notifier takes policy.Settings.LimitHit's hits and posts the first of each.
 type Notifier struct {
-	store       Store
-	poster      Poster
-	environment string
-	links       Links
-	logger      *slog.Logger
+	sender *Sender
+	logger *slog.Logger
 
 	hits chan policy.LimitHit
 	// seen is the organizations and kinds this process has already taken a hit of, so a
@@ -73,12 +63,11 @@ type Notifier struct {
 	done chan struct{}
 }
 
-// New starts a Notifier that writes to db and posts to poster, naming environment in every
-// message and linking links. Close stops it.
-func New(db Store, poster Poster, environment string, links Links, logger *slog.Logger) *Notifier {
+// New starts a Notifier that notes and posts through sender. Close stops it.
+func New(sender *Sender, logger *slog.Logger) *Notifier {
 	ctx, stop := context.WithCancel(context.Background())
 	n := &Notifier{
-		store: db, poster: poster, environment: environment, links: links, logger: logger,
+		sender: sender, logger: logger,
 		hits: make(chan policy.LimitHit, queued), stop: stop, done: make(chan struct{}),
 	}
 	go n.run(ctx)
@@ -99,7 +88,7 @@ func (n *Notifier) Hit(hit policy.LimitHit) {
 }
 
 // Close stops the Notifier, leaving what it had not written to the next refusal and what it
-// had not posted to the next sweep.
+// had not posted to the Sender's next sweep.
 func (n *Notifier) Close() {
 	n.stop()
 	<-n.done
@@ -107,16 +96,12 @@ func (n *Notifier) Close() {
 
 func (n *Notifier) run(ctx context.Context) {
 	defer close(n.done)
-	sweep := time.NewTicker(sweepEvery)
-	defer sweep.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case hit := <-n.hits:
 			n.note(ctx, hit)
-		case <-sweep.C:
-			n.sweep(ctx)
 		}
 	}
 }
@@ -125,50 +110,19 @@ func (n *Notifier) run(ctx context.Context) {
 func (n *Notifier) note(ctx context.Context, hit policy.LimitHit) {
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	notice := store.LimitNotice{
+	notice, err := store.LimitNotice{
 		OrganizationID: hit.OrganizationID, Kind: hit.Kind, AppID: hit.AppID, Tier: hit.Tier,
 		Enforced: hit.Enforced, Message: hit.Message,
+	}.Notice()
+	if err == nil {
+		_, err = n.sender.Note(ctx, notice)
 	}
-	written, err := n.store.NoteLimit(ctx, notice)
 	if err != nil {
 		n.logger.Error("could not write that an organization reached a money limit",
 			"organization", hit.OrganizationID, "kind", hit.Kind, "error", err)
 		key := hit.OrganizationID + "\x00" + hit.Kind
 		time.AfterFunc(retryAfter, func() { n.seen.Delete(key) })
-		return
 	}
-	if written {
-		n.post(ctx, notice)
-	}
-}
-
-// sweep posts the notices whose post failed or whose router stopped before it posted.
-func (n *Notifier) sweep(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
-	defer cancel()
-	notices, err := n.store.ClaimUnpostedLimits(ctx, stale, sweepBatch)
-	if err != nil {
-		n.logger.Error("could not read the money limit notices never posted", "error", err)
-		return
-	}
-	for _, notice := range notices {
-		n.post(ctx, notice)
-	}
-}
-
-func (n *Notifier) post(ctx context.Context, notice store.LimitNotice) {
-	if err := n.poster.Post(ctx, Message(n.environment, n.links, notice)); err != nil {
-		n.logger.Error("could not post that an organization reached a money limit; it is retried",
-			"organization", notice.OrganizationID, "kind", notice.Kind, "error", err)
-		return
-	}
-	if err := n.store.MarkLimitPosted(ctx, notice.OrganizationID, notice.Kind); err != nil {
-		n.logger.Error("posted that an organization reached a money limit, and could not record it; it may be posted again",
-			"organization", notice.OrganizationID, "kind", notice.Kind, "error", err)
-		return
-	}
-	n.logger.Info("posted that an organization reached a money limit for the first time",
-		"organization", notice.OrganizationID, "kind", notice.Kind, "enforced", notice.Enforced)
 }
 
 // limits names each kind of limit as a message says it.

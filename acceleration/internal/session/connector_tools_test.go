@@ -74,7 +74,7 @@ func (s *AttachConnectorsSuite) TestAConnectorDeletedBeforeThePinnedReadLeavesTh
 	id := s.connection("", "primary")
 	optional := s.config(s.fixed("crm", id, "whoami"))
 	needed := s.config(required(s.fixed("crm", id, "whoami")))
-	_, err := s.store.DB().NewDelete().Model((*store.ConnectorDefinition)(nil)).
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ConnectorDefinition)(nil)).
 		Where("customer_id = ?", s.customerID).Where("id = ?", s.connectorID).Exec(s.ctx)
 	s.Require().NoError(err)
 
@@ -94,7 +94,7 @@ func (s *AttachConnectorsSuite) TestAConnectorDeletedBeforeThePinnedReadLeavesTh
 func (s *AttachConnectorsSuite) TestAStoreFailureOtherThanNotFoundOnThePinnedReadStillFailsTheOpen() {
 	id := s.connection("", "primary")
 	optional := s.config(s.fixed("crm", id, "whoami"))
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE connector_definitions SET manifest = '[]'::jsonb WHERE customer_id = ? AND id = ?",
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_definitions SET manifest = '[]'::jsonb WHERE customer_id = ? AND id = ?",
 		s.customerID, s.connectorID)
 	s.Require().NoError(err)
 
@@ -374,7 +374,7 @@ func (s *AttachConnectorsSuite) TestAGrantedToolTheConnectorLeavesOutSaysSo() {
 		"scopes:\n  list: [read]\nsources:", 1) + "    tools:\n      - name: whoami\n        needs_scopes: [write]\n"
 	manifest, err := core.ParseManifest([]byte(scoped))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 	app := s.connection("", "primary")
@@ -591,7 +591,7 @@ func (s *AttachConnectorsSuite) TestAFixedBindingNeverPinsAToolGrantedByName() {
 	s.Empty(tools)
 	s.Equal([]ConnectorUnavailable{{Name: "crm", ConnectorID: s.connectorID, Reason: unavailableTool}}, unavailable)
 	var pins int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ?", app).Scan(&pins))
 	s.Zero(pins)
 }
@@ -618,7 +618,7 @@ func (s *AttachConnectorsSuite) TestAGrantWithADigestOpensAsBeforeAndPinsNothing
 	s.Empty(noTools)
 	s.Empty(noneUnavailable)
 	var pins int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ?", alice).Scan(&pins))
 	s.Zero(pins)
 }
@@ -844,7 +844,7 @@ func (s *AttachConnectorsSuite) TestABindingWithOnlyToolsOpensAsOnBase() {
 	s.Empty(noTools)
 	s.Empty(noneUnavailable)
 	var pins int
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ?", alice).Scan(&pins))
 	s.Zero(pins)
 }
@@ -870,7 +870,7 @@ func (s *AttachConnectorsSuite) TestABindingWhoseToolsAllMatchWarnsNothing() {
 // pinOf is connection's pin of tool, as stored.
 func (s *AttachConnectorsSuite) pinOf(connection, tool string) store.ConnectorToolPin {
 	var pin store.ConnectorToolPin
-	s.Require().NoError(s.store.DB().NewSelect().Model(&pin).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&pin).
 		Where("connection_id = ?", connection).Where("tool_name = ?", tool).Scan(s.ctx))
 	return pin
 }

@@ -74,7 +74,7 @@ func request(app string) Request {
 // refusal's code, and whether there is a row at all.
 func (s *ActivitySuite) row(app string) (requests, refused int64, code string, found bool) {
 	var last sql.NullString
-	err := s.db.DB().QueryRowContext(s.ctx, `
+	err := s.db.GlobalDB().QueryRowContext(s.ctx, `
 SELECT requests, refused, last_refusal_code FROM customer_activity
 WHERE app_id = ? AND area = ? AND client = ? AND day = ?::date`,
 		app, AreaAgentSetup, store.AuditSourceCLI, day.Format(time.DateOnly)).Scan(&requests, &refused, &last)
@@ -152,7 +152,7 @@ func (s *ActivitySuite) TestARequestNamingNoAppIsNotCounted() {
 	recorder.Close()
 
 	var rows int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM customer_activity WHERE area = ?", nobody.Area).Scan(&rows))
 	s.Equal(0, rows)
 }
@@ -209,7 +209,7 @@ func (s *ActivitySuite) TestARecorderAtCapacityWritesAtOnce() {
 func (s *ActivitySuite) TestAFailedWriteIsWrittenByTheNextOne() {
 	stuck, other := s.app(), s.app()
 	// One more request than a BIGINT holds is refused by Postgres, and the whole write with it.
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{{
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
 		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
 		Day: day, Requests: math.MaxInt64, FirstAt: day, LastAt: day,
 	}}))
@@ -220,7 +220,7 @@ func (s *ActivitySuite) TestAFailedWriteIsWrittenByTheNextOne() {
 	s.Never(func() bool { return s.requests(other) > 0 }, 200*time.Millisecond, 20*time.Millisecond,
 		"a write holding the row that overflows succeeded")
 
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
 	s.Require().NoError(err)
 
 	s.Require().Eventually(func() bool { return s.requests(other) == 1 && s.requests(stuck) == 1 },
@@ -238,7 +238,7 @@ func (s *ActivitySuite) TestARequestIsCountedOnItsUTCDay() {
 	recorder.Close()
 
 	var counted string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT day::text FROM customer_activity WHERE app_id = ?", app).Scan(&counted))
 	s.Equal("2026-03-02", counted)
 }
@@ -260,7 +260,7 @@ func (h errorCounter) WithGroup(string) slog.Handler      { return h }
 // tick: every request is then a failed statement and an error log while the database is down.
 func (s *ActivitySuite) TestAFailedWriteOfAFullRecordIsNotRetriedBeforeTheNextTick() {
 	stuck, other := s.app(), s.app()
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{{
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
 		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
 		Day: day, Requests: math.MaxInt64, FirstAt: day, LastAt: day,
 	}}))
@@ -279,7 +279,7 @@ func (s *ActivitySuite) TestAFailedWriteOfAFullRecordIsNotRetriedBeforeTheNextTi
 	}
 	s.Equal(int64(1), failed.Load(), "writes failed in 300ms with an hour between ticks")
 
-	_, err = s.db.DB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
 	s.Require().NoError(err)
 	recorder.Close()
 	s.Positive(s.requests(other), "what the failed writes held was lost")

@@ -505,7 +505,7 @@ func (w *Writer) writeRows(rows []pending) {
 		unknown := w.attribute(rows)
 		requests := requestsOf(rows)
 		ctx, cancel := w.attempt()
-		written, err := w.store.RecordRequests(ctx, requests)
+		written, err := w.store.Requests.InsertMany(ctx, requests)
 		cancel()
 		if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
 			if err != nil {
@@ -539,7 +539,7 @@ func (w *Writer) writeRows(rows []pending) {
 			w.lose(requests, lostInvalid, err)
 			return
 		}
-		// RecordRequests has moved the sequence past the id, so the next try draws a free one.
+		// Requests.InsertMany has moved the sequence past the id, so the next try draws a free one.
 		if store.IDTaken(err) && taken < takenRetries && w.ctx.Err() == nil {
 			taken++
 			continue
@@ -561,7 +561,7 @@ func (w *Writer) writeRows(rows []pending) {
 }
 
 // countGrants sees to the written rows naming a grant counting toward it. With one database
-// RecordRequests counted them in the transaction that wrote them, so Counted is told at once;
+// Requests.InsertMany counted them in the transaction that wrote them, so Counted is told at once;
 // with shards they are handed to the grant counter, which never holds up the next batch. A row
 // with nothing to count (not billable, or free) is counted as it is. A row the shard already
 // had is left to the reconcile, which counts it if its first write did not, and the policies

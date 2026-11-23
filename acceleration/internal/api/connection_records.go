@@ -238,7 +238,7 @@ func (s *Server) listConnectionInvocations(ctx context.Context, request *listCon
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.ConnectorInvocations(ctx, connection.CustomerID, connection.ID, request.Limit, cursor)
+	found, err := s.store.ConnectorInvocations.Select(ctx, connection.CustomerID, store.InvocationFilter{ConnectionID: connection.ID, Limit: request.Limit, After: cursor})
 	if err != nil {
 		return nil, err
 	}
@@ -279,9 +279,10 @@ func (s *Server) listConnectorAudit(ctx context.Context, request *listConnectorA
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.ConnectorAuditEvents(ctx, customerID, store.AuditFilter{
+	found, err := s.store.ConnectorAuditEvents.Select(ctx, customerID, store.AuditFilter{
 		ConnectionID: request.ConnectionID, Limit: request.Limit, After: cursor,
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -335,12 +336,12 @@ func (s *Server) deleteUserConnections(ctx context.Context, request *deleteUserC
 	}
 	// The grants the delete drops are revoked after it, for a manifest that opts in; their
 	// tokens are read before it, since the delete removes them.
-	granted, err := s.store.GrantedConnectorConnectionsOfUser(ctx, customerID, request.UserID)
+	granted, err := s.store.ConnectorConnections.SelectGrantedOfUser(ctx, customerID, request.UserID)
 	if err != nil {
 		return nil, err
 	}
 	held := s.revocableGrants(ctx, granted)
-	deleted, err := s.store.DeleteUserConnectorConnections(ctx, customerID, request.UserID)
+	deleted, err := s.store.ConnectorConnections.DeleteUser(ctx, customerID, request.UserID)
 	if err != nil {
 		return nil, err
 	}

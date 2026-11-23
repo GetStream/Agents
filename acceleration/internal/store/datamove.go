@@ -69,8 +69,8 @@ func (t dataTable) rollup() bool {
 // dataTables is everything that belongs to a customer, parents first.
 //
 // Deliberately absent: organizations, apps and api_keys, which are the credentials rather
-// than the data, and which a deployment mints for itself; and goose_db_version, which is
-// this schema's own bookkeeping. Organization-scope policies are absent too, since one
+// than the data, and which a deployment mints for itself; and the goose version tables,
+// which are this schema's own bookkeeping. Organization-scope policies are absent too, since one
 // organization's decisions cover apps the caller may not have. So are
 // connector_authorization_attempts: one lives minutes, is sealed under this deployment's
 // key and finishes at this deployment's callback, so a copy could only expire. And
@@ -81,28 +81,31 @@ func (t dataTable) rollup() bool {
 // connector_config_tokens, sealed under this deployment's key for the provider app whose
 // events URL is this deployment's. And connector_event_destinations, whose signing secrets are
 // sealed under this deployment's key, with connector_event_deliveries, forwards in flight. And
-// connection_event_subscriptions with connection_event_deliveries: their secrets are sealed
-// under this deployment's key and their callbacks are this deployment's URL. And
-// channel_threads, contact_map, episodes and episode_activity: the thread channels,
+// connection_event_subscriptions: their secrets are sealed under this deployment's key and
+// their callbacks are this deployment's URL. And deliveries_seen, the deliveries this
+// deployment acted on in the last day, which is where their retries arrive. And
+// channel_threads, channel_turns, contact_map and episodes: the thread channels,
 // omni-channels and cards they point at live in the Stream app, which a move does not carry
 // either; and user_phones, whose links join only those contact_map rows; and
 // channel_thread_waiting and channel_thread_inbound, messages in flight for minutes. And
-// connector_invocations and connector_audit, with connector_audit_credentials and
-// connector_invocation_arguments: this deployment's record of what it did with credentials
-// sealed under its own key. And connector_tool_pins: the deployment a connection moves to pins
-// its tools again on first use. And connector_connection_clients: the next consent of the
-// connection where it moved to records its client again. And connector_connection_validations:
-// the next validate where it moved to records its result again. And chat_inbound, Stream
-// Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes.
+// connector_invocations and connector_audit: this deployment's record of what it did with
+// credentials sealed under its own key. And connector_tool_pins: the deployment a connection
+// moves to pins its tools again on first use. And chat_inbound, Stream
+// Chat messages in flight for minutes, and image_jobs, pictures in flight for minutes. And
+// call_bridges, an answer parked for seconds at this deployment's URL: its key is the token
+// that authenticates the fetch, and it holds the trunk's password in the clear.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
-	{name: "agent_plugin_connections", customer: "customer_id"},
-	{name: "agent_plugin_clients", customer: "customer_id"},
 	// Only the customer's own definitions: the built-ins are under no customer, and every
 	// deployment seeds its own. They come before the connections that pin them.
 	{name: "connector_definitions", customer: "customer_id"},
-	{name: "connector_connections", customer: "customer_id"},
+	// The next consent where it moved to records its client again, and the next validate its
+	// result.
+	{name: "connector_connections", customer: "customer_id", vouched: []string{
+		"client_registration", "client_id", "client_updated_at",
+		"validation_revision", "validation_status", "validation_code", "validation_error", "validation_checked_at",
+	}},
 	{name: "router_configs", customer: "customer_id"},
 	{name: "voices", customer: "customer_id"},
 	{name: "voice_samples", parent: "voices", parentColumn: "voice_id"},
@@ -122,11 +125,11 @@ var dataTables = []dataTable{
 	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
-	{name: "calls", customer: "customer_id", shard: true},
-	{name: "call_bridges", customer: "customer_id", shard: true},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
+	// After the sessions their session_id points at.
+	{name: "calls", customer: "customer_id", shard: true},
 	{name: "agent_responses", customer: "customer_id", shard: true},
 	{name: "agent_response_items", parent: "agent_responses", parentColumn: "response_id", shard: true},
 	{name: "conversation_documents", customer: "customer_id", shard: true},
@@ -156,7 +159,7 @@ var dataTables = []dataTable{
 	{name: "policies", customer: "scope_id", filter: "scope = 'app'"},
 }
 
-// secretColumns never leave the deployment that holds them.
+// A secret column never leaves the deployment that holds it.
 //
 // A sealed key secret is worth nothing anywhere else, since the key that unseals it is
 // this deployment's. An OAuth token is worse than worthless: it belongs to whoever
@@ -166,7 +169,20 @@ var dataTables = []dataTable{
 // authorized again rather than arriving broken.
 // A guest's refresh secret hash is the same kind of thing: a moved guest is handed a new
 // one by its own token or by the app's backend, or comes back as a new guest.
-var secretColumns = []string{"secret_sealed", "access_token", "refresh_token", "oauth_state", "code_verifier", "credentials_sealed", "password_sealed", "bridge_password_sealed", "refresh_secret_hash"}
+//
+// isSecret is the one list: the export, the import and the record_data_change trigger
+// (watchDataChanges) all read it.
+func isSecret(column string) bool {
+	return strings.HasSuffix(column, "_sealed") || strings.HasSuffix(column, "_secret_hash") ||
+		slices.Contains(oauthSecrets, column)
+}
+
+// oauthSecrets are an OAuth grant's tokens and the state of one under way.
+var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
+
+// retiredTables are tables an export from an older release may carry that this schema dropped
+// (20270112000100_drop_plugin_tables.sql). An import skips their rows, inserts and deletes alike.
+var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -193,6 +209,17 @@ type shape struct {
 	keys    []string
 	// sequences are the sequences behind the columns whose default draws from one, by column.
 	sequences map[string]string
+}
+
+// secrets are the table's columns that never leave the deployment (isSecret).
+func (s shape) secrets() []string {
+	var secrets []string
+	for _, column := range s.columns {
+		if isSecret(column) {
+			secrets = append(secrets, column)
+		}
+	}
+	return secrets
 }
 
 // tableShapes caches those, since they only change when a migration does.
@@ -235,7 +262,7 @@ func (s *Store) StartDataCapture(ctx context.Context, customerID string, retenti
 	if customerID == "" {
 		return errors.New("store: a customer id is required")
 	}
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A lock_timeout of 0 waits for ever.
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)",
 			fmt.Sprintf("%dms", max(within.Milliseconds(), 1))); err != nil {
@@ -297,7 +324,7 @@ var ErrWritesOpen = errors.New("store: a write from before the capture started i
 func (s *Store) WaitForOpenWrites(ctx context.Context, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	var open []string
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.global.QueryRowContext(ctx, `
 SELECT COALESCE(array_agg(l.transactionid::text), '{}') FROM pg_locks l
 JOIN pg_stat_activity a ON a.pid = l.pid
 WHERE l.locktype = 'transactionid'
@@ -314,7 +341,7 @@ WHERE l.locktype = 'transactionid'
 			return ctx.Err()
 		case <-time.After(min(pause, time.Until(deadline))):
 		}
-		if err := s.db.QueryRowContext(ctx, `
+		if err := s.global.QueryRowContext(ctx, `
 SELECT COALESCE(array_agg(transactionid::text), '{}') FROM pg_locks
 WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 			pgdialect.Array(open)).Scan(pgdialect.Array(&open)); err != nil {
@@ -355,7 +382,7 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 	if err != nil {
 		return 0, err
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	tx, err := s.global.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return 0, fmt.Errorf("store: export: %w", err)
 	}
@@ -547,13 +574,13 @@ func addNumbers(a, b json.Number) json.Number {
 // either the lock is there and the mark is below the number, or its transaction has ended.
 func (s *Store) changeWatermark(ctx context.Context) (int64, error) {
 	var handedOut int64
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.global.QueryRowContext(ctx,
 		"SELECT CASE WHEN is_called THEN last_value ELSE last_value - 1 END FROM data_changes_seq_seq",
 	).Scan(&handedOut); err != nil {
 		return 0, fmt.Errorf("store: change watermark: %w", err)
 	}
 	var held sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.global.QueryRowContext(ctx, `
 SELECT MIN((classid::bigint << 32) | objid::bigint) FROM pg_locks
 WHERE locktype = 'advisory' AND objsubid = 2
   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&held); err != nil {
@@ -578,7 +605,11 @@ func recordedSince(ctx context.Context, tx bun.Tx, customerID string) (since, pr
 }
 
 func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, customerID string, write func(string, json.RawMessage) error) error {
-	query, args := table.selectRows(customerID)
+	shape, err := s.shapeOf(ctx, table.name)
+	if err != nil {
+		return err
+	}
+	query, args := table.selectRows(customerID, shape.secrets())
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("store: export %s: %w", table.name, err)
@@ -605,10 +636,10 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 
 // selectRows reads one table's rows for one customer, without the columns that never
 // leave.
-func (t dataTable) selectRows(customerID string) (string, []any) {
+func (t dataTable) selectRows(customerID string, secrets []string) (string, []any) {
 	var subject strings.Builder
 	subject.WriteString("to_jsonb(t)")
-	for _, column := range secretColumns {
+	for _, column := range secrets {
 		subject.WriteString(" - '" + column + "'")
 	}
 
@@ -645,16 +676,19 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 	if table.shard {
 		return s.shard
 	}
-	return s.db
+	return s.global
 }
 
 // lineColumns are what attaching a number, or giving it a line, writes on its row (AttachNumber,
 // TrunkGroupTx.SetLine): where its calls go and which agent answers them. The sealed bridge
-// password is one too, and an import never writes it (secretColumns).
+// password is one too, and an import never writes it (isSecret).
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
-	"bridge_uri", "bridge_username", "bridge_password_kek_version", "attached_at", "config_id"}
+	"attached_at", "config_id"}
 
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage) error {
+	if slices.Contains(retiredTables, table) {
+		return nil
+	}
 	spec, found := dataTableByName(table)
 	if !found {
 		return fmt.Errorf("store: %q is not a table an export carries", table)
@@ -672,6 +706,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		row, err = requeueImportedContact(row, time.Now())
 	case "campaign_attempts":
 		row, err = endImportedAttempt(row, time.Now())
+	case "simulation_runs":
+		row, err = renameImported(row, map[string]string{"held_until": "lease_until"})
+	case "agent_configs":
+		row, err = renameImported(row, map[string]string{"sandbox": "sandbox_provider", "episode_cards": "episode_cards_on",
+			"channels": "channels_lines", "chat_channels": "channels_chat"})
 	}
 	if err != nil {
 		return err
@@ -765,20 +804,13 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
 	}
 
-	// Every writer of a log draws its id under its customer's lock (RecordAgentLog), so ids
+	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
 	// commit in order and a reader resuming after one misses none. The row is read through the
 	// lock, so it is taken before the id is drawn and held until the statement's transaction ends.
-	//
-	// A request's log is a row of agent_logs the export carries, written where the request was
-	// (agent_request_log), so an imported request tells the trigger here it is logged already,
-	// as RecordRequests does, until the statement's transaction ends.
 	locked, through := "", ""
-	switch table {
-	case "agent_logs":
+	if table == "agent_logs" {
 		locked, through = "WITH locked AS (SELECT pg_advisory_xact_lock(hashtextextended(?, ?))) ", "locked, "
 		args = append([]any{customerID, agentLogLockSeed}, args...)
-	case "requests":
-		locked, through = "WITH logged AS (SELECT set_config('router.request_logged', 'on', true)) ", "logged, "
 	}
 
 	query := fmt.Sprintf(
@@ -926,8 +958,28 @@ func pauseImported(row json.RawMessage, active []string, paused string, claimed 
 	}
 	fields["move_paused"] = json.RawMessage(strconv.FormatBool(moved))
 	if claimed {
-		fields["claim_id"] = json.RawMessage(`""`)
+		fields["leased_by"] = json.RawMessage(`""`)
 		fields["lease_until"] = json.RawMessage("null")
+	}
+	return json.Marshal(fields)
+}
+
+// renameImported carries an imported row's columns that a migration since renamed under their
+// new names (renames, old to new), as an export from an older release names them.
+func renameImported(row json.RawMessage, renames map[string]string) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, fmt.Errorf("store: read an imported row: %w", err)
+	}
+	for old, renamed := range renames {
+		value, found := fields[old]
+		if !found {
+			continue
+		}
+		if _, carried := fields[renamed]; !carried {
+			fields[renamed] = value
+		}
+		delete(fields, old)
 	}
 	return json.Marshal(fields)
 }
@@ -954,7 +1006,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 		return row, nil
 	}
 	fields["leased_by"] = json.RawMessage(`""`)
-	fields["leased_until"] = until
+	fields["lease_until"] = until
 	return json.Marshal(fields)
 }
 
@@ -990,7 +1042,7 @@ func endImportedAttempt(row json.RawMessage, now time.Time) (json.RawMessage, er
 // task is completed and loses the mark.
 func (s *Store) SkipOccurrencesBeforeCutOver(ctx context.Context, customerID string, cutOver time.Time,
 	next func(ScheduledTask) (*time.Time, *ScheduledTaskRun, error)) error {
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var tasks []ScheduledTask
 		// Locked, as a pause or an edit here may land meanwhile and writes the whole row.
 		if err := tx.NewSelect().Model(&tasks).
@@ -1093,7 +1145,7 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 // person. Any change of a campaign's state here clears the mark (transitionIn). Running it
 // again resumes nothing twice.
 func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed, skipped, overLimit int64, campaigns []string, err error) {
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var marked []ScheduledTask
 		if err := tx.NewSelect().Model(&marked).
 			Column("id", "user_id", "config_id").
@@ -1312,15 +1364,12 @@ func (t dataTable) identity() string {
 	if t.name == "sip_trunks" {
 		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0)"
 	}
-	// An attached number arrives without its bridge password for the same reason, so its key
-	// version stays behind too rather than describing a password that is not there. Nor does
-	// where its calls go: the trunk, route and call it was attached to are named by whatever
+	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers
 	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again.
 	if t.name == "phone_numbers" {
-		return "jsonb_build_object('customer_id', ?::text, 'bridge_password_kek_version', NULL," +
-			" 'stream_trunk_id', NULL, 'stream_route_id', NULL, 'stream_call_id', NULL," +
-			" 'stream_call_type', NULL, 'bridge_uri', NULL, 'bridge_username', NULL, 'attached_at', NULL)"
+		return "jsonb_build_object('customer_id', ?::text, 'stream_trunk_id', NULL, 'stream_route_id', NULL," +
+			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL)"
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
@@ -1443,7 +1492,7 @@ func (s *Store) Changes(ctx context.Context, customerID string, after int64, lim
 	// rows after the cursor, and the rows read would then start above them with the check
 	// already passed. The mark is read before the transaction, as in an export, so every
 	// change at or below it has ended before the snapshot is taken.
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	tx, err := s.global.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: changes: %w", err)
 	}
@@ -1509,7 +1558,7 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 		return errors.New("store: a customer id is required")
 	}
 	if !s.Sharded() {
-		return s.applyChanges(ctx, s.db, customerID, changes)
+		return s.applyChanges(ctx, s.global, customerID, changes)
 	}
 	var shared, sharded []DataChange
 	for _, change := range changes {
@@ -1519,7 +1568,7 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 			shared = append(shared, change)
 		}
 	}
-	if err := s.applyChanges(ctx, s.db, customerID, shared); err != nil {
+	if err := s.applyChanges(ctx, s.global, customerID, shared); err != nil {
 		return err
 	}
 	return s.applyChanges(ctx, s.shard, customerID, sharded)
@@ -1549,6 +1598,9 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
 // change carrying somebody else's key cannot reach their row.
 func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange) error {
+	if slices.Contains(retiredTables, change.Table) {
+		return nil
+	}
 	spec, found := dataTableByName(change.Table)
 	if !found {
 		return fmt.Errorf("store: %q is not a table an export carries", change.Table)
@@ -1621,7 +1673,7 @@ func (s *Store) PruneDataChanges(ctx context.Context, retention time.Duration) (
 	// pruned_through only goes up. A WITH statement that changes rows runs once and to the end
 	// whether or not the query reads it (https://www.postgresql.org/docs/current/queries-with.html).
 	var removed int64
-	err = s.db.QueryRowContext(ctx, `
+	err = s.global.QueryRowContext(ctx, `
 WITH pruned AS (
   DELETE FROM data_changes
   WHERE at < now() - make_interval(secs => ?)
@@ -1653,6 +1705,9 @@ SELECT count(*) FROM pruned`,
 // startup and nothing afterwards.
 func (s *Store) watchDataChanges(ctx context.Context, db *bun.DB) error {
 	for _, table := range dataTables {
+		if s.sideOf(table) != db {
+			continue
+		}
 		shape, err := s.shapeOf(ctx, table.name)
 		if err != nil {
 			return err
@@ -1661,6 +1716,7 @@ func (s *Store) watchDataChanges(ctx context.Context, db *bun.DB) error {
 		if table.parent != "" {
 			arguments = []string{"'parent'", "'" + table.parentColumn + "'", "'" + table.parent + "'"}
 		}
+		arguments = append(arguments, "'{"+strings.Join(shape.secrets(), ",")+"}'")
 		for _, key := range table.captured(shape) {
 			arguments = append(arguments, "'"+key+"'")
 		}
@@ -1684,13 +1740,14 @@ func (s *Store) shapeOf(ctx context.Context, table string) (shape, error) {
 	if known, found := s.shapes.byName[table]; found {
 		return known, nil
 	}
-	if _, known := dataTableByName(table); !known {
+	spec, known := dataTableByName(table)
+	if !known {
 		return shape{}, fmt.Errorf("store: %q is not a table an export carries", table)
 	}
 
 	read := shape{sequences: map[string]string{}}
 	// pg_get_serial_sequence finds the sequence of a serial and of an identity column alike.
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.sideOf(spec).QueryContext(ctx, `
 SELECT a.attname,
        EXISTS (SELECT 1 FROM pg_index i
                WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)) AS is_key,
@@ -1739,7 +1796,7 @@ ORDER BY a.attnum`, table, table)
 func (s shape) insertable(table dataTable) []string {
 	columns := make([]string, 0, len(s.columns))
 	for _, column := range s.columns {
-		if !slices.Contains(secretColumns, column) && !slices.Contains(table.vouched, column) {
+		if !isSecret(column) && !slices.Contains(table.vouched, column) {
 			columns = append(columns, column)
 		}
 	}
@@ -1763,4 +1820,30 @@ func dataTableByName(name string) (dataTable, bool) {
 		}
 	}
 	return dataTable{}, false
+}
+
+// HoldingTable names the first table an export carries that holds a row of the customer's in the
+// shared database, empty when none does. A table kept in the shards is left out: it holds the
+// customer's own traffic here, and a shard's pod reads only its own shard, so counting it would
+// make the answer depend on which pod runs. A table that belongs to a customer through a parent
+// is left out too: its rows are written only under a parent of the customer's.
+func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, error) {
+	for _, table := range dataTables {
+		if table.customer == "" || table.shard {
+			continue
+		}
+		where := table.customer + " = ?"
+		if table.filter != "" {
+			where += " AND " + table.filter
+		}
+		var holds bool
+		query := "SELECT EXISTS (SELECT 1 FROM " + table.name + " WHERE " + where + ")"
+		if err := s.global.QueryRowContext(ctx, query, customerID).Scan(&holds); err != nil {
+			return "", fmt.Errorf("store: holds %s: %w", table.name, err)
+		}
+		if holds {
+			return table.name, nil
+		}
+	}
+	return "", nil
 }

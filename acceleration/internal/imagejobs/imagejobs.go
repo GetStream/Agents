@@ -228,13 +228,13 @@ func (s *Service) Queue(ctx context.Context, request Request) (bool, error) {
 		return false, stack.Wrap(err)
 	}
 	job := store.ImageJob{
-		ID: uuid.NewString(), CustomerID: request.CustomerID, StreamApp: request.StreamApp, CID: request.CID,
+		ID: uuid.NewString(), CustomerID: request.CustomerID, StreamAppPK: request.StreamApp, CID: request.CID,
 		AgentUser: request.AgentUser, SessionID: request.SessionID, TurnID: request.TurnID, ToolCallID: request.ToolCallID,
 		RequestKey: requestKey(request),
 		AgentID:    request.AgentID, CallID: request.CallID, Region: request.Region, Target: request.Target,
 		Tags: request.Tags, Attribution: attribution, Prompt: request.Prompt, AspectRatio: request.AspectRatio,
 	}
-	queued, err := s.store.QueueImageJob(ctx, &job)
+	queued, err := s.store.ImageJobs.Queue(ctx, &job)
 	if err != nil {
 		return false, err
 	}
@@ -306,7 +306,7 @@ func (s *Service) runDue(ctx context.Context) time.Duration {
 			continue
 		}
 		now := time.Now()
-		claimed, err := s.store.ClaimImageJobs(ctx, now, free, now.Add(s.lease), kind.decided)
+		claimed, err := s.store.ImageJobs.Claim(ctx, now, free, now.Add(s.lease), kind.decided)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not take the image jobs due", "error", err)
@@ -336,7 +336,7 @@ func (s *Service) runDue(ctx context.Context) time.Duration {
 		if len(kind.slots) == cap(kind.slots) {
 			continue
 		}
-		next, queued, err := s.store.NextImageJobAt(ctx, kind.decided)
+		next, queued, err := s.store.ImageJobs.NextDue(ctx, kind.decided)
 		switch {
 		case err != nil:
 			if ctx.Err() == nil {
@@ -356,7 +356,7 @@ func (s *Service) prune(ctx context.Context) {
 		return
 	}
 	s.pruned = time.Now()
-	if _, err := s.store.PruneImageJobs(ctx, s.pruned); err != nil && ctx.Err() == nil {
+	if _, err := s.store.ImageJobs.Prune(ctx, s.pruned); err != nil && ctx.Err() == nil {
 		s.logger.Error("could not delete the image jobs past their keep", "error", err)
 	}
 }
@@ -390,7 +390,7 @@ func (s *Service) draw(log *slog.Logger, job store.ImageJob) {
 		return
 	}
 	if !s.write(log, "start an image job's draw", func(ctx context.Context) (bool, error) {
-		return s.store.StartImageJobDraw(ctx, job)
+		return s.store.ImageJobs.StartDraw(ctx, job)
 	}) {
 		return
 	}
@@ -442,7 +442,7 @@ func (s *Service) keep(log *slog.Logger, job store.ImageJob) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), keepFor)
 	defer cancel()
 	for wait := 100 * time.Millisecond; ; wait = min(2*wait, 5*time.Second) {
-		kept, err := s.store.KeepImageJobDrawing(ctx, job, job.Drawn, job.DrawnType, job.Message)
+		kept, err := s.store.ImageJobs.KeepDrawing(ctx, job, job.Drawn, job.DrawnType, job.Message)
 		switch {
 		case err == nil && !kept:
 			log.Warn("an image job's lease ran out while it was drawn; it is kept by no claim")
@@ -462,7 +462,7 @@ func (s *Service) keep(log *slog.Logger, job store.ImageJob) bool {
 // decideFailure decides the job posts message, why there is no picture, and delivers it.
 func (s *Service) decideFailure(log *slog.Logger, job store.ImageJob, message string) {
 	if !s.write(log, "decide an image job's failure", func(ctx context.Context) (bool, error) {
-		return s.store.DecideImageJobFailure(ctx, job, message)
+		return s.store.ImageJobs.DecideFailure(ctx, job, message)
 	}) {
 		return
 	}
@@ -485,7 +485,7 @@ func (s *Service) deliver(log *slog.Logger, job store.ImageJob) {
 		files = []sandbox.Attachment{*picture}
 	}
 
-	err := s.poster.Post(s.ctx, job.CustomerID, job.StreamApp, job.CID, job.AgentUser, messageID(job), job.CreatedAt, job.Message, files)
+	err := s.poster.Post(s.ctx, job.CustomerID, job.StreamAppPK, job.CID, job.AgentUser, messageID(job), job.CreatedAt, job.Message, files)
 	switch {
 	case err == nil:
 		state, outcome := store.ImageJobDone, ""
@@ -517,7 +517,7 @@ func (s *Service) upload(log *slog.Logger, job store.ImageJob) (_ *sandbox.Attac
 		return &picture, true
 	}
 	if job.Drawn == nil {
-		drawn, err := s.store.ImageJobDrawn(s.ctx, job.ID)
+		drawn, err := s.store.ImageJobs.Drawn(s.ctx, job.ID)
 		switch {
 		case err != nil && s.ctx.Err() != nil:
 			s.release(log, job, false, time.Now())
@@ -532,7 +532,7 @@ func (s *Service) upload(log *slog.Logger, job store.ImageJob) (_ *sandbox.Attac
 		job.Drawn = drawn
 	}
 	file := sandbox.File{Name: "picture." + strings.TrimPrefix(job.DrawnType, "image/"), MIME: job.DrawnType, Data: job.Drawn}
-	picture, err := s.poster.UploadTo(s.ctx, job.CustomerID, job.StreamApp, job.CID, job.AgentUser, file)
+	picture, err := s.poster.UploadTo(s.ctx, job.CustomerID, job.StreamAppPK, job.CID, job.AgentUser, file)
 	switch {
 	case err == nil:
 	case s.ctx.Err() != nil:
@@ -549,7 +549,7 @@ func (s *Service) upload(log *slog.Logger, job store.ImageJob) (_ *sandbox.Attac
 	kept, err := json.Marshal(picture)
 	if err == nil {
 		s.write(log, "keep an image job's uploaded picture", func(ctx context.Context) (bool, error) {
-			return s.store.SaveImageJobPicture(ctx, job, kept)
+			return s.store.ImageJobs.SavePicture(ctx, job, kept)
 		})
 	}
 	// Posted even when not kept: the drawn picture is still on the row, so a later claim uploads
@@ -567,7 +567,7 @@ func (s *Service) retryPost(log *slog.Logger, job store.ImageJob, failure error)
 	next := time.Now().Add(s.postBackoff[job.Posts])
 	log.Warn("could not post an image job's message; it is tried again", "posts", job.Posts, "next", next, "error", failure)
 	s.write(log, "make an image job's post due again", func(ctx context.Context) (bool, error) {
-		return s.store.RetryImageJobPost(ctx, job, next)
+		return s.store.ImageJobs.RetryPost(ctx, job, next)
 	})
 }
 
@@ -575,14 +575,14 @@ func (s *Service) retryPost(log *slog.Logger, job store.ImageJob, failure error)
 // undraw.
 func (s *Service) release(log *slog.Logger, job store.ImageJob, undraw bool, next time.Time) {
 	s.write(log, "give an image job back", func(ctx context.Context) (bool, error) {
-		return s.store.ReleaseImageJob(ctx, job, undraw, next)
+		return s.store.ImageJobs.Release(ctx, job, undraw, next)
 	})
 }
 
 // finish records that the claim is done with the job.
 func (s *Service) finish(log *slog.Logger, job store.ImageJob, state, outcome string) {
 	if s.write(log, "record an image job's outcome", func(ctx context.Context) (bool, error) {
-		return s.store.FinishImageJob(ctx, job, state, outcome, time.Now())
+		return s.store.ImageJobs.Finish(ctx, job, state, outcome, time.Now())
 	}) {
 		log.Info("finished an image job", "state", state)
 	}

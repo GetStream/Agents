@@ -112,7 +112,7 @@ func (s *Server) getUser(ctx context.Context, request *getUserRequest) (*putUser
 // one of the two fields.
 func (s *Server) storedUser(ctx context.Context, customerID string, app int64, userID string) (*putUserResponse, error) {
 	answer := &putUserResponse{Body: AgentUser{UserID: userID}}
-	phone, since, linked, err := s.store.LinkedPhone(ctx, customerID, app, userID)
+	phone, since, linked, err := s.store.UserPhones.Linked(ctx, customerID, app, userID)
 	if err != nil || !linked {
 		return answer, err
 	}
@@ -174,13 +174,13 @@ func (s *Server) putUser(ctx context.Context, request *putUserRequest) (*putUser
 		return nil, err
 	}
 	if request.Body.Phone == nil {
-		return &putUserResponse{Body: AgentUser{UserID: request.UserID}}, s.store.UnlinkUserPhone(ctx, customerID, app, request.UserID)
+		return &putUserResponse{Body: AgentUser{UserID: request.UserID}}, s.store.UserPhones.Unlink(ctx, customerID, app, request.UserID)
 	}
 	person, err := omnichannel.Phone(*request.Body.Phone)
 	if err != nil {
 		return nil, invalidRequest("phone is not a number in E.164, such as +15551234567")
 	}
-	err = s.store.LinkUserPhone(ctx, &store.UserPhone{CustomerID: customerID, StreamAppPK: app,
+	err = s.store.UserPhones.Link(ctx, &store.UserPhone{CustomerID: customerID, StreamAppPK: app,
 		UserID: request.UserID, Phone: person.Address, History: history})
 	if errors.Is(err, store.ErrPhoneTaken) {
 		return nil, errPhoneTaken

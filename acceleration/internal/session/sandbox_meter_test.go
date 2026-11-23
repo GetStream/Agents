@@ -27,7 +27,7 @@ func (s *RuntimeSuite) daytona() *daytonatest.Server {
 func (s *RuntimeSuite) sandboxRows(sessionID string) []store.Request {
 	s.Require().NoError(s.manager.Shutdown())
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customer).
 		Where("session_id = ?", sessionID).
 		Where("modality = ?", string(routing.Sandbox)).

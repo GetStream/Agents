@@ -286,7 +286,7 @@ func (f *Forwarder) queue(ctx context.Context, event Event, forwards []string) e
 	if !event.HeadersUntil.IsZero() {
 		delivery.ProviderHeadersUntil = &event.HeadersUntil
 	}
-	queued, err := f.store.QueueEventDeliveries(ctx, event.CustomerID, event.ConnectorID, forwards, delivery)
+	queued, err := f.store.EventDeliveries.Queue(ctx, event.CustomerID, event.ConnectorID, forwards, delivery)
 	if err != nil {
 		return err
 	}
@@ -437,7 +437,7 @@ func (f *Forwarder) sendDue() (wait time.Duration, again bool) {
 		f.mu.Lock()
 		sending := maps.Clone(f.sending)
 		f.mu.Unlock()
-		claimed, err := f.store.ClaimEventDeliveries(f.ctx, now, free, perDestination, sending, now.Add(f.lease))
+		claimed, err := f.store.EventDeliveries.Claim(f.ctx, now, free, perDestination, sending, now.Add(f.lease))
 		if err != nil {
 			if f.ctx.Err() == nil {
 				f.logger.Error("could not take the event forwards due", "error", err)
@@ -468,7 +468,7 @@ func (f *Forwarder) sendDue() (wait time.Duration, again bool) {
 			break
 		}
 	}
-	next, queued, err := f.store.NextEventDeliveryAt(f.ctx)
+	next, queued, err := f.store.EventDeliveries.NextDue(f.ctx)
 	switch {
 	case err != nil:
 		if f.ctx.Err() == nil {
@@ -500,13 +500,13 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	attempts := delivery.Attempts + 1
 	switch {
 	case err == nil:
-		err = f.store.FinishEventDelivery(writing, delivery.DestinationID, delivery.ID)
+		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	case errors.As(err, &again) && attempts <= len(f.retries):
 		log.Info("an event forward failed and is sent again", "attempts", attempts, "error", err)
-		err = f.store.RetryEventDelivery(writing, delivery.DestinationID, delivery.ID, attempts, time.Now().Add(f.retries[attempts-1]))
+		err = f.store.EventDeliveries.Retry(writing, delivery.DestinationID, delivery.ID, attempts, time.Now().Add(f.retries[attempts-1]))
 	default:
 		log.Warn("gave up an event forward", "attempts", attempts, "error", err)
-		err = f.store.FinishEventDelivery(writing, delivery.DestinationID, delivery.ID)
+		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	}
 	if err != nil {
 		log.Error("could not record an event forward's attempt", "error", err)

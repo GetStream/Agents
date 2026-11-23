@@ -127,12 +127,12 @@ func (s *ConnectorEventsSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(),
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(),
 		fstest.MapFS{"events_test_bot.yaml": {Data: []byte(eventsBot)}}))
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{
 		"events_test_secretless.yaml": {Data: []byte(eventsBotAs("events_test_secretless", "EVENTS_TEST_SECRETLESS"))},
-		// ed25519 reads no algorithm, encoding or prefix.
+
 		"events_test_unverifiable.yaml": {Data: []byte(strings.NewReplacer("kind: hmac_header", "kind: ed25519",
 			"    algorithm: sha256\n", "", "    encoding: hex\n", "", "    prefix: v0=\n", "").
 			Replace(eventsBotAs("events_test_unverifiable", "EVENTS_TEST_UNVERIFIABLE")))},
@@ -233,7 +233,7 @@ func (s *ConnectorEventsSuite) TestAConnectionDeletedDuringAnUninstallCountsAsRe
 	s.Require().Eventually(func() bool {
 		return s.status(first) == store.ConnectionNeedsReauthorization
 	}, 10*time.Second, 20*time.Millisecond, "the loop reached the held connection")
-	s.Require().NoError(s.store.DeleteConnectorConnection(context.Background(), last.CustomerID, last.ConnectionID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(context.Background(), last.CustomerID, last.ConnectionID))
 	release()
 
 	select {
@@ -368,7 +368,7 @@ func (s *ConnectorEventsSuite) hold(ref core.ConnectionRef) (release func()) {
 }
 
 func (s *ConnectorEventsSuite) status(ref core.ConnectionRef) string {
-	connection, err := s.store.ConnectorConnection(context.Background(), ref.CustomerID, ref.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), ref.CustomerID, ref.ConnectionID)
 	s.Require().NoError(err)
 	return connection.Status
 }

@@ -502,7 +502,7 @@ func (s *Server) handOn(ctx context.Context, origin hookOrigin, recorded bool, h
 func (s *Server) unopenedSpec(ctx context.Context, customerID, configID string, event messageEvent) (session.Spec, error) {
 	spec := session.Spec{CustomerID: customerID}
 	if configID != "" {
-		config, err := s.store.AgentConfig(ctx, customerID, configID)
+		config, err := s.store.AgentConfigs.Get(ctx, customerID, configID)
 		switch {
 		case err == nil:
 			spec = session.FromConfig(config)
@@ -546,7 +546,7 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 		return withPhotoNote(event.Message.Text, event.photos(), unheardRecording, unheardRecordingWithMore)
 	}
 	if origin.queuedMessage != "" {
-		if err := s.store.KeepChatInboundHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
+		if err := s.store.ChatInbounds.KeepHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
 			s.logger.Warn("could not keep what the voice recording of a queued chat inbound message said",
 				"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
 		}
@@ -663,7 +663,7 @@ func (s *Server) ownerOf(ctx context.Context, origin hookOrigin, event messageEv
 // not known without it. A channel naming no config, or another one than the row's, is not
 // read, nor one with a voice recording, which unopenedSpec reads. A read that fails costs the
 // card, not the answer: nil.
-func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.Call) *store.AgentConfig {
+func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.HeldCall) *store.AgentConfig {
 	if _, recorded := event.recording(); recorded {
 		return nil
 	}
@@ -688,9 +688,9 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 	}
 
 	if owner, scoped := s.configOwnerOf(origin); scoped {
-		config, err = s.store.AgentConfig(ctx, owner, declared)
+		config, err = s.store.AgentConfigs.Get(ctx, owner, declared)
 	} else {
-		config, err = s.store.AgentConfigOwner(ctx, declared)
+		config, err = s.store.AgentConfigs.GetUnscoped(ctx, declared)
 	}
 	// A config nobody in the app holds is no failure here: an app whose message hooks deliver
 	// to two routers, such as a local one and staging, sends each the other's channels too.
@@ -712,7 +712,7 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 // that failed. A hook goes on as for a channel that held none when the read fails, as it always
 // has; a queued delivery is tried again instead, so it is answered by the agent that actually
 // ran there.
-func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.Call, bool, error) {
+func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.HeldCall, bool, error) {
 	previous, err := s.store.CallByAgentInApp(ctx, origin.scope(), channelID)
 	switch {
 	case err == nil:

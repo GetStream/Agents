@@ -82,7 +82,7 @@ func (b *Bridge) keyword(ctx context.Context, thread store.ChannelThread, queued
 	word := keywordOf(message.Text)
 	stop, start, help := slices.Contains(stopWords, word), slices.Contains(startWords, word), slices.Contains(helpWords, word)
 	if !stop && !start && !help {
-		optedOut, err := b.store.OptedOut(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
+		optedOut, err := b.store.OptOuts.OptedOut(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
 		if err != nil {
 			return false, err
 		}
@@ -113,17 +113,17 @@ func (b *Bridge) keyword(ctx context.Context, thread store.ChannelThread, queued
 	switch {
 	case stop:
 		if group {
-			muted, err = b.store.OptedOut(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
+			muted, err = b.store.OptOuts.OptedOut(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
 			if err != nil {
 				return false, err
 			}
 		}
-		err = b.store.OptOut(ctx, &store.OptOut{
+		err = b.store.OptOuts.Insert(ctx, &store.OptOut{
 			CustomerID: thread.CustomerID, Recipient: source.recipientOf(message.AuthorID), Channel: channel, Source: optOutSource,
 		})
 		reply = cmp.Or(useCase.OptOutMessage, stoppedReply)
 	case start:
-		err = b.store.RevokeOptOuts(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
+		err = b.store.OptOuts.RevokeAll(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
 		reply = cmp.Or(useCase.OptInMessage, startedReply)
 	default:
 		reply = cmp.Or(useCase.HelpMessage, helpReply)
@@ -145,7 +145,7 @@ func (b *Bridge) keyword(ctx context.Context, thread store.ChannelThread, queued
 	if source.answered != nil && source.answered(message.Raw) {
 		return true, nil
 	}
-	marked, err := b.store.MarkChannelInboundKeywordAnswered(ctx, queued)
+	marked, err := b.store.ChannelInbounds.MarkKeywordAnswered(ctx, queued)
 	if err != nil {
 		return false, err
 	}
@@ -212,7 +212,7 @@ func (b *Bridge) detached(ctx context.Context) (context.Context, context.CancelF
 // WhatsApp line has the customer's default use case. None, or a store that fails, is the zero
 // use case, whose empty texts leave today's; the keyword is answered either way.
 func (b *Bridge) useCase(ctx context.Context, thread store.ChannelThread) store.UseCase {
-	useCase, err := b.store.UseCaseForNumber(ctx, thread.CustomerID, thread.ProviderUnitID)
+	useCase, err := b.store.UseCases.GetForNumber(ctx, thread.CustomerID, thread.ProviderUnitID)
 	if err != nil && !errors.Is(err, store.ErrUnknownUseCase) {
 		b.logger.Error("could not find the use case a line sends as", "connector", thread.ConnectorID,
 			"channel", thread.ChannelID, "error", err)

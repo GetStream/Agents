@@ -244,7 +244,7 @@ func (s *ReadSuite) TestAnAppChatsLineIsTheAgentsOnlyWhenTheAgentWroteIt() {
 			s.Require().NoError(err)
 		}
 		card := store.EpisodeCard{Episode: store.Episode{CustomerID: "customer", Source: tc.source,
-			ThreadChannel: chatlog.ChannelType + ":" + tc.channel, StartedAt: time.Now().Add(-time.Hour)}, AgentConfigID: "config-1"}
+			ThreadChannel: chatlog.ChannelType + ":" + tc.channel, StartedAt: time.Now().Add(-time.Hour)}, ConfigID: "config-1"}
 
 		lines, err := linesOf(s.T().Context(), streamapp.Bound{Client: chat.Client}, card, 10)
 

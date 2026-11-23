@@ -89,7 +89,7 @@ func (s *MentionSuite) TestATypeAnsweringEveryMessageNeedsNoMention() {
 		{{Type: "shifts", Answer: store.ChatChannelAnswerMentioned}, {Type: "callouts"}},
 		{{Type: "shifts", Answer: store.ChatChannelAnswerMentioned}},
 	} {
-		config := store.AgentConfig{ID: "rota", Name: "Front Desk", ChatChannels: channels}
+		config := store.AgentConfig{ID: "rota", Name: "Front Desk", Channels: store.AgentAnswersIn{Chat: channels}}
 		s.True(answersTo(config, mentioning("feel better!", "")), "%+v", channels)
 	}
 }
@@ -104,7 +104,7 @@ func (s *MentionSuite) TestANamelessConfigIsMentionedByItsIDAlone() {
 
 // mentionsOnly is a config answering only its mentions in callouts.
 func mentionsOnly() store.AgentConfig {
-	return store.AgentConfig{ID: "rota", Name: "Front Desk", ChatChannels: []store.ChatChannel{
+	return store.AgentConfig{ID: "rota", Name: "Front Desk", Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{
 		{Type: "shifts"}, {Type: "callouts", Answer: store.ChatChannelAnswerMentioned},
-	}}
+	}}}
 }

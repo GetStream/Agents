@@ -57,11 +57,11 @@ func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.Ca
 	if owner.OrganizationID == "" {
 		// Known when the row is written, but the concurrent calls of an organization are counted
 		// from its open legs.
-		organization, err := s.store.OrganizationOf(ctx, owner.CustomerID)
+		membership, err := s.store.AppOrganizations.Get(ctx, owner.CustomerID)
 		if err != nil {
 			s.logger.Warn("could not tell whose organization a call leg is", "customer", owner.CustomerID, "error", err)
 		}
-		owner.OrganizationID = organization
+		owner.OrganizationID = membership.OrganizationID
 	}
 	if leg.Direction == store.Outbound {
 		s.gate.Dialed(ctx, owner.CustomerID, owner.OrganizationID, leg.RemoteNumber)
@@ -77,7 +77,7 @@ func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.Ca
 	if started {
 		leg.StartedAt = &leg.DialedAt
 	}
-	opened, err := s.store.OpenCallLeg(ctx, &leg)
+	opened, err := s.store.CallLegs.Open(ctx, &leg)
 	switch {
 	case err != nil && !opened:
 		s.logger.Error("could not record a call leg; its minutes are not billed", "call", leg.CallType+":"+leg.CallID,
@@ -108,30 +108,30 @@ func (s *Service) Connect(ctx context.Context, scope store.AppScope, callType, c
 		return nil
 	}
 	at = s.eventAt(at)
-	left, err := s.store.ParticipantLeft(ctx, scope, callType, callID, participant)
+	left, err := s.store.CallParticipants.Left(ctx, scope, callType, callID, participant)
 	if err != nil {
 		return err
 	}
 	if s.connecting != nil {
 		s.connecting()
 	}
-	leg, connection, err := s.store.ConnectCallLeg(ctx, scope, callType, callID, sessionID, participant, number, at, left)
+	leg, connection, err := s.store.CallLegs.Connect(ctx, scope, callType, callID, sessionID, participant, number, at, left)
 	if err != nil || connection == store.LegKnown {
 		return err
 	}
 	if connection == store.NothingWaiting {
-		if err := s.store.RecordParticipant(ctx, scope, store.CallParticipant{
+		if err := s.store.CallParticipants.Record(ctx, scope, store.CallParticipant{
 			CallType: callType, CallID: callID, ParticipantSession: participant, Number: number, JoinedAt: &at,
 		}, s.now()); err != nil {
 			return err
 		}
 		// A leg opened between the two looks found nothing kept: it is connected here.
-		leg, connection, err = s.store.ConnectCallLeg(ctx, scope, callType, callID, sessionID, participant, number, at, left)
+		leg, connection, err = s.store.CallLegs.Connect(ctx, scope, callType, callID, sessionID, participant, number, at, left)
 		switch {
 		case err != nil || connection == store.NothingWaiting:
 			return err
 		case connection == store.LegKnown:
-			return s.store.ForgetParticipant(ctx, scope, callType, callID, participant, nil)
+			return s.store.CallParticipants.Forget(ctx, scope, callType, callID, participant, nil)
 		}
 	}
 	if leg.EndedAt != nil {
@@ -139,19 +139,19 @@ func (s *Service) Connect(ctx context.Context, scope store.AppScope, callType, c
 	} else {
 		s.told(ctx, leg)
 		s.awaitAgent(leg)
-		if left, err = s.store.ParticipantLeft(ctx, scope, callType, callID, participant); err != nil {
+		if left, err = s.store.CallParticipants.Left(ctx, scope, callType, callID, participant); err != nil {
 			return err
 		} else if left != nil {
 			// The phone's leave was kept between the first look and the connect, which did not
 			// see it: the leg ends at it, before the leave is forgotten.
-			ended, err := s.store.EndParticipantLeg(ctx, scope, callType, callID, participant, *left)
+			ended, err := s.store.CallLegs.EndParticipant(ctx, scope, callType, callID, participant, *left)
 			if err != nil {
 				return err
 			}
 			s.settleLegs(ctx, ended)
 		}
 	}
-	return s.store.ForgetParticipant(ctx, scope, callType, callID, participant, left)
+	return s.store.CallParticipants.Forget(ctx, scope, callType, callID, participant, left)
 }
 
 // Left ends the leg of a phone that left a call at at (or now, when zero), and bills its
@@ -162,7 +162,7 @@ func (s *Service) Left(ctx context.Context, scope store.AppScope, callType, call
 		return nil
 	}
 	at = s.eventAt(at)
-	ended, err := s.store.EndParticipantLeg(ctx, scope, callType, callID, participant, at)
+	ended, err := s.store.CallLegs.EndParticipant(ctx, scope, callType, callID, participant, at)
 	if err != nil {
 		return err
 	}
@@ -170,17 +170,17 @@ func (s *Service) Left(ctx context.Context, scope store.AppScope, callType, call
 		s.settleLegs(ctx, ended)
 		return nil
 	}
-	known, err := s.store.ParticipantHasLeg(ctx, scope, callType, callID, participant)
+	known, err := s.store.CallLegs.HasParticipant(ctx, scope, callType, callID, participant)
 	if err != nil || known {
 		return err
 	}
-	if err := s.store.RecordParticipant(ctx, scope, store.CallParticipant{
+	if err := s.store.CallParticipants.Record(ctx, scope, store.CallParticipant{
 		CallType: callType, CallID: callID, ParticipantSession: participant, LeftAt: &at,
 	}, s.now()); err != nil {
 		return err
 	}
 	// A leg given the phone between the two looks did not see the leave: it is ended here.
-	if ended, err = s.store.EndParticipantLeg(ctx, scope, callType, callID, participant, at); err != nil {
+	if ended, err = s.store.CallLegs.EndParticipant(ctx, scope, callType, callID, participant, at); err != nil {
 		return err
 	}
 	s.settleLegs(ctx, ended)
@@ -194,7 +194,7 @@ func (s *Service) EndLegs(ctx context.Context, scope store.AppScope, callType, c
 	if s.store == nil {
 		return nil
 	}
-	ended, err := s.store.EndCallLegs(ctx, scope, callType, callID, s.eventAt(at))
+	ended, err := s.store.CallLegs.EndCall(ctx, scope, callType, callID, s.eventAt(at))
 	if err != nil {
 		return err
 	}
@@ -221,14 +221,14 @@ func (s *Service) Heard(ctx context.Context, scope store.AppScope, callType, cal
 	if !s.heard.first(key, now, heardRecheck) {
 		return nil
 	}
-	ringing, err := s.store.CallRinging(ctx, scope, callType, callID)
+	ringing, err := s.store.CallLegs.Ringing(ctx, scope, callType, callID)
 	if err != nil || !ringing {
 		if err != nil {
 			s.heard.forget(key)
 		}
 		return err
 	}
-	if err := s.store.HeardCall(ctx, scope, callType, callID, now); err != nil {
+	if err := s.store.CallParticipants.RecordHeard(ctx, scope, callType, callID, now); err != nil {
 		s.heard.forget(key)
 		return err
 	}
@@ -248,7 +248,7 @@ func (s *Service) checkHooked(ctx context.Context, scope store.AppScope, callTyp
 	if index < 0 {
 		return
 	}
-	heard, err := s.store.CallHeard(ctx, scope, callType, callID)
+	heard, err := s.store.CallParticipants.Heard(ctx, scope, callType, callID)
 	if err != nil {
 		s.logger.Warn("could not tell whether the call hook delivers participant events", "call", callType+":"+callID, "error", err)
 		return
@@ -373,13 +373,12 @@ const refusedFor = MaxCallLength + LegSweepEvery
 // it ends, on whichever node ends it (tell). A mark that cannot be kept is logged, and the call
 // is counted completed.
 func (s *Service) Refused(ctx context.Context, customer string, app int64, callType, callID, session string) {
-	if s.redis == nil {
+	if s.store == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeTimeout)
 	defer cancel()
-	command := s.redis.B().Set().Key(refusedKey(customer, app, callType, callID, session)).Value("1").Ex(refusedFor).Build()
-	if err := s.redis.Do(ctx, command).Error(); err != nil {
+	if err := s.store.CallLegs.MarkRefused(ctx, customer, app, callType, callID, session, refusedFor); err != nil {
 		s.logger.Warn("could not mark a refused arriving call; it is counted completed",
 			"customer", customer, "call", callType+":"+callID, "error", err)
 	}
@@ -393,26 +392,18 @@ const refusedReadTimeout = time.Second
 // refused reports whether the call of an inbound leg was marked Refused. One that cannot be
 // read in refusedReadTimeout is logged, and taken as not refused.
 func (s *Service) refused(ctx context.Context, leg store.CallLeg) bool {
-	if s.redis == nil {
+	if s.store == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, refusedReadTimeout)
 	defer cancel()
-	command := s.redis.B().Exists().Key(refusedKey(leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID, leg.StreamSessionID)).Build()
-	found, err := s.redis.Do(ctx, command).AsInt64()
+	found, err := s.store.CallLegs.Refused(ctx, leg)
 	if err != nil {
 		s.logger.Warn("could not tell whether the router refused an arriving call; it is counted completed",
 			"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "error", err)
 		return false
 	}
-	return found > 0
-}
-
-// refusedKey names the mark of a refused call. A call's id is unique only within its app, and
-// a number attached before per-caller calls puts every caller in the number's own call, each
-// caller a Stream session of it with a leg of its own: only the refused caller's leg is marked.
-func refusedKey(customer string, app int64, callType, callID, session string) string {
-	return "phone:refused:" + customer + ":" + strconv.FormatInt(app, 10) + ":" + callType + ":" + callID + ":" + session
+	return found
 }
 
 // SweepLegs ends the legs of this shard open longer than MaxCallLength, and checks the legs
@@ -427,7 +418,7 @@ func (s *Service) SweepLegs(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	now := s.now()
-	ended, err := s.store.SweepCallLegs(ctx, now, MaxCallLength, legSweepBatch)
+	ended, err := s.store.CallLegs.Sweep(ctx, now, MaxCallLength, legSweepBatch)
 	if err != nil {
 		return 0, err
 	}
@@ -447,7 +438,7 @@ func (s *Service) SweepLegs(ctx context.Context) (int, error) {
 		return len(ended), err
 	}
 	for {
-		deleted, err := s.store.DeleteCallParticipants(ctx, now.Add(-keepParticipantsFor), legSweepBatch)
+		deleted, err := s.store.CallParticipants.DeleteBefore(ctx, now.Add(-keepParticipantsFor), legSweepBatch)
 		if err != nil {
 			return len(ended), err
 		}
@@ -460,7 +451,7 @@ func (s *Service) SweepLegs(ctx context.Context) (int, error) {
 // rebill writes the row of each leg that ended lately and has none, under the usage id it
 // was first meant to have, so a row written meanwhile is not written twice.
 func (s *Service) rebill(ctx context.Context, now time.Time) error {
-	legs, err := s.store.EndedCallLegs(ctx, now.Add(-rebillFrom), now.Add(-rebillTo), legSweepBatch)
+	legs, err := s.store.CallLegs.SelectEnded(ctx, now.Add(-rebillFrom), now.Add(-rebillTo), legSweepBatch)
 	if err != nil || len(legs) == 0 {
 		return err
 	}

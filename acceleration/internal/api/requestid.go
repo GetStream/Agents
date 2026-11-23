@@ -11,6 +11,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
@@ -118,6 +119,13 @@ func answerFailure(ctx huma.Context, status int, message string, errs ...error) 
 			}
 		}
 		return answer
+	}
+	var invalid *store.ValidationError
+	if errors.As(errors.Join(errs...), &invalid) {
+		recordFailure(ctx.Context(), invalid, "")
+		failure := invalidRequest(invalid.Error())
+		failure.Code = codeValidationFailed
+		return failure
 	}
 	if status < http.StatusInternalServerError {
 		if len(errs) > 0 {

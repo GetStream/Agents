@@ -53,7 +53,7 @@ func (s *ActivitySuite) counted(area, client string) counted {
 		row       counted
 		code, org sql.NullString
 	)
-	err := s.store.DB().QueryRowContext(context.Background(), `
+	err := s.store.GlobalDB().QueryRowContext(context.Background(), `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0),
        (array_agg(last_refusal_code ORDER BY last_refusal_at DESC NULLS LAST))[1], max(organization_id)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
@@ -180,7 +180,7 @@ func (s *ActivitySuite) TestARequestNobodyAuthenticatedIsNotCounted() {
 
 	// Since the test began: suites run beside each other and count their own requests.
 	var nobody int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM customer_activity WHERE app_id = '' AND last_at >= ?", asked).Scan(&nobody))
 	s.Equal(0, nobody)
 }
@@ -220,7 +220,7 @@ func (s *ActivitySuite) TestARequestIsCountedWhenItArrived() {
 	recorder.Close()
 
 	var first time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT first_at FROM customer_activity WHERE app_id = ?", s.customerID()).Scan(&first))
 	s.True(first.Before(began), "first_at %s, handler began %s", first, began)
 }

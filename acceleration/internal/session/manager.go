@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -136,11 +135,7 @@ type ManagerOptions struct {
 	// organization's, which its agent config can shorten and not lengthen. Nil holds it to
 	// the agent config alone.
 	Policies *policy.Enforcer
-	// Configs reads what a session is opened from -- the skills it names -- through
-	// whatever cache is in front of Postgres. Built over Store when it is not given, in
-	// which case every read is a query, which is what a deployment without Redis does.
-	Configs *appconfig.Store
-	Live    *live.Client
+	Live     *live.Client
 	// Pricer and Writer are the process's price list and usage writer, for what a session
 	// records of its own rather than through a router or internal/metered, such as the time
 	// it runs; memory and knowledge record through the recorders they are built with. Nothing
@@ -291,20 +286,13 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	// written is the recorder behind records, which titles are written through too.
 	var written *sessionRecorder
 	if options.Store != nil {
-		if options.Configs == nil {
-			configs, err := appconfig.New(appconfig.Options{Store: options.Store, Logger: options.Logger})
-			if err != nil {
-				return nil, err
-			}
-			manager.options.Configs = configs
-		}
 		manager.logs = newLogRecorder(options.Store, options.Logger)
-		manager.calls = newCallRecorder(options.Store, options.Logger)
 		// Read only: the phone service's keeper is what counts calls, so this one names no vendors.
 		manager.outcomes = outcome.NewKeeper(options.Store, time.Now, nil, options.Logger)
 		written = newSessionRecorder(options.Store, options.Logger)
 		manager.records = written
-		manager.reviews = newReviewer(options.LLM, options.Store, options.Logger)
+		manager.calls = &callRecorder{records: written}
+		manager.reviews = newReviewer(options.LLM, options.Store, written, options.Logger)
 		if options.Connectors.Transports != nil {
 			manager.invocations = newInvocationRecorder(options.Store, options.Logger)
 		}
@@ -400,10 +388,10 @@ func (m *Manager) newSession(spec Spec, conv *persistent.Conversation, skills ha
 // team's agent configs to its own users keeps their channels in the config's team too, so
 // that Chat shows them to that team's users alone. A config of no team asks nothing.
 func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
-	if spec.ConfigTeam == "" || m.options.Configs == nil {
+	if spec.ConfigTeam == "" || m.options.Store == nil {
 		return "", nil
 	}
-	settings, err := m.options.Configs.AppSettings(ctx, spec.CustomerID)
+	settings, err := m.options.Store.Apps.GetSettings(ctx, spec.CustomerID)
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrAppSettingsUnreadable, err))
 	}
@@ -459,14 +447,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// write this session over theirs. A reopened one is the same session, its owner checked
 	// by whoever reopened it.
 	if m.options.Store != nil && spec.Reopened.IsZero() {
-		taken, err := m.options.Store.SessionExists(ctx, spec.ID)
+		taken, err := m.options.Store.Sessions.Exists(ctx, spec.ID)
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}
 		// A session's channel is named after it, and a thread channel's id is taken by the
 		// external thread it holds. Compared case-folded, as threadConversation does.
 		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			_, err := m.options.Store.ChannelThread(ctx, folded)
+			_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
 			if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
 				return nil, stack.Wrap(err)
 			}
@@ -911,7 +899,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			MemoryUserID:       spec.Memory.UserID,
 			MemoryFilter:       spec.Memory.Filter,
 			Store:              m.options.Store,
-			Live:               m.options.Live,
 			Logger:             m.logger,
 		})
 	}
@@ -1015,7 +1002,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 				fail()
 				return nil, stack.Wrap(err)
 			}
-			leaf, err := m.options.Store.ActiveLeaf(ctx, spec.CustomerID, spec.ID)
+			leaf, err := m.options.Store.Responses.ActiveLeaf(ctx, spec.CustomerID, spec.ID)
 			if err != nil {
 				fail()
 				return nil, err
@@ -1054,22 +1041,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		created.closers = append(created.closers, func() { m.hangUpRinging(created, spec) })
 	}
 
-	// The row is queued before the session is reachable, so the call cannot be recorded
-	// as ending before it is recorded as starting. An incognito session has none: the row
-	// names the session, its caller and the instructions it ran with.
-	if m.calls != nil && !spec.Incognito {
-		created.calls = m.calls
-		created.closers = append(created.closers, func() {
-			m.calls.Ended(created.id, time.Now().UTC())
-			// The review runs on a model rather than in this closer, so it is started
-			// here and lands on the row whenever it comes back.
-			if !spec.NoReview {
-				m.reviews.Review(row(created), spec.Attribution, spec.Region, spec.reviewTarget(), spec.ReviewInstructions, created.conversation())
-			}
-		})
-		m.calls.Started(row(created))
-	}
-
 	// The row is queued once the session has joined, so a call that refused it leaves no
 	// session behind, and once search has started, so its tool is among the ones stored.
 	// The turns held until now, the greeting's among them, are written after it.
@@ -1079,6 +1050,30 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		})
 		m.records.Opened(sessionRow(created), toolRows(created))
 		created.startRecording()
+	}
+
+	// The call is queued behind the session row it names, and before the session is
+	// reachable, so it cannot be recorded as ending before it is recorded as starting. An
+	// incognito session has none: the row names the session, its caller and the
+	// instructions it ran with.
+	if m.calls != nil && !spec.Incognito {
+		created.calls = m.calls
+		// A reopened session's created is when it first opened; its new call starts now.
+		started := created.created
+		if !spec.Reopened.IsZero() {
+			started = created.began.UTC().Truncate(time.Microsecond)
+		}
+		created.nextCall(started)
+		created.closers = append(created.closers, func() {
+			id, _ := created.callRow()
+			m.calls.Ended(id, time.Now().UTC())
+			// The review runs on a model rather than in this closer, so it is started
+			// here and lands on the row whenever it comes back.
+			if !spec.NoReview {
+				m.reviews.Review(row(created), spec.Attribution, spec.Region, spec.reviewTarget(), spec.ReviewInstructions, created.conversation())
+			}
+		})
+		m.calls.Started(row(created))
 	}
 
 	m.mu.Lock()
@@ -1571,9 +1566,9 @@ func (m *Manager) find(ctx context.Context, owner Owner, text string, filter sto
 		var rows []store.AgentSession
 		var err error
 		if text != "" {
-			rows, err = m.options.Store.SearchSessions(ctx, owner.CustomerID, text, filter)
+			rows, err = m.options.Store.Sessions.Search(ctx, owner.CustomerID, text, filter)
 		} else {
-			rows, err = m.options.Store.QuerySessions(ctx, owner.CustomerID, filter)
+			rows, err = m.options.Store.Sessions.Select(ctx, owner.CustomerID, filter)
 		}
 		if err != nil {
 			return nil, err
@@ -1674,7 +1669,7 @@ func (m *Manager) Pin(ctx context.Context, live *Session, pinned bool) (*time.Ti
 	if err := live.records.Flush(ctx); err != nil {
 		return nil, stack.Wrap(err)
 	}
-	return m.options.Store.PinSession(ctx, live.spec.CustomerID, live.id, pinned, time.Now().UTC())
+	return m.options.Store.Sessions.Pin(ctx, live.spec.CustomerID, live.id, pinned, time.Now().UTC())
 }
 
 // Recorded reports whether the session has a row: false for an incognito one and for a
@@ -1942,7 +1937,7 @@ func (m *Manager) Delete(ctx context.Context, id string, owner Owner) error {
 	if m.options.Store == nil {
 		return nil
 	}
-	return m.options.Store.DeleteSession(ctx, owner.CustomerID, id)
+	return m.options.Store.Sessions.Delete(ctx, owner.CustomerID, id)
 }
 
 // mayRemember is whether a session could have taught the memory store anything. Only a row
@@ -1954,7 +1949,7 @@ func (m *Manager) mayRemember(ctx context.Context, customerID, id string) bool {
 	if m.options.Store == nil {
 		return true
 	}
-	row, err := m.options.Store.StoredSession(ctx, customerID, id)
+	row, err := m.options.Store.Sessions.Get(ctx, customerID, id)
 	if err != nil {
 		return true
 	}
@@ -1971,7 +1966,7 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 		return stack.Wrap(ErrNoMemory)
 	}
 	if m.options.Store != nil {
-		if _, err := m.options.Store.DeleteUserBranchMessages(ctx, customerID, userID); err != nil {
+		if _, err := m.options.Store.BranchMessages.DeleteUser(ctx, customerID, userID); err != nil {
 			return err
 		}
 	}
@@ -2029,7 +2024,6 @@ func (m *Manager) Shutdown() error {
 	}
 	if m.calls != nil {
 		m.reviews.Close()
-		m.calls.Close()
 		m.records.Close()
 		m.logs.close()
 	}
@@ -2156,7 +2150,7 @@ func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error
 	// A call that already has lines, a number's or a placed call's, is in the app they were
 	// made in, and the agent has to join it there.
 	if m.options.Store != nil && spec.CallID != "" && !spec.Text {
-		pin, found, err := m.options.Store.CallPin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
+		pin, found, err := m.options.Store.CallResources.Pin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
 		if err != nil {
 			return streamapp.Bound{}, err
 		}
@@ -2490,10 +2484,17 @@ func newID() string {
 	return hex.EncodeToString(raw)
 }
 
+// branchJournal is the store's copies of the messages branch switches hide and its journal of
+// the switches, as conversations keep them.
+type branchJournal struct {
+	*store.BranchMessages
+	*store.BranchSwitches
+}
+
 // keepBranches has service keep its conversations' branch switches in tree, and finish the
 // ones a router left unfinished with the sessions' responses there.
 func keepBranches(service *persistent.Service, tree *store.Store) {
-	service.SetBranches(tree)
+	service.SetBranches(branchJournal{tree.BranchMessages, tree.BranchSwitches})
 	service.SetSwitchHooks(switchHooks(tree))
 }
 
@@ -2508,7 +2509,7 @@ func (m *Manager) Conversations() (*persistent.Service, error) {
 		}
 		service := persistent.NewForChats(persistent.StreamApps(m.options.Stream))
 		if m.options.Store != nil {
-			service.SetPins(m.options.Store.ConversationPin)
+			service.SetPins(m.options.Store.Sessions.ConversationPin)
 			keepBranches(service, m.options.Store)
 		}
 		m.conversations = service
