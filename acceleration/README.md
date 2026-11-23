@@ -2172,10 +2172,14 @@ curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/orgs/$ORG_ID/ac
 Every organization's activity is a list by cursor of `customer_activity`'s rows from `from` to
 `to`, UTC days, both included, at most 400 days apart (500 a page, `limit` up to 1000). Each page
 also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
-on it. Its description holds the definitions of tried, API calls, production and churned:
+on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
+`app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+definitions of tried, API calls, production and churned:
 
 ```bash
 curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
+curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,

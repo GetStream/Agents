@@ -392,7 +392,7 @@ components:
             $ref: '#/components/schemas/ActivityDay'
           type: array
         next_cursor:
-          description: Pass as cursor for the next page, with the same from and to. Absent on the last.
+          description: Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last.
           type: string
         organizations:
           description: Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
@@ -7152,12 +7152,12 @@ components:
       properties:
         furthest_step:
           $ref: '#/components/schemas/ActivityStep'
-          description: The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since.
+          description: The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
         organization_id:
           description: The organization.
           type: string
         steps:
-          description: Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
+          description: Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
           items:
             $ref: '#/components/schemas/ActivityStepDay'
           type: array
@@ -23486,7 +23486,7 @@ paths:
   /v1/ops/activity:
     get:
       description: |-
-        What every organization's apps did in each area of the API, from each client, on each UTC day from from to to, one item per organization, day, app, area and client, with how far each organization on the page got, read from the rows that name the organization; for apps that stayed in it, as getOrganizationActivity tells it. Send from and to again with cursor for the next page. Rows are kept 400 days. A row of an app whose organization was not known when it was written names none and is left out. Today's counts keep rising until the UTC day ends: pull with to = yesterday.
+        What every organization's apps did in each area of the API, from each client, on each UTC day from from to to, one item per organization, day, app, area and client, with how far each organization on the page got, read from the rows that name the organization; for apps that stayed in it, as getOrganizationActivity tells it. org_id and app_id narrow the items; with app_id, how far an organization got is still read from all its apps. Send from, to, org_id and app_id again with cursor for the next page. Rows are kept 400 days. A row of an app whose organization was not known when it was written names none and is left out. Today's counts keep rising until the UTC day ends: pull with to = yesterday.
 
         These definitions are the router's; count a dashboard by them:
 
@@ -23516,6 +23516,20 @@ paths:
             description: The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it.
             format: date
             type: string
+        - description: Narrow to the rows that name this organization. One with no row is an empty page.
+          explode: false
+          in: query
+          name: org_id
+          schema:
+            description: Narrow to the rows that name this organization. One with no row is an empty page.
+            type: string
+        - description: Narrow to this app's rows. One with no row is an empty page.
+          explode: false
+          in: query
+          name: app_id
+          schema:
+            description: Narrow to this app's rows. One with no row is an empty page.
+            type: string
         - description: Up to 1000. Omitted is 500.
           explode: false
           in: query
@@ -23526,12 +23540,12 @@ paths:
             maximum: 1000
             minimum: 1
             type: integer
-        - description: The next_cursor of the previous page, sent with the same from and to.
+        - description: The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused.
           explode: false
           in: query
           name: cursor
           schema:
-            description: The next_cursor of the previous page, sent with the same from and to.
+            description: The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused.
             type: string
       responses:
         "200":

@@ -11,11 +11,11 @@ use GetStream\VisionAgents\Json;
 final readonly class OrganizationProgress
 {
     public function __construct(
-        // The furthest step from from to to, read from the rows that name the organization. For apps that stayed in i...
+        // The furthest step from from to to, read from the rows that name the organization, of all its apps even when...
         public ActivityStep|string $furthestStep,
         // The organization.
         public string $organizationId,
-        // Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in f...
+        // Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of a...
         /** @var list<ActivityStepDay> */
         public array $steps,
     ) {

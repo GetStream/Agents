@@ -18,7 +18,7 @@ final readonly class ActivityPage
         // Every organization items names, by id. An organization whose items span two pages is on both, the same, unl...
         /** @var list<OrganizationProgress> */
         public array $organizations,
-        // Pass as cursor for the next page, with the same from and to. Absent on the last.
+        // Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last.
         public ?string $nextCursor = null,
     ) {
     }

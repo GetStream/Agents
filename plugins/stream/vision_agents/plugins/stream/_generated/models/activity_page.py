@@ -25,7 +25,8 @@ class ActivityPage:
         items (list[ActivityDay]): One item per organization, day, app, area and client, sorted in that order.
         organizations (list[OrganizationProgress]): Every organization items names, by id. An organization whose items
             span two pages is on both, the same, unless a row was written between the two reads.
-        next_cursor (str | Unset): Pass as cursor for the next page, with the same from and to. Absent on the last.
+        next_cursor (str | Unset): Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent
+            on the last.
     """
 
     has_more: bool

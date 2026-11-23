@@ -503,7 +503,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<ActivityDay> Items { get; set; } = new System.Collections.Generic.List<ActivityDay>();
 
         /// <summary>
-        /// Pass as cursor for the next page, with the same from and to. Absent on the last.
+        /// Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("next_cursor")]
         public string? NextCursor { get; set; } = default!;
@@ -10508,7 +10508,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since.
+        /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
         public string FurthestStep { get; set; } = default!;
@@ -10520,7 +10520,7 @@ namespace GetStream.VisionAgents.Models
         public string OrganizationId { get; set; } = default!;
 
         /// <summary>
-        /// Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
+        /// Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("steps")]
         public System.Collections.Generic.List<ActivityStepDay> Steps { get; set; } = new System.Collections.Generic.List<ActivityStepDay>();

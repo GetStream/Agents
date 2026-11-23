@@ -4788,7 +4788,7 @@ export type components = {
             readonly has_more: boolean;
             /** @description One item per organization, day, app, area and client, sorted in that order. */
             readonly items: readonly components["schemas"]["ActivityDay"][];
-            /** @description Pass as cursor for the next page, with the same from and to. Absent on the last. */
+            /** @description Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last. */
             readonly next_cursor?: string;
             /** @description Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads. */
             readonly organizations: readonly components["schemas"]["OrganizationProgress"][];
@@ -8662,11 +8662,11 @@ export type components = {
             readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
         };
         readonly OrganizationProgress: {
-            /** @description The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since. */
+            /** @description The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since. */
             readonly furthest_step: components["schemas"]["ActivityStep"];
             /** @description The organization. */
             readonly organization_id: string;
-            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them. */
+            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them. */
             readonly steps: readonly components["schemas"]["ActivityStepDay"][];
         };
         /**

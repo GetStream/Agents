@@ -892,7 +892,7 @@ module GetStream
         }.freeze,
         "listActivity" => {
           method: :get, path: "/v1/ops/activity",
-          path_params: [].freeze, query: %w[from to limit cursor].freeze,
+          path_params: [].freeze, query: %w[from to org_id app_id limit cursor].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,

@@ -4966,10 +4966,16 @@ pub struct ListActivityQuery {
     /// The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// Narrow to the rows that name this organization. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// Narrow to this app's rows. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
     /// Up to 1000. Omitted is 500.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
-    /// The next_cursor of the previous page, sent with the same from and to.
+    /// The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
