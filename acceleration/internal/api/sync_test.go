@@ -327,6 +327,30 @@ func (s *SyncSuite) TestASyncedDirectorysPagesAreReadIntoItsKnowledge() {
 	s.Equal(24, value(listed[0].RefreshHours))
 }
 
+func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
+	s.failQueries("knowledge_urls")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}},
+	})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "store:")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *SyncSuite) TestASyncDeclaringAPageThatIsNotAFetchablePageIsRefusedInItsWords() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "mailto:sales@example.com"}},
+	})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "mailto:sales@example.com is not a page that can be fetched")
+}
+
 func (s *SyncSuite) TestASyncDeclaringAPageWithAUrlLongerThan2048CharactersIsRefused() {
 	page := "https://example.com/"
 	page += strings.Repeat("a", 2049-len(page))

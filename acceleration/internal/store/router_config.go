@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -69,13 +70,16 @@ func (r *RouterConfigs) Insert(ctx context.Context, config *RouterConfig) error 
 	config.UpdatedAt = now
 	config.DeletedAt = nil
 
-	if _, err := r.store.global.NewInsert().Model(config).Exec(ctx); err != nil {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(config).Exec(ctx)
+		return err
+	}, func() []string { return []string{routerConfigNameKey(config.CustomerID, config.Name)} })
+	if err != nil {
 		if constraint(err) == "router_configs_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
 		return stack.Wrap(fmt.Errorf("store: create router config: %w", err))
 	}
-	r.store.forget(ctx, routerConfigNameKey(config.CustomerID, config.Name))
 	return nil
 }
 
@@ -99,14 +103,26 @@ func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error 
 		Where("deleted_at IS NULL").
 		For("UPDATE")
 	var wasName string
-	err := r.store.global.NewUpdate().Model(config).
-		With("was", was).
-		TableExpr("was").
-		Column("name", "stt", "tts", "llm", "sts", "search", "updated_at").
-		Where("rc.id = ?", config.ID).
-		Where("rc.customer_id = ?", config.CustomerID).
-		Returning("was.name").
-		Scan(ctx, &wasName)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model(config).
+			With("was", was).
+			TableExpr("was").
+			Column("name", "stt", "tts", "llm", "sts", "search", "updated_at").
+			Where("rc.id = ?", config.ID).
+			Where("rc.customer_id = ?", config.CustomerID).
+			Returning("was.name").
+			Scan(ctx, &wasName)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if wasName == "" {
+			return nil
+		}
+		return []string{
+			routerConfigKey(config.CustomerID, config.ID),
+			routerConfigNameKey(config.CustomerID, config.Name),
+			routerConfigNameKey(config.CustomerID, wasName),
+		}
+	})
 	switch {
 	case constraint(err) == "router_configs_name_idx":
 		return stack.Wrap(ErrNameTaken)
@@ -115,10 +131,6 @@ func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error 
 	case err != nil:
 		return stack.Wrap(fmt.Errorf("store: update router config: %w", err))
 	}
-	r.store.forget(ctx,
-		routerConfigKey(config.CustomerID, config.ID),
-		routerConfigNameKey(config.CustomerID, config.Name),
-		routerConfigNameKey(config.CustomerID, wasName))
 	return nil
 }
 
@@ -130,20 +142,27 @@ func (r *RouterConfigs) Delete(ctx context.Context, customerID, id string) error
 	}
 
 	var name string
-	err := r.store.global.NewUpdate().Model((*RouterConfig)(nil)).
-		Set("deleted_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Where("deleted_at IS NULL").
-		Returning("name").
-		Scan(ctx, &name)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model((*RouterConfig)(nil)).
+			Set("deleted_at = ?", time.Now().UTC()).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Returning("name").
+			Scan(ctx, &name)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if name == "" {
+			return nil
+		}
+		return []string{routerConfigKey(customerID, id), routerConfigNameKey(customerID, name)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownRouterConfig(id)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete router config: %w", err))
 	}
-	r.store.forget(ctx, routerConfigKey(customerID, id), routerConfigNameKey(customerID, name))
 	return nil
 }
 
@@ -159,7 +178,7 @@ func (r *RouterConfigs) Get(ctx context.Context, customerID, id string) (RouterC
 
 // GetByName returns the config a customer holds under this name, which is how a caller that
 // names a config rather than an id reaches one, and ErrNoRouterConfig when it holds none.
-// That none is cached too.
+// That none is cached too, for missTTL.
 func (r *RouterConfigs) GetByName(ctx context.Context, customerID, name string) (RouterConfig, error) {
 	if customerID == "" || name == "" {
 		return RouterConfig{}, stack.Wrap(errors.New("store: a customer and a config name are required"))
@@ -167,6 +186,7 @@ func (r *RouterConfigs) GetByName(ctx context.Context, customerID, name string) 
 	answer, err := cached(ctx, r.store, routerConfigNameKey(customerID, name), func(ctx context.Context) (found[RouterConfig], error) {
 		config, err := r.where(ctx, customerID, "name", name)
 		if errors.Is(err, ErrNoRouterConfig) {
+			rueidisaside.OverrideCacheTTL(ctx, missTTL)
 			return found[RouterConfig]{}, nil
 		}
 		return found[RouterConfig]{Value: config, Found: err == nil}, err

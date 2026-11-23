@@ -46,6 +46,9 @@ type dataTable struct {
 	// filter is an extra predicate on an export, for a table that holds more than one
 	// kind of row.
 	filter string
+	// order is the order an export reads the table's rows in, for a table whose rows must
+	// arrive in one.
+	order string
 	// shard is a table kept in the shards rather than the shared database.
 	shard bool
 	// across is the column a row is known by in every deployment, for a table whose primary
@@ -132,6 +135,10 @@ var dataTables = []dataTable{
 	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
+	// Who asked not to be reached: STOP and START at the source carry on here through the changes.
+	// Revoked rows go first, so one revoked at the source lifts its copy here before the live
+	// row that replaced it arrives, rather than after the import skipped that row beside it.
+	{name: "opt_outs", customer: "customer_id", order: "revoked_at IS NULL"},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
@@ -178,7 +185,8 @@ var dataTables = []dataTable{
 // one by its own token or by the app's backend, or comes back as a new guest.
 //
 // isSecret is the one list: the export, the import and the record_data_change trigger
-// (watchDataChanges) all read it.
+// (watchDataChanges) all read it. A trigger attached before the list was passed applies the
+// same rule in SQL (20270117000400_record_data_change_secrets.sql): change both together.
 func isSecret(column string) bool {
 	return strings.HasSuffix(column, "_sealed") || strings.HasSuffix(column, "_secret_hash") ||
 		slices.Contains(oauthSecrets, column)
@@ -617,28 +625,62 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 		return err
 	}
 	query, args := table.selectRows(customerID, shape.secrets())
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
+	// Read through a cursor in the transaction's snapshot rather than as one query: closing a
+	// query's rows early reads every row left, so an export that ends partway would hold its
+	// transaction until the whole table had been read. A batch is all it reads instead.
+	if _, err := tx.ExecContext(ctx, "DECLARE export_rows NO SCROLL CURSOR FOR "+query, args...); err != nil {
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var row json.RawMessage
-		if err := rows.Scan(&row); err != nil {
+	for {
+		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("store: export %s: %w", table.name, err)
 		}
-		if row, err = s.exportPin(table.name, row); err != nil {
+		fetched, err := s.exportBatch(ctx, tx, table.name, write)
+		if err != nil {
 			return err
 		}
-		if err := write(table.name, row); err != nil {
-			return err
+		if fetched < exportBatchRows {
+			break
 		}
 	}
-	if err := rows.Err(); err != nil {
+	if _, err := tx.ExecContext(ctx, "CLOSE export_rows"); err != nil {
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
 	return nil
+}
+
+// exportBatchRows is how many rows an export reads from its cursor at a time, and so the most it
+// reads past the row it stops at. A row can be a whole document's text of several MiB, which
+// a hundred keep to a moment's reading, and most rows are well under a KiB.
+const exportBatchRows = 100
+
+// exportBatch writes the next exportBatchRows rows of the export_rows cursor and returns how many
+// it read.
+func (s *Store) exportBatch(ctx context.Context, tx bun.Tx, table string, write func(string, json.RawMessage) error) (int, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("FETCH %d FROM export_rows", exportBatchRows))
+	if err != nil {
+		return 0, fmt.Errorf("store: export %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	fetched := 0
+	for rows.Next() {
+		fetched++
+		var row json.RawMessage
+		if err := rows.Scan(&row); err != nil {
+			return 0, fmt.Errorf("store: export %s: %w", table, err)
+		}
+		if row, err = s.exportPin(table, row); err != nil {
+			return 0, err
+		}
+		if err := write(table, row); err != nil {
+			return 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: export %s: %w", table, err)
+	}
+	return fetched, nil
 }
 
 // selectRows reads one table's rows for one customer, without the columns that never
@@ -659,6 +701,9 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 	if t.filter != "" {
 		where += " AND " + t.filter
 	}
+	if t.order != "" {
+		where += " ORDER BY " + t.order
+	}
 	return fmt.Sprintf("SELECT %s FROM %s AS t WHERE %s", subject.String(), t.name, where), []any{customerID}
 }
 
@@ -669,13 +714,19 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // customer inside every row it carries, and believing that would let anybody holding
 // credentials for one app write into another. For a row that belongs to a customer
 // through a parent there is no column to overwrite, so the parent is checked instead and
-// a row whose parent is somebody else's is silently not written.
+// a row whose parent is somebody else's is silently not written. A row whose key a row of
+// another customer holds here is refused (ErrAnotherCustomersRow).
 //
 // It upserts, so importing the same export twice is the same as importing it once, which
 // is what lets a move be resumed after it was interrupted.
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
 	spec, _ := dataTableByName(table)
-	return s.importRow(ctx, s.sideOf(spec), customerID, table, row)
+	var stale []string
+	if err := s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale); err != nil {
+		return err
+	}
+	s.forget(ctx, stale...)
+	return nil
 }
 
 // sideOf is the database a table's rows are written to here: this shard's or the shared one.
@@ -692,7 +743,9 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
 	"attached_at", "config_id"}
 
-func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage) error {
+// importRow writes one row of an export or of a change (ImportRow). It adds to stale the cached
+// values the row was and is read through, for the caller to forget once the write has committed.
+func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage, stale *[]string) error {
 	if slices.Contains(retiredTables, table) {
 		return nil
 	}
@@ -805,6 +858,15 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if spec.copied != "" {
 		where = " WHERE NOT " + spec.copiedBefore(shape, columns)
 	}
+	if table == "opt_outs" {
+		// An opt-out live here under another id is this deployment's, and stays: the row arriving
+		// would break the one-live-row index, and dropping the live one would let the person be
+		// reached again. A revoked row is history beside it, and revokes only the row of its own id,
+		// so a START replayed from the source lifts only what the source sent. Two writes of one
+		// live opt-out here at the same moment can still fail the statement on that index.
+		where = " WHERE NOT (r.revoked_at IS NULL AND EXISTS (SELECT 1 FROM opt_outs AS h WHERE h.customer_id = r.customer_id" +
+			" AND h.recipient = r.recipient AND h.channel = r.channel AND h.revoked_at IS NULL AND h.id <> r.id))"
+	}
 	args := []any{string(row), customerID}
 	if table == "requests" {
 		// The organization a request counts against is the app's here, whatever the row says.
@@ -851,6 +913,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if table == "phone_numbers" {
 		conflict += " AND NOT " + boughtHere("phone_numbers")
 	}
+	// An opt-out here stays on the recipient and channel it was recorded for: a row arriving
+	// under its id for another one neither moves nor lifts it.
+	if table == "opt_outs" {
+		conflict += " AND opt_outs.recipient = EXCLUDED.recipient AND opt_outs.channel = EXCLUDED.channel"
+	}
 
 	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
 	// commit in order and a reader resuming after one misses none. The row is read through the
@@ -865,10 +932,100 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		"%sINSERT INTO %s (%s) SELECT %s FROM %sjsonb_populate_record(NULL::%s, %s) AS r%s ON CONFLICT %s %s",
 		locked, spec.name, quoted, selected, through, spec.name, subject, where, spec.conflictTarget(shape), conflict)
 
-	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+	// A row renamed, or a skill moved to another config, is cached under what it was too.
+	var was []byte
+	if cachedByID(table) {
+		err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT to_jsonb(h) FROM %s AS h WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ?",
+			spec.name), string(row), customerID).Scan(&was)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("store: import %s: %w", table, err)
+		}
+	}
+
+	result, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
+	*stale = append(*stale, cachedKeys(customerID, table, was)...)
+	*stale = append(*stale, cachedKeys(customerID, table, row)...)
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	if written > 0 || spec.copied != "" {
+		return nil
+	}
+	// Nothing written is the importer's own row kept as it is here, or a row whose key another
+	// customer holds, which is refused rather than dropped. A copied row's key names its customer.
+	keys := shape.keys
+	if spec.across != "" {
+		keys = []string{spec.across}
+	}
+	keyed, held, imported := make([]string, 0, len(keys)), make([]string, 0, len(keys)), make([]string, 0, len(keys))
+	for _, key := range keys {
+		expression := "r." + key
+		if i := slices.Index(columns, key); i >= 0 {
+			expression = picked[i]
+		}
+		keyed = append(keyed, expression+" AS "+key)
+		held, imported = append(held, "h."+key), append(imported, "i."+key)
+	}
+	var taken bool
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT EXISTS (SELECT 1 FROM (SELECT %s FROM jsonb_populate_record(NULL::%s, %s) AS r) AS i JOIN %s AS h ON (%s) = (%s) WHERE NOT %s)",
+		strings.Join(keyed, ", "), spec.name, subject, spec.name, strings.Join(held, ", "), strings.Join(imported, ", "), spec.owned("h")),
+		append(slices.Clone(read), customerID)...).Scan(&taken); err != nil {
+		return fmt.Errorf("store: import %s: %w", table, err)
+	}
+	if taken {
+		return fmt.Errorf("store: import %s: %w", table, ErrAnotherCustomersRow)
+	}
 	return nil
+}
+
+// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
+var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
+
+// cachedByID is whether a moved table's rows are cached by their id and something else they
+// hold, which a write can change.
+func cachedByID(table string) bool {
+	return slices.Contains([]string{"agent_configs", "router_configs", "skills", "voices"}, table)
+}
+
+// cachedKeys are the cached values a row of a moved table, as row reads under customerID, is read
+// through: what the table's own writes forget (AgentConfigs.Update and its siblings). An app's
+// policy is cached by its app alone, so any row of it names the same values.
+func cachedKeys(customerID, table string, row []byte) []string {
+	if table == "policies" {
+		return policyKeys(ScopeApp, customerID)
+	}
+	if !cachedByID(table) || len(row) == 0 {
+		return nil
+	}
+	// The columns are text, which jsonb_populate_record also fills from a number, so a value is
+	// read as the text it is written as. A row that is not a JSON object was refused before it
+	// was written.
+	var fields map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(row))
+	decoder.UseNumber()
+	if decoder.Decode(&fields) != nil {
+		return nil
+	}
+	text := func(column string) string {
+		if value, found := fields[column]; found && value != nil {
+			return fmt.Sprint(value)
+		}
+		return ""
+	}
+	switch table {
+	case "agent_configs":
+		return []string{agentConfigKey(customerID, text("id")), agentConfigNameKey(customerID, text("name"))}
+	case "router_configs":
+		return []string{routerConfigKey(customerID, text("id")), routerConfigNameKey(customerID, text("name"))}
+	case "voices":
+		return []string{voiceKey(customerID, text("id")), voiceNameKey(customerID, text("name"))}
+	}
+	return []string{skillsKey(customerID, text("config_id"))}
 }
 
 // validated is a model that refuses a row the API would not store.
@@ -895,6 +1052,7 @@ var importedModels = map[string]func() validated{
 	"simulation_cases":       func() validated { return &SimulationCase{} },
 	"scheduled_tasks":        func() validated { return &ScheduledTask{} },
 	"scheduled_task_runs":    func() validated { return &ScheduledTaskRun{} },
+	"opt_outs":               func() validated { return &OptOut{} },
 	"recordings":             func() validated { return &Recording{} },
 	"agent_sessions":         func() validated { return &AgentSession{} },
 	"agent_session_tools":    func() validated { return &agentSessionTools{} },
@@ -1637,10 +1795,13 @@ func (s *Store) Changes(ctx context.Context, customerID string, after int64, lim
 		return nil, 0, ErrChangesExpired
 	}
 
+	// A policy is recorded under its scope id whatever its scope, so an organization's sharing the
+	// customer's id is left out, as an export leaves it out. It is left out before the limit, so a
+	// page is as full as the customer's own changes make it.
 	rows, err := tx.QueryContext(ctx, `
 SELECT seq, table_name, op, key, payload, at
 FROM data_changes
-WHERE customer_id = ? AND seq > ? AND seq <= ?
+WHERE customer_id = ? AND seq > ? AND seq <= ? AND (table_name <> 'policies' OR key ->> 'scope' = 'app')
 ORDER BY seq
 LIMIT ?`, customerID, after, mark, limit)
 	if err != nil {
@@ -1667,6 +1828,15 @@ LIMIT ?`, customerID, after, mark, limit)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("store: changes: %w", err)
+	}
+	// A page that is not full holds every change of theirs up to the mark, so the cursor moves past
+	// the ones left out too: one left ahead of it would be pruned in time and expire the cursor.
+	if len(changes) < limit {
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(seq), ?) FROM data_changes WHERE customer_id = ? AND seq > ? AND seq <= ?",
+			cursor, customerID, cursor, mark).Scan(&cursor); err != nil {
+			return nil, 0, fmt.Errorf("store: changes: %w", err)
+		}
 	}
 	return changes, cursor, nil
 }
@@ -1699,26 +1869,49 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 	if len(changes) == 0 {
 		return nil
 	}
-	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	var stale []string
+	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range changes {
+			if !appPolicy(change) {
+				continue
+			}
 			switch change.Op {
 			case ChangeDelete:
-				if err := s.deleteRow(ctx, tx, customerID, change); err != nil {
+				if err := s.deleteRow(ctx, tx, customerID, change, &stale); err != nil {
 					return err
 				}
 			default:
-				if err := s.importRow(ctx, tx, customerID, change.Table, change.Payload); err != nil {
+				if err := s.importRow(ctx, tx, customerID, change.Table, change.Payload, &stale); err != nil {
 					return err
 				}
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.forget(ctx, stale...)
+	return nil
+}
+
+// appPolicy is false for a change to a policy of another scope than an app's. The trigger records
+// a policy under its scope id whatever its scope, so an organization's that shares an id with the
+// app is recorded under the app, and replaying it would write it over the app's (identity).
+func appPolicy(change DataChange) bool {
+	if change.Table != "policies" {
+		return true
+	}
+	var key struct {
+		Scope string `json:"scope"`
+	}
+	return json.Unmarshal(change.Key, &key) == nil && key.Scope == string(ScopeApp)
 }
 
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
-// change carrying somebody else's key cannot reach their row.
-func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange) error {
+// change carrying somebody else's key cannot reach their row. It adds to stale the cached values
+// the row was read through.
+func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange, stale *[]string) error {
 	if slices.Contains(retiredTables, change.Table) {
 		return nil
 	}
@@ -1748,6 +1941,11 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		args = append(args, string(change.Key))
 	} else {
 		for _, column := range shape.keys {
+			// The customer in the key is the source's, which a move under another id does not
+			// keep: the customer's own condition below is what scopes the delete.
+			if column == spec.customer {
+				continue
+			}
 			conditions = append(conditions, fmt.Sprintf("t.%s::text = (?::jsonb ->> '%s')", column, column))
 			args = append(args, string(change.Key))
 		}
@@ -1768,7 +1966,33 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	args = append(args, customerID)
 
 	query := fmt.Sprintf("DELETE FROM %s AS t WHERE %s", spec.name, strings.Join(conditions, " AND "))
-	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+	if !cachedByID(change.Table) {
+		result, err := db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("store: delete %s: %w", change.Table, err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: delete %s: %w", change.Table, err)
+		}
+		if deleted > 0 {
+			*stale = append(*stale, cachedKeys(customerID, change.Table, nil)...)
+		}
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, query+" RETURNING to_jsonb(t)", args...)
+	if err != nil {
+		return fmt.Errorf("store: delete %s: %w", change.Table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row []byte
+		if err := rows.Scan(&row); err != nil {
+			return fmt.Errorf("store: delete %s: %w", change.Table, err)
+		}
+		*stale = append(*stale, cachedKeys(customerID, change.Table, row)...)
+	}
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("store: delete %s: %w", change.Table, err)
 	}
 	return nil
@@ -1951,10 +2175,12 @@ func dataTableByName(name string) (dataTable, bool) {
 // shared database, empty when none does. A table kept in the shards is left out: it holds the
 // customer's own traffic here, and a shard's pod reads only its own shard, so counting it would
 // make the answer depend on which pod runs. A table that belongs to a customer through a parent
-// is left out too: its rows are written only under a parent of the customer's.
+// is left out too: its rows are written only under a parent of the customer's. So are opt-outs:
+// an import keeps one recorded here live (importRow), so an app holding only those holds nothing
+// an export would write over.
 func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, error) {
 	for _, table := range dataTables {
-		if table.customer == "" || table.shard {
+		if table.customer == "" || table.shard || table.name == "opt_outs" {
 			continue
 		}
 		where := table.customer + " = ?"

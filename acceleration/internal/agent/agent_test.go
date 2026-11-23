@@ -1057,10 +1057,23 @@ func (s *AgentSuite) delegates() {
 	}}}
 }
 
-// reasoner is the model router the agent answers through. The agent opens the voice
-// model, the flow controller and the optional subagent from it, in that order.
+// reasoner is the model router a voice agent answers through. It opens the conversation's
+// model, the flow controller and the optional subagent from it, in that order. A text agent
+// opens no flow controller, so it uses textReasoner.
 func (s *AgentSuite) reasoner(logger *slog.Logger) *llmrouter.Router {
-	models := []llmrouter.Provider{s.model, s.flow}
+	return s.reasonerOver(logger, s.model, s.flow)
+}
+
+// textReasoner is reasoner for an agent that holds the conversation in writing, which opens
+// no flow controller: the conversation's model, then the subagent's.
+func (s *AgentSuite) textReasoner(logger *slog.Logger) *llmrouter.Router {
+	return s.reasonerOver(logger, s.model)
+}
+
+// reasonerOver hands out the given models in the order the agent opens them, then the
+// subagent's, the last one for every open after that.
+func (s *AgentSuite) reasonerOver(logger *slog.Logger, opens ...llmrouter.Provider) *llmrouter.Router {
+	models := opens
 	if s.subagent != nil {
 		models = append(models, s.subagent)
 	}
@@ -1146,7 +1159,7 @@ func (s *AgentSuite) joinText() {
 		Tools:              s.tools,
 		ToolRunner:         running,
 		Ender:              ending,
-		LLM:                s.reasoner(logger),
+		LLM:                s.textReasoner(logger),
 		LLMTarget:          "en-low-latency",
 		Knowledge:          reading,
 		KnowledgeNamespace: s.namespace,

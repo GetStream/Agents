@@ -350,7 +350,12 @@ type watcherCommand struct {
 	Type string `json:"type"`
 	// ToolCallID names the call a tool_result answers.
 	ToolCallID string `json:"tool_call_id"`
-	CommandID  string `json:"request_id"`
+	// ID is tool_call_id under the name the tool_call frame gives it, which a client
+	// echoing that frame's fields sends. tool_call_id wins when both are sent. It is read raw
+	// and used only when it is a string: a command that never named a call by id may carry an
+	// id of any shape, and must not close the socket over a field it never read.
+	ID        json.RawMessage `json:"id"`
+	CommandID string          `json:"request_id"`
 	// LegacyCommandID is request_id under its name before v0.6.35, which clients built
 	// against an older SDK (the getstream.io Ask panel among them) still send.
 	LegacyCommandID string `json:"command_id"`
@@ -432,6 +437,28 @@ var errNoApprovalWaits = errors.New("tool_approval reached no call waiting for i
 var errApprovalNeedsTurn = errors.New("tool_approval reached no call: the call of a durable command " +
 	"needs the turn_id of its tool_call with the request_id")
 
+// errToolResultNeedsCall answers a tool_result that names no call.
+var errToolResultNeedsCall = errors.New("tool_result needs tool_call_id: the id of the tool_call it answers")
+
+// errNoResultWaits answers a tool_result no call waits for.
+var errNoResultWaits = errors.New("tool_result reached no call waiting for it: the call was already " +
+	"answered, cancelled or timed out, or its tool_call_id names none, or a call of a durable command " +
+	"was answered without the request_id and turn_id of its tool_call")
+
+// maxEchoedID is the most of an id tool_result_ignored repeats, the length a request_id may
+// have on the HTTP API.
+const maxEchoedID = 128
+
+// echoedID is id as tool_result_ignored repeats it. Every watcher is sent that frame and it is
+// kept for replay, so a watcher sending ids of a megabyte must not be able to fill the buffer
+// with them; no id the router hands out is longer than this.
+func echoedID(id string) string {
+	if len(id) <= maxEchoedID {
+		return id
+	}
+	return strings.ToValidUTF8(id[:maxEchoedID], "")
+}
+
 // errUnreadableFrame ends a socket on a frame that is not JSON of the shape it reads.
 var errUnreadableFrame = invalidRequest("a frame on this socket is not JSON it can read")
 
@@ -464,8 +491,15 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 	if command.CommandID == "" {
 		command.CommandID = command.LegacyCommandID
 	}
+	if command.ToolCallID == "" {
+		command.ToolCallID = stringID(command.ID)
+	}
 	switch command.Type {
 	case "tool_result":
+		if command.ToolCallID == "" {
+			found.Report(errToolResultNeedsCall, "tool")
+			return true
+		}
 		// A watcher that was not asked to run the call does not answer it, so a browser
 		// without the tool cannot fail a call the backend that holds it is running.
 		if !found.Answers(seat, command.ToolCallID) {
@@ -474,17 +508,16 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 			return true
 		}
 		parts, err := parseToolOutput(command.Output)
+		failure := command.Error
 		if err != nil {
 			found.Report(err, "tool")
-			if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, nil, err.Error()) {
-				s.logger.Debug("a tool result answered nothing",
-					"session", found.ID(), "call", command.ToolCallID)
-			}
-			return true
+			parts, failure = nil, err.Error()
 		}
-		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, command.Error) {
-			s.logger.Debug("a tool result answered nothing",
-				"session", found.ID(), "call", command.ToolCallID)
+		// Without a word back, a result naming no call it can settle looks to its sender as
+		// though it was taken, while the model waits out the call's timeout.
+		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, failure) {
+			found.IgnoreToolResult(echoedID(command.ToolCallID), echoedID(command.CommandID), echoedID(command.TurnID),
+				errNoResultWaits)
 		}
 
 	case "tool_hold":
@@ -591,10 +624,17 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 
 	default:
 		found.Report(fmt.Errorf("unknown command %q", command.Type), "command")
-		s.logger.Debug("ignoring an unknown command",
-			"session", found.ID(), "type", command.Type)
 	}
 	return true
+}
+
+// stringID is raw as a string, or empty when it is not one.
+func stringID(raw json.RawMessage) string {
+	var id string
+	if json.Unmarshal(raw, &id) != nil {
+		return ""
+	}
+	return id
 }
 
 func resolveTool(found *session.Session, callID, commandID, turnID string, parts []llm.ContentPart, failure string) bool {
@@ -658,6 +698,15 @@ func frameOf(event session.Event) (frame, bool) {
 
 	case session.ToolApprovalIgnored:
 		ignored := frame{"type": "tool_approval_ignored", "reason": typed.Reason}
+		for key, id := range map[string]string{"tool_call_id": typed.ID, "request_id": typed.CommandID, "turn_id": typed.TurnID} {
+			if id != "" {
+				ignored[key] = id
+			}
+		}
+		return ignored, true
+
+	case session.ToolResultIgnored:
+		ignored := frame{"type": "tool_result_ignored", "reason": typed.Reason}
 		for key, id := range map[string]string{"tool_call_id": typed.ID, "request_id": typed.CommandID, "turn_id": typed.TurnID} {
 			if id != "" {
 				ignored[key] = id
@@ -1139,12 +1188,24 @@ func participantOf(participant stt.Participant) frame {
 // errorText renders a failure as the empty string when there was none, so a client can
 // read one field rather than checking whether it is there. A provider's error can echo the
 // credential it was sent, so the text goes through the redactor the requests table keeps
-// failures by.
+// failures by. A failure of what the router depends on says only that something went wrong.
 func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
+	if dependencyFailed(err) {
+		return somethingWentWrong
+	}
 	return store.SafeLogText(err.Error())
+}
+
+// dependencyFailed reports whether err is a failure of what the router depends on rather than
+// a refusal of what the caller asked: a deadline that passed, the network, or a vendor. Its
+// text names hosts, addresses, URLs and bodies, so a caller is never sent it.
+func dependencyFailed(err error) bool {
+	_, network := errors.AsType[net.Error](err)
+	_, vendor := errors.AsType[*llm.ProviderFailure](err)
+	return network || vendor || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, routing.ErrVendorsFailed)
 }
 
 // withRefusal adds the code naming a refusal to an error frame for one, so a client can tell

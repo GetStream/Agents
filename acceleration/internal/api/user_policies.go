@@ -454,7 +454,7 @@ func (s *Server) updateCustomerPolicy(ctx context.Context, request *updateCustom
 	}
 	policy, err := s.savePolicy(ctx, scope, id, sent, auditedAs)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }

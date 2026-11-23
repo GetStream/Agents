@@ -288,7 +288,7 @@ TABLE channel_links
     expires_at timestamp with time zone NOT NULL
     used_at timestamp with time zone
     user_id text NOT NULL
-    CONSTRAINT channel_links_pkey PRIMARY KEY (code)
+    CONSTRAINT channel_links_pkey PRIMARY KEY (customer_id, code)
 
 TABLE channel_thread_inbound
     attempts integer NOT NULL DEFAULT 0
@@ -1121,6 +1121,7 @@ TABLE scheduled_task_runs
     started_at timestamp with time zone
     state text NOT NULL DEFAULT 'running'::text
     task_id text NOT NULL
+    texted text[] NOT NULL DEFAULT '{}'::text[]
     trigger text NOT NULL DEFAULT 'schedule'::text
     CONSTRAINT scheduled_task_runs_customer_id_task_id_fkey FOREIGN KEY (customer_id, task_id) REFERENCES scheduled_tasks(customer_id, id) ON DELETE CASCADE
     CONSTRAINT scheduled_task_runs_pkey PRIMARY KEY (id)

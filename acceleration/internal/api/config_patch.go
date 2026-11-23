@@ -266,7 +266,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if message, ok := textSubagentComplaint(&config, patch.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.channelsComplaint(ctx, config); !ok {
+	if message, ok, err := s.channelsComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.storedSkillSandboxComplaint(ctx, config); err != nil {

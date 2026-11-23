@@ -63,12 +63,13 @@ func (s *OCRSuite) TestAPageReadWithItsFiguresGoesToAModelThatSeesBeforeTheShort
 	s.Equal("vision", *read.Provider, "ocr-default prefers the OCR model, which cannot summarise a chart")
 }
 
-func (s *OCRSuite) TestAReadingEveryModelFailedIsAnAnswerSayingWhy() {
+func (s *OCRSuite) TestAReadingEveryModelFailedIsAnAnswerSayingWhyInNoneOfTheVendorsWords() {
 	read := s.read(OcrRequest{Image: drawn.Images[0].Data, Options: &OcrOptions{Target: pointerTo("broken/stub")}})
 
 	s.Equal(OcrStatusFailed, read.Status)
 	s.Equal(OcrErrorCode(ocr.ProviderFailed), *read.ErrorCode)
-	s.Contains(*read.Error, "vendor down")
+	s.Equal("the provider failed to read the page", *read.Error)
+	s.NotContains(*read.Error, "vendor down")
 	s.Empty(read.Markdown)
 	s.Zero(read.CostMicros)
 }

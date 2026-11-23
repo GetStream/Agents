@@ -55,7 +55,7 @@ one is a migration rather than a type change, and a bad value never reaches a ro
 ### Who made it
 
 [internal/api/actor.go](../../acceleration/internal/api/actor.go) reads three headers:
-`X-Stream-Client` (`dashboard`, `cli`, `sdk`), `X-Stream-Actor-Id` and
+`X-Stream-Client` (`dashboard`, `cli`, `sdk`, or an SDK's `stream-agents-<lang>-v<version>` name, which is recorded as `sdk`), `X-Stream-Actor-Id` and
 `X-Stream-Actor-Name`. They are read **only from a server-side caller**, and a caller that
 names no client is recorded as `api`, which is all that can be said about it.
 

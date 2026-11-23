@@ -58,7 +58,7 @@ func documentHandWritten(api huma.API) {
 			"`decision`, `delegated`, `task_settled` (files " +
 			"lists what the work's code handed back, each a name, mime_type, url and size, uploaded " +
 			"to a persistent conversation's channel and attached to the reply), " +
-			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`, " +
+			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`, `tool_ran`, " +
 			"`tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`, `looked_up`, " +
 			"`backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and " +
 			"message_end, the utterance being heard when it was cut, how many milliseconds of it had been, " +
@@ -166,7 +166,7 @@ func documentHandWritten(api huma.API) {
 			"and `name` of the person whose turn asked for it, when the router knows) and " +
 			"`conversation` (`cid` when the conversation is kept, and the session's `custom`). " +
 			"Every watcher sees every `tool_call`, and `run` says whether this one is to run it: " +
-			"only a watcher that runs the tool answers, and a result from any other is dropped. A " +
+			"only a watcher that runs the tool answers, and a result from any other is dropped while the call waits. A " +
 			"watcher says which tools it runs with `tools` when it attaches. Without it, it runs " +
 			"the session's tools when it is on the side that created the session: a backend for a " +
 			"session a backend created, the same person for one a device created. A tool a backend " +
@@ -175,7 +175,19 @@ func documentHandWritten(api huma.API) {
 			"`tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout passed, or " +
 			"the caller interrupted a call to an `interruptible` tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; " +
 			"their result must repeat both values so a result cannot be adopted by another command " +
-			"or turn.\n" +
+			"or turn. A `tool_result`, `tool_hold`, `tool_update` or `tool_approval` names its call " +
+			"with `tool_call_id`, or with `id` as the `tool_call` did; `tool_call_id` wins when both " +
+			"are sent. A `tool_result` naming no call is answered with an `error` (`context` `tool`). " +
+			"One no call waits for (answered already, cancelled, timed out, naming another call, or a " +
+			"call of a durable command without its `request_id` and `turn_id`) is answered with " +
+			"`tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, " +
+			"each left out when it was and each cut to its first 128 bytes, and `reason`, a sentence " +
+			"saying why; the socket stays open. Every watcher is sent both. A result sent in the " +
+			"moment its call times out may be taken and lost without either. A result from a watcher " +
+			"that does not run a call still waiting for it is dropped without a word, since the " +
+			"watcher that runs it answers. Once the call waits no longer, a result from any watcher, " +
+			"running it or not, is answered with `tool_result_ignored` like any other. An `id` that " +
+			"is not a string names no call.\n" +
 			"While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) " +
 			"to keep the call going when the caller talks over the agent, which would otherwise " +
 			"cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it " +
@@ -937,6 +949,8 @@ func documentHandWritten(api huma.API) {
 			"sample and a call recording lives in an object bucket rather than in this database; the " +
 			"rows naming those objects are here, and copying the bucket is yours to do.\n" +
 			"A router with shards cannot be the source of a move and answers 400 `not_configured`.\n" +
+			"An app runs one export at a time, and an export ends after an hour, or when one line " +
+			"has taken a minute to write: an export with no cursor line is one to run again.\n" +
 			"Server-side only, and refused entirely when the router runs with " +
 			"ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.",
 		Responses: map[string]*huma.Response{
@@ -944,7 +958,8 @@ func documentHandWritten(api huma.API) {
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "This deployment has no database to export from, or cannot record changes; or a write that was open when the export started is still open after 30 seconds: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"409": {Description: "An export of this app is already running on this router: one runs at a time.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or a write that was open when the export started is still open after 30 seconds: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -952,8 +967,8 @@ func documentHandWritten(api huma.API) {
 		Method:      http.MethodPost,
 		Path:        "/v1/data/import",
 		Summary:     "Write an export, or a batch of changes, into this deployment",
-		Description: "Takes what `exportData` produced, and the same lines with a `change` in place of a " +
-			"`row` for what `listDataChanges` returned. Every row is written under the calling app " +
+		Description: "Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the " +
+			"same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app " +
 			"whatever the file says, so an export from one app cannot be imported into another's " +
 			"rows, and rows belonging to a customer through a parent are only written where that " +
 			"parent is the caller's.\n" +
@@ -979,6 +994,7 @@ func documentHandWritten(api huma.API) {
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
 			"409": {Description: "The file carries an export's rows, the app already has data here and `full` is not true.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"413": {Description: "A line of the file is over 64 MiB.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"503": {Description: "This deployment has no database to import into.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
