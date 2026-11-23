@@ -3,6 +3,7 @@
 package egress_test
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -207,4 +208,51 @@ func boolName(name string, value bool) string {
 		return name
 	}
 	return "not " + name
+}
+
+// TestATrailerReachesTheHostAsOnTheBase: reading a body to its end fills its trailer, which ReverseProxy would then
+// send on, a method override in it included, after the trailer check; the host gets what it got on the base
+// (18962cc3e), where the body streamed (probe of this test there).
+func (s *ProxySuite) TestATrailerReachesTheHostAsOnTheBase() {
+	s.readsUploadPack()
+	trailers := make(chan http.Header, 1)
+	s.answering(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		trailers <- r.Trailer.Clone()
+	})
+	// The base's host got the names declared in Trailer, with no value, and no other.
+	want := map[string]http.Header{"": nil, "X-Checksum": {"X-Checksum": nil}}
+	for _, declared := range []string{"", "X-Checksum"} {
+		conn := s.tunnel(&tls.Config{})
+		head := "POST /o/r.git/git-upload-pack HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer " + s.placeholder +
+			"\r\nTransfer-Encoding: chunked\r\n"
+		if declared != "" {
+			head += "Trailer: " + declared + "\r\n"
+		}
+		_, err := io.WriteString(conn, head+"\r\n4\r\n0000\r\n0\r\nX-Checksum: abc\r\nX-HTTP-Method-Override: DELETE\r\n\r\n")
+		s.Require().NoError(err)
+		response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		s.Require().NoError(err)
+		_ = response.Body.Close()
+
+		s.Equal(http.StatusOK, response.StatusCode, declared)
+		s.Equal(want[declared], <-trailers, declared)
+	}
+}
+
+// TestABodyCutShortIsNoRequest: a chunked body whose sandbox stops sending before its last chunk is no request the
+// host may apply, so the sandbox gets the 502 it got on the base (18962cc3e), where the body streamed.
+func (s *ProxySuite) TestABodyCutShortIsNoRequest() {
+	s.readsUploadPack()
+	conn := s.tunnel(&tls.Config{})
+	_, err := io.WriteString(conn, "POST /o/r.git/git-upload-pack HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer "+
+		s.placeholder+"\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n0000\r\n")
+	s.Require().NoError(err)
+	s.Require().NoError(conn.CloseWrite())
+
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+
+	s.Require().NoError(err)
+	_ = response.Body.Close()
+	s.Equal(http.StatusBadGateway, response.StatusCode)
 }

@@ -507,6 +507,17 @@ func (s *EgressSuite) TestARequestWithABodyGoCannotSendTwiceRidesANewConnection(
 	}
 }
 
+// The sandbox proxy gives a body it keeps in memory a GetBody (AI-3463), so Go can send it again after an HTTP/2
+// GOAWAY. A POST is still one Go does not send twice on HTTP/1.1, so it still rides a new connection, as on base
+// 18962cc3e.
+func (s *EgressSuite) TestAPostWithAGetBodyStillRidesANewConnection() {
+	request := &http.Request{Method: http.MethodPost, Header: http.Header{}}
+	request.Body, request.GetBody = io.NopCloser(strings.NewReader("{}")), func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("{}")), nil
+	}
+	s.False(s.reusesAConnection(request))
+}
+
 // An HTTP/2 origin closes a connection with GOAWAY, which tells the client what it did not process, so POSTs to
 // it share one connection.
 func (s *EgressSuite) TestPostsToAnHTTP2OriginShareOneConnection() {
