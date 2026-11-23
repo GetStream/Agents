@@ -403,6 +403,9 @@ func (s *Server) publishSessionEvents(
 	// detached, and both end the watcher: dropping it here is what closes its command
 	// queue and takes it out of the registry.
 	defer state.dropProxy(watcher)
+	// A session can end after Close has cancelled ctx (cmd/router closes the server before
+	// it ends the sessions still held), and the other node must still be told.
+	ctx = context.WithoutCancel(ctx)
 
 	for event := range events {
 		rendered, ok := frameOf(event)
