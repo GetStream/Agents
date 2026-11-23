@@ -35,3 +35,15 @@ func TestAReplyOfTwoTurnsIsJoinedAsTheConversationJoinsThem(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "First.\n\nSecond.", text)
 }
+
+// A reply ends however its turn did, interrupted included: a regenerate or an edit during the
+// turn interrupts it (Conversation.switchTo) while the session stays open, and a wait that took
+// it for running would hold its worker to the end of the reply window (AI-3594 R1.3).
+func TestAReplyEndsHoweverItsTurnEnded(t *testing.T) {
+	for _, state := range []string{"completed", "cancelled", "interrupted", "failed"} {
+		require.True(t, replyEnded(state), state)
+	}
+	for _, state := range []string{"", "thinking", "writing", "tools", "queued"} {
+		require.False(t, replyEnded(state), state)
+	}
+}

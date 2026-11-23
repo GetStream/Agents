@@ -1140,6 +1140,22 @@ func (s *TelnyxUnpaidSuite) TestAConversationRetryWaitsOutTheTurnAnEarlierAttemp
 	}
 }
 
+// A conversation follow-up the session refuses to run, such as one with nothing to answer, fails
+// the attempt: no turn ran, so nothing is delivered once the reply window passes (AI-3594 R1.3).
+func (s *TelnyxUnpaidSuite) TestAConversationFollowUpTheSessionRefusesIsNotDelivered() {
+	window := scheduledReplyWindow
+	scheduledReplyWindow = 2 * time.Second
+	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	user, opened := s.creditedOpening("holding/holding-model")
+	found, delivery := s.followUpIn(user, opened, "conversation")
+	delivery.Text = ""
+
+	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+		store.ScheduledTaskDeliveredConversation)
+
+	s.ErrorContains(err, "there is nothing to answer")
+}
+
 // A conversation turn whose session ends while it runs is delivered, as it always was: nothing
 // more comes from the session to say otherwise.
 func (s *TelnyxUnpaidSuite) TestAConversationTurnWhoseSessionEndsIsDelivered() {
