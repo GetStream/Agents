@@ -46,7 +46,7 @@ type Request struct {
 	UserID           string   `bun:"user_id,notnull"`
 	UsageCategories  []string `bun:"usage_categories,array,nullzero"`
 	// LimitGrants are the grants the work was admitted on past a spent limit, which its
-	// billable cost is drawn from (20261112121000_requests_limit_grants.sql).
+	// billable cost is drawn from.
 	LimitGrants []int64 `bun:"limit_grants,array,nullzero"`
 	// AgentID is the agent the work was done for. Empty outside a conversation.
 	AgentID string `bun:"agent_id,nullzero"`
@@ -182,8 +182,8 @@ func measured(prefix string) string {
 	return "COALESCE(" + prefix + "error_code, '') NOT IN ('" + ErrorCancelled + "', '" + ErrorRefused + "')"
 }
 
-// requestsPrimaryKey is named for the table's first name: 20260815090000_multi_modality.sql
-// renamed the table and not its key.
+// requestsPrimaryKey is named for the table's first name: the table was renamed and its key
+// was not.
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a

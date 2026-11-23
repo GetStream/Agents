@@ -28,7 +28,7 @@ const (
 )
 
 // limitLevels is each subject's levels, most specific first, which is the order a subject's
-// limit is resolved in (20261112120000_limits.sql, limits_level_check).
+// limit is resolved in (limits_level_check).
 var limitLevels = map[usage.Subject][]LimitLevel{
 	usage.SubjectOrganization: {LevelOrganization},
 	usage.SubjectApp:          {LevelApp},

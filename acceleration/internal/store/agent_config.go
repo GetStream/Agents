@@ -35,14 +35,14 @@ type AgentConfig struct {
 	Name       string `bun:"name,notnull"`
 	// Role is what the config is for in the app around it, beyond answering people:
 	// RoleAgentModerator, or empty for an ordinary agent. One live config per customer holds a
-	// role, test copies aside (20261103120000_agent_config_role.sql).
+	// role, test copies aside (agent_configs_role_idx).
 	Role string `bun:"role,notnull"`
 	// Mode is whether the agent is spoken to or written to: AgentModeVoice or
 	// AgentModeText. A text agent uses neither speech target and joins no call.
 	Mode string `bun:"mode,notnull"`
 	// Region is where the agent's work is done, such as pricing.RegionEU: every model its
 	// sessions run, its knowledge base and its sandbox are there, and nothing of it is done
-	// elsewhere (20261202135000_agent_region.sql). Empty is stored as pricing.DefaultRegion.
+	// elsewhere. Empty is stored as pricing.DefaultRegion.
 	Region string `bun:"region,notnull"`
 	// Models are what the agent's sessions run on, one column each.
 	Models AgentModels `bun:"embed:"`
@@ -103,16 +103,14 @@ type AgentConfig struct {
 	// episode_cards_ columns.
 	EpisodeCards AgentEpisodeCards `bun:"embed:episode_cards_"`
 	// ToolGroups are the functions an SDK provides that the config's sessions may offer, and
-	// how each group is loaded (20270103090000_agent_config_tool_groups.sql). A function no
-	// group names is not offered.
+	// how each group is loaded. A function no group names is not offered.
 	ToolGroups []ToolGroup `bun:"tool_groups,type:jsonb"`
 	// ResumeHistory is how the config's sessions are handed back a conversation they
 	// carry on. The zero value is the router's default.
 	ResumeHistory ResumeHistory `bun:"resume_history,type:jsonb,notnull"`
 	// FloorControl is the model that controls the floor in the config's sessions, and how
-	// long a caller may wait once they stop, as the config chose
-	// (20261221090000_floor_control_max_wait.sql). The zero value, NULL, is no choice: the
-	// router's default rules (session.FloorControlOf).
+	// long a caller may wait once they stop, as the config chose. The zero value, NULL, is no
+	// choice: the router's default rules (session.FloorControlOf).
 	FloorControl FloorControl `bun:"floor_control,type:jsonb,nullzero"`
 	// SyncHash is a fingerprint of the last directory written onto this config. Empty
 	// if it was never synced from a directory.
@@ -165,14 +163,12 @@ type AgentDispatch struct {
 
 // AgentEpisodeCards is how an agent's conversations use the person's episode cards.
 type AgentEpisodeCards struct {
-	// On has each session under the config start with the person's other episode cards
-	// (20261007042200_agent_config_episode_cards.sql), and the config write them as Record
-	// does. Off unless a config turns it on.
+	// On has each session under the config start with the person's other episode cards, and
+	// the config write them as Record does. Off unless a config turns it on.
 	On bool `bun:"on,notnull"`
 	// Record has each call, app chat and channel thread under the config write its episode
-	// card and summary into the person's omni-channel while no session reads them
-	// (20261217090000_agent_config_episode_cards_record.sql). Read only beside On off;
-	// WritesCards is the two together.
+	// card and summary into the person's omni-channel while no session reads them. Read only
+	// beside On off; WritesCards is the two together.
 	Record bool `bun:"record,notnull"`
 }
 
@@ -182,8 +178,7 @@ type AgentAnswersIn struct {
 	// number to text, an iMessage line.
 	Lines AgentChannels `bun:"lines,type:jsonb,notnull"`
 	// Chat are the Stream Chat channel types of the customer's own app it answers in, such as
-	// a team's group channels (20261222120000_agent_config_chat_channels.sql). Empty, as every
-	// config starts, answers in agent channels alone.
+	// a team's group channels. Empty, as every config starts, answers in agent channels alone.
 	Chat []ChatChannel `bun:"chat,type:jsonb"`
 }
 
