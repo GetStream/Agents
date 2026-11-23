@@ -1,7 +1,9 @@
 package store
 
 import (
+	"io/fs"
 	"slices"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -42,4 +44,33 @@ func TestATableALaterMigrationDropsOrRenamesIsNotTheSets(t *testing.T) {
 	tables, err := setTables(set)
 	require.NoError(t, err)
 	require.Equal(t, []string{"kept", "moved"}, tables)
+}
+
+// A migration that waits behind a long query for a table's lock holds every write queued behind
+// it, so each one run in a transaction after the initial one sets a lock timeout before it takes
+// a lock: as its first statement. The initial one runs only on an empty database.
+func TestEveryTransactionalMigrationAfterTheInitialOneSetsALockTimeout(t *testing.T) {
+	for _, set := range []migrationSet{globalSet, shardSet} {
+		files, err := fs.Glob(set.files, "*.sql")
+		require.NoError(t, err)
+		for _, name := range files {
+			if strings.HasSuffix(name, "_initial.sql") {
+				continue
+			}
+			raw, err := fs.ReadFile(set.files, name)
+			require.NoError(t, err)
+			if strings.Contains(string(raw), "-- +goose NO TRANSACTION") {
+				continue
+			}
+			up, _, _ := strings.Cut(string(raw), "-- +goose Down")
+			var first string
+			for _, line := range strings.Split(up, "\n") {
+				if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "--") {
+					first = line
+					break
+				}
+			}
+			require.True(t, strings.HasPrefix(first, "SET LOCAL lock_timeout"), "%s/%s starts with %q", set.name, name, first)
+		}
+	}
 }

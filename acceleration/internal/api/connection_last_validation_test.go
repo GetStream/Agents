@@ -123,7 +123,8 @@ func (s *ConnectionToolsSuite) TestA429OrA5xxKeepsAStaticTokenConnected() {
 }
 
 // TestAProviderThatDoesNotAnswerKeepsAStaticTokenConnected: no answer at all (a closed port)
-// says nothing about the credential.
+// says nothing about the credential, and the reason kept names none of the addresses the dial
+// failed between (AI-3575).
 func (s *ConnectionToolsSuite) TestAProviderThatDoesNotAnswerKeepsAStaticTokenConnected() {
 	closed := httptest.NewTLSServer(http.NotFoundHandler())
 	closed.Close()
@@ -138,7 +139,8 @@ func (s *ConnectionToolsSuite) TestAProviderThatDoesNotAnswerKeepsAStaticTokenCo
 	s.Require().NotNil(got.LastValidation)
 	s.Equal(validationFailed, string(got.LastValidation.Status))
 	s.Empty(got.LastValidation.Code, "no status to name")
-	s.Equal(validation.Error, got.LastValidation.Error)
+	s.Equal(providerUnreachable, validation.Error)
+	s.Equal(providerUnreachable, got.LastValidation.Error)
 }
 
 // TestTheAnswerAValidateFailedOnDecidesNotTheSessionsDelete: a stateful MCP server answers

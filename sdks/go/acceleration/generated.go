@@ -15517,6 +15517,7 @@ type ClientInterface interface {
 	// One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 	// Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 	// A router with shards cannot be the source of a move and answers 400 `not_configured`.
+	// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 	// Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 	//
 	// Corresponds with GET /v1/data/export (the `ExportData` operationId).
@@ -15524,7 +15525,7 @@ type ClientInterface interface {
 
 	// ImportDataWithBody Write an export, or a batch of changes, into this deployment
 	//
-	// Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
@@ -21224,6 +21225,7 @@ func (c *Client) ListDataChanges(ctx context.Context, params *ListDataChangesPar
 // One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 // Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 // A router with shards cannot be the source of a move and answers 400 `not_configured`.
+// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 // Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 //
 // Corresponds with GET /v1/data/export (the `ExportData` operationId).
@@ -21241,7 +21243,7 @@ func (c *Client) ExportData(ctx context.Context, reqEditors ...RequestEditorFn) 
 
 // ImportDataWithBody Write an export, or a batch of changes, into this deployment
 //
-// Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
@@ -38775,6 +38777,7 @@ type ClientWithResponsesInterface interface {
 	// One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 	// Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 	// A router with shards cannot be the source of a move and answers 400 `not_configured`.
+	// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 	// Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -38784,7 +38787,7 @@ type ClientWithResponsesInterface interface {
 
 	// ImportDataWithBodyWithResponse Write an export, or a batch of changes, into this deployment
 	//
-	// Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
@@ -55762,6 +55765,8 @@ type RunSimulationResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON429 the response for an HTTP 429 `application/json` response
+	JSON429 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -55800,6 +55805,11 @@ func (r RunSimulationResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r RunSimulationResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON429 returns the response for an HTTP 429 `application/json` response
+func (r RunSimulationResponse) GetJSON429() *ErrorResponse {
+	return r.JSON429
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -58559,6 +58569,8 @@ type ExportDataResponse struct {
 	JSON402 *PaymentRequired
 	// JSON403 the response for an HTTP 403 `application/json` response
 	JSON403 *Forbidden
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -58587,6 +58599,11 @@ func (r ExportDataResponse) GetJSON402() *PaymentRequired {
 // GetJSON403 returns the response for an HTTP 403 `application/json` response
 func (r ExportDataResponse) GetJSON403() *Forbidden {
 	return r.JSON403
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r ExportDataResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -58657,6 +58674,8 @@ type ImportDataResponse struct {
 	JSON403 *Forbidden
 	// JSON409 the response for an HTTP 409 `application/json` response
 	JSON409 *ErrorResponse
+	// JSON413 the response for an HTTP 413 `application/json` response
+	JSON413 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -58695,6 +58714,11 @@ func (r ImportDataResponse) GetJSON403() *Forbidden {
 // GetJSON409 returns the response for an HTTP 409 `application/json` response
 func (r ImportDataResponse) GetJSON409() *ErrorResponse {
 	return r.JSON409
+}
+
+// GetJSON413 returns the response for an HTTP 413 `application/json` response
+func (r ImportDataResponse) GetJSON413() *ErrorResponse {
+	return r.JSON413
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -71218,6 +71242,7 @@ func (c *ClientWithResponses) ListDataChangesWithResponse(ctx context.Context, p
 // One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 // Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 // A router with shards cannot be the source of a move and answers 400 `not_configured`.
+// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 // Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -71233,7 +71258,7 @@ func (c *ClientWithResponses) ExportDataWithResponse(ctx context.Context, reqEdi
 
 // ImportDataWithBodyWithResponse Write an export, or a batch of changes, into this deployment
 //
-// Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
@@ -91591,6 +91616,13 @@ func ParseRunSimulationResponse(rsp *http.Response) (*RunSimulationResponse, err
 		}
 		response.JSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON429 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -94831,6 +94863,13 @@ func ParseExportDataResponse(rsp *http.Response) (*ExportDataResponse, error) {
 		}
 		response.JSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -94956,6 +94995,13 @@ func ParseImportDataResponse(rsp *http.Response) (*ImportDataResponse, error) {
 			return nil, err
 		}
 		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON413 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError

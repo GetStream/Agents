@@ -12,6 +12,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/detection"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/detectionrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // detectionDeadline bounds one detection. A worker sampling a camera sends the next frame
@@ -79,7 +80,19 @@ func (s *Server) detect(ctx context.Context, request *detectRequest) (*detectRes
 	if err != nil && found.Provider == "" && detection.CodeOf(err) == detection.UnsupportedOption {
 		return nil, invalidRequest(err.Error())
 	}
+	if err != nil {
+		recordFailure(ctx, err, stack.Trace(err))
+	}
 	return &detectResponse{Body: detectionOf(found, err)}, nil
+}
+
+// detectionFailures is what a failed detection says, by its code. What the provider said
+// names its URL and its body, so it is left for the request log.
+var detectionFailures = map[detection.Code]string{
+	detection.UnsupportedOption: "no model asked can honour the classes, settings or overwrites asked for",
+	detection.ProviderFailed:    "the provider failed to look at the image",
+	detection.Timeout:           "the image was not looked at in time",
+	detection.Cancelled:         "the caller stopped waiting for the detection",
 }
 
 // detectionOf renders what was found for the wire, and why nothing was when it failed.
@@ -110,7 +123,7 @@ func detectionOf(found detectionrouter.Found, failure error) DetectionResult {
 		code := DetectionErrorCode(detection.CodeOf(failure))
 		rendered.Status = DetectionStatusFailed
 		rendered.ErrorCode = &code
-		rendered.Error = optional(failure.Error())
+		rendered.Error = optional(detectionFailures[detection.Code(code)])
 	}
 	return rendered
 }

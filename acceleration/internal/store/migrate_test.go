@@ -5,9 +5,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"math"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/database"
 	"github.com/uptrace/bun"
 )
 
@@ -91,4 +95,141 @@ func (s *StoreSuite) TestADatabaseFromBeforeTheSplitIsRefused() {
 	s.Require().NoError(err)
 
 	s.ErrorContains(db.Migrate(s.ctx), "ran the migrations from before they were split")
+}
+
+// A version counts by its latest row, so one recorded and then rolled back is not applied: a
+// database holding such a version with no file is no history the squash left out.
+func (s *StoreSuite) TestARolledBackVersionWithNoFileIsNotRefused() {
+	db, err := Open(s.emptyDatabase("rolled_back"))
+	s.Require().NoError(err)
+	defer db.Close()
+	s.Require().NoError(db.Migrate(s.ctx))
+	_, err = db.global.ExecContext(s.ctx, "INSERT INTO goose_global_version (version_id, is_applied) VALUES (20270105090000, true), (20270105090000, false)")
+	s.Require().NoError(err)
+
+	s.Require().NoError(db.Migrate(s.ctx))
+}
+
+// shardTo opens an empty database of the suite's own with the shared set applied and the shard
+// set up to version, the order Migrate runs them in.
+func (s *StoreSuite) shardTo(name string, version int64) *Store {
+	opened, err := Open(s.emptyDatabase(name))
+	s.Require().NoError(err)
+	s.upTo(opened, globalSet, math.MaxInt64)
+	s.upTo(opened, shardSet, version)
+	return opened
+}
+
+// An index built concurrently waits for every write open on its table, which may be longer than
+// the serving pool's read timeout; the migration still finishes.
+func (s *StoreSuite) TestAMigrationThatWaitsPastTheReadTimeoutFinishes() {
+	split := s.shardTo("migrate_waits", 20270127000100-1)
+	defer split.Close()
+	writing, err := split.shard.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // a no-op once rolled back
+	_, err = writing.ExecContext(s.ctx, "UPDATE calls SET summary = summary WHERE false")
+	s.Require().NoError(err)
+	ended := time.AfterFunc(11*time.Second, func() { _ = writing.Rollback() })
+	defer ended.Stop()
+
+	s.NoError(split.Migrate(s.ctx))
+}
+
+// A database that ran 20270117000400 while its function still refused writes through old
+// triggers ends with the function that records them, on the shared database and the shard.
+func (s *StoreSuite) TestADatabaseThatRanTheRefusingFunctionGetsTheOneThatRecords() {
+	opened, err := OpenShards(Options{DSN: s.emptyDatabase("refusing_global"), ShardDSN: s.emptyDatabase("refusing_shard")})
+	s.Require().NoError(err)
+	defer opened.Close()
+	refusing := `CREATE OR REPLACE FUNCTION record_data_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'record_data_change: % was attached without its secret columns', TG_TABLE_NAME; END $$`
+	for set, db := range map[migrationSet]*bun.DB{globalSet: opened.global, shardSet: opened.shard} {
+		s.upToOn(db, set, 20270127000400-1)
+		_, err := db.ExecContext(s.ctx, refusing)
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(opened.Migrate(s.ctx))
+
+	fresh, err := OpenShards(Options{DSN: s.emptyDatabase("recording_global"), ShardDSN: s.emptyDatabase("recording_shard")})
+	s.Require().NoError(err)
+	defer fresh.Close()
+	s.Require().NoError(fresh.Migrate(s.ctx))
+	body := func(db *bun.DB) string {
+		var body string
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT pg_get_functiondef('record_data_change'::regproc)").Scan(&body))
+		return body
+	}
+	s.Equal(body(fresh.global), body(opened.global), "the shared database ends with the function a new one has")
+	s.Equal(body(fresh.shard), body(opened.shard), "the shard ends with the function a new one has")
+}
+
+// A trigger attached by the release before passes no secret columns, and stays in place from
+// the migration that replaces the function until Migrate attaches the triggers again. A write
+// in between is recorded without its secrets rather than refused.
+func (s *StoreSuite) TestAWriteThroughATriggerAttachedBeforeIsRecordedWithoutItsSecrets() {
+	opened, err := Open(s.emptyDatabase("old_trigger"))
+	s.Require().NoError(err)
+	defer opened.Close()
+	s.writeThroughAnOldTrigger(opened)
+}
+
+// The shared database of a deployment with shards runs the shared set's copy of the function
+// alone, where a database of one runs the shard set's copy last.
+func (s *StoreSuite) TestAWriteThroughATriggerAttachedBeforeOnTheSharedDatabaseIsRecordedWithoutItsSecrets() {
+	opened, err := OpenShards(Options{DSN: s.emptyDatabase("old_trigger_global"), ShardDSN: s.emptyDatabase("old_trigger_shard")})
+	s.Require().NoError(err)
+	defer opened.Close()
+	s.writeThroughAnOldTrigger(opened)
+}
+
+// writeThroughAnOldTrigger migrates opened, attaches triggers of the release before to two
+// shared tables and checks what a captured write through them records.
+func (s *StoreSuite) writeThroughAnOldTrigger(opened *Store) {
+	s.Require().NoError(opened.Migrate(s.ctx))
+	// provider_keys carries no trigger of its own: one there shows a secret column the release
+	// before did not know of is left out too.
+	_, err := opened.global.ExecContext(s.ctx, `CREATE OR REPLACE TRIGGER data_changes_recorded
+AFTER INSERT OR UPDATE OR DELETE ON users FOR EACH ROW EXECUTE FUNCTION record_data_change('customer_id', '', '', 'customer_id', 'id');
+CREATE OR REPLACE TRIGGER data_changes_recorded
+AFTER INSERT OR UPDATE OR DELETE ON provider_keys FOR EACH ROW EXECUTE FUNCTION record_data_change('customer_id', '', '', 'customer_id', 'provider', 'region')`)
+	s.Require().NoError(err)
+	s.Require().NoError(opened.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	_, hash, err := NewGuestSecret()
+	s.Require().NoError(err)
+
+	s.Require().NoError(opened.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	_, err = opened.global.ExecContext(s.ctx, `INSERT INTO provider_keys (customer_id, provider, region, api_key_sealed, kek_version, key_hint)
+		VALUES ('acme', 'openai', 'us', 'sealed', 1, 'sk-...abcd')`)
+	s.Require().NoError(err)
+
+	changes, _, err := opened.Changes(s.ctx, "acme", 0, 100)
+	s.Require().NoError(err)
+	byTable := map[string][]DataChange{}
+	for _, change := range changes {
+		byTable[change.Table] = append(byTable[change.Table], change)
+	}
+	s.Require().Len(byTable["users"], 1)
+	s.JSONEq(`{"customer_id": "acme", "id": "guest-1"}`, string(byTable["users"][0].Key))
+	s.Contains(string(byTable["users"][0].Payload), "Alice")
+	s.NotContains(string(byTable["users"][0].Payload), "refresh_secret_hash")
+	s.Require().Len(byTable["provider_keys"], 1)
+	s.Contains(string(byTable["provider_keys"][0].Payload), "sk-...abcd")
+	s.NotContains(string(byTable["provider_keys"][0].Payload), "api_key_sealed")
+}
+
+// upTo applies set's migrations to the store's one database up to version.
+func (s *StoreSuite) upTo(opened *Store, set migrationSet, version int64) {
+	s.upToOn(opened.global, set, version)
+}
+
+// upToOn applies set's migrations to db up to version.
+func (s *StoreSuite) upToOn(db *bun.DB, set migrationSet, version int64) {
+	versions, err := database.NewStore(database.DialectPostgres, set.table)
+	s.Require().NoError(err)
+	provider, err := goose.NewProvider("", db.DB, set.files, goose.WithStore(versions))
+	s.Require().NoError(err)
+	_, err = provider.UpTo(s.ctx, version)
+	s.Require().NoError(err)
 }

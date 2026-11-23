@@ -4,6 +4,7 @@ package store
 
 import (
 	"errors"
+	"time"
 )
 
 func (s *StoreSuite) TestAVoiceIsReadBackByIdAndByTheNameItWasGiven() {
@@ -18,6 +19,18 @@ func (s *StoreSuite) TestAVoiceIsReadBackByIdAndByTheNameItWasGiven() {
 	byName, err := s.store.Voices.GetByName(s.ctx, "acme", "founder")
 	s.Require().NoError(err)
 	s.Equal(voice.ID, byName.ID)
+}
+
+func (s *StoreSuite) TestANameNoVoiceHoldsIsCachedForAMinuteOnly() {
+	s.Require().NoError(s.store.Voices.Insert(s.ctx, &Voice{CustomerID: "acme", Name: "founder"}))
+	_, err := s.store.Voices.GetByName(s.ctx, "acme", "founder")
+	s.Require().NoError(err)
+	_, err = s.store.Voices.GetByName(s.ctx, "acme", "narrator")
+	s.Require().ErrorIs(err, ErrNoVoice)
+
+	s.Positive(s.expiryOf(voiceNameKey("acme", "narrator")), "the miss is cached")
+	s.LessOrEqual(s.expiryOf(voiceNameKey("acme", "narrator")), time.Minute)
+	s.Greater(s.expiryOf(voiceNameKey("acme", "founder")), 59*time.Minute, "a voice found is still cached for the hour")
 }
 
 func (s *StoreSuite) TestOneCustomersVoiceIsNotAnothersToRead() {

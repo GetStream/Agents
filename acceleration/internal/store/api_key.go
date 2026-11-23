@@ -203,12 +203,15 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 			return auth.App{}, auth.ErrUnauthenticated
 		}
 		owner, err := r.GetLive(ctx, key)
-		if err != nil {
+		if errors.Is(err, ErrNoAPIKey) {
 			return auth.App{}, auth.ErrUnauthenticated
+		}
+		if err != nil {
+			return auth.App{}, err
 		}
 		secret, err := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
 		if err != nil {
-			return auth.App{}, fmt.Errorf("unseal key %s: %w", key, err)
+			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
 		}
 		if err := r.Touch(ctx, key, KeyUseInterval); err != nil {
 			slog.Default().Debug("could not record key use", "key", key, "error", err)

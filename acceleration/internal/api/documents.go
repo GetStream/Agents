@@ -26,6 +26,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -153,6 +154,7 @@ func (s *Server) readDocument(ctx context.Context, found *session.Session, sourc
 	case errors.Is(err, policy.ErrPromptInjection):
 		return sentDocument{}, errDocumentRefused
 	case err != nil:
+		recordFailure(ctx, err, stack.Trace(err))
 		return sentDocument{}, errDocumentUnscreened
 	}
 
@@ -225,7 +227,7 @@ func (s *Server) readDocumentPictures(ctx context.Context, spec session.Spec, re
 	if answer, money := moneyError(err); money {
 		return answer
 	}
-	return modelFailed(err)
+	return modelFailed(ctx, err)
 }
 
 // fetchDocument is the bytes of the file at source, a data URI or a URL, and its name.
@@ -247,6 +249,7 @@ func (s *Server) fetchDocument(ctx context.Context, source FileSource) ([]byte, 
 		return nil, "", documentTooLarge(fmt.Sprintf("a file fetched by URL is at most %d MiB", maxFetchedDocument>>20))
 	}
 	if err != nil {
+		recordFailure(ctx, withoutURL(err), "")
 		return nil, "", invalidRequest(fmt.Sprintf("the file could not be fetched: %v", err))
 	}
 	fallback := "document"

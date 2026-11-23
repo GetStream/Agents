@@ -29,6 +29,11 @@ const cacheTTL = time.Hour
 // stop authenticating within a minute rather than an hour.
 const keyCacheTTL = time.Minute
 
+// missTTL is how long a lookup that found nothing is cached. No write deletes such a key unless
+// it creates the row, so the expiry is what lets one go, and every name asked for once would
+// otherwise be kept for cacheTTL.
+const missTTL = time.Minute
+
 // Redis says where a Redis server is. An empty Address is none.
 type Redis struct {
 	// Address is a host:port, for example localhost:6379.

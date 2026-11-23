@@ -558,7 +558,11 @@ func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
 		return stack.Wrap(fmt.Errorf("store: delete session documents: %w", err))
 	}
 	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentSession)(nil)).
+		// The copies of hidden messages go with the session, and the changes recorded of them,
+		// which hold the same words, are emptied (forgottenCopies). A data-modifying WITH runs
+		// whether or not it is read.
+		changes := forgottenCopies(db, customerID).Where("payload->>'session_id' = ?", id)
+		return db.NewDelete().With("changes", changes).Model((*AgentSession)(nil)).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
 			Exec(ctx)

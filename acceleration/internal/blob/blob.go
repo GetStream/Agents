@@ -9,6 +9,7 @@ package blob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -52,8 +53,8 @@ func (b *Bucket) Write(ctx context.Context, key, contentType string, content io.
 		// The failed write is closed and then removed, so a half-written object is not
 		// left behind for something later to read as if it were whole.
 		writer.Close()
-		if err := b.bucket.Delete(ctx, key); err != nil {
-			return 0, stack.Wrap(fmt.Errorf("blob: write %s: %w", key, err))
+		if deleteErr := b.bucket.Delete(ctx, key); deleteErr != nil && gcerrors.Code(deleteErr) != gcerrors.NotFound {
+			err = errors.Join(err, deleteErr)
 		}
 		return 0, stack.Wrap(fmt.Errorf("blob: write %s: %w", key, err))
 	}

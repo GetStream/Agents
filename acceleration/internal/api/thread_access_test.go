@@ -242,6 +242,32 @@ func (s *SlackChannelSuite) TestReadingACommandInAThreadChannelIsAnsweredAsForAn
 	s.Equal(s.readConversation(s.serverClient, unknown, "/commands/command-1"), s.readConversation(s.serverClient, channel, "/commands/command-1"))
 }
 
+// TestTheBackendReadingAnUnknownChannelsMessagesIsAnsweredAsForAThreadChannel: Chat's refusal
+// of a channel it does not have is no text of Chat's for the backend, and tells it nothing a
+// thread channel's refusal does not.
+func (s *SlackChannelSuite) TestTheBackendReadingAnUnknownChannelsMessagesIsAnsweredAsForAThreadChannel() {
+	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
+	unknown := conversation.ThreadChannelPrefix + s.utils.uuid()
+
+	s.Equal(s.readConversation(s.serverClient, channel, "/messages"), s.readConversation(s.serverClient, unknown, "/messages"))
+}
+
+// TestChatFailingAConversationsReadIsAnswered500WithNothingOfChat: an outage is neither the
+// caller's request to correct (a 400 with Chat's words) nor a command that does not exist.
+func (s *SlackChannelSuite) TestChatFailingAConversationsReadIsAnswered500WithNothingOfChat() {
+	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
+	s.chat.Fail(http.MethodPost, "/query")
+	defer s.chat.Heal(http.MethodPost, "/query")
+
+	for _, what := range []string{"/messages", "/commands/command-1"} {
+		read := s.readConversation(s.serverClient, channel, what)
+
+		s.Equal(http.StatusInternalServerError, read.status, what)
+		s.Equal("internal_error", read.error.Code, what)
+		s.NotContains(read.error.Message, "boom", what)
+	}
+}
+
 // TestABackendDoesNotForkAThreadChannelsRunningSession: a thread is everyone's in it
 // (Spec.Shared), and a fork would carry their words into a conversation one caller owns,
 // outside the thread and its connector rule. None is made, with its history or without.
