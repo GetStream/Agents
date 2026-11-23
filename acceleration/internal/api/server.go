@@ -2664,7 +2664,7 @@ type AgentStats struct {
 	PeakConcurrentSessions int64       `json:"peak_concurrent_sessions" doc:"The most sessions open at the same time, each one an agent running. A session still open counts up to now."`
 	PeakAt                 *time.Time  `json:"peak_at" nullable:"true" doc:"When that peak was first reached. Null when no session was open in the window."`
 	Sessions               int64       `json:"sessions" doc:"Sessions that took a turn in the window: what a tool's session_share is out of."`
-	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one."`
+	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one."`
 	ToolCalls              ToolStats   `json:"tool_calls" doc:"Every tool call in the window, as one. Its tool is empty."`
 	Tools                  []ToolStats `json:"tools" nullable:"false" doc:"One row per tool, most called first."`
 }
