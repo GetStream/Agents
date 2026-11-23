@@ -1046,13 +1046,26 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 }
 
 // lasting reports whether a call failed before it was sent for a reason that placing it again
-// would meet again: the request itself, a number the app does not hold, or the deployment's own
-// setup (credentials, keys, a public URL, SIP trunks). Such a failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+// would meet again: the request itself, a number or SIP trunk the app does not hold, its Stream
+// app, or the deployment's own setup (credentials, keys, a public URL, SIP trunks). Such a
+// failure is not marked ErrNotDialed, so a campaign does not try it for ever.
 func lasting(err error) bool {
-	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) ||
+	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
 		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
-		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled)
+		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
+		errors.Is(err, errLasting) || (err != nil && streamapp.Settled(err))
 }
+
+// errLasting marks a failure that has no kind of its own and that a second try meets again: a
+// vendor that cannot be built from its configuration, or a password the router's keys cannot
+// open or seal.
+var errLasting = errors.New("phone: a lasting failure")
+
+type lastingError struct{ err error }
+
+func (e lastingError) Error() string        { return e.err.Error() }
+func (e lastingError) Unwrap() error        { return e.err }
+func (e lastingError) Is(target error) bool { return target == errLasting }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
 // whatever the call returns.
@@ -1479,7 +1492,7 @@ func (s *Service) park(
 		}
 		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
 		if err != nil {
-			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
+			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
 		}
 		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
 	}

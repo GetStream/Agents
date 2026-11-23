@@ -54,7 +54,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 		return Dialed{Result: Paused, Reason: reasonConfigMissing}, nil
 	}
 	if err != nil {
-		return Dialed{Result: Deferred, Reason: codeDialFailed}, err
+		return Dialed{Result: DialFailed, Reason: codeDialFailed}, err
 	}
 
 	if !dial.Step.Voicemail.hangsUp() && session.FromConfig(config).Native() {
@@ -75,7 +75,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	if err != nil {
 		dialed := resultOf(err)
 		// A failure, as opposed to a refusal, is returned to be logged.
-		if dialed.Result == "" || dialed.Reason == codeDialFailed {
+		if dialed.Result == "" || dialed.Result == DialFailed {
 			return dialed, err
 		}
 		return dialed, nil
@@ -143,6 +143,34 @@ func (d *phoneDialer) close(created *session.Session) {
 	if _, err := d.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
 		d.logger.Error("could not end a campaign call", "session", created.ID(), "error", err)
 	}
+}
+
+// outcomeRetries are the waits between reads of how a call ended. A database blip passes in
+// well under a second, and a read that fails every time leaves the contact leased for the
+// router that takes it over to read again.
+var outcomeRetries = []time.Duration{200 * time.Millisecond, time.Second}
+
+// errOutcomeUnread is a call whose outcome could not be read.
+var errOutcomeUnread = errors.New("campaign: how the call ended could not be read")
+
+// readOutcome is callOutcome, read again after each of outcomeRetries while it fails.
+func readOutcome(ctx context.Context, st *store.Store, customerID, callID string) (outcome.Outcome, error) {
+	read, err := callOutcome(ctx, st, customerID, callID)
+	for _, wait := range outcomeRetries {
+		if err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(wait):
+		}
+		read, err = callOutcome(ctx, st, customerID, callID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", errOutcomeUnread, err)
+	}
+	return read, nil
 }
 
 // callOutcome is how the call placed into callID ended, as the phone keeps it. A phone that

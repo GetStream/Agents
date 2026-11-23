@@ -5,6 +5,7 @@ package campaign
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -304,13 +305,14 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	s.Equal("no_answer", attempts[0].CallOutcome)
 }
 
-// A double dial whose first call's outcome cannot be read does not ring again as if nobody
-// answered: the person may just have hung up. The contact stays leased, and the router that
-// takes it over reads the outcome and settles from it without dialing.
+// A double dial whose first call's outcome cannot be read, however often it is read again,
+// does not ring again as if nobody answered: the person may just have hung up. The contact
+// stays leased, and the router that takes it over reads the outcome and settles from it
+// without dialing.
 func (s *RunnerSuite) TestADialWhoseOutcomeCannotBeReadIsNotDialedAgainUntilItIsRead() {
 	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
 	s.dialer.results["+15550000001"] = []Dialed{{}}
-	s.failing.left.Store(1)
+	s.failing.left.Store(int32(1 + len(outcomeRetries)))
 
 	s.tick(s.runner)
 
@@ -334,6 +336,54 @@ func (s *RunnerSuite) TestADialWhoseOutcomeCannotBeReadIsNotDialedAgainUntilItIs
 	s.Equal(2, settled.Attempt)
 	s.Require().Len(attempts, 1)
 	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
+}
+
+// An outcome read that fails once, as a database blip would, is read again at once and the
+// contact settles in the same tick. Catches a single read that leaves the contact leased for
+// the lease's twenty minutes.
+func (s *RunnerSuite) TestAnOutcomeReadThatFailsOnceIsReadAgainAtOnce() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.dialer.onDial = func(dial Dial) {
+		placed := s.clock.now()
+		s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
+			CallType: "default", CallID: dial.SessionID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: dial.Contact.ToNumber,
+			PlacedAt: &placed, Outcome: string(outcome.Busy)}))
+	}
+	s.failing.left.Store(1)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1)
+	settled, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, settled.Stage)
+	s.Equal(2, settled.Attempt)
+	s.Require().Len(attempts, 1)
+	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
+}
+
+// A dial that keeps failing before anything rang is tried again five minutes later without
+// using the attempt, but only so often: the maxDialFailures-th uses it, as a failure that
+// never passes would otherwise retry for ever. Catches an uncapped retry.
+func (s *RunnerSuite) TestADialThatKeepsFailingBeforeItRingsUsesTheAttemptInTheEnd() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.fails = errors.New("phone: stream api: connection reset")
+	s.dialer.failWith = Dialed{Result: DialFailed, Reason: codeDialFailed}
+
+	for range maxDialFailures - 1 {
+		s.tick(s.runner)
+		waiting, _ := s.contact(campaign, "+15550000001")
+		s.Require().Equal(store.Enrolled, waiting.Stage)
+		s.Require().LessOrEqual(waiting.Attempt, 1, "the attempt is not used yet")
+		s.clock.advance(concurrentRetry)
+	}
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), maxDialFailures, "one dial a tick: a failure before ringing is not dialed twice")
+	spent, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, spent.Stage)
+	s.Equal(2, spent.Attempt, "the attempt is used")
+	s.Len(attempts, maxDialFailures)
 }
 
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
@@ -934,6 +984,11 @@ func (c *clock) advance(by time.Duration) {
 type stubDialer struct {
 	mu      sync.Mutex
 	results map[string][]Dialed
+	// fails, set, fails every dial with failWith.
+	fails    error
+	failWith Dialed
+	// onDial runs as each dial is placed.
+	onDial  func(Dial)
 	hold    chan struct{}
 	dials   []Dial
 	now     int
@@ -955,8 +1010,17 @@ func (d *stubDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	if queued := d.results[dial.Contact.ToNumber]; len(queued) > 0 {
 		dialed, d.results[dial.Contact.ToNumber] = queued[0], queued[1:]
 	}
-	hold := d.hold
+	hold, fails, failWith, onDial := d.hold, d.fails, d.failWith, d.onDial
 	d.mu.Unlock()
+	if fails != nil {
+		d.mu.Lock()
+		d.now--
+		d.mu.Unlock()
+		return failWith, fails
+	}
+	if onDial != nil {
+		onDial(dial)
+	}
 
 	if hold != nil {
 		<-hold

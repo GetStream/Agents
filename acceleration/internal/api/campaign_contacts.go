@@ -409,7 +409,7 @@ type ContactAttempt struct {
 	Attempt     int          `json:"attempt" doc:"Which attempt of the sequence, from 1."`
 	Dial        int          `json:"dial" doc:"1, or 2 for the second call of a double dial."`
 	CallId      *string      `json:"call_id,omitempty"`
-	Result      string       `json:"result" doc:"Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says."`
+	Result      string       `json:"result" doc:"Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says."`
 	CallOutcome *CallOutcome `json:"call_outcome,omitempty" doc:"How the call the dial placed ended, as the phone says. Absent while it is happening and for a dial that placed none."`
 	Outcome     *string      `json:"outcome,omitempty" doc:"The outcome an answered call was read as: no_response when nobody but the agent spoke."`
 	StartedAt   time.Time    `json:"started_at"`

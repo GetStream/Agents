@@ -113,6 +113,19 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 	return nil
 }
 
+// CountResult counts a contact's dials of one attempt that ended with result.
+func (r *CampaignAttempts) CountResult(ctx context.Context, contactID string, attempt int, result string) (int, error) {
+	count, err := r.store.global.NewSelect().Model((*CampaignAttempt)(nil)).
+		Where("contact_id = ?", contactID).
+		Where("attempt = ?", attempt).
+		Where("result = ?", result).
+		Count(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: count dials: %w", err))
+	}
+	return count, nil
+}
+
 // Latest returns a contact's most recent dial, and false when it was never dialed.
 func (r *CampaignAttempts) Latest(ctx context.Context, contactID string) (CampaignAttempt, bool, error) {
 	var attempt CampaignAttempt

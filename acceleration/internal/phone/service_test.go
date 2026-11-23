@@ -10,6 +10,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 type ServiceSuite struct {
@@ -83,7 +84,9 @@ func (s *ServiceSuite) TestEveryVendorOfTheServiceHasItsCallSeriesAtZeroFromTheS
 // A call that fails before it is sent, for a reason a second try would meet again, is not
 // marked never dialed: a campaign would retry it every few minutes for ever. Anything else is.
 func (s *ServiceSuite) TestOnlyAFailureThatMayPassIsMarkedNeverDialed() {
-	for _, err := range []error{ErrInvalid, store.ErrNoNumber, ErrNoStream, ErrNoSealerToCall, ErrNotConfigured, ErrSIPTrunksDisabled} {
+	for _, err := range []error{ErrInvalid, store.ErrNoNumber, store.ErrNoSIPTrunk, ErrNoStream, ErrNoSealerToCall, ErrNotConfigured,
+		ErrSIPTrunksDisabled, streamapp.ErrNoIdentity, streamapp.ErrStreamAppMoved, streamapp.ErrStreamAppDisconnected,
+		streamapp.ErrReadOnly, streamapp.ErrDeploymentAppMismatch, lastingError{errors.New("telnyx: no api key")}} {
 		s.True(lasting(stack.Wrap(err)), err.Error())
 	}
 	s.False(lasting(errors.New("store: number: read tcp: i/o timeout")))

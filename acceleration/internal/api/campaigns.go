@@ -894,7 +894,7 @@ type Campaign struct {
 	Sequence       CampaignSequence  `json:"sequence"`
 	CallingHours   CallingHours      `json:"calling_hours"`
 	Tags           map[string]string `json:"tags" nullable:"false"`
-	PausedReason   *string           `json:"paused_reason,omitempty" doc:"Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it."`
+	PausedReason   *string           `json:"paused_reason,omitempty" doc:"Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it."`
 	StartAt        *time.Time        `json:"start_at,omitempty" doc:"When it was launched to start ringing."`
 	LaunchedAt     *time.Time        `json:"launched_at,omitempty"`
 	StartedAt      *time.Time        `json:"started_at,omitempty" doc:"When it first rang anybody."`
@@ -969,7 +969,7 @@ type CampaignVoicemail struct {
 
 // CampaignAttempt is one try at reaching a contact.
 type CampaignAttempt struct {
-	DelayMinutes int `json:"delay_minutes" doc:"Minutes after the previous attempt started, pushed into the calling hours."`
+	DelayMinutes int `json:"delay_minutes" doc:"Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days)."`
 }
 
 // CampaignOutcome is one way an answered call can end.
