@@ -31,7 +31,7 @@ done
 case $set in global | shard | both) ;; *) echo "set must be global, shard or both" >&2; exit 2 ;; esac
 
 context="gke_stream-gcp-2026-v2_${region}_${region}-acceleration"
-pod="squash-cleanup-$(date +%s)"
+pod="squash-cleanup-$(date +%s)-$RANDOM"
 script=$(base64 < "$(dirname "$0")/cleanup.sql" | tr -d '\n')
 
 kubectl --context "$context" -n "$namespace" apply -f - >/dev/null <<EOF
