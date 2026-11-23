@@ -26,8 +26,8 @@ type Recording struct {
 	CustomerID string `bun:"customer_id,notnull"`
 	// Modality is stt for a transcription and tts for a recorded voice.
 	Modality string `bun:"modality,notnull"`
-	// Status is where the job has got to: RecordingQueued, RecordingRunning,
-	// RecordingCompleted or RecordingFailed.
+	// Status is where the job has got to: RecordingQueued, RecordingCompleted or
+	// RecordingFailed.
 	Status string `bun:"status,notnull"`
 	// Provider and Model are what served it, once routing has picked.
 	Provider string `bun:"provider,nullzero"`
@@ -55,8 +55,6 @@ type Recording struct {
 const (
 	// RecordingQueued is accepted and not yet started.
 	RecordingQueued = "queued"
-	// RecordingRunning is at the provider.
-	RecordingRunning = "running"
 	// RecordingCompleted has a result.
 	RecordingCompleted = "completed"
 	// RecordingFailed has a reason instead.
