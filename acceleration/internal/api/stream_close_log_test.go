@@ -73,6 +73,16 @@ func (s *StreamsSuite) TestAFrameAStartedStreamSocketCannotReadIsARefusal() {
 	s.Contains(s.closeLine(id), " close_reason=refused close_code=1000 ")
 }
 
+func (s *StreamsSuite) TestAStartFrameWithBytesAfterItsJSONStarts() {
+	// Catches a read stricter than base's ReadJSON, which decodes the frame's first JSON value
+	// and leaves what follows it.
+	connection := s.serverClient.opens("/v1/llm/stream")
+
+	s.Require().NoError(connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"start","target":"echo/echo-model"} trailing`)))
+
+	s.Equal("started", s.nextConversationFrame(connection)["type"])
+}
+
 func (s *StreamsSuite) TestAStartTheCallerMustChangeIsARefusal() {
 	// Catches each refusal of the caller's start logged as the router's failure. The close
 	// codes are the ones the caller is sent on base: 1011 for a plain failure, 1008 for a
