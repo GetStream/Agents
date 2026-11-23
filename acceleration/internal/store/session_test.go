@@ -850,7 +850,7 @@ func (s *StoreSuite) TestAGuestIsClaimedOnce() {
 	// another's account.
 	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
 	s.Require().ErrorIs(err, ErrGuestClaimed, "so a caller can answer a conflict, not a failure")
-	s.Contains(err.Error(), "already claimed by jlahey")
+	s.NotContains(err.Error(), "jlahey", "the error is logged, and names no end user")
 }
 
 func (s *StoreSuite) TestClaimingSomethingThatWasNeverAGuestFails() {

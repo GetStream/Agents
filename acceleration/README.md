@@ -2375,8 +2375,11 @@ router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read the
 **Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
 written. `router usage replay --from <log>` writes them from the log, once each. Each line
 holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
-text in the row is redacted and masked first. A user id that changes is left off, and the row
-bills to its app without that user. A line from before that holds the row as `row=` JSON the
+text in the row is redacted and masked first. A user id that changes is logged masked after
+`masked:`; replay gives the row back the user of its own app's session when that user masks
+alike, and otherwise the row bills to its app without a user. Replay before forgetting a user:
+the session still holds the id, so a replay after `forget-user` writes it back, and
+`forget-user` must then be run again for that user. A line from before that holds the row as `row=` JSON the
 redaction rewrote, and cannot be recovered: replay counts it as could not be read.
 
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
@@ -2398,7 +2401,11 @@ stopped, pass the replacement it printed as `--replacement`, and the rest is rew
 that one replacement, with the run's own audit row. Sessions, conversation history and
 `agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
 `keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
-that forgetting leaves alone.
+that forgetting leaves alone. It cannot reach logs, so the logger masks the ids it can tell
+apart: `phone:` and a number anywhere in a line, everything before an email's `@` under `user`,
+`user_id`, `participant`, `bound` and `id` (`logMasks`, `internal/store/logmask.go`), and in the
+logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
+another name among them, stays until log retention ends.
 
 The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,

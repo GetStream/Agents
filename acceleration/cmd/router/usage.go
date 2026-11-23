@@ -37,7 +37,10 @@ const usageCommands = `usage: router usage <command>
                              nothing twice. With a usage service (ROUTER_USAGE_URL) the sweeper
                              ships them. A line logged with the row as plain JSON (row=, before
                              row_hex) was rewritten by the log's redaction and cannot be
-                             recovered: it counts as could not be read. Writes the database
+                             recovered: it counts as could not be read. A user the log masked
+                             (masked:) is taken from the row's session when that user masks
+                             alike, else the row bills to its app alone: replay before
+                             forget-user. Writes the database
   reship --since time [--rejected]
                              queue this shard's rows started since then (RFC 3339, or a duration
                              back from now such as 24h) that the usage service has to be sent to
@@ -223,6 +226,9 @@ func runUsageReplay(ctx context.Context, args []string, settings config.Config, 
 		return err
 	}
 	defer pgStore.Close()
+	if err := sessionUsers(ctx, pgStore, rows); err != nil {
+		return err
+	}
 
 	var written, refused int
 	for start := 0; start < len(rows); start += replayBatch {
@@ -236,6 +242,38 @@ func runUsageReplay(ctx context.Context, args []string, settings config.Config, 
 	_, err = fmt.Fprintf(out, "%d lost rows: %d written, %d already there, %d refused; %d lost-row lines could not be read\n",
 		len(rows), written, len(rows)-written-refused, refused, unreadable)
 	return err
+}
+
+// sessionUsers gives a row whose user the log masked (routing.MaskedUser) the user of its
+// session, when that user masks to the same text, so the user's spend and usage count it
+// again. A row with no session, or whose session is gone or another user's, is billed to its
+// app alone.
+func sessionUsers(ctx context.Context, pgStore *store.Store, rows []store.Request) error {
+	users := map[[2]string]string{}
+	for i := range rows {
+		masked, ok := strings.CutPrefix(rows[i].UserID, routing.MaskedUser)
+		if !ok {
+			continue
+		}
+		rows[i].UserID = ""
+		if rows[i].SessionID == "" {
+			continue
+		}
+		key := [2]string{rows[i].CustomerID, rows[i].SessionID}
+		user, read := users[key]
+		if !read {
+			session, err := pgStore.Sessions.Get(ctx, rows[i].CustomerID, rows[i].SessionID)
+			if err != nil && !errors.Is(err, store.ErrNoSession) {
+				return fmt.Errorf("usage replay: %w", err)
+			}
+			user = session.UserID
+			users[key] = user
+		}
+		if store.RedactLogAttr(nil, slog.String("user_id", user)).Value.String() == masked {
+			rows[i].UserID = routing.RecordedUser(user)
+		}
+	}
+	return nil
 }
 
 // replayRows writes one batch of lost rows, and one at a time when the database refuses the

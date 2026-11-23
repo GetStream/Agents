@@ -210,7 +210,7 @@ func (s *UsageCommandsSuite) TestALostRowIsLoggedWithoutTheNumbersAndKeysItsText
 	s.Equal("org-1", rows[0].OrganizationID)
 	s.Equal("key-a", rows[0].APIKey)
 	s.EqualValues(10, rows[0].OutputTokens)
-	s.Empty(rows[0].UserID, "a user id the log masks is left off, so the row bills to its app")
+	s.Equal(routing.MaskedUser+"phone:+1•••01", rows[0].UserID, "a user id the log masks is read back masked, for replay to find in its session")
 	s.Equal("named", rows[0].Tags["phone_caller"], "two tag keys masked alike both come back")
 	s.Equal("also named", rows[0].Tags["phone_caller#2"])
 }
@@ -235,6 +235,63 @@ func (s *UsageCommandsSuite) TestAReplayedRowWithAUserTheUsageServiceWouldRefuse
 	s.Equal(lost.UsageID, rows[0].UsageID)
 	s.Empty(rows[0].UserID)
 	s.Equal("key-a", rows[0].APIKey)
+}
+
+func (s *UsageCommandsSuite) TestAReplayedRowLoggedWithAMaskedUserTakesItsSessionsUser() {
+	const ali = "Ali.Khan@Example.com"
+	for _, session := range []store.AgentSession{
+		{ID: "session-ali", CustomerID: "app-1", UserID: ali},
+		{ID: "session-bob", CustomerID: "app-1", UserID: "bob@other.org"},
+		{ID: "session-zed", CustomerID: "app-1", UserID: "zed@Example.com"},
+		{ID: "session-phone", CustomerID: "app-2", UserID: "phone:15550001101"},
+	} {
+		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &session))
+	}
+	var log bytes.Buffer
+	logger := newLogger(&log, slog.LevelInfo)
+	writer := routing.NewWriter(routing.WriterOptions{Store: s.store, Logger: logger})
+	ctx, cancel := context.WithTimeout(s.ctx, time.Second)
+	defer cancel()
+	writer.Close(ctx)
+	rows := []struct {
+		name        string
+		app         string
+		attribution routing.Attribution
+		user        string
+	}{
+		{"in its session", "app-1", routing.Attribution{SessionID: "session-ali", UserID: ali}, ali},
+		{"a phone: user", "app-2", routing.Attribution{SessionID: "session-phone", UserID: "phone:15550001101"}, "phone:15550001101"},
+		{"with no session", "app-1", routing.Attribution{UserID: ali}, ""},
+		{"in a gone session", "app-1", routing.Attribution{SessionID: "session-gone", UserID: ali}, ""},
+		{"in another user's", "app-1", routing.Attribution{SessionID: "session-bob", UserID: ali}, ""},
+		// The check is that the session's user masks alike, so another user of the same
+		// domain is taken for this one: the session is what names the user.
+		{"in a same-domain user's", "app-1", routing.Attribution{SessionID: "session-zed", UserID: ali}, "zed@Example.com"},
+		{"in another app's session", "app-2", routing.Attribution{SessionID: "session-ali", UserID: ali}, ""},
+		{"an opaque user", "app-1", routing.Attribution{SessionID: "session-bob", UserID: "user-42"}, "user-42"},
+		{"no user", "app-1", routing.Attribution{SessionID: "session-ali"}, ""},
+	}
+	ids := map[uuid.UUID]int{}
+	for i, row := range rows {
+		id := uuid.Must(uuid.NewV7())
+		ids[id] = i
+		routing.NewRecorderOn(routing.LLM, writer, nil, logger).Record(routing.ProviderConfig{Provider: "openai", Model: "gpt"}, routing.Stat{
+			Owner:   routing.Owner{CustomerID: row.app, Attribution: row.attribution},
+			UsageID: id, StartedAt: time.Now().UTC(), Usage: routing.Usage{OutputTokens: 10},
+		})
+	}
+	s.Require().NotContains(log.String(), "Khan", "the log holds no email")
+	path := filepath.Join(s.T().TempDir(), "router.log")
+	s.Require().NoError(os.WriteFile(path, log.Bytes(), 0o600))
+
+	s.Require().NoError(runUsage([]string{"replay", "--from", path}, s.settings, &bytes.Buffer{}))
+
+	replayed := s.requests()
+	s.Require().Len(replayed, len(rows))
+	for _, row := range replayed {
+		want := rows[ids[row.UsageID]]
+		s.Equal(want.user, row.UserID, want.name)
+	}
 }
 
 func (s *UsageCommandsSuite) TestWithNoUsageServiceAReplayedRowIsNotQueued() {

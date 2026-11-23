@@ -307,7 +307,7 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	s.Require().NotNil(guest.ClaimedAt)
 	s.True(claimed.ClaimedAt.Equal(*guest.ClaimedAt))
 	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
-	s.ErrorContains(err, "already claimed")
+	s.ErrorIs(err, ErrGuestClaimed)
 }
 
 func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGranted() {

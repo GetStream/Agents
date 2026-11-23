@@ -281,7 +281,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	identity, err := s.store.ContactMapEntries.GetByUser(ctx, notice.CustomerID, notice.ConfigID,
 		string(notice.Kind), notice.UserID)
 	if errors.Is(err, store.ErrNoContact) {
-		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: %s has never written on %s", ErrUnreachable, notice.UserID, notice.Kind))
+		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: the user has never written on %s", ErrUnreachable, notice.Kind))
 	}
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
