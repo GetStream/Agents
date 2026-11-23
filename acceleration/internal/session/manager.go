@@ -408,6 +408,7 @@ func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
 // session would hold a model session and a place in a call that nobody holds a handle to.
 func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure error) {
 	began := time.Now()
+	generated := spec.ID == ""
 	if err := spec.Normalize(); err != nil {
 		return nil, stack.Wrap(err)
 	}
@@ -445,8 +446,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}
 	// The id is the row's primary key whoever owns it, so one somebody already used would
 	// write this session over theirs. A reopened one is the same session, its owner checked
-	// by whoever reopened it.
-	if m.options.Store != nil && spec.Reopened.IsZero() {
+	// by whoever reopened it. One generated just now is a UUIDv7 nobody has, and asking every
+	// shard about it would refuse the session whenever any one of them is down.
+	if m.options.Store != nil && spec.Reopened.IsZero() && !generated {
 		taken, err := m.options.Store.Sessions.Exists(ctx, spec.ID)
 		if err != nil {
 			return nil, stack.Wrap(err)

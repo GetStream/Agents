@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"maps"
 	"slices"
 	"sync"
@@ -124,6 +125,30 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 		return nil, err
 	}
 	return found, nil
+}
+
+// answeringShards reads every shard's database at once, as everyShard does, for a read one
+// shard's answer can settle: it returns what each shard answered and, apart, how each that
+// did not answer failed, this shard's first. A shard down then costs only what is on it.
+func answeringShards[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
+	all := s.shards()
+	found := make([]T, len(all))
+	failed := make([]error, len(all))
+	var wg sync.WaitGroup
+	for i, db := range all {
+		wg.Go(func() { found[i], failed[i] = read(ctx, db) })
+	}
+	wg.Wait()
+	return found, failed
+}
+
+// settledWithout logs each shard that failed a read the others' answers settled.
+func (s *Store) settledWithout(ctx context.Context, read string, failed []error) {
+	for i, err := range failed {
+		if err != nil {
+			slog.Default().WarnContext(ctx, "a shard did not answer, settled on the others", "read", read, "shard", s.shardNames[i], "error", err)
+		}
+	}
 }
 
 // whicheverShard reads a row from the shard holding it: this one first, where the row almost

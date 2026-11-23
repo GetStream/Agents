@@ -131,8 +131,11 @@ func (r *CallResources) Forget(ctx context.Context, resource CallResource) error
 }
 
 // Select is what Release would delete for one call, read without deleting it.
+//
+// A call's lines are on the shard that placed it, so rows from one shard settle it while
+// another does not answer; with no rows, a shard that did not answer may hold them.
 func (r *CallResources) Select(ctx context.Context, scope AppScope, callType, callID string) ([]CallResource, error) {
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
+	lists, failed := answeringShards(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
 		var resources []CallResource
 		err := db.NewSelect().Model(&resources).
 			Where("call_type = ?", callType).
@@ -141,10 +144,15 @@ func (r *CallResources) Select(ctx context.Context, scope AppScope, callType, ca
 			Scan(ctx)
 		return resources, err
 	})
-	if err != nil {
+	resources := slices.Concat(lists...)
+	if len(resources) > 0 {
+		r.store.settledWithout(ctx, "call resources", failed)
+		return resources, nil
+	}
+	if err := errors.Join(failed...); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: call resources: %w", err))
 	}
-	return slices.Concat(lists...), nil
+	return nil, nil
 }
 
 // Pin is the Stream app a customer's call has its lines in: the app the trunk carrying it
