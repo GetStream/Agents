@@ -105,8 +105,12 @@ generated notes by using the `--notes` flag"). The CHANGELOG section is not copi
 
 ## 6. Check what was published
 
-- `gh run list -R GetStream/Agents --workflow release.yml --limit 1` must show the new tag with
-  `success`.
+- `gh run list -R GetStream/Agents --workflow release.yml --limit 1` shows the run of the new tag.
+  Do not read its conclusion: the `integration` job is in the same run and does not gate the
+  publish (a provider outage must not hold back a release), so a good publish can end `failure`.
+  `gh run view <run id> -R GetStream/Agents --json jobs --jq '.jobs[] | [.name, .conclusion]'` must
+  show `success` for `Build & Test Core SDK` (build, version check and upload) and for
+  `Verify PIP install works`.
 - `curl -s https://pypi.org/pypi/vision-agents/json | jq -r .info.version` must print `X.Y.Z`.
 
 `release.yml` has never succeeded: of its 41 runs, 34 ended `failure`, 3 `startup_failure`, 3
