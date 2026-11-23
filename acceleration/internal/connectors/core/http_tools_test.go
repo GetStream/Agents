@@ -145,6 +145,7 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"X-Method-Override": {withTool(func(t *HTTPTool) { t.Parameters["X-Method-Override"] = HTTPParameter{Type: "string"} }), `parameters.X-Method-Override: names a method override`},
 		"$httpMethod":       {withTool(func(t *HTTPTool) { t.Parameters["$httpMethod"] = HTTPParameter{Type: "string"} }), `parameters.$httpMethod: "$httpMethod" is not 1 to 64`},
 		"a tilde":           {withTool(func(t *HTTPTool) { t.Parameters["a~b"] = HTTPParameter{Type: "string"} }), `parameters.a~b: "a~b" is not 1 to 64 letters, digits, ., _ or -`},
+		"a slash":           {withTool(func(t *HTTPTool) { t.Parameters["a/b"] = HTTPParameter{Type: "string"} }), `parameters.a/b: "a/b" is not 1 to 64`},
 		"a bracket":         {withTool(func(t *HTTPTool) { t.Parameters["page[size]"] = HTTPParameter{Type: "string"} }), `"page[size]" is not 1 to 64`},
 		"a brace":           {withTool(func(t *HTTPTool) { t.Parameters["a}b"] = HTTPParameter{Type: "string"} }), `"a}b" is not 1 to 64`},
 		"an empty name":     {withTool(func(t *HTTPTool) { t.Parameters[""] = HTTPParameter{Type: "string"} }), `"" is not 1 to 64`},
