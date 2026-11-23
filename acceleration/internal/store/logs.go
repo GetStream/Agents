@@ -381,7 +381,14 @@ func redactJSONString(literal, decoded string, nested bool) (string, bool) {
 	escaped := literal[1:len(literal)-1] != decoded
 	read := literal
 	if escaped {
-		read = `"` + decoded + `"`
+		// Only the rules read this text; what is written is jsonString(redacted) or a literal
+		// that decodes to redacted.
+		var quoted strings.Builder
+		quoted.Grow(len(decoded) + 2)
+		quoted.WriteByte('"')
+		quoted.WriteString(decoded)
+		quoted.WriteByte('"')
+		read = quoted.String()
 	}
 	read = redactCredentialShapes(read)
 	redacted := strings.TrimSuffix(strings.TrimPrefix(read, `"`), `"`)
