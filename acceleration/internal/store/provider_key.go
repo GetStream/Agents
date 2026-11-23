@@ -93,7 +93,7 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 
 	var was ProviderKey
 	var replaced bool
-	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		err := tx.NewSelect().Model(&was).
 			Where("customer_id = ? AND provider = ? AND region = ?", key.CustomerID, key.Provider, key.Region).
 			For("UPDATE").
@@ -117,11 +117,10 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 			Set("updated_at = EXCLUDED.updated_at").
 			Exec(ctx)
 		return err
-	})
+	}, func() []string { return []string{providerKeysKey(key.CustomerID)} })
 	if err != nil {
 		return ProviderKey{}, false, stack.Wrap(fmt.Errorf("store: put provider key: %w", err))
 	}
-	r.store.forget(ctx, providerKeysKey(key.CustomerID))
 	return was, replaced, nil
 }
 
@@ -187,17 +186,24 @@ func (r *ProviderKeys) Delete(ctx context.Context, customerID, provider, region 
 		return ProviderKey{}, stack.Wrap(errors.New("store: a customer, a provider and a region are required"))
 	}
 	var deleted ProviderKey
-	err := r.store.global.NewDelete().Model(&deleted).
-		Where("customer_id = ? AND provider = ? AND region = ?", customerID, provider, region).
-		Returning("*").
-		Scan(ctx)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewDelete().Model(&deleted).
+			Where("customer_id = ? AND provider = ? AND region = ?", customerID, provider, region).
+			Returning("*").
+			Scan(ctx)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if deleted.CustomerID == "" {
+			return nil
+		}
+		return []string{providerKeysKey(customerID)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProviderKey{}, stack.Wrap(fmt.Errorf("%w: %s in %s", ErrNoProviderKey, provider, region))
 	}
 	if err != nil {
 		return ProviderKey{}, stack.Wrap(fmt.Errorf("store: delete provider key: %w", err))
 	}
-	r.store.forget(ctx, providerKeysKey(customerID))
 	return deleted, nil
 }
 

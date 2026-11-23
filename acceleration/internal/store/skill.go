@@ -83,13 +83,16 @@ func (r *Skills) Insert(ctx context.Context, skill *Skill) error {
 		skill.Files = map[string]string{}
 	}
 
-	if _, err := r.store.global.NewInsert().Model(skill).Exec(ctx); err != nil {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(skill).Exec(ctx)
+		return err
+	}, func() []string { return []string{skillsKey(skill.CustomerID, skill.ConfigID)} })
+	if err != nil {
 		if constraint(err) == "skills_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
 		return stack.Wrap(fmt.Errorf("store: create skill: %w", err))
 	}
-	r.store.forget(ctx, skillsKey(skill.CustomerID, skill.ConfigID))
 	return nil
 }
 
@@ -115,14 +118,25 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 		Where("deleted_at IS NULL").
 		For("UPDATE")
 	var wasConfig string
-	err := r.store.global.NewUpdate().Model(skill).
-		With("was", was).
-		TableExpr("was").
-		Column("config_id", "name", "description", "instructions", "files", "capture_video", "deadline_ms", "updated_at").
-		Where("sk.id = ?", skill.ID).
-		Where("sk.customer_id = ?", skill.CustomerID).
-		Returning("was.config_id").
-		Scan(ctx, &wasConfig)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model(skill).
+			With("was", was).
+			TableExpr("was").
+			Column("config_id", "name", "description", "instructions", "files", "capture_video", "deadline_ms", "updated_at").
+			Where("sk.id = ?", skill.ID).
+			Where("sk.customer_id = ?", skill.CustomerID).
+			Returning("was.config_id").
+			Scan(ctx, &wasConfig)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if wasConfig == "" {
+			return nil
+		}
+		return []string{
+			skillsKey(skill.CustomerID, skill.ConfigID),
+			skillsKey(skill.CustomerID, wasConfig),
+		}
+	})
 	switch {
 	case constraint(err) == "skills_name_idx":
 		return stack.Wrap(ErrNameTaken)
@@ -131,7 +145,6 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 	case err != nil:
 		return stack.Wrap(fmt.Errorf("store: update skill: %w", err))
 	}
-	r.store.forget(ctx, skillsKey(skill.CustomerID, skill.ConfigID), skillsKey(skill.CustomerID, wasConfig))
 	return nil
 }
 
@@ -142,20 +155,27 @@ func (r *Skills) Delete(ctx context.Context, customerID, id string) error {
 	}
 
 	var configID string
-	err := r.store.global.NewUpdate().Model((*Skill)(nil)).
-		Set("deleted_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Where("deleted_at IS NULL").
-		Returning("config_id").
-		Scan(ctx, &configID)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model((*Skill)(nil)).
+			Set("deleted_at = ?", time.Now().UTC()).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Returning("config_id").
+			Scan(ctx, &configID)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if configID == "" {
+			return nil
+		}
+		return []string{skillsKey(customerID, configID)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownSkill(id)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete skill: %w", err))
 	}
-	r.store.forget(ctx, skillsKey(customerID, configID))
 	return nil
 }
 
