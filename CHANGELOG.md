@@ -864,6 +864,9 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### An imported row is held to what the API holds it to
 
 `POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. A moved voice arrives with its id, name and description and without its samples or bindings, whose audio and clone stay with the deployment that made them: add a recording and prepare it again. An import that names `voice_samples` or `voice_bindings` is refused. An imported request is never billable here and counts against the importing app's organization: the one it was last seen under here, else the one it is registered under, else none.
+### An imported bought number arrives given back
+
+A `phone_numbers` row in `/v1/data/import`, or in a change applied after it, for a number bought at a vendor arrives released at the import time, unless it was released earlier: it is the number's billing history, and is neither attached nor given back at the vendor here. A customer that moves keeps a bought number by buying or porting it at the destination, which the imported row does not block. A number on the customer's own SIP trunk still arrives held. No imported number keeps its `dlc_use_case_id`, which names a use case of the source.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

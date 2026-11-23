@@ -3032,9 +3032,7 @@ func (s *DataMoveSuite) TestAMovedNumberLeavesItsTrunkBehind() {
 }
 
 func (s *DataMoveSuite) TestAMovedNumberArrivesNotAttached() {
-	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
-		E164: "+15550000113", Vendor: "telnyx", Country: "US", CustomerID: "acme",
-	}))
+	s.ownNumber("+15550000113")
 	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000113", NumberAttachment{
 		TrunkID: "trunk-1", RouteID: "route-1", CallType: "default",
 	}))
@@ -3046,17 +3044,70 @@ func (s *DataMoveSuite) TestAMovedNumberArrivesNotAttached() {
 	s.Nil(moved.AttachedAt)
 }
 
-func (s *DataMoveSuite) TestAMovedNumberIsHeldWhereItArrives() {
-	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
-		E164: "+15550000111", Vendor: "plivo", Country: "US", CustomerID: "acme",
-	}))
+func (s *DataMoveSuite) TestAMovedNumberOnItsOwnTrunkIsHeldWhereItArrives() {
+	s.ownNumber("+15550000111")
 
 	s.move("acme", "acme")
 	s.move("acme", "acme")
 
 	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000111")
 	s.Require().NoError(err)
-	s.Equal("plivo", held.Vendor)
+	s.Equal(sipTrunkVendor, held.Vendor)
+}
+
+func (s *DataMoveSuite) TestAMovedBoughtNumberArrivesGivenBack() {
+	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000121", Vendor: "plivo", Country: "US", CustomerID: "acme",
+	}))
+
+	s.move("acme", "acme")
+	s.move("acme", "acme")
+
+	_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000121")
+	s.ErrorIs(err, ErrNoNumber)
+	numbers, err := s.destination.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(numbers, 1, "its bill's history arrives")
+	s.NotNil(numbers[0].ReleasedAt)
+}
+
+func (s *DataMoveSuite) TestAnImportedBoughtNumberIsNotHeldAndCanStillBeBoughtHere() {
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", s.importedNumber("+15550000122", "telnyx")))
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "other", []DataChange{{
+		Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000123", "telnyx"),
+	}}))
+
+	for _, e164 := range []string{"+15550000122", "+15550000123"} {
+		_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", e164)
+		s.ErrorIs(err, ErrNoNumber, e164)
+		s.ErrorContains(s.destination.PhoneNumbers.Attach(s.ctx, "other", e164, NumberAttachment{
+			TrunkID: "trunk-here", RouteID: "route-here", CallType: "default", CallID: "call-here",
+		}), "is not a number other holds", e164)
+		s.NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+			E164: e164, Vendor: "telnyx", Country: "US", CustomerID: "acme",
+		}), "%s can be bought here", e164)
+	}
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkIsHeld() {
+	row := s.importedNumber("+15550000124", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000124")
+	s.Require().NoError(err)
+	s.Nil(held.ReleasedAt)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberHasNoUseCase() {
+	row := s.importedNumber("+15550000125", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"dlc_use_case_id", "use-case-there")
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000125")
+	s.Require().NoError(err)
+	s.Empty(held.UseCaseID)
 }
 
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumberAttachedOnTheDestination() {
@@ -3086,12 +3137,10 @@ func (s *DataMoveSuite) TestAChangeAppliedLaterKeepsANumberAttachedOnTheDestinat
 }
 
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumbersLineOnTheDestination() {
-	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
-		E164: "+15550000132", Vendor: "telnyx", Country: "US", CustomerID: "acme",
-	}))
+	s.ownNumber("+15550000132")
 	s.move("acme", "acme")
 	// On a trunk to place calls, not attached.
-	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
+	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: sipTrunkVendor},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.SetLine("+15550000132", "trunk-here", "route-here")
 		}))
@@ -3105,9 +3154,7 @@ func (s *DataMoveSuite) TestCopyingAgainKeepsANumbersLineOnTheDestination() {
 }
 
 func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDestination() {
-	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
-		E164: "+15550000133", Vendor: "telnyx", Country: "US", CustomerID: "acme",
-	}))
+	s.ownNumber("+15550000133")
 	s.move("acme", "acme")
 	there := s.seedAgentConfig(s.source, "acme", "there")
 	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000133", NumberAttachment{
@@ -3131,15 +3178,13 @@ func (s *DataMoveSuite) TestCopyingAgainStillUpdatesANumberNotOnATrunkOnTheDesti
 
 func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALineOnTheDestination() {
 	first := s.seedAgentConfig(s.source, "acme", "first")
-	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
-		E164: "+15550000134", Vendor: "telnyx", Country: "US", CustomerID: "acme",
-	}))
+	s.ownNumber("+15550000134")
 	s.Require().NoError(s.source.PhoneNumbers.Attach(s.ctx, "acme", "+15550000134", NumberAttachment{
 		TrunkID: "trunk-there", RouteID: "route-there", CallType: "default", CallID: "call-there", ConfigID: first,
 	}))
 	s.move("acme", "acme")
 	// On a line to place calls, which never wrote an agent.
-	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: "telnyx"},
+	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", StreamAppPK: 42, Vendor: sipTrunkVendor},
 		func(_ context.Context, tx *TrunkGroupTx) error {
 			return tx.SetLine("+15550000134", "trunk-here", "route-here")
 		}))
@@ -3176,12 +3221,17 @@ func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGave
 	s.Empty(moved.ConfigID)
 }
 
-// numberAttachedHere is a number the source holds, copied here and attached here, as it reads
-// here once attached.
-func (s *DataMoveSuite) numberAttachedHere(e164 string) PhoneNumber {
-	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
-		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: "acme",
+// ownNumber is a number on acme's own trunk at the source: a bought one arrives given back.
+func (s *DataMoveSuite) ownNumber(e164 string) {
+	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+		E164: e164, Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.source, "acme").ID,
 	}))
+}
+
+// numberAttachedHere is a number the source holds on acme's own trunk, copied here and attached
+// here, as it reads here once attached.
+func (s *DataMoveSuite) numberAttachedHere(e164 string) PhoneNumber {
+	s.ownNumber(e164)
 	s.move("acme", "acme")
 	s.Require().NoError(s.destination.PhoneNumbers.Attach(s.ctx, "acme", e164, NumberAttachment{
 		TrunkID: "trunk-here", RouteID: "route-here", StreamAppPK: 42, CallType: "default", CallID: "call-here",

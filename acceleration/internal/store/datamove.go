@@ -752,6 +752,13 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		// same unit of work.
 		picked[i] = "COALESCE(usage_id, " + importedUsageID("customer_id", "id") + ")"
 	}
+	if i := slices.Index(columns, "released_at"); spec.name == "phone_numbers" && i >= 0 {
+		// A bought number is held in the vendor account of the deployment that bought it, which
+		// a row cannot prove is this one's, so it arrives given back: only its bill's history.
+		// A customer keeps the number by buying or porting it here. One on the customer's own
+		// trunk is in no vendor account.
+		picked[i] = "CASE WHEN vendor = '" + sipTrunkVendor + "' THEN released_at ELSE COALESCE(released_at, now()) END"
+	}
 	if i := slices.Index(columns, spec.copied); spec.copied != "" && i >= 0 {
 		// The source's id, whatever the source kept as the id of where the row came from.
 		picked[i] = shape.keys[0]
@@ -1497,10 +1504,11 @@ func (t dataTable) identity() string {
 	}
 	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers
-	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again.
+	// it for neither (ErrAmbiguousHook). It arrives needing to be attached again. Nor with its
+	// use case, which names one of the source's.
 	if t.name == "phone_numbers" {
 		return "jsonb_build_object('customer_id', ?::text, 'stream_trunk_id', NULL, 'stream_route_id', NULL," +
-			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL)"
+			" 'stream_call_id', NULL, 'stream_call_type', NULL, 'attached_at', NULL, 'dlc_use_case_id', NULL)"
 	}
 	// A request was billed by the deployment that recorded it, so this one never ships it, and
 	// what that one's usage service answered for it is not this one's: a reship of the rows
