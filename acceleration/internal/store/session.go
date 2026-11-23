@@ -345,20 +345,22 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 //
 // Only a row opened before is superseded, so a late write from a router that held the session
 // earlier never hides the row of the one holding it now.
+//
+// The rows are read, superseded already or not, before any is marked, and every write only
+// moves one way. A call that failed partway, which the recorder retries, ends as one that did
+// not.
 func (r *Sessions) Supersede(ctx context.Context, customerID, id string, opened time.Time) error {
 	if customerID == "" || id == "" || opened.IsZero() {
 		return stack.Wrap(errors.New("store: a customer, a session id and when it opened are required"))
 	}
 	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
 		var earlier []AgentSession
-		_, err := db.NewUpdate().Model((*AgentSession)(nil)).
-			Set("superseded_at = ?", time.Now().UTC()).
+		err := db.NewSelect().Model(&earlier).
+			Column("modality", "last_response_at", "pinned_at", "review_score", "remembers", "updated_at").
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
-			Where("superseded_at IS NULL").
 			Where("opened_at IS NULL OR opened_at < ?", opened).
-			Returning("modality, last_response_at, pinned_at, review_score, remembers, updated_at").
-			Exec(ctx, &earlier)
+			Scan(ctx)
 		return earlier, err
 	})
 	if err != nil {
@@ -382,6 +384,17 @@ func (r *Sessions) Supersede(ctx context.Context, customerID, id string, opened 
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: supersede session: take its earlier row's: %w", err))
+	}
+	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
+		return db.NewUpdate().Model((*AgentSession)(nil)).
+			Set("superseded_at = COALESCE(superseded_at, ?)", time.Now().UTC()).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("opened_at IS NULL OR opened_at < ?", opened).
+			Exec(ctx)
+	})
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: supersede session: mark its earlier rows: %w", err))
 	}
 	return nil
 }

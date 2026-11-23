@@ -4,6 +4,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -169,6 +170,41 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardKeepsWhatItsRowHe
 	s.Equal(ModalityVoice, found.Modality, "a session spoken in stays a voice one")
 	s.Require().NotNil(found.Remembers)
 	s.True(*found.Remembers, "deleting it still forgets what it taught the memory store")
+}
+
+func (s *ShardedStoreSuite) TestASupersedeTriedAgainAfterAShardFailedTakesWhatTheEarlierRowSaid() {
+	s.opened("chat", "app", s.base, func(session *AgentSession) { session.Remembers = new(true) })
+	_, err := s.store.Sessions.Pin(s.ctx, "app", "chat", true, s.base)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(time.Minute), ""))
+	opened := s.base.Add(time.Hour)
+	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user",
+		CreatedAt: s.base, OpenedAt: opened, Remembers: new(false)}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+
+	// The first try also reads a shard that is down, and fails once the shard holding the
+	// earlier row has answered. The recorder tries again.
+	s.Require().Error(s.withAShardDown(s.other.shardDSN, s.shardDSN).Sessions.Supersede(s.ctx, "app", "chat", opened))
+	s.Require().NoError(s.other.Sessions.Supersede(s.ctx, "app", "chat", opened))
+
+	found, err := s.other.Sessions.Get(s.ctx, "app", "chat")
+	s.Require().NoError(err)
+	s.NotNil(found.PinnedAt, "pinned before it was carried on")
+	s.Require().NotNil(found.Remembers)
+	s.True(*found.Remembers, "deleting it still forgets what its first run taught the memory store")
+}
+
+// withAShardDown is a router of the shard own that reads the shards up and one more, which is
+// down: nothing listens on port 1.
+func (s *ShardedStoreSuite) withAShardDown(own string, up ...string) *Store {
+	shards := map[string]string{"own": own, "down": "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable"}
+	for i, dsn := range up {
+		shards[fmt.Sprintf("up-%d", i)] = dsn
+	}
+	router, err := OpenShards(Options{DSN: s.dsn, ShardDSN: own, Shards: shards})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(router.Close()) })
+	return router
 }
 
 func (s *ShardedStoreSuite) TestALateRowFromARouterThatHeldASessionEarlierHidesNoRowOpenedSince() {
