@@ -1,0 +1,40 @@
+name: Build the Python packages
+description: Build every workspace package and check that each carries the version of the release tag. Never uploads.
+inputs:
+  tag:
+    description: The release tag, vX.Y.Z. The checkout must see it.
+    required: true
+outputs:
+  version:
+    description: The version, X.Y.Z, that every built file carries
+    value: ${{ steps.check.outputs.version }}
+runs:
+  using: composite
+  steps:
+    # No dependency cache in a job that holds an OIDC token: a cache poisoned by another
+    # run would hand that token to whatever it planted.
+    - uses: ./.github/actions/python-uv-setup
+      with:
+        enable-cache: "false"
+        # `uv build` makes its own build environments and needs none of the dev dependencies.
+        sync: "false"
+
+    - name: Clean dist directory
+      shell: bash
+      run: |
+        rm -rf dist
+
+    - name: Build all distributions
+      shell: bash
+      env:
+        UV_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-build-constraints.txt
+      run: |
+        uv build --all
+
+    - name: Check that every file has the release version
+      id: check
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+      run: |
+        .github/scripts/check-release-version.sh "$TAG" dist
