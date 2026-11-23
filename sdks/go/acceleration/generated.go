@@ -8100,7 +8100,7 @@ type OrganizationActivity struct {
 
 // OrganizationProgress defines model for OrganizationProgress.
 type OrganizationProgress struct {
-	// Funded The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the rule that lets it buy numbers. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+	// Funded The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
 	Funded *bool `json:"funded,omitempty"`
 
 	// FurthestStep The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.

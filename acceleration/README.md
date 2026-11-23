@@ -2188,7 +2188,9 @@ Every organization's activity is a list by cursor of `customer_activity`'s rows 
 also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
 on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
 `app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
-refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Each organization also tells `funded`: whether it has credit that is not trial
+credit, read live from the usage service when the page is read. It is absent on every organization of the page when
+the deployment has no usage service or it did not answer. Its description holds the
 definitions of tried, API calls, production and churned:
 
 ```bash
@@ -2246,7 +2248,7 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
-| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step`, `steps` and `funded` (read live from the usage service), by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
 The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).

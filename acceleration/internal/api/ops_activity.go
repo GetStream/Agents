@@ -62,7 +62,7 @@ type OrganizationProgress struct {
 	OrganizationId string            `json:"organization_id" doc:"The organization."`
 	FurthestStep   ActivityStep      `json:"furthest_step" doc:"The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since."`
 	Steps          []ActivityStepDay `json:"steps" nullable:"false" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them."`
-	Funded         *bool             `json:"funded,omitempty" doc:"The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the rule that lets it buy numbers. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer."`
+	Funded         *bool             `json:"funded,omitempty" doc:"The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer."`
 }
 
 // ActivityPage is a page of every organization's activity.
