@@ -47,7 +47,7 @@ func (s *RecordingsSuite) transcribeLogged(transcriber timedTranscriber, recordi
 		transcribers := NewTranscriberRegistry()
 		transcribers.Register("batchy", func(routing.Spec) (stt.Transcriber, error) { return transcriber, nil })
 		config := routing.ModalityConfig{Providers: []routing.ProviderConfig{{Provider: "batchy", Model: "whole",
-			Languages: []string{"en"}, Price: routing.Price{PerAudioHour: 3.6}}}}
+			Languages: []string{"en"}, Region: "us", Price: routing.Price{PerAudioHour: 3.6}}}}
 		recordings, err := NewRecordings(Options{Config: config, Transcribers: transcribers})
 		s.Require().NoError(err)
 		defer recordings.Close()
@@ -74,7 +74,7 @@ func (s *RecordingsSuite) TestATranscribedRecordingLogsOneBatchLineWithWhatItCos
 
 	s.Equal([]map[string]any{{
 		"level": "INFO", "msg": "speech transcription timing",
-		"call": "default:c1", "app_id": app, "agent_id": "concierge", "provider": "batchy", "model": "whole",
+		"call": "default:c1", "app_id": app, "agent_id": "concierge", "provider": "batchy", "model": "whole", "region": "us",
 		"batch": true, "audio_ms": 1_500.0, "duration_ms": 250.0, "cost_micros": 1_500.0,
 		"success": true, "error_code": "",
 	}}, lines, "no ttfb_ms: one answer for the whole file has no first transcript to time")
@@ -94,7 +94,7 @@ func (s *RecordingsSuite) TestAFailedTranscriptionLogsItsCodeAndItsErrorWithNoCr
 	delete(line, "error")
 	s.Equal(map[string]any{
 		"level": "INFO", "msg": "speech transcription timing",
-		"call": "", "app_id": app, "provider": "batchy", "model": "whole",
+		"call": "", "app_id": app, "provider": "batchy", "model": "whole", "region": "us",
 		"batch": true, "audio_ms": 0.0, "duration_ms": 250.0, "cost_micros": 0.0,
 		"success": false, "error_code": "transcribe_failed",
 	}, line, "a recording outside a call names no agent and an empty call")

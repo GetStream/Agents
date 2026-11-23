@@ -50,7 +50,7 @@ func (s *RecordingsSuite) recordLogged(app string, first, next timedRecorder) []
 		registry.Register("spoken", func(routing.Spec) (tts.Recorder, error) { return next, nil })
 		price := routing.Price{PerMillionChars: 30}
 		config := routing.ModalityConfig{Providers: []routing.ProviderConfig{
-			{Provider: "voicy", Model: "whole", Languages: []string{"en"}, Price: price},
+			{Provider: "voicy", Model: "whole", Languages: []string{"en"}, Region: "us", Price: price},
 			{Provider: "spoken", Model: "whole", Languages: []string{"en"}, Price: price},
 		}}
 		recordings, err := NewRecordings(Options{Config: config, Recorders: registry,
@@ -80,7 +80,7 @@ func (s *RecordingsSuite) TestASpokenRecordingLogsOneBatchLineWithWhatItCost() {
 
 	s.Equal([]map[string]any{{
 		"level": "INFO", "msg": "speech synthesis timing",
-		"call": "", "app_id": app, "provider": "voicy", "model": "whole",
+		"call": "", "app_id": app, "provider": "voicy", "model": "whole", "region": "us",
 		"batch": true, "characters": 5.0, "audio_ms": 800.0, "duration_ms": 300.0, "cost_micros": 150.0,
 		"success": true, "error_code": "",
 	}}, lines, "no ttfb_ms: one answer for the whole text has no first audio to time")
@@ -101,7 +101,7 @@ func (s *RecordingsSuite) TestEachCandidateARecordingFallsBackFromLogsItsOwnLine
 	delete(failed, "error")
 	s.Equal(map[string]any{
 		"level": "INFO", "msg": "speech synthesis timing",
-		"call": "", "app_id": app, "provider": "voicy", "model": "whole",
+		"call": "", "app_id": app, "provider": "voicy", "model": "whole", "region": "us",
 		"batch": true, "characters": 0.0, "audio_ms": 0.0, "duration_ms": 120.0, "cost_micros": 0.0,
 		"success": false, "error_code": "record_failed",
 	}, failed)

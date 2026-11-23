@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
@@ -351,5 +352,23 @@ func (s *CallSuite) TestARecordedHookIsToldWhatTheStoredRowCosts() {
 		case "quoted":
 			s.Positive(row.CostMicros)
 		}
+	}
+}
+
+// A refused user id is counted once for the row: the line's pricing must not count it again.
+func (s *CallSuite) TestARecordedHookCountsARefusedUserIDOncePerRow() {
+	for id, reason := range refusedUsers {
+		meter := s.meter(priced)
+		meter.Owner.UserID = id
+		told := 0
+		meter.Recorded = func(Stat, int64) { told++ }
+		before := testutil.ToFloat64(usageUserIDDropped.WithLabelValues(reason))
+
+		_, err := Call(s.ctx, meter, func(context.Context) (used, error) { return used{"input_tokens": 1_000}, nil })
+
+		s.Require().NoError(err)
+		s.Equal(1, told)
+		s.Empty(s.only(meter).UserID)
+		s.Equal(1.0, testutil.ToFloat64(usageUserIDDropped.WithLabelValues(reason))-before, reason)
 	}
 }
