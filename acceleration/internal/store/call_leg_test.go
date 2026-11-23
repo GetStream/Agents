@@ -365,7 +365,7 @@ func (s *StoreSuite) TestMergingPlacedCallsIntoTheirLegsBillsTheSame() {
 	db, err := Open(s.emptyDatabase("merge_legs"))
 	s.Require().NoError(err)
 	defer db.Close()
-	s.Require().NoError(db.migrate(s.ctx, db.global, globalSet))
+	s.Require().NoError(db.migrate(s.ctx, db.globalDSN, globalSet))
 	versions, err := database.NewStore(database.DialectPostgres, shardSet.table)
 	s.Require().NoError(err)
 	provider, err := goose.NewProvider("", db.shard.DB, shardSet.files, goose.WithStore(versions))

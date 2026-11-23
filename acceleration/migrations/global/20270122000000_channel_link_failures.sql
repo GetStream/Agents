@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- The messages each number texted a line that claimed no link code, per window, so a code
 -- cannot be guessed by texting one after another.

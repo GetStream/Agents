@@ -46,6 +46,11 @@ def _parse_response(
 
         return response_403
 
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
+
     if response.status_code == 500:
         response_500 = ErrorResponse.from_dict(response.json())
 
@@ -90,6 +95,8 @@ def sync_detailed(
     an object bucket rather than in this database; the rows naming those objects are here, and copying
     the bucket is yours to do.
     A router with shards cannot be the source of a move and answers 400 `not_configured`.
+    An app runs one export at a time, and an export ends after an hour, or when one line has taken a
+    minute to write: an export with no cursor line is one to run again.
     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where
     naming a customer is all it takes to be one.
 
@@ -127,6 +134,8 @@ def sync(
     an object bucket rather than in this database; the rows naming those objects are here, and copying
     the bucket is yours to do.
     A router with shards cannot be the source of a move and answers 400 `not_configured`.
+    An app runs one export at a time, and an export ends after an hour, or when one line has taken a
+    minute to write: an export with no cursor line is one to run again.
     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where
     naming a customer is all it takes to be one.
 
@@ -160,6 +169,8 @@ async def asyncio_detailed(
     an object bucket rather than in this database; the rows naming those objects are here, and copying
     the bucket is yours to do.
     A router with shards cannot be the source of a move and answers 400 `not_configured`.
+    An app runs one export at a time, and an export ends after an hour, or when one line has taken a
+    minute to write: an export with no cursor line is one to run again.
     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where
     naming a customer is all it takes to be one.
 
@@ -195,6 +206,8 @@ async def asyncio(
     an object bucket rather than in this database; the rows naming those objects are here, and copying
     the bucket is yours to do.
     A router with shards cannot be the source of a move and answers 400 `not_configured`.
+    An app runs one export at a time, and an export ends after an hour, or when one line has taken a
+    minute to write: an export with no cursor line is one to run again.
     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where
     naming a customer is all it takes to be one.
 

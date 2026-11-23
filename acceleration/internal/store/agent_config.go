@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -494,8 +495,8 @@ func (r *AgentConfigs) Get(ctx context.Context, customerID, id string) (AgentCon
 }
 
 // GetByName returns the config a customer holds under this name, and ErrNoAgentConfig when it
-// holds none. That none is cached too: a session opened by name asks the same question on
-// every conversation.
+// holds none. That none is cached too, for missTTL: a session opened by name asks the same
+// question on every conversation.
 func (r *AgentConfigs) GetByName(ctx context.Context, customerID, name string) (AgentConfig, error) {
 	if customerID == "" || name == "" {
 		return AgentConfig{}, stack.Wrap(errors.New("store: a customer and a config name are required"))
@@ -503,6 +504,7 @@ func (r *AgentConfigs) GetByName(ctx context.Context, customerID, name string) (
 	answer, err := cached(ctx, r.store, agentConfigNameKey(customerID, name), func(ctx context.Context) (found[AgentConfig], error) {
 		config, err := r.where(ctx, customerID, "name", name)
 		if errors.Is(err, ErrNoAgentConfig) {
+			rueidisaside.OverrideCacheTTL(ctx, missTTL)
 			return found[AgentConfig]{}, nil
 		}
 		return found[AgentConfig]{Value: config, Found: err == nil}, err

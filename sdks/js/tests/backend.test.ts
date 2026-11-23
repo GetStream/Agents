@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { after, before, describe, it } from "node:test";
 import { inspect } from "node:util";
 
@@ -56,18 +55,17 @@ describe("Backend", () => {
 
   it("names the SDK and its release on every request from Node", async () => {
     // The router counts a call that names no client as the API's, and logs Node's own
-    // User-Agent with no release; the release is the one npm published, from package.json.
-    const manifest = await readFile(new URL("../../package.json", import.meta.url), "utf8");
-    const published = JSON.parse(manifest) as { version: string };
+    // User-Agent with no release. Which release is the build's to write in.
+    const named = /^stream-agents-js\/\S+$/;
     router.serve("GET", "/v1/teams", { body: [] });
     const api = new Client({ url: router.url, apiKey: "vak_live_x", apiSecret: "shh" });
 
     await api.teams.list();
 
-    assert.equal(router.last.headers["user-agent"], `stream-agents-js/${published.version}`);
+    assert.match(router.last.headers["user-agent"] ?? "", named);
     assert.equal(router.last.headers["x-stream-client"], "sdk");
     const anonymous = await new Backend({ url: router.url, apiKey: "vak_live_x" }).headers(true);
-    assert.equal(anonymous["User-Agent"], `stream-agents-js/${published.version}`, "a guest asked for anonymously");
+    assert.match(anonymous["User-Agent"] ?? "", named, "a guest asked for anonymously");
     assert.equal(anonymous["X-Stream-Client"], "sdk", "a guest asked for anonymously");
   });
 
