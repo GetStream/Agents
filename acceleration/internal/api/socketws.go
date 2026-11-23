@@ -265,7 +265,13 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 				Type string `json:"type"`
 			}
 			if json.Unmarshal(payload, &command) == nil && command.Type == "stop" {
-				ended = socketEnd{cause: closedByClient, code: websocket.CloseNormalClosure}
+				// A stop sent once the conversation was over did not end it.
+				select {
+				case <-over:
+					ended = socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}
+				default:
+					ended = socketEnd{cause: closedByClient, code: websocket.CloseNormalClosure}
+				}
 				return
 			}
 		}

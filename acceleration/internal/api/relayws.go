@@ -192,18 +192,15 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 	go func() {
 		gone <- s.readRelayedCommands(connection, state, watcher, id, &closing)
 	}()
-	ended := s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load))
-	// The holder ends the session on a close command, which reaches this node as its end.
-	if closing.Load() && ended.cause == sessionEnded {
-		ended.cause = closedByClient
-	}
+	ended := s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load), &closing)
 	recordClose(r.Context(), ended)
 	return true
 }
 
 // writeRelayedEvents writes what arrives on the bus out to the caller, and keeps both the
 // socket and the watcher behind it alive. It says why the socket closed; the session's end
-// reason is the holder's to log.
+// reason is the holder's to log. closing is whether the caller had sent a close command: the
+// holder ends the session on one, which reaches this node as its end.
 //
 // The ping and the refresh share a tick because they say the same thing in each
 // direction: this socket is still being read, and the watcher standing for it elsewhere
@@ -216,6 +213,7 @@ func (s *Server) writeRelayedEvents(
 	asked wanted,
 	gone <-chan error,
 	ended ending,
+	closing *atomic.Bool,
 ) socketEnd {
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
@@ -231,8 +229,13 @@ func (s *Server) writeRelayedEvents(
 
 		case <-socket.closed:
 			code, reason := ended()
+			// Read as the end arrives: a close command sent after it did not cause it.
+			end := sessionEnd(code)
+			if closing.Load() && end.cause == sessionEnded {
+				end.cause = closedByClient
+			}
 			closeBeforeReader(connection, code, reason, gone)
-			return sessionEnd(code)
+			return end
 
 		case payload := <-socket.frames:
 			if !asked.takesFrame(frameType(payload)) {

@@ -77,6 +77,54 @@ func (s *SocketCloseLogSuite) closesWith(connection *websocket.Conn, code int) {
 	_, _ = s.socketEnd(connection)
 }
 
+// awaitRouterClose reads until the router's close frame arrives and leaves it unanswered, so
+// the caller can still send what it would have sent as the close crossed it.
+func (s *SocketCloseLogSuite) awaitRouterClose(connection *websocket.Conn) {
+	connection.SetCloseHandler(func(int, string) error { return nil })
+	s.Require().NoError(connection.SetReadDeadline(time.Now().Add(settleFor)))
+	for {
+		if _, _, err := connection.ReadMessage(); err != nil {
+			s.Require().True(websocket.IsCloseError(err, websocket.CloseNormalClosure), "the router sent no close: %v", err)
+			return
+		}
+	}
+}
+
+// commandAfterTheEnd stops the session, then sends command once the router's close for the
+// session's end has arrived, then answers that close.
+func (s *SocketCloseLogSuite) commandAfterTheEnd(connection *websocket.Conn, session, command string) {
+	s.serverClient.stopSession(session)
+	s.awaitRouterClose(connection)
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": command}))
+	s.Require().NoError(connection.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")))
+}
+
+func (s *SocketCloseLogSuite) TestACloseCommandAfterTheSessionEndedIsTheSessionsEnd() {
+	// Catches the first cause lost: an SDK hanging up sends close as the router's close for
+	// the session's end crosses it.
+	opened, connection, id := s.watched(nil)
+
+	s.commandAfterTheEnd(connection, opened.Id, "close")
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 end_reason=closed ")
+}
+
+func (s *SocketCloseLogSuite) TestARelayedCloseCommandAfterTheSessionEndedIsTheSessionsEnd() {
+	opened, connection, id := s.watched(s.other)
+
+	s.commandAfterTheEnd(connection, opened.Id, "close")
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 ")
+}
+
+func (s *SocketCloseLogSuite) TestAStopOnTheVoiceSocketAfterTheSessionEndedIsTheSessionsEnd() {
+	connection, session, id := s.socketSession()
+
+	s.commandAfterTheEnd(connection, session, "stop")
+
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 end_reason=closed ")
+}
+
 func (s *SocketCloseLogSuite) TestACloseCommandIsTheCallersClose() {
 	// Catches the session's end, which the command causes before the reader stops, logged in
 	// place of the command.
