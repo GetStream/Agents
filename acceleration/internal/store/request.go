@@ -1047,7 +1047,8 @@ func (r *Requests) CountByModel(ctx context.Context, modality string, since time
 // vendorCosts is every row since a time whose vendor reported what it charged, with the list's
 // cost at the vendor's rates: base_cost_micros once something writes it, else cost_micros,
 // which is the same figure for a row priced before either was written. A malformed figure is skipped,
-// never cast, so one bad row cannot fail the read.
+// never cast, so one bad row cannot fail the read. A row on the customer's own key is left out:
+// its vendor bills the customer, so the list puts no cost at the vendor's rates on it.
 const vendorCosts = `
 SELECT id, usage_id, modality, provider, model, started_at, vendor, base
 FROM (
@@ -1056,7 +1057,7 @@ FROM (
                 THEN (attributes->>'vendor_cost_micros')::bigint END AS vendor,
            CASE WHEN price_version = '' THEN cost_micros ELSE base_cost_micros END AS base
     FROM requests
-    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL
+    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL AND NOT byok
 ) AS reported
 WHERE vendor > 0`
 
