@@ -144,6 +144,8 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 		entry.Changes = append(entry.Changes, counts.Changes()...)
 		return recordAuditEntry(ctx, tx, entry)
 	})
+	// Dropped whatever the outcome, since a commit that fails can still have landed.
+	s.Policies.forget(ctx, ScopeUser, UserScopeID(appID, userID))
 	if err != nil {
 		return UserSettings{}, stack.Wrap(fmt.Errorf("store: forget user settings: %w", err))
 	}

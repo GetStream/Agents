@@ -286,10 +286,10 @@ func (s *StoreSuite) TestPolicyQueryBudgets() {
 	limit := int64(3)
 	user := Policy{Scope: ScopeUser, ScopeID: UserScopeID(app, "ann"), Document: PolicyDocument{Quota: &Quota{MessagesPerUserPerDay: &limit}}}
 
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(3, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Upsert(s.ctx, &user)) }),
 			"the document and the app's user flag are forgotten in one round trip")
-	}))
+	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.Policies.SelectUsers(s.ctx, app, "", 10)
 		s.Require().NoError(err)
@@ -310,9 +310,9 @@ func (s *StoreSuite) TestPolicyQueryBudgets() {
 			s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), name+" is then answered locally")
 		}
 	}
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(3, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Delete(s.ctx, ScopeUser, user.ScopeID)) }))
-	}))
+	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 }
 
 func (s *StoreSuite) TestAppPoliciesQueryBudgets() {
@@ -338,8 +338,9 @@ func (s *StoreSuite) TestAppPoliciesQueryBudgets() {
 		read()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), "then answered locally")
 	}
-	// The write, then the apps whose cached policies it changed, all forgotten in one round trip.
-	s.Equal(s.redisTrips(1)+1, s.countQueries(func() {
+	// The write (begin, the write and commit), then the apps whose cached
+	// policies it changed, all forgotten in one round trip.
+	s.Equal(s.redisTrips(1)+3, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Upsert(s.ctx, &organization)) }))
 	}), "an organization's save, however many apps it has")
 }
