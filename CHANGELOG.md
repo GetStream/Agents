@@ -843,9 +843,6 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
-### Log and stored error text no longer keeps a connector's token
-
-The redaction that runs on every log line and on the error text the router stores now takes out a Slack token (`xoxb-`, `xoxp-`, `xoxe-`, `xapp-` and the other `xox` types), a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), a Google API key (`AIza`), an AWS access key id (`AKIA`, `ASIA`), a JSON Web Token and a PEM private key block, even with no keyword before it, and the values of `id_token`, `auth_token`, `private_key` and a JSON `"token"` key. A token after a JSON or percent escape (`\n`, `\u0026`, `%3D`) is taken out too. In a JSON answer the `"token"` key stays and its value reads `"[redacted]"`, so the stored text is still valid JSON. Names such as `max_tokens`, `input_tokens`, `"token_count"` and `keyterm`, and a dotted name that is not a JWT, are unchanged. Rows written before are not rewritten (AI-3543, #2184).
 ### An inbound Slack message goes to the connection an agent binds
 
 With two app connections to the same workspace, the router now picks the connected one that a live agent config binds, instead of the newest (#2185).
