@@ -528,9 +528,14 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 // channel's does. Any other end leaves the reply in the conversation as it stands, delivered: a
 // turn that finished or failed for another reason, one still running at scheduledReplyWindow, or a
 // session that ended. A follow-up the conversation already holds runs nothing, so nothing is
-// waited for.
+// waited for: it stands as it is, except a rerun after a refusal for money (replyCommand) that
+// failed too, which left the user nothing again. That one fails the attempt under the earlier
+// reason, tried again until the run's attempts are spent, as a text channel's is.
 func (s *Server) followUpInConversation(ctx context.Context, found *session.Session, delivery scheduledDelivery) error {
-	_, _, known := found.FollowUpReply(delivery.CommandID)
+	state, _, known := found.FollowUpReply(delivery.CommandID)
+	if known && state == "failed" && moneyCode(delivery.Earlier) {
+		return undelivered(delivery.Earlier, turnRefused{errors.New("the turn run again after a refusal for money failed too")})
+	}
 	events, detach := found.Watch()
 	defer detach()
 	if err := s.followUpWithin(ctx, found, delivery); err != nil || known {

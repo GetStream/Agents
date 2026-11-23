@@ -587,6 +587,26 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedWhileMoneyCannotBeChecke
 	s.NotEmpty(said, "the user got a reply")
 }
 
+// A conversation task whose turn is refused because the money cannot be checked, and whose rerun
+// on the retry is refused again, did not reach the user: the run fails under the money once its
+// attempts are spent, as an SMS task's does, and is never delivered (AI-3183).
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedAgainOnItsRerunFailsTheRun() {
+	user, opened := s.uncheckableAfterOpening()
+	task := s.userTask(user, opened.Id, "conversation")
+
+	run, attempts := s.settledByTheWorker(task)
+
+	s.Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Empty(run.DeliveredTo)
+	s.Require().NotNil(run.Error)
+	s.Equal(codeSpendCheckUnavailable, *run.Error)
+	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	rerun, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.Equal("failed", rerun, "the retry ran the turn again, and it was refused again")
+}
+
 // A text channel's turn refused because the money cannot be checked runs again on the attempt
 // after it, once the check passes, and that attempt carries what the agent said.
 func (s *TelnyxUnpaidSuite) TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAgainOnItsRetry() {
