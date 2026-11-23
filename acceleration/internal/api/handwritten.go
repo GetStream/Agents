@@ -58,7 +58,7 @@ func documentHandWritten(api huma.API) {
 			"`decision`, `delegated`, `task_settled` (files " +
 			"lists what the work's code handed back, each a name, mime_type, url and size, uploaded " +
 			"to a persistent conversation's channel and attached to the reply), " +
-			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`, " +
+			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`, `tool_ran`, " +
 			"`tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`, `looked_up`, " +
 			"`backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and " +
 			"message_end, the utterance being heard when it was cut, how many milliseconds of it had been, " +
@@ -175,7 +175,13 @@ func documentHandWritten(api huma.API) {
 			"`tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout passed, or " +
 			"the caller interrupted a call to an `interruptible` tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; " +
 			"their result must repeat both values so a result cannot be adopted by another command " +
-			"or turn.\n" +
+			"or turn. A `tool_result` names its call with `tool_call_id`, or with `id` as the " +
+			"`tool_call` did; `tool_call_id` wins when both are sent. One naming no call is answered " +
+			"with an `error` (`context` `tool`). One no call waits for (answered already, cancelled, " +
+			"timed out, naming another call, or a call of a durable command without its `request_id` " +
+			"and `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` " +
+			"and `turn_id` it was sent with, each left out when it was, and `reason`, a sentence " +
+			"saying why; the socket stays open. Every watcher is sent both.\n" +
 			"While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) " +
 			"to keep the call going when the caller talks over the agent, which would otherwise " +
 			"cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it " +
