@@ -28,14 +28,21 @@ type CustomSuite struct {
 	// refuseCap answers a request that sends max_tokens the way vLLM answers one whose prompt
 	// and cap together exceed the model's length.
 	refuseCap bool
+	// refuseAll answers every request with refusal, capped or not.
+	refuseAll bool
+	refusal   string
 }
+
+// lengthRefusal is how vLLM refuses a request whose prompt and max_tokens together exceed the
+// model's length.
+const lengthRefusal = `{"object":"error","message":"This model's maximum context length is 8192 tokens. However, you requested 9000 tokens (2952 in the messages, 6048 in the completion). Please reduce the length of the messages or completion.","type":"BadRequestError","param":null,"code":400}`
 
 func TestCustomSuite(t *testing.T) {
 	suite.Run(t, new(CustomSuite))
 }
 
 func (s *CustomSuite) SetupTest() {
-	s.bodies, s.headers, s.refuseCap = nil, nil, false
+	s.bodies, s.headers, s.refuseCap, s.refuseAll, s.refusal = nil, nil, false, false, lengthRefusal
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
 		s.Require().NoError(err)
@@ -46,10 +53,10 @@ func (s *CustomSuite) SetupTest() {
 		s.headers = append(s.headers, r.Header.Clone())
 		s.mu.Unlock()
 
-		if _, capped := body["max_tokens"]; capped && s.refuseCap {
+		if _, capped := body["max_tokens"]; (capped && s.refuseCap) || s.refuseAll {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, `{"object":"error","message":"This model's maximum context length is 8192 tokens. However, you requested 9000 tokens (2952 in the messages, 6048 in the completion). Please reduce the length of the messages or completion.","type":"BadRequestError","param":null,"code":400}`)
+			_, _ = io.WriteString(w, s.refusal)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -96,23 +103,38 @@ func (s *CustomSuite) TestAModelThatMayThinkIsGivenRoomToThinkBeforeItAnswers() 
 	s.EqualValues(answerTokens+llm.ThinkingRoom, body["max_tokens"])
 }
 
-func (s *CustomSuite) TestTheDefaultCapLeavesRoomForThePromptInTheContext() {
+// prompted is a request whose prompt the router estimates at about tokens.
+func prompted(tokens int) llm.ResponseParams {
 	params := hello()
-	params.Instructions = strings.Repeat("Be terse. ", 1600)
+	params.Instructions = strings.Repeat("abcd", tokens)
+	return params
+}
+
+func (s *CustomSuite) TestTheDefaultCapLeavesRoomForThePromptInTheContext() {
+	// 4500 tokens counted half again is 6750, which leaves 1442 of 8192: less than the 2048 a
+	// reply is otherwise given.
+	params := prompted(4500)
+	s.Require().EqualValues(4501, llm.Compose(params).Total())
 
 	body := s.askIn("Qwen/Qwen3-8B", 8192, params)
 
-	limit, ok := body["max_tokens"].(float64)
-	s.Require().True(ok)
-	s.Less(int64(limit)+llm.Compose(params).Total(), int64(8192))
-	s.GreaterOrEqual(int(limit), leastCap)
+	s.EqualValues(8192-4501*3/2, body["max_tokens"])
+}
+
+func (s *CustomSuite) TestAContextWithLittleRoomLeftSendsNoDefaultCap() {
+	// About 300 tokens are left: too few to answer in, so no cap rather than one that cuts the
+	// reply short.
+	params := prompted(5260)
+	s.Require().Less(8192-llm.Compose(params).Total()*3/2, int64(leastCap))
+	s.Require().Positive(8192 - llm.Compose(params).Total()*3/2)
+
+	body := s.askIn("Qwen/Qwen3-8B", 8192, params)
+
+	s.NotContains(body, "max_tokens")
 }
 
 func (s *CustomSuite) TestAContextWithNoRoomLeftSendsNoDefaultCap() {
-	params := hello()
-	params.Instructions = strings.Repeat("Be terse. ", 3000)
-
-	body := s.askIn("Qwen/Qwen3-8B", 8192, params)
+	body := s.askIn("Qwen/Qwen3-8B", 8192, prompted(7500))
 
 	s.NotContains(body, "max_tokens", "a cap too small to answer in would fail what used to be answered")
 }
@@ -125,6 +147,39 @@ func (s *CustomSuite) TestADefaultCapTheEndpointRefusesIsDroppedAndTheTurnAskedA
 	s.Len(s.bodies, 2, "asked once with the cap, once without")
 	s.Contains(s.bodies[0], "max_tokens")
 	s.NotContains(body, "max_tokens")
+}
+
+// refused is the error Create returns from an endpoint answering every request with refusal,
+// and how many requests it was sent.
+func (s *CustomSuite) refused(refusal string) (error, int) {
+	s.refuseAll, s.refusal = true, refusal
+	provider, err := New(Options{Name: "mine", Model: "mistralai/Mistral-7B-Instruct-v0.3", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = provider.Close() })
+	_, err = provider.Create(context.Background(), hello())
+	return err, len(s.bodies)
+}
+
+func (s *CustomSuite) TestADefaultCapIsDroppedOnlyOnce() {
+	err, requests := s.refused(lengthRefusal)
+
+	s.ErrorContains(err, "maximum context length")
+	s.Equal(2, requests)
+}
+
+func (s *CustomSuite) TestARefusalOfAnythingButTheReplysLengthIsNotAskedAgain() {
+	err, requests := s.refused(`{"object":"error","message":"The request was refused by the content policy.","type":"BadRequestError","code":400}`)
+
+	s.ErrorContains(err, "content policy")
+	s.Equal(1, requests)
+}
+
+func (s *CustomSuite) TestAPromptTooLongForTheContextIsNotAskedAgain() {
+	// Without the cap the prompt is just as long.
+	err, requests := s.refused(`{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}`)
+
+	s.ErrorContains(err, "context size")
+	s.Equal(1, requests)
 }
 
 func (s *CustomSuite) TestACapTheCallerSetIsNotDroppedWhenRefused() {

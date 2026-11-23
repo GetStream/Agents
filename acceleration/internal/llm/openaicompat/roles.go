@@ -3,7 +3,6 @@ package openaicompat
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -41,7 +40,7 @@ func strictRoles(messages []openai.ChatCompletionMessageParamUnion) []openai.Cha
 			out[last] = joinUsers(out[last].OfUser, message.OfUser)
 		case message.OfUser != nil && spoke(out) == roleUser:
 			out = append(out, openai.AssistantMessage(""), message)
-		case isAssistantText(message) && spoke(out) == "":
+		case isAssistantText(message) && onlySystem(out):
 			out = opened(out, assistantText(message.OfAssistant))
 		case isAssistantText(message) && last >= 0 && isAssistantText(out[last]):
 			out[last] = openai.AssistantMessage(joinText(assistantText(out[last].OfAssistant), assistantText(message.OfAssistant)))
@@ -87,9 +86,21 @@ func spoke(messages []openai.ChatCompletionMessageParamUnion) string {
 	return ""
 }
 
-// opened tells the model in the system prompt what it said before anybody else spoke.
+// onlySystem reports whether nothing but the system prompt has been sent yet: no turn of the
+// caller's, and no call of the model's.
+func onlySystem(messages []openai.ChatCompletionMessageParamUnion) bool {
+	for _, message := range messages {
+		if message.OfSystem == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// opened tells the model in the system prompt what it said before anybody else spoke. The
+// line is quoted as it was said, its line breaks kept rather than escaped.
 func opened(messages []openai.ChatCompletionMessageParamUnion, said string) []openai.ChatCompletionMessageParamUnion {
-	line := fmt.Sprintf("You opened the conversation by saying: %q", said)
+	line := "You opened the conversation by saying: \"" + said + "\""
 	if len(messages) > 0 && messages[0].OfSystem != nil {
 		messages[0] = openai.SystemMessage(joinText(systemText(messages[0].OfSystem), line))
 		return messages

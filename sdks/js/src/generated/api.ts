@@ -7181,7 +7181,7 @@ export type components = {
             readonly base_url: string;
             /**
              * Format: int64
-             * @description Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+             * @description Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
              */
             readonly context_window?: number;
             /** @description Input kinds beyond text the model accepts, e.g. image. */

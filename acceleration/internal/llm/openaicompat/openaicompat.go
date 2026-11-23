@@ -325,21 +325,20 @@ func (l *LLM) defaultCap(params llm.ResponseParams) int {
 	return max(0, l.options.DefaultMaxTokens(params))
 }
 
-// lengthRefused reports whether a server refused a request as asking for more tokens than its
-// context holds, which vLLM answers with a 400 when the prompt and max_tokens together exceed
-// the model's length. Servers share no code for it, OpenAI's context_length_exceeded aside,
-// so the message is read: vLLM's names the maximum context length, llama.cpp's the context
-// size.
+// lengthRefused reports whether a server refused a request because the reply it may write
+// does not fit beside the prompt, which vLLM answers with a 400 when the prompt and max_tokens
+// together exceed the model's length. Only that refusal goes away without the cap: one about
+// the prompt alone, such as llama.cpp's "exceeds the available context size", is the same
+// without it. Servers share no code that tells the two apart (OpenAI's context_length_exceeded
+// covers both), so the message is read for the reply's budget: vLLM names max_tokens or "in
+// the completion", as OpenAI's own message does.
 func lengthRefused(err error) bool {
 	apiError, ok := errors.AsType[*openai.Error](err)
 	if !ok || apiError.StatusCode != http.StatusBadRequest {
 		return false
 	}
-	if apiError.Code == "context_length_exceeded" {
-		return true
-	}
 	said := strings.ToLower(err.Error())
-	for _, words := range []string{"max_tokens", "max_completion_tokens", "context length", "context size", "context window", "too many tokens"} {
+	for _, words := range []string{"max_tokens", "max_completion_tokens", "in the completion"} {
 		if strings.Contains(said, words) {
 			return true
 		}
@@ -369,7 +368,9 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 			io.Reader
 			io.Closer
 		}{body, response.Body}
-		if !stream {
+		// A body with nothing in it is a stream that ended before anything was sent, which the
+		// stream reports as such, as it does under text/event-stream.
+		if !stream && len(bytes.TrimSpace(head)) > 0 {
 			*refused = &llm.ProviderFailure{Err: fmt.Errorf("openaicompat: %s: answered a streaming request with %q rather than an event stream: %s",
 				l.options.Provider, contentType, bytes.TrimSpace(head[:min(len(head), 256)]))}
 		}

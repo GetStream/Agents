@@ -352,7 +352,7 @@ type CustomModelRequest struct {
 	BaseUrl                string    `json:"base_url" doc:"The endpoint root, up to and including /v1, that chat completions are posted under." minLength:"1" example:"https://model-abc123.api.baseten.co/environments/production/sync/v1"`
 	Model                  string    `json:"model" doc:"The id the endpoint serves the weights under." minLength:"1" example:"Qwen/Qwen3.8-27B"`
 	ApiKey                 *string   `json:"api_key,omitempty" doc:"Sent as a bearer token. Stored sealed and never returned. Left out of an update keeps the one stored; empty removes it." writeOnly:"true"`
-	ContextWindow          *int64    `json:"context_window,omitempty" doc:"Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown." minimum:"0"`
+	ContextWindow          *int64    `json:"context_window,omitempty" doc:"Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown." minimum:"0"`
 	InputModalities        *[]string `json:"input_modalities,omitempty" doc:"Input kinds beyond text the model accepts, e.g. image."`
 	PerMillionInputTokens  *float64  `json:"per_million_input_tokens,omitempty" doc:"What the host bills per million input tokens in USD, so usage can say what a conversation cost. Omitted is free." minimum:"0"`
 	PerMillionOutputTokens *float64  `json:"per_million_output_tokens,omitempty" doc:"What the host bills per million output tokens in USD. Omitted is free." minimum:"0"`

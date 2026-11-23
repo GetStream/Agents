@@ -530,3 +530,30 @@ func (s *OpenAICompatSuite) TestWithoutStrictRolesCallIDsAreSentAsTheyAre() {
 
 	s.Equal([]string{"call-1", "call-1"}, callIDs(s.sentMessages(0)))
 }
+
+func (s *OpenAICompatSuite) TestAnEmptyBodyUnderAnotherTypeEndsAsAnEmptyStreamDoes() {
+	s.contentType, s.body = "text/plain", "\n"
+
+	stream, err := s.provider(Options{}).Create(context.Background(), hello())
+	s.Require().NoError(err)
+
+	s.Equal(llm.StatusFailed, drain(stream).Status)
+	s.True(llm.Transient(stream.Err()))
+	s.ErrorContains(stream.Err(), "ended before anything was sent")
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesKeepsWhatTheModelSaidAfterACallBeforeTheCallerSpoke() {
+	messages := s.strictly(weatherCall, weatherSaid, llm.Message{Role: llm.Assistant, Content: "It is 18C."})
+
+	s.Equal([]string{"system", "assistant", "tool", "assistant"}, roles(messages))
+	s.Equal("Be terse.", messages[0]["content"], "only a reply before anything else is an opening line")
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesQuotesAnOpeningLineAsItWasSaid() {
+	messages := s.strictly(
+		llm.Message{Role: llm.Assistant, Content: "Hi!\nHow can I help?"},
+		llm.Message{Role: llm.User, Content: "weather?"},
+	)
+
+	s.Equal("Be terse.\n\nYou opened the conversation by saying: \"Hi!\nHow can I help?\"", messages[0]["content"])
+}
