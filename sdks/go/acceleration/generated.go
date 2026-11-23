@@ -5763,6 +5763,9 @@ type Connector struct {
 
 	// Setup What a person does at the provider before the first consent.
 	Setup *ConnectorSetup `json:"setup,omitempty"`
+
+	// SyncHash The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+	SyncHash *string `json:"sync_hash,omitempty"`
 }
 
 // ConnectorAuditAction grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
@@ -6504,6 +6507,9 @@ type CustomConnectorRequest struct {
 
 	// Scopes The scopes a consent asks for, each an RFC 6749 scope token.
 	Scopes *[]string `json:"scopes,omitempty"`
+
+	// SyncHash The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+	SyncHash *string `json:"sync_hash,omitempty"`
 }
 
 // CustomModel defines model for CustomModel.
@@ -9099,6 +9105,9 @@ type RouterConfig struct {
 	// Stt How this config transcribes, live or from a recording. A field that only means something on one of the two forms says so: a recording has no endpointing to do, and a socket has no file to write subtitles from. A provider that cannot express a term refuses the request rather than dropping it silently.
 	Stt *SttOptions `json:"stt,omitempty"`
 
+	// SyncHash The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+	SyncHash *string `json:"sync_hash,omitempty"`
+
 	// Tts How this config speaks. A provider that cannot express a term refuses the request rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that says it cannot.
 	Tts       *TtsOptions `json:"tts,omitempty"`
 	UpdatedAt time.Time   `json:"updated_at"`
@@ -9120,6 +9129,9 @@ type RouterConfigRequest struct {
 
 	// Stt How this config transcribes, live or from a recording. A field that only means something on one of the two forms says so: a recording has no endpointing to do, and a socket has no file to write subtitles from. A provider that cannot express a term refuses the request rather than dropping it silently.
 	Stt *SttOptions `json:"stt,omitempty"`
+
+	// SyncHash The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+	SyncHash *string `json:"sync_hash,omitempty"`
 
 	// Tts How this config speaks. A provider that cannot express a term refuses the request rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that says it cannot.
 	Tts *TtsOptions `json:"tts,omitempty"`

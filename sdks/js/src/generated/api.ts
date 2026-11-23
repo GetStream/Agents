@@ -6573,6 +6573,8 @@ export type components = {
             readonly scopes: readonly string[] | null;
             /** @description What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing. */
             readonly setup?: components["schemas"]["ConnectorSetup"];
+            /** @description The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync. */
+            readonly sync_hash?: string;
         };
         /**
          * @description grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
@@ -7206,6 +7208,8 @@ export type components = {
             readonly schemes: readonly string[] | null;
             /** @description The scopes a consent asks for, each an RFC 6749 scope token. */
             readonly scopes?: readonly string[] | null;
+            /** @description The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one. */
+            readonly sync_hash?: string;
         };
         readonly CustomModel: {
             readonly base_url: string;
@@ -9581,6 +9585,8 @@ export type components = {
             readonly search?: components["schemas"]["SearchOptions"];
             readonly sts?: components["schemas"]["StsOptions"];
             readonly stt?: components["schemas"]["SttOptions"];
+            /** @description The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync. */
+            readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
             /** Format: date-time */
             readonly updated_at: string;
@@ -9592,6 +9598,8 @@ export type components = {
             readonly search?: components["schemas"]["SearchOptions"];
             readonly sts?: components["schemas"]["StsOptions"];
             readonly stt?: components["schemas"]["SttOptions"];
+            /** @description The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing. */
+            readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
         };
         readonly Run: {

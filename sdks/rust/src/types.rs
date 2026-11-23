@@ -4030,6 +4030,9 @@ pub struct Connector {
     ///What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub setup: ::std::option::Option<ConnectorSetup>,
+    ///The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
 }
 ///grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
 #[derive(
@@ -5294,6 +5297,9 @@ pub struct CustomConnectorRequest {
     ///The scopes a consent asks for, each an RFC 6749 scope token.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub scopes: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+    ///The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
 }
 ///`CustomModel`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
@@ -10460,6 +10466,9 @@ pub struct RouterConfig {
     pub sts: ::std::option::Option<StsOptions>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub stt: ::std::option::Option<SttOptions>,
+    ///The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
     pub updated_at: ::std::string::String,
@@ -10477,6 +10486,9 @@ pub struct RouterConfigRequest {
     pub sts: ::std::option::Option<StsOptions>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub stt: ::std::option::Option<SttOptions>,
+    ///The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
 }

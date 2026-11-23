@@ -2288,7 +2288,7 @@ module GetStream
           required: [].freeze, open: false
         }.freeze,
         "Connector" => {
-          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup].freeze,
+          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup sync_hash].freeze,
           required: %w[id revision name custom schemes inputs scopes client channel created_at].freeze, open: false
         }.freeze,
         "ConnectorAuditCredential" => {
@@ -2432,7 +2432,7 @@ module GetStream
           required: %w[items has_more].freeze, open: false
         }.freeze,
         "CustomConnectorRequest" => {
-          properties: %w[category client description endpoint id name schemes scopes].freeze,
+          properties: %w[category client description endpoint id name schemes scopes sync_hash].freeze,
           required: %w[id name endpoint schemes].freeze, open: false
         }.freeze,
         "CustomModel" => {
@@ -2980,11 +2980,11 @@ module GetStream
           required: %w[candidates description id title].freeze, open: false
         }.freeze,
         "RouterConfig" => {
-          properties: %w[created_at id llm name search sts stt tts updated_at].freeze,
+          properties: %w[created_at id llm name search sts stt sync_hash tts updated_at].freeze,
           required: %w[created_at id name updated_at].freeze, open: false
         }.freeze,
         "RouterConfigRequest" => {
-          properties: %w[llm name search sts stt tts].freeze,
+          properties: %w[llm name search sts stt sync_hash tts].freeze,
           required: %w[name].freeze, open: false
         }.freeze,
         "Run" => {
