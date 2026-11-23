@@ -143,7 +143,7 @@ func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAu
 			return fmt.Errorf("%w: %s", ErrOAuthClientRegistration, client.ConnectorID)
 		}
 		// ON CONFLICT arbitrates the primary key alone, so another customer's row with the app
-		// fails the unique index (20261006195500_connector_oauth_clients_provider_app.sql).
+		// fails the unique index.
 		if constraint(err) == "connector_oauth_clients_provider_app" {
 			return fmt.Errorf("%w: %s %s", ErrProviderAppTaken, client.ConnectorID, client.ProviderAppID)
 		}

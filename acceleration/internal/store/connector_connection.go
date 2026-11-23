@@ -70,8 +70,7 @@ var ErrNoSharedWebhook = errors.New("store: the connector's events are not route
 // disconnected, so it holds no provider unit: only a connected one does.
 var ErrConnectorConnectionNotConnected = errors.New("store: the connector connection is not connected")
 
-// providerUnitIndex is the unique index ErrProviderUnitTaken stands for
-// (20261006194000_connector_connections_provider_unit.sql).
+// providerUnitIndex is the unique index ErrProviderUnitTaken stands for.
 const providerUnitIndex = "connector_connections_provider_unit_idx"
 
 // Get is one account at one connector. Stored credentials are sealed by the
@@ -620,8 +619,8 @@ func (r *ConnectorConnections) DeleteUser(ctx context.Context, customerID, userI
 			ids = append(ids, row.ID)
 			deleted = append(deleted, DeletedConnection{ID: row.ID, ConnectorID: row.ConnectorID, OwnerType: row.OwnerType, HadGrant: row.HadGrant})
 		}
-		// Attempts reference their connection with no cascade (20261002193100), so they go
-		// first. Invocations cascade.
+		// Attempts reference their connection with no cascade, so they go first. Invocations
+		// cascade.
 		if _, err := tx.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
 			Where("caa.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
 			return fmt.Errorf("store: delete a user's authorization attempts: %w", err)

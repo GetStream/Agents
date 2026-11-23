@@ -17,9 +17,9 @@ import (
 )
 
 // ConnectorToolPin is the schema digest one tool of one connection had when a session first
-// offered it, for a tool a session binding grants by name alone
-// (20261011150000_connector_tool_pins.sql). It holds for the grant the connection had then,
-// its ConnectedAt: a reconnect is a new trust event, and the next session pins again.
+// offered it, for a tool a session binding grants by name alone. It holds for the grant the
+// connection had then, its ConnectedAt: a reconnect is a new trust event, and the next session
+// pins again.
 type ConnectorToolPin struct {
 	bun.BaseModel `bun:"table:connector_tool_pins,alias:ctp"`
 

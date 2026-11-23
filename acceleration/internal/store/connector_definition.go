@@ -623,8 +623,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 				ID: connection.ID, ConnectorID: id, OwnerType: connection.OwnerType, HadGrant: connection.HadGrant,
 			})
 		}
-		// The deliveries go with their destination (ON DELETE CASCADE,
-		// 20261007040000_connector_event_destinations.sql).
+		// The deliveries go with their destination (ON DELETE CASCADE).
 		for _, model := range []any{(*ConnectorOAuthClient)(nil), (*ConnectorConfigToken)(nil), (*EventDestination)(nil)} {
 			q := tx.NewDelete().Model(model).Where("customer_id = ? AND connector_id = ?", customerID, id)
 			if _, err := q.Exec(ctx); err != nil {
