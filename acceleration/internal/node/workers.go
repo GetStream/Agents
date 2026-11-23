@@ -143,10 +143,10 @@ func NewWorkers(ctx context.Context, pool *dispatch.Pool, directory *Directory, 
 		progress:  map[string]carriedCall{},
 		running:   map[string]context.CancelFunc{},
 	}
-	if err := bus.Subscribe(ctx, workers.requests, func(payload []byte) { go workers.take(ctx, payload) }); err != nil {
+	if _, err := bus.Subscribe(ctx, workers.requests, func(payload []byte) { go workers.take(ctx, payload) }); err != nil {
 		return nil, err
 	}
-	if err := bus.Subscribe(ctx, workers.replies, workers.resolve); err != nil {
+	if _, err := bus.Subscribe(ctx, workers.replies, workers.resolve); err != nil {
 		return nil, err
 	}
 	return workers, nil
