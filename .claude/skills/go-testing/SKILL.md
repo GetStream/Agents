@@ -33,6 +33,8 @@ Checks a reviewer runs and an author often skips:
 - Run the touched suites on the merge with current `origin/main`. CI's green is from the `main` it ran on.
 - An entry added to a shared list (`dataTables`, `importedModels`, `usageIndexes`) changes every reader of that list: read each one.
 - Round-trip an id that moves, is derived or is replayed: A to B to A, and a second run, each end as one row.
-- A shipped migration never runs again: change it in a new one. Make each new one expand-only for the release before, number it after the newest on `origin/main` and in every open PR, and start a transactional one with `SET LOCAL lock_timeout = '5s';`.
+- A shipped migration never runs again: change it in a new one.
+- A new migration is expand-only: it drops or renames nothing the release before still reads or writes.
+- A migration's lock timeout is in the `go` skill's `store.md` ("Which database"). Its version slot is in the `parallel-agents` skill ("Migration versions").
 - Work moved onto `context.WithoutCancel` takes its follow-on calls (billing, the cache drop) with it.
 - A fix covers every path to the same data: each writer, and each copy of it (a cache, `data_changes`).

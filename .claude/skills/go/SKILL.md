@@ -1,6 +1,6 @@
 ---
 name: go
-description: How Go is written in this repo - errors (errors.md), state (store.md), logging, spans, context, goroutines, comments. Read before writing or changing Go code.
+description: How Go is written in this repo - errors (errors.md), state (store.md), logging (logging.md), spans, context, goroutines, comments. Read before writing or changing Go code.
 paths:
   - "**/*.go"
 ---
