@@ -110,6 +110,22 @@ func (s *StoreSuite) TestARolledBackVersionWithNoFileIsNotRefused() {
 	s.Require().NoError(db.Migrate(s.ctx))
 }
 
+// A database a later release migrated holds versions this one has no file for, after the
+// squashed history and before any of it is recorded once the cleanup has run: rolling back to
+// this release starts on it.
+func (s *StoreSuite) TestADatabaseALaterReleaseMigratedStartsAfterTheCleanup() {
+	db, err := Open(s.emptyDatabase("later_release"))
+	s.Require().NoError(err)
+	defer db.Close()
+	s.Require().NoError(db.Migrate(s.ctx))
+	for _, set := range []migrationSet{globalSet, shardSet} {
+		_, err = db.global.ExecContext(s.ctx, "INSERT INTO ? (version_id, is_applied) VALUES (29991231000000, true)", bun.Ident(set.table))
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(db.Migrate(s.ctx))
+}
+
 // shardTo opens an empty database of the suite's own with the shared set applied and the shard
 // set up to version, the order Migrate runs them in.
 func (s *StoreSuite) shardTo(name string, version int64) *Store {

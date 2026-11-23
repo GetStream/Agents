@@ -111,7 +111,9 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 // the initial migration would otherwise be wrong about: one that ran the single history from
 // before the split, on which it would fail to create tables already there, and one that ran
 // part of the history squashed into it, whose missing migrations it would claim as applied.
-// One that ran the whole history holds the initial migration's schema and starts as it is.
+// One that ran the whole history holds the initial migration's schema and starts as it is, and
+// so does one cleaned of it once deployed, which holds no version of it. A version after the
+// squashed history with no file is a later release's, from before a rollback to this one.
 func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider, set migrationSet) error {
 	var recorded, legacy bool
 	err := conn.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL, to_regclass($2) IS NOT NULL", set.table, set.marker).Scan(&recorded, &legacy)
@@ -142,7 +144,7 @@ func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider,
 		if err := rows.Scan(&version); err != nil {
 			return fmt.Errorf("store: migrate %s: %w", set.name, err)
 		}
-		unknown = unknown || !known[version]
+		unknown = unknown || (!known[version] && version < set.squashed)
 		squashed = squashed || version == set.squashed
 	}
 	if err := rows.Err(); err != nil {
