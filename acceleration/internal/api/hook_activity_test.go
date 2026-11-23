@@ -258,14 +258,15 @@ func (s *TelnyxHookSuite) TestACallWhoseTrunkPasswordCannotBeOpenedIsCountedRefu
 }
 
 // Defect: a call Telnyx signed that the router hangs up on because the number's stored trunk is
-// not one TeXML can dial, counted as answered.
+// not one TeXML can dial, counted as answered. Reading the trunk refuses a URI that is not SIP
+// (phone.Bridge.WithNumber), so the call is hung up as one whose trunk was not found.
 func (s *TelnyxHookSuite) TestACallWhoseTrunkCannotBeRenderedIsCountedRefused() {
 	s.attach(s.e164, "trunk.sip.example.test", "trunk-user", "trunk-password")
 
 	status, _, body := s.deliver(s.call(s.e164), true)
 	s.Require().Equal(http.StatusOK, status)
 	s.Require().Contains(body, "<Hangup/>")
-	s.Require().True(s.loggedLine("could not render its trunk"))
+	s.Require().True(s.loggedLine("could not find its trunk", "is not a sip uri"))
 
 	row := s.countedOnce(activity.AreaPhoneSMS, store.AuditSourceAPI)
 	s.Equal(int64(1), row.refused)

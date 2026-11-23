@@ -159,7 +159,7 @@ func (s *SchedulerSuite) TestAnOccurrenceSettledUnderAFencedClaimIsCounted() {
 	fence := func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		if claimed.Task.ID == task.ID {
 			// An edit during the delivery takes the claim away.
-			_, err := s.db.GlobalDB().ExecContext(ctx, `UPDATE scheduled_tasks SET claim_id = 'fenced' WHERE id = ?`, task.ID)
+			_, err := s.db.GlobalDB().ExecContext(ctx, `UPDATE scheduled_tasks SET leased_by = 'fenced' WHERE id = ?`, task.ID)
 			s.Require().NoError(err)
 		}
 		return "conversation", "", nil
