@@ -223,9 +223,15 @@ func (s *SecretsSuite) TestAConfigWithoutLateGrantsSendsDaytonaWhatItDidBefore()
 
 	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github, gitlab})
 	s.Require().NoError(err)
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	env, err := broker.BeforeRun(s.ctx)
+	s.Require().NoError(err)
+	s.Nil(env, "a run gets no env of its own")
+	s.Require().NoError(broker.AfterRun(s.ctx))
 	revision = 2
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	env, err = broker.BeforeRun(s.ctx)
+	s.Require().NoError(err)
+	s.Nil(env)
+	s.Require().NoError(broker.AfterRun(s.ctx), "a run's end changes no secret")
 
 	s.Len(mount.Secrets, 2)
 	s.Equal([]string{"POST /api/secret", "POST /api/secret", "PATCH /api/secret/secret-1", "PATCH /api/secret/secret-2"}, s.platform.history())
