@@ -1820,7 +1820,8 @@ func (t dataTable) identity() string {
 	// expiry are what a connection without credentials holds,
 	// so the source credentials' key version and expiry do not come along either, on an import or
 	// on every change applied after it. Nor does its provider unit: a row in an import is
-	// whatever the importer wrote, and nothing here stores a unit, so the column stays empty.
+	// whatever the importer wrote, and the column still holds one unit per connector
+	// (connector_connections_provider_unit_idx), so it is emptied here.
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
 			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"
