@@ -161,10 +161,10 @@ func (s *ResolverSuite) TestAuditOfRevokingAPendingConnectionIsNothing() {
 	s.Empty(s.audited(ref, 0))
 }
 
-// TestAnUninstallAfterALostRefreshAnswerAddsItsOwnRow: a lost answer leaves the checkpoint's text
+// TestAuditOfAnUninstallAfterALostRefreshAnswerIsItsOwnRow: a lost answer leaves the checkpoint's text
 // and one grant_revoked row (uncertain); a Revoke of that row is a change of its own, so a second
 // row (uninstalled) follows and the connection's last_error is the uninstall's.
-func (s *ResolverSuite) TestAnUninstallAfterALostRefreshAnswerAddsItsOwnRow() {
+func (s *ResolverSuite) TestAuditOfAnUninstallAfterALostRefreshAnswerIsItsOwnRow() {
 	ref := s.f.connected()
 	s.f.srv.Use(fakeprovider.LostResponse)
 	s.f.due()
@@ -174,7 +174,9 @@ func (s *ResolverSuite) TestAnUninstallAfterALostRefreshAnswerAddsItsOwnRow() {
 
 	s.Require().NoError(s.f.router(s.f.srv.Client()).Revoke(s.f.ctx, ref, core.SignalUninstalled, time.Time{}))
 
+	// Select returns the newest first: the uninstall's row, then the uncertain one.
 	rows := s.audited(ref, 2)
-	s.ElementsMatch([]string{"uncertain", string(core.SignalUninstalled)}, []string{rows[0].Reason, rows[1].Reason})
-	s.NotEqual(lostRefresh, s.f.stored(ref).LastError)
+	s.Equal(string(core.SignalUninstalled), rows[0].Reason)
+	s.Equal("uncertain", rows[1].Reason)
+	s.Equal(uninstalled, s.f.stored(ref).LastError)
 }
