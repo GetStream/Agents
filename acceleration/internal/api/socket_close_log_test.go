@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 )
 
-// SocketCloseLogSuite covers why a session socket closed, as its access line says it: the
-// events socket on the node running the session and on another one, and /v1/agents/socket.
+// SocketCloseLogSuite covers why a socket closed, as its access line says it: the events
+// socket on the node running the session and on another one, /v1/agents/socket and
+// /v1/dispatch. StreamsSuite covers /v1/{modality}/stream.
 type SocketCloseLogSuite struct {
 	RouterSuite
 	logged *lockedLog
@@ -63,9 +66,15 @@ func (s *SocketCloseLogSuite) socketSession() (*websocket.Conn, string, string) 
 
 // closeLine is the access line of the socket opened with request id once it has closed.
 func (s *SocketCloseLogSuite) closeLine(id string) string {
+	return s.closeLineIn(s.logged, id)
+}
+
+// closeLineIn is the access line in logged of the socket opened with request id once it has
+// closed.
+func (s *RouterSuite) closeLineIn(logged *lockedLog, id string) string {
 	var found string
 	s.Require().Eventually(func() bool {
-		found = lineWith(s.logged, `msg="served a request"`, " request_id="+id)
+		found = lineWith(logged, `msg="served a request"`, " request_id="+id)
 		return found != ""
 	}, settleFor, 20*time.Millisecond, "the socket left no access line")
 	return found
@@ -355,4 +364,60 @@ func (s *SocketCloseLogSuite) TestAVoiceSocketNamingACallIsARefusal() {
 	_, _ = s.socketEnd(connection)
 
 	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
+}
+
+// worker opens /v1/dispatch on node (nil for the suite's own) and waits for its ready frame,
+// named by a request id of its own.
+func (s *SocketCloseLogSuite) worker(node *httptest.Server) (*websocket.Conn, string) {
+	id := rand.Text()
+	client := s.serverClient.withRequestID(id)
+	if node != nil {
+		client = client.on(node)
+	}
+	connection := client.opens("/v1/dispatch")
+	s.await(connection, "ready")
+	return connection, id
+}
+
+func (s *SocketCloseLogSuite) TestADispatchWorkersCloseFrameIsLoggedWithItsCode() {
+	// Catches the reader's error dropped (it returned nil on base), which logs every close as
+	// client_gone.
+	connection, id := s.worker(nil)
+
+	s.closesWith(connection, 4004)
+
+	s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4004 ")
+}
+
+func (s *SocketCloseLogSuite) TestADroppedDispatchWorkerIsClientGone() {
+	connection, id := s.worker(nil)
+
+	s.Require().NoError(connection.UnderlyingConn().Close())
+
+	line := s.closeLine(id)
+	s.Contains(line, " close_reason=client_gone ")
+	s.NotContains(line, "close_code=")
+}
+
+func (s *SocketCloseLogSuite) TestAnUnreadableFrameFromADispatchWorkerIsARefusal() {
+	connection, id := s.worker(nil)
+
+	s.Require().NoError(connection.WriteMessage(websocket.TextMessage, []byte("not json")))
+	_, _ = s.socketEnd(connection)
+
+	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
+}
+
+func (s *SocketCloseLogSuite) TestADispatchWorkerSentElsewhereByADrainIsAShutdown() {
+	// Catches the drain's close logged as the worker's own answer to it, or with no code.
+	other, router := s.otherRouterSealedBy(dispatch.NewPool(), s.sealer,
+		slog.New(NewLogHandler(slog.NewTextHandler(s.logged, nil))))
+	connection, id := s.worker(other)
+
+	router.Drain()
+	_, _ = s.socketEnd(connection)
+
+	line := s.closeLine(id)
+	s.Contains(line, " close_reason=shutdown close_code=1001 ")
+	s.NotContains(line, "end_reason=")
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -187,11 +188,11 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 		recordFailure(r.Context(), err, trace)
 	}
 
-	opening, err := readStart(connection, modality)
+	opening, err := readStart(out, modality)
 	if err != nil {
 		record(err)
 		out.failed(err)
-		out.end(err)
+		recordClose(r.Context(), out.end(err))
 		return
 	}
 
@@ -208,7 +209,7 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 			err = internalError()
 		}
 		out.failed(err)
-		out.end(err)
+		recordClose(r.Context(), out.end(err))
 		return
 	}
 	speech, voice, model, conversation := opening.options(config)
@@ -223,7 +224,7 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 	if err := request.Tags.Validate(); err != nil {
 		record(err)
 		out.failed(err)
-		out.end(err)
+		recordClose(r.Context(), out.end(startRefused{err}))
 		return
 	}
 
@@ -255,7 +256,7 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 		out.failed(err)
 	}
 	out.frame(frame{"type": "closed"})
-	out.end(err)
+	recordClose(r.Context(), out.end(err))
 }
 
 // serves reports whether this deployment routes a modality over a socket.
@@ -284,13 +285,13 @@ func (s *Server) streamSTT(
 	// A start frame is options the same way a stored config is, so it is held to the same
 	// standard: a mode nothing recognises is refused rather than ignored.
 	if err := held.Validate(); err != nil {
-		return err
+		return startRefused{err}
 	}
 	// The cap a session is held to, counted the same way. Deepgram takes whatever it is
 	// sent, and the providers that do refuse a long list each word it differently.
 	if keyterms := stt.CleanKeyterms(held.Keyterms); len(keyterms) > stt.MaxKeyterms {
-		return stack.Wrap(fmt.Errorf("stt: at most %d keyterms may be named, and this asks for %d",
-			stt.MaxKeyterms, len(keyterms)))
+		return startRefused{stack.Wrap(fmt.Errorf("stt: at most %d keyterms may be named, and this asks for %d",
+			stt.MaxKeyterms, len(keyterms)))}
 	}
 
 	session, err := s.streams.STT.Start(ctx, sttrouter.Request{
@@ -349,6 +350,7 @@ func (s *Server) streamSTT(
 	for {
 		kind, payload, err := out.connection.ReadMessage()
 		if err != nil {
+			out.stopped = err
 			break
 		}
 		if kind != websocket.BinaryMessage {
@@ -378,7 +380,7 @@ func (s *Server) streamTTS(
 	// A start frame is options the same way a stored config is, so a retention nothing
 	// could be measured against is refused rather than ignored.
 	if err := held.Validate(); err != nil {
-		return err
+		return startRefused{err}
 	}
 
 	session, err := s.streams.TTS.Start(ctx, ttsrouter.Request{
@@ -431,7 +433,7 @@ func (s *Server) streamTTS(
 			Voice    string `json:"voice"`
 			Language string `json:"language"`
 		}
-		if err := out.connection.ReadJSON(&command); err != nil {
+		if err := out.readJSON(&command); err != nil {
 			break
 		}
 
@@ -499,7 +501,7 @@ func (s *Server) streamLLM(
 
 	for {
 		var command respond
-		if err := out.connection.ReadJSON(&command); err != nil {
+		if err := out.readJSON(&command); err != nil {
 			break
 		}
 
@@ -591,7 +593,7 @@ func (s *Server) streamSTS(
 	// A start frame is options the same way a stored config is, so a turn detector
 	// nothing recognises is refused rather than ignored.
 	if err := held.Validate(); err != nil {
-		return err
+		return startRefused{err}
 	}
 
 	session, err := s.streams.STS.Start(ctx, stsrouter.Request{
@@ -663,6 +665,7 @@ func (s *Server) streamSTS(
 	for {
 		kind, payload, err := out.connection.ReadMessage()
 		if err != nil {
+			out.stopped = err
 			break
 		}
 		out.connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -1064,19 +1067,19 @@ const defaultSampleRate = 16000
 //
 // A frame naming a config need not name a target, because the config it names may hold
 // one. A frame naming neither is refused: nothing about it says what to route to.
-func readStart(connection *websocket.Conn, modality routing.Modality) (start, error) {
-	connection.SetReadDeadline(time.Now().Add(startWait))
-	defer connection.SetReadDeadline(time.Time{})
+func readStart(out *socket, modality routing.Modality) (start, error) {
+	out.connection.SetReadDeadline(time.Now().Add(startWait))
+	defer out.connection.SetReadDeadline(time.Time{})
 
 	var opening start
-	if err := connection.ReadJSON(&opening); err != nil {
+	if err := out.readJSON(&opening); err != nil {
 		return start{}, errors.New("the socket opens with a start frame naming the target")
 	}
 	if opening.Type != "" && opening.Type != "start" {
-		return start{}, errors.New("the first frame must be a start frame")
+		return start{}, startRefused{errors.New("the first frame must be a start frame")}
 	}
 	if !opening.names(modality) && opening.ConfigID == "" {
-		return start{}, errors.New("routing needs a target, either sent or held in a config")
+		return start{}, startRefused{errors.New("routing needs a target, either sent or held in a config")}
 	}
 	return opening, nil
 }
@@ -1266,6 +1269,30 @@ type socket struct {
 	// it. Nil when nothing waits on it.
 	started   chan struct{}
 	startOnce sync.Once
+	// stopped is why the caller's reads stopped: the read's error, or errUnreadableFrame for a
+	// frame that is not JSON of the shape read. Only the goroutine reading the socket sets it.
+	stopped error
+}
+
+// startRefused marks a failure as the caller's start frame refused, for the close_reason of a
+// stream socket. It reads as the failure itself, so the caller is sent the same frames. None
+// of the failures it marks is a routing.ErrRequest or a refusal about money, so the close code
+// is the same too.
+type startRefused struct{ error }
+
+// readJSON reads the caller's next frame into v as ReadJSON does, keeping why the caller's
+// reads stopped when the read fails or the frame is not JSON of v's shape.
+func (s *socket) readJSON(v any) error {
+	_, payload, err := s.connection.ReadMessage()
+	if err != nil {
+		s.stopped = err
+		return err
+	}
+	if err := json.NewDecoder(bytes.NewReader(payload)).Decode(v); err != nil {
+		s.stopped = errUnreadableFrame
+		return err
+	}
+	return nil
 }
 
 // frame sends one JSON message under the write deadline.
@@ -1317,8 +1344,9 @@ func (s *socket) failed(err error) {
 // redacted by errorText, as the reason. A request the router refused (routing.ErrRequest),
 // or refused for money, is the caller's to change, so it ends with 1008, policy violation;
 // any other failure, as often a provider's as a caller's, with 1011, an unexpected condition
-// (RFC 6455 section 7.4.1, https://www.rfc-editor.org/rfc/rfc6455#section-7.4.1).
-func (s *socket) end(failure error) {
+// (RFC 6455 section 7.4.1, https://www.rfc-editor.org/rfc/rfc6455#section-7.4.1). It says
+// why the socket closed (closedWith).
+func (s *socket) end(failure error) socketEnd {
 	code, reason := websocket.CloseNormalClosure, ""
 	if failure != nil {
 		code, reason = websocket.CloseInternalServerErr, errorText(failure)
@@ -1330,6 +1358,26 @@ func (s *socket) end(failure error) {
 		}
 	}
 	closeSocket(s.connection, code, reason)
+	return s.closedWith(failure, code)
+}
+
+// closedWith is why the socket closed with code, on failure or once the caller's reads stopped.
+// A frame the router could not read, a start frame it would not take (startRefused, or an
+// APIError such as a config the caller does not have) and a refusal sent as 1008 are refused.
+// Any other failure, a provider's or the router's own (an internal APIError, such as a config
+// the database could not read), is server_error.
+func (s *socket) closedWith(failure error, code int) socketEnd {
+	_, refused := errors.AsType[startRefused](failure)
+	answer, answered := errors.AsType[APIError](failure)
+	switch {
+	case errors.Is(s.stopped, errUnreadableFrame):
+		return socketEnd{cause: refusedByRouter, code: code}
+	case s.stopped != nil:
+		return readEnd(s.stopped)
+	case code == websocket.ClosePolicyViolation, refused, answered && answer.Type != ErrorTypeInternal:
+		return socketEnd{cause: refusedByRouter, code: code}
+	}
+	return socketEnd{cause: serverFailed, code: code}
 }
 
 // closeSocket sends the close frame after the last frame and reads until the caller answers

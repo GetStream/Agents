@@ -9,7 +9,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 )
 
-// closeCause is why a session socket closed, logged as close_reason on its access line.
+// closeCause is why a socket closed (a session socket, /v1/dispatch, /v1/{modality}/stream),
+// logged as close_reason on its access line.
 type closeCause string
 
 const (
@@ -18,16 +19,19 @@ const (
 	// clientGone is a connection that broke with no close frame: it dropped, or a write to it
 	// failed.
 	clientGone closeCause = "client_gone"
-	// timedOut is a caller that answered no ping within pongWait.
+	// timedOut is a caller that answered no ping within pongWait, or sent no start frame within
+	// startWait.
 	timedOut closeCause = "timeout"
 	// sessionEnded is a session that ended, for the end_reason logged beside it.
 	sessionEnded closeCause = "session_ended"
 	// refusedByRouter is a caller the router refused: a start frame, a session it would not
 	// open, a frame it could not read or one past maxSocketMessage.
 	refusedByRouter closeCause = "refused"
-	// serverFailed is a failure of the router's own.
+	// serverFailed is a failure of the router's own, or of a provider a stream socket could not
+	// start.
 	serverFailed closeCause = "server_error"
-	// routerShutdown is a session the router stopped as it went away.
+	// routerShutdown is a session the router stopped as it went away, or a dispatch worker it
+	// sent to reconnect elsewhere.
 	routerShutdown closeCause = "shutdown"
 )
 
