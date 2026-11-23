@@ -297,8 +297,9 @@ func (s *Session) loggedCall(stat routing.Stat) []any {
 }
 
 // vendorHost is the host a provider sends its requests to, for a provider that says
-// (openaicompat.LLM.Host). A provider that says nothing is one not built on openaicompat
-// (mock), or one whose native adapter takes an instance endpoint (openai, anthropic Messages).
+// (openaicompat.LLM.Host, and the native openai and anthropic Messages adapters). Each says
+// its default endpoint's host too, so every call names where it ran. A provider that says
+// nothing is one with no endpoint to name (mock).
 func vendorHost(provider Provider) string {
 	var inner any = provider
 	if wrapped, ok := provider.(started); ok {

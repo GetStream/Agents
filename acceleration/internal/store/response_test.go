@@ -14,7 +14,7 @@ func (s *StoreSuite) branchAnswered(into *Store, id, parent, question string, at
 		ID: id, SessionID: "one", CustomerID: "app", Said: id, CreatedAt: at,
 		ParentResponseID: parent, QuestionResponseID: question,
 	}))
-	s.Require().NoError(into.Responses.Finish(s.ctx, id, ResponseCompleted, "", at.Add(time.Second)))
+	s.Require().NoError(into.Responses.Finish(s.ctx, "app", id, ResponseCompleted, "", at.Add(time.Second)))
 }
 
 // conversation is the ids of session "one"'s responses still in its conversation, oldest first.
@@ -286,7 +286,7 @@ func (s *StoreSuite) TestResponseQueryBudgets() {
 	s.withinQueryBudgets([]queryBudget{
 		{"Insert", 1, 0, func() error { return s.store.Responses.Insert(s.ctx, retry) }},
 		{"Finish", 2, 0, func() error {
-			return s.store.Responses.Finish(s.ctx, retry.ID, ResponseCompleted, "", at.Add(time.Hour))
+			return s.store.Responses.Finish(s.ctx, retry.CustomerID, retry.ID, ResponseCompleted, "", at.Add(time.Hour))
 		}},
 		{"Select", 0, 1, func() error {
 			listed, err := s.store.Responses.Select(s.ctx, "app", "conversed", ResponseFilter{Limit: 10})
@@ -334,4 +334,134 @@ func (s *StoreSuite) TestAnInvalidResponseIsNotWritten() {
 	s.opened("one", "app", time.Now(), nil)
 	err := s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "invalid", SessionID: "one", CustomerID: "app", Status: "lost"})
 	s.refusedUnwritten(err, "agent_responses", "id", "invalid")
+}
+
+func (s *StoreSuite) TestAnotherCustomersWriteToAResponseIdChangesNothing() {
+	writes := []struct {
+		name  string
+		write func() error
+		want  error
+	}{
+		{"Insert", func() error {
+			return s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "one", SessionID: "theirs", CustomerID: "somebody-else", Said: "not app's"})
+		}, ErrIDTaken},
+		{"Finish", func() error {
+			return s.store.Responses.Finish(s.ctx, "somebody-else", "one", ResponseFailed, "not app's", s.base.Add(time.Hour))
+		}, nil},
+	}
+	for _, c := range writes {
+		s.Run(c.name, func() {
+			s.SetupTest()
+			s.opened("one", "app", s.base, nil)
+			s.opened("theirs", "somebody-else", s.base, nil)
+			s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "one", SessionID: "one", CustomerID: "app", Said: "app's", CreatedAt: s.base}))
+			before, err := s.store.Responses.Get(s.ctx, "app", "one", "one")
+			s.Require().NoError(err)
+
+			err = c.write()
+			if c.want == nil {
+				s.Require().NoError(err)
+			} else {
+				s.ErrorIs(err, c.want, "the writer is told the id is not its own")
+			}
+
+			after, err := s.store.Responses.Get(s.ctx, "app", "one", "one")
+			s.Require().NoError(err)
+			s.Equal(before, after, "app's response is as it was")
+		})
+	}
+}
+
+func (s *StoreSuite) TestAnotherCustomersFinishedTurnDoesNotMoveASessionsClock() {
+	s.opened("one", "app", s.base, nil)
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	// The foreign key is the session id alone, so another customer's turn can name it.
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "theirs", SessionID: "one", CustomerID: "somebody-else", CreatedAt: s.base}))
+
+	s.Require().NoError(s.store.Responses.Finish(s.ctx, "somebody-else", "theirs", ResponseCompleted, "", s.base.Add(time.Hour)))
+
+	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before.LastResponseAt, after.LastResponseAt, "app's session was not answered")
+	s.Equal(before.UpdatedAt, after.UpdatedAt)
+}
+
+func (s *StoreSuite) TestAnotherCustomersFinishOfAnAppsResponseDoesNotMoveItsSessionsClock() {
+	s.opened("one", "app", s.base, nil)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "mine", SessionID: "one", CustomerID: "app", CreatedAt: s.base}))
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Responses.Finish(s.ctx, "somebody-else", "mine", ResponseCompleted, "", s.base.Add(time.Hour)))
+
+	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before.LastResponseAt, after.LastResponseAt, "app's session was not answered")
+	s.Equal(before.UpdatedAt, after.UpdatedAt)
+}
+
+func (s *StoreSuite) TestTheSameCustomerWritingARowAgainUnderItsIdIsNotAnError() {
+	s.opened("one", "app", s.base, nil)
+	writes := map[string]func() error{
+		"Responses.Insert": func() error {
+			return s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "first", SessionID: "one", CustomerID: "app", CreatedAt: s.base})
+		},
+		"BranchSwitches.Insert": func() error {
+			return s.store.BranchSwitches.Insert(s.ctx, &AgentBranchSwitch{
+				ID: "switch", SessionID: "one", CustomerID: "app", Kind: SwitchEdit, TargetResponseID: "first",
+				ForkMessageID: "m-one", HiddenFrom: s.base, CreatedAt: s.base,
+			})
+		},
+		"ConversationDocuments.Insert": func() error {
+			return s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{
+				ID: "document", CustomerID: "app", OwnerUserID: "jlahey", SessionID: "one",
+				Name: "document.pdf", SHA256: "digest", Markdown: "text", CreatedAt: s.base,
+			})
+		},
+	}
+	for _, name := range []string{"Responses.Insert", "BranchSwitches.Insert", "ConversationDocuments.Insert"} {
+		s.Run(name, func() {
+			s.Require().NoError(writes[name]())
+			s.NoError(writes[name](), "a retry of the customer's own row")
+		})
+	}
+}
+
+func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
+	at := s.base.Add(time.Hour)
+	writes := map[string]func() error{
+		"Sessions.Close":          func() error { return s.store.Sessions.Close(s.ctx, "", "one", at, "hangup") },
+		"Sessions.SetToolTimeout": func() error { return s.store.Sessions.SetToolTimeout(s.ctx, "", "one", "user", 5_000) },
+		"Sessions.SawVideo":       func() error { return s.store.Sessions.SawVideo(s.ctx, "", "one") },
+		"Sessions.Voiced":         func() error { return s.store.Sessions.Voiced(s.ctx, "", "one") },
+		"Responses.Finish": func() error {
+			return s.store.Responses.Finish(s.ctx, "", "one", ResponseCompleted, "", at)
+		},
+		"Calls.Finish":       func() error { return s.store.Calls.Finish(s.ctx, "", "one", at) },
+		"Calls.ChangeModels": func() error { return s.store.Calls.ChangeModels(s.ctx, &Call{ID: "one", LLM: "openai/gpt-5"}) },
+		"Recordings.Start":   func() error { return s.store.Recordings.Start(s.ctx, "", "one", "deepgram", "nova-3") },
+		"Recordings.Finish": func() error {
+			return s.store.Recordings.Finish(s.ctx, "", "one", "deepgram", "nova-3", nil, nil)
+		},
+		"ScheduledTaskRuns.FinishManual": func() error {
+			return s.store.ScheduledTaskRuns.FinishManual(s.ctx, "", "one", "delivered", "", "", "")
+		},
+		"ConnectorConnections.PutClient": func() error {
+			return s.store.ConnectorConnections.PutClient(s.ctx, "", "one", ConnectorConnectionClient{ClientID: "client"})
+		},
+		"ConnectorConnections.PutValidation": func() error {
+			return s.store.ConnectorConnections.PutValidation(s.ctx, "", "one",
+				ConnectorConnectionValidation{Status: "ok", CheckedAt: at})
+		},
+		"SimulationRuns.Finish": func() error { return s.store.SimulationRuns.Finish(s.ctx, SimulationRun{ID: "one"}) },
+		"CampaignAttempts.End": func() error {
+			return s.store.CampaignAttempts.End(s.ctx, "", "one", "answered", "", "", "", at, nil)
+		},
+	}
+	for name, write := range writes {
+		s.Run(name, func() {
+			s.Error(write(), "a write naming no customer would match only rows with none")
+		})
+	}
 }

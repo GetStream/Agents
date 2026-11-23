@@ -686,14 +686,14 @@ func (s *Server) auditGrant(ctx context.Context, customerID, connectionID, conne
 // that names it (core.ClientNamer), so the connection's reads show it (AI-990 F16). The consent
 // is committed when it is called, so a row that cannot be written is logged and the consent
 // stands. Detached, as auditGrant is: only the next consent would write it again.
-func (s *Server) recordClient(ctx context.Context, connectionID string, credentials core.StoredCredentials) {
+func (s *Server) recordClient(ctx context.Context, customerID, connectionID string, credentials core.StoredCredentials) {
 	client, ok := core.ClientOf(s.connectors.Schemes, credentials)
 	if !ok {
 		return
 	}
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	err := s.store.ConnectorConnections.PutClient(ctx, connectionID, store.ConnectorConnectionClient{
+	err := s.store.ConnectorConnections.PutClient(ctx, customerID, connectionID, store.ConnectorConnectionClient{
 		Registration: client.Registration, ClientID: client.ID,
 	})
 

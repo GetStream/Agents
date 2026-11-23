@@ -15,8 +15,9 @@ var phoneSweepEvery = 10 * time.Minute
 // sooner, so its trunk is one whose end hook never came.
 const phoneCallMaxAge = 6 * time.Hour
 
-// startPhoneSweeper deletes the per-call trunks of calls that never reported their end, and
-// retires the status urls of old placed calls, until ctx is done.
+// startPhoneSweeper deletes the per-call trunks of calls that never reported their end and the
+// bridges of calls nobody answered, and retires the status urls of old placed calls, until ctx
+// is done.
 func startPhoneSweeper(ctx context.Context, service *phone.Service, logger *slog.Logger) {
 	// Read before the goroutine, so a test that sets it back after run returns does not race it.
 	every := phoneSweepEvery
@@ -33,6 +34,12 @@ func startPhoneSweeper(ctx context.Context, service *phone.Service, logger *slog
 					logger.Error("could not sweep the trunks of calls that never ended", "error", err)
 				} else if swept > 0 {
 					logger.Info("swept the trunks of calls that never ended", "calls", swept)
+				}
+				bridges, err := service.SweepBridges(ctx)
+				if err != nil {
+					logger.Error("could not sweep the bridges of calls nobody answered", "error", err)
+				} else if bridges > 0 {
+					logger.Info("swept the bridges of calls nobody answered", "bridges", bridges)
 				}
 				retired, err := service.SweepStatusTokens(ctx)
 				if err != nil {

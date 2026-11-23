@@ -410,7 +410,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 	if status := answered.status(); record.Code == "" && status >= http.StatusBadRequest {
 		record.Code = strconv.Itoa(status)
 	}
-	if err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, record); err != nil {
+	if err := s.store.ConnectorConnections.PutValidation(ctx, connection.CustomerID, connection.ID, record); err != nil {
 		return nil, err
 	}
 	return response, nil

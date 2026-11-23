@@ -216,7 +216,7 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 	})
 	retired := func() bool {
 		var gone bool
-		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT token IS NULL FROM call_legs WHERE id = ?", call.ID).Scan(&gone)
+		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT token_hash IS NULL FROM call_legs WHERE id = ?", call.ID).Scan(&gone)
 		return err == nil && gone
 	}
 
@@ -229,6 +229,40 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 	// 10 s: the sweeper's goroutine ends as soon as run's ctx does; the deadline only covers scheduling under load, as the 10 s dial wait in idletimeout_test.go does.
 	s.Eventually(func() bool { return !strings.Contains(goroutines(), "startPhoneSweeper") },
 		10*time.Second, 50*time.Millisecond, "the phone sweep went on after the router stopped")
+}
+
+// The router's phone sweep deletes the bridges of calls nobody answered, and only those.
+func (s *RouterStartSuite) TestAStartingRouterSweepsTheBridgesOfCallsNobodyAnswered() {
+	previous := phoneSweepEvery
+	// Well inside the wait below; the production ten minutes would outlast it.
+	phoneSweepEvery = 50 * time.Millisecond
+	s.T().Cleanup(func() { phoneSweepEvery = previous })
+	customer := "customer-" + uuid.NewString()
+	for _, expires := range []time.Time{time.Now().Add(-time.Minute), time.Now().Add(time.Hour)} {
+		s.Require().NoError(s.db.CallBridges.Insert(s.ctx, &store.CallBridge{
+			Token: uuid.NewString(), CustomerID: customer, Vendor: "plivo", TrunkURI: "sip:x@example.com",
+			CallID: uuid.NewString(), ExpiresAt: expires,
+		}))
+	}
+	s.T().Cleanup(func() {
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM call_bridges WHERE customer_id = ?", customer)
+		s.NoError(err)
+	})
+	parked := func() int {
+		var count int
+		s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM call_bridges WHERE customer_id = ?", customer).Scan(&count))
+		return count
+	}
+
+	stop := s.start(s.settings)
+
+	s.Eventually(func() bool { return parked() == 1 }, 30*time.Second, 50*time.Millisecond, "the expired bridge is still parked")
+	s.Require().NoError(stop())
+	var waiting bool
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT expires_at > now() FROM call_bridges WHERE customer_id = ?", customer).Scan(&waiting))
+	s.True(waiting, "the bridge kept is the one still waiting for its fetch")
 }
 
 // The router starts the sweep that closes idle episodes where an agent config has the cards on.

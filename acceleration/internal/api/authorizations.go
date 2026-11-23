@@ -908,7 +908,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 	}
 	s.auditGrant(ctx, connection.CustomerID, connection.ID, connection.ConnectorID, connection.OwnerType,
 		store.AuditGrantCreated, store.AuditReasonConsent, committed.Revision, row.ID, change)
-	s.recordClient(ctx, connection.ID, credentials)
+	s.recordClient(ctx, connection.CustomerID, connection.ID, credentials)
 	// A reconnect brings back the MCP event subscriptions its bindings declare, as a validate
 	// does: one a disconnect or a long wait dropped is made again. The consent itself is done,
 	// so a failure here is logged and the next validate tries again.
@@ -963,7 +963,7 @@ func (s *Server) recordRefusal(ctx context.Context, connection store.ConnectorCo
 	if code == "unauthorized_client" {
 		reason += " " + fmt.Sprintf(unauthorizedClientHint, connectorCallbackURL(s.publicURL))
 	}
-	err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, store.ConnectorConnectionValidation{
+	err := s.store.ConnectorConnections.PutValidation(ctx, connection.CustomerID, connection.ID, store.ConnectorConnectionValidation{
 		Revision: connection.Revision, Status: validationFailed,
 		Code: codeConsentRefused, Error: reason, CheckedAt: time.Now().UTC(),
 	})
