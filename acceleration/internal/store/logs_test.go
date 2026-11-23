@@ -676,6 +676,9 @@ func TestRedactLogTextReadsALongJSONTextInTime(t *testing.T) {
 // rows are a string holding JSON 16 levels deep around a payload of 1 MB, and 1 MB of short
 // strings that each hold a keyword and a value.
 func TestRedactLogTextAllocatesForAJSONTextAboutWhatTheRulesDo(t *testing.T) {
+	if raceDetector {
+		t.Skip("the race detector drops what sync.Pool holds at random, so allocations vary")
+	}
 	nested := `{"password":"x","m":"` + strings.Repeat("key=Ab1 ", 1<<17) + `"}`
 	for range 16 {
 		quoted, err := json.Marshal(nested)
@@ -706,6 +709,9 @@ func TestRedactLogTextAllocatesForAJSONTextAboutWhatTheRulesDo(t *testing.T) {
 // A line that cannot be JSON, as it starts with no brace, bracket or quote, is not copied to be
 // checked as JSON: it costs what the rules cost on it.
 func TestRedactLogTextChecksOnlyALineThatStartsAsJSONForJSON(t *testing.T) {
+	if raceDetector {
+		t.Skip("the race detector drops what sync.Pool holds at random, so allocations vary")
+	}
 	for _, text := range []string{
 		"openai: 429 rate limit reached for max_tokens on model gpt-4o, request id req_abc123",
 		"openai: 401 Incorrect API key provided: sk-abcdefghij1234567890 (request id req_abc123)",
