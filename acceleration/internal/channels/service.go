@@ -45,6 +45,12 @@ const (
 	maxLineLinkFailures = 20
 )
 
+// releaseTimeout bounds giving a counted code back: it runs detached from the message's context,
+// so a router shutting down after the code was counted does not leave it counted to the end of the
+// window, and a database that does not answer cannot hold the turn. The 2 s is that of the
+// store's credentialDetachedTimeout for a single write, unmeasured here.
+const releaseTimeout = 2 * time.Second
+
 // Options configures a Service. Store, Sessions and Secrets are required.
 type Options struct {
 	Store    *store.Store
@@ -545,9 +551,11 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 		// The code was counted before it was tried, so that codes texted at once are counted one
 		// after the other; only one that matched nothing stays counted.
 		if !errors.Is(err, store.ErrUnknownChannelLink) {
-			if err := s.store.ChannelLinkFailures.Release(ctx, account.ID, message.From, window); err != nil {
+			release, stop := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+			if err := s.store.ChannelLinkFailures.Release(release, account.ID, message.From, window); err != nil {
 				s.logger.Error("could not give back a code counted on a line", "channel", account.Kind, "error", err)
 			}
+			stop()
 		}
 		if err != nil {
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
