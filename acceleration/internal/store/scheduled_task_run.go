@@ -193,8 +193,10 @@ func (r *ScheduledTaskRuns) SetCallReason(ctx context.Context, customerID, runID
 // SetAttemptReason records on a running run the reason an attempt failed under, for the
 // attempt after it: a worker that takes the run over reads it from the row, as the worker that
 // made the attempt reads it from memory. It writes only under the claim leasedBy, so a worker
-// that lost its claim cannot overwrite the next one's, and only while no call is placed for the
-// run: the reason that call ended under is the run's (SetCallReason).
+// that lost its claim cannot overwrite the next one's, as far as the claim is checked
+// when the statement starts (a write that waits on the run's row behind a takeover's claim still
+// lands after it, with a reason of the same occurrence), and only while no call is placed for
+// the run: the reason that call ended under is the run's (SetCallReason).
 func (r *ScheduledTaskRuns) SetAttemptReason(ctx context.Context, customerID, runID, leasedBy, reason string) error {
 	claimed := r.store.global.NewSelect().Model((*ScheduledTask)(nil)).
 		ColumnExpr("1").
