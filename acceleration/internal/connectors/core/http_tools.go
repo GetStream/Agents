@@ -106,6 +106,9 @@ func checkHTTPSource(fail func(field, format string, args ...any), field string,
 	if len(source.ReadOnlyTools) > 0 {
 		fail(field+".read_only_tools", "is not set on an http source: each of its tools says read_only")
 	}
+	if len(source.Tools) > 0 {
+		fail(field+".tools", "is not set on an http source: it keeps no needs_scopes, and each of its http_tools says what it needs")
+	}
 	if !source.SendsOut() {
 		fail(field+".outbound", "is not false on an http source: each of its tools says read_only")
 	}
