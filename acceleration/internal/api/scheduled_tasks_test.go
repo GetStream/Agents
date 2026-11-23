@@ -3886,6 +3886,45 @@ func (s *ScheduledTasksSuite) TestATextThatFailedAndCouldNotBeGivenBackFailsItsR
 	s.Empty(s.sink.to(writer))
 }
 
+// A later channel failing for now made the occurrence retried, and the retry found the first
+// channel's unsent text taken and counted the run delivered.
+func (s *ScheduledTasksSuite) TestATextKeptUnsentFailsItsRunThoughTheNextChannelFailedForNow() {
+	s.retryAtOnce()
+	whatsAppLine, smsLine := s.lineNumber(), s.lineNumber()
+	onWhatsApp, bySMS := s.writerNumber(), s.writerNumber()
+	s.connectWhatsApp(whatsAppLine)
+	s.seedSMSLine(smsLine)
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Channels = &AgentChannels{
+			Whatsapp: &ChannelLineRequest{Number: whatsAppLine},
+			Sms:      &ChannelLineRequest{Number: smsLine},
+		}
+	})
+	user := s.data.createUser()
+	s.seedWriter(user, config, whatsAppLine, onWhatsApp)
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
+		CustomerID: s.customerID(), ConfigID: config, Kind: "sms",
+		Address: bySMS, UserID: user.userID,
+	}))
+	s.sink.fail(onWhatsApp, 1)
+	s.sink.fail(bySMS, 1)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp", "sms"})
+	task := s.tasksOf(user)[0]
+	s.trigger("failing_release_"+strings.ReplaceAll(s.utils.uuid(), "-", ""), "scheduled_task_runs", "UPDATE",
+		"NEW.task_id = '"+task.ID+"' AND 'whatsapp' = ANY(OLD.texted) AND NOT ('whatsapp' = ANY(NEW.texted))",
+		"RAISE EXCEPTION 'the release fails';")
+	// Due before the worker starts, so its first look claims it.
+	s.makeDue(task)
+	s.runWorker()
+
+	run := s.settledRun(task)
+	s.Require().Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Equal(int32(1), s.attempts.Load(), "the occurrence was not tried again")
+	s.Empty(s.sink.to(onWhatsApp))
+	s.Empty(s.sink.to(bySMS), "no channel texted the words a second time")
+}
+
 func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrenceIsRetried() {
 	s.retryAtOnce()
 	number, writer := s.lineNumber(), s.writerNumber()

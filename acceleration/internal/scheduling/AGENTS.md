@@ -103,9 +103,11 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   before the send (`ScheduledTaskRuns.TakeText`, column `texted`) and gives it back when the send
   fails; an attempt that finds it taken, such as a worker taking over a run whose finish was
   lost, counts the run delivered on that channel without texting again. A failed send that
-  cannot be given back fails the channel finally, since a later attempt would count it delivered.
+  cannot be given back fails the occurrence finally unless a later channel lands it, since a
+  later attempt would count it delivered.
   `TestScheduledTasksSuite/TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotTextedAgain`,
   `TestScheduledTasksSuite/TestATextThatFailedAndCouldNotBeGivenBackFailsItsRun`,
+  `TestScheduledTasksSuite/TestATextKeptUnsentFailsItsRunThoughTheNextChannelFailedForNow`,
   `TestStoreSuite/TestARunTakesEachTextChannelOnceUntilItIsGivenBack`.
 - **A first occurrence opens one session, retries included.** `openTaskSession` records it on
   the task, and a delivery whose claimed copy names none reads the task back first.
