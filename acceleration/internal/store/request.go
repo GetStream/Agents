@@ -302,7 +302,7 @@ func (r *Requests) Insert(ctx context.Context, request *Request) error {
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
 // A row InsertMany wrote has its ID set, and one with an agent a provider_request agent log
 // row. With one database each row it wrote counts toward the grants it names, and is logged,
-// in the same transaction (AddGrantUses); with shards the grants are the caller's to count,
+// in the same transaction (addGrantUses); with shards the grants are the caller's to count,
 // apart, and the log rows are written to the shared database after the commit.
 func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
 	for i := range requests {

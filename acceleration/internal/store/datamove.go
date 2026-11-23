@@ -199,7 +199,7 @@ var dataTables = []dataTable{
 	// Nothing points at a log's id, so a copied log is given one of this deployment's.
 	{name: "agent_logs", customer: "customer_id", copied: "source_id"},
 	// No foreign key points at a request's id. An agent log row names it as text, and
-	// Store.AgentLog only takes a request's error by that number from a row that carries none of
+	// AgentLogs.Get only takes a request's error by that number from a row that carries none of
 	// its own and whose time and agent are the request's, so a moved row cannot show the error
 	// of whichever request holds its number here. Its usage id is the unit of work wherever it is.
 	{name: "requests", customer: "customer_id", shard: true, across: "usage_id"},
@@ -803,7 +803,7 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 	return s.global
 }
 
-// lineColumns are what attaching a number, or giving it a line, writes on its row (AttachNumber,
+// lineColumns are what attaching a number, or giving it a line, writes on its row (PhoneNumbers.Attach,
 // TrunkGroupTx.SetLine): where its calls go and which agent answers them. The sealed bridge
 // password is one too, and an import never writes it (isSecret).
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
@@ -893,7 +893,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		switch {
 		case spec.isKey(shape, column):
 		case spec.name == "phone_numbers" && slices.Contains(lineColumns, column):
-			// A number on a trunk here was attached or given a line here (AttachNumber, SetLine),
+			// A number on a trunk here was attached or given a line here (PhoneNumbers.Attach, TrunkGroupTx.SetLine),
 			// since an imported row arrives off any trunk (identity). Where its calls go is then
 			// this deployment's, so the source's copy of the row, in a copy taken again or a
 			// change applied later, does not detach it. The agent is too only once attached:
@@ -1567,7 +1567,7 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 // It returns how many tasks it resumed, how many it left paused for want of a config, how many
 // for want of room, and the campaigns still running or scheduled there at the last catch-up.
 // Those it leaves paused and marked: a contact the source rang after that is still enrolled
-// here, and resuming the campaign here (ResumeCampaign) rings it again, so that is left to a
+// here, and resuming the campaign here (Campaigns.Resume) rings it again, so that is left to a
 // person. Any change of a campaign's state here clears the mark (transitionIn). Running it
 // again resumes nothing twice.
 func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed, skipped, overLimit int64, campaigns []string, err error) {
@@ -1832,7 +1832,7 @@ func (t dataTable) identity() string {
 	// on every change applied after it. Nor does its provider unit: a row in an import is
 	// whatever the importer wrote, and a unit stored from it would route another customer's
 	// events to this one. The reconnect it needs proves the unit again
-	// (SetConnectorConnectionProviderUnit).
+	// (ConnectorConnections.SetProviderUnit).
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
 			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"

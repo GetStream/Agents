@@ -323,7 +323,7 @@ func (r *UseCases) Insert(ctx context.Context, useCase *UseCase, numbers ...stri
 }
 
 // Update replaces what an app wrote on a use case. Its status, vendor fields and
-// review timestamps are left alone: those move through MoveUseCase.
+// review timestamps are left alone: those move through Move.
 func (r *UseCases) Update(ctx context.Context, useCase *UseCase) error {
 	if err := useCase.Validate(); err != nil {
 		return stack.Wrap(err)
