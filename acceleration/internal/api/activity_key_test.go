@@ -76,7 +76,7 @@ func (s *ActivityKeySuite) TestOnlyAnActivityKeyInItsOwnHeaderReadsActivity() {
 	} {
 		s.Run(name, func() {
 			for _, path := range s.activityPaths() {
-				s.refused(caller, http.MethodGet, path, "X-Ops-Key or X-Activity-Key")
+				s.refused(caller, http.MethodGet, path, "this operation is Stream staff's: it needs X-Ops-Key or X-Activity-Key")
 			}
 		})
 	}
@@ -87,25 +87,24 @@ func (s *ActivityKeySuite) TestOnlyAnActivityKeyInItsOwnHeaderReadsActivity() {
 func (s *ActivityKeySuite) TestTheActivityKeyReachesNoOtherRoute() {
 	for _, key := range []string{suiteActivityKey, suitePreviousActivityKey} {
 		caller := s.holding(activityKeyHeader, key).with(actorIDHeader, "staff:"+s.utils.uuid())
-		s.refused(caller, http.MethodGet, "/v1/ops/use-cases", "it needs X-Ops-Key")
-		s.refused(caller, http.MethodPost, "/v1/ops/stats/rollup", "it needs X-Ops-Key")
-		s.refused(caller, http.MethodGet, "/v1/manage/status", "it needs X-Manage-Key")
+		s.refused(caller, http.MethodGet, "/v1/ops/use-cases", "this operation is Stream staff's: it needs X-Ops-Key")
+		s.refused(caller, http.MethodPost, "/v1/ops/stats/rollup", "this operation is Stream staff's: it needs X-Ops-Key")
+		s.refused(caller, http.MethodGet, "/v1/manage/status", "this operation is Stream staff's: it needs X-Manage-Key")
 		s.refused(caller, http.MethodGet, "/v1/phone/use-cases", "")
 	}
 	// Control: the routes it was refused on answer their own key.
 	s.Equal(http.StatusOK, s.holding(opsKeyHeader, suiteOpsKey).do(http.MethodGet, "/v1/ops/use-cases", nil, nil))
 }
 
-// refused checks caller is answered 401 on method path, with a message holding asked for,
+// refused checks caller is answered 401 on method path, with message when it is not empty,
 // and no key in the answer.
-func (s *ActivityKeySuite) refused(caller *testClient, method, path, asked string) {
+func (s *ActivityKeySuite) refused(caller *testClient, method, path, message string) {
 	status, body := caller.call(method, path, nil)
 	s.Require().Equal(http.StatusUnauthorized, status, method+" "+path+": "+string(body))
 	var answered ErrorResponse
 	s.Require().NoError(json.Unmarshal(body, &answered), string(body))
-	s.Contains(answered.Error.Message, asked, path)
-	if asked == "it needs X-Ops-Key" {
-		s.NotContains(answered.Error.Message, activityKeyHeader, "only the activity routes take it: "+path)
+	if message != "" {
+		s.Equal(message, answered.Error.Message, path)
 	}
 	for _, key := range []string{suiteActivityKey, suitePreviousActivityKey, suiteOpsKey, suiteManageKey} {
 		s.NotContains(string(body), key, path)

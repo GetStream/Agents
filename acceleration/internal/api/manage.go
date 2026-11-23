@@ -54,9 +54,6 @@ type staffKey struct{ header, key string }
 // schemes, and for ActivityKey the activity key and the one being rotated out. It is empty for
 // every other operation.
 func (s *Server) staffKeys(operation *huma.Operation) []staffKey {
-	if !staffOperation(operation) {
-		return nil
-	}
 	var keys []staffKey
 	for _, requirement := range operation.Security {
 		for scheme := range requirement {
