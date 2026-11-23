@@ -843,6 +843,14 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### A hosted tool call in a group channel names the person who wrote
+
+In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.
+
+### A connection keeps a rotated token when saving it fails once
+
+When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
+
 ### An SMS reply sets its price aside before it is sent
 
 A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what Telnyx will bill for it, its link and each MMS of up to ten files included, before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).

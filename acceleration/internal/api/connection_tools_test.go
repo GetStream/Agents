@@ -355,6 +355,46 @@ func (s *ConnectionToolsSuite) TestATokenTheProviderRefusesMovesTheConnectionToN
 	s.Equal(validationConnected, string(s.validate(id).Status), "a new token is what fixes it")
 }
 
+// TestANewTokenForARefusedOneBeginsANewGrant: a credentials write that connects a connection
+// a refusal moved to needs_reauthorization begins a grant, as a consent does: connected_at
+// moves, and the tools pinned for the old grant no longer hold. The credential store stamps
+// nothing itself (AI-3504).
+func (s *ConnectionToolsSuite) TestANewTokenForARefusedOneBeginsANewGrant() {
+	id := s.connection(bearer.Name)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(1, "not-a-token-the-fake-issued"), nil))
+	before := s.connectedAt(id)
+	s.Require().NotNil(before, "the first write began a grant")
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, before, map[string]string{"echo": "pinned"})
+	s.Require().NoError(err)
+	s.Require().Equal(validationNeedsReauthorization, string(s.validate(id).Status))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(s.get(id).Revision, s.token), nil))
+
+	after := s.connectedAt(id)
+	s.Require().NotNil(after)
+	s.True(after.After(*before), "a new grant began")
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, after)
+	s.Require().NoError(err)
+	s.Empty(pins, "the pin taken for the refused token is not one for the new grant")
+}
+
+// TestANewTokenForAConnectionWhoseBlobNoLongerOpensBeginsANewGrant: the stored credentials of a
+// connected row do not open, so the store moves it to needs_reauthorization before the write
+// runs, and the new token begins a grant as one for a refused row does.
+func (s *ConnectionToolsSuite) TestANewTokenForAConnectionWhoseBlobNoLongerOpensBeginsANewGrant() {
+	id := s.connected(bearer.Name)
+	before := s.connectedAt(id)
+	s.Require().NotNil(before)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?", []byte("not a sealed blob"), id)
+	s.Require().NoError(err)
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(s.get(id).Revision, s.token), nil))
+
+	after := s.connectedAt(id)
+	s.Require().NotNil(after)
+	s.True(after.After(*before), "a new grant began")
+}
+
 // TestAValidateTheProviderRefusesLogsItsStatusAndMessageNotTheToken: the provider answers a 4xx
 // whose JSON-RPC error repeats the bearer token, padded past the 1 KiB a line keeps. The validate
 // logs one WARN line with the connection, the connector, the provider's status and its words, cut

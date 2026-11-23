@@ -474,16 +474,18 @@ func (s *PGSealedSuite) TestWhenAConsentConnectedIsKeptAndARefreshKeepsIt() {
 	s.True(connected.Equal(*stored.ConnectedAt))
 }
 
-// A credentials write that connects a connection names no time of its own (T18's write,
-// AI-849); the grant begins when it is committed.
-func (s *PGSealedSuite) TestAConnectionCommittedConnectedFromAnotherStatusIsStampedConnectedNow() {
+// A commit that connects a connection from another status writes the time fn leaves: a
+// renewal saved again after its checkpoint loads needs_reauthorization and is still the same
+// grant (the resolver's saveAgain). Whatever begins a grant names its time (AI-3504).
+func (s *PGSealedSuite) TestAConnectionCommittedConnectedFromAnotherStatusKeepsTheTimeFnLeaves() {
 	ref := s.connected("acme-app", tokens{Access: "a", Refresh: "r"}, time.Time{})
 	credentialStore := s.credentialStore(s.v1)
+	connected := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	s.Require().NoError(credentialStore.Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Status = store.ConnectionNeedsReauthorization
+		state.ConnectedAt = connected
 		return true, nil
 	}))
-	before := time.Now().UTC()
 
 	s.Require().NoError(credentialStore.Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Credentials = credentials(tokens{Access: "a2", Refresh: "r2"})
@@ -493,7 +495,7 @@ func (s *PGSealedSuite) TestAConnectionCommittedConnectedFromAnotherStatusIsStam
 
 	stored := s.stored(ref)
 	s.Require().NotNil(stored.ConnectedAt)
-	s.False(stored.ConnectedAt.Before(before.Truncate(time.Microsecond)))
+	s.True(connected.Equal(*stored.ConnectedAt), "the grant's time, not the commit's")
 }
 
 // A refresh checkpoints needs_reauthorization and commits connected again; it is the same
