@@ -65,7 +65,7 @@ func (s *Server) scheduledTasksCustomer(ctx context.Context) (string, error) {
 // caller kind, and reachability is a session owner's (Owner.Reaches), so a task a
 // backend made is still its user's own device's to read.
 func (s *Server) loadScheduledTask(ctx context.Context, customerID, id string) (store.ScheduledTask, error) {
-	task, err := s.store.ScheduledTask(ctx, customerID, id)
+	task, err := s.store.ScheduledTasks.Get(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoScheduledTask) {
 		return store.ScheduledTask{}, errUnknownScheduledTask
 	}
@@ -113,12 +113,14 @@ func (s *Server) listScheduledTasks(ctx context.Context, request *listScheduledT
 		return nil, invalidRequest(err.Error())
 	}
 	limit := store.ScheduledTaskLimit(value(request.Limit.ptr()))
-	rows, err := s.store.ScheduledTasks(ctx, customerID, store.ScheduledTaskFilter{
+	rows, err := s.store.ScheduledTasks.Select(ctx, customerID, store.ScheduledTaskFilter{
 		Scope:     scope,
 		State:     value(request.State.ptr()),
 		ConfigID:  value(request.ConfigId.ptr()),
 		SessionID: value(request.SessionId.ptr()),
-	}, limit, after)
+		Limit:     limit,
+		After:     after,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +254,7 @@ func (s *Server) createScheduledTask(ctx context.Context, request *createSchedul
 	if config != nil {
 		maxActive = config.Scheduling.MaxActive()
 	}
-	if err := s.store.CreateScheduledTask(ctx, &task, maxActive); err != nil {
+	if err := s.store.ScheduledTasks.Insert(ctx, &task, maxActive); err != nil {
 		switch {
 		case errors.Is(err, store.ErrScheduledTaskIDTaken):
 			return nil, conflict("a scheduled task with this id already exists; read it back, or choose another id")
@@ -389,7 +391,7 @@ func (s *Server) updateScheduledTask(ctx context.Context, request *updateSchedul
 			task.StartLocal = moved.StartLocal
 		}
 	}
-	if err := s.store.SaveScheduledTask(ctx, &task); err != nil {
+	if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return nil, errUnknownConfig
 		}
@@ -498,7 +500,7 @@ func (s *Server) pauseScheduledTask(ctx context.Context, request *pauseScheduled
 	// A task a data move paused is paused by the user once they say so, so the cut-over leaves it.
 	if task.State == store.ScheduledTaskActive || (task.State == store.ScheduledTaskPaused && task.MovePaused) {
 		task.State, task.MovePaused = store.ScheduledTaskPaused, false
-		if err := s.store.SaveScheduledTask(ctx, &task); err != nil {
+		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
 			return nil, err
 		}
 	}
@@ -538,21 +540,21 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 				return nil, scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 					Message: "that task has no occurrence left; give it a new schedule, then resume it"})
 			}
-			if err := s.store.InsertScheduledTaskRun(ctx, missed); err != nil {
+			if err := s.store.ScheduledTaskRuns.Insert(ctx, missed); err != nil {
 				return nil, err
 			}
 			task.State, task.NextRunAt = store.ScheduledTaskCompleted, nil
 		} else {
 			maxActive := store.DefaultMaxActiveTasks
 			// A deleted config leaves a task nothing to run on; any other failure to read it is not that.
-			config, err := s.store.AgentConfig(ctx, customerID, task.ConfigID)
+			config, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID)
 			if errors.Is(err, store.ErrNoAgentConfig) {
 				return nil, errUnknownConfig
 			}
 			if err == nil {
 				maxActive = config.Scheduling.MaxActive()
 			}
-			active, err := s.store.ActiveScheduledTaskCount(ctx, customerID, task.UserID, task.ConfigID)
+			active, err := s.store.ScheduledTasks.CountActive(ctx, customerID, task.UserID, task.ConfigID)
 			if err != nil {
 				return nil, err
 			}
@@ -562,7 +564,7 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 			task.State, task.NextRunAt = store.ScheduledTaskActive, &next
 		}
 		task.ConsecutiveFailures, task.MovePaused = 0, false
-		if err := s.store.SaveScheduledTask(ctx, &task); err != nil {
+		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
 			if errors.Is(err, store.ErrNoAgentConfig) {
 				return nil, errUnknownConfig
 			}
@@ -592,7 +594,7 @@ func (s *Server) runScheduledTask(ctx context.Context, request *runScheduledTask
 		Trigger: store.ScheduledTaskTriggerManual, Prompt: task.Instructions,
 		State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	if err := s.store.InsertScheduledTaskRun(ctx, &run); err != nil {
+	if err := s.store.ScheduledTaskRuns.Insert(ctx, &run); err != nil {
 		return nil, err
 	}
 	go s.deliverManualRun(task, run)
@@ -618,7 +620,7 @@ func (s *Server) deliverManualRun(task store.ScheduledTask, run store.ScheduledT
 		s.logger.Error("a scheduled task run by hand did not land",
 			"task", task.ID, "run", run.ID, "error", err)
 	}
-	if err := s.store.FinishManualScheduledTaskRun(ctx, run.ID, state, deliveredTo, sessionID, failure); err != nil {
+	if err := s.store.ScheduledTaskRuns.FinishManual(ctx, run.ID, state, deliveredTo, sessionID, failure); err != nil {
 		s.logger.Error("could not record a scheduled task run by hand",
 			"task", task.ID, "run", run.ID, "error", err)
 	}
@@ -632,7 +634,7 @@ func (s *Server) deleteScheduledTask(ctx context.Context, request *deleteSchedul
 	if _, err := s.loadScheduledTask(ctx, customerID, request.Id); err != nil {
 		return nil, err
 	}
-	if err := s.store.DeleteScheduledTask(ctx, customerID, request.Id); err != nil {
+	if err := s.store.ScheduledTasks.Delete(ctx, customerID, request.Id); err != nil {
 		if errors.Is(err, store.ErrNoScheduledTask) {
 			return nil, errUnknownScheduledTask
 		}
@@ -655,7 +657,7 @@ func (s *Server) listScheduledTaskRuns(ctx context.Context, request *listSchedul
 		return nil, invalidRequest(err.Error())
 	}
 	limit := store.ScheduledTaskLimit(value(request.Limit.ptr()))
-	rows, err := s.store.ScheduledTaskRuns(ctx, customerID, task.ID, limit, after)
+	rows, err := s.store.ScheduledTaskRuns.Select(ctx, customerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: limit, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -676,7 +678,7 @@ func (s *Server) listScheduledTaskRuns(ctx context.Context, request *listSchedul
 // last_run_at out rather than failing a change that stands, which a client
 // retrying a create would make twice.
 func (s *Server) scheduledTaskOf(ctx context.Context, task store.ScheduledTask) ScheduledTask {
-	last, err := s.store.LastScheduledTaskRunsAt(ctx, task.CustomerID, []string{task.ID})
+	last, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, task.CustomerID, []string{task.ID})
 	if err != nil {
 		s.logger.Error("could not read when a scheduled task last ran", "task", task.ID,
 			"customer", task.CustomerID, "error", err)
@@ -690,7 +692,7 @@ func (s *Server) scheduledTasksOf(ctx context.Context, customerID string, tasks 
 	for _, task := range tasks {
 		ids = append(ids, task.ID)
 	}
-	last, err := s.store.LastScheduledTaskRunsAt(ctx, customerID, ids)
+	last, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, customerID, ids)
 	if err != nil {
 		return nil, err
 	}

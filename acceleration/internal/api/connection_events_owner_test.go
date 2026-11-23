@@ -165,11 +165,12 @@ func (s *ConnectionEventsSuite) TestACarrierStillTakesADeliveryOnceTheOwnersSubs
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+older,
 		map[string]any{"connectors": []map[string]any{binding}}, nil))
 	arguments := map[string]any{"project": "web"}
-	_, err := s.store.AddConnectionEventSubscription(context.Background(), &store.ConnectionEventSubscription{
+	_, err := s.store.ConnectionEventSubscriptions.Insert(context.Background(), &store.ConnectionEventSubscription{
 		CustomerID: s.customerID(), ConnectionID: connection, ConfigID: older, Binding: "crm",
 		Event: issueCreated, Arguments: arguments, Key: mcpevents.Key(issueCreated, arguments),
 		Token: s.utils.uuid(), SecretSealed: []byte("synthetic"), KEKVersion: 1, Status: store.ConnectionEventActive,
 	})
+
 	s.Require().NoError(err)
 	marker := s.utils.uuid()
 

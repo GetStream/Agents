@@ -34,7 +34,7 @@ func (s *Service) keyword(ctx context.Context, account store.ChannelAccount, lin
 		return false
 	}
 
-	useCase, err := s.store.UseCaseForNumber(ctx, account.CustomerID, account.E164)
+	useCase, err := s.store.UseCases.GetForNumber(ctx, account.CustomerID, account.E164)
 	if err != nil && !errors.Is(err, store.ErrUnknownUseCase) {
 		s.logger.Error("could not find what a line sends as", "number", account.E164, "error", err)
 	}
@@ -42,12 +42,12 @@ func (s *Service) keyword(ctx context.Context, account store.ChannelAccount, lin
 	var recorded error
 	switch {
 	case stop:
-		recorded = s.store.OptOut(ctx, &store.OptOut{
+		recorded = s.store.OptOuts.Insert(ctx, &store.OptOut{
 			CustomerID: account.CustomerID, Recipient: message.From, Channel: account.Kind, Source: "keyword",
 		})
 		reply = cmp.Or(useCase.OptOutMessage, stoppedReply)
 	case start:
-		recorded = s.store.RevokeOptOuts(ctx, account.CustomerID, message.From, account.Kind)
+		recorded = s.store.OptOuts.RevokeAll(ctx, account.CustomerID, message.From, account.Kind)
 		reply = cmp.Or(useCase.OptInMessage, startedReply)
 	default:
 		reply = cmp.Or(useCase.HelpMessage, helpReply)

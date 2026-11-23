@@ -303,7 +303,7 @@ func (s *AuthorizationsSuite) assertReturnURLRefused(why, returnURL string) {
 	s.True(strings.HasPrefix(message, "return_url: "), message)
 	s.Contains(message, why, returnURL)
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", id).Scan(&attempts))
 	s.Zero(attempts, returnURL)
 }

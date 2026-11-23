@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
@@ -85,7 +84,7 @@ func TestADeploymentWithNoDefaultDailyLimitStillCapsAnAppThatSetsOne(t *testing.
 	liveClient, err := redisready.Retry(address, func() (*live.Client, error) { return live.New(live.Options{Address: address}) })
 	require.NoError(t, err)
 	t.Cleanup(liveClient.Close)
-	policies, err := policy.New(&appconfig.Store{}, policy.Settings{}, logger)
+	policies, err := policy.New(&store.Store{}, policy.Settings{}, logger)
 	require.NoError(t, err)
 	t.Cleanup(policies.Close)
 

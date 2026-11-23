@@ -131,10 +131,10 @@ func (s *CampaignContactsSuite) TestOnlyAContactWaitingToBeRungShowsWhenItIsNext
 	s.add(created.Id, map[string]any{"contacts": []map[string]any{{"to_number": "+14155550186"}, {"to_number": "+14155550187"}}})
 	listed := s.list(created.Id, "").Items
 	due := time.Now().UTC().Add(-time.Hour)
-	_, err := s.store.DB().NewUpdate().Model((*store.Contact)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.Contact)(nil)).
 		Set("next_attempt_at = ?", due).Where("id IN (?)", bun.In([]string{listed[0].Id, listed[1].Id})).Exec(context.Background())
 	s.Require().NoError(err)
-	_, err = s.store.DB().NewUpdate().Model((*store.Contact)(nil)).
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.Contact)(nil)).
 		Set("stage = ?", store.InProgress).Where("id = ?", listed[1].Id).Exec(context.Background())
 	s.Require().NoError(err)
 
@@ -264,7 +264,7 @@ func (s *CampaignContactsSuite) TestContactsPageAndFilterByStage() {
 	all := s.list(created.Id, "").Items
 	s.Require().Len(all, 4)
 	s.stop(created.Id, all[1].Id)
-	_, err := s.store.DB().NewUpdate().Model((*store.Contact)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.Contact)(nil)).
 		Set("stage = ?", store.AwaitingOutcome).Where("id = ?", all[2].Id).Exec(context.Background())
 	s.Require().NoError(err)
 
@@ -432,7 +432,7 @@ func (s *CampaignContactsSuite) draft(body map[string]any) Campaign {
 // launched is a running campaign with one contact.
 func (s *CampaignContactsSuite) launched() Campaign {
 	from := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: from, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	created := s.draft(map[string]any{"config_id": s.data.createAgentConfig().Id, "from_number": from})
@@ -481,13 +481,13 @@ func (s *CampaignContactsSuite) dial(campaignID, contactID string, attempt, dial
 		CampaignID: campaignID, ContactID: contactID, StepID: "step_1",
 		Attempt: attempt, Dial: dial, StartedAt: at,
 	}
-	s.Require().NoError(s.store.StartDial(ctx, &row))
+	s.Require().NoError(s.store.CampaignAttempts.Insert(ctx, &row))
 	if result == "" && callOutcome == "" {
 		return
 	}
-	s.Require().NoError(s.store.EndDial(ctx, row.ID, result, callOutcome, s.utils.callID(), "", at.Add(30*time.Second), nil))
+	s.Require().NoError(s.store.CampaignAttempts.End(ctx, row.ID, result, callOutcome, s.utils.callID(), "", at.Add(30*time.Second), nil))
 	if outcome != "" {
-		_, err := s.store.DB().NewUpdate().Model((*store.CampaignAttempt)(nil)).
+		_, err := s.store.GlobalDB().NewUpdate().Model((*store.CampaignAttempt)(nil)).
 			Set("outcome = ?", outcome).Where("id = ?", row.ID).Exec(ctx)
 		s.Require().NoError(err)
 	}

@@ -190,8 +190,9 @@ type Session struct {
 	typed      []string
 	typedTurns map[string]struct{}
 	tools      *bridge
-	// calls records the call's row when it moves onto other models. Nil when the
-	// deployment keeps no calls.
+	toolCalls  toolCalls
+	// calls records the session's calls: the one it opened on, and one each time voice is
+	// started on it. Nil when the deployment keeps no calls.
 	calls      *callRecorder
 	transcript Transcript
 	// skills are what the fast model may hand over, resolved once when the session was
@@ -287,8 +288,12 @@ type Session struct {
 	toolSources map[string]ToolSource
 	// otherTools are what the session offers besides its caller's own tools, which go first:
 	// the workers', the router's, the connectors' and other agents'. Set before the session
-	// is served and only read after; the caller's change (AddTools, RemoveTool).
+	// is served and only read after; the caller's change (AddTools, RemoveTool). Each is
+	// held whole, and offered as loading says.
 	otherTools []harness.Tool
+	// loading is how each tool is offered and how long what it was given and gave back is
+	// kept. Set before the session is served and only read after.
+	loading toolLoading
 	// connectors is the session's connector dispatcher, nil when its config binds none. A
 	// consent finished for one of its logins is handed back to it (ConnectorConsentFinished).
 	connectors *dispatcher
@@ -313,6 +318,10 @@ type Session struct {
 	labelMu     sync.Mutex
 	title       string
 	description string
+	// call is the id of the session's current call row, and callStarted when it began.
+	// Guarded by labelMu.
+	call        string
+	callStarted time.Time
 	// renamed is set once somebody named the conversation, after which naming leaves it be.
 	renamed bool
 
@@ -550,9 +559,10 @@ func (w *watcher) send(event Event) bool {
 
 // Watch attaches a consumer and returns it along with the way to detach.
 //
-// Every watcher sees everything from the moment it attached. Nothing is replayed: a caller
-// that connects late has missed the conversation, and a control channel that opened with a
-// backlog would have it answering tool calls that timed out before it arrived.
+// Every watcher sees everything from the moment it attached. Nothing else is replayed, but a
+// call still waiting for the person to allow it is asked again: a caller that connects late has
+// missed the conversation, and a control channel that opened with a backlog would have it
+// answering tool calls that timed out before it arrived.
 func (s *Session) Watch() (<-chan Event, func()) {
 	return s.WatchAs(Seat{Owner: OwnerOf(s.Spec())})
 }
@@ -573,6 +583,7 @@ func (s *Session) WatchAs(seat Seat) (<-chan Event, func()) {
 // (WatchFrom), sent resumed and then what it missed after cursor.
 func (s *Session) watch(seat Seat, cursor string, resumed *Resumed) (<-chan Event, func()) {
 	attached := &watcher{events: make(chan Event, watcherBuffer), seat: seat}
+	asking := s.askingPerson()
 
 	s.mu.Lock()
 	if s.state == Ended {
@@ -615,6 +626,23 @@ func (s *Session) watch(seat Seat, cursor string, resumed *Resumed) (<-chan Even
 	}
 	for _, unavailable := range s.connectorsUnavailable {
 		attached.send(unavailable)
+	}
+	// A call still waiting for the person to allow it is asked again of a watcher that comes
+	// later, such as an app reopened after the one that was asked was closed: the question is
+	// on the reply's step, and only a watcher that has the call can answer it and run it. One
+	// answered or finished since asking was read is not: the answer is recorded on the call
+	// before the conversation hears it (DecideCommandTool).
+	for _, pending := range asking {
+		if resent[pending.ID] || !s.tools.asking(pending.ID) {
+			continue
+		}
+		if resent == nil {
+			resent = map[string]bool{}
+		}
+		resent[pending.ID] = true
+		replayed := s.placed(pending)
+		replayed.Run = s.seatRuns(seat, replayed.Name)
+		attached.send(replayed)
 	}
 	if seat.ReplayPendingVoiceTools && s.Voicing() && s.tools != nil {
 		for _, pending := range s.tools.Pending() {
@@ -1220,6 +1248,23 @@ type Recorded interface {
 	ConversationDocuments(ctx context.Context, customerID string, scope store.DocumentScope) ([]store.ConversationDocument, error)
 }
 
+// RecordedIn is the conversation as written stores it.
+func RecordedIn(written *store.Store) Recorded { return storedRecord{written} }
+
+type storedRecord struct{ store *store.Store }
+
+func (r storedRecord) Exchanges(ctx context.Context, customerID, sessionID, upTo string) ([]store.Exchange, error) {
+	return r.store.Responses.Exchanges(ctx, customerID, sessionID, upTo)
+}
+
+func (r storedRecord) RewindResponses(ctx context.Context, customerID, sessionID, kept string, at time.Time) error {
+	return r.store.Responses.Rewind(ctx, customerID, sessionID, kept, at)
+}
+
+func (r storedRecord) ConversationDocuments(ctx context.Context, customerID string, scope store.DocumentScope) ([]store.ConversationDocument, error) {
+	return r.store.ConversationDocuments.Select(ctx, customerID, scope)
+}
+
 // Rewind carries the conversation on from the end of a response, as though nothing after it
 // had been said. The reply being spoken is abandoned and the model's history is rebuilt from
 // what was recorded up to that response.
@@ -1632,10 +1677,14 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 	s.mu.Unlock()
 	if s.records != nil && voice {
-		s.records.Voiced(s.id, next.CallID, next.CallType)
+		s.records.Voiced(s.id)
 	}
+	// Each time voice is started or stopped begins a call of its own, so every moment of a
+	// session is on exactly one call.
 	if s.calls != nil {
-		s.calls.Changed(row(s))
+		now := time.Now()
+		s.calls.Ended(s.nextCall(now), now.UTC())
+		s.calls.Started(row(s))
 	}
 
 	if err := old.Close(); err != nil {
@@ -1772,9 +1821,9 @@ func (s *Session) HoldTool(id string) bool {
 
 // ToolUpdate passes on what whoever runs a call says about it while it runs (agent
 // ToolUpdate). An update for a call this session is not waiting on is dropped.
-func (s *Session) ToolUpdate(id, text string, verbatim bool) {
+func (s *Session) ToolUpdate(id, text string, verbatim bool, custom map[string]any) {
 	if _, waiting := s.tools.nameOf(id); waiting {
-		s.current().ToolUpdate(id, text, verbatim)
+		s.current().ToolUpdate(id, text, verbatim, custom)
 	}
 }
 
@@ -1822,7 +1871,10 @@ func (s *Session) DecideCommandTool(id, commandID, turnID string, allowed bool, 
 	if !bound || expected != commandID || !s.tools.waitsOn(id, turnID) {
 		return false
 	}
-	s.persisted.Observe(agent.ToolApprovalDecided{ID: id, TurnID: turnID, Allowed: allowed, Summary: summary})
+	s.tools.decide(id, turnID)
+	decided := agent.ToolApprovalDecided{ID: id, TurnID: turnID, Allowed: allowed, Summary: summary}
+	s.persisted.Observe(decided)
+	s.trackToolCall(decided)
 	return true
 }
 
@@ -1937,6 +1989,7 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 		s.remember(event)
 		s.record(event)
 		s.broadcast(event)
+		s.trackToolCall(event)
 		s.name(event)
 	}
 	s.heard(held)
@@ -2007,11 +2060,14 @@ func (s *Session) write(event Event) {
 			s.openTurn(typed.TurnID, typed.Prompt)
 		}
 	case agent.ToolStarted:
-		s.item(typed.TurnID, store.ItemToolCall, "", typed.Tool, map[string]any{
-			"call_id": typed.ID, "product": typed.Product, "sdk": typed.SDK,
-		})
+		payload := map[string]any{"call_id": typed.ID, "product": typed.Product, "sdk": typed.SDK}
+		s.describeOffer(payload, typed.Tool)
+		s.item(typed.TurnID, store.ItemToolCall, "", typed.Tool, payload)
 	case agent.ToolRan:
-		payload := map[string]any{"call_id": typed.ID, "arguments": typed.Arguments}
+		payload := map[string]any{
+			"call_id": typed.ID, "arguments": typed.Arguments,
+			"tokens": llm.ToolUseTokens(typed.Tool, typed.Arguments, typed.Result),
+		}
 		if typed.Err != nil {
 			payload["error"] = store.SafeLogText(typed.Err.Error())
 		}
@@ -2128,7 +2184,7 @@ func (s *Session) nextTurn(ctx context.Context) persistent.Turn {
 	s.turnsMu.Unlock()
 	var place persistent.Place
 	if s.tree != nil {
-		asked, err := s.tree.QuestionsAt(ctx, s.spec.CustomerID, s.id, parent)
+		asked, err := s.tree.Responses.QuestionsAt(ctx, s.spec.CustomerID, s.id, parent)
 		if err != nil {
 			s.logger.Warn("could not read the questions asked before, so the next one is marked as the only one",
 				"session", s.id, "error", err)
@@ -2199,7 +2255,7 @@ func (s *Session) item(turnID, kind, text, tool string, payload map[string]any) 
 		Kind: kind, Text: text, ToolName: tool, Payload: payload, At: time.Now().UTC(),
 	}
 	if kind == store.ItemToolCall || kind == store.ItemToolResult {
-		switch window, kept := s.spec.ToolOutputRetention.Window(); {
+		switch window, kept := s.spec.ToolOutputRetention.Shorter(s.loading.retention(tool)).Window(); {
 		case kept && window == 0:
 			item.Redact()
 		case kept:
@@ -2363,6 +2419,24 @@ func (s *Session) broadcast(event Event) {
 	}
 }
 
+// askingPerson is the calls still waiting for the person to allow them, on the step of the
+// conversation's reply, each with its command as askTool sends it. It is read without s.mu,
+// since the conversation broadcasts to the session under its own lock.
+func (s *Session) askingPerson() []ToolCall {
+	if s.persisted == nil || s.tools == nil {
+		return nil
+	}
+	var asking []ToolCall
+	for _, pending := range s.tools.Pending() {
+		if !s.persisted.AwaitsApproval(pending.ID) {
+			continue
+		}
+		pending.CommandID, _ = s.persisted.CommandForTurn(pending.TurnID)
+		asking = append(asking, pending)
+	}
+	return asking
+}
+
 // placed is call with what it is part of filled in: this session, its conversation, and
 // the session's own user when the agent did not say whose turn asked for it.
 func (s *Session) placed(call ToolCall) ToolCall {
@@ -2495,7 +2569,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 
 	defined := map[string]harness.Skill{}
 	if m.options.Store != nil {
-		stored, err := m.options.Configs.SkillsNamed(ctx, customerID, configID, names)
+		stored, err := m.options.Store.Skills.GetByNames(ctx, customerID, configID, names)
 		if err != nil {
 			return harness.Skills{}, err
 		}
@@ -2516,7 +2590,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 	resolved := harness.Skills{Skills: make([]harness.Skill, 0, len(names))}
 	if m.options.Store != nil {
 		resolved.Load = func(ctx context.Context, name string) (harness.Loaded, error) {
-			found, err := m.options.Configs.SkillsNamed(ctx, customerID, configID, []string{name})
+			found, err := m.options.Store.Skills.GetByNames(ctx, customerID, configID, []string{name})
 			if err != nil {
 				return harness.Loaded{}, err
 			}

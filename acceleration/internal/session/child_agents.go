@@ -37,7 +37,7 @@ const childInput = "input"
 // after the parent's RunDeadline. It takes none of the app's run slots: the parent's slot
 // covers it, and maxChildrenAtOnce bounds how many one parent holds.
 func (m *Manager) childAgents(spec Spec, parent *Session, declared []harness.Tool, next agent.ToolRunner) ([]harness.Tool, agent.ToolRunner) {
-	if !spec.Text || len(spec.Agents) == 0 || m.options.Configs == nil {
+	if !spec.Text || len(spec.Agents) == 0 || m.options.Store == nil {
 		return declared, next
 	}
 	// The agent offers these itself, past the tools it is handed.
@@ -117,13 +117,13 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 		return nil, childEnded(call.Name, ctx.Err())
 	}
 
-	config, found, err := r.manager.options.Configs.AgentConfigByName(ctx, r.spec.CustomerID, child.Config)
-	if err != nil {
+	config, err := r.manager.options.Store.AgentConfigs.GetByName(ctx, r.spec.CustomerID, child.Config)
+	if err != nil && !errors.Is(err, store.ErrNoAgentConfig) {
 		return nil, err
 	}
 	// Checked again as the child runs, since it may have changed since the parent was saved.
 	switch {
-	case !found:
+	case err != nil:
 		return nil, fmt.Errorf("the agent %q behind %s no longer exists", child.Config, call.Name)
 	case config.Mode != store.AgentModeText:
 		return nil, fmt.Errorf("the agent %q behind %s is no text agent", child.Config, call.Name)

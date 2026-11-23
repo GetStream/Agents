@@ -180,7 +180,7 @@ func (s *StoredSuite) TestAnAppNoTokenWasForwardedForActsNowhere() {
 // placeholder is the row the migration seeds for an app that had registered its keys: no
 // token, already expired, naming the key to mint with.
 func (s *StoredSuite) placeholder() {
-	_, err := s.store.KeepStreamAppToken(s.ctx, store.StreamAppToken{
+	_, err := s.store.StreamAppTokens.Keep(s.ctx, &store.StreamAppToken{
 		StreamAppPK: s.app, CustomerID: s.customer, APIKey: forwardedKey, Sealed: []byte{}, ExpiresAt: time.Unix(0, 0),
 	})
 	s.Require().NoError(err)

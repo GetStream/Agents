@@ -50,7 +50,7 @@ func (p *popularity) shares(ctx context.Context, modality string) map[string]flo
 		return cached.shares
 	}
 
-	requests, err := p.store.ModelRequests(ctx, modality, time.Now().Add(-popularityWindow))
+	requests, err := p.store.Requests.CountByModel(ctx, modality, time.Now().Add(-popularityWindow))
 	if err != nil {
 		p.logger.Warn("count model popularity", "modality", modality, "error", err)
 		return cached.shares

@@ -62,12 +62,12 @@ func (s *EpisodeSweeperSuite) SetupSuite() {
 func (s *EpisodeSweeperSuite) SetupTest() {
 	// The gate reads every customer's configs, so no earlier test's may have the cards on,
 	// and no earlier episode may be left to sweep. The database is the suite's own.
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = false")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx,
+	_, err = s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET lease_until = NULL")
 	s.Require().NoError(err)
 	s.settings.Connectors.Enabled = false
 
@@ -96,16 +96,16 @@ func (s *EpisodeSweeperSuite) SetupTest() {
 // hour, under the agent config configID of the customer customer.
 func (s *EpisodeSweeperSuite) idleEpisode(customer, configID string) {
 	contact := store.ContactMapEntry{
-		CustomerID: customer, AgentConfigID: configID, Kind: store.ContactSlack,
+		CustomerID: customer, ConfigID: configID, Kind: store.ContactSlack,
 		Address: "T1:U1", ConversationID: "agent:omni-" + uuid.NewString(),
 	}
-	_, err := s.store.MapContact(s.ctx, &contact)
+	_, err := s.store.ContactMapEntries.Map(s.ctx, &contact)
 	s.Require().NoError(err)
 	episode := store.Episode{
 		CustomerID: customer, ContactID: contact.ID, Source: store.EpisodeSlack,
 		ThreadChannel: "agent:thread-" + uuid.NewString(), StartedAt: time.Now().Add(-2 * time.Hour),
 	}
-	_, err = s.store.OpenEpisode(s.ctx, &episode)
+	_, err = s.store.Episodes.Open(s.ctx, &episode)
 	s.Require().NoError(err)
 	s.episode = episode.ID
 }
@@ -118,7 +118,7 @@ func (s *EpisodeSweeperSuite) strayEpisode() {
 // status is the test's episode's status as stored.
 func (s *EpisodeSweeperSuite) status() string {
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", s.episode).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", s.episode).Scan(&status))
 	return status
 }
 
@@ -127,7 +127,7 @@ func (s *EpisodeSweeperSuite) status() string {
 // as on base 668d15d5c.
 func (s *EpisodeSweeperSuite) TestWithNeitherConnectorsNorCardsNorAnEpisodeTheSweeperNeverStarts() {
 	plain := &store.AgentConfig{CustomerID: "sweep-" + uuid.NewString(), Name: "plain"}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, plain))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, plain))
 
 	started, err := startEpisodeSweeper(s.ctx, s.settings, s.store, s.closer)
 
@@ -143,10 +143,10 @@ func (s *EpisodeSweeperSuite) TestWithNeitherConnectorsNorCardsNorAnEpisodeTheSw
 // never started, so the episode stayed in progress and was never summarized.
 func (s *EpisodeSweeperSuite) TestAnEpisodeLeftOpenAfterItsConfigTurnedTheCardsOffIsClosedAndItsSummaryFinished() {
 	customer := "sweep-" + uuid.NewString()
-	carded := &store.AgentConfig{CustomerID: customer, Name: "was carded", EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, carded))
+	carded := &store.AgentConfig{CustomerID: customer, Name: "was carded", EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, carded))
 	s.idleEpisode(customer, carded.ID)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards = false WHERE id = ?", carded.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET episode_cards_on = false WHERE id = ?", carded.ID)
 	s.Require().NoError(err)
 
 	started, err := startEpisodeSweeper(s.ctx, s.settings, s.store, s.closer)
@@ -162,10 +162,10 @@ func (s *EpisodeSweeperSuite) TestAnEpisodeLeftOpenAfterItsConfigTurnedTheCardsO
 func (s *EpisodeSweeperSuite) TestAnEndedEpisodeWhoseSummaryLeaseRanOutHasItsSummaryFinished() {
 	customer := "sweep-" + uuid.NewString()
 	plain := &store.AgentConfig{CustomerID: customer, Name: "was carded"}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, plain))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, plain))
 	s.idleEpisode(customer, plain.ID)
 	closedAt := time.Now()
-	closed, err := s.store.CloseIdleEpisodes(s.ctx, closedAt.Add(-time.Hour), closedAt, 10, closedAt.Add(-time.Second))
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, closedAt.Add(-time.Hour), closedAt, 10, closedAt.Add(-time.Second), "closer")
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
 
@@ -193,8 +193,8 @@ func (s *EpisodeSweeperSuite) TestWithConnectorsOnTheSweeperStartsAndClosesAnIdl
 // No episode is in the database yet: the config alone starts the sweeper, for the app chat
 // episodes it will open.
 func (s *EpisodeSweeperSuite) TestWithAConfigThatTurnedCardsOnTheSweeperStartsAndClosesAnIdleEpisode() {
-	carded := &store.AgentConfig{CustomerID: "sweep-" + uuid.NewString(), Name: "carded", EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, carded))
+	carded := &store.AgentConfig{CustomerID: "sweep-" + uuid.NewString(), Name: "carded", EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, carded))
 
 	started, err := startEpisodeSweeper(s.ctx, s.settings, s.store, s.closer)
 

@@ -12,6 +12,7 @@ use GetStream\VisionAgents\Generated\Session as SessionRow;
 use GetStream\VisionAgents\Generated\SessionTool;
 use GetStream\VisionAgents\Json;
 use GetStream\VisionAgents\Session;
+use GetStream\VisionAgents\Tests\Support\LocalRouter;
 use GetStream\VisionAgents\Tests\Support\LocalSocketServer;
 use GetStream\VisionAgents\Tests\Support\Rows;
 use GetStream\VisionAgents\ToolCallContext;
@@ -41,7 +42,7 @@ final class ToolCallTest extends TestCase
         $this->server?->stop();
     }
 
-    public function testAToolIsToldWhoItsCallAnswersAndCanSayHowItIsGoing(): void
+    public function testAToolIsToldWhoItsCallAnswers(): void
     {
         $server = $this->serve(static function (WebsocketClient $socket, LocalSocketServer $server): void {
             LocalSocketServer::send($socket, [
@@ -53,18 +54,12 @@ final class ToolCallTest extends TestCase
         });
         $agent = new Agent(name: 'jean', client: $server->client());
         $agent->tools->register('book', 'Books a flight', [], static function (ToolCallContext $toolCallContext, array $args): string {
-            $toolCallContext->update('Looking at flights');
-            $toolCallContext->say('One moment.');
             return implode(' ', [$toolCallContext->id, $toolCallContext->sessionId, $toolCallContext->turnId, $toolCallContext->user->id, $toolCallContext->user->name,
                 Json::string($toolCallContext->user->custom, 'tier'), $toolCallContext->conversation->cid, $toolCallContext->approved ? 'approved' : 'asked']);
         });
 
         self::watch($server, $agent);
 
-        self::assertSame([
-            ['type' => 'tool_update', 'tool_call_id' => 't1', 'text' => 'Looking at flights', 'verbatim' => false],
-            ['type' => 'tool_update', 'tool_call_id' => 't1', 'text' => 'One moment.', 'verbatim' => true],
-        ], $server->sent('tool_update'));
         self::assertSame('t1 ses_1 turn-1 u1 Ada gold messaging:c1 approved', $server->sent('tool_result')[0]['output']);
     }
 
@@ -158,6 +153,51 @@ final class ToolCallTest extends TestCase
         self::assertSame('c1', $tools->call('only_call', '{}', $call));
     }
 
+    public function testStringArgumentsAreAllRequiredUnlessTheCallerSaysWhich(): void
+    {
+        $properties = ['location' => 'a city or region', 'unit' => 'celsius or fahrenheit'];
+        $described = [
+            'location' => ['type' => 'string', 'description' => 'a city or region'],
+            'unit' => ['type' => 'string', 'description' => 'celsius or fahrenheit'],
+        ];
+
+        self::assertSame(['type' => 'object', 'properties' => $described, 'required' => ['location', 'unit']], Tools::strings($properties));
+        self::assertSame(['type' => 'object', 'properties' => $described, 'required' => ['location']], Tools::strings($properties, ['location']));
+        self::assertSame([], Tools::strings($properties, [])['required']);
+    }
+
+    public function testAToolWithNoStringArgumentsIsSentAnEmptyPropertiesObject(): void
+    {
+        $router = new LocalRouter();
+        try {
+            $router->answer('POST', '/v1/agents/sessions', 201, Rows::session());
+            $agent = new Agent(name: 'jean', client: $router->client());
+            $agent->tools->register('ping', 'Checks the line', Tools::strings([]), static fn (array $args): string => 'pong');
+
+            $agent->chat();
+
+            self::assertStringContainsString(
+                '"tools":[{"description":"Checks the line","name":"ping","parameters":{"type":"object","properties":{},"required":[]}}]',
+                $router->to('POST', '/v1/agents/sessions')[0]->body,
+            );
+        } finally {
+            $router->stop();
+        }
+    }
+
+    public function testAToolRegisteredWithNamedArgumentsRuns(): void
+    {
+        $tools = (new Tools())->register(
+            name: 'weather_lookup',
+            description: 'Look up the current weather for a location',
+            parameters: Tools::strings(['location' => 'a city or region']),
+            run: static fn (array $args): string => 'sunny in ' . Json::string($args, 'location'),
+        );
+
+        self::assertSame('sunny in Lyon', $tools->call('weather_lookup', '{"location":"Lyon"}'));
+        self::assertSame(['location'], Json::object($tools->declared()[0]->toArray(), 'parameters')['required']);
+    }
+
     public function testAToolIsDeclaredWithOnlyThePoliciesItSets(): void
     {
         $tools = new Tools();
@@ -203,10 +243,10 @@ final class ToolCallTest extends TestCase
             self::until($socket, $server, 'tool_result');
             $socket->close();
         });
-        $agent = $server->client()->agent('payments');
-        self::payments($agent->tools);
+        $client = $server->client();
+        self::payments($client->tools);
 
-        (new Dispatch(client: $server->client()))->host($agent)->run();
+        (new Dispatch(client: $client))->host($client)->run();
 
         $declared = [];
         foreach (Json::objects($server->sent('host_tools')[0], 'tools') as $tool) {
@@ -233,10 +273,10 @@ final class ToolCallTest extends TestCase
             delay(0.4);
             $socket->close();
         });
-        $agent = $server->client()->agent('payments');
-        self::payments($agent->tools);
+        $client = $server->client();
+        self::payments($client->tools);
 
-        (new Dispatch(client: $server->client()))->host($agent)->run();
+        (new Dispatch(client: $client))->host($client)->run();
 
         self::assertSame([['type' => 'tool_result', 'tool_call_id' => 'c2', 'id' => 'c2', 'output' => 'done']], $server->sent('tool_result'));
     }
@@ -253,13 +293,40 @@ final class ToolCallTest extends TestCase
             self::until($socket, $server, 'tool_result');
             $socket->close();
         });
-        $agent = $server->client()->agent('payments');
-        self::payments($agent->tools);
+        $client = $server->client();
+        self::payments($client->tools);
 
-        (new Dispatch(client: $server->client()))->host($agent)->run();
+        (new Dispatch(client: $client))->host($client)->run();
 
         self::assertSame([['type' => 'tool_hold', 'tool_call_id' => 'c1']], $server->sent('tool_hold'));
         self::assertSame([['type' => 'tool_result', 'tool_call_id' => 'c1', 'id' => 'c1', 'output' => 'paid for s1']], $server->sent('tool_result'));
+    }
+
+    public function testAHostedCallsUpdatesReachTheRouterBeforeItsResult(): void
+    {
+        $server = $this->serve(static function (WebsocketClient $socket, LocalSocketServer $server): void {
+            LocalSocketServer::send($socket, ['type' => 'ready', 'worker_id' => 'w-1']);
+            self::until($socket, $server, 'host_tools');
+            LocalSocketServer::send($socket, ['type' => 'tool_call', 'id' => 'c1', 'session_id' => 's1', 'name' => 'search_flights', 'arguments' => '{}']);
+            self::until($socket, $server, 'tool_result');
+            $socket->close();
+        });
+        $client = $server->client();
+        $client->tools->register('search_flights', 'Searches', [], static function (ToolCallContext $toolCallContext, array $args): string {
+            $toolCallContext->update('Comparing 40 flights');
+            $toolCallContext->update('Booking the cheapest', custom: ['cheapest' => 129]);
+            $toolCallContext->update(custom: ['seat' => '12A']);
+            return 'found 3';
+        });
+
+        (new Dispatch(client: $client))->host($client)->run();
+
+        self::assertSame([
+            ['type' => 'tool_update', 'tool_call_id' => 'c1', 'text' => 'Comparing 40 flights'],
+            ['type' => 'tool_update', 'tool_call_id' => 'c1', 'text' => 'Booking the cheapest', 'custom' => ['cheapest' => 129]],
+            ['type' => 'tool_update', 'tool_call_id' => 'c1', 'custom' => ['seat' => '12A']],
+        ], $server->sent('tool_update'));
+        self::assertSame([['type' => 'tool_result', 'tool_call_id' => 'c1', 'id' => 'c1', 'output' => 'found 3']], $server->sent('tool_result'));
     }
 
     public function testAToolAddedWhileTheSessionIsWatchedIsRunHere(): void

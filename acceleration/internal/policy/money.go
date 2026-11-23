@@ -367,7 +367,7 @@ func (m *money) start(e *Enforcer) {
 		m.loops.Add(1)
 		go m.every(ctx, m.settings.FlushEvery, nil, m.flushPass)
 	}
-	db := e.config.DB()
+	db := e.config
 	reconcile := func(ctx context.Context) { m.reconcilePass(ctx, db) }
 	go func() {
 		reconcile(ctx)

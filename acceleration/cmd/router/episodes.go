@@ -18,7 +18,7 @@ import (
 // the call hook, and its app chats' episodes and expired summary leases taken from the next start.
 func startEpisodeSweeper(ctx context.Context, settings config.Config, pgStore *store.Store, closer *omnichannel.Closer) (bool, error) {
 	if !settings.Connectors.Enabled {
-		due, err := pgStore.AnyEpisodeToSweep(ctx)
+		due, err := pgStore.Episodes.AnyToSweep(ctx)
 		if err != nil || !due {
 			return false, err
 		}

@@ -32,7 +32,7 @@ func (s *TelnyxChannelSuite) TestAThreadWhoseConfigWasDeletedIsAnsweredByTheConf
 
 	old := s.config.ID
 	s.rebind()
-	s.Require().NoError(s.store.DeleteAgentConfig(context.Background(), s.customerID(), old))
+	s.Require().NoError(s.store.AgentConfigs.Delete(context.Background(), s.customerID(), old))
 	s.smsTurn(person, "And the invoice?")
 
 	s.Equal("Counted.", s.took(2)[1].text)
@@ -46,10 +46,10 @@ func (s *TelnyxChannelSuite) TestAnotherCustomersConfigNamingTheLineNeverAnswers
 	person := "+13125550001"
 	s.smsTurn(person, "Hi, is my order ready?")
 	forged := store.AgentConfig{
-		CustomerID: s.data.createApp().app.ID, Name: "forged-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "echo/echo-model",
+		CustomerID: s.data.createApp().app.ID, Name: "forged-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "echo/echo-model"},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &forged))
-	_, err := s.store.DB().ExecContext(ctx,
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &forged))
+	_, err := s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE agent_configs SET connectors = (SELECT connectors FROM agent_configs WHERE id = ?) WHERE id = ?", s.config.ID, forged.ID)
 	s.Require().NoError(err)
 
@@ -64,10 +64,10 @@ func (s *TelnyxChannelSuite) TestAnotherCustomersConfigNamingTheLineNeverAnswers
 func (s *TelnyxChannelSuite) TestALineTwoConfigsBindIsAnsweredByTheOldest() {
 	ctx := context.Background()
 	newer := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "counted/counted-model",
+		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "counted/counted-model"},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &newer))
-	_, err := s.store.DB().ExecContext(ctx,
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &newer))
+	_, err := s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE agent_configs SET connectors = (SELECT connectors FROM agent_configs WHERE id = ?) WHERE id = ?", s.config.ID, newer.ID)
 	s.Require().NoError(err)
 
@@ -85,7 +85,7 @@ func (s *TelnyxChannelSuite) TestAThreadWhoseLineNoConfigBindsAnyMoreIsNotAnswer
 	channel := s.threadChannel(person)
 	s.written(channel, 1)
 	s.config.Connectors = nil
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 
 	handOver()
 
@@ -105,10 +105,10 @@ func (s *TelnyxChannelSuite) rebind() {
 	ctx := context.Background()
 	bindings := s.config.Connectors
 	s.config.Connectors = nil
-	s.Require().NoError(s.store.UpdateAgentConfig(ctx, &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(ctx, &s.config))
 	s.config = store.AgentConfig{
-		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "counted/counted-model",
+		CustomerID: s.customerID(), Name: "telnyx-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "counted/counted-model"},
 		Connectors: bindings,
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &s.config))
 }

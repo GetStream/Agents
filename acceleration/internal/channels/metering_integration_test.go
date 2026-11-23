@@ -107,7 +107,7 @@ func (s *TextMeteringSuite) TestAReplyPartlySentCountsOnceAgainstTheSandboxDay()
 	gate := dlc.NewGate(s.store, redis, dlc.Sandbox{Enabled: true, Recipients: 2, MessagesPerDay: 30}, nil)
 	s.service.gate = gate
 	writer := "+13479018418"
-	s.Require().NoError(s.store.SetSandboxRecipients(s.ctx, s.customer, []string{writer}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(s.ctx, s.customer, []string{writer}))
 	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)

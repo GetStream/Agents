@@ -236,7 +236,7 @@ func runUsageReplay(ctx context.Context, args []string, settings config.Config, 
 // replayRows writes one batch of lost rows, and one at a time when the database refuses the
 // batch for a row in it, naming each row it still refuses.
 func replayRows(ctx context.Context, pgStore *store.Store, rows []store.Request, out io.Writer) (written, refused int, err error) {
-	ids, err := pgStore.RecordRequests(ctx, rows)
+	ids, err := pgStore.Requests.InsertMany(ctx, rows)
 	if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
 		return len(ids), 0, nil
 	}
@@ -331,7 +331,7 @@ func runUsageReship(ctx context.Context, args []string, settings config.Config, 
 		return err
 	}
 	defer pgStore.Close()
-	queued, err := pgStore.Reship(ctx, since, *rejected)
+	queued, err := pgStore.Requests.Reship(ctx, since, *rejected)
 	if err != nil {
 		return err
 	}
@@ -463,7 +463,7 @@ func (f forgetting) count(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	requests, err := f.store.UserRequests(ctx, f.app, f.user)
+	requests, err := f.store.Requests.CountByUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
@@ -481,7 +481,7 @@ func (f forgetting) count(ctx context.Context) error {
 			keys += int(found)
 		}
 	}
-	branches, err := f.store.CountUserBranchMessages(ctx, f.app, f.user)
+	branches, err := f.store.BranchMessages.CountUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
@@ -510,14 +510,14 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if err != nil {
 		return err
 	}
-	requests, err := f.store.RenameUserRequests(ctx, f.app, f.user, f.replacement)
+	requests, err := f.store.Requests.RenameUser(ctx, f.app, f.user, f.replacement)
 	if err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\n", requests); err != nil {
 		return err
 	}
-	branches, err := f.store.DeleteUserBranchMessages(ctx, f.app, f.user)
+	branches, err := f.store.BranchMessages.DeleteUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}

@@ -30,7 +30,7 @@ func TestConnectorEventDestinationsSuite(t *testing.T) {
 func (s *ConnectorEventDestinationsSuite) SetupSuite() {
 	s.forwardHTTP = destinationClient()
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ConnectorEventDestinationsSuite) SetupTest() {

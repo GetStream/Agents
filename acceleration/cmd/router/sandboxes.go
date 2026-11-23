@@ -104,7 +104,7 @@ func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(contex
 		return nil
 	}
 	return func(ctx context.Context) ([]string, error) {
-		rows, err := pgStore.ProviderKeysOf(ctx, providerkeys.Daytona)
+		rows, err := pgStore.ProviderKeys.SelectByProvider(ctx, providerkeys.Daytona)
 		if err != nil {
 			return nil, err
 		}
@@ -276,11 +276,11 @@ func (j *sandboxJob) sweep(ctx context.Context) error {
 			sessions = append(sessions, session)
 		}
 	}
-	ends, err := j.store.SessionEnds(ctx, sessions, j.now.Add(-runtimeSilence))
+	ends, err := j.store.Sessions.Ends(ctx, sessions, j.now.Add(-runtimeSilence))
 	if err != nil {
 		return fmt.Errorf("usage sandboxes: %w", err)
 	}
-	recorded, err := j.store.SandboxUsage(ctx, j.deployment, ids, j.now.Add(-sandboxRecordsLag), j.now.Add(time.Minute))
+	recorded, err := j.store.Sandboxes.Usage(ctx, j.deployment, ids, j.now.Add(-sandboxRecordsLag), j.now.Add(time.Minute))
 	if err != nil {
 		return fmt.Errorf("usage sandboxes: %w", err)
 	}
@@ -367,7 +367,7 @@ func (j *sandboxJob) reconcile(ctx context.Context, day time.Time) error {
 	for _, used := range billed {
 		ids = append(ids, used.SandboxID)
 	}
-	recorded, err := j.store.SandboxUsage(ctx, j.deployment, ids, from, to)
+	recorded, err := j.store.Sandboxes.Usage(ctx, j.deployment, ids, from, to)
 	if err != nil {
 		return fmt.Errorf("usage sandboxes: %w", err)
 	}
@@ -526,7 +526,7 @@ func (j *sandboxJob) closedAt(ctx context.Context, session string) *time.Time {
 	if session == "" {
 		return nil
 	}
-	ends, err := j.store.SessionEnds(ctx, []string{session}, j.now)
+	ends, err := j.store.Sessions.Ends(ctx, []string{session}, j.now)
 	if err != nil {
 		j.logger.Warn("could not read whether a sandbox's session closed, so none of its time is marked an orphan's",
 			"session", session, "error", err)
