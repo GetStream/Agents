@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 SET LOCAL lock_timeout = '5s';
 
@@ -13,6 +14,7 @@ ALTER TABLE channel_links
     ADD CONSTRAINT channel_links_pkey PRIMARY KEY (customer_id, code);
 
 -- +goose Down
+SET LOCAL lock_timeout = '5s';
 
 SET LOCAL lock_timeout = '5s';
 

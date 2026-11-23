@@ -804,7 +804,7 @@ func (s *StoreSuite) TestAGuestIsClaimedOnce() {
 	// A second claim naming somebody else would move one person's conversations onto
 	// another's account.
 	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
-	s.Require().Error(err)
+	s.Require().ErrorIs(err, ErrGuestClaimed, "so a caller can answer a conflict, not a failure")
 	s.Contains(err.Error(), "already claimed by jlahey")
 }
 

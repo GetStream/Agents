@@ -128,6 +128,43 @@ func (s *ChannelsSuite) TestAnAgentNamingANumberNobodyConnectedIsRefused() {
 	s.Contains(string(body), "has not connected")
 }
 
+// A line that could not be looked up is the router's failure, not a number for the caller to fix.
+func (s *ChannelsSuite) TestALineThatCannotBeLookedUpIsAnInternalError() {
+	number := s.number()
+	s.connect(number)
+	var plain AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
+		Name: "channelled-" + s.utils.uuid(), Mode: pointerTo(AgentModeText), Llm: pointerTo("llm-flow"),
+	}, &plain))
+	s.failQueries(number)
+
+	line := map[string]any{"whatsapp": map[string]any{"number": number}}
+	for name, call := range map[string]func() (int, []byte){
+		"create": func() (int, []byte) {
+			return s.serverClient.call(http.MethodPost, "/v1/agents/configs", map[string]any{
+				"name": "channelled-" + s.utils.uuid(), "mode": "text", "llm": "llm-flow", "channels": line})
+		},
+		"update": func() (int, []byte) {
+			return s.serverClient.call(http.MethodPut, "/v1/agents/configs/"+plain.Id, map[string]any{
+				"name": plain.Name, "mode": "text", "llm": "llm-flow", "channels": line})
+		},
+		"patch": func() (int, []byte) {
+			return s.serverClient.call(http.MethodPatch, "/v1/agents/configs/"+plain.Id, map[string]any{"channels": line})
+		},
+		"sync": func() (int, []byte) {
+			return s.serverClient.call(http.MethodPost, "/v1/agents/sync", map[string]any{
+				"name": "channelled-" + s.utils.uuid(), "hash": "v1", "mode": "text", "channels": line})
+		},
+	} {
+		status, body := call()
+
+		s.Equal(http.StatusInternalServerError, status, name)
+		s.Contains(string(body), `"code":"internal_error"`, name)
+		s.NotContains(string(body), "store:", name)
+		s.NotContains(string(body), "deadline", name)
+	}
+}
+
 // A provider can take days to approve a number, and the directory naming it should still sync.
 func (s *ChannelsSuite) TestASyncNamingANumberNobodyConnectedIsStoredWithAWarning() {
 	number := s.number()
@@ -367,7 +404,7 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	body := s.delivery(writer, id, "Stop")
 	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
 	s.Equal(http.StatusInternalServerError, status, "a STOP not recorded is the provider's to deliver again")
-	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.Contains(string(answered), "something went wrong")
 	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -470,7 +507,7 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	body := s.delivery(writer, id, "START")
 	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
 	s.Equal(http.StatusInternalServerError, status, "a START not recorded is the provider's to deliver again")
-	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.Contains(string(answered), "something went wrong")
 	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -533,7 +570,7 @@ func (s *ChannelsSuite) TestARedeliveryRacingAStopThatFailsRecordsIt() {
 
 	failed := <-first
 	s.Equal(http.StatusInternalServerError, failed.status)
-	s.Contains(string(failed.body), "the message could not be recorded; deliver it again")
+	s.Contains(string(failed.body), "something went wrong")
 	s.Equal(http.StatusAccepted, (<-second).status)
 	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)

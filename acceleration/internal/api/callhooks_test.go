@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -841,6 +842,18 @@ func (s *CallHooksSuite) TestAnEndedPlacedCallGetsACallSitesRow() {
 	s.Empty(left, "the call's resources are still released")
 }
 
+func (s *CallHooksSuite) TestACallSitesRowSaysNothingOfAStatsReadThatFailed() {
+	s.placed()
+	_, s.stats.failure = net.Dial("tcp", "stats.invalid:443")
+	s.Require().Error(s.stats.failure)
+
+	s.Require().Equal(http.StatusOK, s.end(`{}`))
+
+	row := s.callSitesRow()
+	s.Equal(callSitesUnread, row.Details["error_message"])
+	s.Contains(s.thisTest(), "stats.invalid", "the log keeps what the row does not say")
+}
+
 func (s *CallHooksSuite) TestAnEndedInboundCallsRowNamesTheNumbersSIPHost() {
 	s.holdBridged("default", s.callID, "sip:+15550100001@sip.example.com")
 
@@ -895,11 +908,13 @@ func (s *CallHooksSuite) sitesLine() string {
 }
 
 // recordedStats answers every stats read with one answer, and says which session it was
-// asked for once that answer is given. hold, when set, keeps the answer back until closed.
+// asked for once that answer is given. hold, when set, keeps the answer back until closed;
+// failure, when set, is answered instead.
 type recordedStats struct {
-	asked  chan string
-	answer *getstream.QueryCallSessionParticipantStatsResponse
-	hold   chan struct{}
+	asked   chan string
+	answer  *getstream.QueryCallSessionParticipantStatsResponse
+	hold    chan struct{}
+	failure error
 }
 
 func (r *recordedStats) read(ctx context.Context, _ *getstream.Stream, _, _, session string) (*getstream.QueryCallSessionParticipantStatsResponse, error) {
@@ -911,6 +926,9 @@ func (r *recordedStats) read(ctx context.Context, _ *getstream.Stream, _, _, ses
 		}
 	}
 	r.asked <- session
+	if r.failure != nil {
+		return nil, r.failure
+	}
 	return r.answer, nil
 }
 

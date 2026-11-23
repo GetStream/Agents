@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -148,19 +150,25 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 		return nil, err
 	}
 	if notStarted := (session.NotStarted{}); errors.As(err, &notStarted) {
-		return nil, runFailed(ctx, err, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidConfig, Message: err.Error()})
+		// Only a refusal of the config is told: the rest, such as a database that did not
+		// answer, is the router's.
+		if errors.Is(err, routing.ErrRequest) || errors.Is(err, session.ErrToolNotConfigured) ||
+			errors.Is(err, session.ErrNoMemory) || errors.Is(err, session.ErrMemoryRegion) {
+			return nil, runFailed(ctx, err, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidConfig, Message: err.Error()})
+		}
+		return nil, runFailed(ctx, err, err)
 	}
 	if err != nil {
 		if errors.Is(err, agent.ErrCannotSeeImages) {
 			return nil, errRunCannotSee
 		}
-		return nil, runFailed(ctx, err, modelFailed(err))
+		return nil, runFailed(ctx, err, modelFailed(ctx, err))
 	}
 	if ctx.Err() != nil {
 		return nil, errRunTimedOut
 	}
 	if run.Failed != nil {
-		return nil, runFailed(ctx, run.Failed, modelFailed(run.Failed))
+		return nil, runFailed(ctx, run.Failed, modelFailed(ctx, run.Failed))
 	}
 	if run.FinalText == "" {
 		return nil, errNoAnswer
@@ -183,7 +191,7 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 // runFailed is err as the caller is told it: a refusal about money, a refused input and a run
 // out of time say so, and anything else is otherwise. A spent budget is a 402, not a 429: waiting does not
 // refill it before it resets, so a caller that retries 429s must not retry it.
-func runFailed(ctx context.Context, err error, otherwise APIError) APIError {
+func runFailed(ctx context.Context, err error, otherwise error) error {
 	if answer, ok := moneyError(err); ok {
 		return answer
 	}
@@ -191,13 +199,17 @@ func runFailed(ctx context.Context, err error, otherwise APIError) APIError {
 		return errRunRefused
 	}
 	if ctx.Err() != nil {
+		recordFailure(ctx, err, stack.Trace(err))
 		return errRunTimedOut
 	}
 	return otherwise
 }
 
-func modelFailed(err error) APIError {
-	return APIError{Type: ErrorTypeUnavailable, Code: codeModelFailed, Message: err.Error()}
+// modelFailed is a model that failed to answer, told without what it said: that names the
+// vendor's URL and body, and is left for the request log.
+func modelFailed(ctx context.Context, err error) APIError {
+	recordFailure(ctx, err, stack.Trace(err))
+	return APIError{Type: ErrorTypeUnavailable, Code: codeModelFailed, Message: "the model failed or gave no answer: try again"}
 }
 
 // fetchImages reads every image sent by URL into bytes, so the model is handed what was
@@ -216,17 +228,18 @@ func fetchImages(ctx context.Context, client *http.Client, images []llm.ImagePar
 		fetching.Go(func() {
 			data, mime, err := fetchImage(ctx, client, images[index].URL)
 			if err != nil {
-				failures[index] = APIError{Type: ErrorTypeInvalidRequest, Code: codeImageUnavailable,
-					Message: fmt.Sprintf("image %d could not be used: %v", index, err)}
+				failures[index] = err
 				return
 			}
 			images[index].URL, images[index].Data, images[index].MIME = "", data, mime
 		})
 	}
 	fetching.Wait()
-	for _, failure := range failures {
+	for index, failure := range failures {
 		if failure != nil {
-			return failure
+			recordFailure(ctx, withoutURL(failure), "")
+			return APIError{Type: ErrorTypeInvalidRequest, Code: codeImageUnavailable,
+				Message: fmt.Sprintf("image %d could not be used: %v", index, failure)}
 		}
 	}
 	return nil
@@ -254,15 +267,37 @@ type fetchTooLargeError struct{ limit int }
 
 func (e fetchTooLargeError) Error() string { return fmt.Sprintf("it is over %d MB", e.limit>>20) }
 
+// fetchFailedError is a file whose host could not be resolved or reached. It says no more
+// than that, for a caller to read: err names the DNS server and the addresses it was dialled
+// with.
+type fetchFailedError struct{ err error }
+
+func (fetchFailedError) Error() string   { return "it could not be fetched" }
+func (e fetchFailedError) Unwrap() error { return e.err }
+
+// fetchFailed is why a fetch failed, as its caller may read it: without the URL, which is
+// the caller's own, and without any lookup or connection, which is the router's.
+func fetchFailed(err error) error {
+	_, resolving := errors.AsType[*net.DNSError](err)
+	_, dialling := errors.AsType[*net.OpError](err)
+	if resolving || dialling {
+		return fetchFailedError{err: err}
+	}
+	if fetching, ok := errors.AsType[*url.Error](err); ok {
+		return fetching.Err
+	}
+	return err
+}
+
 func fetchAtMost(ctx context.Context, client *http.Client, source string, limit int) ([]byte, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fetchFailed(err)
 	}
 	request.Header.Set("User-Agent", egress.UserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fetchFailed(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -270,7 +305,7 @@ func fetchAtMost(ctx context.Context, client *http.Client, source string, limit 
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 	if err != nil {
-		return nil, "", err
+		return nil, "", fetchFailed(err)
 	}
 	if len(data) > limit {
 		return nil, "", fetchTooLargeError{limit: limit}
