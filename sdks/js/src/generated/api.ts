@@ -5269,7 +5269,7 @@ export type components = {
         readonly AgentStats: {
             /**
              * Format: double
-             * @description Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+             * @description Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
              */
             readonly avg_turns: number | null;
             /**

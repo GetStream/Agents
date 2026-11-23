@@ -4322,7 +4322,7 @@ type AgentScheduling struct {
 
 // AgentStats defines model for AgentStats.
 type AgentStats struct {
-	// AvgTurns Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+	// AvgTurns Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
 	AvgTurns *float64 `json:"avg_turns"`
 
 	// PeakAt When that peak was first reached. Null when no session was open in the window.
