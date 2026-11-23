@@ -65,23 +65,6 @@ type Limit struct {
 	UpdatedAt      time.Time      `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 }
 
-// Covers reports whether the row limits the subject: the same subject and organization, and
-// every id the row's level names equal to the subject's.
-func (l Limit) Covers(ref usage.SubjectRef) bool {
-	if l.Subject != ref.Subject || l.OrganizationID != ref.OrganizationID || l.Category != ref.Category {
-		return false
-	}
-	switch l.Level {
-	case LevelApp:
-		return l.AppID == ref.AppID
-	case LevelAPIKey:
-		return l.AppID == ref.AppID && l.APIKey == ref.APIKey
-	case LevelUser:
-		return l.AppID == ref.AppID && l.UserID == ref.UserID
-	}
-	return true
-}
-
 // Validate refuses a limit its table's checks would: a subject limited at a level it has
 // none of, an id its level does not name or one it names left out, an interval spend is not
 // kept in, or a negative amount.
