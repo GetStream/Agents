@@ -114,6 +114,7 @@ const (
 	codePhoneVendorFailed       = "phone_vendor_failed"
 	codePhoneNumberSettling     = "phone_number_settling"
 	codeTelephonySuspended      = "telephony_suspended"
+	codeVerificationRequired    = "verification_required"
 	codeTelephonyNotSuspended   = "telephony_not_suspended"
 	codeNameTaken               = "name_taken"
 	codeScheduledTaskNotFound   = "scheduled_task_not_found"

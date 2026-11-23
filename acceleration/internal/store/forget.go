@@ -239,9 +239,7 @@ var keptUserTables = map[string]string{
 	"agent_sessions": "the user's conversations, which the app deletes one by one (DELETE /v1/agents/sessions/{id}), " +
 		"their tasks with them",
 	"agent_logs": "the app's log of what its agents did; nothing deletes or rewrites it, forget included",
-	"calls": "the call's user from before a call belonged to its session, written only by the release before; " +
-		"kept for that release, and dropped in a later one",
-	"call_legs": "the legs of phone calls as billed, with the numbers on them; forget does not rewrite them",
+	"call_legs":  "the legs of phone calls as billed, with the numbers on them; forget does not rewrite them",
 	"channel_links": "one-time codes that tie a number texting in to the user, spent once (used_at) " +
 		"or expired (expires_at), and kept after",
 	"contact_map": "the addresses the app's agents reach people at and the conversation each carries on, " +

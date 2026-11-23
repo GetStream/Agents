@@ -714,6 +714,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Buckets.Select(ctx, "customer-7", BucketFilter{Modality: "llm", Granularity: Hourly, From: since, To: until})
 			return err
 		}},
+		{name: "TagBuckets.Select", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.TagBuckets.Select(ctx, "customer-7", TagBucketFilter{Modality: "llm", Key: "project", Granularity: Hourly, From: since, To: until})
+			return err
+		}},
 		{name: "Sandboxes.Usage", index: "requests_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sandboxes.Usage(ctx, "deployment", []string{"sandbox-7"}, s.base.Add(-48*time.Hour), s.base)
 			return err
