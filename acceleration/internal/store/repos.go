@@ -64,6 +64,7 @@ type repos struct {
 	OptOuts                        *OptOuts
 	OrganizationTiers              *OrganizationTiers
 	Organizations                  *Organizations
+	PhoneNumberOrders              *PhoneNumberOrders
 	PhoneNumbers                   *PhoneNumbers
 	Policies                       *Policies
 	PriceChanges                   *PriceChanges
@@ -168,6 +169,7 @@ func (s *Store) wire() {
 		OptOuts:                        &OptOuts{store: s},
 		OrganizationTiers:              &OrganizationTiers{store: s},
 		Organizations:                  &Organizations{store: s},
+		PhoneNumberOrders:              &PhoneNumberOrders{store: s},
 		PhoneNumbers:                   &PhoneNumbers{store: s},
 		Policies:                       &Policies{store: s},
 		PriceChanges:                   &PriceChanges{store: s},

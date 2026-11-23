@@ -613,9 +613,10 @@ type stub struct {
 	monthly  int64
 	vendorID string
 	// ordered counts the numbers this vendor was asked to sell, and released the numbers it
-	// was told to take back.
+	// was told to take back. holds is the numbers it sold and still holds.
 	ordered  int
 	released []string
+	holds    map[string]bool
 	// releaseErr is what a release answers, the vendor's other answers left to err.
 	releaseErr error
 	// stopped are the numbers this vendor was told to stop sending callers to the trunk.
@@ -648,12 +649,27 @@ func (s *stub) BuyNumber(_ context.Context, order Order) (Number, error) {
 	if s.err != nil {
 		return Number{}, s.err
 	}
+	if s.holds == nil {
+		s.holds = map[string]bool{}
+	}
+	s.holds[order.E164] = true
 	return Number{E164: order.E164, Vendor: s.vendor, VendorID: s.vendorID, Country: "US", MonthlyCostMicros: s.monthly}, nil
 }
 
 func (s *stub) ReleaseNumber(_ context.Context, e164 string) error {
 	s.released = append(s.released, e164)
-	return cmp.Or(s.releaseErr, s.err)
+	if err := cmp.Or(s.releaseErr, s.err); err != nil {
+		return err
+	}
+	delete(s.holds, e164)
+	return nil
+}
+
+func (s *stub) HoldsNumber(_ context.Context, e164 string) (string, bool, error) {
+	if s.err != nil {
+		return "", false, s.err
+	}
+	return s.vendorID, s.holds[e164], nil
 }
 
 func (s *stub) ConfigureInbound(_ context.Context, inbound Inbound) error {

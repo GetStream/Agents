@@ -105,7 +105,9 @@ func (t dataTable) rollup() bool {
 // deployment's key. And voice_samples and voice_bindings: a sample's audio is in this
 // deployment's bucket and a binding's clone in this deployment's account at the provider, so
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
-// with its name and description, to be given a recording and prepared again.
+// with its name and description, to be given a recording and prepared again. And
+// phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
+// which only this deployment's sweep can settle.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},

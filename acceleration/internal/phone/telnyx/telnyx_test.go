@@ -176,6 +176,34 @@ func (s *TelnyxSuite) TestANumberThisAccountDoesNotOwnCannotBeReleased() {
 	s.ErrorContains(err, "not one of this account's numbers")
 }
 
+func (s *TelnyxSuite) TestANumberThisAccountHoldsIsFoundByItsNumber() {
+	s.answer(`{"data":[{"id":"num-3","phone_number":"+15125551234","status":"purchase-pending"}]}`)
+
+	id, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+
+	s.Require().NoError(err)
+	s.True(held, "a purchase still pending is the account's number")
+	s.Equal("num-3", id)
+	s.Equal("+15125551234", s.seen.query.Get("filter[phone_number]"))
+}
+
+// A number Telnyx still lists after its purchase failed, or after it was given back or ported
+// away, is not one the account holds.
+func (s *TelnyxSuite) TestANumberListedAsFailedOrGoneIsNotHeld() {
+	for _, status := range []string{"purchase-failed", "port-failed", "deleted", "ported-out"} {
+		s.answer(`{"data":[{"id":"num-3","phone_number":"+15125551234","status":"` + status + `"}]}`)
+
+		_, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+
+		s.Require().NoError(err)
+		s.False(held, status)
+	}
+	s.answer(`{"data":[]}`)
+	_, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+	s.Require().NoError(err)
+	s.False(held, "not listed at all")
+}
+
 func (s *TelnyxSuite) TestConfiguringInboundAssignsTheNumberToTheConnection() {
 	s.answer(`{"data":[{"id":"num-3","phone_number":"+15125551234"}]}`)
 

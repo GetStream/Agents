@@ -51,8 +51,8 @@ type MeteringSuite struct {
 	deployment *chattest.Server
 	customer   string
 	e164       string
-	// failing fails the writes of new legs' rows a test asks it to.
-	failing *failingLegWrites
+	// failing fails the queries a test asks it to.
+	failing *failingQueries
 }
 
 func TestMeteringSuite(t *testing.T) { suite.Run(t, new(MeteringSuite)) }
@@ -68,7 +68,7 @@ func (s *MeteringSuite) SetupSuite() {
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
-	s.failing = &failingLegWrites{}
+	s.failing = &failingQueries{}
 	opened.ShardDB().AddQueryHook(s.failing)
 	s.redis, err = redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
 	s.Require().NoError(err)
@@ -76,7 +76,7 @@ func (s *MeteringSuite) SetupSuite() {
 }
 
 func (s *MeteringSuite) SetupTest() {
-	s.failing.fail(0)
+	s.failing.fail("", 0)
 	s.withSandbox(dlc.Sandbox{})
 }
 
@@ -711,7 +711,7 @@ func (s *MeteringSuite) TestALegWhoseRowWasLostIsRecordedAgainByTheSweep() {
 // billed.
 func (s *MeteringSuite) TestALegWhoseFirstWriteFailsIsBilled() {
 	callID := "call-" + uuid.NewString()
-	s.failing.fail(1)
+	s.failing.fail(`INSERT INTO "call_legs"`, 1)
 	s.arrived(callID)
 	s.clock.advance(2 * time.Minute)
 
@@ -726,7 +726,7 @@ func (s *MeteringSuite) TestALegWhoseFirstWriteFailsIsBilled() {
 // bills it from the join and the leave its phone had meanwhile.
 func (s *MeteringSuite) TestALegThatCouldNotBeWrittenIsWrittenAndBilledByTheSweep() {
 	callID := "call-" + uuid.NewString()
-	s.failing.fail(openAttempts)
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
 	s.arrived(callID)
 	s.Empty(s.openLegs())
 	s.joined(defaultCallType, callID, "caller-1", "15125550199")
@@ -810,6 +810,81 @@ func (s *MeteringSuite) TestABoughtNumberIsBilledItsFirstMonth() {
 	s.True(month.Billable)
 	s.Equal("key-a", month.APIKey, "the month it was bought in is the buyer's")
 	s.Equal(bought.PurchasedAt, month.StartedAt.UTC())
+}
+
+// A number bought whose row could not be written is recorded by the sweep, from the vendor's
+// account, as of when it was bought, and its first month is billed once.
+func (s *MeteringSuite) TestANumberBoughtWithoutItsRowIsRecordedByTheSweep() {
+	e164 := aNumber()
+	s.vendor.offers = []Available{{E164: e164, MonthlyCostMicros: 1_000_000}}
+	s.failing.fail(`INSERT INTO "phone_numbers"`, 1)
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().ErrorContains(err, "was not recorded")
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().ErrorIs(err, store.ErrNoNumber)
+	month := s.row(ModelNumber)
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().NoError(err)
+	s.Equal(month.StartedAt.UTC(), held.PurchasedAt.UTC(), "bought when the purchase billed its first month")
+	s.Equal(int64(1_000_000), held.MonthlyCostMicros)
+	s.Never(func() bool { return len(s.rows(ModelNumber)) > 1 }, time.Second, 50*time.Millisecond,
+		"the first month is billed once")
+	s.Zero(s.orders(), "nothing is left to settle")
+}
+
+// A number given back at the vendor whose release could not be written is released by the
+// sweep, as of when it was given back, rather than billed every month.
+func (s *MeteringSuite) TestANumberGivenBackWithoutItsReleaseIsReleasedByTheSweep() {
+	s.failing.fail(`SET released_at = `, 1)
+	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
+	returned := time.Now()
+	_, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.Require().NoError(err, "the vendor has it back, and the row still holds it")
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.Zero(s.orders())
+	numbers, err := s.store.PhoneNumbers.Select(s.ctx, s.customer, store.PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(numbers, 1)
+	s.Require().NotNil(numbers[0].ReleasedAt)
+	s.False(numbers[0].ReleasedAt.After(returned), "released as of when the vendor took it back, not when the sweep ran")
+}
+
+// A purchase the vendor refused, whose order could not be forgotten, leaves no number.
+func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber() {
+	e164 := aNumber()
+	s.failing.fail(`DELETE FROM "phone_number_orders"`, 1)
+	s.vendor.err = errors.New("the vendor refused")
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().Error(err)
+	s.vendor.err = nil
+	s.Require().Equal(1, s.orders())
+	s.clock.advance(orderSettles + time.Minute)
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.Zero(s.orders())
+}
+
+// orders counts the customer's orders still to settle.
+func (s *MeteringSuite) orders() int {
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.PhoneNumberOrder)(nil)).
+		Where("customer_id = ?", s.customer).Count(s.ctx)
+	s.Require().NoError(err)
+	return count
 }
 
 func (s *MeteringSuite) TestANumberWhosePriceIsOnlyInItsOfferIsBilledTheOffer() {
@@ -1018,26 +1093,24 @@ func (l *meteringLogs) count(level, message string) int {
 	return lines
 }
 
-// failingLegWrites fails the next writes of a new leg's row, as a database that does not answer
-// in time does.
-type failingLegWrites struct {
-	mu   sync.Mutex
-	left int
+// failingQueries fails the next queries holding a text, as a database that does not answer in
+// time does.
+type failingQueries struct {
+	mu    sync.Mutex
+	query string
+	left  int
 }
 
-// fail fails the next times writes.
-func (f *failingLegWrites) fail(times int) {
+// fail fails the next times queries holding query.
+func (f *failingQueries) fail(query string, times int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.left = times
+	f.query, f.left = query, times
 }
 
-func (f *failingLegWrites) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if !strings.HasPrefix(event.Query, `INSERT INTO "call_legs"`) {
-		return ctx
-	}
+func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
 	f.mu.Lock()
-	failing := f.left > 0
+	failing := f.left > 0 && strings.Contains(event.Query, f.query)
 	if failing {
 		f.left--
 	}
@@ -1050,7 +1123,7 @@ func (f *failingLegWrites) BeforeQuery(ctx context.Context, event *bun.QueryEven
 	return expired
 }
 
-func (*failingLegWrites) AfterQuery(context.Context, *bun.QueryEvent) {}
+func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // meteringClock is the service's clock, moved by the test.
 type meteringClock struct {
