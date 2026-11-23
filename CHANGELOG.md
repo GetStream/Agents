@@ -865,10 +865,6 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
-### A scheduled task's turn refused while money could not be checked runs again after a router stops
-
-A router that stopped, or lost the task's lease, while it waited to retry a task left the run to another router, which did not know why the last attempt failed. A turn refused under `spend_check_unavailable` was then read back as it was, and a conversation task settled `delivered` with no reply. The run now records the reason each attempt failed under before the wait, and the router that takes the run over runs that turn again, as the first router would have (AI-3595).
-
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
 A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again, and the first retry now runs the turn once more, in the conversation or on a text channel, also when another router holds the session, or in a thread, so the user gets the reply once the money can be checked. A conversation turn refused again on that retry fails the run under `spend_check_unavailable` once its retries are spent, never `delivered`. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
