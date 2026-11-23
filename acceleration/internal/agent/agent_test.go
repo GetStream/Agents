@@ -1439,6 +1439,9 @@ func (s *AgentSuite) synthesises(turnID string) {
 func (s *AgentSuite) heardSomeOf(turnID string) {
 	s.synthesises(turnID)
 	s.eventually(func() bool { return len(s.edge.heard()) > 0 }, "none of the reply went out")
+	// On the fake clock no time passes by itself, so words the caller begins next could begin
+	// at the instant the reply went out, which is not after it (answerHeardBefore).
+	time.Sleep(time.Millisecond)
 }
 
 // replyWentOut waits until the reply the agent is saying has begun to go out. Words said
