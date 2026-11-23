@@ -513,18 +513,30 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedWhileMoneyCannotBeChecke
 	s.False(failure.Final, "the check passes again on its own")
 }
 
+// creditedOpening is a user who texts the agent's SMS line, on model, and a session they opened on
+// the agent while the organization has credit.
+func (s *TelnyxUnpaidSuite) creditedOpening(model string) (*testClient, Session) {
+	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
+	s.seedSMSLine(number)
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.config.Models.LLM = model
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
+	user := s.data.createUser()
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
+		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
+	}))
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
+	s.Require().Eventually(func() bool {
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
+	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	return user, user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
+}
+
 // A task delivered in the conversation of a session that is open, whose turn fails for a reason
 // that is not money, such as the model's provider being down, settles as it always has: delivered,
 // on the first attempt. Only a refusal for money fails the run.
 func (s *TelnyxUnpaidSuite) TestAConversationTaskWhoseTurnFailsNotForMoneyIsDelivered() {
-	s.config.Models.LLM = "failing/failing-model"
-	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
-	user := s.data.createUser()
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+13125550010") == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
-	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
+	user, opened := s.creditedOpening("failing/failing-model")
 	task := s.userTask(user, opened.Id, "conversation")
 
 	run, attempts := s.settledByTheWorker(task)
@@ -539,6 +551,111 @@ func (s *TelnyxUnpaidSuite) TestAConversationTaskWhoseTurnFailsNotForMoneyIsDeli
 		state, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
 		return state == "failed"
 	}, deliveryWait, 20*time.Millisecond, "the task's turn did fail")
+}
+
+// A task on SMS and then the conversation, whose turn fails for a reason that is not money: the
+// SMS channel has nothing to carry, and the conversation, which holds the failed turn already,
+// is delivered to at once, as it always was, rather than waiting for a turn that is over.
+func (s *TelnyxUnpaidSuite) TestAConversationAfterATextChannelIsNotWaitedOnForTheSameTurn() {
+	user, opened := s.creditedOpening("failing/failing-model")
+	task := s.userTask(user, opened.Id, "sms", "conversation")
+
+	run, attempts := s.settledByTheWorker(task)
+
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(store.ScheduledTaskDeliveredConversation, run.DeliveredTo)
+	s.Equal(int32(1), attempts)
+}
+
+// heldConversationTurn starts the conversation channel's delivery of a task due in a session on
+// the holding model, under ctx, and returns once the turn holds, with what the delivery answers.
+func (s *TelnyxUnpaidSuite) heldConversationTurn(ctx context.Context) (*session.Session, <-chan error) {
+	user, opened := s.creditedOpening("holding/holding-model")
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
+		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
+	model := s.holding
+	model.mu.Lock()
+	before := model.turns
+	model.mu.Unlock()
+	model.holds()
+	s.T().Cleanup(model.answers)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := s.router.deliverOn(scheduledOwnerContext(ctx, delivery), delivery, found,
+			store.ScheduledTaskDeliveredConversation)
+		done <- err
+	}()
+	s.Require().Eventually(func() bool {
+		model.mu.Lock()
+		defer model.mu.Unlock()
+		return model.turns > before
+	}, deliveryWait, 10*time.Millisecond, "the turn never began")
+	return found, done
+}
+
+// The conversation channel settles once its turn ends, not when the turn starts: a failure
+// reported meanwhile that is not about money, such as a tool's, leaves the turn running, and the
+// turn may still be refused.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnIsWaitedOutToItsEnd() {
+	found, done := s.heldConversationTurn(context.Background())
+	found.Report(errors.New("the weather tool timed out"), "tool")
+
+	s.Never(func() bool { return len(done) > 0 }, time.Second, 20*time.Millisecond, "settled while the turn ran")
+	s.holding.answers()
+	select {
+	case err := <-done:
+		s.NoError(err)
+	case <-time.After(deliveryWait):
+		s.Fail("the delivery never settled once the turn ended")
+	}
+}
+
+// A conversation turn still running when the reply window ends is delivered: the reply is the
+// conversation's, and comes when it comes.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnStillRunningAtTheWindowIsDelivered() {
+	window := scheduledReplyWindow
+	scheduledReplyWindow = time.Second
+	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	_, done := s.heldConversationTurn(context.Background())
+
+	select {
+	case err := <-done:
+		s.NoError(err)
+	case <-time.After(deliveryWait):
+		s.Fail("the delivery waited past its window")
+	}
+}
+
+// A conversation turn whose delivery is cut short, as a draining router cuts it, answers why: the
+// run is left to its lease, not settled delivered while the turn may still be refused.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnCutShortIsNotDelivered() {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, done := s.heldConversationTurn(ctx)
+	cancel()
+
+	select {
+	case err := <-done:
+		s.ErrorIs(err, context.Canceled)
+	case <-time.After(deliveryWait):
+		s.Fail("the delivery never stopped")
+	}
+}
+
+// A conversation turn whose session ends while it runs is delivered, as it always was: nothing
+// more comes from the session to say otherwise.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnWhoseSessionEndsIsDelivered() {
+	found, done := s.heldConversationTurn(context.Background())
+	_, err := s.router.sessions.Close(found.ID(), session.OwnerOf(found.Spec()))
+	s.Require().NoError(err)
+
+	select {
+	case err := <-done:
+		s.NoError(err)
+	case <-time.After(deliveryWait):
+		s.Fail("the delivery never settled once the session ended")
+	}
 }
 
 // teamed tags the config with a team: a session opened on it after counts under the team.
