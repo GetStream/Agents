@@ -48,6 +48,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2cc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/slackapps"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/ed25519header"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/hmacheader"
@@ -553,7 +554,7 @@ func newConnectorRegistry(settings config.Config, clients oauth2code.ClientLooku
 	}
 	// The tool sources a manifest's sources[].kind may name; a new one is one more entry.
 	sources := map[string]core.ToolSource{}
-	for _, source := range []core.ToolSource{mcp.New()} {
+	for _, source := range []core.ToolSource{mcp.New(), httpsource.New()} {
 		sources[source.Kind()] = source
 	}
 	return core.Registry{Schemes: schemes, Verifiers: verifiers, ToolSources: sources}, nil
