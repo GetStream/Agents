@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -34,6 +35,9 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 		return nil, failure
 	}
 	if failure := s.refuseCall(ctx, customerID, *request.Body); failure != nil {
+		return nil, failure
+	}
+	if failure := s.refuseDeviceReturnURL(ctx, customerID, *request.Body); failure != nil {
 		return nil, failure
 	}
 
@@ -267,6 +271,74 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// errDeviceReturnURL refuses a return_url an end user's device named that its app does not list.
+var errDeviceReturnURL = forbidden("return_url is sent server-side unless the app's policy lists its origin " +
+	"or native app scheme in device_return_urls: the launch page takes a consent's handoff from that page")
+
+// refuseDeviceReturnURL refuses a new session's return_url sent by an end user's device whose
+// origin or native app scheme the app's policy does not list in device_return_urls. The launch
+// page takes the handoff from that page, so which pages may is the app's to decide.
+func (s *Server) refuseDeviceReturnURL(ctx context.Context, customerID string, request CreateSessionRequest) error {
+	returnURL := value(request.ReturnUrl)
+	if returnURL == "" || ServerSideFrom(ctx) {
+		return nil
+	}
+	if s.configs == nil {
+		return errDeviceReturnURL
+	}
+	policy, err := s.configs.Policies.Get(ctx, store.ScopeApp, customerID)
+	if err != nil {
+		return err
+	}
+	key := returnURLKey(returnURL)
+	for _, entry := range policy.DeviceReturnURLs {
+		if key != "" && returnURLKey(entryURL(entry)) == key {
+			return nil
+		}
+	}
+	return errDeviceReturnURL
+}
+
+// checkDeviceReturnURL is why entry cannot be in device_return_urls, or nil: a web origin
+// checkReturnURL takes, or a native app's scheme without its colon.
+func checkDeviceReturnURL(entry string) error {
+	if err := checkReturnURL(entryURL(entry)); err != nil {
+		return err
+	}
+	if !strings.Contains(entry, ":") {
+		return nil
+	}
+	if origin, err := originOf(entry); err != nil || strings.TrimSuffix(entry, "/") != origin {
+		return errors.New("not an origin, such as https://app.example, or a native app's scheme, such as com.example.app")
+	}
+	return nil
+}
+
+// entryURL is a device_return_urls entry as a return_url: a native app's scheme becomes a URL of it.
+func entryURL(entry string) string {
+	if strings.Contains(entry, ":") {
+		return entry
+	}
+	return entry + ":/"
+}
+
+// returnURLKey is what a device_return_urls entry must match for raw, a URL checkReturnURL
+// took: a native app's scheme, or else the origin.
+func returnURLKey(raw string) string {
+	if returnsToNativeApp(raw) {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		return parsed.Scheme
+	}
+	origin, err := originOf(raw)
+	if err != nil {
+		return ""
+	}
+	return origin
 }
 
 // registerSessionCreate declares the operations served in session_create.go.

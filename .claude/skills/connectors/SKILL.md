@@ -158,7 +158,7 @@ runs in the same reply. A `tool_approval` with only the `tool_call_id` and `allo
 declines it, and a consent that is refused, fails or is not finished in ten minutes ends it.
 Either way the model is told, and nothing runs. A native app opens
 `url#handoff_token=<handoff_token>` in its web authentication sheet, with its own scheme as the
-session's `return_url`. On iOS that is StreamChatAI's `AIToolAuthorizationView`, which
+session's `return_url`, which the app's backend first lists in the app policy's `device_return_urls`. On iOS that is StreamChatAI's `AIToolAuthorizationView`, which
 `examples/voice_agents/swift_assistant` uses for Gmail and Linear. A spoken turn on a call has
 no reply to show it on, so by voice the binding answers that it is not available.
 

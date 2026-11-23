@@ -66,9 +66,44 @@ func run(ctx context.Context, dir string) error {
 	if patched.JSON200 == nil {
 		return fmt.Errorf("the router refused the visible tools: %s", patched.Status())
 	}
+	// A phone names its app's own scheme as its sessions' return_url, and react_assistant its
+	// page's origin, which the router takes from a device only when the app's policy lists it.
+	schemes := []string{
+		"io.getstream.visionagents.swiftassistant",
+		"io.getstream.visionagents.androidassistant",
+		"io.getstream.visionagents.flutterassistant",
+		"io.getstream.expochatgptsample",
+		"http://localhost:5173",
+	}
+	if err := allowReturnURLs(ctx, client, schemes); err != nil {
+		return err
+	}
 	fmt.Printf("visible    %v\n", visible)
 	fmt.Printf("skills     %v\n", skills)
+	fmt.Printf("return to  %v\n", schemes)
 	fmt.Printf("\nnext       STREAM_API_SECRET=<the router's> go run ./backend\n")
 	fmt.Printf("           open examples/voice_agents/swift_assistant/app/SwiftAssistant.xcodeproj and run it\n")
+	return nil
+}
+
+// allowReturnURLs lists schemes in the app's policy as the return_urls its phones may name,
+// and keeps the rest of the policy as it is.
+func allowReturnURLs(ctx context.Context, client *acceleration.ClientWithResponses, schemes []string) error {
+	read, err := client.GetAppPolicyWithResponse(ctx)
+	if err != nil {
+		return err
+	}
+	if read.JSON200 == nil {
+		return fmt.Errorf("reading the app's policy: %s %s", read.Status(), read.Body)
+	}
+	policy := *read.JSON200
+	policy.DeviceReturnUrls = &schemes
+	stored, err := client.UpdateAppPolicyWithResponse(ctx, policy)
+	if err != nil {
+		return err
+	}
+	if stored.JSON200 == nil {
+		return fmt.Errorf("the router refused the app's policy: %s %s", stored.Status(), stored.Body)
+	}
 	return nil
 }

@@ -6389,7 +6389,7 @@ type CreateSessionRequest struct {
 	// ResumeHistory How a conversation is handed back to the model when a session carries it on.
 	ResumeHistory *ResumeHistory `json:"resume_history,omitempty"`
 
-	// ReturnUrl The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands.
+	// ReturnUrl The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. A server-side caller may send any. An end user's device may send one only of a web origin or native app scheme its app's policy lists in device_return_urls, and any other is refused with a 403 (an error frame on the session socket).
 	ReturnUrl *string `json:"return_url,omitempty"`
 
 	// Search Omit it and the config decides, or search-fast when there is no config.
@@ -8237,6 +8237,11 @@ type Policy struct {
 
 	// DataPolicy What an organization or an app requires of what happens to what its requests send. It is a floor every routed request is held to, on top of whatever the request asks: a request is only routed to a model whose declared handling meets both, and is refused rather than sent somewhere that does not. It says nothing of where the work is done, which is an agent's own region (agent.yaml's region) or what a direct call's own data_policy.region asks, so region is refused here, as is any other field it does not have.
 	DataPolicy *PolicyDataPolicy `json:"data_policy,omitempty"`
+
+	// DeviceReturnUrls What an end user's device may name as a session's return_url: web origins (https, or http on a loopback host), such as https://app.example, any page of which a device may name, and native apps' own schemes in reverse domain form, such as com.example.app, without the colon. A session an end user's device asks for with a return_url whose origin or scheme is not listed is refused with 403; a server-side caller needs no entry. Only an app's policy has them: an organization's that sets them is refused.
+	//
+	// Example: ["https://app.example","com.example.app"]
+	DeviceReturnUrls *[]string `json:"device_return_urls,omitempty"`
 
 	// PromptInjection Screen what every LLM response is asked for prompt injection. The newest input - the user's turn and any tool results - goes to a decision model beside the model call, so it adds nothing to time to first token. The end of the response is held until the verdict, and a response whose input reads as an injection fails with prompt_injection before its tool calls can be acted on.
 	PromptInjection *bool `json:"prompt_injection,omitempty"`

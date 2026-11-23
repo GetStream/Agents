@@ -41,6 +41,7 @@ type Policy struct {
 	ResumeHistory        *ResumeHistory    `json:"resume_history,omitempty" doc:"How the scope's sessions are handed back a conversation they carry on. The most specific level wins, field by field: a server-side session request, then its agent config, then the app's policy, then the organization's, then the router's default (text only, 100 turns, 60000 characters)."`
 	BalanceWarningMicros *int64            `json:"balance_warning_micros,omitempty" minimum:"0" example:"20000000" doc:"The organization's own warning threshold, in millionths of a dollar: at or below it, every answer to a backend says X-Stream-Balance-Warning: low, and the organization's stream event destinations get one account.balance_low. It wins over the tier's. Left out, the tier's applies. Only an organization's policy has one: an app's that sets it is refused."`
 	ToolOutputRetention  *string           `json:"tool_output_retention,omitempty" pattern:"^(|none|[1-9][0-9]*[hd])$" patternDescription:"none, a number of hours such as 12h, or a number of days such as 30d" example:"30d" doc:"How long a session keeps what its tools were given and gave back on the turns it records: a tool's arguments, its result, a search's query and the wording of a tool's error. none records none of it; a duration such as 12h or 30d (at least 1h, at most 3650d) keeps it that long after the call and then takes it out, within minutes. The item stays, with its tool name, its time, its call id and whether it failed, so a session's items read in the same order and tool usage still counts the call. Left out, or empty, it is kept as long as the session. The shortest of the organization's, the app's and the output_retention of the agent config's tool group or connector binding the tool is in applies, so an agent can shorten it and never lengthen it. It applies to tool calls recorded after it is set. Deleting a session deletes all of it at once."`
+	DeviceReturnURLs     []string          `json:"device_return_urls,omitempty" maxItems:"32" example:"[\"https://app.example\",\"com.example.app\"]" doc:"What an end user's device may name as a session's return_url: web origins (https, or http on a loopback host), such as https://app.example, any page of which a device may name, and native apps' own schemes in reverse domain form, such as com.example.app, without the colon. A session an end user's device asks for with a return_url whose origin or scheme is not listed is refused with 403; a server-side caller needs no entry. Only an app's policy has them: an organization's that sets them is refused."`
 }
 
 func (*Policy) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -257,6 +258,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 		RequireOwnStreamApp:  sent.RequireOwnStreamApp,
 		BalanceWarningMicros: sent.BalanceWarningMicros,
 		ToolOutputRetention:  options.Retention(value(sent.ToolOutputRetention)),
+		DeviceReturnURLs:     sent.DeviceReturnURLs,
 	}
 	if sent.ResumeHistory != nil {
 		resume := resumeHistoryOr(store.ResumeHistory{}, sent.ResumeHistory)
@@ -265,6 +267,15 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 	// Credit is the organization's, so the balance it is warned at is too.
 	if scope == store.ScopeApp && sent.BalanceWarningMicros != nil {
 		return Policy{}, invalidRequest("an app has no balance warning of its own: set balance_warning_micros on the organization's policy")
+	}
+	// The pages an app's sign-ins go back to are the app's own.
+	if scope == store.ScopeOrganization && sent.DeviceReturnURLs != nil {
+		return Policy{}, invalidRequest("an organization has no device_return_urls: set them on each app's policy")
+	}
+	for _, entry := range sent.DeviceReturnURLs {
+		if err := checkDeviceReturnURL(entry); err != nil {
+			return Policy{}, invalidRequest(fmt.Sprintf("device_return_urls has %q: %s", entry, err))
+		}
 	}
 	// Any app's backend can write its organization's policy, so the one setting that keeps
 	// every app of an organization out of the shared Stream app is the operator's alone. It
@@ -327,6 +338,7 @@ func (s *Server) policyOf(ctx context.Context, scope store.PolicyScope, id strin
 		ResumeHistory:        renderedResumeHistory(value(document.ResumeHistory)),
 		BalanceWarningMicros: document.BalanceWarningMicros,
 		ToolOutputRetention:  optional(string(document.ToolOutputRetention)),
+		DeviceReturnURLs:     document.DeviceReturnURLs,
 	}, nil
 }
 

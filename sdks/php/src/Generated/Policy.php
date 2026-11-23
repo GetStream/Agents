@@ -37,6 +37,9 @@ final readonly class Policy
         public ?array $tags = null,
         // How long a session keeps what its tools were given and gave back on the turns it records: a tool's argument...
         public ?string $toolOutputRetention = null,
+        // What an end user's device may name as a session's return_url: web origins (https, or http on a loopback hos...
+        /** @var list<string>|null */
+        public ?array $deviceReturnUrls = null,
     ) {
     }
 
@@ -56,6 +59,7 @@ final readonly class Policy
             resumeHistory: array_key_exists('resume_history', $data) && $data['resume_history'] !== null ? ResumeHistory::fromArray(Json::object($data, 'resume_history')) : null,
             tags: array_key_exists('tags', $data) && $data['tags'] !== null ? Json::stringMap($data, 'tags') : null,
             toolOutputRetention: array_key_exists('tool_output_retention', $data) && $data['tool_output_retention'] !== null ? Json::string($data, 'tool_output_retention') : null,
+            deviceReturnUrls: array_key_exists('device_return_urls', $data) && $data['device_return_urls'] !== null ? Json::strings($data, 'device_return_urls') : null,
         );
     }
 
@@ -96,6 +100,9 @@ final readonly class Policy
         }
         if ($this->toolOutputRetention !== null) {
             $out['tool_output_retention'] = $this->toolOutputRetention;
+        }
+        if ($this->deviceReturnUrls !== null) {
+            $out['device_return_urls'] = $this->deviceReturnUrls;
         }
         return $out;
     }

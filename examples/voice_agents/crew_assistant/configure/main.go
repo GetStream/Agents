@@ -81,8 +81,37 @@ func run(ctx context.Context, dir, name string) error {
 	if err := uploadDocuments(ctx, client, config.Name, filepath.Join(dir, "knowledge")); err != nil {
 		return err
 	}
+	// A phone names its app's own scheme as its sessions' return_url, which the router takes
+	// from a device only when the app's policy lists it.
+	schemes := []string{"io.getstream.expocrewassistant"}
+	if err := allowReturnURLs(ctx, client, schemes); err != nil {
+		return err
+	}
 	fmt.Printf("visible    %v\n", visibleTools)
 	fmt.Printf("skills     %v\n", skills)
+	fmt.Printf("return to  %v\n", schemes)
+	return nil
+}
+
+// allowReturnURLs lists schemes in the app's policy as the return_urls its phones may name,
+// and keeps the rest of the policy as it is.
+func allowReturnURLs(ctx context.Context, client *acceleration.ClientWithResponses, schemes []string) error {
+	read, err := client.GetAppPolicyWithResponse(ctx)
+	if err != nil {
+		return err
+	}
+	if read.JSON200 == nil {
+		return fmt.Errorf("reading the app's policy: %s %s", read.Status(), read.Body)
+	}
+	policy := *read.JSON200
+	policy.DeviceReturnUrls = &schemes
+	stored, err := client.UpdateAppPolicyWithResponse(ctx, policy)
+	if err != nil {
+		return err
+	}
+	if stored.JSON200 == nil {
+		return fmt.Errorf("the router refused the app's policy: %s %s", stored.Status(), stored.Body)
+	}
 	return nil
 }
 
