@@ -13,6 +13,7 @@
 package openaicompat
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -126,6 +127,11 @@ type Options struct {
 	// Authorization header then, not even the OPENAI_API_KEY the SDK would otherwise read from
 	// the router's own environment.
 	Keyless bool
+	// DefaultMaxTokens is the cap sent as max_tokens on a request whose caller set none, zero
+	// for none, for a server that otherwise generates until its context is full. A server that
+	// refuses it as too long for the context is asked again, once, without it: a cap the caller
+	// never asked for must not fail a turn that would have been answered without one.
+	DefaultMaxTokens func(llm.ResponseParams) int
 	// FirstTokenTimeout bounds the wait for the first token, from the moment the request is
 	// sent: headers, prompt processing and all. A server that hangs then fails the turn there,
 	// rather than after the whole Timeout in silence. Zero is no bound but Timeout.
@@ -244,22 +250,20 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 	// The caller has been waiting since the request was sent, not since its headers came
 	// back: llama.cpp and Ollama send none before the first token.
 	sentAt := time.Now()
-	var response *http.Response
-	upstream := l.client.Chat.Completions.NewStreaming(
-		requestCtx, l.params(params), append(l.requestOptions(params), option.WithResponseInto(&response))...,
-	)
-	err := upstream.Err()
-	if err == nil {
-		err = l.notAStream(response)
+	capped := l.defaultCap(params) > 0
+	upstream, err := l.open(requestCtx, params, capped)
+	if err != nil && capped && lengthRefused(err) {
+		l.logger.Warn("the endpoint refused the default reply cap as too long for its context, asking again without it",
+			"turn", params.ID, "error", err)
+		upstream, err = l.open(requestCtx, params, false)
 	}
 	if err != nil {
-		_ = upstream.Close()
 		cancel()
 		l.forget(id)
 		if late := context.Cause(requestCtx); errors.Is(late, errNoFirstToken) {
 			err = late
 		}
-		return nil, stack.Wrap(withBody(err))
+		return nil, stack.Wrap(err)
 	}
 	return llm.NewStream(
 		llm.StreamOptions{
@@ -295,28 +299,126 @@ func (l *LLM) firstTokenDeadline(ctx context.Context, cancel context.CancelFunc)
 	}
 }
 
-// notAStream refuses a 200 whose body is not an event stream, such as a proxy's HTML page or
-// a server that ignored stream:true and answered with JSON. The SDK finds no events in either
-// and ends the stream cleanly, which would settle the turn as an empty answer. A response
-// that names no type is let through, since Go would sniff an event stream as text/plain.
-func (l *LLM) notAStream(response *http.Response) error {
-	if response == nil {
-		return nil
+// open sends the request, with the default reply cap or without it, and returns its stream
+// once the headers are in.
+func (l *LLM) open(ctx context.Context, params llm.ResponseParams, capped bool) (*ssestream.Stream[openai.ChatCompletionChunk], error) {
+	var refused error
+	options := append(l.requestOptions(params, capped), option.WithMiddleware(l.sniff(&refused)))
+	upstream := l.client.Chat.Completions.NewStreaming(ctx, l.params(params), options...)
+	err := upstream.Err()
+	if err == nil {
+		err = refused
 	}
-	contentType := response.Header.Get("Content-Type")
-	if contentType == "" {
-		return nil
+	if err != nil {
+		_ = upstream.Close()
+		return nil, withBody(err)
 	}
+	return upstream, nil
+}
+
+// defaultCap is the cap DefaultMaxTokens puts on a request the caller left uncapped, zero
+// for none.
+func (l *LLM) defaultCap(params llm.ResponseParams) int {
+	if params.MaxOutputTokens > 0 || l.options.DefaultMaxTokens == nil {
+		return 0
+	}
+	return max(0, l.options.DefaultMaxTokens(params))
+}
+
+// lengthRefused reports whether a server refused a request as asking for more tokens than its
+// context holds, which vLLM answers with a 400 when the prompt and max_tokens together exceed
+// the model's length. Servers share no code for it, OpenAI's context_length_exceeded aside,
+// so the message is read: vLLM's names the maximum context length, llama.cpp's the context
+// size.
+func lengthRefused(err error) bool {
+	apiError, ok := errors.AsType[*openai.Error](err)
+	if !ok || apiError.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	if apiError.Code == "context_length_exceeded" {
+		return true
+	}
+	said := strings.ToLower(err.Error())
+	for _, words := range []string{"max_tokens", "max_completion_tokens", "context length", "context size", "context window", "too many tokens"} {
+		if strings.Contains(said, words) {
+			return true
+		}
+	}
+	return false
+}
+
+// sniff refuses a 2xx whose body is not an event stream, such as a proxy's HTML page or a
+// server that ignored stream:true and answered with JSON. The SDK finds no events in either
+// and ends the stream cleanly, which would settle the turn as an empty answer. The type is
+// trusted when it says text/event-stream. Any other type, or none, is not proof either way:
+// some servers send a stream as text/plain, application/octet-stream or application/x-ndjson,
+// so the body's first bytes decide. They are put back for the stream to read.
+func (l *LLM) sniff(refused *error) option.Middleware {
+	return func(request *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		response, err := next(request)
+		if err != nil || response.StatusCode/100 != 2 || response.Body == nil {
+			return response, err
+		}
+		contentType := response.Header.Get("Content-Type")
+		if eventStream(contentType) {
+			return response, nil
+		}
+		body := bufio.NewReader(response.Body)
+		stream, head := opensLikeEvents(body)
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{body, response.Body}
+		if !stream {
+			*refused = &llm.ProviderFailure{Err: fmt.Errorf("openaicompat: %s: answered a streaming request with %q rather than an event stream: %s",
+				l.options.Provider, contentType, bytes.TrimSpace(head[:min(len(head), 256)]))}
+		}
+		return response, nil
+	}
+}
+
+// eventStream reports whether a Content-Type names an event stream. A parameter Go cannot
+// parse, as in "text/event-stream; charset", does not make it something else.
+func eventStream(contentType string) bool {
 	media, _, err := mime.ParseMediaType(contentType)
-	if err == nil && media == "text/event-stream" {
-		return nil
+	return media == "text/event-stream" && (err == nil || errors.Is(err, mime.ErrInvalidMediaParameter))
+}
+
+// sseFields are what a line of an event stream opens with, the comment's bare colon included.
+var sseFields = []string{"data:", "event:", "id:", "retry:", ":"}
+
+// opensLikeEvents reads as little of a body as decides whether it opens as an event stream,
+// without consuming it: what has already arrived, and more only while that is not enough. It
+// returns what it read.
+func opensLikeEvents(body *bufio.Reader) (bool, []byte) {
+	const most = 512
+	n := 1
+	for {
+		head, err := body.Peek(n)
+		if arrived, _ := body.Peek(min(body.Buffered(), most)); len(arrived) > len(head) {
+			head = arrived
+		}
+		decided, stream := sseOpening(bytes.TrimLeft(head, " \t\r\n\ufeff"))
+		if decided || err != nil || len(head) >= most {
+			return decided && stream, head
+		}
+		n = len(head) + 1
 	}
-	var body []byte
-	if response.Body != nil {
-		body, _ = io.ReadAll(io.LimitReader(response.Body, 256))
+}
+
+// sseOpening says whether start opens an event stream, and whether that is decided yet: a
+// start that could still grow into a field name is not.
+func sseOpening(start []byte) (decided, stream bool) {
+	undecided := len(start) == 0
+	for _, field := range sseFields {
+		if bytes.HasPrefix(start, []byte(field)) {
+			return true, true
+		}
+		if bytes.HasPrefix([]byte(field), start) {
+			undecided = true
+		}
 	}
-	return &llm.ProviderFailure{Err: fmt.Errorf("openaicompat: %s: answered a streaming request with %q rather than an event stream: %s",
-		l.options.Provider, contentType, bytes.TrimSpace(body))}
+	return !undecided, false
 }
 
 // named keeps what a provider said about a failure it sent inside a stream, as an `error`
@@ -629,8 +731,9 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 	}
 	switch {
 	case err == nil && p.chunks == 0:
-		// The server closed the stream without a single chunk, not even the [DONE] that
-		// ends an answer of nothing, which is a dropped connection rather than a reply.
+		// The server closed the stream without a single chunk. A real answer of nothing still
+		// sends one, with its finish reason or its usage, so a stream of none, or of comments
+		// and a bare [DONE], is a dropped connection or a broken server rather than a reply.
 		p.err = &llm.ProviderFailure{
 			Err:       fmt.Errorf("openaicompat: %s: the stream ended before anything was sent", p.llm.options.Provider),
 			Transient: true,
@@ -701,6 +804,7 @@ func (l *LLM) params(request llm.ResponseParams) openai.ChatCompletionNewParams 
 	}
 	if l.options.StrictRoles {
 		messages = strictRoles(messages)
+		shortCallIDs(messages)
 	}
 	if prefill := l.prefill(request); prefill != "" {
 		messages = append(messages, openai.AssistantMessage(prefill))
@@ -861,11 +965,20 @@ func (l *LLM) prefill(request llm.ResponseParams) string {
 	return l.options.Prefill(request)
 }
 
-// requestOptions applies the request fields outside the OpenAI schema.
-func (l *LLM) requestOptions(request llm.ResponseParams) []option.RequestOption {
+// requestOptions applies the request fields outside the OpenAI schema, with the default reply
+// cap when capped.
+func (l *LLM) requestOptions(request llm.ResponseParams, capped bool) []option.RequestOption {
 	fields := map[string]any{}
 	if l.options.RequestFields != nil {
 		fields = l.options.RequestFields(request, l.options.Capabilities.Effort(request))
+	}
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	if capped {
+		if limit := l.defaultCap(request); limit > 0 {
+			fields["max_tokens"] = limit
+		}
 	}
 	if l.prefill(request) != "" {
 		fields["continue_final_message"] = true

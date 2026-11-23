@@ -288,3 +288,245 @@ func (s *OpenAICompatSuite) TestAnEndpointThatNeedsAKeyStillRefusesNone() {
 
 	s.ErrorContains(err, "api key is required")
 }
+
+// sse is a whole event stream that answers hi.
+func sse() string { return "data: " + textFrame("hi") + "\n\ndata: [DONE]\n\n" }
+
+func (s *OpenAICompatSuite) TestAStreamSentUnderAnotherTypeIsStillAStream() {
+	for _, contentType := range []string{
+		"text/plain; charset=utf-8", "application/octet-stream", "application/x-ndjson",
+		"Text/Event-Stream", "text/event-stream; charset",
+	} {
+		s.contentType, s.body = contentType, sse()
+
+		response, _ := s.ask(s.provider(Options{}), hello())
+
+		s.Equal("hi", response.OutputText, contentType)
+	}
+}
+
+func (s *OpenAICompatSuite) TestAStreamOpeningOnACommentIsStillAStream() {
+	s.contentType, s.body = "text/plain", "\n: keep-alive\n\n"+sse()
+
+	response, _ := s.ask(s.provider(Options{}), hello())
+
+	s.Equal("hi", response.OutputText)
+}
+
+func (s *OpenAICompatSuite) TestABodyThatIsNoStreamIsRefusedWhateverItsType() {
+	for _, contentType := range []string{"text/plain", "application/octet-stream"} {
+		s.contentType, s.body = contentType, `{"error":"model is loading"}`
+
+		_, err := s.provider(Options{}).Create(context.Background(), hello())
+
+		s.ErrorContains(err, "model is loading", contentType)
+	}
+}
+
+func (s *OpenAICompatSuite) TestAStreamThatNamesNoTypeIsLetThrough() {
+	s.contentType, s.body = "", sse()
+
+	response, _ := s.ask(s.provider(Options{}), hello())
+
+	s.Equal("hi", response.OutputText)
+}
+
+func (s *OpenAICompatSuite) TestAPageThatNamesNoTypeIsRefused() {
+	s.contentType, s.body = "", "<html>not json</html>"
+
+	_, err := s.provider(Options{}).Create(context.Background(), hello())
+
+	s.ErrorContains(err, "<html>not json</html>")
+}
+
+func (s *OpenAICompatSuite) TestAStreamOfNothingButDoneIsATransientFailure() {
+	for _, body := range []string{"data: [DONE]\n\n", ": keep-alive\n\n: keep-alive\n\ndata: [DONE]\n\n"} {
+		s.contentType, s.body = "text/event-stream", body
+
+		stream, err := s.provider(Options{}).Create(context.Background(), hello())
+		s.Require().NoError(err)
+
+		s.Equal(llm.StatusFailed, drain(stream).Status, body)
+		s.True(llm.Transient(stream.Err()), body)
+	}
+}
+
+// slowAfter is a stream that sends frame, then nothing for longer than a 100ms first-token
+// deadline, then its answer.
+func (s *OpenAICompatSuite) slowAfter(frame string) llm.Response {
+	s.frames = []string{roleOnlyFrame(), frame}
+	s.hold = make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		close(s.hold)
+	}()
+	stream, err := s.provider(Options{FirstTokenTimeout: 100 * time.Millisecond}).Create(context.Background(), hello())
+	s.Require().NoError(err)
+	response := drain(stream)
+	s.NoError(stream.Err())
+	return response
+}
+
+func (s *OpenAICompatSuite) TestThinkingIsAFirstTokenForTheDeadline() {
+	s.Equal(llm.StatusCompleted, s.slowAfter(reasoningFrame("Let me think.")).Status)
+}
+
+func (s *OpenAICompatSuite) TestAToolCallIsAFirstTokenForTheDeadline() {
+	response := s.slowAfter(toolFrame(0, "call-1", "weather", `{"city":"Paris"}`))
+
+	s.Equal(llm.StatusCompleted, response.Status)
+	s.Len(response.ToolCalls, 1)
+}
+
+// strictly sends input under StrictRoles, as custom/ does, and returns the messages sent.
+func (s *OpenAICompatSuite) strictly(input ...llm.Message) []map[string]any {
+	s.frames = []string{textFrame("ok"), usageFrame(5, 0, 1, 0, "stop")}
+	s.ask(s.provider(Options{StrictRoles: true, ResultsFollowCalls: true}), llm.ResponseParams{Instructions: "Be terse.", Input: input})
+	return s.sentMessages(len(s.requests) - 1)
+}
+
+var (
+	weatherCall = llm.Message{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "weather", Arguments: `{}`}}}
+	weatherSaid = llm.Message{Role: llm.ToolResult, ToolCallID: "call-1", Content: "18C"}
+)
+
+func (s *OpenAICompatSuite) TestStrictRolesPutsAnEmptyReplyBetweenAResultAndTheCallersNextWords() {
+	messages := s.strictly(
+		llm.Message{Role: llm.User, Content: "weather?"}, weatherCall, weatherSaid,
+		llm.Message{Role: llm.User, Content: "hello?"},
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant", "user"}, roles(messages))
+	s.Equal("", messages[4]["content"])
+	s.Empty(messages[4]["tool_calls"])
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesPutsALateNoteAfterAResultOnTheUsersSide() {
+	messages := s.strictly(
+		llm.Message{Role: llm.User, Content: "weather?"}, weatherCall, weatherSaid,
+		llm.Message{Role: llm.System, Content: "Today is Monday."},
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant", "user"}, roles(messages))
+	s.Equal("Today is Monday.", messages[5]["content"])
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesMovesWhatTheCallerSaidDuringACallAfterItsResult() {
+	messages := s.strictly(
+		llm.Message{Role: llm.User, Content: "weather?"}, weatherCall,
+		llm.Message{Role: llm.User, Content: "hello?"}, weatherSaid,
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant", "user"}, roles(messages))
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesAddsNoEmptyReplyWhenTheModelAnsweredTheResult() {
+	messages := s.strictly(
+		llm.Message{Role: llm.User, Content: "weather?"}, weatherCall, weatherSaid,
+		llm.Message{Role: llm.Assistant, Content: "18C."},
+		llm.Message{Role: llm.User, Content: "thanks"},
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant", "user"}, roles(messages))
+	s.Equal("18C.", messages[4]["content"])
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesTellsTheModelWhatItOpenedWithInTheSystemPrompt() {
+	messages := s.strictly(
+		llm.Message{Role: llm.Assistant, Content: "Hi, how can I help?"},
+		llm.Message{Role: llm.User, Content: "weather?"},
+	)
+
+	s.Equal([]string{"system", "user"}, roles(messages))
+	s.Equal("Be terse.\n\nYou opened the conversation by saying: \"Hi, how can I help?\"", messages[0]["content"])
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesJoinsTwoRepliesInARow() {
+	messages := s.strictly(
+		llm.Message{Role: llm.User, Content: "hi"},
+		llm.Message{Role: llm.Assistant, Content: "hello"},
+		llm.Message{Role: llm.Assistant, Content: "still there?"},
+		llm.Message{Role: llm.User, Content: "yes"},
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "user"}, roles(messages))
+	s.Equal("hello\n\nstill there?", messages[2]["content"])
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesSendsWhatTheModelSaidBeforeItsCallsWithThem() {
+	messages := s.strictly(
+		llm.Message{Role: llm.User, Content: "weather?"},
+		llm.Message{Role: llm.Assistant, Content: "Let me check."}, weatherCall, weatherSaid,
+		llm.Message{Role: llm.Assistant, Content: "18C."},
+	)
+
+	s.Equal([]string{"system", "user", "assistant", "tool", "assistant"}, roles(messages))
+	s.Equal("Let me check.", messages[2]["content"])
+	s.NotEmpty(messages[2]["tool_calls"])
+}
+
+// callIDs is the id of every call sent and every result's call, in order.
+func callIDs(messages []map[string]any) []string {
+	var ids []string
+	for _, message := range messages {
+		calls, _ := message["tool_calls"].([]any)
+		for _, call := range calls {
+			ids = append(ids, call.(map[string]any)["id"].(string))
+		}
+		if id, ok := message["tool_call_id"].(string); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesSendsEveryCallIDAsNineLettersAndDigits() {
+	input := []llm.Message{
+		{Role: llm.User, Content: "weather?"},
+		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "call_b0jupvrg", Name: "weather", Arguments: `{}`}, {ID: "resp-1-tool-1", Name: "weather", Arguments: `{}`}}},
+		{Role: llm.ToolResult, ToolCallID: "call_b0jupvrg", Content: "18C"},
+		{Role: llm.ToolResult, ToolCallID: "resp-1-tool-1", Content: "20C"},
+	}
+
+	first := callIDs(s.strictly(input...))
+	again := callIDs(s.strictly(input...))
+
+	s.Require().Len(first, 4)
+	for _, id := range first {
+		s.Regexp(`^[0-9A-Za-z]{9}$`, id)
+	}
+	s.Equal(first[0], first[2], "a result names its call by the id the call was sent with")
+	s.Equal(first[1], first[3])
+	s.NotEqual(first[0], first[1])
+	s.Equal(first, again, "the same history is sent the same way, so a cached prefix still matches")
+}
+
+func (s *OpenAICompatSuite) TestStrictRolesKeepsAnIDThatIsAlreadyNineLettersAndDigits() {
+	// The id another call's hash would land on is already taken, so that call is hashed again.
+	taken := hashCallID("call_b0jupvrg", 0)
+	ids := callIDs(s.strictly(
+		llm.Message{Role: llm.User, Content: "weather?"},
+		llm.Message{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "call_b0jupvrg", Name: "weather", Arguments: `{}`}, {ID: taken, Name: "weather", Arguments: `{}`}}},
+		llm.Message{Role: llm.ToolResult, ToolCallID: "call_b0jupvrg", Content: "18C"},
+		llm.Message{Role: llm.ToolResult, ToolCallID: taken, Content: "20C"},
+	))
+
+	s.Equal(taken, ids[1])
+	s.Equal(hashCallID("call_b0jupvrg", 1), ids[0])
+}
+
+func (s *OpenAICompatSuite) TestAStreamedCallKeepsTheIDTheModelGaveIt() {
+	s.frames = []string{toolFrame(0, "call_b0jupvrg", "weather", `{}`), usageFrame(5, 0, 1, 0, "tool_calls")}
+
+	response, _ := s.ask(s.provider(Options{StrictRoles: true}), hello())
+
+	s.Equal("call_b0jupvrg", response.ToolCalls[0].ID, "only what is sent is renamed")
+}
+
+func (s *OpenAICompatSuite) TestWithoutStrictRolesCallIDsAreSentAsTheyAre() {
+	s.frames = []string{textFrame("ok"), usageFrame(5, 0, 1, 0, "stop")}
+
+	s.ask(s.provider(Options{}), calledATool())
+
+	s.Equal([]string{"call-1", "call-1"}, callIDs(s.sentMessages(0)))
+}

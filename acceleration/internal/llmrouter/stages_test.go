@@ -384,7 +384,9 @@ func (s *StagesSuite) TestAWaitForHeadersThatComeWithTheFirstTokenIsCountedOnce(
 	// llama.cpp and Ollama send their headers with the first token. The response's own time
 	// to first token, which the caller's responded event reports, is the whole wait, and the
 	// row adds no wait for headers on top of it.
-	const wait, slack = 300 * time.Millisecond, 150 * time.Millisecond
+	// Counted twice it would be twice the wait, so anything short of that, with room for a
+	// busy machine, is counted once.
+	const wait, slack = 400 * time.Millisecond, 300 * time.Millisecond
 	config := s.config()
 	session := s.session(s.provider(wait, 0, 0, answer), config)
 	sink := &statSink{}

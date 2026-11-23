@@ -114,7 +114,11 @@ func (s *OpenAICompatSuite) SetupTest() {
 			}
 		}
 		if s.body != "" {
-			w.Header().Set("Content-Type", s.contentType)
+			// A nil value sends no Content-Type and stops Go from sniffing one.
+			w.Header()["Content-Type"] = nil
+			if s.contentType != "" {
+				w.Header().Set("Content-Type", s.contentType)
+			}
 			fmt.Fprint(w, s.body)
 			return
 		}
