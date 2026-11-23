@@ -510,6 +510,13 @@ func (l *lockSlots) callersOf(customerID string) int {
 	return 0
 }
 
+// customersLocking is how many customers have an entry in the lock slot map.
+func (l *lockSlots) customersLocking() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.customers)
+}
+
 // parked starts n locks of the customer's own connections on router, each stalled inside
 // until release is called, as a refresh stalls at a token endpoint the customer runs. inside
 // counts the ones that got in; release returns once every one has.
@@ -591,6 +598,7 @@ func (s *StoreSuite) TestACustomersLockSlotIsGivenBackHoweverItsLockEnds() {
 	s.ErrorIs(err, context.DeadlineExceeded)
 	release()
 	s.Zero(router.lockSlots.callersOf("acme-app"), "a lock that gave up waiting for a slot leaves none counted")
+	s.Zero(router.lockSlots.customersLocking(), "a customer whose locks all ended leaves no entry in the map")
 
 	closed, err := s.openRouter()
 	s.Require().NoError(err)
