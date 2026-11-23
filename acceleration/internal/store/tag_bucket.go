@@ -33,7 +33,8 @@ type TagBucket struct {
 	Uptime                 *float64  `bun:"uptime"`
 }
 
-// TagBucketFilter picks a customer's buckets of one modality and one tag key in [From, To).
+// TagBucketFilter picks a customer's buckets of one modality and one tag key: every bucket
+// [From, To) touches, whole, as a rollup writes it.
 type TagBucketFilter struct {
 	Modality    string
 	Key         string
@@ -66,7 +67,7 @@ SELECT
     r.customer_id,
     tag.key,
     tag.value,
-    date_trunc('%[2]s', r.started_at) AS bucket,
+    date_trunc('%[2]s', r.started_at, 'UTC') AS bucket,
     COALESCE(SUM(r.audio_ms), 0),
     COALESCE(SUM(r.characters), 0),
     COALESCE(SUM(r.input_tokens), 0),
@@ -134,7 +135,7 @@ SELECT
     customer_id,
     ?0 AS tag_key,
     tags->>?0 AS tag_value,
-    date_trunc('%[1]s', started_at) AS bucket,
+    date_trunc('%[1]s', started_at, 'UTC') AS bucket,
     COALESCE(SUM(audio_ms), 0) AS audio_ms_total,
     COALESCE(SUM(characters), 0) AS characters_total,
     COALESCE(SUM(input_tokens), 0) AS input_tokens_total,

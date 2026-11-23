@@ -199,11 +199,11 @@ func (s *Store) CustomerActivity(
 	// the shared database knows rather than the shard.
 	people := fmt.Sprintf(`
 SELECT DISTINCT bucket, user_id FROM (
-    SELECT date_trunc('%[1]s', s.created_at) AS bucket, s.user_id, s.caller_kind
+    SELECT date_trunc('%[1]s', s.created_at, 'UTC') AS bucket, s.user_id, s.caller_kind
     FROM agent_sessions AS s
     WHERE s.customer_id = ? AND s.created_at >= ? AND s.created_at < ?
     UNION ALL
-    SELECT date_trunc('%[1]s', a.created_at) AS bucket, s.user_id, s.caller_kind
+    SELECT date_trunc('%[1]s', a.created_at, 'UTC') AS bucket, s.user_id, s.caller_kind
     FROM agent_responses AS a
     JOIN agent_sessions AS s ON s.id = a.session_id
     WHERE a.customer_id = ? AND a.created_at >= ? AND a.created_at < ?
@@ -211,20 +211,20 @@ SELECT DISTINCT bucket, user_id FROM (
 WHERE user_id <> '' AND caller_kind <> 'anonymous'`, unit)
 	query := fmt.Sprintf(`
 WITH session_counts AS (
-    SELECT date_trunc('%[1]s', created_at) AS bucket, COUNT(*) AS n
+    SELECT date_trunc('%[1]s', created_at, 'UTC') AS bucket, COUNT(*) AS n
     FROM agent_sessions
     WHERE customer_id = ? AND created_at >= ? AND created_at < ?
     GROUP BY bucket
 ),
 message_counts AS (
-    SELECT date_trunc('%[1]s', created_at) AS bucket, COUNT(*) AS n
+    SELECT date_trunc('%[1]s', created_at, 'UTC') AS bucket, COUNT(*) AS n
     FROM agent_responses
     WHERE customer_id = ? AND created_at >= ? AND created_at < ?
     GROUP BY bucket
 ),
 call_counts AS (
     SELECT
-        date_trunc('%[1]s', started_at) AS bucket,
+        date_trunc('%[1]s', started_at, 'UTC') AS bucket,
         COUNT(*) AS n,
         SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)))::double precision / 60
             AS voice_minutes,
@@ -256,7 +256,7 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 	// sessions are counted from a hash of their ids once every shard has answered, in the
 	// bucket of the earliest row.
 	opened := fmt.Sprintf(`
-SELECT date_trunc('%[1]s', created_at) AS bucket, hashtextextended(id, 0) AS session
+SELECT date_trunc('%[1]s', created_at, 'UTC') AS bucket, hashtextextended(id, 0) AS session
 FROM agent_sessions
 WHERE customer_id = ? AND created_at >= ? AND created_at < ?`, unit)
 	sharded := len(s.peers) > 0

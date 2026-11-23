@@ -636,9 +636,16 @@ func (h *Harness) SetModel(model, controller *llmrouter.Session) {
 	h.stored = stored{}
 	h.mu.Unlock()
 
-	if controller != nil && h.flow != nil {
-		h.flow.setModel(controller)
+	if controller == nil {
+		return
 	}
+	if h.flow == nil {
+		// Why: a harness built without a flow (a text session) never closes a controller it
+		// did not adopt, so one handed to it would stay open for the rest of the call.
+		_ = controller.Close()
+		return
+	}
+	h.flow.setModel(controller)
 }
 
 // SetSubagent opens delegated work on another model in the background. Tasks already

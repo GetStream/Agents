@@ -61,6 +61,22 @@ func (s *StoreSuite) TestTagStatisticsAreOnlyTheCallingCustomers() {
 	s.EqualValues(1000, buckets[0].AudioMsTotal)
 }
 
+func (s *StoreSuite) TestATagWindowInsideItsHoursKeepsOnlyTheRequestsInIt() {
+	s.tagged("acme", s.base.Add(15*time.Minute), 4000, map[string]string{"project": "support"})
+	s.tagged("acme", s.base.Add(45*time.Minute), 1000, map[string]string{"project": "support"})
+	s.tagged("acme", s.base.Add(2*time.Hour+15*time.Minute), 500, map[string]string{"project": "support"})
+	s.tagged("acme", s.base.Add(2*time.Hour+45*time.Minute), 2000, map[string]string{"project": "support"})
+
+	buckets, err := s.store.TagBuckets.Select(s.ctx, "acme", TagBucketFilter{Modality: "stt", Key: "project", Granularity: Hourly,
+		From: s.base.Add(30 * time.Minute), To: s.base.Add(2*time.Hour + 30*time.Minute)})
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 2, "the hour the window starts in and the hour it ends in")
+	s.Equal(s.base, buckets[0].Bucket.UTC())
+	s.EqualValues(1000, buckets[0].AudioMsTotal, "the request before the window starts is not in it")
+	s.Equal(s.base.Add(2*time.Hour), buckets[1].Bucket.UTC())
+	s.EqualValues(500, buckets[1].AudioMsTotal, "nor the one after it ends")
+}
+
 // tagged stores a labelled request, which is what the tag rollups are built from.
 func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags map[string]string) {
 	latencyMs := 100.0

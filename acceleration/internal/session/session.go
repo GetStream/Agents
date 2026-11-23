@@ -146,6 +146,14 @@ type ToolApprovalIgnored struct {
 	Reason    string
 }
 
+// ToolResultIgnored is a tool_result no call took, with the ids it named and why.
+type ToolResultIgnored struct {
+	ID        string
+	CommandID string
+	TurnID    string
+	Reason    string
+}
+
 // ToolUser is who a tool call was made for.
 type ToolUser struct {
 	ID   string
@@ -1191,6 +1199,12 @@ func (s *Session) Report(err error, context string) {
 // its sender can tell which of its answers it is.
 func (s *Session) IgnoreApproval(id, commandID, turnID string, reason error) {
 	s.broadcast(ToolApprovalIgnored{ID: id, CommandID: commandID, TurnID: turnID, Reason: reason.Error()})
+}
+
+// IgnoreToolResult tells the watchers a tool_result reached no call, naming the ids it sent so
+// its sender can tell which of its results it is.
+func (s *Session) IgnoreToolResult(id, commandID, turnID string, reason error) {
+	s.broadcast(ToolResultIgnored{ID: id, CommandID: commandID, TurnID: turnID, Reason: reason.Error()})
 }
 
 // WaitsForResult reports whether the call id waits for a watcher's tool_result.
