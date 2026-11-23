@@ -991,6 +991,71 @@ func (s *StoreSuite) TestASaveOfACopyReadBeforeAPauseIsRefused() {
 	s.Equal("Stretch", task.Title)
 }
 
+// dueRepeat stores a daily task due a minute ago and returns a copy read before anything else
+// writes to it.
+func (s *StoreSuite) dueRepeat() ScheduledTask {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt, task.RRule = &due, "FREQ=DAILY" })
+	read, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	return read
+}
+
+// claimOne claims the one due task.
+func (s *StoreSuite) claimOne() ClaimedScheduledTask {
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	return claimed[0]
+}
+
+// refusesStale saves a copy read before a worker's write and expects the save refused.
+func (s *StoreSuite) refusesStale(stale ScheduledTask) {
+	stale.Title = "Stretch twice"
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, &stale), ErrScheduledTaskChanged)
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal("Stretch", task.Title)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAClaimIsRefused() {
+	stale := s.dueRepeat()
+	s.claimOne()
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAHoldIsRefused() {
+	s.dueRepeat()
+	claim := s.claimOne()
+	stale, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claim.Run.ID, claim.LeasedBy, time.Now().Add(2*time.Hour))
+	s.Require().NoError(err)
+	s.Require().True(held)
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeItsSessionWasSetIsRefused() {
+	stale := s.dueRepeat()
+	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "one", "session-2"))
+	s.refusesStale(stale)
+}
+
+func (s *StoreSuite) TestASaveOfACopyReadBeforeAFinishIsRefused() {
+	s.dueRepeat()
+	claim := s.claimOne()
+	stale, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	next := s.base.Add(24 * time.Hour)
+	finished, err := s.store.ScheduledTasks.Finish(s.ctx, "acme", claim.Run.ID, claim.LeasedBy, ScheduledTaskOutcome{
+		RunState: ScheduledTaskRunDelivered, DeliveredTo: ScheduledTaskDeliveredConversation,
+		NextRunAt: &next, State: ScheduledTaskActive,
+	})
+	s.Require().NoError(err)
+	s.Require().True(finished)
+	s.refusesStale(stale)
+}
+
 func (s *StoreSuite) TestASavedCopyCanBeSavedAgain() {
 	task := s.task("one", nil)
 	task.Title = "Stretch twice"
