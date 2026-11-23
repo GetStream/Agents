@@ -151,6 +151,10 @@ link-local and metadata addresses (`169.254.169.254`) at dial time, so a DNS reb
 redirect cannot get round a check made earlier. Flag `http.Get`, `http.DefaultClient` or a
 fresh `http.Client` on a caller's URL.
 
+A refused URL gets one answer, whatever egress found. A different answer for a name that does
+not resolve and one that resolves to a private address lets a caller probe the router's
+resolver, so never quote the egress error (`createEventDestination`, AI-3575).
+
 ### 7. Secrets stay secret
 
 - Client secrets, API secrets, OAuth tokens and provider keys are sealed with the KEK at
@@ -161,12 +165,13 @@ fresh `http.Client` on a caller's URL.
 - A 500 says only "something went wrong" (`apierror.go`). No answer of any status, socket
   frame or field stored for a later read carries the text of a store, vendor, network or DNS
   error: it names hosts, ports, SQL, constraint names, URLs, bodies and the cluster's DNS
-  server. Flag `invalidRequest(err.Error())`, `"...: " + err.Error()` and a stored
-  `err.Error()`, unless the error is one this code wrote for the caller to correct. The rules
-  are in the `go` skill's `errors.md`, «HTTP».
-- Refusals of an outbound URL give one answer, whatever egress found. A different answer for a
-  name that does not resolve and one that resolves to a private address lets a caller probe
-  the router's resolver (`createEventDestination`, AI-3575).
+  server. Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`,
+  `fmt.Sprintf("...: %v", err)` and a stored `err.Error()`. The one exception is an error
+  whose whole text this code wrote for the caller to correct (`*oauth2code.ManifestError`): no
+  wrapped cause (`fmt.Errorf("%w: %w", ErrInvalid, err)` still carries the store's text), and
+  nothing only the operator sets, such as environment variable names. The rules are in
+  [errors.md «HTTP»](../go/errors.md#http).
+- Refused outbound URLs: see rule 6.
 - The ops key (`X-Ops-Key`) is compared in constant time and turns the paths off when empty.
 - The manage key (`X-Manage-Key`) is compared in constant time, makes every `/v1/manage/*`
   path a 404 `not_configured` when empty, is never the ops key, and every call with it must
