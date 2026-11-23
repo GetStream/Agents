@@ -326,7 +326,8 @@ func (s *Server) setPhoneNumberAgent(ctx context.Context, request *setPhoneNumbe
 		return nil, errNumberNotAttached
 	}
 	if err != nil {
-		return nil, err
+		// Deleted since configFor read it.
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	held.ConfigID = config.ID
 	return &setPhoneNumberAgentResponse{Body: phoneNumber(held)}, nil

@@ -467,6 +467,28 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 			"agent", config.Name, "error", err)
 		return
 	}
+	// The conversation a session opened is the one the next message carries on, so it is
+	// recorded before the turn rather than after: a turn that fails halfway still leaves the
+	// person's history where they can see it.
+	if identity.ConversationID == "" {
+		opened := created.Spec().ConversationID
+		identity.ConversationID = opened
+		if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
+			logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
+		} else if identity.ConversationID != opened {
+			// Another router opened one for this person's first message at the same time and
+			// recorded it first: this message goes on in that one, which is what continues.
+			if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
+				logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
+			}
+			spec.ConversationID = identity.ConversationID
+			if created, err = s.sessions.Create(ctx, spec); err != nil {
+				logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
+					"agent", config.Name, "error", err)
+				return
+			}
+		}
+	}
 	// The session ends with the message it answered, which is what saves the conversation:
 	// the next message reopens it by its id rather than starting over.
 	defer func() {
@@ -476,16 +498,6 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	}()
 	events, detach := created.Watch()
 	defer detach()
-
-	// The conversation a session opened is the one the next message carries on, so it is
-	// recorded before the turn rather than after: a turn that fails halfway still leaves the
-	// person's history where they can see it.
-	if identity.ConversationID == "" {
-		identity.ConversationID = created.Spec().ConversationID
-		if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
-			logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
-		}
-	}
 
 	sending := make(chan struct{})
 	go func() {

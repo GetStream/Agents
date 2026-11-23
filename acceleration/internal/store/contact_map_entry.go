@@ -175,8 +175,10 @@ func (r *ContactMapEntries) GetByUser(ctx context.Context, customerID, configID,
 	return entry, nil
 }
 
-// Upsert records who a channel line's sender is, or moves their conversation on and where a
-// reply reaches them.
+// Upsert records who a channel line's sender is, their conversation and where a reply reaches
+// them, and reads the row back into entry. A row that has a conversation keeps it: two first
+// messages from one number on two routers each open one, and the second is handed the first
+// to carry on in.
 func (r *ContactMapEntries) Upsert(ctx context.Context, entry *ContactMapEntry) error {
 	if err := entry.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -190,9 +192,10 @@ func (r *ContactMapEntries) Upsert(ctx context.Context, entry *ContactMapEntry) 
 	_, err := r.store.global.NewInsert().Model(entry).
 		On("CONFLICT (customer_id, config_id, kind, address) DO UPDATE").
 		Set("user_id = EXCLUDED.user_id").
-		Set("conversation_id = EXCLUDED.conversation_id").
+		Set("conversation_id = COALESCE(NULLIF(?TableAlias.conversation_id, ''), EXCLUDED.conversation_id)").
 		Set("thread = EXCLUDED.thread").
 		Set("updated_at = EXCLUDED.updated_at").
+		Returning("*").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save contact: %w", err))
