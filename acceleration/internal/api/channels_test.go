@@ -378,6 +378,101 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once, however often it is delivered")
 }
 
+// A provider that hangs up on a slow delivery and delivers it again still leaves the person
+// opted out, confirmed once: the hang-up does not cut the write, and the second delivery
+// waits for the first instead of taking a message the first has not stored yet. A trigger
+// makes the app's opt-out slower than the provider waits.
+func (s *ChannelsSuite) TestAStopWhoseDeliveryWasHungUpOnIsObeyed() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	writer, id := s.writer(), "msg-"+s.utils.uuid()
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+		CREATE FUNCTION channels_suite_slow_opt_out() RETURNS trigger AS $$
+			BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER channels_suite_slow_opt_out BEFORE INSERT ON opt_outs FOR EACH ROW
+			WHEN (NEW.customer_id = '`+s.customerID()+`') EXECUTE FUNCTION channels_suite_slow_opt_out();
+		COMMIT`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+			DROP TRIGGER channels_suite_slow_opt_out ON opt_outs;
+			DROP FUNCTION channels_suite_slow_opt_out();
+			COMMIT`)
+		s.Require().NoError(err)
+	}()
+
+	body := s.delivery(writer, id, "Stop")
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+line.WebhookUrl, bytes.NewReader(body))
+	s.Require().NoError(err)
+	request.Header = s.signed(body)
+	request.Header.Set("Content-Type", "application/json")
+	impatient := &http.Client{Timeout: 200 * time.Millisecond}
+	_, err = impatient.Do(request)
+	s.Require().Error(err, "the provider hangs up before the opt-out is stored")
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "Stop"))
+	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut, "the STOP hung up on is recorded")
+	s.Contains(s.answer(writer), "unsubscribed")
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
+	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 2))
+	s.Len(s.meta.to(writer), 2, "the STOP is confirmed once")
+}
+
+// A START the store could not record fails its delivery, leaving the person opted out, and
+// is taken when the provider delivers it again. A trigger refuses lifting the app's opt-outs
+// for the first delivery.
+func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	writer, id := s.writer(), "msg-"+s.utils.uuid()
+	ctx := context.Background()
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "STOP"))
+	s.Require().Contains(s.answer(writer), "unsubscribed")
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+		CREATE FUNCTION channels_suite_refuse_opt_in() RETURNS trigger AS $$
+			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER channels_suite_refuse_opt_in BEFORE UPDATE ON opt_outs FOR EACH ROW
+			WHEN (NEW.customer_id = '`+s.customerID()+`') EXECUTE FUNCTION channels_suite_refuse_opt_in();
+		COMMIT`)
+	s.Require().NoError(err)
+	refusing := true
+	allow := func() {
+		if !refusing {
+			return
+		}
+		refusing = false
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+			DROP TRIGGER channels_suite_refuse_opt_in ON opt_outs;
+			DROP FUNCTION channels_suite_refuse_opt_in();
+			COMMIT`)
+		s.Require().NoError(err)
+	}
+	defer allow()
+
+	s.Equal(http.StatusInternalServerError, s.deliver(line, writer, id, "START"),
+		"a START not recorded is the provider's to deliver again")
+	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.True(optedOut)
+	s.Contains(s.logged.String(), `level=ERROR msg="could not record a keyword" keyword=START channel=whatsapp`)
+	allow()
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "START"))
+	optedOut, err = s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
+	s.Require().NoError(err)
+	s.False(optedOut, "the START delivered again is recorded")
+	s.Equal("You are subscribed again. Reply STOP to unsubscribe.", s.reply(writer, 2))
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, id, "START"))
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
+	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 3))
+	s.Len(s.meta.to(writer), 3, "the START is confirmed once, however often it is delivered")
+}
+
 func (s *ChannelsSuite) TestTextingStartAfterStopIsAnsweredAgain() {
 	number := s.number()
 	line := s.connect(number)

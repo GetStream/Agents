@@ -39,11 +39,49 @@ type ChannelDeliveries struct {
 // Claim records a message as delivered, and who sent it. False is one already taken, which a
 // provider retrying a slow delivery sends.
 func (r *ChannelDeliveries) Claim(ctx context.Context, accountID, messageID, from string) (bool, error) {
+	return claimDelivery(ctx, r.store.global, accountID, messageID, from)
+}
+
+// ClaimStop is Claim of a STOP, recording its opt-out (OptOuts.Insert) in the same
+// transaction: the message is taken only once the opt-out is stored, so a write that failed
+// leaves it to be delivered again, and a delivery of it racing this one waits for the outcome.
+func (r *ChannelDeliveries) ClaimStop(ctx context.Context, accountID, messageID, from string, optOut *OptOut) (bool, error) {
+	return r.claimWith(ctx, accountID, messageID, from, func(ctx context.Context, tx bun.Tx) error {
+		return insertOptOut(ctx, tx, optOut)
+	})
+}
+
+// ClaimStart is ClaimStop of a START, lifting the recipient's opt-outs (OptOuts.RevokeAll).
+func (r *ChannelDeliveries) ClaimStart(ctx context.Context, accountID, messageID, from, customerID, recipient, channel string) (bool, error) {
+	return r.claimWith(ctx, accountID, messageID, from, func(ctx context.Context, tx bun.Tx) error {
+		return revokeAllOptOuts(ctx, tx, customerID, recipient, channel)
+	})
+}
+
+// claimWith claims a message and, when it is fresh, runs write in the same transaction.
+func (r *ChannelDeliveries) claimWith(ctx context.Context, accountID, messageID, from string, write func(context.Context, bun.Tx) error) (bool, error) {
+	var fresh bool
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		var err error
+		fresh, err = claimDelivery(ctx, tx, accountID, messageID, from)
+		if err != nil || !fresh {
+			return err
+		}
+		return write(ctx, tx)
+	})
+	if err != nil {
+		return false, stack.Wrap(err)
+	}
+	return fresh, nil
+}
+
+// claimDelivery is Claim on db.
+func claimDelivery(ctx context.Context, db bun.IDB, accountID, messageID, from string) (bool, error) {
 	delivery := channelDelivery{AccountID: accountID, MessageID: messageID, ReceivedAt: time.Now().UTC(), FromAddress: from}
 	if err := delivery.Validate(); err != nil {
 		return false, stack.Wrap(err)
 	}
-	result, err := r.store.global.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
+	result, err := db.NewInsert().Model(&delivery).On("CONFLICT DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: claim channel message: %w", err))
 	}
@@ -52,18 +90,6 @@ func (r *ChannelDeliveries) Claim(ctx context.Context, accountID, messageID, fro
 		return false, stack.Wrap(fmt.Errorf("store: claim channel message: %w", err))
 	}
 	return affected == 1, nil
-}
-
-// Release gives back a message claimed but not taken, so the provider's next delivery of it
-// claims it again.
-func (r *ChannelDeliveries) Release(ctx context.Context, accountID, messageID string) error {
-	_, err := r.store.global.NewDelete().Model((*channelDelivery)(nil)).
-		Where("account_id = ? AND message_id = ?", accountID, messageID).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: release channel message: %w", err))
-	}
-	return nil
 }
 
 // LastAt is when somebody last wrote to a line, or the zero time when they never have.

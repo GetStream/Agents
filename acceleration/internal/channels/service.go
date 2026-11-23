@@ -164,7 +164,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		return Answer{Status: http.StatusBadRequest, Body: failure(err.Error())}
 	}
 	for _, message := range delivered {
-		fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
+		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
 			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
 		}
@@ -172,15 +172,6 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		// it twice is the agent talking over itself, so a message already taken is dropped.
 		if !fresh {
 			continue
-		}
-		// A keyword is recorded before the delivery is answered: one the store refused gives
-		// its claim back and fails the delivery, so the provider delivers it again.
-		confirmation, err := s.keyword(ctx, account, message)
-		if err != nil {
-			if released := s.store.ChannelDeliveries.Release(ctx, account.ID, message.ID); released != nil {
-				err = errors.Join(err, released)
-			}
-			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
 		}
 		s.received(ctx, account, message)
 		// Files with no words are billed, and there is nothing in them for the agent to answer.
@@ -190,10 +181,6 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		s.working.Add(1)
 		go func(message Message) {
 			defer s.working.Done()
-			if confirmation != "" {
-				s.confirm(account, line, provider, message, confirmation)
-				return
-			}
 			s.answer(account, line, provider, message)
 		}(message)
 	}
@@ -402,6 +389,9 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	defer cancel()
 	logger := s.logger.With("customer", account.CustomerID)
 
+	if s.keyword(ctx, account, line, provider, message) {
+		return
+	}
 	config, found, err := s.store.ConfigOnChannel(ctx, account.CustomerID, account.Kind, account.E164)
 	if err != nil {
 		logger.Error("could not find the agent on a channel", "channel", account.Kind,

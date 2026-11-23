@@ -898,9 +898,10 @@ In a channel an agent config answers through `chat_channels`, a call of a tool y
 When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
 ### A STOP on a line is recorded before its delivery is answered
 
-A STOP, START or HELP texted to a line connected under `/v1/agents/channels` is recorded before
-the router answers the provider's webhook. When the opt-out cannot be stored, the delivery is answered 500 and its
-message is not taken, so the provider's next delivery records it and confirms it once.
+A STOP or START texted to a line connected under `/v1/agents/channels` is recorded in the same transaction that takes
+its message, before the router answers the provider's webhook, and a provider hanging up on a slow delivery does not
+cut the write. When the opt-out cannot be stored, the delivery is answered 500 and its message is not taken, so the
+provider's next delivery records it and confirms it once (AI-3490).
 
 ### An SMS reply sets its price aside before it is sent
 
