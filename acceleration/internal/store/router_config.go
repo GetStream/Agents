@@ -30,14 +30,18 @@ type RouterConfig struct {
 	// The option blocks, one per routed modality. They are the routing package's own
 	// types rather than copies of them, so what is stored and what reaches a provider
 	// cannot drift apart.
-	STT       options.STT    `bun:"stt,type:jsonb"`
-	TTS       options.TTS    `bun:"tts,type:jsonb"`
-	LLM       options.LLM    `bun:"llm,type:jsonb"`
-	STS       options.STS    `bun:"sts,type:jsonb"`
-	Search    options.Search `bun:"search,type:jsonb"`
-	CreatedAt time.Time      `bun:"created_at,notnull"`
-	UpdatedAt time.Time      `bun:"updated_at,notnull"`
-	DeletedAt *time.Time     `bun:"deleted_at"`
+	STT    options.STT    `bun:"stt,type:jsonb"`
+	TTS    options.TTS    `bun:"tts,type:jsonb"`
+	LLM    options.LLM    `bun:"llm,type:jsonb"`
+	STS    options.STS    `bun:"sts,type:jsonb"`
+	Search options.Search `bun:"search,type:jsonb"`
+	// SyncHash is a fingerprint of the file the CLI last synced onto this config
+	// (20270201000800_connector_router_sync_hash.sql), as AgentConfig.SyncHash is for a
+	// directory. Empty if it was never synced, or was written since by anything that is not a sync.
+	SyncHash  string     `bun:"sync_hash,notnull"`
+	CreatedAt time.Time  `bun:"created_at,notnull"`
+	UpdatedAt time.Time  `bun:"updated_at,notnull"`
+	DeletedAt *time.Time `bun:"deleted_at"`
 }
 
 // Validate refuses a config the table would refuse.
@@ -107,7 +111,7 @@ func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error 
 		return tx.NewUpdate().Model(config).
 			With("was", was).
 			TableExpr("was").
-			Column("name", "stt", "tts", "llm", "sts", "search", "updated_at").
+			Column("name", "stt", "tts", "llm", "sts", "search", "sync_hash", "updated_at").
 			Where("rc.id = ?", config.ID).
 			Where("rc.customer_id = ?", config.CustomerID).
 			Returning("was.name").

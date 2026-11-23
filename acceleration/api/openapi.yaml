@@ -3548,6 +3548,10 @@ components:
         setup:
           $ref: '#/components/schemas/ConnectorSetup'
           description: What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
+        sync_hash:
+          description: The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+          readOnly: true
+          type: string
       required:
         - id
         - revision
@@ -4688,6 +4692,12 @@ components:
           nullable: true
           type: array
           uniqueItems: true
+        sync_hash:
+          description: 'The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.'
+          maxLength: 128
+          pattern: ^[!-~]*$
+          patternDescription: printable ASCII without a space
+          type: string
       required:
         - id
         - name
@@ -8714,6 +8724,10 @@ components:
           $ref: '#/components/schemas/StsOptions'
         stt:
           $ref: '#/components/schemas/SttOptions'
+        sync_hash:
+          description: The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+          readOnly: true
+          type: string
         tts:
           $ref: '#/components/schemas/TtsOptions'
         updated_at:
@@ -8738,6 +8752,12 @@ components:
           $ref: '#/components/schemas/StsOptions'
         stt:
           $ref: '#/components/schemas/SttOptions'
+        sync_hash:
+          description: The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+          maxLength: 128
+          pattern: ^[!-~]*$
+          patternDescription: printable ASCII without a space
+          type: string
         tts:
           $ref: '#/components/schemas/TtsOptions'
       required:

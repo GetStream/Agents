@@ -784,6 +784,7 @@ type RouterConfig struct {
 	Sts       *StsOptions    `json:"sts,omitempty"`
 	Stt       *SttOptions    `json:"stt,omitempty"`
 	Tts       *TtsOptions    `json:"tts,omitempty"`
+	SyncHash  string         `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync."`
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
