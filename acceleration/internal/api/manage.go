@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -22,6 +23,14 @@ const manageKeyHeader = "X-Manage-Key"
 // and no customer at all.
 var manageSecurity = []map[string][]string{{"ManageKey": {}}}
 
+// activityKeyHeader carries the key a job reads every organization's activity with, and
+// nothing else.
+const activityKeyHeader = "X-Activity-Key"
+
+// activitySecurity marks an activity read as Stream staff's, reached with the ops key or the
+// activity key and no customer at all.
+var activitySecurity = []map[string][]string{{"OpsKey": {}}, {"ActivityKey": {}}}
+
 // staffTag keeps an operation out of every generated SDK: it is Stream's, not a customer's.
 const staffTag = "Staff"
 
@@ -38,15 +47,56 @@ var (
 	errActorName = invalidRequest(actorNameHeader + " holds a % that is not percent-encoded UTF-8")
 )
 
-// staffKey is the header and the key an operation is reached with, when it is staff's.
-func (s *Server) staffKey(operation *huma.Operation) (header, key string, staff bool) {
-	switch staffScheme(operation) {
-	case "OpsKey":
-		return opsKeyHeader, s.opsKey, true
-	case "ManageKey":
-		return manageKeyHeader, s.manageKey, true
+// staffKey is a header and the key a staff operation takes in it.
+type staffKey struct{ header, key string }
+
+// staffKeys is every header and key a staff operation is reached with: the key of each of its
+// schemes, and for ActivityKey the activity key and the one being rotated out. It is empty for
+// every other operation.
+func (s *Server) staffKeys(operation *huma.Operation) []staffKey {
+	if !staffOperation(operation) {
+		return nil
 	}
-	return "", "", false
+	var keys []staffKey
+	for _, requirement := range operation.Security {
+		for scheme := range requirement {
+			switch scheme {
+			case "OpsKey":
+				keys = append(keys, staffKey{opsKeyHeader, s.opsKey})
+			case "ManageKey":
+				keys = append(keys, staffKey{manageKeyHeader, s.manageKey})
+			case "ActivityKey":
+				for _, key := range s.activityKeys {
+					keys = append(keys, staffKey{activityKeyHeader, key})
+				}
+			}
+		}
+	}
+	return keys
+}
+
+// heldStaffKey reports whether the call carries one of keys in its header. Every key is
+// compared, in constant time, and an empty one matches nothing, so a scheme whose key is
+// unset is off.
+func heldStaffKey(ctx huma.Context, keys []staffKey) bool {
+	held := 0
+	for _, want := range keys {
+		if want.key != "" {
+			held |= subtle.ConstantTimeCompare([]byte(ctx.Header(want.header)), []byte(want.key))
+		}
+	}
+	return held == 1
+}
+
+// staffHeaders names the headers keys are taken in, each once, for the 401 that asks for one.
+func staffHeaders(keys []staffKey) string {
+	var headers []string
+	for _, key := range keys {
+		if !slices.Contains(headers, key.header) {
+			headers = append(headers, key.header)
+		}
+	}
+	return strings.Join(headers, " or ")
 }
 
 // staffScheme is the scheme a staff operation is reached with, OpsKey or ManageKey, and
@@ -69,25 +119,25 @@ func staffOperation(operation *huma.Operation) bool {
 }
 
 // requireStaffKey answers a staff operation called without its key with a 401, whatever
-// customer credential came with it: the two keys are not interchangeable, and neither is an
-// app's. An ops operation on a deployment with no ops key is answered the same, since nobody
+// customer credential came with it: the keys are not interchangeable, and neither is an
+// app's. The activity key reaches only the operations under activitySecurity. An ops operation on a deployment with no ops key is answered the same, since nobody
 // is staff there. A management operation on a deployment with no manage key answers 404
 // not_configured, as the rest of a feature the deployment lacks does, and one called with
 // the key must name its actor, who is what ActorFrom and managedBy answer from then on.
 func (s *Server) requireStaffKey(api huma.API) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		header, key, staff := s.staffKey(ctx.Operation())
-		if !staff {
+		keys := s.staffKeys(ctx.Operation())
+		if len(keys) == 0 {
 			next(ctx)
 			return
 		}
 		manage := staffScheme(ctx.Operation()) == "ManageKey"
-		if manage && key == "" {
+		if manage && s.manageKey == "" {
 			writeOperationError(ctx, errNoManagement)
 			return
 		}
-		if key == "" || subtle.ConstantTimeCompare([]byte(ctx.Header(header)), []byte(key)) != 1 {
-			writeOperationError(ctx, unauthenticated("this operation is Stream staff's: it needs "+header))
+		if !heldStaffKey(ctx, keys) {
+			writeOperationError(ctx, unauthenticated("this operation is Stream staff's: it needs "+staffHeaders(keys)))
 			return
 		}
 		if !manage {

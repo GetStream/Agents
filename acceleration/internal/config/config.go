@@ -302,6 +302,13 @@ type Auth struct {
 	// limits. Empty turns those endpoints off. It decides what customers pay, so it is never
 	// the ops key.
 	ManageKey string `koanf:"manage_key"`
+	// ActivityKey is what a job reading every organization's activity sends as
+	// X-Activity-Key. It reads the two activity paths and nothing else, so it is never the ops
+	// or the manage key. Empty turns it off; the ops key still reads them.
+	ActivityKey string `koanf:"activity_key"`
+	// ActivityKeyPrevious is the activity key being rotated out, still taken until the job
+	// sends the new one. Empty takes only ActivityKey.
+	ActivityKeyPrevious string `koanf:"activity_key_previous"`
 }
 
 // RateLimit caps what one of a customer's end users may spend in a day, for a customer
@@ -613,6 +620,9 @@ var variables = map[string]string{
 	"stream.tenancy":       "ROUTER_STREAM_TENANCY",
 	"stream.fallback":      "ROUTER_STREAM_FALLBACK",
 	"stream.app_id":        "ROUTER_STREAM_APP_ID",
+
+	"auth.activity_key":          "ROUTER_AUTH_ACTIVITY_KEY",
+	"auth.activity_key_previous": "ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS",
 
 	"stream.mint_url":   "ROUTER_STREAM_MINT_URL",
 	"stream.mint_token": "ROUTER_STREAM_MINT_TOKEN",
@@ -1000,6 +1010,9 @@ func (c Config) validate() error {
 		return errors.New("config: auth.manage_key (ROUTER_AUTH_MANAGE_KEY) is the same as auth.ops_key " +
 			"(ROUTER_AUTH_OPS_KEY): give the management API a key of its own")
 	}
+	if err := c.Auth.validateActivityKeys(); err != nil {
+		return err
+	}
 	if err := c.validateUsage(); err != nil {
 		return err
 	}
@@ -1032,6 +1045,30 @@ func (c Config) validate() error {
 
 // validateUsage refuses a usage service the router could not ship to. A token without a URL is
 // allowed, since unsetting the URL alone is how shipping is stopped; the router warns of it.
+// validateActivityKeys refuses an activity key that is also the ops or the manage key: a job
+// holding it would then reach every path that key does. The error names the settings, never
+// a key.
+func (a Auth) validateActivityKeys() error {
+	for _, activity := range []struct{ setting, key string }{
+		{"auth.activity_key (ROUTER_AUTH_ACTIVITY_KEY)", a.ActivityKey},
+		{"auth.activity_key_previous (ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS)", a.ActivityKeyPrevious},
+	} {
+		if activity.key == "" {
+			continue
+		}
+		for _, staff := range []struct{ setting, key string }{
+			{"auth.ops_key (ROUTER_AUTH_OPS_KEY)", a.OpsKey},
+			{"auth.manage_key (ROUTER_AUTH_MANAGE_KEY)", a.ManageKey},
+		} {
+			if activity.key == staff.key {
+				return fmt.Errorf("config: %s is the same as %s: the activity key reads activity only, so it "+
+					"is a key of its own", activity.setting, staff.setting)
+			}
+		}
+	}
+	return nil
+}
+
 func (c Config) validateUsage() error {
 	if c.Usage.URL == "" {
 		if c.Usage.RedisURL != "" {
@@ -1196,6 +1233,8 @@ func (c Config) export() error {
 		"auth.kms_key":                  c.Auth.KMSKey,
 		"auth.ops_key":                  c.Auth.OpsKey,
 		"auth.manage_key":               c.Auth.ManageKey,
+		"auth.activity_key":             c.Auth.ActivityKey,
+		"auth.activity_key_previous":    c.Auth.ActivityKeyPrevious,
 		"auth.proxy_declares_kind":      fmt.Sprint(c.Auth.ProxyDeclaresKind),
 		"stream.api_key":                c.Stream.APIKey,
 		"stream.api_secret":             c.Stream.APISecret,

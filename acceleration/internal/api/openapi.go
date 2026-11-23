@@ -47,6 +47,14 @@ var securitySchemes = map[string]*huma.SecurityScheme{
 		Description: "Stream staff's own key, for reviewing 10DLC use cases across apps. It is " +
 			"held by Stream's internal tools and never by an app or a browser.",
 	},
+	"ActivityKey": {
+		Type: "apiKey",
+		In:   "header",
+		Name: activityKeyHeader,
+		Description: "Stream staff's read-only key for organizations' activity, held by the job that " +
+			"reads it. It reaches listActivity and getOrganizationActivity and nothing else, and is " +
+			"never held by an app or a browser.",
+	},
 	"ManageKey": {
 		Type: "apiKey",
 		In:   "header",
