@@ -129,7 +129,7 @@ func (i *Inworld) Preview(ctx context.Context, id string) (Speech, error) {
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Speech{}, refused(inworld.ProviderName, response)
+		return Speech{}, previewRefused(inworld.ProviderName, response)
 	}
 	var preview struct {
 		AudioContent string `json:"audioContent"`
@@ -142,7 +142,7 @@ func (i *Inworld) Preview(ctx context.Context, id string) (Speech, error) {
 		return Speech{}, stack.Wrap(fmt.Errorf("voices: inworld preview: decode audio: %w", err))
 	}
 	if len(audio) == 0 {
-		return Speech{}, stack.Wrap(fmt.Errorf("voices: inworld has no sample of %s", id))
+		return Speech{}, stack.Wrap(fmt.Errorf("%w: inworld, %s", ErrNoSample, id))
 	}
 	return Speech{Audio: audio, ContentType: "audio/mpeg"}, nil
 }

@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- channel_thread_people and channel_thread_starters were split from channel_threads only so a
 -- rollback could still read it; the store reads with unknown columns discarded, so they are

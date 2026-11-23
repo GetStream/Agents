@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -1231,9 +1232,10 @@ func (s *AuthorizationsSuite) TestAConsentWithoutAClientForAPublicClientAsksForN
 	s.NotContains(failure.Message, "client_secret")
 }
 
-// TestAConsentThatFailsForAnotherReasonKeepsTheGenericMessage (AI-1357): only a missing client
-// is answered with the ways to give one; a provider the router cannot reach is not.
-func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonKeepsTheGenericMessage() {
+// TestAConsentThatFailsForAnotherReasonSaysNothingOfIt (AI-1357, AI-3575): only a missing
+// client is answered with the ways to give one; a provider the router cannot reach is a 500
+// that names none of its endpoints.
+func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonSaysNothingOfIt() {
 	id := "custom_fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	// 10.0.0.1 is a private address, which the scheme's public-endpoint check refuses
 	// (loopbackOrPublic); the client is there, so what fails is not a missing one.
@@ -1246,10 +1248,57 @@ func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonKeepsTheGener
 
 	status, failure := s.consentFailure(id)
 
+	s.Equal(http.StatusInternalServerError, status)
+	s.Equal(somethingWentWrong, failure.Message)
+	s.Equal("internal_error", failure.Code)
+}
+
+// TestAConsentItsOwnManifestCannotStartIsRefused: a custom connector naming an issuer whose
+// metadata offers no PKCE S256 is the app's to correct, so it is a 400 in our words, naming no
+// URL, where an endpoint egress refuses is a 500
+// (TestAConsentThatFailsForAnotherReasonSaysNothingOfIt).
+func (s *AuthorizationsSuite) TestAConsentItsOwnManifestCannotStartIsRefused() {
+	var issuer *httptest.Server
+	// httptest servers share one certificate, so the scheme's client trusts this one too.
+	issuer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer": issuer.URL, "authorization_endpoint": issuer.URL + "/authorize", "token_endpoint": issuer.URL + "/token",
+			"response_types_supported": []string{"code"}, "code_challenge_methods_supported": []string{"plain"},
+		})
+	}))
+	s.T().Cleanup(issuer.Close)
+	id := "custom_fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	yaml := strings.Replace(s.fakeManifest(id, 1, "customer", ""), "endpoints:\n", "endpoints:\n  issuer: "+issuer.URL+"\n", 1)
+	manifest, err := core.ParseManifest([]byte(yaml))
+	s.Require().NoError(err)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+	s.Require().NoError(err)
+	s.putClient(id, s.provider.ClientSecret)
+
+	status, failure := s.consentFailure(id)
+
 	s.Equal(http.StatusBadRequest, status)
-	s.True(strings.HasPrefix(failure.Message, "the provider's consent could not be started: "), failure.Message)
-	s.NotContains(failure.Message, "oauth-client")
 	s.Equal("invalid_request", failure.Code)
+	s.Equal("the provider's consent could not be started: the authorization server does not support PKCE S256", failure.Message)
+}
+
+// TestAConsentWhoseOAuthClientReadFailsSaysNothingOfTheDatabase (AI-3575): the app's client
+// is read from the database as the consent begins, and a read that fails is a 500, not a 400
+// quoting the query.
+func (s *AuthorizationsSuite) TestAConsentWhoseOAuthClientReadFailsSaysNothingOfTheDatabase() {
+	connector := s.connectorRegistering("customer", "")
+	s.putClient(connector, s.provider.ClientSecret)
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(connector), &created))
+	s.failQueries("connector_oauth_clients")
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/connections/"+created.ID+"/authorizations", nil)
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	s.Contains(string(payload), `"code":"internal_error"`)
+	s.NotContains(string(payload), "connector_oauth_clients")
+	s.NotContains(string(payload), "deadline")
 }
 
 // TestAConsentWithoutAClientTheAppCannotGiveAnswersAsBefore (AI-1357), the control: a

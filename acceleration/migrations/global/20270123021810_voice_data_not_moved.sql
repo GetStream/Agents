@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- A voice's samples and bindings are no longer carried by a move (store.dataTables): the audio
 -- is in this deployment's bucket and the clone in this deployment's account at the provider.

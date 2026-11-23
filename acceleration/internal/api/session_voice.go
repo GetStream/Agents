@@ -122,8 +122,10 @@ func (s *Server) stopSessionVoice(ctx context.Context, request *sessionVoiceRequ
 	if failure != nil {
 		return nil, failure
 	}
+	// Nothing the caller asked for can be refused here: what fails is opening the agent in
+	// writing, whose model is read from the database and opened at its vendor.
 	if err := found.StopVoice(ctx); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &sessionVoiceResponse{Body: sessionOf(ctx, found)}, nil
 }

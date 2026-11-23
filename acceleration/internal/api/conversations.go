@@ -9,7 +9,9 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 func (s *Server) getConversationMessages(ctx context.Context, req *getConversationMessagesRequest) (*getConversationMessagesResponse, error) {
@@ -25,12 +27,20 @@ func (s *Server) getConversationMessages(ctx context.Context, req *getConversati
 		return nil, invalidRequest(err.Error())
 	}
 	page, err := service.HistoryForCaller(ctx, owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
+	if refused, ok := errors.AsType[conversation.RefusedRead](err); ok {
+		return nil, invalidRequest(refused.Error())
 	}
-	b, _ := json.Marshal(page)
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(page)
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
 	var result map[string]any
-	_ = json.Unmarshal(b, &result)
+	if err := json.Unmarshal(b, &result); err != nil {
+		return nil, stack.Wrap(err)
+	}
 	return &getConversationMessagesResponse{Body: result}, nil
 }
 
@@ -49,7 +59,7 @@ func (s *Server) getConversationCommand(ctx context.Context, req *getConversatio
 	}
 	receipt, err := service.CommandForCaller(ctx, owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
 	if err != nil {
-		return nil, errUnknownCommand
+		return nil, unknownOr(err, conversation.ErrCommandNotFound, errUnknownCommand)
 	}
 	return &getConversationCommandResponse{Body: receiptOf(receipt)}, nil
 }

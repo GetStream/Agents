@@ -85,7 +85,7 @@ func (s *PhoneSuite) TestSearchingEveryVendorSaysNoneCanBeAsked() {
 	var answered ErrorResponse
 	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(answered.Error.Message, "no vendor has the credentials")
+	s.Equal(errPhoneNotConfigured.Message, answered.Error.Message)
 	s.Equal(codeNotConfigured, answered.Error.Code)
 }
 

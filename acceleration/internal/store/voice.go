@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
@@ -157,7 +158,7 @@ func (r *Voices) Get(ctx context.Context, customerID, id string) (Voice, error) 
 
 // GetByName returns the voice a customer calls this. It is what lets a session name a voice
 // the way a person would rather than by id. A name the customer has no voice by is cached as
-// that too, since it is usually one of a provider's own.
+// that too, for missTTL, since it is usually one of a provider's own.
 func (r *Voices) GetByName(ctx context.Context, customerID, name string) (Voice, error) {
 	if customerID == "" || name == "" {
 		return Voice{}, stack.Wrap(errors.New("store: a customer and a voice name are required"))
@@ -165,6 +166,7 @@ func (r *Voices) GetByName(ctx context.Context, customerID, name string) (Voice,
 	answer, err := cached(ctx, r.store, voiceNameKey(customerID, name), func(ctx context.Context) (found[Voice], error) {
 		voice, err := r.where(ctx, customerID, "name", name)
 		if errors.Is(err, ErrNoVoice) {
+			rueidisaside.OverrideCacheTTL(ctx, missTTL)
 			return found[Voice]{}, nil
 		}
 		return found[Voice]{Value: voice, Found: err == nil}, err

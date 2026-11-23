@@ -107,3 +107,23 @@ func (s *ReviewsSuite) TestAnotherAppsBadCallsAreNotRead() {
 		"/v1/agents/calls/reviews/analysis", s.analysis("nobody/none"), &analysis))
 	s.Zero(analysis.CallsRead)
 }
+
+func (s *ReviewsSuite) TestAnAnalystThatFailsIsUnavailableInNoneOfItsWords() {
+	s.reviewed(1, time.Minute)
+
+	status, body := s.serverClient.call(http.MethodPost,
+		"/v1/agents/calls/reviews/analysis", s.analysis("failing/failing-model"))
+
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.NotContains(string(body), "the provider is down")
+}
+
+func (s *ReviewsSuite) TestAnAnalystNoModelAnswersToIsRefusedNamingIt() {
+	s.reviewed(1, time.Minute)
+
+	status, failure := s.serverClient.failure(http.MethodPost,
+		"/v1/agents/calls/reviews/analysis", s.analysis("nowhere/nothing"))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "nowhere")
+}

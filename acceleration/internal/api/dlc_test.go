@@ -366,6 +366,66 @@ func (s *DLCSuite) TestAReportNotSignedByTheVendorIsRefused() {
 	s.Equal(http.StatusUnauthorized, s.report(`{"campaignId":"C1"}`, stranger))
 }
 
+// Why a report is refused can name the deployment's settings: it goes to the log, and the
+// sender, which needs no credential, is told only that the report was refused.
+func (s *DLCSuite) TestARefusedReportIsAnsweredWithoutTheReason() {
+	_, stranger, err := ed25519.GenerateKey(rand.Reader)
+	s.Require().NoError(err)
+	body := `{"campaignId":"C1"}`
+	seconds := strconv.FormatInt(time.Now().Unix(), 10)
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+dlc.HookPath, bytes.NewBufferString(body))
+	s.Require().NoError(err)
+	request.Header.Set("Telnyx-Timestamp", seconds)
+	request.Header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
+		ed25519.Sign(stranger, []byte(seconds+"|"+body))))
+	before := len(s.logged.String())
+
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	answered, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusUnauthorized, response.StatusCode)
+	var failure ErrorResponse
+	s.Require().NoError(json.Unmarshal(answered, &failure), string(answered))
+	s.Equal("that is not a report from the registrar", failure.Error.Message)
+	s.NotContains(string(answered), "dlc:")
+	s.Contains(s.logged.String()[before:], "dlc: refused", "the operator still learns why")
+}
+
+// A number the app does not hold is the app's to correct, and the answer names it.
+func (s *DLCSuite) TestAUseCaseNamingANumberTheAppDoesNotHoldIsRefusedNamingIt() {
+	held := store.PhoneNumber{CustomerID: s.customerID(), E164: s.utils.number(), Vendor: "telnyx"}
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &held))
+	stranger := s.utils.number()
+	request := completeUseCase("support")
+	request.Numbers = []string{held.E164, stranger}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/phone/use-cases", request)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, stranger+" is not a number this app holds")
+	s.NotContains(failure, "store:")
+}
+
+// Assigning numbers that the database fails is the router's failure: a 500 that says nothing
+// of the database, not a 400 the app could not act on.
+func (s *DLCSuite) TestAUseCaseWhoseNumbersTheDatabaseFailsIsAnInternalError() {
+	s.failQueries("dlc_use_case_id = NULL")
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/use-cases", completeUseCase("support"))
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	var failure ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &failure), string(payload))
+	s.Equal("internal_error", failure.Error.Code)
+	s.Equal(somethingWentWrong, failure.Error.Message)
+	for _, internal := range []string{"store:", "dlc:", "deadline", "assign numbers"} {
+		s.NotContains(string(payload), internal)
+	}
+}
+
 func (s *DLCSuite) TestOnlyStreamStaffReviewUseCases() {
 	s.Equal(http.StatusUnauthorized, s.serverClient.do(http.MethodGet, "/v1/ops/use-cases", nil, nil),
 		"an app's own backend is not staff")

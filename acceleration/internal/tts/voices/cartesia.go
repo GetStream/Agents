@@ -281,7 +281,7 @@ func (c *Cartesia) Preview(ctx context.Context, id string) (Speech, error) {
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Speech{}, refused(cartesia.ProviderName, response)
+		return Speech{}, previewRefused(cartesia.ProviderName, response)
 	}
 	var voice struct {
 		Preview string `json:"preview_file_url"`
@@ -290,7 +290,7 @@ func (c *Cartesia) Preview(ctx context.Context, id string) (Speech, error) {
 		return Speech{}, stack.Wrap(fmt.Errorf("voices: cartesia preview: decode: %w", err))
 	}
 	if voice.Preview == "" {
-		return Speech{}, stack.Wrap(fmt.Errorf("voices: cartesia has published no sample of %s", id))
+		return Speech{}, stack.Wrap(fmt.Errorf("%w: cartesia, %s", ErrNoSample, id))
 	}
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+c.options.APIKey)
