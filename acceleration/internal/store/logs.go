@@ -45,6 +45,11 @@ var providerCredential = regexp.MustCompile(`\bsk-[a-zA-Z0-9_-]{8,}`)
 // stays and the value becomes "[redacted]", so the JSON a log or a stored text holds stays valid.
 var jsonToken = regexp.MustCompile(`(?i)(["\x27]token["\x27]\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`)
 
+// jsonTokenKey is a key of a JSON object, as decoded, that jsonToken takes in the text as written:
+// "token", or one that ends in a quote and token (x'token, x"token), whose quote jsonToken reads as
+// the start of the key.
+var jsonTokenKey = regexp.MustCompile(`(?i)(?:^|["\x27])token$`)
+
 // shapedCredential is a rule and the literals one of which a text holds if the rule can match
 // it. The rule is run only then, so a line that passes mayHoldCredential for its "key" or "token" is
 // not scanned once for every shape it does not hold.
@@ -257,7 +262,7 @@ func redactLegacyCredentials(text string) string {
 }
 
 // jsonFrame is the object or array redactJSONText is inside of. In an object, key is true when its
-// next string is a key, and token when the value after the key "token" is next.
+// next string is a key, and token when the value after a jsonTokenKey key is next.
 type jsonFrame struct {
 	object, key, token bool
 }
@@ -269,8 +274,8 @@ const jsonRedacted = `"[redacted]"`
 // so whatever reads it back as JSON still can. A key that ends in one of credentialNames
 // (password, client_secret, x-api-key) keeps its name, and its value, whether a string, a number,
 // an object or an array, becomes "[redacted]"; true, false and null hold no credential and stay,
-// as a value that is a word does in credentialText. A "token" key does the same for a string
-// value, as jsonToken does. Every other string, key or value, goes through redactJSONString;
+// as a value that is a word does in credentialText. A "token" key (see jsonTokenKey) does the same
+// for a string value, as jsonToken does. Every other string, key or value, goes through redactJSONString;
 // nested is true for a text that is itself a string of a JSON text, whose strings are read by
 // the rules only. It is false when the text cannot be read, and the caller uses the rules on it.
 func redactJSONText(text string, nested bool) (string, bool) {
@@ -313,7 +318,7 @@ func redactJSONText(text string, nested bool) (string, bool) {
 			start := prev + strings.IndexByte(text[prev:end], '"')
 			switch {
 			case frame != nil && frame.key:
-				frame.key, frame.token = false, strings.EqualFold(typed, "token")
+				frame.key, frame.token = false, jsonTokenKey.MatchString(typed)
 				if edited, changed := redactJSONString(text[start:end], typed, nested); changed {
 					edits = append(edits, edit{start, end, edited})
 				}

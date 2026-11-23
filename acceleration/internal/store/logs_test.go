@@ -480,6 +480,8 @@ func TestRedactLogTextKeepsJSONValidForEveryCredentialKeyword(t *testing.T) {
 		"duplicate key":              `{"password":"a","password":"` + secret + `"}`,
 		"strings after a credential": `{"password":"` + secret + `","m":"password=` + secret + `","k":["Bearer ` + secret + `"]}`,
 		"a key after a credential":   `{"password":"` + secret + `","Bearer ` + secret + `":1}`,
+		"a key ending in 'token":     `{"x'token":"` + secret + `"}`,
+		"a key ending in \"token":    `{"a":"x","x\"Token" : "` + secret + `"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.True(t, json.Valid([]byte(text)), text)
@@ -506,6 +508,7 @@ func TestRedactLogTextKeepsWhatIsNoCredentialInJSON(t *testing.T) {
 		"{\"a\":\"line\u2028sep\",\"k\":\"key\"}",
 		`{"secretary":"office","passwords":["a"],"keyboard":"b","cookies":3,"secret_name":"s"}`,
 		`{"token":5,"token_count":"7","max_tokens":256}`,
+		`{"mytoken":"kept","token'":"kept","x'tokens":"kept"}`,
 		`{"token":null,"a":"b"}`,
 		`{"token":["x"],"a":"password"}`,
 		`{"messages":[{"role":"user","content":"my secret is a word"}]}`,
