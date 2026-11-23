@@ -1,2 +1,6 @@
 plugins/getstream/vision_agents/plugins/getstream/sfu_events.py linguist-generated=true
+# Kept for branches from before AI-3557, which still append an SDK note here; union keeps both sides on a local merge.
+.claude/skills/sdk/SKILL.md merge=union
+# Kept for branches from before AI-3557 and for the breaking-change lines under `# Unreleased`; union keeps both sides on a local merge.
+CHANGELOG.md merge=union
 sdks/go/acceleration/generated.go linguist-generated=true
