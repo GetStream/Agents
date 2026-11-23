@@ -1,8 +1,6 @@
 -- +goose Up
 SET LOCAL lock_timeout = '5s';
 
-SET LOCAL lock_timeout = '5s';
-
 -- A link code is claimed on the app's own lines, so it needs to be unique only within the app:
 -- keyed on the code alone, every app drew from one space of codes, and a code one app held
 -- failed another app's link. The new key refuses nothing the old one let through, so an older
@@ -14,8 +12,6 @@ ALTER TABLE channel_links
     ADD CONSTRAINT channel_links_pkey PRIMARY KEY (customer_id, code);
 
 -- +goose Down
-SET LOCAL lock_timeout = '5s';
-
 SET LOCAL lock_timeout = '5s';
 
 -- Two apps may hold one code now: all but one app's are dropped, and those links fail.
