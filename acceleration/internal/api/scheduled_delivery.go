@@ -536,23 +536,19 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 // turn that finished or failed for another reason, one still running at scheduledReplyWindow, or a
 // session that ended. How the turn ended is read from the conversation (turnRefusal), never from
 // the events alone, which a watcher that falls behind loses. A follow-up the conversation already
-// holds runs nothing, so nothing is waited for: it stands as it is, except one whose turn was
-// refused for money while no attempt watched it, which fails under the money too, and a rerun
-// after a refusal for money (replyCommand) that failed too, which left the user nothing again.
-// That one fails the attempt under the earlier reason, tried again until the run's attempts are
-// spent, as a text channel's is.
+// holds runs nothing: its turn, which an earlier attempt began, is waited out the same, and one
+// already ended settles at once, failing under the money when it was refused for money while no
+// attempt watched it. A rerun after a refusal for money (replyCommand) that failed too left the
+// user nothing again: it fails the attempt under the earlier reason, tried again until the run's
+// attempts are spent, as a text channel's is.
 func (s *Server) followUpInConversation(ctx context.Context, found *session.Session, delivery scheduledDelivery) error {
 	if err := refusedAgain(found, delivery); err != nil {
 		return err
 	}
-	_, _, known := found.FollowUpReply(delivery.CommandID)
 	events, detach := found.Watch()
 	defer detach()
 	if err := s.followUpWithin(ctx, found, delivery); err != nil {
 		return err
-	}
-	if known {
-		return turnRefusal(found, delivery.CommandID)
 	}
 	deadline := time.Now().Add(scheduledReplyWindow)
 	ticker := time.NewTicker(s.replyPoll)

@@ -1043,6 +1043,35 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnCutShortIsNotDelivered() {
 	}
 }
 
+// The retry of a conversation delivery cut short while its turn runs waits that turn out, as the
+// attempt it follows did, rather than settling delivered on a turn that may still be refused
+// (AI-3594 R1.1).
+func (s *TelnyxUnpaidSuite) TestAConversationRetryWaitsOutTheTurnAnEarlierAttemptBegan() {
+	ctx, cancel := context.WithCancel(context.Background())
+	found, done := s.heldConversationTurn(ctx)
+	cancel()
+	s.Require().ErrorIs(<-done, context.Canceled)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: found.Spec().Caller.UserID,
+		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
+	retried := make(chan error, 1)
+	go func() {
+		_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+			store.ScheduledTaskDeliveredConversation)
+		retried <- err
+	}()
+
+	s.Never(func() bool { return len(retried) > 0 }, time.Second, 20*time.Millisecond, "settled while the turn ran")
+	s.holding.answers()
+	select {
+	case err := <-retried:
+		s.NoError(err)
+		state, _, _ := found.FollowUpReply("st_run")
+		s.Equal("completed", state, "settled before the turn ended")
+	case <-time.After(deliveryWait):
+		s.Fail("the retry never settled once the turn ended")
+	}
+}
+
 // A conversation turn whose session ends while it runs is delivered, as it always was: nothing
 // more comes from the session to say otherwise.
 func (s *TelnyxUnpaidSuite) TestAConversationTurnWhoseSessionEndsIsDelivered() {
