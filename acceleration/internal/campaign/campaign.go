@@ -90,7 +90,8 @@ type Dial struct {
 }
 
 // Dialer places a call and returns once it is over. An error is a dial that could not be
-// tried; a refusal is a Dialed.
+// tried; a refusal is a Dialed. A call that ended with no outcome, its CallID set, is read
+// from the phone's record by the runner.
 type Dialer interface {
 	Dial(ctx context.Context, dial Dial) (Dialed, error)
 }
@@ -367,7 +368,7 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 	for number := 1; ; number++ {
 		dialed, err := r.ring(ctx, current, contact, step, number)
 		if err != nil {
-			r.logger.Error("could not record a campaign dial", "contact", contact.ID, "error", err)
+			r.logger.Error("could not record a campaign dial or read how it ended", "contact", contact.ID, "error", err)
 			return
 		}
 		if dialed.Result == Paused {
@@ -454,6 +455,17 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	}
 
 	r.countDial(campaign, dialed, err)
+
+	// Unknown would ring a double dial's person again at once, maybe just after they hung up,
+	// so an outcome that cannot be read leaves the dial unended and the contact leased: the
+	// router that takes it over reads the outcome again and never dials.
+	if dialed.CallID != "" && dialed.Outcome == "" && (dialed.Result == "" || dialed.Result == Voicemail) {
+		read, err := callOutcome(context.WithoutCancel(ctx), r.store, campaign.CustomerID, dialed.CallID)
+		if err != nil {
+			return Dialed{}, err
+		}
+		dialed.Outcome = read
+	}
 
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()

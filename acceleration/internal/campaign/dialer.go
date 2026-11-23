@@ -46,7 +46,8 @@ func NewPhoneDialer(phone *phone.Service, sessions *session.Manager, store *stor
 }
 
 // Dial places one call and stays on the line until the conversation is over. The agent config
-// is read at each dial, so a change to it reaches the next person rung.
+// is read at each dial, so a change to it reaches the next person rung. How a call that held
+// a session ended is left for the runner to read.
 func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	config, err := d.store.AgentConfigs.Get(ctx, dial.Campaign.CustomerID, cmp.Or(dial.Step.ConfigID, dial.Campaign.ConfigID))
 	if errors.Is(err, store.ErrNoAgentConfig) {
@@ -103,8 +104,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	if created.EndReason() == session.EndVoicemail {
 		dialed.Result = Voicemail
 	}
-	dialed.Outcome, err = callOutcome(context.WithoutCancel(ctx), d.store, dial.Campaign.CustomerID, placed.SessionID)
-	return dialed, err
+	return dialed, nil
 }
 
 // hold waits for the conversation to end, and ends it if nothing else does.

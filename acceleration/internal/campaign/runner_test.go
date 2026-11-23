@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
@@ -33,6 +35,8 @@ type RunnerSuite struct {
 	classifier  *stubClassifier
 	runner      *Runner
 	customerID  string
+	// failing fails the next reads of the phone's call record.
+	failing *failingCallReads
 }
 
 func TestRunnerSuite(t *testing.T) {
@@ -49,6 +53,8 @@ func (s *RunnerSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
+	s.failing = &failingCallReads{}
+	opened.GlobalDB().AddQueryHook(s.failing)
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
 }
 
@@ -64,6 +70,7 @@ func (s *RunnerSuite) SetupTest() {
 	s.classifier = &stubClassifier{outcome: OutcomeSuccess}
 	s.customerID = uuid.NewString()
 	s.runner = s.newRunner("router-a")
+	s.failing.left.Store(0)
 }
 
 func (s *RunnerSuite) newRunner(owner string) *Runner {
@@ -295,6 +302,38 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	s.Require().NotNil(unanswered.NextAttemptAt)
 	s.Equal(died.Add(3*24*time.Hour), unanswered.NextAttemptAt.UTC())
 	s.Equal("no_answer", attempts[0].CallOutcome)
+}
+
+// A double dial whose first call's outcome cannot be read does not ring again as if nobody
+// answered: the person may just have hung up. The contact stays leased, and the router that
+// takes it over reads the outcome and settles from it without dialing.
+func (s *RunnerSuite) TestADialWhoseOutcomeCannotBeReadIsNotDialedAgainUntilItIsRead() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.failing.left.Store(1)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1)
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt, "the dial is not ended with an outcome nobody read")
+
+	placed := s.clock.now()
+	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
+		CallType: "default", CallID: attempts[0].CallID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
+		PlacedAt: &placed, Outcome: string(outcome.Busy)}))
+	s.clock.advance(lease + time.Minute)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "the outcome read is busy, which is not dialed again at once")
+	settled, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, settled.Stage)
+	s.Equal(2, settled.Attempt)
+	s.Require().Len(attempts, 1)
+	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
 }
 
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
@@ -1097,3 +1136,18 @@ func (s *RunnerSuite) TestACallsOutcomeIsReadFromThePhone() {
 	s.Require().NoError(err)
 	s.Equal(outcome.Unknown, never, "a call the phone kept no row for")
 }
+
+// failingCallReads fails the next left reads of the phone's call record, as a database blip
+// would, by handing them a context that has already ended.
+type failingCallReads struct{ left atomic.Int32 }
+
+func (f *failingCallReads) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.HasPrefix(event.Query, "SELECT") || !strings.Contains(event.Query, `FROM "call_legs"`) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	ended, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return ended
+}
+
+func (*failingCallReads) AfterQuery(context.Context, *bun.QueryEvent) {}
