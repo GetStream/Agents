@@ -1064,6 +1064,5 @@ publishes and nothing is committed back.
 `prepublishOnly` runs `npm run build`: Vite (`vite.config.ts`) builds `dist/`, one module per
 source file, and `tsc` writes the declarations beside them. The build writes the version in
 `package.json`, which semantic-release has just set, into `VERSION`, the release every request
-from Node names in its `User-Agent`. The source names it `__SDK_VERSION__`; the tests and
-examples, which run the source through `tsc` alone, set it from `package.json` with
-`--import ./build/tests/sdk-version.js`.
+from Node names in its `User-Agent`. The source names it `__SDK_VERSION__`; run through `tsc`
+alone, as the tests and examples are, `VERSION` is `0.0.0-development`.

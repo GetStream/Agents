@@ -62,11 +62,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "types": "node scripts/generate.mjs",
     "a2ui": "node scripts/a2ui.mjs",
-    "test": "tsc -p tsconfig.json && node --import ./build/tests/sdk-version.js --test --test-timeout 20000 \"build/tests/*.test.js\"",
-    "test:local": "tsc -p tsconfig.json && node --import ./build/tests/sdk-version.js --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/local.test.js\"",
-    "test:qa": "tsc -p tsconfig.json && node --import ./build/tests/sdk-version.js --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/hosted.test.js\"",
-    "test:integration": "tsc -p tsconfig.json && node --import ./build/tests/sdk-version.js --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/integration.test.js\"",
-    "example": "npm run build && tsc -p tsconfig.json && node --import ./build/tests/sdk-version.js",
+    "test": "tsc -p tsconfig.json && node --test --test-timeout 20000 \"build/tests/*.test.js\"",
+    "test:local": "tsc -p tsconfig.json && node --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/local.test.js\"",
+    "test:qa": "tsc -p tsconfig.json && node --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/hosted.test.js\"",
+    "test:integration": "tsc -p tsconfig.json && node --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/integration.test.js\"",
+    "example": "npm run build && tsc -p tsconfig.json && node",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
