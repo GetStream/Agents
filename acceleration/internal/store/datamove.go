@@ -196,8 +196,7 @@ var dataTables = []dataTable{
 	// they hid and the switches that hid it go with their session.
 	{name: "agent_branch_switches", customer: "customer_id", shard: true},
 	{name: "agent_branch_messages", customer: "customer_id", shard: true},
-	// Nothing points at a log's id, so a copied log is given one of this deployment's
-	// (20261206120000_agent_logs_source_id.sql).
+	// Nothing points at a log's id, so a copied log is given one of this deployment's.
 	{name: "agent_logs", customer: "customer_id", copied: "source_id"},
 	// No foreign key points at a request's id. An agent log row names it as text, and
 	// Store.AgentLog only takes a request's error by that number from a row that carries none of
@@ -231,7 +230,7 @@ var dataTables = []dataTable{
 //
 // isSecret is the one list: the export, the import and the record_data_change trigger
 // (watchDataChanges) all read it. A trigger attached before the list was passed applies the
-// same rule in SQL (20270117000400_record_data_change_secrets.sql): change both together.
+// same rule in SQL (record_data_change's own copy): change both together.
 func isSecret(column string) bool {
 	return strings.HasSuffix(column, "_sealed") || strings.HasSuffix(column, "_secret_hash") ||
 		slices.Contains(oauthSecrets, column)
@@ -240,8 +239,8 @@ func isSecret(column string) bool {
 // oauthSecrets are an OAuth grant's tokens and the state of one under way.
 var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
 
-// retiredTables are tables an export from an older release may carry that this schema dropped
-// (20270112000100_drop_plugin_tables.sql). An import skips their rows, inserts and deletes alike.
+// retiredTables are tables an export from an older release may carry that this schema dropped.
+// An import skips their rows, inserts and deletes alike.
 var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
 
 // DataChange is one thing that happened to one row.
@@ -1828,7 +1827,7 @@ func (t dataTable) identity() string {
 	}
 	// A connector connection arrives without its credentials, so it arrives saying it needs
 	// one, rather than connected with nothing to connect with. Key version 0 and no
-	// expiry are what a connection without credentials holds (20261002193000_connector_connections.sql),
+	// expiry are what a connection without credentials holds,
 	// so the source credentials' key version and expiry do not come along either, on an import or
 	// on every change applied after it. Nor does its provider unit: a row in an import is
 	// whatever the importer wrote, and a unit stored from it would route another customer's
@@ -1840,7 +1839,7 @@ func (t dataTable) identity() string {
 	}
 	// A trunk arrives without its password, since the key that sealed it is the other
 	// deployment's, so it arrives at key version 0, which is what a trunk without one
-	// holds (20261007050000_sip_trunks.sql).
+	// holds.
 	if t.name == "sip_trunks" {
 		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0)"
 	}
