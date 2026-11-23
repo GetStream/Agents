@@ -116,7 +116,12 @@ var encodedCredential = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9]|%[0-9A-Fa-f]{2}|
 // the same for an API token. The key is the 16 characters or more of the key alphabet after the
 // phrase, so a request id of 8 hex digits after "Invalid API key." stays. The phrase stays and
 // the key is taken out, unless it is a word (see redactVendorKeyMessage).
-var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*)([A-Za-z0-9_-]{16,})`)
+var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*)([A-Za-z0-9_-]{16,})()`)
+
+// vendorKeyBefore is the same refusal with the key before the verdict: "The API key '<key>' is
+// invalid", with single quotes, double quotes or none. The key has the same 16 character floor,
+// and the phrase around it stays.
+var vendorKeyBefore = regexp.MustCompile(`(?i)\b(api[\s_-]?(?:key|token)\s+["\x27]?)([A-Za-z0-9_-]{16,})(["\x27]?\s+(?:is|was)\s+(?:invalid|incorrect)\b)`)
 
 // encodedAuthorization is an authorization or cookie header (proxy-authorization and
 // set-cookie end in those names) written into a URL: the name, an optional encoded quote
@@ -211,7 +216,8 @@ func redactLegacyCredentials(text string) string {
 	text = urlCredential.ReplaceAllString(text, "${1}[redacted]@")
 	text = queryCredential.ReplaceAllString(text, "${1}[redacted]")
 	text = encodedCredential.ReplaceAllString(text, "${1}${2}[redacted]")
-	text = redactVendorKeyMessage(text)
+	text = redactVendorKeyMessage(vendorKeyMessage, text)
+	text = redactVendorKeyMessage(vendorKeyBefore, text)
 	text = encodedAuthorization.ReplaceAllString(text, "[redacted]")
 	text = encodedBearer.ReplaceAllString(text, "[redacted]")
 	text = providerCredential.ReplaceAllString(text, "[redacted]")
@@ -219,15 +225,16 @@ func redactLegacyCredentials(text string) string {
 	return text
 }
 
-// redactVendorKeyMessage takes the key out of each vendorKeyMessage match, but for a value that
+// redactVendorKeyMessage takes the key out of each match of rule (vendorKeyMessage or
+// vendorKeyBefore: the phrase before it, the key, the phrase after it), but for a value that
 // is a word, as redactUnlessWord does, such as authentication_failed after "invalid_api_key".
-func redactVendorKeyMessage(text string) string {
-	return vendorKeyMessage.ReplaceAllStringFunc(text, func(match string) string {
-		parts := vendorKeyMessage.FindStringSubmatch(match)
+func redactVendorKeyMessage(rule *regexp.Regexp, text string) string {
+	return rule.ReplaceAllStringFunc(text, func(match string) string {
+		parts := rule.FindStringSubmatch(match)
 		if word.MatchString(parts[2]) {
 			return match
 		}
-		return parts[1] + "[redacted]"
+		return parts[1] + "[redacted]" + parts[3]
 	})
 }
 
