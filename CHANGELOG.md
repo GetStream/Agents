@@ -2,6 +2,10 @@
 
 ## Features
 
+### New voice agents default to `sts-fast` and STS providers expose built-in voices
+
+Creating or syncing a new voice agent config without explicit cascade settings (`stt`, `tts`, `llm`, `floor_control`, `guardrail`) now defaults `sts` to `sts-fast` when the region supports it; passing `sts: ""` or any cascade setting explicitly stays on the cascade, and existing cascaded agents remain cascaded on sync or update. `GET /v1/sts/providers` now includes each native speech model's built-in `voices` (`id`, `name`, `description`, `gender`, `default`), defined in `router.yaml` and exposed on the Go SDK's `Provider` type.
+
 ### Qwen4-Max is `qwen/qwen4-max`
 
 Alibaba's Qwen4-Max can be routed as `qwen/qwen4-max`, in the `high-quality` tier, with images in, tools and JSON Schema answers. It is reached on QwenCloud's Singapore endpoint with `DASHSCOPE_API_KEY`, the key the qwen realtime models take; `QWEN_BASE_URL` names another region's endpoint for a key made there. Thinking is off unless the model entry sets `thinking: true`, which takes `reasoning_effort` `low`, `high` or `xhigh`. It is $1.50 in, $4.50 out and $0.075 for a cache hit per 1M tokens.
