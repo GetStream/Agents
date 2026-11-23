@@ -834,6 +834,8 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		row, err = endImportedAttempt(row, time.Now())
 	case "simulation_runs":
 		row, err = renameImported(row, map[string]string{"held_until": "lease_until"})
+	case "opt_outs":
+		row, err = normalizeImportedOptOut(row)
 	case "agent_configs":
 		row, err = renameImported(row, map[string]string{"sandbox": "sandbox_provider", "episode_cards": "episode_cards_on",
 			"channels": "channels_lines", "chat_channels": "channels_chat"})
@@ -1326,6 +1328,27 @@ func renameImported(row json.RawMessage, renames map[string]string) (json.RawMes
 		}
 		delete(fields, old)
 	}
+	return json.Marshal(fields)
+}
+
+// normalizeImportedOptOut writes an imported opt-out's recipient as this deployment keeps it
+// (optOutRecipient), so the one-live-row check and the update guard compare it with what is
+// kept here, and a source that never normalized its rows hands over ones that match.
+func normalizeImportedOptOut(row json.RawMessage) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
+	}
+	var recipient string
+	if err := json.Unmarshal(fields["recipient"], &recipient); err != nil {
+		return row, nil // validateImported refuses a row without one
+	}
+	recipient, _ = optOutRecipient(recipient, "")
+	written, err := json.Marshal(recipient)
+	if err != nil {
+		return nil, err
+	}
+	fields["recipient"] = written
 	return json.Marshal(fields)
 }
 

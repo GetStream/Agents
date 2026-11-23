@@ -194,6 +194,7 @@ const usage = `usage: router [--config path] [command]
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
   prices                read and check the price list (router prices for its commands)
+  opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
   usage storage         record the last hour of every knowledge base's size, once each (hourly, one job per turbopuffer key)
@@ -279,6 +280,8 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 		return runStreamApps(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
+	case "opt-outs":
+		return runOptOuts(args, settings, logger)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
 	case "help", "-h", "--help":

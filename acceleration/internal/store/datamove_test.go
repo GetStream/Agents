@@ -519,6 +519,30 @@ func (s *DataMoveSuite) TestAnImportOverALiveOptOutLeavesIt() {
 	s.Equal("keyword", live[0].Source)
 }
 
+// Defect: a move wrote an opt-out the source stored as written as it came, and checked it
+// against the opt-outs here as it came, so it neither matched the number dialled nor met the
+// live one here for the same number.
+func (s *DataMoveSuite) TestAMoveKeepsAnOptOutStoredAsWrittenInE164() {
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO opt_outs (id, customer_id, recipient, channel, source, created_at)
+		VALUES (?, 'acme', '12025550106', 'sms', 'api', now()), (?, 'acme', '12025550107', 'sms', 'api', now())`, newID(), newID())
+	s.Require().NoError(err)
+	here := OptOut{CustomerID: "moved", Recipient: "+12025550107", Channel: "sms", Source: "keyword"}
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &here))
+
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550106", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+	live, err := s.destination.OptOuts.Select(s.ctx, "moved", 10, nil)
+	s.Require().NoError(err)
+	recipients := map[string]string{}
+	for _, optOut := range live {
+		recipients[optOut.Recipient] = optOut.ID
+	}
+	s.Equal(map[string]string{"+12025550106": recipients["+12025550106"], "+12025550107": here.ID}, recipients)
+}
+
 // Defect: a second copy read the source's new live opt-out before the revoked one it replaced,
 // so the import skipped it beside the old copy here, and the revoked row then lifted that copy.
 func (s *DataMoveSuite) TestASecondCopyAfterAStartAndAStopKeepsTheRecipientOptedOut() {
