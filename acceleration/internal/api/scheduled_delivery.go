@@ -132,8 +132,8 @@ type scheduledHandOff struct {
 	SessionID  string `json:"session_id"`
 	UserID     string `json:"user_id"`
 	CallerKind string `json:"caller_kind"`
-	// Earlier is taken only when it is a refusal for money (moneyCode): all it does is have
-	// replyCommand run a failed turn again.
+	// Earlier is the reason the run records so far; replyCommand and refusedAgain read it, and
+	// act only on a refusal for money (moneyCode).
 	Earlier string `json:"earlier"`
 }
 
@@ -958,9 +958,7 @@ func (s *Server) deliverScheduledForPeer(w http.ResponseWriter, r *http.Request)
 	// another conversation, zone, key, prompt or due time would ring into that conversation,
 	// bill that key or say those words. Its work is the task's, as the asker attributes it.
 	delivery := s.occurrenceDelivery(r.Context(), claimed)
-	if moneyCode(handOff.Earlier) {
-		delivery.Earlier = handOff.Earlier
-	}
+	delivery.Earlier = handOff.Earlier
 	ctx := routing.WithAttribution(routing.WithScheduledTurn(r.Context()), delivery.attribution())
 	deliveredTo, sessionID, err := s.deliverChainHere(ctx, delivery)
 	switch {
