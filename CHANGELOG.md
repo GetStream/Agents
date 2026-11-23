@@ -869,10 +869,6 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
-### One sandbox holds at most 256 tunnels open through the egress proxy
-
-Sandbox code could open any number of CONNECT tunnels through the router's sandbox egress proxy, and an idle one stays open up to 4 minutes, so one sandbox could hold thousands of the router's file descriptors that every other sandbox on it shares. A sandbox now holds at most 256 tunnels open on one router, to granted hosts and allowed domains together: 256 is the most connections Chromium lets one profile open through a proxy. The next CONNECT gets a 429, «egress: too many open tunnels», before anything is dialed, counted as `decision="denied_tunnels"` in `router_sandbox_egress_requests_total`. A tunnel that closes, either end or its idle timeout, makes room for the next one. Other sandboxes are not affected (#2311).
-
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
 A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again, and the first retry now runs the turn once more, in the conversation or on a text channel, also when another router holds the session, or in a thread, so the user gets the reply once the money can be checked. A conversation turn refused again on that retry fails the run under `spend_check_unavailable` once its retries are spent, never `delivered`. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
