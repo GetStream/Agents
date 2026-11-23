@@ -78,8 +78,8 @@ func (s *StoreSuite) TestCustomModelQueryBudgets() {
 		s.Len(listed, 11)
 	}))
 	model.Model = "llama-2"
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CustomModels.Update(s.ctx, &model)) }))
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CustomModels.Delete(s.ctx, "app", model.ID)) }))
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.CustomModels.Update(s.ctx, &model)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.CustomModels.Delete(s.ctx, "app", model.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 	if s.store.cache == nil {
 		return
 	}

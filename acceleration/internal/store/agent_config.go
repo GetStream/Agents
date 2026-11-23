@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -332,7 +333,7 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 	config.UpdatedAt = now
 	config.DeletedAt = nil
 
-	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		missing, err := lockBoundConnections(ctx, tx, config)
 		if err != nil {
 			return err
@@ -360,13 +361,14 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 			return fmt.Errorf("store: create agent config: %w", err)
 		}
 		return nil
+	}, func() []string {
+		// Only the name, because the id was minted by the insert and nothing can have asked for
+		// it yet. The name may well have been asked for and not found.
+		return []string{agentConfigNameKey(config.CustomerID, config.Name)}
 	})
 	if err != nil {
 		return stack.Wrap(err)
 	}
-	// Only the name, because the id was minted by the insert and nothing can have asked for it
-	// yet. The name may well have been asked for and not found.
-	r.store.forget(ctx, agentConfigNameKey(config.CustomerID, config.Name))
 	return nil
 }
 
@@ -390,7 +392,7 @@ func (r *AgentConfigs) Update(ctx context.Context, config *AgentConfig) error {
 	config.UpdatedAt = time.Now().UTC()
 
 	var wasName string
-	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		missing, err := lockBoundConnections(ctx, tx, config)
 		if err != nil {
 			return err
@@ -447,14 +449,20 @@ func (r *AgentConfigs) Update(ctx context.Context, config *AgentConfig) error {
 			return fmt.Errorf("store: update agent config: %w", err)
 		}
 		return nil
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if wasName == "" {
+			return nil
+		}
+		return []string{
+			agentConfigKey(config.CustomerID, config.ID),
+			agentConfigNameKey(config.CustomerID, config.Name),
+			agentConfigNameKey(config.CustomerID, wasName),
+		}
 	})
 	if err != nil {
 		return stack.Wrap(err)
 	}
-	r.store.forget(ctx,
-		agentConfigKey(config.CustomerID, config.ID),
-		agentConfigNameKey(config.CustomerID, config.Name),
-		agentConfigNameKey(config.CustomerID, wasName))
 	return nil
 }
 
@@ -466,20 +474,27 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 	}
 
 	var name string
-	err := r.store.global.NewUpdate().Model((*AgentConfig)(nil)).
-		Set("deleted_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Where("deleted_at IS NULL").
-		Returning("name").
-		Scan(ctx, &name)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model((*AgentConfig)(nil)).
+			Set("deleted_at = ?", time.Now().UTC()).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Returning("name").
+			Scan(ctx, &name)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if name == "" {
+			return nil
+		}
+		return []string{agentConfigKey(customerID, id), agentConfigNameKey(customerID, name)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownAgentConfig(id)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete agent config: %w", err))
 	}
-	r.store.forget(ctx, agentConfigKey(customerID, id), agentConfigNameKey(customerID, name))
 	return nil
 }
 
@@ -494,8 +509,8 @@ func (r *AgentConfigs) Get(ctx context.Context, customerID, id string) (AgentCon
 }
 
 // GetByName returns the config a customer holds under this name, and ErrNoAgentConfig when it
-// holds none. That none is cached too: a session opened by name asks the same question on
-// every conversation.
+// holds none. That none is cached too, for missTTL: a session opened by name asks the same
+// question on every conversation.
 func (r *AgentConfigs) GetByName(ctx context.Context, customerID, name string) (AgentConfig, error) {
 	if customerID == "" || name == "" {
 		return AgentConfig{}, stack.Wrap(errors.New("store: a customer and a config name are required"))
@@ -503,6 +518,7 @@ func (r *AgentConfigs) GetByName(ctx context.Context, customerID, name string) (
 	answer, err := cached(ctx, r.store, agentConfigNameKey(customerID, name), func(ctx context.Context) (found[AgentConfig], error) {
 		config, err := r.where(ctx, customerID, "name", name)
 		if errors.Is(err, ErrNoAgentConfig) {
+			rueidisaside.OverrideCacheTTL(ctx, missTTL)
 			return found[AgentConfig]{}, nil
 		}
 		return found[AgentConfig]{Value: config, Found: err == nil}, err

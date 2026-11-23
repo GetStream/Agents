@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- stream_app_pk names a Stream app pinned to a row, as every other table names it.
 ALTER TABLE chat_inbound RENAME COLUMN stream_app TO stream_app_pk;

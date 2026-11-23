@@ -442,7 +442,22 @@ func (s *URLsSuite) TestAPageIsNotReadAgainBeforeItsIntervalHasPassed() {
 
 func (s *URLsSuite) TestANegativeRefreshIntervalIsRefused() {
 	_, err := s.service.Add(s.ctx, "acme", Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: -1})
-	s.Error(err)
+	s.ErrorIs(err, ErrRefused)
+	s.ErrorContains(err, "refresh_hours cannot be negative")
+}
+
+// A refusal is the caller's to read, so it says what to correct and is marked as such.
+func (s *URLsSuite) TestASubscriptionTheCallerHasToCorrectIsRefusedInItsWords() {
+	for refused, wanted := range map[string]Subscription{
+		"a namespace is required":           {URL: "https://example.com/pricing"},
+		"a url is required":                 {Namespace: "docs"},
+		"is not a page that can be fetched": {Namespace: "docs", URL: "mailto:sales@example.com"},
+		"names no host":                     {Namespace: "docs", URL: "https:///pricing"},
+	} {
+		_, err := s.service.Add(s.ctx, "acme", wanted)
+		s.ErrorIs(err, ErrRefused, refused)
+		s.ErrorContains(err, refused)
+	}
 }
 
 func (s *URLsSuite) TestAReadThatFailedOnceIsTriedAgain() {
@@ -458,12 +473,13 @@ func (s *URLsSuite) TestAReadThatFailedOnceIsTriedAgain() {
 func (s *URLsSuite) TestAPageThatCouldNotBeReadIsKeptWithTheReason() {
 	// The caller asked for this url to be part of the knowledge base. Telling them why it
 	// is not, on a row they can retry, is more use than refusing and forgetting.
-	s.reader.serve("", errors.New("CRAWL_NOT_FOUND"))
+	s.reader.serve("", errors.New("exa: 500 from https://api.exa.ai/contents: CRAWL_NOT_FOUND"))
 
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/gone"})
 
 	s.Equal(store.KnowledgeURLFailed, page.State, "every retry failed")
-	s.Contains(page.Error, "CRAWL_NOT_FOUND")
+	s.Equal("urls: the page could not be read", page.Error,
+		"the crawler's answer names its host and body, so the caller reads a reason of ours")
 	s.Nil(page.LastIndexedAt, "nothing was ever read, which is not the same as broken since")
 	s.Zero(page.Passages)
 	s.Empty(s.base.ids(), "a page that could not be read writes nothing")
@@ -483,6 +499,15 @@ func (s *URLsSuite) TestAPageOfACustomerWhoMayNotPayIsNeverRead() {
 	s.Contains(page.Error, policy.ErrNoCredits.Error())
 	s.Zero(s.readsMade(), "a read nobody can be billed for is never made")
 	s.Empty(s.base.ids())
+}
+
+func (s *URLsSuite) TestAPageWithNoTextIsKeptWithThatReason() {
+	s.reader.serve("", nil)
+
+	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/blank"})
+
+	s.Equal(store.KnowledgeURLFailed, page.State)
+	s.Equal(errEmpty.Error(), page.Error, "a reason the caller can act on is still theirs to read")
 }
 
 func (s *URLsSuite) TestAPageThatFailedCanBeReadAgainOnceItIsBack() {

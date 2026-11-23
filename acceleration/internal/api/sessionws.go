@@ -591,8 +591,6 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 
 	default:
 		found.Report(fmt.Errorf("unknown command %q", command.Type), "command")
-		s.logger.Debug("ignoring an unknown command",
-			"session", found.ID(), "type", command.Type)
 	}
 	return true
 }
@@ -1139,12 +1137,24 @@ func participantOf(participant stt.Participant) frame {
 // errorText renders a failure as the empty string when there was none, so a client can
 // read one field rather than checking whether it is there. A provider's error can echo the
 // credential it was sent, so the text goes through the redactor the requests table keeps
-// failures by.
+// failures by. A failure of what the router depends on says only that something went wrong.
 func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
+	if dependencyFailed(err) {
+		return somethingWentWrong
+	}
 	return store.SafeLogText(err.Error())
+}
+
+// dependencyFailed reports whether err is a failure of what the router depends on rather than
+// a refusal of what the caller asked: a deadline that passed, the network, or a vendor. Its
+// text names hosts, addresses, URLs and bodies, so a caller is never sent it.
+func dependencyFailed(err error) bool {
+	_, network := errors.AsType[net.Error](err)
+	_, vendor := errors.AsType[*llm.ProviderFailure](err)
+	return network || vendor || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, routing.ErrVendorsFailed)
 }
 
 // withRefusal adds the code naming a refusal to an error frame for one, so a client can tell

@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- One row per UTC day whose activity digest was posted to the operator's channel, so the
 -- deployment posts each day's once whatever its routers and restarts. internal/limitnotice

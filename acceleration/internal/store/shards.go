@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
@@ -43,6 +44,8 @@ type Options struct {
 	ShardRedis Redis
 	// redisHook sees every Redis command, for the tests counting round trips.
 	redisHook rueidishook.Hook
+	// writeTimeout bounds a write of a cached row. Zero is writeTimeout; a test shortens it.
+	writeTimeout time.Duration
 }
 
 // OpenShards connects to the shared database, this shard's, and every other shard's.
@@ -51,9 +54,12 @@ func OpenShards(options Options) (*Store, error) {
 		return nil, errors.New("store: dsn is required")
 	}
 	db := connect(options.DSN, maxConns)
-	s := &Store{global: db, shard: db}
+	s := &Store{global: db, shard: db, globalDSN: options.DSN, shardDSN: options.DSN,
+		retries: make(chan struct{}, forgetSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
+	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
 		s.shard = connect(options.ShardDSN, maxConns)
+		s.shardDSN = options.ShardDSN
 	}
 	own := cmp.Or(options.ShardDSN, options.DSN)
 	s.shardNames = []string{unnamedShard(own)}

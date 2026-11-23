@@ -57,13 +57,13 @@ func (s *Server) classify(ctx context.Context, request *classifyRequest) (*class
 		Options:    held,
 	})
 	if err != nil {
-		return nil, classifyFailed(err)
+		return nil, classifyFailed(ctx, err)
 	}
 	defer session.Close()
 
 	result, err := session.Classify(ctx, asked)
 	if err != nil {
-		return nil, classifyFailed(err)
+		return nil, classifyFailed(ctx, err)
 	}
 
 	answers := make(map[string]ClassifyAnswer, len(result.Answers))
@@ -86,13 +86,15 @@ func (s *Server) classify(ctx context.Context, request *classifyRequest) (*class
 
 // classifyFailed tells a caller whether waiting is worth it. A rate limit and an overloaded
 // or unreachable provider come back on their own, so they are not reported as the
-// request's fault; anything else is.
-func classifyFailed(err error) error {
+// request's fault; anything else is. What the provider said is left for the request log.
+func classifyFailed(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, decisionmodel.ErrRateLimited):
-		return rateLimited(err.Error())
+		recordFailure(ctx, err, stack.Trace(err))
+		return rateLimited("the classifier is being asked too often: try again shortly")
 	case errors.Is(err, decisionmodel.ErrUnavailable):
-		return unavailable(err.Error())
+		recordFailure(ctx, err, stack.Trace(err))
+		return unavailable("the classifier could not answer just now: try again shortly")
 	}
 	return refusedRequest(err)
 }

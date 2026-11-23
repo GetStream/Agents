@@ -17,6 +17,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +44,9 @@ type Store struct {
 	global *bun.DB
 	shard  *bun.DB
 	peers  []*bun.DB
+	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
+	// migration runs on.
+	globalDSN, shardDSN string
 	// cache is the shared Redis, holding copies of rows read on every request, and redis the
 	// shard's, holding the state of its running calls. Both are nil without Redis.
 	cache rueidisaside.CacheAsideClient
@@ -59,6 +63,59 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
+	// retries holds a slot for each deletion forgetLater is trying again. stop ends them
+	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
+	// retry starts once Close is waiting.
+	retries  chan struct{}
+	closing  context.Context
+	stop     context.CancelFunc
+	retrying sync.WaitGroup
+	retryMu  sync.Mutex
+	closed   bool
+	// writeTimeout bounds detachedWrite.
+	writeTimeout time.Duration
+}
+
+// writeTimeout is how long the statements of a write of a cached row may take when Options
+// does not say. Its COMMIT is bounded by the DSN's read_timeout instead (detachedWrite).
+const writeTimeout = 10 * time.Second
+
+// detachedWrite runs write in a transaction of the shared database that outlives ctx's
+// cancellation, its statements within the store's write timeout. pgdriver sends the COMMIT on
+// context.Background(), so only the DSN's read_timeout bounds that, and a write can take the
+// write timeout plus the read timeout. It then drops from the cache the keys that
+// keys names, whatever the commit answered. A request that gives up therefore leaves no
+// statement for Postgres to commit after a read has cached the old row again: the transaction
+// is rolled back when its connection goes, since Postgres commits nothing without the COMMIT.
+// keys is read once write has run, and names nothing when write found no row.
+//
+// A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
+// shortly after it (forgetLater).
+func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
+	_, err := s.detachedWriteTold(ctx, write, keys)
+	return err
+}
+
+// detachedWriteTold is detachedWrite, and says whether every replica was told, the keys'
+// deletion having landed in Redis.
+func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
+	defer cancel()
+	var committing bool
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := write(ctx, tx); err != nil {
+			return err
+		}
+		committing = true
+		return nil
+	})
+	names := keys()
+	told = s.forget(ctx, names...)
+	var answered pgdriver.Error
+	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
+		s.forgetLater(names, err)
+	}
+	return told, err
 }
 
 // Open connects to Postgres using a pgdriver DSN, for example
@@ -99,6 +156,11 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 
 // Close releases the connection pools.
 func (s *Store) Close() error {
+	s.retryMu.Lock()
+	s.closed = true
+	s.retryMu.Unlock()
+	s.stop()
+	s.retrying.Wait()
 	s.closeRedis()
 	return errors.Join(s.closeShards(), s.global.Close())
 }

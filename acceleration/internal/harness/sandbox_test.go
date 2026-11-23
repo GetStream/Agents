@@ -225,7 +225,7 @@ func (s *HarnessSuite) TestAnAnswerAfterCodeThatFailedIsNotPassedOffAsSuccess() 
 
 	settled := s.awaitSettled(1)[0]
 	s.Equal(Done, settled.State)
-	s.ErrorContains(settled.Err, errNoSandbox.Error())
+	s.EqualError(settled.Err, "the code could not be run", "watchers are sent the task's error, never the sandbox's")
 	s.respond("turn-2", "")
 	s.Contains(shown(s.fast.requests()[1]), "do not claim anything that code was meant to produce")
 }

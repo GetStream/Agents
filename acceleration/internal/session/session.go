@@ -1187,11 +1187,13 @@ func (s *Session) AwaitCommand(ctx context.Context, id, text, clientID string) (
 	return receipt, nil
 }
 
-// Report publishes a failure the watcher should see, without ending the session.
+// Report publishes a failure the watcher should see, without ending the session. It logs the
+// failure, since what the turns it fails keep says only which part failed.
 func (s *Session) Report(err error, context string) {
 	if err == nil {
 		return
 	}
+	s.logger.Warn("a failure reported to the session's watchers", "session", s.id, "context", context, "error", err)
 	s.broadcast(agent.Error{Err: err, Context: context})
 }
 
@@ -2314,10 +2316,15 @@ func (s *Session) abandonTurns() {
 // failTurns records a failure against every turn still in flight and closes them. The turn
 // the prompt injection screen refused, with every reply that continued it, is closed as
 // refused, so what it asked is never replayed to a model; the others failed with it.
+// Callers read the reason back, so it names the part that failed and never the cause's text,
+// which whoever reported it logged.
 func (s *Session) failTurns(where string, cause error, refusedTurn string) {
-	reason := cause.Error()
+	reason := "the turn failed"
 	if where != "" {
-		reason = where + ": " + reason
+		reason = where + " failed"
+	}
+	if errors.Is(cause, policy.ErrPromptInjection) {
+		reason = policy.ErrPromptInjection.Error()
 	}
 
 	s.turnsMu.Lock()
