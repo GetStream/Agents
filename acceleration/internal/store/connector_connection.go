@@ -590,7 +590,7 @@ func (r *ConnectorConnections) SelectGrantedOfUser(ctx context.Context, customer
 }
 
 // DeleteUser hard deletes every connection of one user of the
-// customer's, live or already soft deleted, with their attempts and their invocations, so
+// customer's, live or already soft deleted, with their attempts, invocations and MCP event subscriptions, so
 // the user's id and their accounts' ids are gone (architecture doc, «Add» item 9: «hard
 // delete of owner_id and account_id on request»). The audit rows of those connections stay,
 // with their session, request and attempt ids emptied. A user with none is not an error.
@@ -634,6 +634,14 @@ func (r *ConnectorConnections) DeleteUser(ctx context.Context, customerID, userI
 		if _, err := tx.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
 			Where("caa.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
 			return fmt.Errorf("store: delete a user's authorization attempts: %w", err)
+		}
+		// Event subscriptions name their connection with no foreign key, so nothing cascades: their
+		// sealed secrets and callback tokens go with the connections, in this transaction (the
+		// single delete does it through ConnectionEventSubscriptions.DeleteConnection).
+		if _, err := tx.NewDelete().Model((*ConnectionEventSubscription)(nil)).
+			Where("ces.customer_id = ?", customerID).
+			Where("ces.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
+			return fmt.Errorf("store: delete a user's connection event subscriptions: %w", err)
 		}
 		if _, err := tx.NewDelete().Model((*ConnectorConnection)(nil)).
 			Where("cc.customer_id = ?", customerID).

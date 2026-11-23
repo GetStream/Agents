@@ -993,6 +993,41 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 	}
 }
 
+// TestDeletingAUsersConnectionsDeletesTheirEventSubscriptions: the subscriptions' sealed secrets and
+// callback tokens go with the connections; another user's, the app's and another customer's stay.
+func (s *StoreSuite) TestDeletingAUsersConnectionsDeletesTheirEventSubscriptions() {
+	first := s.connection("acme-app", userOwned("alice"))
+	second := s.connection("acme-app", userOwned("alice"))
+	bob := s.connection("acme-app", userOwned("bob"))
+	app := s.connection("acme-app", nil)
+	elsewhere := s.connection("other-app", userOwned("alice"))
+	hers := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", first.ID, "config-1", "key-1"),
+		s.eventSubscription("acme-app", first.ID, "config-1", "key-2"),
+		s.eventSubscription("acme-app", second.ID, "config-1", "key-1"),
+	}
+	kept := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", bob.ID, "config-1", "key-1"),
+		s.eventSubscription("acme-app", app.ID, "config-1", "key-1"),
+		s.eventSubscription("other-app", elsewhere.ID, "config-1", "key-1"),
+		// A row of another customer that names her connection's id: the customer is part of the match.
+		s.eventSubscription("other-app", first.ID, "config-2", "key-1"),
+	}
+
+	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	for _, sub := range hers {
+		_, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.ErrorIs(err, ErrNoConnectionEventSubscription, "her subscription %s is gone", sub.Token)
+	}
+	for _, sub := range kept {
+		got, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.Require().NoError(err, "subscription %s stays", sub.Token)
+		s.Equal(sub.ID, got.ID)
+	}
+}
+
 // TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser: the rows stay, with no id that
 // leads back to the user; another user's keep theirs.
 func (s *StoreSuite) TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser() {
@@ -1268,7 +1303,7 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connections[2].ID))
 	}), "DeleteUnbound")
-	s.Equal(6, s.countQueries(func() {
+	s.Equal(7, s.countQueries(func() {
 		_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
 		s.Require().NoError(err)
 	}), "DeleteUser")
