@@ -62,9 +62,6 @@ const (
 	// maxHTTPParameters is the cap an agent config has on its connector bindings and its
 	// visible_tools (internal/api/configs.go).
 	maxHTTPParameters = 64
-	// maxHTTPParameterName is the length OpenAI caps a function name at
-	// (https://developers.openai.com/api/reference/resources/chat, tools[].function.name).
-	maxHTTPParameterName = 64
 )
 
 var (
@@ -88,12 +85,19 @@ var (
 	// (AgentConnectorBinding.name, internal/api/configs.go), and 63+2+63 is the 128 Anthropic
 	// caps a tool name at (^[a-zA-Z0-9_-]{1,128}$,
 	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools). OpenAI caps
-	// a function name at 64 (the reference maxHTTPParameterName cites), so a longest alias and
-	// name do not fit it: the same holds for an MCP tool today.
+	// a function name at 64 (https://developers.openai.com/api/reference/resources/chat,
+	// tools[].function.name), so a longest alias and name do not fit it: the same holds for an
+	// MCP tool today.
 	httpToolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
 	// httpPath is visible ASCII (RFC 9110 section 5.5's vchar), so a path holds no space or
 	// line break, and no ? or #, so it has no query or fragment of its own.
 	httpPath = regexp.MustCompile(`^/[!"$->@-~]*$`)
+	// httpParameterName is what Anthropic takes as a key of a tool's input_schema properties,
+	// 1 to 64 letters, digits, _, . or -: its 400 answers a key outside it with «Property keys
+	// should match pattern '^[a-zA-Z0-9_.-]{1,64}$'» (quoted in anthropics/claude-code issues
+	// 24272, 34771 and 92648; not probed live, AI-3674: the keys in .env were refused). Each of
+	// these characters is RFC 3986 unreserved, so a name also goes into a query as it is.
+	httpParameterName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 )
 
 // checkHTTPSource refuses an http source whose tools a session could not offer or that could
@@ -139,8 +143,8 @@ func checkHTTPSource(fail func(field, format string, args ...any), field string,
 		for _, name := range slices.Sorted(maps.Keys(tool.Parameters)) {
 			field := field + ".parameters." + name
 			switch {
-			case len(name) > maxHTTPParameterName || !unreserved.MatchString(name):
-				fail(field, "%q is not 1 to %d letters, digits, ., _, ~ or -", name, maxHTTPParameterName)
+			case !httpParameterName.MatchString(name):
+				fail(field, "%q is not 1 to 64 letters, digits, ., _ or -", name)
 			case slices.Contains(httpMethodOverrides, strings.ToLower(name)):
 				fail(field, "names a method override")
 			}
