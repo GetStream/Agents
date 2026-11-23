@@ -33,9 +33,10 @@ func (s *AppHooksSuite) TestAHostedCallInAChannelTypeAnsweringEveryMessageIsForE
 func (s *AppHooksSuite) hostedCallsAreForEachWriter(answer string) {
 	s.holdsType("callouts", memberWrites)
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "rota-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "tooling/tool-model", ChatChannels: []store.ChatChannel{{Type: "callouts", Answer: answer}},
+		Models:     store.AgentModels{LLM: "tooling/tool-model"},
+		Channels:   store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: "callouts", Answer: answer}}},
 		ToolGroups: []store.ToolGroup{{Name: "orders", Tools: []string{lookupOrder}}}}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	worker := s.hostsLookupOrder(config.ID)
 	mention := ""
 	if answer == store.ChatChannelAnswerMentioned {

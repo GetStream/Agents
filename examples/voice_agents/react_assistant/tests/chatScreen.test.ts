@@ -199,9 +199,16 @@ describe("ChatScreen", () => {
     expect(sessions[0]?.asked[0]?.options.uiAction).toEqual(uiAction);
   });
 
-  it("offers neither editing nor regenerating, which the router can't do", () => {
+  it("offers editing and regenerating, which the transport branches", () => {
     const { deps } = router();
     const screen = new ChatScreen(undefined, deps, () => undefined);
+
+    expect(screen.conversation.actions).toMatchObject({ edit: true, regenerate: true, rate: true });
+  });
+
+  it("offers neither editing nor regenerating in an incognito chat, which keeps nothing to branch from", () => {
+    const { deps } = router();
+    const screen = new ChatScreen(undefined, { ...deps, incognito: true }, () => undefined);
 
     expect(screen.conversation.actions).toMatchObject({ edit: false, regenerate: false, rate: true });
   });
