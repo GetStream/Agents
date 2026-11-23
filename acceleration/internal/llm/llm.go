@@ -13,6 +13,7 @@ package llm
 
 import (
 	"context"
+	"net/url"
 	"strings"
 )
 
@@ -176,4 +177,15 @@ func Unfence(answer string) string {
 	trimmed = strings.TrimPrefix(trimmed, "```")
 	trimmed = strings.TrimSuffix(trimmed, "```")
 	return strings.TrimSpace(trimmed)
+}
+
+// HostOf is the host of a base URL, without its scheme, path, query or any credentials, so a
+// log line can name where a model is served. Empty when the URL does not parse. Every provider
+// that reports its host goes through it.
+func HostOf(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -194,13 +193,7 @@ func New(options Options) (*LLM, error) {
 // Host is the host requests go to, without the scheme, path or any credentials, so a log
 // line can name where a model is served: Gemma's host is GEMMA_BASE_URL, which says whether
 // it runs on Baseten or Nebius. Empty when the base URL does not parse.
-func (l *LLM) Host() string {
-	parsed, err := url.Parse(l.options.BaseURL)
-	if err != nil {
-		return ""
-	}
-	return parsed.Host
-}
+func (l *LLM) Host() string { return llm.HostOf(l.options.BaseURL) }
 
 // Client exposes the underlying SDK client, so anything this package does not standardise
 // -- embeddings, moderation, the responses endpoint itself -- is still one call away.

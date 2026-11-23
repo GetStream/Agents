@@ -46,6 +46,7 @@ const defaultMaxTokens = 64000
 // not model).
 type LLM struct {
 	model        string
+	baseURL      string
 	client       anthropic.Client
 	capabilities llm.Capabilities
 	// systemTurns is whether this model takes a system message in the middle of the
@@ -59,6 +60,9 @@ type LLM struct {
 	nextID   atomic.Uint64
 	closed   bool
 }
+
+// defaultMessagesBaseURL is Anthropic's endpoint, the one the SDK itself defaults to.
+const defaultMessagesBaseURL = "https://api.anthropic.com/"
 
 func newMessages(options Options) (*LLM, error) {
 	keys := keypool.FromEnv(options.APIKey)
@@ -75,15 +79,18 @@ func newMessages(options Options) (*LLM, error) {
 		option.WithAPIKey(keys.Peek()),
 		option.WithHTTPClient(keys.WrapDoer(nil, keypool.Header("X-Api-Key", ""))),
 	}
-	if options.BaseURL != "" {
-		clientOptions = append(clientOptions, option.WithBaseURL(options.BaseURL))
+	// The SDK's own default, named so the host a call went to can be logged.
+	if options.BaseURL == "" {
+		options.BaseURL = defaultMessagesBaseURL
 	}
+	clientOptions = append(clientOptions, option.WithBaseURL(options.BaseURL))
 	if options.WorkspaceID != "" {
 		clientOptions = append(clientOptions, option.WithHeader(workspaceHeader, options.WorkspaceID))
 	}
 	return &LLM{
-		model:  options.Model,
-		client: anthropic.NewClient(clientOptions...),
+		model:   options.Model,
+		baseURL: options.BaseURL,
+		client:  anthropic.NewClient(clientOptions...),
 		// Every current Claude model reads images. High is the API's own default effort,
 		// so naming it changes nothing for a request that names none.
 		capabilities: llm.Capabilities{InputModalities: []string{llm.ModalityImage}, ReasoningEfforts: efforts(options.Model), DefaultEffort: defaultEffort(options.Model), ToolChoices: toolChoices(options.Model)},
@@ -156,6 +163,10 @@ func takesSystemTurns(model string) bool {
 
 // Client exposes the underlying SDK client.
 func (l *LLM) Client() *anthropic.Client { return &l.client }
+
+// Host is the host requests go to, the default endpoint's included, as openaicompat.LLM.Host
+// says it, so a log line names where a call was served.
+func (l *LLM) Host() string { return llm.HostOf(l.baseURL) }
 
 // Provider is the stable provider name used in stats.
 func (l *LLM) Provider() string { return ProviderName }
