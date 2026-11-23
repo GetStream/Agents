@@ -2877,9 +2877,13 @@ so an export is the caller's own data and an import lands under the caller's own
 however the file was edited on the way. An import upserts and refuses a row whose primary
 key belongs to another tenant, so replaying the same change twice lands where applying it
 once would and a guessed id overwrites nothing. A request row is the exception: each
-deployment numbers its own, so it is imported by its `usage_id` with an id the destination
-gives it, written once, and a delete of it is replayed by its `usage_id`, or for a row from
-before usage ids by the one its import made from its source id.
+deployment numbers its own, so it is imported with an id the destination gives it, under a
+`usage_id` made from the importing app and the `usage_id` the row had where it was first
+recorded (its source id, for a row from before usage ids), and written once. It keeps that
+first `usage_id` as `source_usage_id`, so the row is written once wherever it moves, and a
+row taken back where it was first recorded is the row it was copied from. A delete of it in a
+change batch is found by the `usage_id` made from the one the change names, and never removes
+a request this deployment recorded itself.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.

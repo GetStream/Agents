@@ -747,10 +747,19 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	quoted := strings.Join(columns, ", ")
 	picked := slices.Clone(columns)
 	if i := slices.Index(columns, "usage_id"); spec.name == "requests" && i >= 0 {
-		// A row from before usage ids has none, and the table refuses a new row without one.
-		// Its usage id is made from the source's id for it, so importing it again names the
-		// same unit of work.
-		picked[i] = "COALESCE(usage_id, " + importedUsageID("customer_id", "id") + ")"
+		// The usage id is this deployment's, made from the one the row had where it was first
+		// recorded, or from the source's id for a row from before usage ids. A usage id names a
+		// unit of work this deployment bills, such as a month of a number, so the one sent is
+		// not kept. Importing the row again, from wherever it moved since, names the same row.
+		// A row taken back where it was first recorded is that row again: one this customer
+		// already holds here names no charge still to come.
+		origin := "COALESCE(r.source_usage_id, r.usage_id)"
+		picked[i] = fmt.Sprintf("CASE WHEN EXISTS (SELECT 1 FROM requests AS h WHERE h.usage_id = %[1]s AND h.customer_id = r.customer_id) THEN %[1]s ELSE %[2]s END",
+			origin, importedUsageID("customer_id", "COALESCE("+origin+"::text, id::text)"))
+		if j := slices.Index(columns, "source_usage_id"); j >= 0 {
+			// Where the row was first recorded, however many moves ago.
+			picked[j] = origin
+		}
 	}
 	if i := slices.Index(columns, spec.copied); spec.copied != "" && i >= 0 {
 		// The source's id, whatever the source kept as the id of where the row came from.
@@ -1546,9 +1555,9 @@ func (t dataTable) captured(s shape) []string {
 	return s.keys
 }
 
-// importedUsageID is the usage id a request from before usage ids is imported under, as SQL,
-// made from the customer importing it and its id in the source, so importing it again and
-// replaying its delete name the same row.
+// importedUsageID is the usage id a request is imported under, as SQL, made from the customer
+// importing it and the request's usage id where it was first recorded (its id in the source, for
+// one from before usage ids), so importing it again and replaying its delete name the same row.
 func importedUsageID(customer, sourceID string) string {
 	return fmt.Sprintf("md5('import:' || %s || ':' || %s)::uuid", customer, sourceID)
 }
@@ -1725,11 +1734,12 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	var conditions []string
 	var args []any
 	if spec.across != "" {
-		// Never by the id, which names another row here. A row from before usage ids has none,
-		// and was imported under one made from its source id, which the change carries too.
-		conditions = append(conditions, fmt.Sprintf("t.%s = COALESCE((?::jsonb ->> '%s')::uuid, %s)",
-			spec.across, spec.across, importedUsageID("?::text", "(?::jsonb ->> 'id')")))
-		args = append(args, string(change.Key), customerID, string(change.Key))
+		// Never by the id, which names another row here: by the usage id the row was imported
+		// under, made from the one the change carries, or from its source id for a row from
+		// before usage ids.
+		conditions = append(conditions, fmt.Sprintf("t.%s = %s", spec.across, importedUsageID("?::text",
+			fmt.Sprintf("COALESCE((?::jsonb ->> '%s')::uuid::text, ?::jsonb ->> 'id')", spec.across))))
+		args = append(args, customerID, string(change.Key), string(change.Key))
 	} else if spec.copied != "" {
 		// Never by the id either: by the source's id, which a copied row keeps. A row copied
 		// before the copied column holds none and is left, as the id it holds may as well be

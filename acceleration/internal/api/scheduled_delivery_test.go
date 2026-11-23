@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -42,15 +43,17 @@ func TestADeliveryCarriesWhatItsTasksRowHolds(t *testing.T) {
 	}, delivery)
 }
 
-// A peer reads only the ids it checks of what it is handed: any other field would be the
-// asker's word on the conversation, zone, command, prompt or due time it delivers under. An
-// older router hands over the whole delivery, and its ids still read.
+// A peer reads only the ids it checks of what it is handed, and the reason the asker's last
+// attempt failed under: any other field would be the asker's word on the conversation, zone,
+// command, prompt or due time it delivers under. An older router hands over the whole delivery,
+// and its ids still read.
 func TestAHandOffReadsOnlyTheIdsAPeerChecks(t *testing.T) {
 	sent, err := json.Marshal(scheduledDelivery{
 		CustomerID: "customer", TaskID: "task", RunID: "run", SessionID: "session",
 		ConversationID: "conversation", ConfigID: "config", UserID: "user", CallerKind: "authenticated",
 		Timezone: "Europe/Amsterdam", CommandID: "st_run", Text: "the prompt", Channels: []string{"phone"},
 		Due: time.Now(), APIKey: "key", UsageCategories: []string{"project:reminders"},
+		Earlier: codeSpendCheckUnavailable,
 	})
 	require.NoError(t, err)
 
@@ -59,12 +62,26 @@ func TestAHandOffReadsOnlyTheIdsAPeerChecks(t *testing.T) {
 
 	require.Equal(t, scheduledHandOff{
 		CustomerID: "customer", TaskID: "task", RunID: "run", SessionID: "session",
-		UserID: "user", CallerKind: "authenticated",
+		UserID: "user", CallerKind: "authenticated", Earlier: codeSpendCheckUnavailable,
 	}, handOff)
 	read, err := json.Marshal(handOff)
 	require.NoError(t, err)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(read, &fields))
-	require.ElementsMatch(t, []string{"customer_id", "task_id", "run_id", "session_id", "user_id", "caller_kind"},
+	require.ElementsMatch(t, []string{"customer_id", "task_id", "run_id", "session_id", "user_id", "caller_kind", "earlier"},
 		slices.Collect(maps.Keys(fields)))
+}
+
+// A retry reruns a failed turn after every refusal for money, not only after the check that
+// could not run: a refusal the check could not settle can carry insufficient_credits or
+// spend_limit_reached too (policy's uncheckedWith), and passes again on its own as well. A reason
+// that is not about money reruns nothing.
+func TestEveryMoneyCodeRerunsAFailedTurn(t *testing.T) {
+	for _, code := range []string{codeAccountSuspended, codeInsufficientCredits, codeTopUpRequired,
+		codeSystemLimitReached, codeSpendLimitReached, codeUserLimitReached, codeSpendCheckUnavailable} {
+		require.True(t, moneyCode(code), code)
+	}
+	for _, code := range []string{"", scheduling.ReasonReplyFailed, scheduling.ReasonTierLimit, scheduling.ReasonNoReply} {
+		require.False(t, moneyCode(code), code)
+	}
 }

@@ -374,6 +374,7 @@ TABLE requests
     ship_error text NOT NULL DEFAULT ''::text
     shipped_at timestamp with time zone
     sku text NOT NULL DEFAULT ''::text
+    source_usage_id uuid
     started_at timestamp with time zone NOT NULL
     success boolean NOT NULL
     tags jsonb NOT NULL DEFAULT '{}'::jsonb

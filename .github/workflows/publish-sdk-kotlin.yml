@@ -14,8 +14,8 @@ name: Publish Kotlin SDK
 #   If the run of a release merge says nothing is published, re-run all its jobs: the lookup of
 #   its pull request can lag right after the merge.
 #
-# There is no GitHub release: publishing one starts the Python release (release.yml), and the
-# repository's releases are the Python packages'.
+# There is no GitHub release: publishing one starts release.yml, and the repository's releases
+# (vX.Y.Z) are of the whole repo, not of this SDK.
 on:
   push:
     branches: [ "main", "release-kotlin-*-SNAPSHOT" ]

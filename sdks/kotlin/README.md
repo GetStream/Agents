@@ -446,4 +446,5 @@ Other merges into `main` publish nothing, even one that sets a new `version`: on
 pull request from a `release-kotlin-X.Y.Z` branch publishes. If a release merge's run says nothing
 is published, re-run all its jobs: the lookup of its pull request can lag right after the merge.
 
-There is no GitHub release: publishing one starts the Python release, `release.yml`.
+There is no GitHub release: publishing one starts `release.yml`, and a release is of the whole
+repository, not of this SDK.

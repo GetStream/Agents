@@ -166,24 +166,36 @@ type found[T any] struct {
 // deletion landed, false without Redis, for a caller that tells a person so.
 //
 // The deletion goes out even when the request has been cancelled since the write: rueidis
-// returns the context's error before it sends anything, so neither the DEL nor the PING would
-// reach Redis and every node would keep the old value until the TTL.
+// returns the context's error before it sends anything, so neither the DEL nor the EXISTS
+// would reach Redis and every node would keep the old value until the TTL.
 func (s *Store) forget(ctx context.Context, names ...string) bool {
 	if s.cache == nil || len(names) == 0 {
 		return false
 	}
 	ctx = context.WithoutCancel(ctx)
 	client := s.cache.Client()
+	// Each key is deleted on its own: a Redis Cluster refuses one DEL whose keys sit in
+	// different hash slots, and the keys one write changes usually do.
+	//
 	// Redis sends this node the invalidation of its own local copy after the DEL's reply, so
 	// a read made as soon as the DEL returns can still be answered by the old copy. The
-	// client reads everything over one connection, in order, so once a PING after the DEL is
-	// answered the invalidation has been applied. A PING that fails needs nothing more: a
-	// broken connection drops every local copy it held, and any other failure is the one the
-	// TTL covers.
-	replies := client.DoMulti(ctx, client.B().Del().Key(names...).Build(), client.B().Ping().Build())
-	if err := replies[0].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
-		slog.Default().Error("could not drop cached rows", "keys", names, "error", err)
-		return false
+	// client sends these commands over the connection it read the node's copies on, and reads
+	// its replies in order, so once a command after the DEL is answered, the invalidation has
+	// been applied. That command is an EXISTS of the same key, so that on a cluster it goes
+	// to the node that holds the key, as a keyless PING would not. An EXISTS that fails needs
+	// nothing more: a broken connection drops every local copy it held, and any other failure
+	// is the one the TTL covers.
+	commands := make(rueidis.Commands, 0, 2*len(names))
+	for _, name := range names {
+		commands = append(commands, client.B().Del().Key(name).Build(), client.B().Exists().Key(name).Build())
 	}
-	return true
+	replies := client.DoMulti(ctx, commands...)
+	landed := true
+	for i, name := range names {
+		if err := replies[2*i].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
+			slog.Default().Error("could not drop a cached row", "key", name, "error", err)
+			landed = false
+		}
+	}
+	return landed
 }
