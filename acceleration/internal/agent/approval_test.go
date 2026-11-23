@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -432,4 +433,68 @@ func withoutKey(line map[string]any, key string) map[string]any {
 	kept := maps.Clone(line)
 	delete(kept, key)
 	return kept
+}
+
+// A confirmation that fails on its own runs nothing, so its line keeps its own error: no run
+// line carries it. Three ways to fail on its own: arguments that are not an answer, a native
+// model's call refused before it is run, and a caller's own tool that has the name.
+func (s *AgentSuite) TestAConfirmationThatFailedOnItsOwnKeepsItsError() {
+	s.onFakeClock(func() {
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":{"yes":1}}`, nil)
+
+		s.Require().Len(lines, 2)
+		s.Equal(confirmTool, lines[1]["tool"])
+		s.Equal(false, lines[1]["success"])
+		s.Equal("error", lines[1]["error_code"])
+		s.Contains(lines[1]["error"], "confirm_tool_call's arguments")
+	})
+}
+
+func (s *AgentSuite) TestANativeConfirmationTheRouterRefusedKeepsItsError() {
+	s.logs = &logLines{}
+	s.ownsTools("")
+	peer := s.joinNativeWith(func(options *Options) {
+		options.Logger = slog.New(slog.NewJSONHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		options.ToolRunner = s.runner
+		options.Tools = s.tools
+	})
+	s.nativeFrame(peer, "session.update")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"r1","call_id":"call2","name":"confirm_tool_call","arguments":"{\"tool_call_id\":\"call1\",\"allowed\":true}"}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r1","status":"completed"}}`)
+
+	s.eventually(func() bool {
+		return slices.ContainsFunc(s.logs.records(toolBack), func(line map[string]any) bool { return line["tool"] == confirmTool })
+	}, "the refused confirmation never came back")
+	lines := s.logs.records(toolBack)
+	s.Require().Len(lines, 1)
+	s.Equal(false, lines[0]["success"])
+	s.Equal("error", lines[0]["error_code"])
+	s.Contains(lines[0]["error"], "is not one of the model's tools")
+}
+
+func (s *AgentSuite) TestACallersToolNamedConfirmToolCallKeepsItsError() {
+	s.onFakeClock(func() {
+		s.logs = &logLines{}
+		s.ownsTools("")
+		s.approves()
+		s.tools.Tools = append(s.tools.Tools, harness.Tool{Name: confirmTool, Description: "the caller's own", Parameters: map[string]any{"type": "object"}})
+		s.join(true)
+		s.agent.options.ToolRunner = s.runner
+		s.runner.run = func(context.Context, llm.ToolCall) ([]llm.ContentPart, error) {
+			return nil, errors.New("the caller's tool failed")
+		}
+		s.model.reply = []string{"Sure."}
+		s.asksFor(confirmTool, `{}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "do it")
+
+		s.eventually(func() bool { return len(s.logs.records(toolBack)) > 0 }, "the call never came back")
+		line := s.logs.records(toolBack)[0]
+		s.Equal(confirmTool, line["tool"])
+		s.Equal(false, line["success"])
+		s.Equal("error", line["error_code"])
+		s.Contains(line["error"], "the caller's tool failed")
+	})
 }

@@ -675,7 +675,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	// ran is whether the tool was called: the router refuses some calls itself, before it.
 	// asked is whether it was answered with its approval question instead.
-	var ran, asked bool
+	var ran, asked, confirmed bool
 	// What the caller said and the tools returned is checked against the whole call, not the
 	// history the model reads: compaction summarises that, and a value it summarised away
 	// was still said or returned.
@@ -686,7 +686,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		err = refusal
 	} else if requested.Call.Name == confirmTool && a.offersConfirm() {
 		ran = true
-		parts, err = a.confirm(ctx, requested.Call)
+		parts, confirmed, err = a.confirm(ctx, requested.Call)
 	} else if earlier, repeated := answeredSinceCaller(harness.WithoutNotes(a.History()), requested.Call, a.connected()); repeated {
 		parts = llm.TextParts(alreadyCalled + earlier)
 	} else if refused, again := refusedBefore(harness.WithoutNotes(a.History()), requested.Call); again {
@@ -757,7 +757,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	// The confirmation's line is about the answer; the approved run's own line carries the
 	// connector and the error, so a count by either does not count a run twice.
 	fields := a.loggedTool(*report, err)
-	if requested.Call.Name == confirmTool {
+	if confirmed {
 		fields = a.loggedAnswer(err)
 	}
 	a.logToolBack(requested.Call, fields, took, outcome, approval...)
