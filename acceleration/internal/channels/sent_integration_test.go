@@ -95,14 +95,14 @@ func (s *SentSuite) TestANoticeCountsTheUserItReachedAsReached() {
 	line, writer := "+15550100"+uuid.NewString()[:2], "+13475550101"
 	sealed, err := s.sealer.SealWithAAD(`{"token":"telnyx-key"}`, []byte(s.owner.CustomerID))
 	s.Require().NoError(err)
-	s.Require().NoError(s.money.Store.SaveChannelAccount(s.ctx, &store.ChannelAccount{
+	s.Require().NoError(s.money.Store.ChannelAccounts.Upsert(s.ctx, &store.ChannelAccount{
 		CustomerID: s.owner.CustomerID, Kind: string(SMS), E164: line, Token: "line-" + uuid.NewString(),
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
 	agentConfig := store.AgentConfig{CustomerID: s.owner.CustomerID, Name: "sent-" + uuid.NewString(),
-		Channels: store.AgentChannels{SMS: &store.ChannelLine{Number: line}}}
-	s.Require().NoError(s.money.Store.CreateAgentConfig(s.ctx, &agentConfig))
-	s.Require().NoError(s.money.Store.SaveChannelIdentity(s.ctx, &store.ChannelIdentity{
+		Channels: store.AgentAnswersIn{Lines: store.AgentChannels{SMS: &store.ChannelLine{Number: line}}}}
+	s.Require().NoError(s.money.Store.AgentConfigs.Insert(s.ctx, &agentConfig))
+	s.Require().NoError(s.money.Store.ContactMapEntries.Upsert(s.ctx, &store.ContactMapEntry{
 		CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: string(SMS), Address: writer, UserID: "user-1",
 	}))
 

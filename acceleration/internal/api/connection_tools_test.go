@@ -498,7 +498,7 @@ func (s *ConnectionToolsSuite) TestSavingAStaticTokenAgainMovesItOffABrokenRevis
 	id := s.connectionTo(connector)
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(1, s.token), nil))
 	before := s.connectedAt(id)
-	_, err := s.store.PinConnectorTools(context.Background(), id, before, map[string]string{"echo": "pinned-on-revision-1"})
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, before, map[string]string{"echo": "pinned-on-revision-1"})
 	s.Require().NoError(err)
 	s.builtin(bearer.Name, 2, brokenFirst)
 
@@ -518,7 +518,7 @@ func (s *ConnectionToolsSuite) TestSavingAStaticTokenAgainMovesItOffABrokenRevis
 	s.Require().NotNil(before)
 	s.Require().NotNil(after)
 	s.True(after.After(*before), "a new grant began")
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, after)
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, after)
 	s.Require().NoError(err)
 	s.Empty(pins, "the pin taken on revision 1 is not one for the new grant")
 }
@@ -529,14 +529,14 @@ func (s *ConnectionToolsSuite) TestSavingAStaticTokenAgainMovesItOffABrokenRevis
 func (s *ConnectionToolsSuite) TestRotatingAStaticTokenOnTheLatestRevisionKeepsItsGrant() {
 	id := s.connected(bearer.Name)
 	before := s.connectedAt(id)
-	_, err := s.store.PinConnectorTools(context.Background(), id, before, map[string]string{"echo": "pinned"})
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, before, map[string]string{"echo": "pinned"})
 	s.Require().NoError(err)
 
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials",
 		s.bearerToken(s.get(id).Revision, s.token), nil))
 
 	s.Equal(before, s.connectedAt(id))
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, s.connectedAt(id))
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, s.connectedAt(id))
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"echo": "pinned"}, pins)
 	s.Equal(1, s.get(id).DefinitionRevision)
@@ -927,7 +927,7 @@ func (s *ConnectionToolsSuite) TestAValidateNeverPinsAChangedToolAgain() {
 	s.validate(id)
 	again := s.validate(id)
 
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, s.connectedAt(id))
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, s.connectedAt(id))
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"echo": "pinned-before-it-changed"}, pins)
 	s.Equal(validationNeedsReapproval, string(again.Status))
@@ -957,7 +957,7 @@ func (s *ConnectionToolsSuite) TestAConsentThatFinishesWhileTheToolsAreListedIsR
 	listed := 0
 	s.afterList = func() {
 		listed++
-		_, err := s.store.DB().ExecContext(context.Background(),
+		_, err := s.store.GlobalDB().ExecContext(context.Background(),
 			"UPDATE connector_connections SET connected_at = ? WHERE id = ?", before.Add(time.Hour), id)
 		s.Require().NoError(err)
 	}
@@ -988,7 +988,7 @@ func (s *ConnectionToolsSuite) TestEveryPinIsCheckedNotOnlyTheToolsTheBodyNames(
 func (s *ConnectionToolsSuite) TestAPinOfAnEarlierGrantIsNotAChange() {
 	id := s.connected(bearer.Name)
 	earlier := s.connectedAt(id).Add(-time.Hour)
-	_, err := s.store.PinConnectorTools(context.Background(), id, &earlier, map[string]string{"echo": "pinned-for-the-old-grant"})
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, &earlier, map[string]string{"echo": "pinned-for-the-old-grant"})
 	s.Require().NoError(err)
 
 	validation := s.validate(id)
@@ -1012,7 +1012,7 @@ func (s *ConnectionToolsSuite) TestAGrantLackingAScopeIsReportedBeforeAChangedTo
 
 // pin pins the connection's tools at digests for its current grant, as a session does.
 func (s *ConnectionToolsSuite) pin(id string, digests map[string]string) {
-	_, err := s.store.PinConnectorTools(context.Background(), id, s.connectedAt(id), digests)
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, s.connectedAt(id), digests)
 	s.Require().NoError(err)
 }
 
@@ -1057,7 +1057,7 @@ func (s *ConnectionToolsSuite) driveShaped(coveredBy, granted string) string {
 		"  list: [chat:write, channels:read]\n", "  list: ["+googleDriveReadonly+", "+googleDriveFile+"]\n"+coveredBy, 1)
 	manifest, err := core.ParseManifest([]byte(yaml))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(id), &created))
@@ -1065,7 +1065,7 @@ func (s *ConnectionToolsSuite) driveShaped(coveredBy, granted string) string {
 		s.importedGrant(s.token, googleDriveReadonly), nil))
 	scopes, err := json.Marshal([]string{granted})
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE connector_connections SET granted_scopes = ?::jsonb WHERE id = ?",
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE connector_connections SET granted_scopes = ?::jsonb WHERE id = ?",
 		string(scopes), created.ID)
 	s.Require().NoError(err)
 	return created.ID
@@ -1103,7 +1103,7 @@ func (s *ConnectionToolsSuite) connector(scheme, tools string) string {
 	id := "custom_tools" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest, err := core.ParseManifest([]byte(s.manifest(id, 1, scheme, tools)))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -1147,7 +1147,7 @@ func (s *ConnectionToolsSuite) builtin(scheme string, revision int, extra string
 	if revision == 1 {
 		s.builtinID = "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{s.builtinID + ".yaml": {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{s.builtinID + ".yaml": {
 		Data: []byte(s.manifest(s.builtinID, revision, scheme, "") + extra)}}))
 	return s.builtinID
 }
@@ -1161,7 +1161,7 @@ func (s *ConnectionToolsSuite) connectionTo(connector string) string {
 
 // connectedAt is when the connection's grant began, as stored.
 func (s *ConnectionToolsSuite) connectedAt(id string) *time.Time {
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), id)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	return connection.ConnectedAt
 }

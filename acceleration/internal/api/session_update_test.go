@@ -51,7 +51,7 @@ func (s *RouterSuite) stallTheRecordWriter() (release func()) {
 	ctx := context.Background()
 	earlier := s.client.createSession(textSession(nil))
 	s.client.querySessions(SessionQuery{}) // lists only once the writer has written earlier's row
-	tx, err := s.store.DB().BeginTx(ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = tx.Rollback() })
 	_, err = tx.ExecContext(ctx, "SELECT 1 FROM agent_sessions WHERE id = ? FOR UPDATE", earlier.Id)
@@ -59,7 +59,7 @@ func (s *RouterSuite) stallTheRecordWriter() (release func()) {
 	s.client.updateSession(earlier.Id, UpdateSessionRequest{Title: pointerTo("Stalls the writer")})
 	s.Require().Eventually(func() bool {
 		var waiting int
-		_ = s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "+
+		_ = s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "+
 			"AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"agent_sessions\"%'").Scan(&waiting)
 		return waiting > 0
 	}, 10*time.Second, 10*time.Millisecond)

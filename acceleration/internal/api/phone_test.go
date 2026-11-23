@@ -278,12 +278,12 @@ func (s *PhoneSuite) TestANumberThatOnlyPlacedCallsIsNotListedAsAttached() {
 	s.useApp(s.data.createApp())
 	ctx := context.Background()
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: number, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
-	s.Require().NoError(s.store.InTrunkGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
-		return tx.SetLine(number, "trunk-"+s.utils.uuid(), "route-"+s.utils.uuid(), store.NumberBridge{})
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.SetLine(number, "trunk-"+s.utils.uuid(), "route-"+s.utils.uuid())
 	}))
 
 	var numbers []PhoneNumber
@@ -296,10 +296,10 @@ func (s *PhoneSuite) TestANumberThatOnlyPlacedCallsIsNotListedAsAttached() {
 func (s *PhoneSuite) attachedNumber(customerID string) string {
 	ctx := context.Background()
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: number, Vendor: "bics", Country: "US", CustomerID: customerID, PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, customerID, number, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, customerID, number, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(), CallType: "default", CallID: "call-" + s.utils.uuid(),
 	}))
 	return number
@@ -428,7 +428,7 @@ func (s *CallStatusSuite) TestACallIntoASessionWhoseCallCarriesOtherCustomIsAnIn
 	s.useApp(s.data.createApp())
 	ctx := context.Background()
 	e164, session := s.utils.number(), s.utils.uuid()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	creator := "agent-1"
@@ -1093,10 +1093,10 @@ func (s *CallStatusSuite) TestASessionOpensWhileItsCallRings() {
 func (s *PhoneSuite) attachedForSessions(customerID string) string {
 	ctx := context.Background()
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: number, Vendor: "bics", Country: "US", CustomerID: customerID, PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, customerID, number, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, customerID, number, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(), CallType: "agent",
 	}))
 	return number
@@ -1200,8 +1200,8 @@ func (s *PhoneSuite) TestANumberDetachedByAnOlderRouterDoesNotKeepItsConfig() {
 	ctx := context.Background()
 	number := s.attachedForSessions(s.customerID())
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(ctx, s.customerID(), number, config))
-	_, err := s.store.DB().NewUpdate().Model((*store.PhoneNumber)(nil)).
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), number, config))
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.PhoneNumber)(nil)).
 		Set("attached_at = NULL").Where("e164 = ?", number).Exec(ctx)
 	s.Require().NoError(err)
 
@@ -1212,13 +1212,13 @@ func (s *PhoneSuite) TestTheRefusedDeleteSaysHowToFreeTheConfig() {
 	s.useApp(s.data.createApp())
 	first, second := s.attachedForSessions(s.customerID()), s.attachedForSessions(s.customerID())
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), first, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), first, config))
 
 	_, failure := s.serverClient.failure(http.MethodDelete, "/v1/agents/configs/"+config, nil)
 	s.Contains(failure, "number "+first+" answers")
 	s.Contains(failure, "DELETE /v1/phone/numbers/{e164}/agent")
 
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), second, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), second, config))
 	_, failure = s.serverClient.failure(http.MethodDelete, "/v1/agents/configs/"+config, nil)
 	s.Contains(failure, "numbers ")
 	s.Contains(failure, first)
@@ -1228,7 +1228,7 @@ func (s *PhoneSuite) TestTheRefusedDeleteSaysHowToFreeTheConfig() {
 func (s *PhoneSuite) TestANumberThatIsNotAttachedCannotBeGivenAnAgent() {
 	s.useApp(s.data.createApp())
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: number, Vendor: "bics", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	config := s.config("echo/local-model")
@@ -1286,7 +1286,7 @@ func (s *PhoneSuite) TestDetachingANumberRemovesItsAgent() {
 
 	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/phone/numbers/"+number+"/attach", nil, nil))
 
-	answering, err := s.store.NumbersAnsweredBy(context.Background(), s.customerID(), config)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(context.Background(), s.customerID(), config)
 	s.Require().NoError(err)
 	s.Empty(answering)
 	s.Nil(s.listedNumber().AgentConfigId)
@@ -1300,12 +1300,12 @@ func (s *PhoneSuite) TestReleasingANumberRemovesItsAgent() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/phone/numbers/"+number+"/agent",
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
-	s.Require().NoError(s.store.ReleaseNumber(ctx, s.customerID(), number, time.Time{}))
+	s.Require().NoError(s.store.PhoneNumbers.Release(ctx, s.customerID(), number, time.Time{}))
 
-	answering, err := s.store.NumbersAnsweredBy(ctx, s.customerID(), config)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, s.customerID(), config)
 	s.Require().NoError(err)
 	s.Empty(answering)
-	held, err := s.store.CustomerNumbers(ctx, s.customerID(), true)
+	held, err := s.store.PhoneNumbers.Select(ctx, s.customerID(), store.PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Require().Len(held, 1)
 	s.Empty(held[0].ConfigID, "a released row keeps no agent")
@@ -1318,7 +1318,7 @@ func (s *PhoneSuite) TestReattachingANumberKeepsItsAgent() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/phone/numbers/"+number+"/agent",
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
-	s.Require().NoError(s.store.AttachNumber(context.Background(), s.customerID(), number, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(context.Background(), s.customerID(), number, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(), CallType: "agent",
 	}))
 
@@ -1336,11 +1336,11 @@ func (s *PhoneSuite) TestClearingANumbersLineRemovesItsAgent() {
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
 	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "bics"}
-	s.Require().NoError(s.store.InTrunkGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
 		return tx.ClearLine(number)
 	}))
 
-	answering, err := s.store.NumbersAnsweredBy(ctx, s.customerID(), config)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, s.customerID(), config)
 	s.Require().NoError(err)
 	s.Empty(answering)
 	s.Nil(s.listedNumber().AgentConfigId)

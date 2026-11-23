@@ -169,7 +169,7 @@ func (s *ResolverSuite) TestADeletedConnectionCannotBeResolvedFromTheCache() {
 	_, err := r.Resolve(s.f.ctx, ref, core.CredentialRequest{})
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.f.db.DeleteConnectorConnection(s.f.ctx, ref.CustomerID, ref.ConnectionID))
+	s.Require().NoError(s.f.db.ConnectorConnections.Delete(s.f.ctx, ref.CustomerID, ref.ConnectionID))
 	_, err = r.Resolve(s.f.ctx, ref, core.CredentialRequest{})
 	s.ErrorIs(err, store.ErrNoConnectorConnection)
 }

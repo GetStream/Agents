@@ -206,13 +206,13 @@ type Opened struct {
 func (c *Cards) Open(ctx context.Context, episode Episode) (Opened, error) {
 	contact := store.ContactMapEntry{
 		CustomerID:     episode.CustomerID,
-		AgentConfigID:  episode.AgentConfigID,
+		ConfigID:       episode.AgentConfigID,
 		Kind:           episode.Person.Kind,
 		Address:        episode.Person.Address,
 		ConversationID: chatlog.ChannelType + ":" + omniChannelPrefix + uuid.NewString(),
 		StreamAppPK:    episode.StreamAppPK,
 	}
-	if _, err := c.store.MapContact(ctx, &contact); err != nil {
+	if _, err := c.store.ContactMapEntries.Map(ctx, &contact); err != nil {
 		return Opened{}, err
 	}
 	row := store.Episode{
@@ -226,7 +226,7 @@ func (c *Cards) Open(ctx context.Context, episode Episode) (Opened, error) {
 		Began:         episode.Began,
 		StreamAppPK:   contact.StreamAppPK,
 	}
-	opened, err := c.store.OpenEpisode(ctx, &row)
+	opened, err := c.store.Episodes.Open(ctx, &row)
 	if err != nil {
 		return Opened{}, err
 	}
@@ -258,7 +258,7 @@ func (c *Cards) Write(ctx context.Context, opened Opened) error {
 		Data: &getstream.ChannelInput{
 			CreatedByID: &channelID,
 			Custom: map[string]any{
-				configField:                opened.Contact.AgentConfigID,
+				configField:                opened.Contact.ConfigID,
 				conversation.CustomerField: opened.Contact.CustomerID,
 				agentField:                 channelID,
 			},

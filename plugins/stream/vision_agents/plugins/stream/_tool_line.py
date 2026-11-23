@@ -54,20 +54,20 @@ class SocketLine:
         self._send = send
         self._holds = holds
 
-    async def update(self, call_id: str, text: str, verbatim: bool) -> None:
-        await self._send(
-            {
-                "type": "tool_update",
-                "tool_call_id": call_id,
-                "text": text,
-                "verbatim": verbatim,
-            }
-        )
-
     async def hold(self, call_id: str) -> bool:
         return await self._holds.ask(
             call_id, lambda: self._send({"type": "tool_hold", "tool_call_id": call_id})
         )
+
+    async def update(
+        self, call_id: str, title: str, custom: Optional[dict[str, Any]]
+    ) -> None:
+        frame: dict[str, Any] = {"type": "tool_update", "tool_call_id": call_id}
+        if title:
+            frame["text"] = title
+        if custom is not None:
+            frame["custom"] = custom
+        await self._send(frame)
 
 
 def cancel(call_id: str, holds: Holds, task: Optional[asyncio.Task]) -> None:

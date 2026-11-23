@@ -100,11 +100,11 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	definition, err := db.CreateConnectorDefinition(s.ctx, customer, manifest)
+	definition, err := db.ConnectorDefinitions.Revise(s.ctx, customer, manifest)
 	s.Require().NoError(err)
 	connection := &store.ConnectorConnection{CustomerID: customer, ConnectorID: definition.ID, DefinitionRevision: definition.Revision,
 		OwnerType: store.OwnerApp, AuthScheme: bearer.Name}
-	s.Require().NoError(db.CreateConnectorConnection(s.ctx, core.Registry{Schemes: schemes}, connection))
+	s.Require().NoError(db.ConnectorConnections.Insert(s.ctx, core.Registry{Schemes: schemes}, connection))
 	ref := core.ConnectionRef{CustomerID: customer, ConnectionID: connection.ID}
 	stored, _, err := bearer.New().Complete(s.ctx, core.CompleteInput{Supplied: map[string]string{bearer.SuppliedToken: "gho_canary"}})
 	s.Require().NoError(err)
@@ -115,7 +115,7 @@ sources:
 	s.binding = store.ConnectorBinding{Name: "forge", ConnectorID: definition.ID, Sandbox: true,
 		Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: connection.ID}}
 	s.config = store.AgentConfig{CustomerID: customer, Name: "agent-" + uuid.NewString(), Connectors: []store.ConnectorBinding{s.binding}}
-	s.Require().NoError(db.CreateAgentConfig(s.ctx, &s.config))
+	s.Require().NoError(db.AgentConfigs.Insert(s.ctx, &s.config))
 
 	s.credential, s.placeholder = "w16bind-"+egress.NewCredential(), "va_ph_"+uuid.NewString()
 	records := sandboxStore(redis)
@@ -155,18 +155,18 @@ func (s *SandboxProxyBindingSuite) TestAConfigThatNoLongerBindsTheGrantStopsTheP
 	other := s.config
 	other.Connectors = []store.ConnectorBinding{{Name: "forge", ConnectorID: uuid.NewString(), Sandbox: true,
 		Connection: s.binding.Connection}}
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &other))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &other))
 	status, body = s.send()
 	s.Equal(http.StatusUnauthorized, status, "a connector the config no longer binds")
 	s.Contains(body, "gives no token: forge")
 
 	unbound := s.config
 	unbound.Connectors = nil
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &unbound))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &unbound))
 	status, _ = s.send()
 	s.Equal(http.StatusUnauthorized, status, "a binding the config dropped")
 
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &s.config))
 	status, _ = s.send()
 	s.Equal(http.StatusBadGateway, status, "the binding put back reaches the host again: the proxy keeps no copy")
 }

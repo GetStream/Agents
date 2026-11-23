@@ -70,7 +70,7 @@ func (s *Server) listCampaigns(ctx context.Context, request *listCampaignsReques
 	}
 
 	limit := cmp.Or(request.Limit, defaultCampaignPage)
-	found, err := s.store.QueryCampaigns(ctx, customerID, store.CampaignFilter{State: string(request.State), Limit: limit + 1, After: after})
+	found, err := s.store.Campaigns.Select(ctx, customerID, store.CampaignFilter{State: string(request.State), Limit: limit + 1, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (s *Server) createCampaign(ctx context.Context, request *createCampaignRequ
 	if err := routing.Tags(created.Tags).Validate(); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	if err := s.store.CreateCampaign(ctx, &created); err != nil {
+	if err := s.store.Campaigns.Insert(ctx, &created); err != nil {
 		return nil, err
 	}
 	return s.campaignAnswer(ctx, created)
@@ -175,7 +175,7 @@ func (s *Server) campaign(ctx context.Context, id string) (string, store.Campaig
 	if s.store == nil {
 		return "", store.Campaign{}, errNoCampaigns
 	}
-	found, err := s.store.Campaign(ctx, customerID, id)
+	found, err := s.store.Campaigns.Get(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoCampaign) {
 		return "", store.Campaign{}, errUnknownCampaign
 	}
@@ -221,7 +221,7 @@ func (s *Server) configAndSequence(ctx context.Context, customerID string, body 
 	// A campaign that names a config nobody has would fail one call at a time, at whatever
 	// hour it was launched.
 	if *config != "" && *config != configID {
-		_, err := s.configs.AgentConfig(ctx, customerID, *config)
+		_, err := s.store.AgentConfigs.Get(ctx, customerID, *config)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return nil, nil, errUnknownConfig
 		}
@@ -290,11 +290,11 @@ func (s *Server) campaignsOf(ctx context.Context, campaigns []store.Campaign) ([
 	for _, one := range campaigns {
 		ids = append(ids, one.ID)
 	}
-	stages, err := s.store.ContactStages(ctx, ids)
+	stages, err := s.store.CampaignContacts.Stages(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	totals, err := s.store.CampaignTotals(ctx, ids)
+	totals, err := s.store.Campaigns.Totals(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +410,7 @@ func (s *Server) updateCampaign(ctx context.Context, request *updateCampaignRequ
 		changes.Tags = *body.Tags
 	}
 
-	updated, err := s.store.UpdateCampaign(ctx, customerID, current.ID, changes)
+	updated, err := s.store.Campaigns.Update(ctx, customerID, current.ID, changes)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, errCampaignLocked
 	}
@@ -426,7 +426,7 @@ func (s *Server) deleteCampaign(ctx context.Context, request *campaignRequest) (
 	if err != nil {
 		return nil, err
 	}
-	err = s.store.DeleteCampaign(ctx, customerID, current.ID)
+	err = s.store.Campaigns.Delete(ctx, customerID, current.ID)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, campaignInState(current.State, "deleted")
 	}
@@ -473,7 +473,7 @@ func (s *Server) launchCampaign(ctx context.Context, request *launchCampaignRequ
 
 	// The calls it places later, by no request, are owned by whoever launched it.
 	launcher := routing.AttributionFrom(ctx)
-	launched, err := s.store.LaunchCampaign(ctx, customerID, current.ID, store.Launch{
+	launched, err := s.store.Campaigns.Launch(ctx, customerID, current.ID, store.Launch{
 		StartAt: start, Now: now,
 		APIKey: launcher.APIKey, UserID: launcher.UserID, UsageCategories: launcher.UsageCategories,
 	})
@@ -489,7 +489,7 @@ func (s *Server) launchCampaign(ctx context.Context, request *launchCampaignRequ
 // readyToLaunch says what a draft still lacks before it can ring anybody, the first thing it
 // finds.
 func (s *Server) readyToLaunch(ctx context.Context, customerID string, draft store.Campaign) error {
-	contacts, err := s.store.QueryContacts(ctx, draft.ID, store.ContactFilter{Limit: 1})
+	contacts, err := s.store.CampaignContacts.Select(ctx, draft.ID, store.ContactFilter{Limit: 1})
 	if err != nil {
 		return err
 	}
@@ -499,7 +499,7 @@ func (s *Server) readyToLaunch(ctx context.Context, customerID string, draft sto
 	if draft.FromNumber == "" {
 		return campaignNotReady("a campaign needs one of the app's numbers to call from before it can launch")
 	}
-	_, err = s.store.Number(ctx, customerID, draft.FromNumber)
+	_, err = s.store.PhoneNumbers.GetByE164(ctx, customerID, draft.FromNumber)
 	if isNumberNotHeld(err) {
 		return campaignNotReady(draft.FromNumber + " is not one of this app's numbers, so the campaign cannot call from it")
 	}
@@ -509,7 +509,7 @@ func (s *Server) readyToLaunch(ctx context.Context, customerID string, draft sto
 	if draft.ConfigID == "" {
 		return campaignNotReady("a campaign needs an agent config to make its calls with before it can launch")
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, draft.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, draft.ConfigID)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return campaignNotReady("the agent config " + draft.ConfigID + " the campaign calls with no longer exists")
 	}
@@ -554,7 +554,7 @@ func (s *Server) mayCall(ctx context.Context, customerID string) error {
 
 // holdsNumber refuses a number the app does not hold, which no call can be placed from.
 func (s *Server) holdsNumber(ctx context.Context, customerID, e164 string) error {
-	_, err := s.store.Number(ctx, customerID, e164)
+	_, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, e164)
 	if isNumberNotHeld(err) {
 		return invalidRequest(e164 + " is not one of this app's numbers")
 	}
@@ -564,7 +564,7 @@ func (s *Server) holdsNumber(ctx context.Context, customerID, e164 string) error
 // pauseCampaign stops ringing anybody new. The calls already happening are left to finish.
 func (s *Server) pauseCampaign(ctx context.Context, request *campaignRequest) (*campaignResponse, error) {
 	return s.moveCampaign(ctx, request.Id, "paused", func(customerID string, current store.Campaign) error {
-		return s.store.PauseCampaign(ctx, customerID, current.ID, "")
+		return s.store.Campaigns.Pause(ctx, customerID, current.ID, "")
 	})
 }
 
@@ -579,7 +579,7 @@ func (s *Server) resumeCampaign(ctx context.Context, request *campaignRequest) (
 		}
 		// A launched campaign's config cannot change, so one deleted since leaves it nothing to
 		// ring with: the dialer would pause it again at its first call.
-		_, err := s.configs.AgentConfig(ctx, customerID, current.ConfigID)
+		_, err := s.store.AgentConfigs.Get(ctx, customerID, current.ConfigID)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return campaignNotReady("the agent config " + current.ConfigID + " the campaign calls with was deleted: duplicate the campaign with another")
 		}
@@ -589,14 +589,14 @@ func (s *Server) resumeCampaign(ctx context.Context, request *campaignRequest) (
 		if err := s.mayCall(ctx, customerID); err != nil {
 			return err
 		}
-		return s.store.ResumeCampaign(ctx, customerID, current.ID)
+		return s.store.Campaigns.Resume(ctx, customerID, current.ID)
 	})
 }
 
 // stopCampaign ends a campaign for good. Nobody waiting is rung; calls in progress finish.
 func (s *Server) stopCampaign(ctx context.Context, request *campaignRequest) (*campaignResponse, error) {
 	return s.moveCampaign(ctx, request.Id, "stopped", func(customerID string, current store.Campaign) error {
-		return s.store.StopCampaign(ctx, customerID, current.ID, time.Now().UTC())
+		return s.store.Campaigns.Stop(ctx, customerID, current.ID, time.Now().UTC())
 	})
 }
 
@@ -613,7 +613,7 @@ func (s *Server) moveCampaign(ctx context.Context, id, move string, apply func(c
 	if err != nil {
 		return nil, err
 	}
-	moved, err := s.store.Campaign(ctx, customerID, current.ID)
+	moved, err := s.store.Campaigns.Get(ctx, customerID, current.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +629,7 @@ func (s *Server) duplicateCampaign(ctx context.Context, request *duplicateCampai
 	if request.Body == nil {
 		return nil, invalidRequest("a request body is required")
 	}
-	copied, err := s.store.DuplicateCampaign(ctx, customerID, current.ID, request.Body.Contacts)
+	copied, err := s.store.Campaigns.Duplicate(ctx, customerID, current.ID, request.Body.Contacts)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, APIError{Type: ErrorTypeConflict, Code: codeCampaignLocked,
 			Message: "the contacts never rung are known once a campaign is stopped or completed; this one is " + current.State}
@@ -646,7 +646,7 @@ func (s *Server) getCampaignAnalytics(ctx context.Context, request *campaignRequ
 	if err != nil {
 		return nil, err
 	}
-	counted, err := s.store.CampaignAnalytics(ctx, current.ID)
+	counted, err := s.store.Campaigns.Analytics(ctx, current.ID)
 	if err != nil {
 		return nil, err
 	}

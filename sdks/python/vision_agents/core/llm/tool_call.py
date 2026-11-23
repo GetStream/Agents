@@ -15,17 +15,19 @@ class ToolLine(Protocol):
     """How a running call reaches the session it runs for.
 
     The socket that delivered the call provides one. Without one, as outside a call,
-    `ToolCallContext.update`, `say` and `disallow_interruptions` do nothing.
+    `ToolCallContext.disallow_interruptions` does nothing.
     """
-
-    async def update(self, call_id: str, text: str, verbatim: bool) -> None:
-        """Say how the call is going, or with `verbatim`, words to say as written."""
 
     async def hold(self, call_id: str) -> bool:
         """Ask for the call to keep going when the caller talks over the agent.
 
         Returns whether it was still running to be held.
         """
+
+    async def update(
+        self, call_id: str, title: str, custom: Optional[dict[str, Any]]
+    ) -> None:
+        """Tell the session how the call is going."""
 
 
 @dataclass(frozen=True)
@@ -53,7 +55,6 @@ class ToolCallContext:
 
         @llm.register_function(description="Book a flight")
         async def book_flight(tool_call_context: ToolCallContext, flight_id: str) -> str:
-            await tool_call_context.update("checking seats")
             return await bookings.book(flight_id, key=tool_call_context.id)
 
     Outside a call, as under a model that does not say, it is an empty one whose methods
@@ -73,25 +74,6 @@ class ToolCallContext:
     approved: bool = False
     line: Optional[ToolLine] = field(default=None, repr=False, compare=False)
 
-    async def update(self, text: str) -> None:
-        """Say how the call is going.
-
-        A voice agent tells the caller in its own words once nobody is talking, and a
-        conversation shows it on the call's step until the call ends. A newer update
-        replaces one not yet said, and the result replaces both.
-        """
-        if self.line is not None and self.id:
-            await self.line.update(self.id, text, False)
-
-    async def say(self, text: str) -> None:
-        """Have the agent say `text` as written while the call runs.
-
-        A text conversation posts it as a message. A speech-to-speech model is asked for
-        these words and may paraphrase them.
-        """
-        if self.line is not None and self.id:
-            await self.line.update(self.id, text, True)
-
     async def disallow_interruptions(self) -> None:
         """Keep the call going from now on when the caller talks over the agent.
 
@@ -105,6 +87,22 @@ class ToolCallContext:
             return
         if not await self.line.hold(self.id):
             raise CallNotHeld(f"the call {self.id} was stopped before it could be held")
+
+    async def update(
+        self, title: str = "", *, custom: Optional[dict[str, Any]] = None
+    ) -> None:
+        """Tell the people in the conversation how the call is going.
+
+        Args:
+            title: Replaces the call's display title while it runs, such as
+                "Comparing 40 flights". On a voice call the agent tells the caller
+                about it in its own words. Empty leaves the title as it was.
+            custom: Replaces the call's data whole, for their app to show, such as a
+                card under the message. Kept once the call finishes. None leaves it.
+        """
+        if self.line is None or not self.id:
+            return
+        await self.line.update(self.id, title, custom)
 
 
 def context_parameter(func: Callable[..., Any]) -> Optional[str]:

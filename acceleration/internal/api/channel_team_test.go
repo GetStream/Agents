@@ -78,7 +78,7 @@ func (s *AgentTeamsSuite) TestAForkIsMadeInATeamOnlyWhileTheAppSaysSo() {
 // user of the app without a team would be let into.
 func (s *AgentTeamsSuite) TestASessionOfATeamsConfigIsRefusedWhenTheSettingsCannotBeRead() {
 	config := s.configOf("red")
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 
@@ -127,7 +127,7 @@ func (s *AgentTeamsSuite) TestABackendsOwnTeamDoesNotMoveTheChannel() {
 // makeSettingsUnreadable breaks the suite's app settings row and waits until the router's
 // settings cache no longer holds the readable ones.
 func (s *AgentTeamsSuite) makeSettingsUnreadable() {
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, DisableCache: true})
@@ -135,7 +135,7 @@ func (s *AgentTeamsSuite) makeSettingsUnreadable() {
 	defer client.Close()
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
-		_, err := s.configs.AppSettings(s.T().Context(), s.customerID())
+		_, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
 		return err != nil
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -164,7 +164,7 @@ func (s *AgentTeamsSuite) madeAsBefore(data map[string]any) {
 // turnTeamsOff turns the setting off for the suite's app, as Stream would, and waits until the
 // router's settings cache no longer holds it on.
 func (s *AgentTeamsSuite) turnTeamsOff() {
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{}'::jsonb WHERE id = ?`, s.customerID()).Exec(s.T().Context())
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{}'::jsonb WHERE id = ?`, s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 	address := os.Getenv("ROUTER_REDIS_ADDR")
 	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
@@ -172,7 +172,7 @@ func (s *AgentTeamsSuite) turnTeamsOff() {
 	defer client.Close()
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
-		settings, err := s.configs.AppSettings(s.T().Context(), s.customerID())
+		settings, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
 		return err == nil && !settings.AgentTeamsChecked()
 	}, 10*time.Second, 20*time.Millisecond)
 }

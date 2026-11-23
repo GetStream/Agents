@@ -225,7 +225,7 @@ func (s *Server) firstDelivery(ctx context.Context, origin hookOrigin, eventType
 	if s.store == nil || key == "" {
 		return true
 	}
-	first, err := s.store.FirstDelivery(ctx, key)
+	first, err := s.store.DeliveriesSeen.First(ctx, store.DeliveryScopeHook, key)
 	if err != nil {
 		// Answering twice is the lesser harm than answering never.
 		s.logger.Warn("could not record a hook delivery", "error", err)
@@ -234,7 +234,7 @@ func (s *Server) firstDelivery(ctx context.Context, origin hookOrigin, eventType
 	return first
 }
 
-// deliveryKey is what a delivery is recorded under (store.FirstDelivery): one key for every
+// deliveryKey is what a delivery is recorded under (store.DeliveriesSeen.First): one key for every
 // delivery of the same event in the same app, whether the webhook or Stream Chat's endpoint
 // (receiveChatInbound) brought it. Empty for an event no key tells apart.
 func deliveryKey(origin hookOrigin, eventType string, stamp hookStamp) string {

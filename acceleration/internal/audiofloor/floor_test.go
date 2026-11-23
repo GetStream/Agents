@@ -564,7 +564,9 @@ func (s *FloorSuite) TestAFloorWhoseServerStaysDownIsAskedLessOftenAndNotAfterCl
 	s.Require().NoError(s.transcriber.Close())
 	closed := time.Now()
 	time.Sleep(250 * time.Millisecond)
-	s.Empty(s.decidedSince(closed), "nothing asked once the session closed")
+	// A probe sent just before Close can reach the server just after it; a probe asked after
+	// Close would come a wait of at least probeFirst later.
+	s.Empty(s.decidedSince(closed.Add(s.transcriber.probeFirst)), "nothing asked once the session closed")
 }
 
 // A check over the agent that runs out of its short deadline says the server took longer than

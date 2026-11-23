@@ -160,7 +160,7 @@ func (s *ChildAgentsSuite) TestAChildThatChangedSinceItsParentWasSavedIsAFailedT
 	s.change(gained.Id, func(config *store.AgentConfig) {
 		config.Agents = []store.ChildAgent{{Config: voiced.Name, Tool: "deeper"}}
 	})
-	s.Require().NoError(s.configs.DeleteAgentConfig(ctx, s.customerID(), deleted.Id))
+	s.Require().NoError(s.store.AgentConfigs.Delete(ctx, s.customerID(), deleted.Id))
 
 	run := s.run(CreateRunRequest{ConfigId: parent, Input: "review this"})
 
@@ -372,10 +372,10 @@ func (s *ChildAgentsSuite) TestTwoChildrenCannotShareATool() {
 // change writes a change to a config through the config store, past the API.
 func (s *ChildAgentsSuite) change(id string, edit func(*store.AgentConfig)) {
 	ctx := s.T().Context()
-	config, err := s.configs.AgentConfig(ctx, s.customerID(), id)
+	config, err := s.store.AgentConfigs.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
 	edit(&config)
-	s.Require().NoError(s.configs.UpdateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Update(ctx, &config))
 }
 
 // text is the id of a text agent config of the app answered by model.

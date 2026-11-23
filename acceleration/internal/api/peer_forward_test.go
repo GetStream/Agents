@@ -54,13 +54,13 @@ func (s *ScheduledTasksSuite) forwardStoredTo(holding, to *httptest.Server, cred
 	if edit != nil {
 		edit(&task)
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 25))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
 	now := time.Now()
 	run := store.ScheduledTaskRun{
 		TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: now, Trigger: store.ScheduledTaskTriggerManual,
 		Prompt: "peer-delivery-" + s.utils.uuid(), State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &run))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
 
 	payload := map[string]any{
 		"customer_id": s.customerID(),
@@ -188,7 +188,7 @@ func (s *ScheduledTasksSuite) textedTask(writer string) func(*store.ScheduledTas
 		config := s.agentWithScheduling(func(r *AgentConfigRequest) {
 			r.Channels = &AgentChannels{Sms: &ChannelLineRequest{Number: number}}
 		})
-		s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+		s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 			CustomerID: s.customerID(), ConfigID: config, Kind: "sms", Address: writer, UserID: task.UserID,
 		}))
 		task.ConfigID = config
@@ -277,7 +277,7 @@ func (s *ScheduledTasksSuite) TestAPeerHandedAnEarlierRunsCommandFollowsUpUnderI
 		Trigger: store.ScheduledTaskTriggerManual, Prompt: "peer-delivery-" + s.utils.uuid(),
 		State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &next))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &next))
 	handed["run_id"] = next.ID
 
 	answer, err = s.handOff(other, s.suiteCredential(), handed)
@@ -294,7 +294,7 @@ func (s *ScheduledTasksSuite) TestAPeerNamingAFinishedRunOfTheTaskIsRefused() {
 			TaskID: payload["task_id"].(string), CustomerID: s.customerID(), ScheduledFor: time.Now(),
 			Trigger: store.ScheduledTaskTriggerManual, Prompt: "done", State: store.ScheduledTaskRunDelivered,
 		}
-		s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &finished))
+		s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &finished))
 		payload["run_id"] = finished.ID
 	}))
 }
@@ -409,15 +409,17 @@ func (s *ScheduledTasksSuite) TestANodeWithNoStoreRefusesAPeersDelivery() {
 }
 
 // A node that could not read the task says so, so the router that handed it over tries
-// again, and nothing is delivered.
+// again, and nothing is delivered. Its store is closed, so it opens no session, and the one
+// the delivery names is held by another node.
 func (s *ScheduledTasksSuite) TestANodeThatCouldNotReadTheTaskAnswersAnError() {
 	closed, err := store.Open(testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
+	holding, _ := s.otherRouter(nil)
 	logged := &loggedText{}
 	other, _, _ := s.otherNodeServingFrom(closed, nil, s.sealer, slog.New(slog.NewTextHandler(logged, nil)))
 
-	text, answer, err := s.forwardDelivery(other, s.suiteCredential())
+	text, answer, err := s.forwardStoredTo(holding, other, s.suiteCredential(), nil, nil)
 
 	s.Require().NoError(err)
 	s.Equal(int32(http.StatusInternalServerError), answer.GetStatus(), "body: %s", answer.GetBody())

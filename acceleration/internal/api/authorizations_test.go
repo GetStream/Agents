@@ -210,7 +210,7 @@ func (s *AuthorizationsSuite) TestACallbackForAConsentNoBrowserHandedOffIsRefuse
 	id := s.connection("")
 	started := s.start(id)
 	// Only a handoff answers the authorize URL, so the test opens the attempt itself.
-	row, err := s.store.ConnectorAuthorizationAttemptByID(context.Background(), started.ID)
+	row, err := s.store.ConnectorAuthorizationAttempts.Get(context.Background(), started.ID)
 	s.Require().NoError(err)
 	plain, err := s.sealer.OpenWithAADVersion(row.AttemptSealed, attemptAAD(row.CustomerID, row.ConnectionID, row.ID), row.KEKVersion)
 	s.Require().NoError(err)
@@ -352,7 +352,7 @@ func (s *AuthorizationsSuite) TestAProviderErrorCodeThatEchoesTheCallbackIsKeptC
 func (s *AuthorizationsSuite) TestARefusedReconnectOfAConnectionThatNeedsReauthorizationStoresTheReason() {
 	id := s.connection("")
 	s.connect(id)
-	_, err := s.store.DB().ExecContext(s.T().Context(),
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", store.ConnectionNeedsReauthorization, id)
 	s.Require().NoError(err)
 
@@ -435,7 +435,7 @@ func (s *AuthorizationsSuite) TestAConsentWhoseConnectionCannotBeReadIsLogged() 
 	connector := s.get(id).ConnectorID
 	alice := s.browser()
 	callback := s.consent(alice.handOff(s.start(id)))
-	_, err := s.store.DB().NewRaw(`UPDATE connector_connections SET metadata = '"unreadable"'::jsonb WHERE id = ?`, id).Exec(s.T().Context())
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE connector_connections SET metadata = '"unreadable"'::jsonb WHERE id = ?`, id).Exec(s.T().Context())
 	s.Require().NoError(err)
 
 	finished := alice.finish(callback)
@@ -498,7 +498,7 @@ func (s *AuthorizationsSuite) TestAnExpiredConsentIsRefused() {
 	alice := s.browser()
 	started := s.start(id)
 	callback := s.consent(alice.handOff(started))
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_authorization_attempts SET expires_at = now() - interval '1 second' WHERE id = ?", started.ID)
 	s.Require().NoError(err)
 
@@ -564,7 +564,7 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 			"connection": map[string]any{"type": "fixed", "connection_id": id}, "tools": []map[string]any{},
 			"events": []map[string]any{{"event": "issue.created"}}}},
 	}, nil))
-	_, err := s.store.DB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions WHERE connection_id = ?", id)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions WHERE connection_id = ?", id)
 	s.Require().NoError(err)
 
 	reconnect := s.start(id)
@@ -573,7 +573,7 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 
 	s.Require().Equal(s.landing(id, consentConnected), finished.Header.Get("Location"))
 	var held int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connection_event_subscriptions WHERE connection_id = ?", id).Scan(&held))
 	s.Equal(1, held)
 }
@@ -645,7 +645,7 @@ func (s *AuthorizationsSuite) TestAReconnectForAnotherAccountKeepsTheOldGrantAnd
 	s.Equal(connected.Metadata, kept.Metadata)
 	s.Equal(connected.Revision, kept.Revision, "the credentials were not replaced")
 	s.Equal(ConnectionStatus(store.ConnectionConnected), kept.Status)
-	stored, err := s.store.ConnectorConnection(context.Background(), s.customerID(), id)
+	stored, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	s.Equal(accountSwitchError, stored.LastError)
 }
@@ -657,7 +657,7 @@ func (s *AuthorizationsSuite) TestAnOwnersOwnConsentConnectsWhereTheManifestChec
 	id := s.ownersConnection(s.ownerChecked("owner_email: true\n"), alice, strings.ToUpper(s.provider.Email()))
 
 	s.Equal(s.landing(id, consentConnected), s.finishAs(alice, id))
-	stored, err := s.store.ConnectorConnection(context.Background(), s.customerID(), id)
+	stored, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	s.Equal(store.ConnectionConnected, stored.Status)
 	s.NotEmpty(stored.CredentialsSealed)
@@ -981,7 +981,7 @@ func (s *AuthorizationsSuite) TestTheClientMetadataDocumentNamesItsOwnURLAndTheC
 // carries, for a custom connector and a built-in alike, and a connector without oauth2_code
 // shows none.
 func (s *AuthorizationsSuite) TestAConnectorsRedirectURIIsTheOneItsConsentsSend() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	connector := s.connector("")
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(connector), &created))
@@ -1017,7 +1017,7 @@ func (s *AuthorizationsSuite) TestAForcedConnectorDeleteRevokesItsConnectionsGra
 	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connectors/"+connector+"?force=true", nil, nil))
 
 	var sealed []byte
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT credentials_sealed FROM connector_connections WHERE id = ?", created.ID).Scan(&sealed))
 	s.Empty(sealed)
 	rows := s.connectorAudit(created.ID)
@@ -1025,7 +1025,7 @@ func (s *AuthorizationsSuite) TestAForcedConnectorDeleteRevokesItsConnectionsGra
 	s.Equal(ConnectorAuditAction(store.AuditGrantRevoked), rows[0].Action, "newest first")
 	s.Equal(store.AuditReasonDeleted, rows[0].Reason)
 	var clients int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_oauth_clients WHERE customer_id = ? AND connector_id = ?", s.customerID(), connector).Scan(&clients))
 	s.Zero(clients, "the client secret went with the connector")
 }
@@ -1051,7 +1051,7 @@ func (s *AuthorizationsSuite) TestAConsentForAConnectorTakingTheAppsOwnClientUse
 // start. The answer names both PUTs the app can make, what each takes, and a code of its own
 // whose doc_url explains it.
 func (s *AuthorizationsSuite) TestAConsentWithoutAClientNamesEveryWayToGiveSlackBotOne() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 
 	status, failure := s.consentFailure("slack_bot")
 
@@ -1134,7 +1134,7 @@ func (s *AuthorizationsSuite) TestAConsentWithoutAClientNamesNoAppTheRouterCanno
 // provider-app answers not_configured without a Slack apps client or an https
 // ROUTER_PUBLIC_URL (setConnectorProviderApp), so neither is told to use it.
 func (s *AuthorizationsSuite) TestAConsentWithoutAClientNamesNoProviderAppWhereTheDeploymentCannotServeIt() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	apps, public := s.router.slackApps, s.router.publicURL
 	s.T().Cleanup(func() { s.router.slackApps, s.router.publicURL = apps, public })
 
@@ -1154,7 +1154,7 @@ func (s *AuthorizationsSuite) TestAConsentWithoutAClientNamesNoProviderAppWhereT
 // answers not_configured without an https ROUTER_PUBLIC_URL (setConnectorProviderApp), so an
 // http one is not told to use it.
 func (s *AuthorizationsSuite) TestAChatConsentWithoutAClientNamesProviderAppOnlyOnHTTPS() {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	request := session.ConsentRequest{CustomerID: s.customerID(), ConnectorID: "slack_bot", UserID: "chat-user"}
 
 	_, err := ConnectorConsents(s.store, s.connectors, s.sealer, "https://router.example")(context.Background(), request)
@@ -1187,7 +1187,7 @@ func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonKeepsTheGener
 	yaml := strings.Replace(s.fakeManifest(id, 1, "customer", ""), s.provider.URL+fakeprovider.PathAuthorize, "https://10.0.0.1/authorize", 1)
 	manifest, err := core.ParseManifest([]byte(yaml))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	s.putClient(id, s.provider.ClientSecret)
 
@@ -1249,7 +1249,7 @@ func (s *AuthorizationsSuite) TestARotatedSecretIsWhatTheNextRefreshOfEveryConne
 	// not put yet: one row changes, and the provider refuses what each refresh then sends.
 	s.putClient(connector, "rotated-"+s.utils.uuid())
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_oauth_clients WHERE customer_id = ?", s.customerID()).Scan(&rows))
 	s.Equal(1, rows)
 	for _, id := range connections {
@@ -1287,9 +1287,9 @@ func (s *AuthorizationsSuite) putClient(connector, secret string) {
 // what the scheme answered.
 func (s *AuthorizationsSuite) refresh(id string) error {
 	ctx := context.Background()
-	connection, err := s.store.ConnectorConnection(ctx, s.customerID(), id)
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
-	definition, err := s.store.ConnectorDefinition(ctx, s.customerID(), connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(ctx, s.customerID(), connection.ConnectorID, connection.DefinitionRevision)
 	s.Require().NoError(err)
 	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	s.Require().NoError(err)
@@ -1336,7 +1336,7 @@ func (s *AuthorizationsSuite) connectorWith(registration, authMethod, extra stri
 	id := "custom_fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest, err := core.ParseManifest([]byte(s.fakeManifestWith(id, 1, registration, authMethod, extra)))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -1380,17 +1380,17 @@ sources:
 // builtinAtFake seeds connector's manifest at revision as a built-in, as a router start with
 // that file does. A built-in's id is the file name and never starts with custom_.
 func (s *AuthorizationsSuite) builtinAtFake(id string, revision int, extra string) {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(),
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(),
 		fstest.MapFS{id + ".yaml": {Data: []byte(s.fakeManifest(id, revision, "operator", extra))}}))
 }
 
 // revise stores the next revision of the app's own connector, changed by change.
 func (s *AuthorizationsSuite) revise(connector string, change func(*core.Manifest)) {
-	latest, err := s.store.LatestConnectorDefinition(context.Background(), s.customerID(), connector)
+	latest, err := s.store.ConnectorDefinitions.Latest(context.Background(), s.customerID(), connector)
 	s.Require().NoError(err)
 	manifest := latest.Manifest
 	change(&manifest)
-	revised, err := s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	revised, err := s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	s.Require().Equal(latest.Revision+1, revised.Revision)
 }
@@ -1421,7 +1421,7 @@ func (s *AuthorizationsSuite) slackAtFake() string {
 	}
 	parsed, err := core.ParseManifest([]byte(manifest))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), parsed)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), parsed)
 	s.Require().NoError(err)
 	return id
 }
@@ -1466,7 +1466,7 @@ sources:
 	s.Require().NoError(err)
 	// Where a refused consent's tokens are revoked, for a manifest that opts in.
 	manifest.Endpoints["revoke"] = s.provider.URL + fakeprovider.PathRevoke
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -1496,7 +1496,7 @@ func (s *AuthorizationsSuite) finishAs(owner *testClient, id string) string {
 // assertNothingStored is a connection a consent left as it was made: pending, with no
 // credentials, no account and no grant.
 func (s *AuthorizationsSuite) assertNothingStored(id string) {
-	stored, err := s.store.ConnectorConnection(context.Background(), s.customerID(), id)
+	stored, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	s.Equal(store.ConnectionPending, stored.Status)
 	s.Empty(stored.CredentialsSealed)
@@ -1689,7 +1689,7 @@ func TestAuthorizationsWithoutAPublicURLSuite(t *testing.T) {
 func (s *AuthorizationsWithoutAPublicURLSuite) SetupSuite() {
 	s.connectors = core.Registry{Schemes: map[string]core.Scheme{oauth2code.Name: namedScheme(oauth2code.Name)}}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *AuthorizationsWithoutAPublicURLSuite) SetupTest() {
@@ -1705,7 +1705,7 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConsentIsRefusedWhenItStarts
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "ROUTER_PUBLIC_URL")
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", created.ID).Scan(&attempts))
 	s.Zero(attempts, "no attempt waits for a callback that could never arrive")
 }

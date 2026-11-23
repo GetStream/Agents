@@ -27,7 +27,7 @@ func (r answeringImages) InRegion(context.Context, string, string, []string) (bo
 // An image target nothing answers to is the save's mistake, refused with a reason; one the
 // router could not look up is the router's, an error rather than a refusal of a good target.
 func TestOnlyAnImageTargetNothingAnswersToIsRefused(t *testing.T) {
-	config := store.AgentConfig{CustomerID: "acme", Image: "image-fast"}
+	config := store.AgentConfig{CustomerID: "acme", Models: store.AgentModels{Image: "image-fast"}}
 
 	unknown := &Server{routers: map[routing.Modality]routing.Inspector{
 		routing.Image: answeringImages{err: routing.Refused(errors.New(`routing: unknown target "image-fast"`))},

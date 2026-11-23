@@ -30,6 +30,10 @@ func documentHandWritten(api huma.API) {
 				registry.Schema(reflect.TypeFor[ToolResultCommand](), true, ""),
 				registry.Schema(reflect.TypeFor[ToolApprovalCommand](), true, ""),
 			},
+			// The frames the server sends that a client keeps state from.
+			"x-server-frames": []*huma.Schema{
+				registry.Schema(reflect.TypeFor[ToolCallState](), true, ""),
+			},
 		},
 		Method:  http.MethodGet,
 		Path:    "/v1/agents/sessions/{id}/events",
@@ -37,7 +41,8 @@ func documentHandWritten(api huma.API) {
 		Description: "A WebSocket, which OpenAPI cannot describe past the upgrade. Frames are JSON objects " +
 			"carrying a `type` and the fields of that event.\n" +
 			"The server sends what the conversation did: `joined`, `heard`, `responding`, " +
-			"`response_delta`, `responded` (pending_work remains true while tools or delegated work " +
+			"`response_delta`, `reasoning_delta` (turn_id and text: the next piece of the model's thinking " +
+			"on a written reply, never spoken), `responded` (pending_work remains true while tools or delegated work " +
 			"are outstanding), `said` (a line the agent says as written rather than asking the model, " +
 			"such as its greeting, with the purpose it has), `speaking` (an utterance started being heard: " +
 			"turn_id, synthesis_id, the text the voice had been sent for it by then, at, when the call's " +
@@ -53,7 +58,8 @@ func documentHandWritten(api huma.API) {
 			"`decision`, `delegated`, `task_settled` (files " +
 			"lists what the work's code handed back, each a name, mime_type, url and size, uploaded " +
 			"to a persistent conversation's channel and attached to the reply), " +
-			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_updated`, `tool_ran`, `transferred`, `pressed`, `looked_up`, " +
+			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`, " +
+			"`tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`, `looked_up`, " +
 			"`backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and " +
 			"message_end, the utterance being heard when it was cut, how many milliseconds of it had been, " +
 			"and where all it had been sent is in the reply's message, when any of it had), " +
@@ -118,6 +124,13 @@ func documentHandWritten(api huma.API) {
 			"failed and cancelled. tool_started includes tool_call_id, tool, turn_id and started_at, and " +
 			"pre_speech when the tool's connector binding sets one in its policy; " +
 			"tool_ran also includes tool_call_id, and files when the tool was run_code, as on task_settled.\n" +
+			"`tool_call.started`, `tool_call.progress` and `tool_call.finished` (`ToolCallState`) are a " +
+			"call's state as a client shows it, whoever runs the call: tool_call_id, tool, turn_id, status " +
+			"(in_progress, waiting for a person's approval, success, failed or cancelled), display_title (what " +
+			"the call is doing, as its tool was declared with), progress (the last " +
+			"`tool_update`, the binding's pre_speech or the approval question), started_at, duration_ms, " +
+			"approved_at, rejected_at, error and custom (the data of the last `tool_update` that " +
+			"carried any, kept once the call finishes). Each carries the whole state: keep the last per tool_call_id.\n" +
 			"A respond command carrying request_id emits command_accepted with a nested command " +
 			"receipt (request_id, user_message_id, assistant_message_id, state, duplicate). Personal " +
 			"persistent text sessions require this ID. A retry with the same text and images returns " +
@@ -168,14 +181,16 @@ func documentHandWritten(api huma.API) {
 			"cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it " +
 			"was held, or `tool_cancel` when the call had already stopped. " +
 			"An explicit `interrupt` still cancels a held call. It may also send `tool_update` " +
-			"(`tool_call_id`, `text`, `verbatim`) to say how the call is going: the agent tells a " +
+			"(`tool_call_id`, `text`, `verbatim`, `custom`) to say how the call is going: the agent tells a " +
 			"voice caller in its own words once nobody is talking, and a persistent conversation " +
 			"shows `text` as the summary of the call's step until it ends. On speech-to-speech, " +
 			"OpenAI Realtime, Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; " +
 			"other models only report it. With `verbatim` true, " +
 			"the agent says or posts `text` as written instead. A newer update replaces one not yet " +
-			"said, and a call's result replaces both. Every watcher is sent `tool_updated` (`id`, " +
-			"`turn_id`, `tool`, `text`, `verbatim`) for each update. An update or hold from a watcher " +
+			"said, and a call's result replaces both. `custom`, an object, replaces the call's `custom` " +
+			"in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and " +
+			"is not said. Every watcher is sent `tool_updated` (`id`, " +
+			"`turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An update or hold from a watcher " +
 			"that does not run the call is dropped.\n" +
 			"On a voice call, a call to a tool declared with an `approval` is asked about out loud " +
 			"instead, and sent only once the caller said yes, with `approved` true; a watcher does " +

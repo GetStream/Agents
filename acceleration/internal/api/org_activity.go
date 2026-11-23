@@ -152,31 +152,31 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 	if since.Before(now.Add(-activityHorizon)) {
 		return nil, errActivityHorizon
 	}
-	apps, err := s.store.OrganizationActivityApps(ctx, request.OrgID)
+	apps, err := s.store.AppOrganizations.ActivityApps(ctx, request.OrgID)
 	if err != nil {
 		return nil, err
 	}
-	areas, err := s.store.ActivityAreas(ctx, apps, since)
+	areas, err := s.store.Activities.Areas(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	days, err := s.store.ActivityDays(ctx, apps, since, []string{activity.AreaConversations, activity.AreaModelAPI})
+	days, err := s.store.Activities.Days(ctx, apps, since, []string{activity.AreaConversations, activity.AreaModelAPI})
 	if err != nil {
 		return nil, err
 	}
-	uses, err := s.store.MeterUses(ctx, apps, since)
+	uses, err := s.store.Spend.Meters(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	endings, err := s.store.SessionEndings(ctx, apps, since)
+	endings, err := s.store.Sessions.Endings(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	latest, err := s.store.LatestSessions(ctx, apps, since, latestSessions)
+	latest, err := s.store.Sessions.Latest(ctx, apps, since, latestSessions)
 	if err != nil {
 		return nil, err
 	}
-	legs, err := s.store.TurnLatency(ctx, apps, since)
+	legs, err := s.store.TurnBuckets.Latency(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +187,7 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 		FurthestStep:   furthestStep(areas, days),
 		Areas:          make([]ActivityArea, 0, len(areas)),
 		Meters:         make([]ActivityMeter, 0, len(uses)),
-		Shards:         s.store.MeterShards(),
+		Shards:         s.store.Spend.Shards(),
 		Sessions:       activitySessions(endings, latest),
 		Latency:        make([]ActivityLatency, 0, len(legs)),
 	}

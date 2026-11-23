@@ -38,7 +38,7 @@ const chatCardTimeout = 30 * time.Second
 // it, so the summary, which reads the lines from the start on (omnichannel.linesOf), holds it:
 // the open comes after it, on the router's clock.
 //
-// Every message calls Open, which keeps the episode open (episode_activity.last_message_at).
+// Every message calls Open, which keeps the episode open (episodes.last_message_at).
 // A message delivered again, by Stream or by the queue's next try, finds the episode its first
 // delivery opened (store.OpenEpisode, episodes_open_thread), so it opens no second one and
 // writes no second card. An episode or a card that fails costs the card, not the answer: it

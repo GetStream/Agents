@@ -38,6 +38,8 @@ type OutcomeSuite struct {
 	ctx   context.Context
 	store *store.Store
 	redis rueidis.Client
+	// dsn is the suite's database.
+	dsn string
 	// redisAddress is where the suite's Redis listens.
 	redisAddress string
 	service      *Service
@@ -58,7 +60,8 @@ func (s *OutcomeSuite) SetupSuite() {
 	}
 	s.ctx = context.Background()
 	s.redisAddress = address
-	opened, err := store.Open(testenv.Database(dsn, "phone_outcome"))
+	s.dsn = testenv.Database(dsn, "phone_outcome")
+	opened, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
@@ -103,7 +106,7 @@ func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
 	s.service.OnUnanswered(func(_ context.Context, customerID, sessionID string) {
 		s.asked = append(s.asked, [2]string{customerID, sessionID})
 	})
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: s.clock.now(),
 	}))
 }
@@ -895,10 +898,10 @@ func (s *OutcomeSuite) TestAnArrivingCallItsAgentLeftOnTheLineIsCountedDropped()
 	before := s.callsCounted()
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
-		ID: callID, CustomerID: s.customer, CallType: defaultCallType, CallID: callID,
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
+		ID: callID, CustomerID: s.customer,
 	}))
-	s.Require().NoError(s.store.CloseSession(s.ctx, callID, s.clock.now(), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, callID, s.clock.now(), ""))
 	s.clock.advance(time.Minute)
 
 	s.ended(defaultCallType, callID)
@@ -924,7 +927,12 @@ func (s *OutcomeSuite) TestACallOnACustomersTrunkIsCountedUnderTheTrunk() {
 // to be kept, and the call was counted nowhere, where it is documented as completed.
 func (s *OutcomeSuite) TestAnArrivingCallIsCountedCompletedWhenRedisHangs() {
 	hang := &atomic.Bool{}
-	s.service.redis = s.redisThatHangs(hang)
+	hanging, err := store.OpenShards(store.Options{DSN: s.dsn, Redis: store.Redis{Address: s.redisThatHangs(hang)}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(hanging.Close()) })
+	// Before the store closes: a close waits on the connection the proxy holds.
+	s.T().Cleanup(func() { hang.Store(false) })
+	s.service.store = hanging
 	before := s.callsCounted()
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
@@ -938,9 +946,9 @@ func (s *OutcomeSuite) TestAnArrivingCallIsCountedCompletedWhenRedisHangs() {
 	s.Equal(map[[2]string]float64{{"inbound", "completed"}: 1}, s.countedSince(before))
 }
 
-// redisThatHangs is a client of the suite's Redis through a proxy that, while hang is set,
+// redisThatHangs is the address of a proxy to the suite's Redis that, while hang is set,
 // passes nothing on in either direction: a Redis that is up and answers nothing.
-func (s *OutcomeSuite) redisThatHangs(hang *atomic.Bool) rueidis.Client {
+func (s *OutcomeSuite) redisThatHangs(hang *atomic.Bool) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { listener.Close() })
@@ -978,10 +986,5 @@ func (s *OutcomeSuite) redisThatHangs(hang *atomic.Bool) rueidis.Client {
 			go pass(conn, upstream)
 		}
 	}()
-	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{listener.Addr().String()}, DisableCache: true})
-	s.Require().NoError(err)
-	s.T().Cleanup(client.Close)
-	// Before the client closes: a close waits on the connection the proxy holds.
-	s.T().Cleanup(func() { hang.Store(false) })
-	return client
+	return listener.Addr().String()
 }

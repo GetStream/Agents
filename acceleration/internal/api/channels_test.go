@@ -94,7 +94,7 @@ func (s *ChannelsSuite) TestTheCredentialsAreSealedInTheDatabase() {
 	number := s.number()
 	s.connect(number)
 
-	stored, err := s.store.ChannelAccount(context.Background(), s.customerID(), "whatsapp", number)
+	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
 	s.Require().NoError(err)
 	s.NotContains(string(stored.SecretsSealed), "meta-token")
 	s.Positive(stored.SecretsKEKVersion)
@@ -270,7 +270,7 @@ func (s *ChannelsSuite) TestTheConversationIsKeptForTheNumberThatWrote() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "what is open?"))
 	s.Require().NotEmpty(s.answer(writer))
 
-	held, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal("phone:+"+writer, held.UserID)
 	s.NotEmpty(held.ConversationID, "the next message carries this one on")
@@ -284,13 +284,13 @@ func (s *ChannelsSuite) TestASecondMessageCarriesOnTheSameConversation() {
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "what is open?"))
 	s.Require().NotEmpty(s.answer(writer))
-	first, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	first, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "and now?"))
 	s.Eventually(func() bool { return len(s.meta.to(writer)) == 2 }, settleFor, 50*time.Millisecond)
 
-	second, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	second, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal(first.ConversationID, second.ConversationID)
 }
@@ -320,7 +320,7 @@ func (s *ChannelsSuite) TestSomebodyWhoTextsStopIsNotWrittenToAgain() {
 
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "stop"))
 	s.Contains(s.answer(writer), "unsubscribed", "the confirmation is the one message they are still owed")
-	optedOut, err := s.store.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
 	s.True(optedOut)
 
@@ -403,7 +403,7 @@ func (s *ChannelsSuite) TestTheNumberThatTextsACodeBecomesThatEndUser() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), minted.Code))
 	s.Require().NotEmpty(s.answer(writer))
 
-	held, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal(owner, held.UserID)
 }
@@ -424,8 +424,55 @@ func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, other, "msg-"+s.utils.uuid(), minted.Code))
 
 	s.Contains(s.answer(other), "code")
-	_, err := s.store.ChannelIdentity(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+other)
-	s.ErrorIs(err, store.ErrUnknownChannelIdentity)
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+other)
+	s.ErrorIs(err, store.ErrNoContact)
+}
+
+// A code is six digits, so a number that may text guesses without end finds one.
+func (s *ChannelsSuite) TestANumberThatTextsWrongCodesCannotClaimEvenTheRightOne() {
+	number := s.number()
+	line := s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	guesser, owner := s.writer(), s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	for n := range 5 {
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), "guess "+strconv.Itoa(n)))
+		s.Contains(s.reply(guesser, n+1), "code")
+	}
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), minted.Code))
+
+	s.Contains(s.reply(guesser, 6), "Too many codes")
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+guesser)
+	s.ErrorIs(err, store.ErrNoContact)
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, owner, "msg-"+s.utils.uuid(), minted.Code))
+	s.NotContains(s.reply(owner, 1), "Too many codes", "another number is not held to the guesser's count")
+	_, err = s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+owner)
+	s.NoError(err)
+}
+
+// Guessing from a new number each time is held to a count of the whole line.
+func (s *ChannelsSuite) TestNumbersGuessingCodesOnOneLineTogetherCannotClaimOne() {
+	number := s.number()
+	line := s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	for n := range 20 {
+		guesser := s.writer()
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), "guess "+strconv.Itoa(n)))
+		s.Contains(s.reply(guesser, 1), "code")
+	}
+	last := s.writer()
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, last, "msg-"+s.utils.uuid(), minted.Code))
+
+	s.Contains(s.reply(last, 1), "Too many codes")
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+last)
+	s.ErrorIs(err, store.ErrNoContact)
 }
 
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {
@@ -527,11 +574,8 @@ func (s *ChannelsSuite) TestAReplyOfASuspendedOrganizationIsNotWrittenBackAndWar
 	model.holds()
 	defer model.answers()
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "and tomorrow?"))
-	s.Require().Eventually(func() bool {
-		model.mu.Lock()
-		defer model.mu.Unlock()
-		return model.turns >= 2
-	}, settleFor, 10*time.Millisecond, "the second turn never began")
+	s.Require().Eventually(func() bool { return len(model.replies()) >= 2 },
+		settleFor, 10*time.Millisecond, "the second turn never began")
 	s.suspend(writer)
 
 	model.answers()
@@ -628,6 +672,16 @@ func (s *ChannelsSuite) answer(to string) string {
 		return len(written) > 0
 	}, settleFor, 50*time.Millisecond, "the agent wrote nothing back to %s", to)
 	return written[0]
+}
+
+// reply is the nth message the agent wrote back to a number, from 1, once there is one.
+func (s *ChannelsSuite) reply(to string, n int) string {
+	var written []string
+	s.Require().Eventually(func() bool {
+		written = s.meta.to(to)
+		return len(written) >= n
+	}, settleFor, 50*time.Millisecond, "the agent wrote %s fewer than %d messages", to, n)
+	return written[n-1]
 }
 
 // post and get reach a webhook the way a provider does: no credentials, since the token in

@@ -286,13 +286,14 @@ type Spec struct {
 	// session does what it did before the cards existed.
 	EpisodeCards       bool
 	EpisodeCardsRecord bool
-	// ProgressiveTools offers plugin, MCP server and connector tools by a summary, and
-	// answers the first call to each with its full description instead of running it.
-	ProgressiveTools bool
-	// ToolOutputRetention is how long the turns this session records keep what its tools
-	// were given and gave back: options.RetentionNone for not at all, a duration, or empty
-	// for as long as the session. From the agent's config, and the manager shortens it to
-	// the app's and the organization's policies when the session is created.
+	// ToolGroups are the agent config's groups of the functions an SDK provides: a session
+	// under a config offers only the functions they name, each loaded as its group says.
+	ToolGroups []store.ToolGroup
+	// ToolOutputRetention is how long the turns this session records keep what any of its
+	// tools were given and gave back: options.RetentionNone for not at all, a duration, or
+	// empty for as long as the session. The manager sets it to the app's and the
+	// organization's policies when the session is created; a tool's group or connector
+	// binding can shorten it for that tool (toolLoading.retention).
 	ToolOutputRetention options.Retention
 	// ResumeHistory is how a conversation the session carries on is handed back to the
 	// model: the session request's, else the agent config's. Zero is the router's default.
@@ -425,17 +426,17 @@ func FromConfig(config store.AgentConfig) Spec {
 		// A text agent holds its conversation in writing, so a session created from one
 		// joins no call unless the request asks for a voice session explicitly.
 		Text:           config.Mode == store.AgentModeText,
-		STTTarget:      config.STT,
-		TTSTarget:      config.TTS,
-		STSTarget:      config.STS,
-		Voice:          config.Voice,
-		LLMTarget:      config.LLM,
-		LLMFallbacks:   config.LLMFallbacks,
+		STTTarget:      config.Models.STT,
+		TTSTarget:      config.Models.TTS,
+		STSTarget:      config.Models.STS,
+		Voice:          config.Models.Voice,
+		LLMTarget:      config.Models.LLM,
+		LLMFallbacks:   config.Models.LLMFallbacks,
 		Agents:         config.Agents,
-		SubagentTarget: config.Subagent,
-		VideoSource:    config.VideoSource, VideoMaxFrames: config.VideoMaxFrames,
-		SearchTarget:       config.Search,
-		ImageTarget:        config.Image,
+		SubagentTarget: config.Models.Subagent,
+		VideoSource:    config.Video.Source, VideoMaxFrames: config.Video.MaxFrames,
+		SearchTarget:       config.Models.Search,
+		ImageTarget:        config.Models.Image,
 		Instructions:       config.Instructions,
 		Greeting:           config.Greeting,
 		VaryGreeting:       config.GreetingMode == store.GreetingVariation,
@@ -447,13 +448,13 @@ func FromConfig(config store.AgentConfig) Spec {
 		Keyterms:           config.Keyterms,
 		VisibleTools:       config.VisibleTools,
 		KnowledgeNamespace: config.KnowledgeNamespace,
-		Sandbox:            config.Sandbox,
-		SandboxOptions:     config.SandboxOptions,
+		Sandbox:            config.Sandbox.Provider,
+		SandboxOptions:     config.Sandbox.Options,
 		Harness:            config.Harness,
-		DispatchText:       config.DispatchText,
-		EpisodeCards:       config.EpisodeCards,
-		EpisodeCardsRecord: config.EpisodeCardsRecord,
-		ProgressiveTools:   config.ProgressiveTools,
+		DispatchText:       config.Dispatch.Text,
+		EpisodeCards:       config.EpisodeCards.On,
+		EpisodeCardsRecord: config.EpisodeCards.Record,
+		ToolGroups:         config.ToolGroups,
 		ResumeHistory:      config.ResumeHistory,
 		FloorControl:       config.FloorControl,
 		Scheduling:         config.Scheduling,
@@ -461,8 +462,6 @@ func FromConfig(config store.AgentConfig) Spec {
 		Tags:               routing.Tags(config.Tags),
 		Team:               configTeam(config.Tags),
 		ConfigTeam:         strings.TrimSpace(config.Tags[TeamTag]),
-		// The config's alone until Manager.Create holds it to the policies.
-		ToolOutputRetention: config.ToolOutputRetention,
 	}
 }
 

@@ -211,6 +211,23 @@ func (s *CatalogueSuite) TestAVoiceTheProviderDoesNotHaveIsRefusedNamingTheClose
 		`"Sarah - Mature, Reassuring, Confident" (EXAVITQu4vr4xnSDxMaL)`, err.Error())
 }
 
+// The account lists every customer's clones as its own, and a refusal is read by whoever
+// asked.
+func (s *CatalogueSuite) TestARefusalNeverPointsToACloneInTheAccount() {
+	s.catalogue.Register("elevenlabs", &findingLister{
+		countingLister: countingLister{voices: []Library{
+			{ID: "CLONE000000000000001", Name: "Sara Example CEO", Own: true}, sarah,
+		}},
+		exists: map[string]bool{},
+	})
+
+	err := s.catalogue.Check(s.ctx, "elevenlabs", "Sara Example")
+
+	s.Require().Error(err)
+	s.NotContains(err.Error(), "CLONE000000000000001")
+	s.Contains(err.Error(), sarah.ID)
+}
+
 func (s *CatalogueSuite) TestAVoiceAskedForByItsNameIsPointedToItsId() {
 	s.library()
 

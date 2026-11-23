@@ -232,7 +232,7 @@ func (s *LimitsSuite) TestLimitUsageWithTheCallersKeyInTheQuery() {
 
 func (s *LimitsSuite) TestLimitUsagePairsTheAppsWithTheirSubjects() {
 	sibling := store.App{OrganizationID: s.organization(), Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &sibling))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &sibling))
 	s.spend(400_000, func(event *usage.Event) { event.UserID = "u1" })
 	s.spend(700_000, func(event *usage.Event) { event.AppID, event.UserID = sibling.ID, "u1" })
 
@@ -263,7 +263,7 @@ func (s *LimitsSuite) TestAClientTokenCannotReadOrWriteLimits() {
 
 func (s *LimitsSuite) TestOneAppsServerCredentialManagesTheWholeOrganization() {
 	sibling := store.App{OrganizationID: s.organization(), Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &sibling))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &sibling))
 
 	created := s.create(map[string]any{"subject": "app", "app_id": sibling.ID, "interval": "daily", "limit_micros": 1_000_000})
 
@@ -382,7 +382,7 @@ func (s *LimitsSuite) TestATeamIsStoredAsACategoryAndReadAsATeam() {
 	team := s.create(map[string]any{"subject": "team", "team": "finance", "interval": "daily", "limit_micros": 5})
 	s.create(map[string]any{"subject": "category", "category": "project:x", "interval": "daily", "limit_micros": 5})
 
-	stored, err := s.store.Limit(context.Background(), s.organization(), team.Id)
+	stored, err := s.store.Limits.Get(context.Background(), s.organization(), team.Id)
 	s.Require().NoError(err)
 	s.Equal(usage.SubjectCategory, stored.Subject)
 	s.Equal("team:finance", stored.Category)
@@ -480,7 +480,7 @@ func (s *LimitsSuite) TestACustomerResetLetsItSpendAgain() {
 	s.Require().NotNil(daily.RoomMicros)
 	s.Equal(int64(1_000_000), *daily.RoomMicros, "the whole limit is back")
 	s.searchedUntil(s.serverClient, http.StatusOK)
-	entries, err := s.store.AuditEntries(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Contains(entries[0].ResourceID, "reset:")
 }
@@ -543,7 +543,7 @@ func (s *LimitsSuite) TestStaffEditACustomerLimitThroughManage() {
 	s.Require().NoError(json.Unmarshal(payload, &created))
 	s.Contains(created.UpdatedBy, "manage:")
 
-	entries, err := s.store.AuditEntries(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	s.Equal(store.AuditSourceManage, entries[0].Source)

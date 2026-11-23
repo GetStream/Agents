@@ -1,0 +1,119 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/uptrace/bun"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+)
+
+// CallBridge is what a vendor is told to do when the person it called picks up.
+//
+// Three vendors take a URL rather than a call plan when a call is placed, and fetch it on
+// answer. This is the answer, parked between the two moments. The token is the whole of the
+// fetch's authentication, so a bridge is read once and then gone.
+type CallBridge struct {
+	bun.BaseModel `bun:"table:call_bridges,alias:cb"`
+
+	// Token is what the vendor puts in the url it fetches, and the only thing proving the
+	// fetch is one this service asked for.
+	Token      string `bun:"token,pk"`
+	CustomerID string `bun:"customer_id,notnull"`
+	Vendor     string `bun:"vendor,notnull"`
+	// TrunkURI is the SIP address the answered leg is transferred to.
+	TrunkURI string `bun:"trunk_uri,notnull"`
+	// TrunkUsername and TrunkPassword are the trunk's digest credentials, set only for a
+	// vendor that can send them.
+	TrunkUsername string `bun:"trunk_username,nullzero"`
+	TrunkPassword string `bun:"trunk_password,nullzero"`
+	// InitialDigits are pressed at the person before the transfer.
+	InitialDigits string `bun:"initial_digits,nullzero"`
+	// CallID is the Stream call the leg is routed into, kept for the audit trail.
+	CallID    string    `bun:"call_id,notnull"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
+	ExpiresAt time.Time `bun:"expires_at,notnull"`
+}
+
+// Validate refuses a bridge no vendor could be told to follow.
+func (b *CallBridge) Validate() error {
+	return validate("call bridge").
+		required("token", b.Token).
+		required("customer_id", b.CustomerID).
+		required("vendor", b.Vendor).
+		required("trunk_uri", b.TrunkURI).
+		check(!b.ExpiresAt.IsZero(), "expires_at", "is required").
+		done()
+}
+
+// CallBridges are bridges parked until a vendor fetches them, on each shard.
+type CallBridges struct {
+	store *Store
+}
+
+// Insert saves what a vendor should be told when the person it is calling answers.
+func (r *CallBridges) Insert(ctx context.Context, bridge *CallBridge) error {
+	if err := bridge.Validate(); err != nil {
+		return stack.Wrap(err)
+	}
+	if bridge.CreatedAt.IsZero() {
+		bridge.CreatedAt = time.Now().UTC()
+	}
+
+	if _, err := r.store.shard.NewInsert().Model(bridge).Exec(ctx); err != nil {
+		return stack.Wrap(fmt.Errorf("store: park bridge: %w", err))
+	}
+	return nil
+}
+
+// Claim returns a parked bridge and removes it, so a token works exactly once.
+//
+// The read and the delete are one statement rather than two, because two vendors retrying
+// the same fetch at once would otherwise both be told to bridge, and the second transfer
+// would arrive at a trunk the first had already taken.
+func (r *CallBridges) Claim(ctx context.Context, token string) (CallBridge, error) {
+	if token == "" {
+		return CallBridge{}, stack.Wrap(errors.New("store: a token is required"))
+	}
+
+	// The vendor's fetch lands on whichever shard is nearest it, not the one that parked it.
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallBridge, error) {
+		var claimed []CallBridge
+		err := db.NewDelete().Model((*CallBridge)(nil)).
+			Where("token = ?", token).
+			Where("expires_at > ?", time.Now().UTC()).
+			Returning("*").
+			Scan(ctx, &claimed)
+		return claimed, err
+	})
+	if err != nil {
+		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w", err))
+	}
+	claimed := slices.Concat(lists...)
+	if len(claimed) == 0 {
+		// One message for a token that never existed, one that has been used and one that
+		// has expired: telling them apart would say whether a guessed token was ever real.
+		return CallBridge{}, stack.Wrap(errors.New("store: that bridge is not waiting to be claimed"))
+	}
+	return claimed[0], nil
+}
+
+// Sweep removes bridges nobody claimed, which is what a call that rang out leaves behind.
+// Each shard sweeps its own.
+func (r *CallBridges) Sweep(ctx context.Context) (int64, error) {
+	result, err := r.store.shard.NewDelete().Model((*CallBridge)(nil)).
+		Where("expires_at <= ?", time.Now().UTC()).
+		Exec(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: sweep bridges: %w", err))
+	}
+	swept, err := result.RowsAffected()
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: sweep bridges: %w", err))
+	}
+	return swept, nil
+}

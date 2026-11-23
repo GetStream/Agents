@@ -89,7 +89,7 @@ func (s *RecordingStatsSuite) recordInworld(text string, failing bool) ([]store.
 	recordings.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	return rows, recordErr
 }
 
@@ -115,7 +115,7 @@ func (s *RecordingStatsSuite) recordOn(asked options.TTS, text string, statuses 
 	recordings.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Scan(s.ctx))
 	return rows, recordErr
 }
 

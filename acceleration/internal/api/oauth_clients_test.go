@@ -37,7 +37,7 @@ func (s *OAuthClientsSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *OAuthClientsSuite) SetupTest() {
@@ -72,7 +72,7 @@ func (s *OAuthClientsSuite) TestTheFirstPutCreatesTheClientAndTheNextReplacesIts
 	}, replaced)
 	s.True(replaced.UpdatedAt.After(created.UpdatedAt))
 	var rows int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_oauth_clients WHERE customer_id = ?", s.customerID()).Scan(&rows))
 	s.Equal(1, rows)
 }
@@ -105,7 +105,7 @@ func (s *OAuthClientsSuite) TestAPutWithoutAProviderAppAnswersAndStoresAsBefore(
 	}
 	// duration is what the server adds to every answered object (server.go, timedResponse).
 	s.ElementsMatch([]string{"connector_id", "registration", "client_id", "created_at", "updated_at", "duration"}, keys)
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "github")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "github")
 	s.Require().NoError(err)
 	s.Empty(record.ProviderAppID)
 	s.Empty(record.SigningSecretSealed)
@@ -184,7 +184,7 @@ func (s *OAuthClientsSuite) TestASecondCustomerClaimingTheSameAppIsAConflict() {
 	s.Require().NoError(err)
 	s.Equal(first, record.CustomerID)
 	s.Equal("first-signing", secret)
-	_, err = s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err = s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient, "nothing stored for the second customer")
 }
 
@@ -207,7 +207,7 @@ func (s *OAuthClientsSuite) TestASigningSecretWithoutAProviderAppIsRefused() {
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "signing_secret needs provider_app_id")
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -220,7 +220,7 @@ func (s *OAuthClientsSuite) TestASigningSecretForAConnectorThatReadsNoAppsEvents
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal("github does not verify its events with the app's own secret (channel.verifier.secret provider_app), so nothing would read signing_secret: leave it out", failure)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "github")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "github")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -248,7 +248,7 @@ func (s *OAuthClientsSuite) TestAConnectorConsentedThroughOAuth2CodeNeedsAClient
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "client_id is required")
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -259,7 +259,7 @@ func (s *OAuthClientsSuite) TestAPutWithNeitherAClientIDNorASigningSecretIsRefus
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "client_id is required")
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "linq")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "linq")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -274,7 +274,7 @@ func (s *OAuthClientsSuite) TestAProviderAppWithoutAClientTakesNoClientSecretOrM
 		s.Equal(http.StatusBadRequest, status)
 		s.Contains(failure, "client_id is required")
 	}
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "linq")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "linq")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -298,7 +298,7 @@ func (s *OAuthClientsSuite) TestAConnectorTakingOnlyTheOperatorsClientRefusesThe
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal("slack does not take an app's own OAuth client: its client.registration is [operator], which does not list customer", failure)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -343,7 +343,7 @@ func (s *OAuthClientsSuite) TestAConnectorWhoseMethodNeedsAKeyRefusesAClientThat
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal("the connector's client.auth_method private_key_jwt needs a key or a certificate this client cannot hold: "+
 		"set auth_method to none, client_secret_basic or client_secret_post", failure)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), id)
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), id)
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -376,7 +376,7 @@ func (s *OAuthClientsSuite) TestAnAppNotMarkedInternalCannotSaveANessyClient() {
 		s.useApp(s.data.createAppAdmitting(settings))
 		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodPut, oauthClientPath("nessy"),
 			confidentialClient("secret-"+s.utils.uuid()), nil))
-		_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "nessy")
+		_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "nessy")
 		s.ErrorIs(err, store.ErrNoConnectorOAuthClient, "nothing stored")
 	}
 }
@@ -489,9 +489,10 @@ func (s *OAuthClientsSuite) TestRemovingTheClientForgetsIt() {
 }
 
 func (s *OAuthClientsSuite) TestTheOperatorsClientForTheAppCannotBeReplacedThroughTheAPI() {
-	_, err := s.store.PutConnectorOAuthClient(context.Background(), &store.ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(context.Background(), &store.ConnectorOAuthClient{
 		CustomerID: s.customerID(), ConnectorID: "github", Registration: core.ClientOperator, ClientID: "operators",
 	})
+
 	s.Require().NoError(err)
 
 	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPut, oauthClientPath("github"), confidentialClient("secret"), nil))
@@ -605,7 +606,7 @@ func (s *OAuthClientsSuite) TestASigningSecretMovedToAnotherProviderAppDoesNotOp
 	s.useApp(s.data.createApp())
 	second := s.providerApp("github", core.ClientCustomer, "second-client-secret", "second-signing-secret")
 
-	_, err := s.store.DB().ExecContext(context.Background(), `
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
 UPDATE connector_oauth_clients AS target
 SET signing_secret_sealed = source.signing_secret_sealed, signing_kek_version = source.signing_kek_version
 FROM connector_oauth_clients AS source
@@ -634,7 +635,7 @@ func (s *OAuthClientsSuite) TestASigningSecretSealedUnderAnOlderKeyIsSealedAgain
 
 	s.Require().NoError(err)
 	s.Equal("signing-secret", secret)
-	found, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "github")
+	found, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "github")
 	s.Require().NoError(err)
 	s.Equal(2, found.SigningKEKVersion)
 	_, secret, err = ProviderApp(context.Background(), s.store, s.onlyTheNewKey(), "github", app.ProviderAppID)
@@ -655,7 +656,7 @@ func (s *OAuthClientsSuite) TestAClientSecretSealedUnderAnOlderKeyIsSealedAgainO
 	s.Require().NoError(err)
 	s.True(ok)
 	s.Equal("the-routers-secret", found.Secret)
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), id)
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	s.Equal(2, record.KEKVersion)
 	found, _, err = lookup(s.onlyTheNewKey())
@@ -697,7 +698,7 @@ func (s *OAuthClientsSuite) providerApp(connector string, registration core.Clie
 		s.Require().NoError(err)
 		record.SigningKEKVersion = s.sealer.CurrentVersion()
 	}
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	return *record
 }
@@ -722,7 +723,7 @@ func (s *OAuthClientsSuite) lookup(connector string, registration core.ClientReg
 // moveSecret copies one row's sealed secret onto another, as somebody with write access to
 // the table could, which the secret's AAD is there to defeat.
 func (s *OAuthClientsSuite) moveSecret(fromCustomer, fromConnector, toCustomer, toConnector string) {
-	_, err := s.store.DB().ExecContext(context.Background(), `
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
 UPDATE connector_oauth_clients AS target
 SET secret_sealed = source.secret_sealed, kek_version = source.kek_version
 FROM connector_oauth_clients AS source
@@ -749,7 +750,7 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -795,7 +796,7 @@ func TestOAuthClientsOffSuite(t *testing.T) {
 func (s *OAuthClientsOffSuite) SetupSuite() {
 	s.connectorsOff = true
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *OAuthClientsOffSuite) SetupTest() {
@@ -811,7 +812,7 @@ func (s *OAuthClientsOffSuite) TestThePutAnswersAsBeforeAndStoresNothing() {
 		s.Contains(string(body), `"code":"not_configured"`)
 		s.Contains(string(body), "OAuth clients cannot be stored: connectors are not enabled on this deployment")
 	}
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 	s.Equal(http.StatusNotFound, s.unauthenticatedClient.do(http.MethodPost, providerAppEventsPath+"slack_bot/"+app,
 		map[string]string{"type": "url_verification", "challenge": "c"}, nil))
@@ -841,7 +842,7 @@ func (s *OAuthClientsOffSuite) TestATelnyxAccountAndItsEventsAnswerAsOnBase() {
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(string(body), `"error":{"message":"validation failed: expected required property client_id to be present (body)","type":"invalid_request","code":"validation_failed","doc_url":"https://getstream.io/agents/docs/api/errors/#validation_failed"}}`)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "telnyx")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "telnyx")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 
 	request, err := http.NewRequest(http.MethodPost, s.server.URL+providerAppEventsPath+"telnyx/"+app,
@@ -872,7 +873,7 @@ func (s *OAuthClientsOffSuite) TestAWhatsAppAppItsEventsAndItsHandshakeAnswerAsO
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(string(body), `"error":{"message":"validation failed: expected required property client_id to be present (body)","type":"invalid_request","code":"validation_failed","doc_url":"https://getstream.io/agents/docs/api/errors/#validation_failed"}}`)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "whatsapp")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "whatsapp")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 
 	route := s.server.URL + providerAppEventsPath + "whatsapp/" + app
@@ -907,11 +908,12 @@ func (s *OAuthClientsOffSuite) TestAWhatsAppAppItsEventsAndItsHandshakeAnswerAsO
 // off, gets the route's 405 as on base, not a failure from the keyring the router does not have.
 func (s *OAuthClientsOffSuite) TestAStoredWhatsAppAppIsStillAnsweredAsOnBaseByTheHandshake() {
 	app := "app-" + s.utils.uuid()
-	_, err := s.store.PutConnectorOAuthClient(context.Background(), &store.ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(context.Background(), &store.ConnectorOAuthClient{
 		CustomerID: s.customerID(), ConnectorID: "whatsapp", Registration: core.ClientCustomer,
 		ClientID: "synthetic-client", AuthMethod: core.AuthClientSecretPost, ProviderAppID: app,
 		SecretSealed: []byte("sealed"), KEKVersion: 1, SigningSecretSealed: []byte("sealed"), SigningKEKVersion: 1,
 	})
+
 	s.Require().NoError(err)
 
 	response, err := http.Get(s.server.URL + providerAppEventsPath + "whatsapp/" + app + "?hub.mode=subscribe&hub.verify_token=" + app + "&hub.challenge=987")
@@ -934,7 +936,7 @@ func (s *OAuthClientsOffSuite) TestALinqAccountIsNotStoredAndItsEventsRouteTakes
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(string(body), `"code":"not_configured"`)
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "linq")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "linq")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 	s.Equal(http.StatusNotFound, s.unauthenticatedClient.do(http.MethodPost, providerAppEventsPath+"linq/"+app,
 		map[string]string{"event_type": "message.received"}, nil))

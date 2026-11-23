@@ -24,7 +24,7 @@ func (s *GateSuite) TestARefusalOverTheConcurrentLimitSaysSo() {
 
 func (s *GateSuite) TestARefusalOfARecipientOutsideTheSandboxDoesNotReset() {
 	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2}, config.LimitsEnforce)
-	s.Require().NoError(s.money.Store.SetSandboxRecipients(s.ctx, s.app(), []string{"+15125550001"}))
+	s.Require().NoError(s.money.Store.SandboxRecipients.Replace(s.ctx, s.app(), []string{"+15125550001"}))
 
 	err := gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550003")
 
@@ -42,7 +42,7 @@ func (s *GateSuite) TestARefusalOfACountryDoesNotReset() {
 }
 
 func (s *GateSuite) TestARefusalOfAnOptedOutRecipientDoesNotReset() {
-	s.Require().NoError(s.money.Store.OptOut(s.ctx, &store.OptOut{
+	s.Require().NoError(s.money.Store.OptOuts.Insert(s.ctx, &store.OptOut{
 		CustomerID: s.app(), Recipient: "+15125550002", Channel: dlc.SMS, Source: "test",
 	}))
 
@@ -103,8 +103,8 @@ func (s *GateSuite) TestARefusalOverTheCallsAtOnceIsATierLimit() {
 
 func (s *GateSuite) TestARefusalOfTheSandboxOrAnOptOutIsNoTierLimit() {
 	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2}, config.LimitsEnforce)
-	s.Require().NoError(s.money.Store.SetSandboxRecipients(s.ctx, s.app(), []string{"+15125550001"}))
-	s.Require().NoError(s.money.Store.OptOut(s.ctx, &store.OptOut{
+	s.Require().NoError(s.money.Store.SandboxRecipients.Replace(s.ctx, s.app(), []string{"+15125550001"}))
+	s.Require().NoError(s.money.Store.OptOuts.Insert(s.ctx, &store.OptOut{
 		CustomerID: s.app(), Recipient: "+15125550001", Channel: dlc.SMS, Source: "test",
 	}))
 

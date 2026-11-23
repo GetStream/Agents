@@ -35,7 +35,7 @@ var storageHour = time.Date(2026, 10, 23, 14, 0, 0, 0, time.UTC)
 // organization leaves them.
 func (s *UsageCommandsSuite) deploymentApps(ids ...string) {
 	for _, id := range ids {
-		_, err := s.store.DB().NewInsert().
+		_, err := s.store.GlobalDB().NewInsert().
 			Model(&store.AppOrganization{AppID: id, OrganizationID: "org-" + id, SeenAt: time.Now().UTC()}).Exec(s.ctx)
 		s.Require().NoError(err)
 	}
@@ -139,7 +139,7 @@ func (s *UsageCommandsSuite) TestABaseInACustomersOwnAccountIsSampledOnTheirKeyA
 	theirs.Holds(knowledge.Scoped("app-1", "docs"), 1_000_000)
 	inTheirs := store.KnowledgePlace{Region: pricing.RegionUS, Account: store.KnowledgeAccountCustomer}
 	for app, namespace := range map[string]string{"app-1": "docs", "app-2": "handbook"} {
-		_, err := s.store.ClaimKnowledgePlace(s.ctx, app, namespace, inTheirs)
+		_, err := s.store.KnowledgeNamespaces.Claim(s.ctx, app, namespace, inTheirs)
 		s.Require().NoError(err)
 	}
 	logger := slog.New(slog.DiscardHandler)
@@ -147,7 +147,7 @@ func (s *UsageCommandsSuite) TestABaseInACustomersOwnAccountIsSampledOnTheirKeyA
 	s.Require().NoError(err)
 	recorder, stop, err := jobRecorder(s.ctx, s.settings, s.store, routing.Knowledge, logger)
 	s.Require().NoError(err)
-	base := metered.NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, recorder, nil, s.store)
+	base := metered.NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, recorder, nil, s.store.KnowledgeNamespaces)
 	base.WithCustomerAccounts(keptKeys{"app-1/turbopuffer/us": "tpuf_customer_0123456789abcdef"}, func(_, key string) (knowledge.Backend, error) {
 		return turbopuffer.New(turbopuffer.Options{APIKey: key, BaseURL: theirs.URL, Logger: logger})
 	})
@@ -188,7 +188,7 @@ func (s *UsageCommandsSuite) TestAStorageRowWithNoPriceAlertsAsTheJobStops() {
 	s.deploymentApps("app-1")
 	server := turbopuffertest.Start(s.T())
 	server.Holds(knowledge.Scoped("app-1", "docs"), 1_000_000)
-	_, err = s.store.ClaimKnowledgePlace(s.ctx, "app-1", "docs", store.KnowledgePlace{Region: pricing.RegionEU})
+	_, err = s.store.KnowledgeNamespaces.Claim(s.ctx, "app-1", "docs", store.KnowledgePlace{Region: pricing.RegionEU})
 	s.Require().NoError(err)
 	logger := slog.New(slog.DiscardHandler)
 	backend, err := turbopuffer.New(turbopuffer.Options{APIKey: "test-key", BaseURL: server.URL, Logger: logger})
@@ -196,7 +196,7 @@ func (s *UsageCommandsSuite) TestAStorageRowWithNoPriceAlertsAsTheJobStops() {
 	recorder, stop, err := jobRecorder(s.ctx, s.settings, s.store, routing.Knowledge, logger)
 	s.Require().NoError(err)
 
-	err = recordStorage(s.ctx, metered.NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionEU: backend}, recorder, nil, s.store),
+	err = recordStorage(s.ctx, metered.NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionEU: backend}, recorder, nil, s.store.KnowledgeNamespaces),
 		s.store, storageHour, logger, &bytes.Buffer{})
 	stop()
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // errShort is the refusal of a booking the credit does not cover.
@@ -86,7 +87,7 @@ func (s *MeteringSuite) TestANumberTheCreditDoesNotCoverIsNotBought() {
 
 	s.Zero(s.vendor.ordered, "the vendor is never asked")
 	s.Empty(money.booked)
-	numbers, err := s.store.CustomerNumbers(s.ctx, s.customer, false)
+	numbers, err := s.store.PhoneNumbers.Select(s.ctx, s.customer, store.PhoneNumberFilter{})
 	s.Require().NoError(err)
 	for _, number := range numbers {
 		s.NotEqual(e164, number.E164)

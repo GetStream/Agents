@@ -274,7 +274,7 @@ func (s *PricesSuite) TestEveryLLMKnowledgeAndSandboxVendorEntryHasABYOKTwin() {
 		s.Equal(pricing.Priced(pricing.Entry{Modality: entry.Modality, Provider: entry.Provider, Model: entry.Model,
 			Region: entry.Region, BYOK: true, When: entry.When, Free: entry.Free, Rates: entry.Rates, Tiers: entry.Tiers}), found, Name(twin))
 	}
-	s.Equal(79, twins, "74 llm, 3 knowledge and 2 sandbox entries")
+	s.Equal(96, twins, "91 llm, 3 knowledge and 2 sandbox entries")
 }
 
 func (s *PricesSuite) TestTheFirstFileWinsForAnItem() {
@@ -408,7 +408,7 @@ func (s *PricesSuite) TestTheEmbeddedListPricesBYOKWorkAtTheFee() {
 
 // TestNoPriceTableIsTruncated: rows of the price list are never changed or deleted, which a
 // trigger enforces, but a trigger on rows does not see TRUNCATE. So nothing the router runs
-// may say it, but for one statement in store.ReloadPrices, which empties a development
+// may say it, but for one statement in store.PriceChanges.Reload, which empties a development
 // database's list (router prices reload, whose command refuses any other database). Test code
 // resets its own databases and is not read.
 func (s *PricesSuite) TestNoPriceTableIsTruncated() {
@@ -425,16 +425,16 @@ func (s *PricesSuite) TestNoPriceTableIsTruncated() {
 		s.False(truncatesPriceTable.MatchString(text), text)
 	}
 	placed := []byte(`package store
-func (s *Store) ReloadPrices() { _ = func() string { return "TRUNCATE price_entries, price_changes" } }
+func (r *PriceChanges) Reload() { _ = func() string { return "TRUNCATE price_entries, price_changes" } }
 const wipe = "TRUNCATE price_changes"
 func other(db *bun.DB) { db.NewTruncateTable() }
 `)
 	allowed, refused := priceTableTruncates("store/prices.go", placed, "store")
-	s.Equal(1, allowed, "the statement inside ReloadPrices")
-	s.Len(refused, 2, "a constant beside ReloadPrices, and bun's truncate")
+	s.Equal(1, allowed, "the statement inside PriceChanges.Reload")
+	s.Len(refused, 2, "a constant beside PriceChanges.Reload, and bun's truncate")
 	allowed, refused = priceTableTruncates("elsewhere/prices.go", placed, "store")
 	s.Zero(allowed)
-	s.Len(refused, 3, "ReloadPrices outside internal/store is no exception")
+	s.Len(refused, 3, "PriceChanges.Reload outside internal/store is no exception")
 
 	root, err := filepath.Abs("..")
 	s.Require().NoError(err)
@@ -460,11 +460,11 @@ func other(db *bun.DB) { db.NewTruncateTable() }
 		}
 		allowed, refused := priceTableTruncates(path, text, storeDir)
 		inReload += allowed
-		s.Emptyf(refused, "%s truncates a price table outside store.ReloadPrices", path)
+		s.Emptyf(refused, "%s truncates a price table outside store.PriceChanges.Reload", path)
 		return nil
 	})
 	s.Require().NoError(err)
-	s.Equal(1, inReload, "store.ReloadPrices truncates the price tables in one statement")
+	s.Equal(1, inReload, "store.PriceChanges.Reload truncates the price tables in one statement")
 }
 
 // truncatesPriceTable is a TRUNCATE of either price table, the entries under the name they have
@@ -480,7 +480,7 @@ var truncatesPriceTable = func() *regexp.Regexp {
 }()
 
 // priceTableTruncates reads a .go or .sql file for truncates of a price table: how many sit in
-// store.ReloadPrices, which may hold them when its file is in storeDir, and what every other
+// store.PriceChanges.Reload, which may hold them when its file is in storeDir, and what every other
 // one says. In Go only string literals are SQL, and any bun NewTruncateTable is refused, since
 // which table it truncates is not in the source. A Go file that does not parse is read as SQL.
 func priceTableTruncates(path string, text []byte, storeDir string) (allowed int, refused []string) {
@@ -516,10 +516,10 @@ func priceTableTruncates(path string, text []byte, storeDir string) (allowed int
 	return allowed, refused
 }
 
-// isReloadPrices is whether a declaration is func (s *Store) ReloadPrices.
+// isReloadPrices is whether a declaration is func (r *PriceChanges) Reload.
 func isReloadPrices(decl ast.Decl) bool {
 	fn, ok := decl.(*ast.FuncDecl)
-	if !ok || fn.Name.Name != "ReloadPrices" || fn.Recv == nil || len(fn.Recv.List) != 1 {
+	if !ok || fn.Name.Name != "Reload" || fn.Recv == nil || len(fn.Recv.List) != 1 {
 		return false
 	}
 	star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
@@ -527,5 +527,5 @@ func isReloadPrices(decl ast.Decl) bool {
 		return false
 	}
 	receiver, ok := star.X.(*ast.Ident)
-	return ok && receiver.Name == "Store"
+	return ok && receiver.Name == "PriceChanges"
 }

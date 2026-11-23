@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 	"github.com/stretchr/testify/suite"
 
 	_ "github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -1640,4 +1641,144 @@ func (s *TakeoverSuite) TestACallLetGoWhileItIsHungUpAtStopIsLeftToTheNodeHoldin
 	s.noReport(a.ended)
 	s.NotEmpty(s.get("call:"+id), "deleted the record of a call another node holds")
 	s.False(a.dialer.call.wasHungUp())
+}
+
+// roundTrips counts what a client sends Redis: a command, or a pipeline of them, is one.
+type roundTrips struct{ sent atomic.Int64 }
+
+func (r *roundTrips) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.Do(ctx, cmd)
+}
+
+func (r *roundTrips) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (r *roundTrips) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (r *roundTrips) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (r *roundTrips) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	r.sent.Add(1)
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	r.sent.Add(1)
+	return client.DoStream(ctx, cmd)
+}
+
+func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
+}
+
+// lapsedCalls records n calls whose claims lapsed, and says their ids.
+func (s *TakeoverSuite) lapsedCalls(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+		rec, err := json.Marshal(callRecord{ID: ids[i], Ref: *ref(), State: callState("a")})
+		s.Require().NoError(err)
+		s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Set().Key(s.prefix+":call:"+ids[i]).Value(string(rec)).Build()).Error())
+		s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zadd().Key(s.prefix+":calls").ScoreMember().ScoreMember(0, ids[i]).Build()).Error())
+	}
+	return ids
+}
+
+func (s *TakeoverSuite) TestClaimingLapsedCallsTakesOneRoundTripHoweverManyThereAre() {
+	counted := &roundTrips{}
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: rueidishook.WithHook(s.redis, counted), Node: "b",
+		holdFor: s.holdFor, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+	// Loads the script, which a first run sends Redis once more.
+	_, err := p.claimLapsed(context.Background())
+	s.Require().NoError(err)
+
+	for _, n := range []int{1, 25} {
+		ids := s.lapsedCalls(n)
+		before := counted.sent.Load()
+		won, err := p.claimLapsed(context.Background())
+		s.Require().NoError(err)
+
+		s.Equal(int64(1), counted.sent.Load()-before, "%d calls", n)
+		s.Require().Len(won, n)
+		for _, call := range won {
+			s.Contains(ids, call.id)
+			var rec callRecord
+			s.Require().NoError(json.Unmarshal([]byte(call.record), &rec))
+			s.Equal(call.id, rec.ID)
+			s.Equal("b", s.get("owner:"+call.id))
+		}
+	}
+}
+
+func (s *TakeoverSuite) TestRenewingTakesOneRoundTripHoweverManyCallsTheNodeHolds() {
+	counted := &roundTrips{}
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: rueidishook.WithHook(s.redis, counted), Node: "a",
+		holdFor: time.Minute, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+	hold := func(n int) []string {
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = uuid.NewString()
+			call := newFakeCall()
+			call.state = callState("a")
+			held := &heldCall{call: call, ref: ref(), movable: true}
+			claimed, err := p.claim(ids[i], held)
+			s.Require().NoError(err)
+			s.Require().True(claimed)
+			p.calls[ids[i]] = held
+		}
+		return ids
+	}
+	// Loads the script, which a first run sends Redis once more.
+	hold(1)
+	p.renew(context.Background())
+
+	ids := hold(24)
+	for _, id := range ids {
+		s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zadd().Key(s.prefix+":calls").ScoreMember().ScoreMember(1, id).Build()).Error())
+	}
+	before := counted.sent.Load()
+	p.renew(context.Background())
+
+	s.Equal(int64(1), counted.sent.Load()-before, "renewing 25 calls")
+	for _, id := range ids {
+		lapse, inSet := s.lapse(id)
+		s.Require().True(inSet)
+		s.True(lapse.After(time.Now()), "a renewed claim pushes its lapse out")
+		s.Equal("a", s.get("owner:"+id))
+	}
+}
+
+func (s *TakeoverSuite) TestClaimingLapsedCallsSkipsHeldOnesAndForgetsOnesWithNoRecord() {
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: s.redis, Node: "b",
+		holdFor: s.holdFor, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+	ids := s.lapsedCalls(3)
+	mine, otherNodes, recordless := ids[0], ids[1], uuid.NewString()
+	p.calls[mine] = &heldCall{}
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Set().Key(s.prefix+":owner:"+otherNodes).Value("c").Build()).Error())
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zadd().Key(s.prefix+":calls").ScoreMember().ScoreMember(0, recordless).Build()).Error())
+
+	won, err := p.claimLapsed(context.Background())
+	s.Require().NoError(err)
+
+	s.Require().Len(won, 1)
+	s.Equal(ids[2], won[0].id)
+	s.Empty(s.get("owner:"+mine), "a call this node holds is not claimed again")
+	s.Equal("c", s.get("owner:"+otherNodes))
+	s.True(s.gone(recordless), "a call with no record is forgotten")
 }

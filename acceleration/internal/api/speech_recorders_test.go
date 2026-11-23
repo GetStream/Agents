@@ -174,7 +174,7 @@ func (s *SpeechRecordersSuite) onlyStreams() string {
 
 // recordingRows is how many recordings, queued or not, this test's app has.
 func (s *SpeechRecordersSuite) recordingRows() int {
-	count, err := s.store.DB().NewSelect().Model((*store.Recording)(nil)).Where("customer_id = ?", s.customerID()).
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.Recording)(nil)).Where("customer_id = ?", s.customerID()).
 		Count(context.Background())
 	s.Require().NoError(err)
 	return count
@@ -183,7 +183,7 @@ func (s *SpeechRecordersSuite) recordingRows() int {
 // speechStats are the text-to-speech rows written for this test's app.
 func (s *SpeechRecordersSuite) speechStats() []store.Request {
 	rows := []store.Request{}
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID()).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID()).
 		Where("modality = ?", "tts").Order("id").Scan(context.Background()))
 	return rows
 }
