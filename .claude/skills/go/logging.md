@@ -22,7 +22,7 @@ Read before you log a value, or read one back out of a log.
 
 ## Redaction
 
-- Every logger sets `ReplaceAttr: store.RedactLogAttr`, as `newLogger` does (`cmd/router/main.go`). It redacts credential shapes (`internal/store/logs.go`) and masks phone numbers (`logMasks`, `logmask.go`) in the message and every value.
+- Build every logger with `ReplaceAttr: store.RedactLogAttr`, as `newLogger` does (`cmd/router/main.go`). The price commands (`cmd/router/prices.go`) still build theirs without it: switch one to `newLogger` when you touch it, and do not copy them. `RedactLogAttr` redacts credential shapes (`internal/store/logs.go`) and masks phone numbers (`logMasks`, `logmask.go`) in the message and every value.
 - It knows shapes only: `sk-...`, `ghp_...`, a JWT, `Bearer x`, `password=x`, a `+` and 7 digits. Log ids, never a secret.
 - A number without `+` is masked only as the whole value of a `number`, `caller`, `to` or `from` attribute: log one under those names.
 - The logger redacts only what is logged: a provider's error stored in a row or sent to a client goes through `store.SafeLogText`. Log a connector's error as `core.LoggedMessage(err, exchange.Redact)`.
