@@ -3778,11 +3778,14 @@ func (s *RouterSuite) retryAfter(waits ...time.Duration) {
 }
 
 // newScheduler is a scheduled-task worker delivering with deliver, retrying as the test set
-// (retryAfter), else as the scheduler does.
+// (retryAfter, finishAtOnce), else as the scheduler does.
 func (s *RouterSuite) newScheduler(deliver scheduling.DeliverFunc, logger *slog.Logger) *scheduling.Scheduler {
 	worker := scheduling.NewScheduler(s.store, deliver, logger)
 	if s.retries != nil {
 		worker.SetRetries(s.retries)
+	}
+	if s.finishRetries != nil {
+		worker.SetFinishRetries(s.finishRetries)
 	}
 	return worker
 }
@@ -3933,11 +3936,11 @@ func (s *ScheduledTasksSuite) TestAFirstOccurrenceRetriedTwiceFollowsUpInTheOneS
 	s.Equal(1, ran, "every attempt followed up in the one session")
 }
 
-// finishAtOnce has a finish that failed written again straight away, three times.
+// finishAtOnce has a finish that failed written again straight away, three times, by the workers
+// the test starts next (newScheduler).
 func (s *ScheduledTasksSuite) finishAtOnce() {
-	retries := scheduling.FinishRetries
-	scheduling.FinishRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.FinishRetries = retries })
+	s.finishRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	s.T().Cleanup(func() { s.finishRetries = nil })
 }
 
 // failFinishes has the database refuse the next times writes that finish a run of the test's

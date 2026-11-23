@@ -67,10 +67,10 @@ const maxConsecutiveFailures = 5
 // being in progress; a task whose retries run out has failed an occurrence.
 var deliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
-// FinishRetries are the waits before an occurrence's outcome is written again after the write
+// finishRetries are the waits before an occurrence's outcome is written again after the write
 // failed, as a database that blinked fails it: a run left running is taken over by another
 // worker once it is stale, and delivered again.
-var FinishRetries = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+var finishRetries = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 // DeliverFunc delivers one claimed occurrence: it returns where the follow-up
 // landed (conversation, call, ...) and the session it landed in. An error is
@@ -227,7 +227,7 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 		lease:         scheduledLease,
 		renewEvery:    renewLeaseEvery,
 		retries:       deliveryRetries,
-		finishRetries: FinishRetries,
+		finishRetries: finishRetries,
 		budget:        occurrenceBudget,
 		kick:          make(chan struct{}, 1),
 		slots:         make(chan struct{}, inFlight),
@@ -241,6 +241,12 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 // value every worker in the process reads.
 func (s *Scheduler) SetRetries(waits []time.Duration) {
 	s.retries = waits
+}
+
+// SetFinishRetries has the worker wait out waits before each next write of an outcome that failed
+// to write, in place of finishRetries. Call it before Start.
+func (s *Scheduler) SetFinishRetries(waits []time.Duration) {
+	s.finishRetries = waits
 }
 
 // SetActivity has each occurrence the worker settles counted in record, as area scheduling. Call
