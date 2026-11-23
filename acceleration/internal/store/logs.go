@@ -99,6 +99,25 @@ var shapedCredentials = []shapedCredential{
 // escape) or a quote, so an encoded one also takes the encoded parameters after it.
 var queryCredential = regexp.MustCompile(`(?i)((?:[?&"]|&amp;|\\u0026|%(?:25)*3F|%(?:25)*26)(?:key|token)(?:=|\\u003d|%(?:25)*3D))[^&\s"\x27#\\]+`)
 
+// encodedCredential is a credential name and an encoded equals sign (%3D, or %253D twice
+// encoded) with the value after it, where no ? or & stands before the name: the text of an
+// encoded query cut at the parameter ("key%3D<hex>"), or a parameter after another separator
+// such as %22. The names are the ones credentialText takes, short: key, token, password and
+// secret end api_key, access_token, client_secret and the like, and apikey is the one name no
+// separator splits. The name starts after the start of the text or a character that is not a
+// letter or digit (an underscore is one), so monkey%3D1 stays; the boundary is the first group
+// and is kept (see shapeStart). The value is read as queryCredential reads it, whatever its
+// length: a parameter named key is a key. A name with a plain = is the rule of credentialText
+// and queryCredential.
+var encodedCredential = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9]|%[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})((?:apikey|key|token|password|secret)%(?:25)*3D)[^&\s"\x27#\\]+`)
+
+// vendorKeyMessage is a provider's refusal that names the key it was sent, with no = or : to
+// say so: "Invalid API key <32 hex>", "Incorrect API key provided: <key>", invalid_api_key, or
+// the same for an API token. The key is the 16 characters or more of the key alphabet after the
+// phrase, so a request id of 8 hex digits after "Invalid API key." stays. The phrase stays and
+// the key is taken out, unless it is a word (see redactVendorKeyMessage).
+var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*)([A-Za-z0-9_-]{16,})`)
+
 // encodedAuthorization is an authorization or cookie header (proxy-authorization and
 // set-cookie end in those names) written into a URL: the name, an optional encoded quote
 // (%22, %27) and an encoded colon or equals sign (%3A, %3D), then the value to the end of its
@@ -191,11 +210,25 @@ func redactLegacyCredentials(text string) string {
 	text = redactUnlessWord(credentialText, text)
 	text = urlCredential.ReplaceAllString(text, "${1}[redacted]@")
 	text = queryCredential.ReplaceAllString(text, "${1}[redacted]")
+	text = encodedCredential.ReplaceAllString(text, "${1}${2}[redacted]")
+	text = redactVendorKeyMessage(text)
 	text = encodedAuthorization.ReplaceAllString(text, "[redacted]")
 	text = encodedBearer.ReplaceAllString(text, "[redacted]")
 	text = providerCredential.ReplaceAllString(text, "[redacted]")
 	text = jsonToken.ReplaceAllString(text, `${1}"[redacted]"`)
 	return text
+}
+
+// redactVendorKeyMessage takes the key out of each vendorKeyMessage match, but for a value that
+// is a word, as redactUnlessWord does, such as authentication_failed after "invalid_api_key".
+func redactVendorKeyMessage(text string) string {
+	return vendorKeyMessage.ReplaceAllStringFunc(text, func(match string) string {
+		parts := vendorKeyMessage.FindStringSubmatch(match)
+		if word.MatchString(parts[2]) {
+			return match
+		}
+		return parts[1] + "[redacted]"
+	})
 }
 
 func (s shapedCredential) mayMatch(text string) bool {

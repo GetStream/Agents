@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,6 +136,79 @@ func TestSafeLogTextKeepsTheRestOfTheURL(t *testing.T) {
 		if result := SafeLogText(message); result != want {
 			t.Errorf("SafeLogText(%q) = %q, want %q", message, result, want)
 		}
+	}
+}
+
+// A key in an encoded query that no ? or & stands before (a text cut at the parameter, a name
+// after an encoded quote), and a provider's refusal that names the key with no = or : before it.
+// Each row is the whole answer, so what stays around the key is checked too. The rows with no
+// credential are the answers base 31fd2dd96 gives, the same as the input.
+func TestSafeLogTextTakesAnEncodedKeyAndAVendorRefusalOut(t *testing.T) {
+	raw := make([]byte, 16)
+	_, err := rand.Read(raw)
+	require.NoError(t, err)
+	secret := hex.EncodeToString(raw)
+	for name, tc := range map[string]struct{ in, want string }{
+		"key":                          {"key%3D" + secret, "key%3D[redacted]"},
+		"api_key":                      {"api_key%3D" + secret, "api_key%3D[redacted]"},
+		"token":                        {"token%3D" + secret, "token%3D[redacted]"},
+		"mixed case equals sign":       {"key%3d" + secret, "key%3d[redacted]"},
+		"upper case name":              {"API_KEY%3d" + secret, "API_KEY%3d[redacted]"},
+		"name with a prefix":           {"x_api_key%3D" + secret, "x_api_key%3D[redacted]"},
+		"apikey":                       {"apikey%3D" + secret, "apikey%3D[redacted]"},
+		"access_token":                 {"access_token%3D" + secret, "access_token%3D[redacted]"},
+		"client_secret":                {"client_secret%3D" + secret, "client_secret%3D[redacted]"},
+		"password":                     {"password%3D" + secret, "password%3D[redacted]"},
+		"twice-encoded equals sign":    {"key%253D" + secret, "key%253D[redacted]"},
+		"in the middle of a sentence":  {"request failed: key%3D" + secret + " tail", "request failed: key%3D[redacted] tail"},
+		"after an encoded quote":       {"q=%22key%3D" + secret + "%22", "q=%22key%3D[redacted]"},
+		"in the middle of a query":     {"wss://live.example/ws?a=1&key%3D" + secret + "&b=2", "wss://live.example/ws?a=1&key%3D[redacted]&b=2"},
+		"in an encoded url":            {"https%3A%2F%2Flive.example%2Fws%3Fa%3D1%26key%3D" + secret, "https%3A%2F%2Flive.example%2Fws%3Fa%3D1%26key%3D[redacted]"},
+		"after a json-escaped newline": {`{"m":"x\nkey%3D` + secret + `"}`, `{"m":"x\nkey%3D[redacted]"}`},
+		"after a json-escaped quote":   {`{"m":"\u0022key%3D` + secret + `"}`, `{"m":"\u0022key%3D[redacted]"}`},
+		"ends at a quote":              {`"key%3D` + secret + `" failed`, `"key%3D[redacted]" failed`},
+		"ends at a single quote":       {`'key%3D` + secret + `' failed`, `'key%3D[redacted]' failed`},
+		"ends at a fragment":           {"key%3D" + secret + "#top", "key%3D[redacted]#top"},
+		"ends at a json escape":        {"key%3D" + secret + `\u0026model=m`, "key%3D[redacted]" + `\u0026model=m`},
+		"invalid api key":              {"Invalid API key " + secret, "Invalid API key [redacted]"},
+		"invalid api key with a colon": {"invalid api key: " + secret, "invalid api key: [redacted]"},
+		"incorrect api key provided":   {"Incorrect API key provided: " + secret, "Incorrect API key provided: [redacted]"},
+		"incorrect key from a vendor":  {"Incorrect API key provided: sk-" + secret, "Incorrect API key provided: [redacted]"},
+		"invalid_api_key code":         {"invalid_api_key " + secret, "invalid_api_key [redacted]"},
+		"invalid x-api-key":            {"Invalid x-api-key " + secret, "Invalid x-api-key [redacted]"},
+		"invalid api token":            {"Invalid API token " + secret, "Invalid API token [redacted]"},
+		"key of 16 characters":         {"Invalid API key " + secret[:16], "Invalid API key [redacted]"},
+		"after a prefix and a colon":   {`provider: 401: {"message":"Invalid API key ` + secret + `"}`, `provider: 401: {"message":"Invalid API key [redacted]"}`},
+		"text after the key":           {"Invalid API key " + secret + " for model m", "Invalid API key [redacted] for model m"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, SafeLogText(tc.in))
+			require.Equal(t, tc.want, SafeLogText(tc.want), "a second pass changes the text")
+		})
+	}
+	for name, text := range map[string]string{
+		"no key named":                  "Invalid API key provided",
+		"no key named, other wording":   "Incorrect API key provided",
+		"request id of 8 hex digits":    "Invalid API key " + secret[:8],
+		"key of 15 characters":          "Invalid API key " + secret[:15],
+		"request id after the sentence": "Invalid API key. Request id " + secret[:8],
+		"request id in parentheses":     "Invalid API key (request " + secret[:8] + ")",
+		"a word after the phrase":       "invalid_api_key authentication_failed_error",
+		"an id with no phrase":          "request id " + secret,
+		"key before the phrase":         "API key " + secret + " is invalid",
+		"phrase with no key":            "API key not valid. Please pass a valid API key.",
+		"already redacted vendor text":  "Invalid API key [redacted]",
+		"already redacted query":        "key%3D[redacted]",
+		"name with no value":            "key%3D",
+		"name inside a word":            "monkey%3D" + secret,
+		"key word glued to the phrase":  "Invalid API keystore" + secret,
+		"plural name":                   "keys%3D" + secret,
+		"tokens":                        "max_tokens%3D256 tokens%3D12",
+		"name with a plain equals":      "the key=value pair",
+	} {
+		t.Run("keeps "+name, func(t *testing.T) {
+			require.Equal(t, text, SafeLogText(text))
+		})
 	}
 }
 
@@ -495,6 +569,8 @@ func TestEveryTextARuleRedactsPassesTheCheck(t *testing.T) {
 		"client_SECRET=" + secret,
 		`{"Password":"` + secret + `"}`,
 		"wss://live.example/ws?KEY=" + secret,
+		"key%3d" + secret,
+		"Invalid API key " + secret,
 		"https://ipinfo.io/json?Token=" + secret,
 		"https://user:" + secret + "@example.com",
 		"used sk-" + secret,
