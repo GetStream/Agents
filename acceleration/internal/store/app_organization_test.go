@@ -63,7 +63,7 @@ func (s *StoreSuite) TestAnAppBelongsToTheOrganizationItWasLastSeenUnder() {
 
 func (s *StoreSuite) TestAnAppMovedToAnotherOrganizationIsAnsweredUnderTheNewOneOnEveryReplica() {
 	replica := s.replica()
-	app := "app-" + uuid.NewString()
+	app := "app-" + newID()
 	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-first"}))
 	under, err := replica.AppOrganizations.Get(s.ctx, app)
 	s.Require().NoError(err)
@@ -118,4 +118,32 @@ func (s *StoreSuite) TestAnOrganizationsAppsAreReadInOneStatement() {
 		_, err := s.store.AppOrganizations.ActivityApps(s.ctx, app.OrganizationID)
 		s.Require().NoError(err)
 	}), "its apps, then whether the app of its own id is its")
+}
+
+func (s *StoreSuite) TestAnAppMovedByACommitThatLandsAfterItGaveUpIsForgottenAgain() {
+	proxy, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+	app := "app-" + newID()
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-before"}))
+
+	s.Require().Error(slow.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-after"}),
+		"the COMMIT is held past the read timeout")
+	seen, err := s.store.AppOrganizations.Get(s.ctx, app)
+	s.Require().NoError(err)
+	s.Require().Equal("org-before", seen.OrganizationID, "the app has not moved while the COMMIT is held")
+	proxy.let()
+	s.Require().Eventually(func() bool {
+		moved, err := s.store.global.NewSelect().Model((*AppOrganization)(nil)).
+			Where("app_id = ? AND organization_id = ?", app, "org-after").Exists(s.ctx)
+		s.Require().NoError(err)
+		return moved
+	}, 5*time.Second, 10*time.Millisecond, "the held COMMIT lands")
+
+	s.Eventually(func() bool {
+		seen, err := s.store.AppOrganizations.Get(s.ctx, app)
+		s.Require().NoError(err)
+		return seen.OrganizationID == "org-after"
+	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped again")
 }

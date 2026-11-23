@@ -50,8 +50,9 @@ import (
 
 var tracer = tracing.Tracer("policy")
 
-// joinTimeout bounds recording which organization an app belongs to, and every read of an
-// app's policies: in the background, and the one a request with no decision yet waits on.
+// joinTimeout bounds how long the background waits on recording which organization an app
+// belongs to, a write that outlives it (AppOrganizations.Upsert), and every read of an app's
+// policies: in the background, and the one a request with no decision yet waits on.
 const joinTimeout = 2 * time.Second
 
 // tierTTL is how long an organization's tier is believed without a request naming it before

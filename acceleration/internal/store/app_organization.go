@@ -42,13 +42,16 @@ func (r *AppOrganizations) Upsert(ctx context.Context, membership *AppOrganizati
 		return stack.Wrap(err)
 	}
 	membership.SeenAt = time.Now().UTC()
-	_, err := r.store.global.NewInsert().Model(membership).
-		On("CONFLICT (app_id) DO UPDATE").
-		Set("organization_id = EXCLUDED.organization_id").
-		Set("seen_at = EXCLUDED.seen_at").
-		Exec(ctx)
-	// A write can commit and still fail to answer (a cancelled request).
-	r.store.forget(ctx, appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID))
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(membership).
+			On("CONFLICT (app_id) DO UPDATE").
+			Set("organization_id = EXCLUDED.organization_id").
+			Set("seen_at = EXCLUDED.seen_at").
+			Exec(ctx)
+		return err
+	}, func() []string {
+		return []string{appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID)}
+	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: join organization: %w", err))
 	}

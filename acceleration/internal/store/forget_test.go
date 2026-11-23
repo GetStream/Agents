@@ -160,3 +160,35 @@ func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBe
 
 	s.Empty(s.payloadsNaming("app", "jlahey"))
 }
+
+func (s *StoreSuite) TestAUsersPolicyForgottenByACommitThatLandsAfterItGaveUpIsForgottenAgain() {
+	proxy, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+	app := "app-" + newID()
+	user := UserScopeID(app, "jlahey")
+	yes := true
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeUser, ScopeID: user, Document: PolicyDocument{PromptInjection: &yes}}))
+
+	_, err = slow.ForgetUserSettings(s.ctx, app, "jlahey", "forgotten", &AuditEntry{
+		CustomerID: app, ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().Error(err, "the COMMIT is held past the read timeout")
+	document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection, "the policy is still there while the COMMIT is held")
+	proxy.let()
+	s.Require().Eventually(func() bool {
+		held, err := s.store.global.NewSelect().Model((*Policy)(nil)).
+			Where("scope = ? AND scope_id = ?", ScopeUser, user).Exists(s.ctx)
+		s.Require().NoError(err)
+		return !held
+	}, 5*time.Second, 10*time.Millisecond, "the held COMMIT lands")
+
+	s.Eventually(func() bool {
+		document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+		s.Require().NoError(err)
+		return document.PromptInjection == nil
+	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped again")
+}

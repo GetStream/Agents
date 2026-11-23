@@ -118,10 +118,11 @@ func forgottenCopies(db bun.IDB, customerID string) *bun.UpdateQuery {
 // and records entry, with these counts added to its changes, in the same transaction. The
 // changes recorded of their campaigns, deleted ones' included, name the replacement too
 // (renamedChanges). A campaign's contacts and their attempts stay: they are the app's data
-// about third parties, not the user's.
+// about third parties, not the user's. It outlives ctx, within the store's write timeout, and
+// then drops the user's cached policy (detachedWrite).
 func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replacement string, entry *AuditEntry) (UserSettings, error) {
 	var counts UserSettings
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range []struct {
 			count *int64
 			exec  func(context.Context, ...any) (sql.Result, error)
@@ -143,9 +144,7 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 		}
 		entry.Changes = append(entry.Changes, counts.Changes()...)
 		return recordAuditEntry(ctx, tx, entry)
-	})
-	// Dropped whatever the outcome, since a commit that fails can still have landed.
-	s.Policies.forget(ctx, ScopeUser, UserScopeID(appID, userID))
+	}, func() []string { return s.Policies.keys(ctx, ScopeUser, UserScopeID(appID, userID)) })
 	if err != nil {
 		return UserSettings{}, stack.Wrap(fmt.Errorf("store: forget user settings: %w", err))
 	}
