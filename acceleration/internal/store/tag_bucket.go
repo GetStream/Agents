@@ -33,7 +33,8 @@ type TagBucket struct {
 	Uptime                 *float64  `bun:"uptime"`
 }
 
-// TagBucketFilter picks a customer's buckets of one modality and one tag key in [From, To).
+// TagBucketFilter picks a customer's buckets of one modality and one tag key: every bucket
+// [From, To) touches, whole, as a rollup writes it.
 type TagBucketFilter struct {
 	Modality    string
 	Key         string
@@ -65,7 +66,7 @@ SELECT
     r.customer_id,
     tag.key,
     tag.value,
-    date_trunc('%[2]s', r.started_at) AS bucket,
+    date_trunc('%[2]s', r.started_at, 'UTC') AS bucket,
     COALESCE(SUM(r.audio_ms), 0),
     COALESCE(SUM(r.characters), 0),
     COALESCE(SUM(r.input_tokens), 0),
@@ -131,8 +132,7 @@ func (r *TagBuckets) Select(ctx context.Context, customerID string, f TagBucketF
 			Where("modality = ?", f.Modality).
 			Where("customer_id = ?", customerID).
 			Where("tag_key = ?", f.Key).
-			Where("bucket >= ?", f.From).
-			Where("bucket < ?", f.To).
+			Where(wholeBuckets(f.Granularity, "bucket"), f.From, f.To).
 			Order("bucket ASC", "tag_value ASC").
 			Scan(ctx, &buckets)
 		return buckets, err

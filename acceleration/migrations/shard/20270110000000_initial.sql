@@ -1,8 +1,11 @@
 -- +goose Up
 
--- The shard tables as they stood at 20270103090000, the last version of the single migration
--- history every database ran. A database that ran it is marked as having applied this baseline
--- (store.adoptLegacy); a new one runs it. Each shard keeps its own; a deployment of one database keeps both sets in it.
+-- A shard's own tables: sessions, responses, calls, call legs, requests and their rollups. This is
+-- the whole history up to 20270126000000, squashed; a database that ran that history records this
+-- version as applied and runs nothing here.
+
+-- The change log, kept by both sets: a deployment of one database runs both initial migrations on
+-- it, so each of these is a no-op the second time.
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION record_data_change() RETURNS trigger
@@ -50,16 +53,21 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    FOREACH column_name IN ARRAY TG_ARGV[3:] LOOP
+    -- TG_ARGV[3] is the table's secret columns as an array literal (store.isSecret, attached by
+    -- Store.watchDataChanges), and TG_ARGV[4:] the columns naming the row. A trigger attached
+    -- before the list was passed would record the secrets, so it records nothing and fails.
+    IF coalesce(left(TG_ARGV[3], 1), '') <> '{' THEN
+        RAISE EXCEPTION 'record_data_change: % was attached without its secret columns', TG_TABLE_NAME;
+    END IF;
+
+    FOREACH column_name IN ARRAY TG_ARGV[4:] LOOP
         identity := identity || jsonb_build_object(column_name, subject -> column_name);
     END LOOP;
 
     -- Credentials are left behind. A secret this deployment sealed is worth nothing to
     -- the one reading it, and an access token a customer's user granted to this
     -- deployment is not something to hand out because somebody asked for their data.
-    subject := subject - 'secret_sealed' - 'access_token' - 'refresh_token'
-        - 'oauth_state' - 'code_verifier' - 'credentials_sealed' - 'password_sealed'
-        - 'bridge_password_sealed' - 'refresh_secret_hash';
+    subject := subject - TG_ARGV[3]::text[];
 
     -- A change is numbered when it is written and seen when its transaction commits, so no
     -- committed row tells a reader which lower number a transaction still running holds.
@@ -93,15 +101,21 @@ $_$;
 -- +goose StatementEnd
 
 CREATE TABLE IF NOT EXISTS data_change_capture (
-    customer_id text PRIMARY KEY,
+    customer_id text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     recorded_since bigint DEFAULT 0 NOT NULL,
     pruned_through bigint DEFAULT 0 NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS data_change_starts (
+    one boolean DEFAULT true NOT NULL,
+    started bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT data_change_starts_one_check CHECK (one)
+);
+
 CREATE TABLE IF NOT EXISTS data_changes (
-    seq bigserial PRIMARY KEY,
+    seq bigint NOT NULL,
     customer_id text NOT NULL,
     table_name text NOT NULL,
     op text NOT NULL,
@@ -111,35 +125,54 @@ CREATE TABLE IF NOT EXISTS data_changes (
     at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+CREATE SEQUENCE IF NOT EXISTS data_changes_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE data_changes_seq_seq OWNED BY data_changes.seq;
+
+ALTER TABLE ONLY data_changes ALTER COLUMN seq SET DEFAULT nextval('data_changes_seq_seq'::regclass);
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_change_capture_pkey' AND conrelid = 'data_change_capture'::regclass) THEN
+        ALTER TABLE ONLY data_change_capture
+            ADD CONSTRAINT data_change_capture_pkey PRIMARY KEY (customer_id);
+    END IF;
+END $$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_change_starts_pkey' AND conrelid = 'data_change_starts'::regclass) THEN
+        ALTER TABLE ONLY data_change_starts
+            ADD CONSTRAINT data_change_starts_pkey PRIMARY KEY (one);
+    END IF;
+END $$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'data_changes_pkey' AND conrelid = 'data_changes'::regclass) THEN
+        ALTER TABLE ONLY data_changes
+            ADD CONSTRAINT data_changes_pkey PRIMARY KEY (seq);
+    END IF;
+END $$;
+-- +goose StatementEnd
+
 CREATE INDEX IF NOT EXISTS data_changes_at_idx ON data_changes USING btree (at);
 
 CREATE INDEX IF NOT EXISTS data_changes_customer_idx ON data_changes USING btree (customer_id, seq);
 
-CREATE TABLE IF NOT EXISTS data_change_starts (
-    one boolean DEFAULT true NOT NULL PRIMARY KEY,
-    started bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT data_change_starts_one_check CHECK (one)
-);
-
 INSERT INTO data_change_starts DEFAULT VALUES ON CONFLICT DO NOTHING;
 
--- +goose StatementBegin
-CREATE OR REPLACE FUNCTION log_agent_request() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE cfg TEXT; sid TEXT;
-BEGIN
- IF NEW.agent_id IS NULL OR NEW.agent_id = '' THEN RETURN NEW; END IF;
- IF current_setting('router.request_logged', true) = 'on' THEN RETURN NEW; END IF;
- PERFORM pg_advisory_xact_lock(hashtextextended(NEW.customer_id, 731));
- SELECT config_id,id INTO cfg,sid FROM calls WHERE customer_id=NEW.customer_id AND agent_id=NEW.agent_id AND (NEW.call_id IS NULL OR call_id=NEW.call_id) AND started_at <= NEW.started_at ORDER BY started_at DESC LIMIT 1;
- INSERT INTO agent_logs(customer_id,config_id,agent_id,session_id,source,severity,event_type,message,occurred_at,details)
- VALUES(NEW.customer_id,coalesce(cfg,''),NEW.agent_id,coalesce(sid,''),'system',CASE WHEN NEW.success OR NEW.error_code = 'cancelled' THEN 'info' ELSE 'error' END,
- 'provider_request',NEW.modality || ' request ' || CASE WHEN NEW.error_code = 'cancelled' THEN 'cancelled' WHEN NEW.success THEN 'completed' ELSE 'failed' END,NEW.started_at,
- jsonb_build_object('provider',NEW.provider,'model',NEW.model,'request_id',NEW.id::text,'duration_ms',NEW.latency_ms,'input_tokens',NEW.input_tokens,'output_tokens',NEW.output_tokens,'cost_micros',NEW.cost_micros,'error_code',NEW.error_code,'error_message',NEW.error_message));
- RETURN NEW;
-END $$;
--- +goose StatementEnd
+-- The set's own objects.
 
 CREATE TABLE agent_branch_messages (
     session_id text NOT NULL,
@@ -215,8 +248,6 @@ CREATE TABLE agent_sessions (
     project text DEFAULT ''::text NOT NULL,
     custom jsonb DEFAULT '{}'::jsonb NOT NULL,
     model_overwrites jsonb DEFAULT '{}'::jsonb NOT NULL,
-    call_id text,
-    call_type text,
     forked_from text,
     state text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -243,7 +274,7 @@ CREATE TABLE agent_sessions (
 );
 
 CREATE TABLE call_bridges (
-    token text NOT NULL,
+    token text,
     customer_id text NOT NULL,
     vendor text NOT NULL,
     trunk_uri text NOT NULL,
@@ -252,7 +283,10 @@ CREATE TABLE call_bridges (
     initial_digits text,
     call_id text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone NOT NULL
+    expires_at timestamp with time zone NOT NULL,
+    token_hash text,
+    trunk_password_sealed bytea,
+    trunk_password_kek_version integer
 );
 
 CREATE TABLE call_legs (
@@ -275,12 +309,24 @@ CREATE TABLE call_legs (
     country text DEFAULT ''::text NOT NULL,
     agent_id text DEFAULT ''::text NOT NULL,
     tags jsonb DEFAULT '{}'::jsonb NOT NULL,
-    dialed_at timestamp with time zone NOT NULL,
+    dialed_at timestamp with time zone,
     started_at timestamp with time zone,
     ended_at timestamp with time zone,
     end_reason text DEFAULT ''::text NOT NULL,
     vendor_call_id text,
-    CONSTRAINT call_legs_direction_check CHECK ((direction = ANY (ARRAY['inbound'::text, 'outbound'::text])))
+    token text,
+    reports boolean DEFAULT false NOT NULL,
+    placed_at timestamp with time zone,
+    answered_at timestamp with time zone,
+    outcome_ended_at timestamp with time zone,
+    outcome text,
+    vendor_status text,
+    decided_at timestamp with time zone,
+    token_hash text,
+    CONSTRAINT call_legs_dialed_check CHECK (((dialed_at IS NOT NULL) OR (placed_at IS NOT NULL))),
+    CONSTRAINT call_legs_direction_check CHECK ((direction = ANY (ARRAY['inbound'::text, 'outbound'::text]))),
+    CONSTRAINT call_legs_outcome_check CHECK ((outcome = ANY (ARRAY['completed'::text, 'busy'::text, 'no_answer'::text, 'failed'::text, 'canceled'::text, 'unknown'::text]))),
+    CONSTRAINT call_legs_placed_check CHECK (((placed_at IS NOT NULL) OR ((token IS NULL) AND (outcome IS NULL))))
 );
 
 CREATE SEQUENCE call_legs_id_seq
@@ -340,7 +386,6 @@ CREATE TABLE calls (
     customer_id text NOT NULL,
     call_id text NOT NULL,
     agent_id text NOT NULL,
-    config_id text,
     campaign_id text,
     contact_id text,
     from_number text,
@@ -360,10 +405,11 @@ CREATE TABLE calls (
     skills jsonb,
     sts text DEFAULT ''::text NOT NULL,
     voice text DEFAULT ''::text NOT NULL,
-    user_id text DEFAULT ''::text NOT NULL,
     stream_app_pk bigint,
     conversation_id text,
-    agent_user_id text
+    agent_user_id text,
+    session_id text,
+    call_type text DEFAULT ''::text NOT NULL
 );
 
 CREATE TABLE conversation_documents (
@@ -379,36 +425,6 @@ CREATE TABLE conversation_documents (
     markdown text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
-CREATE TABLE phone_calls (
-    id bigint NOT NULL,
-    token text,
-    customer_id text NOT NULL,
-    stream_app_pk bigint,
-    call_type text NOT NULL,
-    call_id text NOT NULL,
-    vendor text NOT NULL,
-    local_number text NOT NULL,
-    remote_number text NOT NULL,
-    reports boolean NOT NULL,
-    vendor_call_id text,
-    placed_at timestamp with time zone NOT NULL,
-    answered_at timestamp with time zone,
-    ended_at timestamp with time zone,
-    outcome text,
-    vendor_status text,
-    decided_at timestamp with time zone,
-    CONSTRAINT phone_calls_outcome_check CHECK ((outcome = ANY (ARRAY['completed'::text, 'busy'::text, 'no_answer'::text, 'failed'::text, 'canceled'::text, 'unknown'::text])))
-);
-
-CREATE SEQUENCE phone_calls_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-ALTER SEQUENCE phone_calls_id_seq OWNED BY phone_calls.id;
 
 CREATE TABLE recordings (
     id text NOT NULL,
@@ -480,7 +496,8 @@ CREATE TABLE requests (
     limit_grants bigint[] DEFAULT '{}'::bigint[] NOT NULL,
     sku text DEFAULT ''::text NOT NULL,
     region text DEFAULT ''::text NOT NULL,
-    byok boolean DEFAULT false NOT NULL
+    byok boolean DEFAULT false NOT NULL,
+    source_usage_id uuid
 );
 
 CREATE TABLE stats_daily (
@@ -596,9 +613,10 @@ ALTER TABLE ONLY call_participants ALTER COLUMN id SET DEFAULT nextval('call_par
 
 ALTER TABLE ONLY call_resources ALTER COLUMN id SET DEFAULT nextval('call_resources_id_seq'::regclass);
 
-ALTER TABLE ONLY phone_calls ALTER COLUMN id SET DEFAULT nextval('phone_calls_id_seq'::regclass);
-
 ALTER TABLE ONLY requests ALTER COLUMN id SET DEFAULT nextval('stt_requests_id_seq'::regclass);
+
+ALTER TABLE requests
+    ADD CONSTRAINT requests_usage_id_present CHECK ((usage_id IS NOT NULL)) NOT VALID;
 
 ALTER TABLE ONLY agent_branch_messages
     ADD CONSTRAINT agent_branch_messages_pkey PRIMARY KEY (session_id, original_message_id);
@@ -618,9 +636,6 @@ ALTER TABLE ONLY agent_session_tools
 ALTER TABLE ONLY agent_sessions
     ADD CONSTRAINT agent_sessions_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY call_bridges
-    ADD CONSTRAINT call_bridges_pkey PRIMARY KEY (token);
-
 ALTER TABLE ONLY call_legs
     ADD CONSTRAINT call_legs_pkey PRIMARY KEY (id);
 
@@ -636,17 +651,8 @@ ALTER TABLE ONLY calls
 ALTER TABLE ONLY conversation_documents
     ADD CONSTRAINT conversation_documents_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY phone_calls
-    ADD CONSTRAINT phone_calls_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY phone_calls
-    ADD CONSTRAINT phone_calls_token_key UNIQUE (token);
-
 ALTER TABLE ONLY recordings
     ADD CONSTRAINT recordings_pkey PRIMARY KEY (id);
-
-ALTER TABLE requests
-    ADD CONSTRAINT requests_usage_id_present CHECK ((usage_id IS NOT NULL)) NOT VALID;
 
 ALTER TABLE ONLY stats_daily
     ADD CONSTRAINT stats_daily_pkey PRIMARY KEY (modality, customer_id, provider, model, bucket);
@@ -743,8 +749,6 @@ CREATE INDEX call_resources_call_idx ON call_resources USING btree (call_type, c
 
 CREATE INDEX calls_agent_idx ON calls USING btree (agent_id, started_at DESC);
 
-CREATE INDEX calls_campaign_idx ON calls USING btree (campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL);
-
 CREATE INDEX calls_customer_idx ON calls USING btree (customer_id, started_at DESC);
 
 CREATE INDEX calls_tags_idx ON calls USING gin (tags);
@@ -752,10 +756,6 @@ CREATE INDEX calls_tags_idx ON calls USING gin (tags);
 CREATE INDEX conversation_documents_conversation_idx ON conversation_documents USING btree (customer_id, conversation_id, created_at) WHERE (conversation_id <> ''::text);
 
 CREATE INDEX conversation_documents_session_idx ON conversation_documents USING btree (customer_id, session_id, created_at);
-
-CREATE INDEX phone_calls_customer_call_idx ON phone_calls USING btree (customer_id, call_id, id DESC);
-
-CREATE INDEX phone_calls_placed_idx ON phone_calls USING btree (placed_at) WHERE (token IS NOT NULL);
 
 CREATE INDEX recordings_customer_idx ON recordings USING btree (customer_id, created_at DESC);
 
@@ -781,7 +781,32 @@ CREATE UNIQUE INDEX requests_usage_id_idx ON requests USING btree (usage_id);
 
 CREATE INDEX requests_user_spend_idx ON requests USING btree (customer_id, user_id, started_at) INCLUDE (cost_micros) WHERE (billable AND (user_id <> ''::text));
 
-CREATE TRIGGER agent_request_log AFTER INSERT ON requests FOR EACH ROW EXECUTE FUNCTION log_agent_request();
+CREATE INDEX calls_customer_agent_idx ON calls USING btree (customer_id, agent_id, started_at DESC);
+
+CREATE INDEX calls_campaign_idx ON calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL);
+
+ALTER TABLE ONLY call_legs
+    ADD CONSTRAINT call_legs_token_key UNIQUE (token);
+
+CREATE INDEX call_legs_placed_call_idx ON call_legs USING btree (customer_id, call_id, id DESC) WHERE (placed_at IS NOT NULL);
+
+CREATE INDEX call_legs_token_placed_idx ON call_legs USING btree (placed_at) WHERE (token IS NOT NULL);
+
+CREATE INDEX call_resources_created_idx ON call_resources USING btree (created_at);
+
+CREATE INDEX call_legs_unanswered_idx ON call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text));
+
+CREATE INDEX calls_session_started_idx ON calls USING btree (session_id, started_at DESC) WHERE (session_id IS NOT NULL);
+
+ALTER TABLE ONLY call_bridges
+    ADD CONSTRAINT call_bridges_token_key UNIQUE (token);
+
+ALTER TABLE ONLY call_bridges
+    ADD CONSTRAINT call_bridges_token_hash_key UNIQUE (token_hash);
+
+CREATE UNIQUE INDEX call_legs_token_hash_key ON call_legs USING btree (token_hash);
+
+CREATE INDEX call_legs_token_hash_placed_idx ON call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL);
 
 ALTER TABLE ONLY agent_branch_messages
     ADD CONSTRAINT agent_branch_messages_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE;
@@ -798,6 +823,9 @@ ALTER TABLE ONLY agent_responses
 ALTER TABLE ONLY agent_session_tools
     ADD CONSTRAINT agent_session_tools_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY calls
+    ADD CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL;
+
 -- +goose Down
--- A baseline is not undone.
+-- The initial migration is not undone.
 SELECT 1;

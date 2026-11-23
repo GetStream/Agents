@@ -1688,10 +1688,8 @@ Writes go to this shard's database. Reads of one call, session or recording look
 shard, and lists merge every shard's rows, so a session carried on in another region is
 still one session. Each database runs the migration set it holds: `migrations/global` on the
 global one and `migrations/shard` on each shard's, both on the one database of a single node
-(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A database migrated
-before the sets were split kept every table; once every router runs a release with two sets,
-`router schema drop-strays` drops the empty ones of the other set. A socket for a session held in
-another shard is proxied to the node holding it, since that shard's relay is not this
+(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A socket for a session
+held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
@@ -2374,10 +2372,19 @@ events `listUsage` answers, with its filters and cursor, without the organizatio
 `base_cost_micros`, `price_version` or `source`. The manage key opens none of them. The
 router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read them.
 
+**Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
+written. `router usage replay --from <log>` writes them from the log, once each. Each line
+holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
+text in the row is redacted and masked first. A user id that changes is left off, and the row
+bills to its app without that user. A line from before that holds the row as `row=` JSON the
+redaction rewrote, and cannot be recovered: replay counts it as could not be read.
+
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
 customer's users reaches the usage records. `router usage forget-user --app <app> --user <id>
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a
-hash of an email can be recomputed from it), in order: the requests of every shard; the usage
+hash of an email can be recomputed from it), in order, once their scheduled tasks are deleted
+with their runs, so none runs again, and the changes recorded of them made deletes: the
+requests of every shard; the usage
 service's events and the user's windows (`POST /v1/manage/users/forget`, one transaction, a
 window the replacement already has taking the forgotten one's spend), and again after
 `--settle` (2 minutes) for a batch a shipper read before the shards were rewritten; the user's
@@ -2388,9 +2395,10 @@ id on their resets, grants and campaigns. Usage and cost stay under the app. It 
 `forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
-that one replacement, with the run's own audit row. It covers
-the usage records only: sessions, conversation history and `agent_logs` have their own
-retention, and work recorded for the id afterwards carries it again.
+that one replacement, with the run's own audit row. Sessions, conversation history and
+`agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
+`keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
+that forgetting leaves alone.
 
 The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,

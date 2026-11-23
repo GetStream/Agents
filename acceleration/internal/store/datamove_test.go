@@ -438,6 +438,20 @@ func (s *DataMoveSuite) TestChangesStopAtTheCustomerAskingForThem() {
 	s.Empty(changes)
 }
 
+func (s *DataMoveSuite) TestAPageCursorNeverPassesTheCustomersOwnLastChange() {
+	s.capture("acme")
+	s.capture("other")
+	s.seedAgentConfig(s.source, "acme", "greeter")
+	_, ownCursor, err := s.source.Changes(s.ctx, "acme", 0, 100)
+	s.Require().NoError(err)
+	s.seedAgentConfig(s.source, "other", "not-yours")
+
+	_, cursor, err := s.source.Changes(s.ctx, "acme", 0, 100)
+
+	s.Require().NoError(err)
+	s.Equal(ownCursor, cursor)
+}
+
 func (s *DataMoveSuite) TestADeleteIsReplayedToo() {
 	s.capture("acme")
 	id := s.seedAgentConfig(s.source, "acme", "doomed")

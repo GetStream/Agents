@@ -195,6 +195,15 @@ func (s *Server) DeliverScheduledTask(ctx context.Context, claimed store.Claimed
 	if task.ChannelThread != "" {
 		return s.deliverOnThread(ctx, delivery, task.ChannelThread)
 	}
+	if delivery.SessionID == "" {
+		// The claim read the task before an earlier attempt at the occurrence opened its session
+		// (openTaskSession records it on the task): a retry follows up in that one.
+		stored, err := s.store.ScheduledTasks.Get(ctx, task.CustomerID, task.ID)
+		if err != nil {
+			return "", "", err
+		}
+		delivery.SessionID = stored.SessionID
+	}
 	if delivery.SessionID != "" {
 		if _, live := s.sessions.Get(delivery.SessionID, delivery.owner()); live {
 			deliveredTo, sessionID, err := s.deliverChainHere(ctx, delivery)
@@ -275,17 +284,18 @@ func (s *Server) deliverChainHere(ctx context.Context, delivery scheduledDeliver
 // conversation is held in, and stops at the first that lands. A failure
 // names every channel tried, for the logs, and is recorded under the first
 // channel's reason, except a call placed already (rangAlready), which gives
-// already_called. It is final when every channel's failure is, and missed
-// when every channel found the occurrence too late. A call placed for the
-// occurrence whose end the run does not record ends the walk (rangAlready), and so
-// does a turn refused for money (refusedTurn): the channels share the turn.
+// already_called. It is final when every channel's failure is, or one kept a
+// text it did not send (errTextKept), and missed when every channel found the
+// occurrence too late. A call placed for the occurrence whose end the run does
+// not record ends the walk (rangAlready), and so does a turn refused for money
+// (refusedTurn): the channels share the turn.
 func (s *Server) deliverChain(ctx context.Context, delivery scheduledDelivery, found *session.Session) (string, string, error) {
 	where := delivery.Channels
 	if len(where) == 0 {
 		where = []string{store.ScheduledTaskDeliveredConversation}
 	}
 	var tried []string
-	reason, final, missed := "", true, true
+	reason, final, missed, kept := "", true, true, false
 	for _, channel := range where {
 		deliveredTo, sessionID, err := s.deliverOn(ctx, delivery, found, channel)
 		if err == nil {
@@ -304,6 +314,7 @@ func (s *Server) deliverChain(ctx context.Context, delivery scheduledDelivery, f
 		var failure *scheduling.Failure
 		reason = cmp.Or(reason, deliveryReason(err))
 		final = final && errors.As(err, &failure) && failure.Final
+		kept = kept || errors.Is(err, errTextKept)
 		missed = false
 		// The turn is the conversation's, shared by the text channels: the next one would only
 		// read it back as failed.
@@ -322,8 +333,12 @@ func (s *Server) deliverChain(ctx context.Context, delivery scheduledDelivery, f
 	if missed {
 		return "", "", &scheduling.Missed{Err: err}
 	}
-	return "", "", &scheduling.Failure{Reason: reason, Final: final, Err: err}
+	return "", "", &scheduling.Failure{Reason: reason, Final: final || kept, Err: err}
 }
+
+// errTextKept says a text channel's send failed and its claim could not be given back: a later
+// attempt would find the words taken and count them sent.
+var errTextKept = errors.New("the unsent text could not be given back")
 
 // rangAlready reports whether a channel failed because the occurrence's call was
 // placed already, by an earlier attempt or a worker that stopped, and the run
@@ -435,7 +450,23 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 		if err != nil {
 			return "", "", err
 		}
+		// The words go out once per run and channel: an attempt after the one that sent them,
+		// such as a worker taking over a run whose finish was lost, finds them taken.
+		took, err := s.store.ScheduledTaskRuns.TakeText(ctx, delivery.CustomerID, delivery.RunID, channel)
+		if err != nil {
+			return "", "", err
+		}
+		if !took {
+			return channel, found.ID(), nil
+		}
 		if err := s.notifyText(ctx, delivery, channel, text, files); err != nil {
+			// Not sent, so a later attempt may send it.
+			if released := s.store.ScheduledTaskRuns.ReleaseText(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, channel); released != nil {
+				s.logger.Error("could not give back a scheduled task's text", "run", delivery.RunID, "error", released)
+				// Still taken: a later attempt would find the words sent and count the run
+				// delivered, so this one is not tried again.
+				return "", "", fmt.Errorf("%w: %w", errTextKept, undeliveredFinally(deliveryReason(err), err))
+			}
 			return "", "", unpaid(err)
 		}
 		return channel, found.ID(), nil

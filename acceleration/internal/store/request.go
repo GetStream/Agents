@@ -834,7 +834,7 @@ func (r *Requests) Spend(
 	// to keep in one shard may be the biggest once the others are added.
 	query := fmt.Sprintf(`
 SELECT
-    date_trunc('%s', started_at) AS bucket,
+    date_trunc('%s', started_at, 'UTC') AS bucket,
     %s AS value,
     COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
     %s AS request_count
