@@ -113,6 +113,8 @@ A state change that is more than a column write gets a domain verb on the same r
 - A lease is `lease_until` and `leased_by`. A queue row retries with `attempts` and
   `next_attempt_at`. A sealed secret column ends in `_sealed` with its key version in
   `<column>_kek_version` (`kek_version` when the table has one secret).
+- `created_at` and `updated_at` are records for people: a table keeps them even when no code
+  reads them.
 
 ## Adding a model
 

@@ -69,7 +69,9 @@ type Campaign struct {
 	LaunchedAt     *time.Time        `bun:"launched_at"`
 	StartedAt      *time.Time        `bun:"started_at"`
 	StoppedAt      *time.Time        `bun:"stopped_at"`
-	ConsentAt      *time.Time        `bun:"consent_at"`
+	// ConsentAt is when the customer said its contacts agreed to be called. No code reads
+	// it: it is the record for whoever is asked to show that consent.
+	ConsentAt *time.Time `bun:"consent_at"`
 	// FinishedAt is when the campaign completed.
 	FinishedAt *time.Time `bun:"finished_at"`
 	// PausedReason is the code of what refused a call when the router paused the campaign
