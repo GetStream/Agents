@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -285,6 +287,9 @@ func (s *AgentSuite) TestAConnectorCallItsRunnerReportsFailedIsLoggedAsFailed() 
 
 func (s *AgentSuite) TestAConnectorCallThatAnsweredNamesItsConnector() {
 	back := s.reportedBy(&reportingTool{report: ToolReport{Connector: "github"}, result: "order 12 ships tomorrow"})
+
+	s.Equal(connectorLineKeys, slices.Sorted(maps.Keys(back)), "a call that asks nothing logs the keys main logs")
+	s.NotContains(back, "approval")
 
 	s.Equal("github", back["connector"])
 	s.Equal(true, back["success"])

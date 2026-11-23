@@ -135,7 +135,7 @@ func (s *Server) recordActivity(routes *chi.Mux, r *http.Request, answered *logg
 		OrganizationID: OrganizationFrom(r.Context()),
 		AppID:          customer,
 		Area:           area,
-		Client:         store.AuditSource(strings.ToLower(strings.TrimSpace(r.Header.Get(clientHeader)))),
+		Client:         store.AuditSource(r.Header.Get(clientHeader)),
 		At:             arrived,
 		// A socket refuses in a frame, after a 101: the code it noted says it was refused.
 		Refused: status >= http.StatusBadRequest || answered.refusal != "",

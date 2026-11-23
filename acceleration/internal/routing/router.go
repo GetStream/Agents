@@ -123,6 +123,9 @@ type Endpoint struct {
 	Model string
 	// APIKey is empty for an endpoint that takes none.
 	APIKey string
+	// ContextWindow is how many tokens the endpoint serves the model with, zero when not
+	// known.
+	ContextWindow int64
 	// Client is how requests reach it. On a router tenants share it dials public addresses
 	// only, because the endpoint is whatever a tenant wrote.
 	Client *http.Client

@@ -297,6 +297,10 @@ func (s *ForgetUserSuite) settingsOf(app, user string) {
 		AmountMicros: 500, Reason: "support", Actor: "staff",
 	}, audit))
 	s.Require().NoError(shared.Campaigns.Insert(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.ScheduledTasks.Insert(s.ctx, &store.ScheduledTask{
+		ID: "reminder", CustomerID: app, UserID: user, Title: "Stretch", Instructions: "Remind them to stretch.",
+		StartLocal: time.Now(), Timezone: "UTC", State: store.ScheduledTaskActive,
+	}, 0))
 }
 
 // userRows is what the shared database holds of app's user: their own policy, the limits naming
@@ -495,7 +499,7 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 	}
 	s.Equal(map[string]float64{
 		"requests": 1, "branch_messages": 1, "events": 1, "windows": 4, "redis_keys": 1,
-		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1,
+		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1, "tasks_deleted": 1, "task_changes_redacted": 0,
 	}, counts)
 	var audits []ledger.ManageAudit
 	s.Require().NoError(s.service.Ledger.DB().NewSelect().Model(&audits).Where("action = ?", ledger.ActionForgetUser).Scan(s.ctx))
@@ -512,7 +516,7 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 
 	out := s.forget(s.app, person, "--dry-run")
 
-	s.Equal("dry run, nothing is changed\nrequests: 2 rows\nbranch snapshots: 0 messages to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
+	s.Equal("dry run, nothing is changed\nscheduled tasks: 1 to delete, 0 recorded changes to redact\nrequests: 2 rows\nbranch snapshots: 0 messages to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
 		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n", out)
 	s.Equal(person, s.requests()[id].UserID)
 	s.Equal(person, s.events()[id].UserID)
@@ -663,4 +667,20 @@ func (s *ForgetUserSuite) TestForgettingAUserNeedsTheManageKey() {
 	err := s.runForget([]string{"forget-user", "--app", s.app, "--user", person, "--actor", "staff@example.com"}, &bytes.Buffer{})
 
 	s.ErrorContains(err, "ROUTER_USAGE_MANAGE_KEY")
+}
+
+func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirScheduledTasks() {
+	s.recorded(0, s.app, person, 100)
+	s.Require().NoError(s.shards[0].StartDataCapture(s.ctx, s.app, time.Hour, time.Second))
+	s.settingsOf(s.app, person)
+	s.settingsOf("other-"+s.app, person)
+	s.Contains(s.forget(s.app, person, "--dry-run"), "\nscheduled tasks: 1 to delete, 1 recorded changes to redact\n")
+
+	out := s.forget(s.app, person)
+
+	s.Contains(out, "\nscheduled tasks: 1 deleted, 1 recorded changes redacted\nrequests: ", "the tasks go first, so none runs during the forget")
+	_, err := s.shards[0].ScheduledTasks.Get(s.ctx, s.app, "reminder")
+	s.ErrorIs(err, store.ErrNoScheduledTask)
+	_, err = s.shards[0].ScheduledTasks.Get(s.ctx, "other-"+s.app, "reminder")
+	s.Require().NoError(err, "the same user id in another app keeps theirs")
 }

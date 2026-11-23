@@ -680,6 +680,56 @@ func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	s.ErrorIs(err, store.ErrNoContact)
 }
 
+// A code texted to another agent's line of the app is answered as a code nobody was given, so a
+// guess cannot tell a live code from a dead one, and is not spent: the number still claims it on
+// the line of the agent it was minted for.
+func (s *ChannelsSuite) TestACodeTextedToAnotherAgentsLineStillClaimsTheNumberOnItsOwn() {
+	ownNumber, otherNumber := s.number(), s.number()
+	own, other := s.connect(ownNumber), s.connect(otherNumber)
+	config := s.agentOn(ownNumber, store.ChannelIdentityLink)
+	otherConfig := s.agentOn(otherNumber, store.ChannelIdentityLink)
+	owner := s.utils.uuid()
+	writer := s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: owner}, &minted))
+	s.Regexp(`^[0-9]{6}$`, minted.Code)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, writer, "msg-"+s.utils.uuid(), "no such code"))
+	unknown := s.reply(writer, 1)
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, writer, "msg-"+s.utils.uuid(), minted.Code))
+	s.Equal(unknown, s.reply(writer, 2))
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), otherConfig.Id, "whatsapp", "+"+writer)
+	s.Require().ErrorIs(err, store.ErrNoContact)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(own, writer, "msg-"+s.utils.uuid(), minted.Code))
+	s.Equal("This number is yours now. What can I do for you?", s.reply(writer, 3))
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	s.Require().NoError(err)
+	s.Equal(owner, held.UserID)
+}
+
+// A guess that hits another agent's live code counts as a wrong one, as any other guess does.
+func (s *ChannelsSuite) TestCodesOfAnotherAgentCountAsWrongCodes() {
+	ownNumber, otherNumber := s.number(), s.number()
+	s.connect(ownNumber)
+	other := s.connect(otherNumber)
+	config := s.agentOn(ownNumber, store.ChannelIdentityLink)
+	s.agentOn(otherNumber, store.ChannelIdentityLink)
+	guesser := s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	for n := range 5 {
+		s.Require().Equal(http.StatusAccepted, s.deliver(other, guesser, "msg-"+s.utils.uuid(), minted.Code))
+		s.Contains(s.reply(guesser, n+1), "code")
+	}
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, guesser, "msg-"+s.utils.uuid(), "no such code"))
+
+	s.Contains(s.reply(guesser, 6), "Too many codes")
+}
+
 // A code is six digits, so a number that may text guesses without end finds one.
 func (s *ChannelsSuite) TestANumberThatTextsWrongCodesCannotClaimEvenTheRightOne() {
 	number := s.number()
@@ -725,6 +775,35 @@ func (s *ChannelsSuite) TestNumbersGuessingCodesOnOneLineTogetherCannotClaimOne(
 	s.Contains(s.reply(last, 1), "Too many codes")
 	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+last)
 	s.ErrorIs(err, store.ErrNoContact)
+}
+
+// A code the router cannot write is its own failure: the caller is told so, not what the store said.
+func (s *ChannelsSuite) TestACodeThatCannotBeWrittenIsA500WithoutTheStoresWords() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+
+	s.failQueries(`INSERT INTO "channel_links"`)
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()})
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	s.Contains(string(payload), "something went wrong")
+	s.NotContains(string(payload), "channel link")
+	s.NotContains(string(payload), "store:")
+}
+
+// Two people linking on one agent before either texts get two codes.
+func (s *ChannelsSuite) TestTwoPeopleLinkingOnOneAgentGetTwoCodes() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	var first, second ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &first))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &second))
+	s.NotEqual(first.Code, second.Code)
 }
 
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {

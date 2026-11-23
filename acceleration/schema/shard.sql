@@ -76,8 +76,6 @@ TABLE agent_sessions
     agent_id text NOT NULL DEFAULT ''::text
     agent_name text NOT NULL DEFAULT ''::text
     api_key text NOT NULL DEFAULT ''::text
-    call_id text
-    call_type text
     caller_kind text NOT NULL DEFAULT ''::text
     caller_tools jsonb
     closed_at timestamp with time zone
@@ -237,7 +235,6 @@ TABLE calls
     call_id text NOT NULL
     call_type text NOT NULL DEFAULT ''::text
     campaign_id text
-    config_id text
     contact_id text
     conversation_id text
     customer_id text NOT NULL
@@ -260,7 +257,6 @@ TABLE calls
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     to_number text
     tts text NOT NULL DEFAULT ''::text
-    user_id text NOT NULL DEFAULT ''::text
     voice text NOT NULL DEFAULT ''::text
     CONSTRAINT calls_pkey PRIMARY KEY (id)
     CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
