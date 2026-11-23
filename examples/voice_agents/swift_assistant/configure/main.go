@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 
 	"github.com/GetStream/Vision-Agents/sdks/go/acceleration"
 	"github.com/GetStream/Vision-Agents/sdks/go/agents"
@@ -86,8 +87,9 @@ func run(ctx context.Context, dir string) error {
 	return nil
 }
 
-// allowReturnURLs lists schemes in the app's policy as the return_urls its phones may name,
-// and keeps the rest of the policy as it is.
+// allowReturnURLs adds schemes to the return_urls the app's policy lets its phones name,
+// keeping the entries already there, which another demo or a person may have set, and the
+// rest of the policy as it is.
 func allowReturnURLs(ctx context.Context, client *acceleration.ClientWithResponses, schemes []string) error {
 	read, err := client.GetAppPolicyWithResponse(ctx)
 	if err != nil {
@@ -97,7 +99,16 @@ func allowReturnURLs(ctx context.Context, client *acceleration.ClientWithRespons
 		return fmt.Errorf("reading the app's policy: %s %s", read.Status(), read.Body)
 	}
 	policy := *read.JSON200
-	policy.DeviceReturnUrls = &schemes
+	listed := []string{}
+	if policy.DeviceReturnUrls != nil {
+		listed = *policy.DeviceReturnUrls
+	}
+	for _, scheme := range schemes {
+		if !slices.Contains(listed, scheme) {
+			listed = append(listed, scheme)
+		}
+	}
+	policy.DeviceReturnUrls = &listed
 	stored, err := client.UpdateAppPolicyWithResponse(ctx, policy)
 	if err != nil {
 		return err

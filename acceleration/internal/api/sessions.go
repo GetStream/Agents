@@ -157,6 +157,13 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
+	openedBy := spec.CallerKind
+	if parent.Live == nil {
+		openedBy = auth.Kind(parent.Stored.CallerKind)
+	}
+	if spec.ReturnURL, err = s.carriedReturnURL(ctx, customerID, openedBy, spec.ReturnURL); err != nil {
+		return nil, err
+	}
 	// The connector bindings are the config's as it is now, even for a live parent. The
 	// session re-resolves the parent's selections against them and against the caller asking
 	// for the fork, and drops the ones the config no longer declares. A config deleted since
@@ -784,7 +791,11 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	// config as it is now and the caller asking, as it did when the chat opened.
 	spec.ConnectorSelections = selectionsOf(*row)
 	// And so do their consents, back to the page the chat was opened with.
-	spec.ReturnURL = row.ReturnURL
+	returnURL, err := s.carriedReturnURL(ctx, row.CustomerID, auth.Kind(row.CallerKind), row.ReturnURL)
+	if err != nil {
+		return session.Spec{}, err
+	}
+	spec.ReturnURL = returnURL
 	spec.NoUI = row.NoUI
 	// Its usage stays under the key and categories it was opened with. The user is the one
 	// asking, who is the row's own; the organization and its tier are as they are now.

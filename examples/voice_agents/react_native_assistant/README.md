@@ -33,6 +33,10 @@ STREAM_ACCELERATION_CUSTOMER_ID=examples \
 go run ./backend
 ```
 
+swift_assistant's `configure` also adds this app's sign-in scheme, `io.getstream.expochatgptsample`,
+to the app policy's `device_return_urls`: the router takes a session's `return_url` from a phone
+only when its scheme is listed there.
+
 Copy `.env.example` to `.env.local`, which git ignores, and set `EXPO_PUBLIC_STREAM_API_KEY` to
 the router's `STREAM_API_KEY`. The app reaches the router on `http://localhost:8080` and the
 backend on `http://localhost:8098`. On Android, `adb reverse` hands the phone's localhost on to

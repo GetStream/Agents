@@ -118,7 +118,8 @@ class CreateSessionRequest:
             rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is
             kept with the session, so a chat carried on after it ended and a fork go back to it too. A server-side caller
             may send any. An end user's device may send one only of a web origin or native app scheme its app's policy lists
-            in device_return_urls, and any other is refused with a 403 (an error frame on the session socket).
+            in device_return_urls, and any other is refused with a 403 (an error frame on the session socket). A device's
+            return_url goes on to a chat carried on or forked only while the policy still lists it.
         search (str | Unset): Omit it and the config decides, or search-fast when there is no config.
         start_voice (bool | Unset): Start voice as the session opens, as startSessionVoice does: the agent joins the
             call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the

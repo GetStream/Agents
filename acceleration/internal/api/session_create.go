@@ -285,25 +285,55 @@ func (s *Server) refuseDeviceReturnURL(ctx context.Context, customerID string, r
 	if returnURL == "" || ServerSideFrom(ctx) {
 		return nil
 	}
-	if s.configs == nil {
-		return errDeviceReturnURL
-	}
-	policy, err := s.configs.Policies.Get(ctx, store.ScopeApp, customerID)
+	listed, err := s.devicesMayReturnTo(ctx, customerID, returnURL)
 	if err != nil {
 		return err
 	}
+	if !listed {
+		return errDeviceReturnURL
+	}
+	return nil
+}
+
+// carriedReturnURL is the return_url a session carried on or forked from one that openedBy
+// opened goes on with: a device's only while the app's policy still lists it, since the app
+// may have taken it out since.
+func (s *Server) carriedReturnURL(ctx context.Context, customerID string, openedBy auth.Kind, returnURL string) (string, error) {
+	if returnURL == "" || openedBy == auth.KindServer {
+		return returnURL, nil
+	}
+	listed, err := s.devicesMayReturnTo(ctx, customerID, returnURL)
+	if err != nil || !listed {
+		return "", err
+	}
+	return returnURL, nil
+}
+
+// devicesMayReturnTo is whether the app's policy lists returnURL's origin or native app
+// scheme in device_return_urls.
+func (s *Server) devicesMayReturnTo(ctx context.Context, customerID, returnURL string) (bool, error) {
+	if s.configs == nil {
+		return false, nil
+	}
+	policy, err := s.configs.Policies.Get(ctx, store.ScopeApp, customerID)
+	if err != nil {
+		return false, err
+	}
 	key := returnURLKey(returnURL)
 	for _, entry := range policy.DeviceReturnURLs {
-		if key != "" && returnURLKey(entryURL(entry)) == key {
-			return nil
+		if returnURLKey(entryURL(entry)) == key {
+			return true, nil
 		}
 	}
-	return errDeviceReturnURL
+	return false, nil
 }
 
 // checkDeviceReturnURL is why entry cannot be in device_return_urls, or nil: a web origin
 // checkReturnURL takes, or a native app's scheme without its colon.
 func checkDeviceReturnURL(entry string) error {
+	if strings.Contains(entry, "*") {
+		return errors.New("an entry is matched exactly and has no wildcards: list each origin or scheme")
+	}
 	if err := checkReturnURL(entryURL(entry)); err != nil {
 		return err
 	}
@@ -311,7 +341,8 @@ func checkDeviceReturnURL(entry string) error {
 		return nil
 	}
 	if origin, err := originOf(entry); err != nil || strings.TrimSuffix(entry, "/") != origin {
-		return errors.New("not an origin, such as https://app.example, or a native app's scheme, such as com.example.app")
+		return errors.New("not an origin written in lowercase with no path and no default port, such as " +
+			"https://app.example, or a native app's scheme without its colon, such as com.example.app")
 	}
 	return nil
 }

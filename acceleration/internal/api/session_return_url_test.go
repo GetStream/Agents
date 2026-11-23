@@ -130,6 +130,62 @@ func (s *ChatLoginsSuite) TestAForkNamingAConfigGoesBackToItsParentsReturnURL() 
 	s.Equal(launchPageFrom(appOrigin), s.launchedFor(connector))
 }
 
+// TestADeviceSessionsReturnURLItsAppNoLongerListsIsNotCarriedOn: the device named a listed
+// origin, which the app then took out of its policy. The chat carried on from its row goes
+// back to the dashboard, as one opened without a return_url does.
+func (s *ChatLoginsSuite) TestADeviceSessionsReturnURLItsAppNoLongerListsIsNotCarriedOn() {
+	s.devicesMayReturnTo(appOrigin)
+	connector, grant := s.connector()
+	opened := s.client.createSession(s.returningTo(s.session(s.config(connector, grant), nil), appReturnURL))
+	s.Require().Eventually(func() bool { return s.storedReturnURL(opened.Id) == appReturnURL }, settleFor, 20*time.Millisecond,
+		"the row keeps the return_url")
+	s.client.stopSession(opened.Id)
+	s.devicesMayReturnTo()
+
+	s.ask(opened.Id)
+
+	s.Equal(baseLaunchPage, s.launchedFor(connector))
+}
+
+// TestAForkOfADeviceSessionDropsAReturnURLItsAppNoLongerLists: whether the parent is live or
+// read from its row, the fork carries no return_url the app took out of its policy.
+func (s *ChatLoginsSuite) TestAForkOfADeviceSessionDropsAReturnURLItsAppNoLongerLists() {
+	for _, ended := range []bool{false, true} {
+		s.devicesMayReturnTo(appOrigin)
+		connector, grant := s.connector()
+		opened := s.client.createSession(s.returningTo(s.session(s.config(connector, grant), nil), appReturnURL))
+		s.Require().Eventually(func() bool { return s.storedReturnURL(opened.Id) == appReturnURL }, settleFor, 20*time.Millisecond,
+			"the parent's row is written")
+		if ended {
+			s.client.stopSession(opened.Id)
+		}
+		s.devicesMayReturnTo()
+
+		forked := s.fork(opened.Id, ForkSessionRequest{Messages: pointerTo(false)})
+
+		s.Eventually(func() bool { return s.storedWithoutReturnURL(forked.Id) }, settleFor, 20*time.Millisecond,
+			"ended %v: the fork has no return_url", ended)
+	}
+}
+
+// TestABackendsReturnURLIsCarriedOnWithoutAnEntry: a session the backend opened goes on to
+// its page whatever the policy lists, carried on and forked alike.
+func (s *ChatLoginsSuite) TestABackendsReturnURLIsCarriedOnWithoutAnEntry() {
+	backend := s.serverClient.actingFor(s.client)
+	connector, grant := s.connector()
+	opened := backend.createSession(s.returningTo(s.session(s.config(connector, grant), nil), appReturnURL))
+	s.Require().Eventually(func() bool { return s.storedReturnURL(opened.Id) == appReturnURL }, settleFor, 20*time.Millisecond,
+		"the row keeps the return_url")
+	backend.stopSession(opened.Id)
+
+	forked := s.fork(opened.Id, ForkSessionRequest{Messages: pointerTo(false)})
+	s.ask(opened.Id)
+
+	s.Equal(launchPageFrom(appOrigin), s.launchedFor(connector))
+	s.Eventually(func() bool { return s.storedReturnURL(forked.Id) == appReturnURL }, settleFor, 20*time.Millisecond,
+		"the fork's row keeps the backend's return_url")
+}
+
 func (s *SessionCreateSuite) TestASessionWithAPlainHTTPReturnURLIsRefusedAndNotCreated() {
 	id := s.utils.uuid()
 	request := textSession(&id)
@@ -316,23 +372,60 @@ func (s *SocketSessionSuite) TestASocketSessionWithADeviceReturnURLItsAppDoesNot
 	s.Equal(string(created.Error.Type), refused["error_type"])
 }
 
-func (s *PoliciesSuite) TestDeviceReturnURLsAreCheckedAndReadBack() {
-	listed := []string{"https://app.example", "http://localhost:3000", "com.example.app"}
-	s.Equal(listed, s.put(map[string]any{"device_return_urls": listed}).DeviceReturnURLs)
+// TestASocketSessionWithADeviceReturnURLItsAppListsIsHeld: the start frame is refused only for
+// an unlisted page, not for every device's.
+func (s *SocketSessionSuite) TestASocketSessionWithADeviceReturnURLItsAppListsIsHeld() {
+	s.devicesMayReturnTo(appOrigin)
+	connection := s.client.opens("/v1/agents/socket")
+	defer connection.Close()
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "sample_rate": 24_000, "session": map[string]any{"return_url": appReturnURL},
+	}))
 
+	answered := s.readFrame(connection)
+
+	s.Require().Equal("session", answered["type"], "the socket answered %v", answered)
+	id := answered["session"].(map[string]any)["id"].(string)
+	s.Eventually(func() bool { return s.storedReturnURL(id) == appReturnURL }, settleFor, 20*time.Millisecond)
+}
+
+func (s *PoliciesSuite) TestDeviceReturnURLsAreStoredAndReadBack() {
+	listed := []string{"https://app.example", "http://localhost:3000", "com.example.app"}
+
+	stored := s.put(map[string]any{"device_return_urls": listed})
+
+	s.Equal(listed, stored.DeviceReturnURLs)
+	var read Policy
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/policies/app", nil, &read))
+	s.Equal(listed, read.DeviceReturnURLs)
+}
+
+// TestADeviceReturnURLThatIsNotAnOriginOrASchemeIsRefused: an entry is matched exactly, so one
+// with a path, a query, a capital, a default port or a wildcard would never match, and plain
+// http, a scheme with its colon or path, a browser's own scheme and a dotless name are refused
+// as return_url is.
+func (s *PoliciesSuite) TestADeviceReturnURLThatIsNotAnOriginOrASchemeIsRefused() {
+	s.put(map[string]any{"device_return_urls": []string{"https://app.example"}})
 	for _, entry := range []string{
-		"https://app.example/connectors/done", "https://app.example?tab=tools", "http://app.example",
+		"https://app.example/connectors/done", "https://app.example?tab=tools", "https://App.example",
+		"https://app.example:443", "https://*.example", "*", "http://app.example",
 		"com.example.app:", "com.example.app:/connected", "javascript", "app", "",
 	} {
 		status, _ := s.serverClient.failure(http.MethodPut, "/v1/policies/app", map[string]any{"device_return_urls": []string{entry}})
+
 		s.Equal(http.StatusBadRequest, status, entry)
 	}
-	status, message := s.serverClient.failure(http.MethodPut, "/v1/policies/organization", map[string]any{"device_return_urls": listed})
-	s.Equal(http.StatusBadRequest, status)
-	s.Equal("an organization has no device_return_urls: set them on each app's policy", message)
 	var read Policy
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/policies/app", nil, &read))
-	s.Equal(listed, read.DeviceReturnURLs, "a refused policy writes nothing")
+	s.Equal([]string{"https://app.example"}, read.DeviceReturnURLs, "a refused policy writes nothing")
+}
+
+func (s *PoliciesSuite) TestAnOrganizationsPolicyHasNoDeviceReturnURLs() {
+	status, message := s.serverClient.failure(http.MethodPut, "/v1/policies/organization",
+		map[string]any{"device_return_urls": []string{"https://app.example"}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("an organization has no device_return_urls: set them on each app's policy", message)
 }
 
 // devicesMayReturnTo sets the app's device_return_urls to entries for the test, and puts the
