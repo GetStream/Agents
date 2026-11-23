@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
 // grantRow is a request row that names grants, written as the writer writes it: of the
@@ -95,6 +98,42 @@ func (s *StoreSuite) TestARowWithoutItsOrganizationCountsTowardItsAppsGrants() {
 	s.EqualValues(100, s.used(own.ID), "an app in no organization keeps its grants under its own id")
 	s.EqualValues(20, s.used(theirs.ID), "a row of the organization's app counts; one of another app, or of an app of "+
 		"another organization whose id is this one's, does not")
+}
+
+func (s *StoreSuite) TestAGrantScopedToAnAppCountsOnlyThatAppsRows() {
+	app := s.grant(LimitGrant{Subject: usage.SubjectApp, AppID: "app-1", AmountMicros: 10_000})
+	key := s.grant(LimitGrant{Subject: usage.SubjectAPIKey, AppID: "app-1", APIKey: "k", AmountMicros: 10_000})
+	written := func(app string, cost int64, grant int64) Request {
+		return Request{
+			UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: app, OrganizationID: "org-1", Provider: "openai",
+			Model: "m", StartedAt: s.base, CostMicros: cost, Billable: true, Success: true, LimitGrants: []int64{grant},
+		}
+	}
+
+	s.writeAsTheWriter(s.store, written("app-1", 40, app.ID), written("app-3", 900, app.ID), written("app-1", 5, key.ID), written("app-3", 900, key.ID))
+
+	s.EqualValues(40, s.used(app.ID), "a row of another app of the organization counts nothing toward the app's grant")
+	s.EqualValues(5, s.used(key.ID), "nor toward a grant of the app's key")
+}
+
+func (s *StoreSuite) TestAUseRefusedOnWhoseTheGrantIsIsCountedOnMetrics() {
+	grant := s.grant(LimitGrant{AmountMicros: 10_000})
+	moved := uuid.Must(uuid.NewV7())
+	_, err := s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{{GrantID: grant.ID, CustomerID: "app-1", OrganizationID: "org-1", UsageID: moved, Micros: 10}})
+	s.Require().NoError(err)
+	before := testutil.ToFloat64(grantUsesRefused)
+
+	_, err = s.store.LimitGrantUses.InsertMany(s.ctx, []GrantUse{
+		{GrantID: grant.ID, CustomerID: "app-1", OrganizationID: "org-1", UsageID: uuid.Must(uuid.NewV7()), Micros: 10},
+		{GrantID: grant.ID, CustomerID: "app-2", OrganizationID: "org-2", UsageID: uuid.Must(uuid.NewV7()), Micros: 10},
+		{GrantID: grant.ID, CustomerID: "app-2", OrganizationID: "org-2", UsageID: moved, Micros: 10},
+		{GrantID: grant.ID + 1_000_000, CustomerID: "app-2", OrganizationID: "org-2", UsageID: uuid.Must(uuid.NewV7()), Micros: 10},
+	})
+	s.Require().NoError(err)
+
+	s.InDelta(1, testutil.ToFloat64(grantUsesRefused)-before, 0, "only the use of another organization the grant had not counted; "+
+		"a use it counts, one it counted before and one of a grant that is not there are not refusals")
+	s.EqualValues(20, s.used(grant.ID))
 }
 
 func (s *StoreSuite) TestARowWrittenTwiceCountsOnceTowardItsGrant() {

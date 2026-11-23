@@ -10,11 +10,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
+
+// grantUsesRefused counts what a grant's owner check turned away, so a grant that pays for
+// less than it admitted shows why.
+var grantUsesRefused = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "usage_grant_uses_refused_total",
+	Help:      "Attempts to count a usage row toward a live grant of neither its organization nor its app, or scoped to another app, that had not counted it before",
+})
 
 // GrantUse is one row counted toward one grant: its billable cost, by its usage id.
 // CustomerID and OrganizationID are the row's: a grant of neither the row's organization nor
@@ -69,8 +79,9 @@ const grantEndedBefore = "least(g.revoked_at, g.expires_at) < now() - make_inter
 
 // InsertMany counts the rows toward their grants in the shared database: each (grant, usage
 // id) once, however often it is sent, added to the grant's used_micros. A grant that is not
-// there, is of neither the row's organization nor its app's, or ended more than GrantUsesKept
-// ago, counts nothing. It says how many it had not counted before.
+// there, is of neither the row's organization nor its app's, is scoped to another app, or ended
+// more than GrantUsesKept ago, counts nothing; one refused on whose it is is counted on
+// /metrics. It says how many it had not counted before.
 func (r *LimitGrantUses) InsertMany(ctx context.Context, uses []GrantUse) (int, error) {
 	added := 0
 	for start := 0; start < len(uses); start += grantUsesChunk {
@@ -114,17 +125,24 @@ func addGrantUses(ctx context.Context, tx bun.Tx, uses []GrantUse) (int, error) 
 	// organization the app was last seen under, or for an app in none the app itself. Either
 	// one serves, since a row is written without its organization when the app could not be
 	// looked up, and the app's membership is recorded in the background after its first grant
-	// may be drawn.
-	var added int
+	// may be drawn. A grant scoped to an app is that app's alone.
+	var counts struct {
+		Added   int `bun:"added"`
+		Refused int `bun:"refused"`
+	}
 	err = tx.NewRaw(`
 WITH sent AS (
     SELECT * FROM unnest(?::bigint[], ?::text[], ?::text[], ?::uuid[], ?::bigint[]) AS s (grant_id, customer_id, organization_id, usage_id, micros)
+), granted AS (
+    SELECT s.grant_id, s.usage_id, s.micros,
+        g.organization_id IN (s.organization_id, coalesce(ao.organization_id, s.customer_id)) AND g.app_id IN ('', s.customer_id) AS owned
+    FROM sent s
+    LEFT JOIN app_organizations ao ON ao.app_id = s.customer_id
+    JOIN limit_grants g ON g.id = s.grant_id
+    WHERE NOT coalesce(`+grantEndedBefore+`, false)
 ), counted AS (
     INSERT INTO limit_grant_uses (grant_id, usage_id, micros)
-    SELECT s.grant_id, s.usage_id, s.micros FROM sent s
-    LEFT JOIN app_organizations ao ON ao.app_id = s.customer_id
-    JOIN limit_grants g ON g.id = s.grant_id AND g.organization_id IN (s.organization_id, coalesce(ao.organization_id, s.customer_id))
-    WHERE NOT coalesce(`+grantEndedBefore+`, false)
+    SELECT grant_id, usage_id, micros FROM granted WHERE owned
     ON CONFLICT DO NOTHING
     RETURNING grant_id, micros
 ), raised AS (
@@ -133,8 +151,16 @@ WITH sent AS (
     WHERE g.id = c.grant_id
     RETURNING 1
 )
-SELECT count(*) FROM counted`, pgdialect.Array(grants), pgdialect.Array(customers), pgdialect.Array(organizations), pgdialect.Array(usageIDs), pgdialect.Array(micros), GrantUsesKept.Seconds()).Scan(ctx, &added)
-	return added, err
+SELECT (SELECT count(*) FROM counted) AS added,
+    (SELECT count(*) FROM granted r WHERE NOT r.owned
+        AND NOT EXISTS (SELECT 1 FROM limit_grant_uses u WHERE u.grant_id = r.grant_id AND u.usage_id = r.usage_id)) AS refused`,
+		pgdialect.Array(grants), pgdialect.Array(customers), pgdialect.Array(organizations), pgdialect.Array(usageIDs), pgdialect.Array(micros),
+		GrantUsesKept.Seconds()).Scan(ctx, &counts)
+	if err != nil {
+		return 0, err
+	}
+	grantUsesRefused.Add(float64(counts.Refused))
+	return counts.Added, nil
 }
 
 // Prune forgets which rows counted toward the grants that expired or were revoked
