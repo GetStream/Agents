@@ -162,6 +162,28 @@ func (s *STSRouterSuite) TestTheWaitIsTheFirstReplyACallerWaitedFor() {
 	s.Equal(3.0, lines[0]["replies"], "the greeting is still a reply")
 }
 
+// A reply that failed after its first audio still made the caller wait, so its wait is the one
+// logged, even though the session's first failure is that reply's.
+func (s *STSRouterSuite) TestAFailedReplyThatMadeTheCallerWaitIsTheWaitLogged() {
+	session, provider, logs := s.timedSession()
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "greet", Generation: 1, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "greet", Generation: 1, TimeToFirstByteMs: 0})
+	s.Require().NoError(session.ProcessAudio(heard(600), sts.Participant{}))
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "r2", Generation: 2, At: time.Now()})
+	provider.emitter.Send(sts.Error{ResponseID: "r2", Err: errors.New("reply timed out"), Context: "response"})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "r2", Generation: 2, TimeToFirstByteMs: 700})
+	provider.emitter.Send(sts.ResponseStarted{ResponseID: "r3", Generation: 3, At: time.Now()})
+	provider.emitter.Send(sts.ResponseComplete{ResponseID: "r3", Generation: 3, TimeToFirstByteMs: 300})
+	s.Require().NoError(session.Close())
+	s.drain(session)
+
+	lines := timingLines(s.T(), logs, session.id)
+	s.Require().Len(lines, 1)
+	s.Equal(700.0, lines[0]["ttfb_ms"])
+	s.Equal(false, lines[0]["success"])
+	s.Equal(3.0, lines[0]["replies"])
+}
+
 func (s *STSRouterSuite) TestASessionWhoseOnlyReplyWasAGreetingLeavesOutTheWait() {
 	session, provider, logs := s.timedSession()
 	provider.emitter.Send(sts.ResponseStarted{ResponseID: "greet", Generation: 1, At: time.Now()})
