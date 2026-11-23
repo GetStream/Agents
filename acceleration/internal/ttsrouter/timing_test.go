@@ -213,7 +213,11 @@ func (s *TTSRouterSuite) TestASynthesisTheSessionClosedOnLogsALineWithNoCost() {
 		for operation, line := range lines {
 			s.Equal("acme", line["app_id"], operation)
 			s.Equal(false, line["success"], operation)
-			s.Equal("closed", line["error_code"], operation)
+			if operation == "silent" {
+				s.Equal("read", line["error_code"], "the code the voice reported for it")
+			} else {
+				s.Equal("closed", line["error_code"], operation)
+			}
 			s.NotContains(line, "cost_micros", "%s wrote no row, so it has no cost", operation)
 			s.NotContains(line, "audio_ms", "%s: the audio of a synthesis that never completed is not counted", operation)
 		}
@@ -318,4 +322,62 @@ func (s *TTSRouterSuite) TestACompletedSynthesisIsNotLoggedAgainAtClose() {
 	s.Require().Len(lines, 1, "its row's line, and none at close")
 	s.Equal(true, lines[0]["success"])
 	s.EqualValues(80, lines[0]["ttfb_ms"], "a completed synthesis logs the time to first byte its voice reported")
+}
+
+func (s *TTSRouterSuite) TestASynthesisAFatalErrorEndedLogsTheCodeTheVoiceReported() {
+	session, provider, logs := s.timedSession("", false)
+	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	s.Require().NoError(session.Synthesize(tts.Request{ID: "u2", Text: "hung up", Final: true}))
+	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})
+	provider.emitter.Send(tts.Error{SynthesisID: "u1", Fatal: true, Err: errors.New("socket reset")})
+	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u2", At: time.Now()})
+	provider.emitter.Close()
+	s.drain(session)
+
+	lines := s.byOperation(s.synthesisLines(logs))
+	s.Require().Len(lines, 2)
+	s.Equal("provider_fatal", lines["u1"]["error_code"], "what the row would say")
+	s.Equal("socket reset", lines["u1"]["error"])
+	s.Equal("closed", lines["u2"]["error_code"], "a hang-up mid-sentence reported nothing")
+}
+
+func (s *TTSRouterSuite) TestRowInterruptedLineCarriesItsStart() {
+	s.onFakeClock(func() {
+		provider := &stubTTS{emitter: tts.NewEmitter(64), perSentence: true}
+		session, logs := s.timedVoice(provider, "", false)
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "half"}))
+		provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})
+		time.Sleep(5 * time.Millisecond)
+		provider.emitter.Send(tts.AudioChunk{SynthesisID: "u1"})
+		time.Sleep(15 * time.Millisecond)
+		s.Require().NoError(session.Interrupt())
+		s.settled(session)
+		lines := s.synthesisLines(logs)
+		s.Require().Len(lines, 1)
+		s.Equal("interrupted", lines[0]["error_code"])
+		s.EqualValues(5, lines[0]["ttfb_ms"])
+		s.EqualValues(20, lines[0]["duration_ms"])
+	})
+}
+
+func (s *TTSRouterSuite) TestRowInterruptedSecondSentenceDoesNotCarryTheFirstsStart() {
+	s.onFakeClock(func() {
+		provider := &stubTTS{emitter: tts.NewEmitter(64), perSentence: true}
+		session, logs := s.timedVoice(provider, "", false)
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "first", Final: true}))
+		provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})
+		s.Require().NoError(session.Interrupt()) // first is kept: its completion is owed
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "more"}))
+		time.Sleep(20 * time.Millisecond)
+		s.Require().NoError(session.Interrupt()) // second dropped
+		s.settled(session)
+		lines := s.synthesisLines(logs)
+		s.Require().Len(lines, 2)
+		for _, l := range lines {
+			if l["error_code"] == "interrupted" {
+				s.EqualValues(4, l["characters"])
+				s.NotContains(l, "duration_ms", "the second sentence never started")
+			}
+		}
+	})
 }

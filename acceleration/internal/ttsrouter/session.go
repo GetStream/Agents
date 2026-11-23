@@ -421,7 +421,8 @@ func (s *Session) abandon(id string, sentence *pending, first bool) (abandonment
 	return abandoned, true
 }
 
-// abandonUnsettled logs every sentence the voice had not completed when its events ended.
+// abandonUnsettled logs every sentence the voice had not completed when its events ended,
+// with the code the voice reported for it, or "closed" when it reported none.
 // Their reservations are let go at Close, as before.
 func (s *Session) abandonUnsettled() {
 	var left []abandonment
@@ -435,7 +436,12 @@ func (s *Session) abandonUnsettled() {
 	}
 	s.mu.Unlock()
 	for _, abandoned := range left {
-		s.logAbandoned(abandoned, "closed")
+		// The code the voice reported for it, when it did, is what its row would say.
+		code := "closed"
+		if reported := abandoned.utterance.errorCode; reported != "" {
+			code = reported
+		}
+		s.logAbandoned(abandoned, code)
 	}
 }
 
