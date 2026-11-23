@@ -279,6 +279,82 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ActivityDay
+    {
+
+        /// <summary>
+        /// The app.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("app_id")]
+        public string AppId { get; set; } = default!;
+
+        /// <summary>
+        /// The area of the API, such as agent_setup or conversations.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("area")]
+        public string Area { get; set; } = default!;
+
+        /// <summary>
+        /// The client the requests named themselves as: dashboard, cli, sdk or api.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("client")]
+        public string Client { get; set; } = default!;
+
+        /// <summary>
+        /// The UTC day, YYYY-MM-DD.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("day")]
+        [System.Text.Json.Serialization.JsonConverter(typeof(DateFormatConverter))]
+        public System.DateTimeOffset Day { get; set; } = default!;
+
+        /// <summary>
+        /// When the first request arrived.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("first_at")]
+        public System.DateTimeOffset FirstAt { get; set; } = default!;
+
+        /// <summary>
+        /// When the last request arrived.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("last_at")]
+        public System.DateTimeOffset LastAt { get; set; } = default!;
+
+        /// <summary>
+        /// The error code of the latest refusal, empty when there was none.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("last_refusal_code")]
+        public string LastRefusalCode { get; set; } = default!;
+
+        /// <summary>
+        /// The organization the app was in when the row was last written.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organization_id")]
+        public string OrganizationId { get; set; } = default!;
+
+        /// <summary>
+        /// How many were answered with a status of 400 or more.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("refused")]
+        public long Refused { get; set; } = default!;
+
+        /// <summary>
+        /// How many requests arrived, refused ones included.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requests")]
+        public long Requests { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class ActivityEnding
     {
 
@@ -401,6 +477,42 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("requests")]
         public long Requests { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ActivityPage
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("has_more")]
+        public bool HasMore { get; set; } = default!;
+
+        /// <summary>
+        /// One item per organization, day, app, area and client, sorted in that order.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("items")]
+        public System.Collections.Generic.List<ActivityDay> Items { get; set; } = new System.Collections.Generic.List<ActivityDay>();
+
+        /// <summary>
+        /// Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("next_cursor")]
+        public string? NextCursor { get; set; } = default!;
+
+        /// <summary>
+        /// Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organizations")]
+        public System.Collections.Generic.List<OrganizationProgress> Organizations { get; set; } = new System.Collections.Generic.List<OrganizationProgress>();
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
@@ -6300,7 +6412,7 @@ namespace GetStream.VisionAgents.Models
         public string? ReasoningEffort { get; set; } = default!;
 
         /// <summary>
-        /// An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
+        /// An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("replaces")]
         public string? Replaces { get; set; } = default!;
@@ -6312,7 +6424,7 @@ namespace GetStream.VisionAgents.Models
         public string? RequestId { get; set; } = default!;
 
         /// <summary>
-        /// What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
+        /// What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("text")]
         public string Text { get; set; } = default!;
@@ -10379,6 +10491,39 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("steps")]
         public System.Collections.Generic.List<ActivityStepDay>? Steps { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class OrganizationProgress
+    {
+
+        /// <summary>
+        /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
+        public string FurthestStep { get; set; } = default!;
+
+        /// <summary>
+        /// The organization.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organization_id")]
+        public string OrganizationId { get; set; } = default!;
+
+        /// <summary>
+        /// Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("steps")]
+        public System.Collections.Generic.List<ActivityStepDay> Steps { get; set; } = new System.Collections.Generic.List<ActivityStepDay>();
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
