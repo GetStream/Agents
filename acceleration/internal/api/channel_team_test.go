@@ -196,6 +196,24 @@ func (s *AgentTeamsSuite) TestASocketSessionIsRefusedWhenTheSettingsCannotBeRead
 	s.Equal(string(ErrorTypeInternal), refused["error_type"])
 }
 
+// The device gets no text of the database error, and the router logs the error.
+func (s *AgentTeamsSuite) TestASocketSessionWhoseConfigTheDatabaseCannotReadIsRefusedWithoutTheError() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+	logBefore := len(s.logged.String())
+	connection := s.serverClient.opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "sample_rate": 24_000, "session": map[string]any{"config_id": id},
+	}))
+
+	var refused map[string]any
+	s.Require().NoError(connection.ReadJSON(&refused))
+
+	s.Equal("error", refused["type"], "%v", refused)
+	s.Equal(somethingWentWrong, refused["error"])
+	s.Contains(s.logged.String()[logBefore:], "could not read the agent config of a socket session")
+}
+
 // A chat that ended here is carried on by the next message, a create like any other.
 func (s *AgentTeamsSuite) TestAReopenIsRefusedWhenTheSettingsCannotBeRead() {
 	ended := s.serverClient.createSession(s.recorded(s.configOf("red")))

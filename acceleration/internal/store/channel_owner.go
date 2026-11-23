@@ -159,10 +159,21 @@ func lockChannelOwner(ctx context.Context, tx bun.Tx, customerID, id string) (st
 // account id is accountID: the connection of the provider unit a provider app's event names,
 // such as the bot token of the Slack workspace the app is installed in, whose identity is the
 // team alone.
+//
+// A customer can hold more than one connection of the same account, such as a second connection
+// to a Slack workspace that no agent uses yet (AI-3503). The answer is the connection that a live
+// agent config binds, as AgentConfigsBindingConnection finds that config. Then a connected
+// connection comes before one that is not, and a newer one before an older one. A connection that
+// no config binds is the answer only when none is bound, and the caller then drops the message.
 func (s *Store) AppConnectionByAccount(ctx context.Context, customerID, connectorID, accountID string) (ConnectorConnection, error) {
 	if customerID == "" || connectorID == "" || accountID == "" {
 		return ConnectorConnection{}, stack.Wrap(errors.New("store: a customer, a connector and an account id are required"))
 	}
+	bound := s.global.NewSelect().Model((*AgentConfig)(nil)).ColumnExpr("1").
+		Where("ac.customer_id = cc.customer_id").
+		Where("ac.deleted_at IS NULL").
+		Where(notTestCopy).
+		Where(bindsFixedConnection, bun.Ident("cc.id"))
 	var connection ConnectorConnection
 	err := s.global.NewSelect().Model(&connection).
 		Where("customer_id = ?", customerID).
@@ -170,6 +181,8 @@ func (s *Store) AppConnectionByAccount(ctx context.Context, customerID, connecto
 		Where("owner_type = ?", OwnerApp).
 		Where("account_id = ?", accountID).
 		Where("deleted_at IS NULL").
+		OrderExpr("EXISTS (?) DESC", bound).
+		OrderExpr("status = ? DESC", ConnectionConnected).
 		Order("created_at DESC", "id DESC").
 		Limit(1).
 		Scan(ctx)

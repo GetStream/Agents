@@ -109,7 +109,8 @@ Every identifier in a code block exists; the quickstart is the example file verb
 `@main` and pkg.go.dev see it. A version is a tag `sdks/go/vX.Y.Z` on a `main` commit; nothing
 is copied. While 0.x, a minor may break a signature; a patch only fixes.
 
-1. Land the change on `main` by a pull request, with the `CHANGELOG.md` entry. The `Go SDK`
+1. Land the change on `main` by a pull request; if it breaks a signature or field, add one line
+   under `# Unreleased` → **Breaking Changes** in the root `CHANGELOG.md`. The `Go SDK`
    steps of the `CI (SDKs)` workflow (`.github/workflows/ci-sdks.yml`) check `sdks/go` alone
    on Go 1.25, as a consumer gets it.
 2. Check out the commit to tag (`git switch --detach <the main commit>`), run the smoke set
