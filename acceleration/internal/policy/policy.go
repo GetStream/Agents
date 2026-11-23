@@ -647,7 +647,7 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		e.decisions[customerID] = cached
 		e.mu.Unlock()
 		if due {
-			go e.refresh(ctx, customerID)
+			go e.refresh(context.WithoutCancel(ctx), customerID)
 		}
 		return cached
 	}

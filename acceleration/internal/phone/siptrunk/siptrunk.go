@@ -243,6 +243,7 @@ func (p *Provider) run(ctx context.Context, id string, config sipbridge.Config, 
 
 	dialing, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Close stops a dial still ringing; the trailing () drops that watch once run returns.
 	defer context.AfterFunc(p.ctx, cancel)()
 	bridged, err := p.dial(dialing, config)
 	if err != nil {

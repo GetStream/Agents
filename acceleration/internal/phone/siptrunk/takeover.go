@@ -686,6 +686,8 @@ func (p *Provider) take(id, raw string) {
 	if held == nil {
 		return
 	}
+	// No request asked for this call, and hold hangs it up once p.ctx ends, so that hang-up
+	// must not end with p.ctx. Nor with this resume's deadline, which would end the call.
 	p.running.Go(func() { p.hold(context.WithoutCancel(p.ctx), id, held, changed, log, report) })
 }
 
