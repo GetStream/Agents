@@ -570,6 +570,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		if errors.Is(err, streamapp.ErrReadOnly) {
 			return nil, ErrConversationReadOnly
 		}
+		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
+			return nil, stack.Wrap(unkept)
+		}
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}

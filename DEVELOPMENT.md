@@ -3,9 +3,11 @@
 ## Local backend
 
 The router, Postgres and Redis run from `compose.yaml` at the repo root. Credentials come
-from the repo-root `.env` (copy `.env.example` if you have none).
+from the repo-root `.env` (copy `.env.example` if you have none). compose refuses to start until
+`.env` sets `ROUTER_DEV_KEK`, the key the router seals the secrets it holds under:
 
 ```bash
+echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
 docker compose up -d --build router   # router on :8080, Postgres on :55432, Redis on :56379
 curl http://localhost:8080/health
 ```

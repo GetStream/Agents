@@ -32,11 +32,9 @@ STREAM_ACCELERATION_CUSTOMER_ID=examples \
 go run ./configure
 ```
 
-A config belongs to one customer, and `compose.yaml` builds the dashboard with
-`NEXT_PUBLIC_CUSTOMER_ID: examples` — baked in at build time, since Next inlines a
-`NEXT_PUBLIC_` variable into the bundle. So store the agent under `examples` and it shows up
-on the dashboard; store it under anything else and the app will find it but
-[the agents page](http://localhost:3000/agents) will not. `Demo.customerID` in
+A config belongs to one customer. The Volt dashboard (see the `dashboard` skill) shows the
+configs of a numeric app id rather than `examples`, so store the agent under that id to see it
+there. `Demo.customerID` in
 `app/SwiftDemo/Demo.swift` has to match whatever you use here.
 
 ```
