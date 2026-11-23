@@ -263,7 +263,7 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.Guests.SetSecret(s.ctx, "acme", "guest-1", next))
+	s.Require().NoError(s.source.Users.SetGuestSecret(s.ctx, "acme", "guest-1", next))
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)

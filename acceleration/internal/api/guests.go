@@ -195,9 +195,9 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	// holding none, such as one minted before secrets existed; one holding a secret keeps it.
 	issued := true
 	if server {
-		err = s.store.Guests.SetSecret(ctx, customerID, requested, hash)
+		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, hash)
 	} else {
-		issued, err = s.store.Guests.GiveSecret(ctx, customerID, requested, hash)
+		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, hash)
 	}
 	if err != nil {
 		return nil, err
@@ -229,7 +229,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	held, err := s.store.Guests.RotateSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err := s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
 	if errors.Is(err, store.ErrGuestSecretRefused) {
 		return nil, nil
 	}

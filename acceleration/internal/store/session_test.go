@@ -889,14 +889,14 @@ func (s *StoreSuite) TestARefreshSecretIsSpentOnce() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	rotated, err := s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), next)
+	rotated, err := s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), next)
 	s.Require().NoError(err)
 	s.Equal("guest-1", rotated.ID)
 	s.Equal("Alice", rotated.Name, "the guest comes back as they were")
 
 	_, other, err := NewGuestSecret()
 	s.Require().NoError(err)
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), other)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), other)
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
@@ -908,7 +908,7 @@ func (s *StoreSuite) TestAWrongRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash("not-it"), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash("not-it"), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
@@ -921,7 +921,7 @@ func (s *StoreSuite) TestAnotherAppsRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "somebody-else", "guest-1", GuestSecretHash(secret), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "somebody-else", "guest-1", GuestSecretHash(secret), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 }
@@ -934,7 +934,7 @@ func (s *StoreSuite) TestAClaimedGuestsRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(secret), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(secret), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 }
@@ -944,14 +944,14 @@ func (s *StoreSuite) TestSettingAGuestsSecretReplacesTheOldOne() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.Guests.SetSecret(s.ctx, "app", "guest-1", next))
+	s.Require().NoError(s.store.Users.SetGuestSecret(s.ctx, "app", "guest-1", next))
 
 	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(next, held.RefreshSecretHash)
 	_, again, err := NewGuestSecret()
 	s.Require().NoError(err)
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(old), again)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(old), again)
 	s.ErrorIs(err, ErrGuestSecretRefused, "the secret it replaced no longer works")
 }
 
@@ -960,7 +960,7 @@ func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	err = s.store.Guests.SetSecret(s.ctx, "app", "jlahey", hash)
+	err = s.store.Users.SetGuestSecret(s.ctx, "app", "jlahey", hash)
 
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
@@ -973,7 +973,7 @@ func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().Error(s.store.Guests.SetSecret(s.ctx, "app", "guest-1", hash))
+	s.Require().Error(s.store.Users.SetGuestSecret(s.ctx, "app", "guest-1", hash))
 }
 
 // guestWithSecret records a guest of app called Alice holding a refresh secret, and returns

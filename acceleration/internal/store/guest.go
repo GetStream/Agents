@@ -40,13 +40,13 @@ func GuestSecretHash(secret string) []byte {
 	return sum[:]
 }
 
-// RotateSecret spends a guest's refresh secret and records the next one in its place,
+// RotateGuestSecret spends a guest's refresh secret and records the next one in its place,
 // returning the guest.
 //
 // One statement, so a secret is spent once: two requests replaying the same secret cannot both
 // see it match. A guest that has been claimed is refused, since it has an account to sign in
 // with now.
-func (r *Guests) RotateSecret(ctx context.Context, customerID, id string, spent, next []byte) (User, error) {
+func (r *Users) RotateGuestSecret(ctx context.Context, customerID, id string, spent, next []byte) (User, error) {
 	if customerID == "" || id == "" || len(spent) == 0 || len(next) == 0 {
 		return User{}, stack.Wrap(errors.New("store: a customer, a guest id and both secret hashes are required"))
 	}
@@ -70,9 +70,9 @@ func (r *Guests) RotateSecret(ctx context.Context, customerID, id string, spent,
 	return guest, nil
 }
 
-// SetSecret replaces a guest's refresh secret without the old one, for a caller that
+// SetGuestSecret replaces a guest's refresh secret without the old one, for a caller that
 // already proved it may: the guest's own still-valid token, or the app's backend.
-func (r *Guests) SetSecret(ctx context.Context, customerID, id string, hash []byte) error {
+func (r *Users) SetGuestSecret(ctx context.Context, customerID, id string, hash []byte) error {
 	if customerID == "" || id == "" || len(hash) == 0 {
 		return stack.Wrap(errors.New("store: a customer, a guest id and a secret hash are required"))
 	}
@@ -93,11 +93,11 @@ func (r *Guests) SetSecret(ctx context.Context, customerID, id string, hash []by
 	return nil
 }
 
-// GiveSecret records a refresh secret for a guest that holds none, and reports whether it
+// GiveGuestSecret records a refresh secret for a guest that holds none, and reports whether it
 // did. For a guest refreshing with their own token: one that already holds a secret keeps it,
 // since replacing it would strand the device or tab holding it, and would let whoever holds a
 // leaked token take the guest's only way back once that token expires.
-func (r *Guests) GiveSecret(ctx context.Context, customerID, id string, hash []byte) (bool, error) {
+func (r *Users) GiveGuestSecret(ctx context.Context, customerID, id string, hash []byte) (bool, error) {
 	if customerID == "" || id == "" || len(hash) == 0 {
 		return false, stack.Wrap(errors.New("store: a customer, a guest id and a secret hash are required"))
 	}
