@@ -485,7 +485,7 @@ func (s *Service) eventSource(ctx context.Context, connection store.ConnectorCon
 	if err != nil {
 		return core.ResolvedBinding{}, nil, err
 	}
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return core.ResolvedBinding{}, nil, stack.Wrap(err)
 	}

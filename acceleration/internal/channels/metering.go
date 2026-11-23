@@ -109,7 +109,11 @@ func (s *Service) received(ctx context.Context, account store.ChannelAccount, me
 func (s *Service) deliver(ctx context.Context, line Account, provider Provider, to, thread string, reply Reply,
 	owner routing.Owner) error {
 	meter := s.textMeter(ctx, line.Kind, store.Outbound, to, owner)
-	meter.Estimate = Sent{Messages: 1, Segments: Segments(reply.Text)}.Used()
+	estimate := Sent{Messages: 1, Segments: Segments(reply.Text)}
+	if e, ok := provider.(Estimator); ok {
+		estimate = e.Estimate(reply)
+	}
+	meter.Estimate = estimate.Used()
 	var partly error
 	_, err := routing.Call(ctx, meter, func(ctx context.Context) (Sent, error) {
 		sent, err := provider.Send(ctx, line, thread, reply)

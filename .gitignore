@@ -123,8 +123,6 @@ profile.html
 
 .uv-cache/
 
-# pytest json report
-.report.json
 .cursor/
 
 # Code generators fetched on demand, not vendored. See sdks/swift/README.md.

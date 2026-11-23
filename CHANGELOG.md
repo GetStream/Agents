@@ -847,9 +847,15 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 The redaction that runs on every log line and on the error text the router stores now takes out a Slack token (`xoxb-`, `xoxp-`, `xoxe-`, `xapp-` and the other `xox` types), a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), a Google API key (`AIza`), an AWS access key id (`AKIA`, `ASIA`), a JSON Web Token and a PEM private key block, even with no keyword before it, and the values of `id_token`, `auth_token`, `private_key` and a JSON `"token"` key. A token after a JSON or percent escape (`\n`, `\u0026`, `%3D`) is taken out too. In a JSON answer the `"token"` key stays and its value reads `"[redacted]"`, so the stored text is still valid JSON. Names such as `max_tokens`, `input_tokens`, `"token_count"` and `keyterm`, and a dotted name that is not a JWT, are unchanged. Rows written before are not rewritten (AI-3543, #2184).
 
+### An SMS reply sets its price aside before it is sent
+
+A text is priced by its direction and destination country, and its reservation is now priced with them too, as its billed row is. An SMS reply or notice sets aside what Telnyx will bill for it, its link and each MMS of up to ten files included, before Telnyx is asked, and one the organization's credit cannot cover is refused there, with no send and no row; before, it reserved nothing and was sent (AI-3182).
 ### A Swift typed tool no longer crashes the app on deeply nested arguments
 
 An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
+### A custom connector never gets the deployment's own OAuth client
+
+Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

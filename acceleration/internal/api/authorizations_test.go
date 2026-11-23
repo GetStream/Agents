@@ -64,8 +64,8 @@ func TestAuthorizationsSuite(t *testing.T) {
 
 // SetupSuite builds oauth2_code against the fake with the router's own client lookup
 // (ConnectorClients): the fake's preregistered client is the operator's, in the environment as
-// FAKE_MCP_CLIENT_ID and _SECRET, and an app's own client is the record it put. A hook refuses
-// every callback.
+// FAKE_MCP_CLIENT_ID and _SECRET, which only a built-in takes (builtinAtFake), and an app's own
+// client is the record it put. A hook refuses every callback.
 func (s *AuthorizationsSuite) SetupSuite() {
 	s.provider = fakeprovider.New(s.T(), fakeprovider.CommaScopes)
 	s.provider.AllowRedirect(consentPublicURL + ConnectorCallbackPath)
@@ -1030,6 +1030,59 @@ func (s *AuthorizationsSuite) TestAForcedConnectorDeleteRevokesItsConnectionsGra
 	s.Zero(clients, "the client secret went with the connector")
 }
 
+// TestACustomConnectorNamingTheOperatorsClientGetsNoConsent: a custom definition stored with
+// registration operator, client.env FAKE and its own token endpoint, as an import stored them,
+// is refused a consent as a connector with no client it can use is, and nothing reaches the endpoints its
+// manifest names: the operator's client id and secret are sent nowhere.
+func (s *AuthorizationsSuite) TestACustomConnectorNamingTheOperatorsClientGetsNoConsent() {
+	connector := s.connectorRegistering("operator", "")
+	authorizes, tokens := s.provider.Hits(fakeprovider.PathAuthorize), s.provider.Hits(fakeprovider.PathToken)
+
+	status, failure := s.consentFailure(connector)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(invalidRequest("the provider's consent could not be started: "+oauth2code.ErrNoClient.Error()+
+		" (client.registration [operator])").Message, failure.Message)
+	s.Equal(authorizes, s.provider.Hits(fakeprovider.PathAuthorize))
+	s.Equal(tokens, s.provider.Hits(fakeprovider.PathToken))
+}
+
+// TestABuiltInNamingTheOperatorsClientConsentsWithIt is the control: the same manifest seeded as
+// a built-in sends the operator's client from the environment and connects.
+func (s *AuthorizationsSuite) TestABuiltInNamingTheOperatorsClientConsentsWithIt() {
+	connector := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	s.builtinAtFake(connector, 1, "")
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(connector), &created))
+
+	b := s.browser()
+	authorize := b.handOff(s.start(created.ID))
+	landed := b.finish(s.consent(authorize)).Header.Get("Location")
+
+	sent, err := url.Parse(authorize)
+	s.Require().NoError(err)
+	s.Equal(s.provider.ClientID, sent.Query().Get("client_id"))
+	s.Equal(s.landing(created.ID, consentConnected), landed)
+	s.Equal(ConnectionStatus(store.ConnectionConnected), s.get(created.ID).Status)
+}
+
+// TestDeletingABuiltInsConnectionRevokesWithTheOperatorsClient is the control for the delete's
+// revoke: a built-in that takes the operator's client and opts in revokes with it.
+func (s *AuthorizationsSuite) TestDeletingABuiltInsConnectionRevokesWithTheOperatorsClient() {
+	connector := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	manifest := strings.Replace(s.fakeManifest(connector, 1, "operator", optInRevoke),
+		"\nendpoints:\n", "\nendpoints:\n  revoke: "+s.provider.URL+fakeprovider.PathRevoke+"\n", 1)
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{connector + ".yaml": {Data: []byte(manifest)}}))
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(connector), &created))
+	s.connect(created.ID)
+	before := s.provider.Hits(fakeprovider.PathRevoke)
+
+	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connections/"+created.ID, nil, nil))
+
+	s.Equal(before+1, s.provider.Hits(fakeprovider.PathRevoke))
+}
+
 func (s *AuthorizationsSuite) TestAConsentForAConnectorTakingTheAppsOwnClientUsesTheOneItPut() {
 	connector := s.connectorRegistering("customer", "")
 	var created Connection
@@ -1291,7 +1344,7 @@ func (s *AuthorizationsSuite) refresh(id string) error {
 	s.Require().NoError(err)
 	definition, err := s.store.ConnectorDefinitions.Get(ctx, s.customerID(), connection.ConnectorID, connection.DefinitionRevision)
 	s.Require().NoError(err)
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	s.Require().NoError(err)
 	credentials, err := pgsealed.New(s.store, s.sealer)
 	s.Require().NoError(err)
@@ -1321,9 +1374,15 @@ func (s *AuthorizationsSuite) connection(extra string) string {
 // connector stores a connector of the test's app whose endpoints are the fake provider's,
 // in the shape of core's Slack fixture (testdata/manifests/slack.yaml): comma scopes, and
 // the account as team and user from the token response, which CommaScopes answers. Its
-// client is the operator's.
+// client is the fake's, put as the app's own: a custom connector never takes the operator's.
 func (s *AuthorizationsSuite) connector(extra string) string {
-	return s.connectorRegistering("operator", extra)
+	return s.withFakeClient(s.connectorRegistering("customer", extra))
+}
+
+// withFakeClient puts the fake's preregistered client as the app's own client of connector.
+func (s *AuthorizationsSuite) withFakeClient(connector string) string {
+	s.putClient(connector, s.provider.ClientSecret)
+	return connector
 }
 
 // connectorRegistering is connector with client.registration [registration].
@@ -1396,7 +1455,7 @@ func (s *AuthorizationsSuite) revise(connector string, change func(*core.Manifes
 }
 
 // slackAtFake stores the built-in Slack manifest (providers/slack.yaml) as a connector of the
-// test's app, with its endpoints at the fake and the fake's operator client: its scopes,
+// test's app, with its endpoints at the fake and the fake's client as the app's own: its scopes,
 // capture and identity are the built-in's own. The channel block is left out, since the
 // consent does not read it, and so are the broken revisions, which name the built-in's
 // earlier revisions and not the custom one's.
@@ -1415,6 +1474,7 @@ func (s *AuthorizationsSuite) slackAtFake() string {
 		"mcp: https://mcp.slack.com/mcp":                       "mcp: " + s.provider.URL + fakeprovider.PathMCP,
 		"resource: https://mcp.slack.com\n":                    "resource: " + s.provider.URL + fakeprovider.PathMCP + "\n",
 		"env: SLACK\n":                                         "env: FAKE\n",
+		"registration: [operator]\n":                           "registration: [customer]\n",
 	} {
 		s.Require().Equal(1, strings.Count(manifest, from), from)
 		manifest = strings.Replace(manifest, from, to, 1)
@@ -1423,7 +1483,7 @@ func (s *AuthorizationsSuite) slackAtFake() string {
 	s.Require().NoError(err)
 	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), parsed)
 	s.Require().NoError(err)
-	return id
+	return s.withFakeClient(id)
 }
 
 // ownerChecked stores a connector of the test's app at the fake that reads who consented from
@@ -1442,9 +1502,8 @@ endpoints:
   mcp: ` + s.provider.URL + fakeprovider.PathMCP + `
 schemes: [oauth2_code]
 client:
-  registration: [operator]
+  registration: [customer]
   auth_method: client_secret_post
-  env: FAKE
 scopes:
   list: [mcp, openid]
 capture:
@@ -1468,7 +1527,7 @@ sources:
 	manifest.Endpoints["revoke"] = s.provider.URL + fakeprovider.PathRevoke
 	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
-	return id
+	return s.withFakeClient(id)
 }
 
 // ownersConnection is owner's connection to connector, made by the app's backend acting for
