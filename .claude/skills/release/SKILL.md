@@ -108,7 +108,7 @@ generated notes by using the `--notes` flag"). The CHANGELOG section is not copi
   `success`.
 - `curl -s https://pypi.org/pypi/vision-agents/json | jq -r .info.version` must print `X.Y.Z`.
 
-`release.yml` has not published a release since v0.6.5: its runs ended `failure`,
-`startup_failure` or `skipped`, and 0.6.9 reached PyPI outside it (AI-3561). Until AI-3561 is
-fixed, step 6 is unverified. If the run does not succeed, the packages are not on PyPI. Report it
+`release.yml` has never succeeded: of its 41 runs, 34 ended `failure`, 3 `startup_failure`, 3
+`cancelled` and 1 `skipped`. The packages of 0.6.5 to 0.6.9 reached PyPI outside it, and 0.6.9
+has no Trusted Publishing provenance (AI-3561). Until AI-3561 is fixed, step 6 is unverified. If the run does not succeed, the packages are not on PyPI. Report it
 on AI-3561, and do not upload by hand.
