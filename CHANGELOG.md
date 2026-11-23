@@ -875,6 +875,12 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### JavaScript: a reply the model couldn't write keeps its error and Try again
+
+The router finishes a reply the model failed to write as an empty message in the channel. `agentChatTransport` fed it to the `AIConversationController`, which takes a finished reply as the answer and clears the error, so stream-chat-react's "couldn't answer" and Try again showed for a moment and went, leaving the question with no reply under it. While the reply has failed, the transport now leaves out an agent message that finished with no text, attachments or UI and was not cut off; it shows again once the agent answers.
+### The Go SDK syncs an agent's directory to a router it was never synced to
+
+`Agent.Sync` skipped a directory whose `.agent_sync` stamp matched it, whichever router the stamp came from, so a directory synced to a local router and then to the hosted one (`go run ./configure` with another `STREAM_ACCELERATION_URL`) answered the hosted router's old config and sent nothing. A matching stamp is now trusted only when the stored config's `sync_hash` is the same hash, as the JavaScript SDK does.
 ### JavaScript: a live UI patch is merged onto the card the router merges it onto
 
 `Conversation` merges an OpenUI patch onto the UI of the latest earlier turn that completed and was not interrupted, whatever its format, as the router does and as Kotlin has since #2089. It used to take the latest OpenUI card it held, so with an A2UI card in between, or after an interrupted reply, the live preview showed a card Stream Chat's copy then replaced. A patch whose base is not OpenUI now shows no UI on its turn, even a preview already merged onto an older card, and Stream Chat's copy is the one that shows.
@@ -908,6 +914,10 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### Only a number on the customer's own trunk moves in an import
 
 `/v1/data/import`, and a change applied after it, writes a `phone_numbers` row only when its vendor is exactly `sip_trunk`; any other row is skipped without an error. A number bought at a vendor stays in the vendor account of the deployment that bought it, and its bills already move with the requests, so the destination neither holds it nor bills its months again. A customer that moves keeps a bought number by buying or porting it at the destination. A number bought here and still held is never updated or deleted by an imported row or a replayed change, whatever id it names. An imported `sip_trunk` number is held to the API's rules (E.164, a vendor, a cost that is not negative), and no imported number keeps its `dlc_use_case_id`, which names a use case of the source.
+
+### A request counts only toward its own organization's spend grants
+
+A request row's cost is added to a grant it names only when the grant belongs to the row's organization or to its app's (the organization the app is in, or the app itself for an app in none), both as the row is written and when the grant uses are reconciled. A grant scoped to an app, or to its key or user, counts only that app's rows. A use refused because the grant is not the row's is counted on `/metrics` as `router_usage_grant_uses_refused_total`. An imported request names no grant: it was drawn from the grants of the deployment that recorded it.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
@@ -1841,6 +1851,10 @@ In a channel of a type an agent config answers in (`chat_channels`), a tool call
 ### A member's line in a call's transcript is no longer read as the agent's
 
 A call's transcript, its timeline and a campaign's outcome read every line marked `source: agent` as the agent's, whoever wrote it, so a member of the channel the transcript is in could put words in the agent's mouth. A call now records the user the agent wrote as, and only that user's lines, or the agent id's, are the agent's; a person's typed turn reads as theirs too. A call from before this change reads as it did (AI-3265).
+
+### A database failure is a 500, not a 404
+
+When the router cannot read or change a row because the database failed, it now sends a 500 and logs the error. Before, it sent a 404, for example "no such session" or "no such agent config". A client then dropped a session that was still there, or a delete that failed looked done. A 404 now means only that the row does not exist. A session that names its agent by name gets a 500 for a database failure, not a 400 with the text of the database error. The voice socket sends "something went wrong" in its error frame when it cannot read the agent config, not the text of the error (AI-3491).
 
 ## Breaking Changes
 

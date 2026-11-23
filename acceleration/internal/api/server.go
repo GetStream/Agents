@@ -2115,7 +2115,7 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 	configID := value(request.Agent.ptr())
 	if configID != "" {
 		if _, err := s.store.AgentConfigs.Get(ctx, customerID, configID); err != nil {
-			return nil, errUnknownConfig
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
 	}
 

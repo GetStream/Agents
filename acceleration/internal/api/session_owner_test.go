@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"slices"
@@ -26,6 +27,25 @@ func TestSessionOwnershipSuite(t *testing.T) {
 
 func (s *SessionOwnershipSuite) SetupTest() {
 	s.useApp(s.data.createApp())
+}
+
+// An empty id is the mistake of the caller, not a failure of the router.
+func (s *SessionOwnershipSuite) TestAnEmptySessionIdIsNoSession() {
+	_, status := s.data.createUser().watch("/v1/agents/sessions//events")
+
+	s.Equal(http.StatusNotFound, status)
+}
+
+// A 404 tells the client that the session is gone. The client then drops a conversation that
+// is still there.
+func (s *SessionOwnershipSuite) TestASessionTheDatabaseCannotReadIsAFailureAndNotAMissingSession() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	alice.stopSession(opened.Id)
+	s.Require().NoError(s.manager.FlushRecords(context.Background()))
+	s.failQueries(opened.Id)
+
+	s.Equal(http.StatusInternalServerError, alice.do(http.MethodGet, "/v1/agents/sessions/"+opened.Id, nil, nil))
 }
 
 func (s *SessionOwnershipSuite) TestTheUserWhoOpenedASessionReachesItAndMayEndIt() {

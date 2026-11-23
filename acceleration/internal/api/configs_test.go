@@ -41,6 +41,15 @@ func (s *ConfigsSuite) SetupTest() {
 	s.useApp(s.data.createApp())
 }
 
+// A 404 tells the client that the config is deleted, but the config is still there.
+func (s *ConfigsSuite) TestADeleteThatTheDatabaseRefusesIsAFailureAndNotAMissingConfig() {
+	created := s.data.createAgentConfig()
+	s.trigger("refused_config_delete_"+strings.ReplaceAll(s.utils.uuid(), "-", ""), "agent_configs", "UPDATE",
+		"OLD.id = '"+created.Id+"'", "RAISE EXCEPTION 'refused';")
+
+	s.Equal(http.StatusInternalServerError, s.serverClient.do(http.MethodDelete, "/v1/agents/configs/"+created.Id, nil, nil))
+}
+
 func (s *ConfigsSuite) TestAnAgentConfigSurvivesBeingStoredAndReadBack() {
 	created := s.createConfig(map[string]any{
 		"name": "support", "llm": "llm-flow", "tts": "en-low-latency", "voice": "aurora",

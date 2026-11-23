@@ -200,6 +200,7 @@ func newBackend(t *testing.T) *backend {
 		stored := acceleration.AgentConfig{
 			Id: "config-" + request.Name, Name: request.Name, Instructions: request.Instructions,
 			Subagent: request.Subagent, Llm: request.Llm, Tags: request.Tags,
+			SyncHash:  &request.Hash,
 			CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		}
 		if !router.ignoresUI {
@@ -2232,6 +2233,43 @@ func TestSyncFailsWhenConnectionsCannotBeListed(t *testing.T) {
 
 // The router does nothing for a hash it already stored (acceleration/internal/api/sync.go:180),
 // so the sync that finds the connection has to send another one.
+func TestAnUnchangedDirectoryIsSyncedToARouterItWasNeverSyncedTo(t *testing.T) {
+	// Synced to a local router first, then pointed at the hosted one: the stamp the first
+	// sync left matches the directory, but the second router keeps nothing of it.
+	root := filepath.Join(t.TempDir(), "concierge")
+	write(t, root, "agent.yaml", "name: concierge\nllm: openai/gpt-5.6\n")
+	local, hosted := newBackend(t), newBackend(t)
+	if _, err := agentOn(t, local, Options{Dir: root}).Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	hosted.mu.Lock()
+	hosted.configs = []acceleration.AgentConfig{{Id: "config-concierge", Name: "concierge", CreatedAt: time.Now(), UpdatedAt: time.Now()}}
+	hosted.mu.Unlock()
+
+	stored, err := agentOn(t, hosted, Options{Dir: root}).Sync(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hosted.mu.Lock()
+	synced := len(hosted.syncs)
+	hosted.mu.Unlock()
+	if synced != 1 {
+		t.Fatalf("the router that never had the directory got %d syncs", synced)
+	}
+	if stored.Llm == nil || *stored.Llm != "openai/gpt-5.6" {
+		t.Errorf("the sync answered the router's old config: %+v", stored)
+	}
+	if _, err := agentOn(t, hosted, Options{Dir: root}).Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	hosted.mu.Lock()
+	defer hosted.mu.Unlock()
+	if len(hosted.syncs) != 1 {
+		t.Errorf("an unchanged directory the router has was sent again: %d syncs", len(hosted.syncs))
+	}
+}
+
 func TestASyncThatLeftAConnectorOutAddsItOnceTheConnectionExists(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "concierge")
 	write(t, root, "agent.yaml", "name: concierge\nconnectors:\n  - name: issues\n    connection: company\n")

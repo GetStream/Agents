@@ -51,7 +51,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 	if id != "" {
 		found, err := s.store.AgentConfigs.Get(ctx, customerID, id)
 		if err != nil {
-			return nil, errUnknownConfig
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
 		if teams.refuses(found) {
 			return nil, errUnknownConfig
@@ -67,7 +67,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return nil, notFound("there is no agent called " + named)
 	}
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	if teams.refuses(found) {
 		return nil, notFound("there is no agent called " + named)
@@ -217,7 +217,7 @@ func (s *Server) getSessionTokens(ctx context.Context, request *getSessionTokens
 	}
 	row, err := s.store.Sessions.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSession
+		return nil, unknownOr(err, store.ErrNoSession, errUnknownSession)
 	}
 	spent, err := s.tokensOf(ctx, customerID, sessionSpan(row))
 	if err != nil {
@@ -555,12 +555,13 @@ func (s *Server) storedOrLiveSession(ctx context.Context, id string) (session.Fo
 	if live, ok := s.sessions.Get(id, owner); ok {
 		return session.Found{Live: live}, nil
 	}
-	if s.store == nil {
+	// The store refuses an empty id as an error of its own, which is not ErrNoSession.
+	if s.store == nil || id == "" {
 		return session.Found{}, errUnknownSession
 	}
 	row, err := s.storedSession(ctx, owner.CustomerID, id)
 	if err != nil {
-		return session.Found{}, errUnknownSession
+		return session.Found{}, unknownOr(err, store.ErrNoSession, errUnknownSession)
 	}
 	// The row carries who opened it, which is what the live path checks through the
 	// manager. Skipping it here would let one of a customer's users read another's.
