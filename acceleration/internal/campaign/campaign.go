@@ -646,6 +646,7 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 			return err
 		}
 	}
+	settle.LeaseUntil = contact.LeaseUntil
 	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner,
 		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome, Converted: settle.Converted}, contact.ID, settle)
 }
@@ -653,14 +654,17 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 // unanswered settles an answered call nobody spoke on like a dial nobody picked up: the next
 // attempt goes on schedule.
 func (r *Runner) unanswered(ctx context.Context, sequence Sequence, hours CallingHours, zone *time.Location, contact store.Contact, attempt store.CampaignAttempt) error {
+	settle := afterSilence(sequence, hours, zone, contact, attempt.StartedAt, r.now())
+	settle.LeaseUntil = contact.LeaseUntil
 	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner, store.Classification{AttemptID: attempt.ID, Outcome: OutcomeNoResponse},
-		contact.ID, afterSilence(sequence, hours, zone, contact, attempt.StartedAt, r.now()))
+		contact.ID, settle)
 }
 
 // settle writes where a call left a contact, even once the call's context is gone.
 func (r *Runner) settle(ctx context.Context, contact store.Contact, settle store.Settle) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
+	settle.LeaseUntil = contact.LeaseUntil
 	err := r.store.CampaignContacts.Settle(written, r.owner, contact.ID, settle)
 	switch {
 	case err == nil:

@@ -700,3 +700,22 @@ func (s *StoreSuite) TestCampaignContactQueryBudgets() {
 		s.Len(stages, 3)
 	}), "Stages")
 }
+
+// An owner is one process, and a call that outlives its lease can find the contact taken over
+// by that same process. The settle of the first claim must not land on the second.
+func (s *StoreSuite) TestASettleUnderALeaseTakenOverSinceSettlesNothing() {
+	campaign := s.runningCampaign(5, "+15550001")
+	first := s.claimDue("a", s.base, 10)[0].Contact
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "a", s.base.Add(2*time.Minute), time.Minute, 10)
+	s.Require().NoError(err)
+	s.Require().Len(taken, 1)
+	second := taken[0].Contact
+	next := s.base.Add(time.Hour)
+
+	err = s.store.CampaignContacts.Settle(s.ctx, "a", first.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &next, LeaseUntil: first.LeaseUntil})
+	s.ErrorIs(err, ErrNotLeaseHolder)
+	s.Equal(InProgress, s.contactByNumber(campaign, "+15550001").Stage)
+
+	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", second.ID, Settle{Stage: ContactCompleted, Attempt: 1, LeaseUntil: second.LeaseUntil}))
+	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
+}
