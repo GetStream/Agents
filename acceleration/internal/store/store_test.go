@@ -400,6 +400,7 @@ func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
 	_, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "some-video-call")
 
 	s.ErrorContains(err, "no number reaches call default:some-video-call")
+	s.ErrorIs(err, ErrNoNumber, "a video call is told from a call to a number")
 }
 
 func (s *StoreSuite) TestAReleasedNumbersCallIsNotAttributedToItsFormerHolder() {
@@ -524,6 +525,22 @@ func (s *StoreSuite) TestMigrateRebuildsTheResponseParentIndexLeftInvalid() {
 	read := func() {
 		s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
 			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('agent_responses_parent_idx')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
+	s.onShard("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('calls_customer_campaign_idx')")
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('calls_customer_campaign_idx')").Scan(&valid))
 	}
 	read()
 	s.Require().False(valid)

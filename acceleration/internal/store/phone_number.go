@@ -83,10 +83,6 @@ const sipTrunkVendor = "sip_trunk"
 // ErrNumberHeld says the customer already holds the number, bought or on a trunk.
 var ErrNumberHeld = errors.New("store: the customer already holds this number")
 
-// ErrNumberHeldElsewhere says another customer holds the number, at any vendor. It does not
-// say so to the customer, who would learn from it which numbers other apps hold.
-var ErrNumberHeldElsewhere = errors.New("store: this number cannot be imported")
-
 // ErrNotE164 says a number is not written in E.164 form, the only form a number is held in.
 var ErrNotE164 = errors.New("store: a number is held in E.164 form, such as +15551234567")
 
@@ -101,7 +97,7 @@ var e164Pattern = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 func IsE164(number string) bool { return e164Pattern.MatchString(number) }
 
 // ErrNoNumber is what GetByE164's error matches when the customer holds no such number, as
-// opposed to the lookup failing.
+// opposed to the lookup failing. So do Attach's, Release's and SetAgent's.
 var ErrNoNumber = errors.New("store: no such number")
 
 // numberNotHeld keeps GetByE164's message as it was while matching ErrNoNumber.
@@ -251,7 +247,7 @@ func attachNumber(ctx context.Context, db bun.IDB, customerID, e164 string, atta
 		return stack.Wrap(fmt.Errorf("store: attach number: %w", err))
 	}
 	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("store: %s is not a number %s holds", e164, customerID))
+		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
 	}
 	return nil
 }
@@ -437,7 +433,7 @@ func releaseNumber(ctx context.Context, db bun.IDB, customerID, e164 string, at 
 		return stack.Wrap(fmt.Errorf("store: release number: %w", err))
 	}
 	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("store: %s is not a number %s holds", e164, customerID))
+		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
 	}
 	return nil
 }

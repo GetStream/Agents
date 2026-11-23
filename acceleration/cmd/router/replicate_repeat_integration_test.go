@@ -154,7 +154,7 @@ func (s *ReplicateRepeatSuite) copiedBefore() {
 
 // recorded records a number of acme's at the source, its digits the number given.
 func (s *ReplicateRepeatSuite) recorded(digits int) {
-	number := &store.PhoneNumber{E164: e164(digits), Vendor: "telnyx", Country: "US", CustomerID: "acme"}
+	number := &store.PhoneNumber{E164: e164(digits), Vendor: "sip_trunk", Country: "US", CustomerID: "acme"}
 	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, number))
 }
 

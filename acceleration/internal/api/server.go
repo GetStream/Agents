@@ -389,9 +389,15 @@ type Server struct {
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
+	exportLineWait     time.Duration
+	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
 	connectors         core.Registry
+	// exporting holds the customers with an export running on this router, one each, and
+	// exports a place for each export running on it, of maxExports.
+	exporting sync.Map
+	exports   chan struct{}
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -471,6 +477,12 @@ type Server struct {
 	// workers to another one.
 	draining  chan struct{}
 	drainOnce sync.Once
+
+	// stopBackground ends the work the server runs for as long as it lives, the relay's
+	// subscriptions and the expiry of its watchers, and background is that work, which Close
+	// waits for.
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 }
 
 // Option adjusts the options a server is built from. It exists for the settings a
@@ -583,6 +595,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		authMode:           authMode,
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
+		exportLineWait:     exportLineWait,
+		exportWait:         exportWait,
+		exports:            make(chan struct{}, maxExports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
@@ -649,11 +664,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	}
 	server.serverSide = serverSide
 
-	// The subscriptions outlive every request, so they are held against the process
-	// rather than against a context a handler brought with it. Closing the Redis client
-	// is what ends them, which is what shutting the deployment down already does.
+	// The subscriptions outlive every request, so they are held against the server rather
+	// than against a context a handler brought with it. Close is what ends them.
+	background, stopBackground := context.WithCancel(context.Background())
+	server.stopBackground = stopBackground
 	if options.Relay != nil {
-		if server.relayed, err = server.newRelayed(context.Background(), options.Relay); err != nil {
+		if server.relayed, err = server.newRelayed(background, options.Relay); err != nil {
+			stopBackground()
 			return nil, fmt.Errorf("api: subscribe to the session relay: %w", err)
 		}
 	}
@@ -706,6 +723,25 @@ func (s *Server) kickScheduled() {
 // closed normally stops waiting for work at all.
 func (s *Server) Drain() {
 	s.drainOnce.Do(func() { close(s.draining) })
+}
+
+// Close ends the work the server runs in the background, the relay's subscriptions among it,
+// and waits for it until ctx is done, returning ctx's error if it had not ended by then. A
+// watcher on another node is not served once it is called, so it comes after the HTTP
+// servers have stopped.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopBackground()
+	ended := make(chan struct{})
+	go func() {
+		s.background.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // methodNotAllowed is the answer to a method a route does not serve.
@@ -966,7 +1002,8 @@ func withTrace(mux *chi.Mux, next http.Handler) http.Handler {
 // It sits inside withCustomer so it can name the caller, and outside withServerSide so a
 // refusal is a logged 403 rather than a request that appears not to have arrived. It is
 // inside withCORS, which means a preflight goes unlogged: it carries nothing worth routing
-// and doubling the volume to record that a browser asked permission is a poor trade.
+// and doubling the volume to record that a browser asked permission is a poor trade. What
+// withCustomer refuses itself is logged through it all the same (refuseLogged).
 //
 // The path is logged without the query, because a socket names its customer there and a
 // vendor names a token, and an access log is the last place either should end up.
@@ -992,7 +1029,8 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		started := time.Now()
 		recorder := &loggedResponse{ResponseWriter: w}
 		failure := &requestFailure{}
-		r = r.WithContext(context.WithValue(r.Context(), requestFailureContextKey{}, failure))
+		ctx, note := activity.WithNote(context.WithValue(r.Context(), requestFailureContextKey{}, failure))
+		r = r.WithContext(ctx)
 		defer func() {
 			recovered := recover()
 			if recovered == nil {
@@ -1000,9 +1038,8 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			}
 			// ErrAbortHandler is net/http's own way of dropping a connection, not a bug.
 			if recovered != http.ErrAbortHandler {
-				customer, _ := CustomerFrom(r.Context())
 				s.logger.ErrorContext(failure.loggedContext(r.Context()), "a request panicked",
-					"method", r.Method, "path", loggedPath(routes, r), "customer", customer,
+					"method", r.Method, "path", loggedPath(routes, r), "customer", loggedCustomer(r, note),
 					"request_id", RequestIDFrom(r.Context()),
 					"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 				if recorder.code == 0 && recorder.written == 0 && !recorder.hijacked {
@@ -1012,25 +1049,25 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			panic(recovered)
 		}()
 		next.ServeHTTP(recorder, r)
-		s.recordActivity(routes, r, recorder, started)
+		s.recordActivity(routes, r, recorder, note, started)
 		if answeredHealthy(routes, r, recorder.status(), failure) {
 			return
 		}
 
-		customer, _ := CustomerFrom(r.Context())
 		// A socket reports the life of the connection rather than a time to respond,
-		// since it is logged once it has closed.
+		// since it is logged once it has closed, and why it closed (socketEnd).
 		fields := []any{
 			"method", r.Method,
 			"path", loggedPath(routes, r),
 			"status", recorder.status(),
 			"duration", time.Since(started).Round(time.Millisecond),
-			"customer", customer,
+			"customer", loggedCustomer(r, note),
 			"request_id", RequestIDFrom(r.Context()),
 		}
 		if recorder.written > 0 {
 			fields = append(fields, "bytes", recorder.written)
 		}
+		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
 			fields = append(fields, "error", failure.err.Error())
 		}
@@ -1045,6 +1082,24 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		}
 		s.logger.InfoContext(logged, "served a request", fields...)
 	})
+}
+
+// loggedCustomer is the customer the request's access line names: the one its credential names,
+// or, for a hook, which no credential names, the app its handler noted once it checked the hook
+// (activity.NoteCustomer). A hook it did not check names none.
+func loggedCustomer(r *http.Request, note *activity.Note) string {
+	if customer, ok := CustomerFrom(r.Context()); ok {
+		return customer
+	}
+	return note.AppID
+}
+
+// refuseLogged answers r with failure through withRequestLog, for a refusal made before the
+// request reaches it, so the refusal has its access line and its code like any other.
+func (s *Server) refuseLogged(w http.ResponseWriter, r *http.Request, failure APIError) {
+	s.withRequestLog(s.mux, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, failure)
+	})).ServeHTTP(w, r)
 }
 
 // answeredHealthy is whether r is a health probe the router answered below 400 with no error
@@ -1287,15 +1342,28 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrLevelRefused) {
 			s.logger.Debug("refused a level of user this app turns away",
 				"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
-			writeError(w, forbidden("this app does not accept "+
+			// The caller proved which app it is of, so its lines name the app, though it is
+			// no customer here: nothing it asked for is counted under the app.
+			r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
+			s.refuseLogged(w, r, forbidden("this app does not accept "+
 				"requests from this level of user"))
 			return
 		}
 		// The categories are what the request's usage is counted under, so a request naming
 		// ones that break the rule is refused rather than counted under fewer.
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
-			writeError(w, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
+			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A credential that could not be checked (the key store down, a key that would not
+		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+		// runs after this.
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			s.logger.Error("could not check a credential", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+				"error", err, "stack", stack.Trace(err))
+			writeError(w, internalError())
 			return
 		}
 		if err == nil && principal.AppID != "" {
@@ -1660,9 +1728,31 @@ func (s *Server) listProviders(ctx context.Context, request *listProvidersReques
 			UsageShare:  &share,
 			Benchmark:   providerBenchmark(candidate.Config.Benchmark),
 			Price:       s.providerPrice(request.Modality, candidate.Config),
+			Voices:      voicesOf(candidate.Config.Voices),
 		})
 	}
 	return &listProvidersResponse{Body: providers}, nil
+}
+
+// voicesOf renders a model's built-in voices for the wire, nil when it declares none.
+func voicesOf(voices []routing.ModelVoice) []ModelVoice {
+	if len(voices) == 0 {
+		return nil
+	}
+	listed := make([]ModelVoice, 0, len(voices))
+	for _, voice := range voices {
+		item := ModelVoice{
+			Id:          voice.ID,
+			Name:        voice.Name,
+			Description: optional(voice.Description),
+			Gender:      optional(voice.Gender),
+		}
+		if voice.Default {
+			item.Default = new(true)
+		}
+		listed = append(listed, item)
+	}
+	return listed
 }
 
 // supportsOf is the terms a model declared, as the names a request's options use.
@@ -2067,7 +2157,7 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 	configID := value(request.Agent.ptr())
 	if configID != "" {
 		if _, err := s.store.AgentConfigs.Get(ctx, customerID, configID); err != nil {
-			return nil, errUnknownConfig
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
 	}
 

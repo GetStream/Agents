@@ -114,7 +114,7 @@ func (s *RefusedReviewSuite) conversed(responses ...storedResponse) (string, str
 			response.items[i].At = started.Add(time.Duration(i) * time.Second)
 		}
 		s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, response.items))
-		s.Require().NoError(s.store.Responses.Finish(s.ctx, id, response.status, "", started.Add(time.Second)))
+		s.Require().NoError(s.store.Responses.Finish(s.ctx, customer, id, response.status, "", started.Add(time.Second)))
 	}
 	return customer, cid
 }

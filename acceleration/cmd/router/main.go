@@ -176,6 +176,10 @@ const (
 	// and logged in full; what a kill at the end of the pod's termination grace period finds
 	// queued first is lost without a log line.
 	usageDrainTimeout = 15 * time.Second
+	// serverCloseTimeout bounds waiting for the API server's background work once it is
+	// cancelled. Nothing in it waits on anything but the cancel, so this only bounds a Redis
+	// client that does not let go of a subscription; short, on sentryFlushTimeout's reasoning.
+	serverCloseTimeout = 2 * time.Second
 )
 
 // usage is what the binary does besides serving.
@@ -183,6 +187,7 @@ const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
   keys create           mint a credential for an app, printing the secret once
+  keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
   prices                read and check the price list (router prices for its commands)
@@ -839,7 +844,9 @@ func run(settings config.Config, logger *slog.Logger) error {
 		defer stopSweeper()
 	}
 
-	// One router of the deployment checks every organization's spend for a jump each hour.
+	// One router of the deployment checks every organization's spend for a jump each hour, posts
+	// the day before's activity digest each day, and deletes the activity past its keep each day.
+	// It runs on every router with a database: without Slack settings it only deletes.
 	if anomalies := costAnomalies(pgStore, sender, logger); anomalies != nil {
 		anomalies.Start()
 		defer anomalies.Close()
@@ -1272,9 +1279,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 			LLM:      streams.LLM,
 			// Speech is what an audio simulation needs and a text one does not, so it is
 			// passed where it exists rather than required.
-			TTS:    streams.TTS,
-			STT:    streams.STT,
-			Logger: logger,
+			TTS:      streams.TTS,
+			STT:      streams.STT,
+			Activity: activityRecord,
+			Logger:   logger,
 		})
 		if err != nil {
 			return err
@@ -1503,7 +1511,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// up, and so closed after it.
 	var forwarder *eventforward.Forwarder
 	if connectorSecrets != nil && pgStore != nil {
-		forwarder, err = eventforward.New(eventforward.Options{Store: pgStore, Secrets: connectorSecrets, Logger: logger})
+		// The activity record closes after it, so a forward it ends while it drains is counted.
+		forwarder, err = eventforward.New(eventforward.Options{
+			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Logger: logger,
+		})
 		if err != nil {
 			return err
 		}
@@ -1641,6 +1652,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Deferred here, it runs once stopServing below has stopped the HTTP servers, and before
+	// Redis is closed.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), serverCloseTimeout)
+		defer cancel()
+		if err := server.Close(ctx); err != nil {
+			logger.Warn("the API server's background work did not end in time", "error", err)
+		}
+	}()
 	// Every router runs the worker that writes the queued inbound messages and hands each to
 	// the agent; a message is taken by one router at a time. The hand-off is the server's
 	// (AnswerQueued), and the server is built with the bridge (options.ChannelBridge), so the
@@ -1655,6 +1675,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	var scheduler *scheduling.Scheduler
 	if pgStore != nil && sessions != nil {
 		scheduler = scheduling.NewScheduler(pgStore, server.DeliverScheduledTask, logger)
+		scheduler.SetActivity(activityRecord)
 		// Before Start: a session the first delivery opens takes the kick then.
 		server.SetSchedulerKick(scheduler.Kick)
 		scheduler.Start(ctx)
@@ -1669,6 +1690,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Dialer:      campaign.NewPhoneDialer(telephony, sessions, pgStore, logger),
 			Transcripts: server,
 			Classifier:  campaign.NewClassifier(streams.LLM),
+			Activity:    activityRecord,
 			Logger:      logger,
 		})
 		if err != nil {

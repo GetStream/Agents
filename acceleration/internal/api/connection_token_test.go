@@ -138,7 +138,7 @@ func (s *ConnectionTokenSuite) TestTheExportIsListedInTheConnectorAudit() {
 // TestAGrantIssuedToTheOperatorsClientIsRefused: Stream's app, from the environment, as when
 // the app has no client record for the connector.
 func (s *ConnectionTokenSuite) TestAGrantIssuedToTheOperatorsClientIsRefused() {
-	id := s.connection(appOwned(s.connector(oauth2code.Name)))
+	id := s.connection(appOwned(s.builtin(oauth2code.Name)))
 	s.importGrant(id, "the-access-token", "the-refresh-token")
 
 	status, body := s.serverClient.call(http.MethodPost, tokenPath(id), nil)
@@ -152,7 +152,7 @@ func (s *ConnectionTokenSuite) TestAGrantIssuedToTheOperatorsClientIsRefused() {
 // TestAGrantIssuedToTheOperatorsClientStaysRefusedOnceTheAppPutsItsOwn: the record says whose
 // client the connector uses now, not whose client the grant was issued to.
 func (s *ConnectionTokenSuite) TestAGrantIssuedToTheOperatorsClientStaysRefusedOnceTheAppPutsItsOwn() {
-	connector := s.connector(oauth2code.Name)
+	connector := s.builtin(oauth2code.Name)
 	id := s.connection(appOwned(connector))
 	s.importGrant(id, "the-access-token", "")
 	s.putOwnClient(connector)
@@ -327,7 +327,26 @@ sources:
 
 func (s *ConnectionTokenSuite) connector(scheme string) string {
 	id := "custom_export" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	manifest, err := core.ParseManifest([]byte(`
+	manifest, err := core.ParseManifest([]byte(s.manifest(id, scheme)))
+	s.Require().NoError(err)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+	s.Require().NoError(err)
+	return id
+}
+
+// builtin seeds a built-in connector at the fake taking scheme, as a router start with that
+// file does: only a built-in takes the operator's client.
+func (s *ConnectionTokenSuite) builtin(scheme string) string {
+	id := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(),
+		fstest.MapFS{id + ".yaml": {Data: []byte(s.manifest(id, scheme))}}))
+	return id
+}
+
+// manifest is connector id at the fake taking scheme, whose consent may use the app's own
+// client, a client the router created, or, for a built-in, the operator's in the environment.
+func (s *ConnectionTokenSuite) manifest(id, scheme string) string {
+	return `
 id: ` + id + `
 revision: 1
 name: Fake
@@ -345,11 +364,7 @@ scopes:
 sources:
   - kind: mcp
     endpoint: mcp
-`))
-	s.Require().NoError(err)
-	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
-	s.Require().NoError(err)
-	return id
+`
 }
 
 func (s *ConnectionTokenSuite) connection(body map[string]any) string {

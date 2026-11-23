@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -133,7 +134,7 @@ func (s *Service) Close() {
 func (s *Service) Challenge(ctx context.Context, token string, query url.Values) Answer {
 	line, _, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	if query.Get("hub.mode") != "subscribe" || query.Get("hub.verify_token") != line.Challenge {
 		return Answer{Status: http.StatusForbidden, Body: failure("that is not this line's verify token")}
@@ -147,7 +148,7 @@ func (s *Service) Challenge(ctx context.Context, token string, query url.Values)
 func (s *Service) Receive(ctx context.Context, token string, header http.Header, body []byte) Answer {
 	line, account, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	provider, ok := For(line.Kind, s.transport)
 	if !ok {
@@ -156,22 +157,23 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	if err := provider.Verify(line, header, body, time.Now()); err != nil {
 		return Answer{Status: http.StatusUnauthorized, Body: failure(err.Error())}
 	}
+	activity.NoteCustomer(ctx, account.CustomerID, activity.AreaPhoneSMS)
 
 	delivered, err := provider.Parse(body)
 	if err != nil {
 		return Answer{Status: http.StatusBadRequest, Body: failure(err.Error())}
 	}
 	for _, message := range delivered {
-		fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
+		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
-			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
+			s.logger.Error("could not claim a channel delivery", "customer", account.CustomerID, "error", err)
+			return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 		}
 		// A provider that did not hear back in time sends the same message again. Answering
 		// it twice is the agent talking over itself, so a message already taken is dropped.
 		if !fresh {
 			continue
 		}
-		s.received(ctx, account, message)
 		// Files with no words are billed, and there is nothing in them for the agent to answer.
 		if message.Text == "" {
 			continue
@@ -371,32 +373,56 @@ func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
 // line opens the credentials of the account a delivery is addressed to.
 func (s *Service) line(ctx context.Context, token string) (Account, store.ChannelAccount, error) {
 	account, err := s.store.ChannelAccounts.GetByToken(ctx, token)
+	if errors.Is(err, store.ErrUnknownChannelAccount) {
+		return Account{}, store.ChannelAccount{}, errNoLine
+	}
 	if err != nil {
-		return Account{}, store.ChannelAccount{}, errors.New("no line is connected at this address")
+		return Account{}, store.ChannelAccount{}, err
 	}
 	line, err := Open(s.secrets, account)
 	if err != nil {
-		return Account{}, account, errors.New("this line's credentials cannot be opened: connect it again")
+		s.logger.Error("could not open a channel line's credentials", "customer", account.CustomerID,
+			"channel", account.Kind, "error", err)
+		return Account{}, account, errUnopened
 	}
 	return line, account, nil
+}
+
+// somethingWentWrong is what a provider is told of a failure of ours, which it retries.
+const somethingWentWrong = "something went wrong"
+
+var (
+	errNoLine   = errors.New("no line is connected at this address")
+	errUnopened = errors.New("this line's credentials cannot be opened: connect it again")
+)
+
+// unread answers a delivery whose line could not be read. A line that is gone is a 410, which
+// stops the provider delivering; a database failure is a 500 it tries again.
+func (s *Service) unread(err error) Answer {
+	if errors.Is(err, errNoLine) || errors.Is(err, errUnopened) {
+		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+	}
+	s.logger.Error("could not read the line a delivery is for", "error", err)
+	return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 }
 
 // answer has the agent on a line take one message and writes back what it says.
 func (s *Service) answer(account store.ChannelAccount, line Account, provider Provider, message Message) {
 	ctx, cancel := context.WithTimeout(s.ctx, runTimeout)
 	defer cancel()
+	logger := s.logger.With("customer", account.CustomerID)
 
 	if s.keyword(ctx, account, line, provider, message) {
 		return
 	}
 	config, found, err := s.store.ConfigOnChannel(ctx, account.CustomerID, account.Kind, account.E164)
 	if err != nil {
-		s.logger.Error("could not find the agent on a channel", "channel", account.Kind,
+		logger.Error("could not find the agent on a channel", "channel", account.Kind,
 			"number", account.E164, "error", err)
 		return
 	}
 	if !found {
-		s.logger.Warn("a message arrived on a line no agent answers on", "channel", account.Kind,
+		logger.Warn("a message arrived on a line no agent answers on", "channel", account.Kind,
 			"number", account.E164, "hint", "name it under channels in the agent's config")
 		return
 	}
@@ -437,7 +463,7 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 
 	created, err := s.sessions.Create(ctx, spec)
 	if err != nil {
-		s.logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
+		logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
 			"agent", config.Name, "error", err)
 		return
 	}
@@ -445,7 +471,7 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	// the next message reopens it by its id rather than starting over.
 	defer func() {
 		if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
-			s.logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
+			logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
 		}
 	}()
 	events, detach := created.Watch()
@@ -457,7 +483,7 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	if identity.ConversationID == "" {
 		identity.ConversationID = created.Spec().ConversationID
 		if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
-			s.logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
+			logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
 		}
 	}
 
@@ -469,7 +495,7 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	// The provider's own message id is the command id, so the durable conversation refuses a
 	// repeat for the same reason the delivery table does.
 	if _, _, err := created.RespondCommand(ctx, message.ID, message.Text, "", nil, options.LLM{}); err != nil {
-		s.logger.Error("the agent could not take a channel message", "session", created.ID(), "error", err)
+		logger.Error("the agent could not take a channel message", "session", created.ID(), "error", err)
 	}
 	<-sending
 }

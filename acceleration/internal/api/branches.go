@@ -85,6 +85,8 @@ func branchRefused(err error) error {
 		return conflict("the conversation changed while it was being switched; read it again and retry")
 	case errors.Is(err, conversation.ErrCommandConflict):
 		return conflict(conversation.ErrCommandConflict.Error())
+	case errors.Is(err, store.ErrIDTaken):
+		return conflict("this switch's id is already in use; send it again with another request id")
 	case errors.Is(err, conversation.ErrCommandNotFound):
 		// The conversation is not the caller's: they are told it does not exist.
 		return errUnknownSession

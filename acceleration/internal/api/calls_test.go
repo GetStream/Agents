@@ -5,7 +5,10 @@ package api
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +26,18 @@ type CallsSuite struct {
 	// base is when the calls in a test happened. It is a fixed hour, and the app is new in
 	// every test, so what is listed is only what the test itself started.
 	base time.Time
+	// logged is what the router logged, for the errors a read leaves.
+	logged *lockedLog
 }
 
 func TestCallsSuite(t *testing.T) {
 	runSuite(t, new(CallsSuite))
+}
+
+func (s *CallsSuite) SetupSuite() {
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
 }
 
 // SetupTest gives every test an app of its own, because the running calls are everything
@@ -248,7 +259,7 @@ func (s *CallsSuite) TestACallAnotherAppHoldsCannotBeJoined() {
 func (s *CallsSuite) TestTheRunningCallsAreTheOnesThatHaveNotEnded() {
 	running := s.started(store.Call{StartedAt: s.base})
 	finished := s.started(store.Call{StartedAt: s.base.Add(-time.Hour)})
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), finished.ID, s.base))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), finished.CustomerID, finished.ID, s.base))
 
 	var listed []Call
 	s.Require().Equal(http.StatusOK,
@@ -282,6 +293,27 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 	s.Equal("how is the weather", value(decided[0].Said))
 }
 
+func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
+	// A session held in writing has no Stream call, so no decisions are kept for it; the
+	// store refuses a read without a call id, which used to answer 500.
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
+	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
+
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Require().Equal(http.StatusOK, response.StatusCode)
+	// A 500 for this request would log its access line at ERROR; the line names the request id.
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=INFO", "the request was answered 200, so it is not an ERROR")
+
+	var decided []CallEvent
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&decided))
+	s.Empty(decided)
+}
+
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
@@ -291,7 +323,7 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 			StartedAt: s.base.Add(time.Second), Success: true,
 		}))
 	}
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.CustomerID, call.ID, s.base.Add(time.Minute)))
 
 	var rendered Call
 	s.Require().Equal(http.StatusOK,
@@ -313,7 +345,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf
 		InputTokens: 900, CachedInputTokens: 400, OutputTokens: 150,
 		CostMicros: 2500, Success: true,
 	}))
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.CustomerID, call.ID, s.base.Add(time.Minute)))
 
 	var rendered Call
 	s.Require().Equal(http.StatusOK,
@@ -700,7 +732,7 @@ func (s *CallsSuite) TestTheCampaignDialerReadsOnlyItsOwnCustomersTranscript() {
 	conversation := "support-" + s.utils.uuid()
 	earlier := s.inSession("agent:"+conversation, store.Call{StartedAt: s.base.Add(-time.Hour)})
 	ended := s.base.Add(-50 * time.Minute)
-	s.Require().NoError(s.store.Calls.Finish(context.Background(), earlier.ID, ended))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), earlier.CustomerID, earlier.ID, ended))
 	call := s.started(store.Call{SessionID: earlier.SessionID, AgentID: earlier.AgentID})
 	s.inChannel(conversation, s.customerID(), earlier.StartedAt.Add(time.Minute), "said on the earlier call")
 	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(time.Minute), "said on the call")
@@ -767,6 +799,114 @@ func (s *CallsSuite) TestATimelineOfACallNobodyWroteDownHasTurnsWithoutWords() {
 	s.Equal("turn-1", timeline[0].TurnId)
 	s.Nil(timeline[0].Heard)
 	s.Nil(timeline[0].Said)
+}
+
+func (s *CallsSuite) TestATextSessionsTimelineReadsNoFloorChecksAndLogsNoError() {
+	// A session held in writing has no Stream call, so it has no call id to keep floor checks
+	// under; the read for them is refused by the store, and used to be logged as an error
+	// on every read of the timeline.
+	ctx := context.Background()
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
+	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		TurnID: "turn-1", StartedAt: call.StartedAt.Add(time.Second)}))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+
+	s.Require().Len(timeline, 1)
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks)
+	s.Empty(s.errorsAbout(call.ID), "reading a text session's timeline is not an error")
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineStillCarriesItsFloorChecks() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+
+	s.Require().Len(timeline, 1)
+	s.Require().NotNil(timeline[0].FloorChecks)
+	s.Require().Len(*timeline[0].FloorChecks, 1)
+	s.Equal(FloorCheckKindPause, (*timeline[0].FloorChecks)[0].Kind)
+	s.Empty(s.errorsAbout(call.ID))
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineIsAnsweredWithoutFloorChecksWhenTheirReadFails() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+	s.callEventsOnClosedRedis()
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline), "the checks are not worth failing the timeline over")
+
+	s.Require().Len(timeline, 1, "the turns are still read")
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks, "the checks the read could not return are not shown")
+	s.Require().Len(s.errorsAbout(call.ID), 1)
+	s.Contains(s.errorsAbout(call.ID)[0], `msg="could not read the floor checks for a timeline"`)
+	s.Contains(s.errorsAbout(call.ID)[0], "store: floor checks")
+}
+
+func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails() {
+	// The decisions are the whole of this answer, so a read that failed is no call that decided
+	// nothing: the caller is told something went wrong, and the access line is an ERROR.
+	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{{
+		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
+		At: time.Now(), Kind: "answer", Reason: "a complete thought",
+	}}))
+	s.callEventsOnClosedRedis()
+
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Equal(http.StatusInternalServerError, response.StatusCode)
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=ERROR")
+	s.Contains(served(), "store: call events")
+}
+
+// callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
+// makes come from a Redis that is closed, as an unreachable one is. The test's end puts them back.
+func (s *CallsSuite) callEventsOnClosedRedis() {
+	closed, err := store.OpenShards(store.Options{DSN: testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")),
+		Redis: store.Redis{Address: s.redisAddr}})
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	original := s.store.CallEvents
+	s.store.CallEvents = closed.CallEvents
+	s.T().Cleanup(func() { s.store.CallEvents = original })
+}
+
+// errorsAbout is the ERROR lines the router logged about the call with this row id.
+func (s *CallsSuite) errorsAbout(id string) []string {
+	var errors []string
+	for _, line := range strings.Split(s.logged.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "call="+id) {
+			errors = append(errors, line)
+		}
+	}
+	return errors
 }
 
 func (s *CallsSuite) TestAMembersLineMarkedAsTheAgentsIsTheMembersOnEveryReader() {

@@ -6,9 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -477,17 +477,19 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	plan, err := s.phone.Answer(r.Context(), token)
+	// Answer notes the call's app once its token resolves.
+	logger := s.logger.With("customer", activity.NotedCustomer(r.Context()))
 	if err != nil {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
-		s.logger.Error("could not answer a placed call", "error", err)
+		logger.Error("could not answer a placed call", "error", err)
 		writeError(w, notFound("that call is not waiting to be answered"))
 		return
 	}
 
 	w.Header().Set("Content-Type", plan.ContentType)
 	if _, err := w.Write(plan.Body); err != nil {
-		s.logger.Error("could not serve a call plan", "error", err)
+		logger.Error("could not serve a call plan", "error", err)
 	}
 }
 
@@ -651,6 +653,8 @@ var (
 		Message: "This number needs a verified address, which is not supported. Choose a number in the US or Canada, or contact support."}
 	errNoKeyring = notConfigured("Numbers from this vendor cannot be attached on this deployment: " +
 		"it has no key encryption key to seal their trunk passwords with.")
+	errCallNoKeyring = notConfigured("Calls from numbers of this vendor cannot be placed on this deployment: " +
+		"it has no key encryption key to seal the trunk password the vendor fetches on answer.")
 	errPhoneVendorFailed = APIError{Type: ErrorTypeUnavailable, Code: codePhoneVendorFailed,
 		Message: "The phone vendor could not complete the request. Try again, or contact support if it keeps failing."}
 	errNumberSettling = APIError{Type: ErrorTypeConflict, Code: codePhoneNumberSettling,
@@ -658,6 +662,7 @@ var (
 	errCallNotConfirmed = APIError{Type: ErrorTypeUnavailable, Code: codePhoneVendorFailed,
 		Message: "The phone vendor did not confirm the call, so it can still ring. Do not place it again at once. Contact support if this keeps happening."}
 	errPhoneNoStream      = notConfigured("phone lines are not available: this deployment has no Stream app to make them in")
+	errPhoneNotConfigured = notConfigured("This deployment is not set up for this phone operation. Try another vendor, or contact support.")
 	errCallHookUnpointed  = unavailable("this app's Stream call hook could not be pointed at this router, so its calls would not reach an agent: try again")
 	errNumberNotAttached  = conflict("The number is not attached: attach the number first.")
 	errNumberOnItsOwnCall = conflict("Every caller of this number joins one call: attach the number again so each caller gets a session of their own.")
@@ -692,6 +697,10 @@ func phoneFailure(logger *slog.Logger, err error) error {
 		logger.Info("a phone number needs an address", "error", err)
 		return errNumberNeedsAddress
 	}
+	if errors.Is(err, phone.ErrNoSealerToCall) {
+		logger.Warn("a phone call cannot be placed without a keyring", "error", phone.ErrNoSealerToCall)
+		return errCallNoKeyring
+	}
 	if errors.Is(err, phone.ErrNoSealer) {
 		// The setting to fix it is the operator's, so it stays in the log.
 		logger.Warn("a phone number cannot be attached without a keyring", "error", err)
@@ -709,9 +718,13 @@ func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrNoStream) {
 		return errPhoneNoStream
 	}
-	if errors.Is(err, phone.ErrNotConfigured) || errors.Is(err, phone.ErrSIPTrunksDisabled) {
-		// A vendor name and the settings it lacks: the operator's to set, the client's to know.
-		return notConfigured(err.Error())
+	if errors.Is(err, phone.ErrSIPTrunksDisabled) {
+		return notConfigured(phone.ErrSIPTrunksDisabled.Error())
+	}
+	if errors.Is(err, phone.ErrNotConfigured) {
+		// The settings it lacks name the deployment's environment: the operator's to read.
+		logger.Warn("a phone operation lacks a setting of this deployment", "error", store.SafeLogText(err.Error()))
+		return errPhoneNotConfigured
 	}
 	for _, theirs := range clientPhoneFailures {
 		if errors.Is(err, theirs) {
@@ -734,23 +747,21 @@ func callFailure(logger *slog.Logger, err error) error {
 // isNumberNotHeld is the store's answer for a number the customer does not hold. A vendor's
 // error is never one, whatever its words, because those are not ours to show.
 func isNumberNotHeld(err error) bool {
-	if err == nil {
-		return false
-	}
-	if _, vendor := errors.AsType[*phone.VendorError](err); vendor {
-		return false
-	}
-	return strings.Contains(err.Error(), "is not a number")
+	return errors.Is(err, store.ErrNoNumber)
 }
 
 // skipReason is why a vendor is missing from a search, in words a client may see.
 func skipReason(logger *slog.Logger, skip phone.Skip) string {
+	if skip.Err == nil {
+		return skip.Reason
+	}
 	if refused, ok := errors.AsType[*phone.VendorError](skip.Err); ok {
 		logger.Error("a phone vendor failed", "vendor", refused.Vendor, "path", refused.Path,
 			"status", refused.Status, "code", refused.Code, "message", refused.Message, "error", skip.Err)
-		return "The phone vendor could not complete the request."
+	} else {
+		logger.Error("a phone vendor could not be reached", "vendor", skip.Vendor, "error", skip.Err)
 	}
-	return skip.Reason
+	return "The phone vendor could not complete the request."
 }
 
 // sipTrunkFailure turns what the phone service said into the status a caller can act on.

@@ -134,6 +134,16 @@ func (s *AppsSuite) vendorOnAnAllowlist() onAnAllowlist {
 // numberOn registers a stub for the vendor next to the suite's own and gives the suite's
 // customer a number on it.
 func (s *AppsSuite) numberOn(vendor string) string {
+	other := s.vendorBeside(vendor)
+	e164 := aNumber()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: other.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+	return e164
+}
+
+// vendorBeside registers a stub for the vendor next to the suite's own.
+func (s *AppsSuite) vendorBeside(vendor string) *stub {
 	other := &stub{vendor: vendor}
 	registry := NewRegistry(s.config())
 	registry.Register(s.vendor.vendor, func() (Provider, error) { return s.vendor, nil })
@@ -144,12 +154,7 @@ func (s *AppsSuite) numberOn(vendor string) string {
 	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps})
 	s.Require().NoError(err)
 	s.service = service
-
-	e164 := aNumber()
-	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
-		E164: e164, Vendor: other.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
-	}))
-	return e164
+	return other
 }
 
 // planStub is a vendor that fetches its call plan when the call is answered, and renders
@@ -224,7 +229,9 @@ func (s *AppsSuite) TestACallOnAVendorThatFetchesItsPlanNeedsAPublicURL() {
 	for _, name := range s.credentials(plivo.vendor) {
 		s.T().Setenv(name, "set")
 	}
-	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps})
+	sealer, err := auth.NewSealer("apps suite")
+	s.Require().NoError(err)
+	service, err := NewService(ServiceOptions{Registry: registry, Store: s.store, Apps: s.apps, Sealer: sealer})
 	s.Require().NoError(err)
 	e164 := aNumber()
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
@@ -240,15 +247,19 @@ func (s *AppsSuite) TestACallOnAVendorThatFetchesItsPlanNeedsAPublicURL() {
 	s.Empty(plivo.dialed.To, "a call nobody could fetch the plan of is not dialled")
 }
 
-func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPassword() {
+// The bridge parked until the vendor fetches its plan keeps the trunk's password sealed and the
+// fetch's token only hashed, and the fetch still carries the password.
+func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPasswordKeptSealed() {
 	plivo := &planStub{stub: stub{vendor: "plivo"}}
 	registry := NewRegistry(s.config())
 	registry.Register(plivo.vendor, func() (Provider, error) { return plivo, nil })
 	for _, name := range s.credentials(plivo.vendor) {
 		s.T().Setenv(name, "set")
 	}
+	sealer, err := auth.NewSealer("apps suite")
+	s.Require().NoError(err)
 	service, err := NewService(ServiceOptions{
-		Registry: registry, Store: s.store, Apps: s.apps, PublicURL: "https://router.example.test",
+		Registry: registry, Store: s.store, Apps: s.apps, Sealer: sealer, PublicURL: "https://router.example.test",
 	})
 	s.Require().NoError(err)
 	e164 := aNumber()
@@ -261,15 +272,149 @@ func (s *AppsSuite) TestACallPlanFetchedOnAnswerCarriesTheTrunksPassword() {
 	})
 	s.Require().NoError(err)
 	token := plivo.dialed.AnswerURL[strings.LastIndex(plivo.dialed.AnswerURL, "/")+1:]
+	trunks := s.deployment.Trunks()
+	s.Require().Len(trunks, 1)
+	password, _ := s.deployment.TrunkAuth(trunks[0])
+	s.Require().NotEmpty(password)
+
+	var rows []string
+	s.Require().NoError(s.store.ShardDB().NewSelect().ColumnExpr("to_jsonb(cb)::text").
+		TableExpr("call_bridges AS cb").Where("cb.customer_id = ?", s.customer).Scan(s.ctx, &rows))
+	s.Require().Len(rows, 1)
+	s.NotContains(rows[0], password, "the parked bridge holds the trunk's password in the clear")
+	s.NotContains(rows[0], token, "the parked bridge holds the token its fetch presents")
 
 	_, err = service.Answer(s.ctx, token)
 	s.Require().NoError(err)
 
+	s.Equal(password, plivo.rendered.Password)
+}
+
+// onAPlanVendor is a service whose vendor fetches its call plan on answer, reachable at a
+// public url, and a number the suite's customer holds on it.
+func (s *AppsSuite) onAPlanVendor(vendor string, config Config, sealer *auth.Sealer) (*planStub, *Service, string) {
+	fetcher := &planStub{stub: stub{vendor: vendor}}
+	registry := NewRegistry(config)
+	registry.Register(fetcher.vendor, func() (Provider, error) { return fetcher, nil })
+	for _, name := range s.credentials(fetcher.vendor) {
+		s.T().Setenv(name, "set")
+	}
+	service, err := NewService(ServiceOptions{
+		Registry: registry, Store: s.store, Apps: s.apps, Sealer: sealer, PublicURL: "https://router.example.test",
+	})
+	s.Require().NoError(err)
+	e164 := aNumber()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: fetcher.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+	return fetcher, service, e164
+}
+
+// A parked bridge's sealed password opens only for the customer and the token it was sealed
+// for: moved to another bridge row, or presented with another token, it does not.
+func (s *AppsSuite) TestAParkedPasswordOpensOnlyForItsCustomerAndToken() {
+	sealer, err := auth.NewSealer("apps suite")
+	s.Require().NoError(err)
+	plivo, service, e164 := s.onAPlanVendor("plivo", s.config(), sealer)
+	_, err = service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+	token := plivo.dialed.AnswerURL[strings.LastIndex(plivo.dialed.AnswerURL, "/")+1:]
+	var parked store.CallBridge
+	s.Require().NoError(s.store.ShardDB().NewSelect().Model(&parked).Where("customer_id = ?", s.customer).Scan(s.ctx))
+	s.Require().NotEmpty(parked.TrunkPasswordSealed)
+	moved := func(customerID, token string) store.CallBridge {
+		return store.CallBridge{
+			Token: token, CustomerID: customerID, Vendor: parked.Vendor, TrunkURI: parked.TrunkURI,
+			TrunkUsername: parked.TrunkUsername, TrunkPasswordSealed: parked.TrunkPasswordSealed,
+			TrunkKEKVersion: parked.TrunkKEKVersion, CallID: parked.CallID, ExpiresAt: parked.ExpiresAt,
+		}
+	}
+
+	_, err = service.Answer(s.ctx, token)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(plivo.rendered.Password)
+
+	for name, bridge := range map[string]store.CallBridge{
+		"another customer's row": moved("customer-"+uuid.NewString(), token),
+		"another token":          moved(s.customer, uuid.NewString()),
+	} {
+		plivo.rendered = Bridge{}
+		s.Require().NoError(s.store.CallBridges.Insert(s.ctx, &bridge))
+		_, err := service.Answer(s.ctx, bridge.Token)
+		s.Error(err, name)
+		s.Empty(plivo.rendered.Password, name)
+	}
+}
+
+// A bridge parked before the key rotated is opened with the key that sealed it, so a call
+// ringing through a rotation is still answered with its trunk's password.
+func (s *AppsSuite) TestAParkedPasswordOpensWithTheKeyThatSealedItAfterARotation() {
+	sealed, err := auth.NewSealerWithKeyring(1, map[int]string{1: "apps suite key one"})
+	s.Require().NoError(err)
+	plivo, service, e164 := s.onAPlanVendor("plivo", s.config(), sealed)
+	_, err = service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+	token := plivo.dialed.AnswerURL[strings.LastIndex(plivo.dialed.AnswerURL, "/")+1:]
 	trunks := s.deployment.Trunks()
 	s.Require().Len(trunks, 1)
 	password, _ := s.deployment.TrunkAuth(trunks[0])
-	s.NotEmpty(password)
+	s.Require().NotEmpty(password)
+
+	service.sealer, err = auth.NewSealerWithKeyring(2, map[int]string{1: "apps suite key one", 2: "apps suite key two"})
+	s.Require().NoError(err)
+	_, err = service.Answer(s.ctx, token)
+
+	s.Require().NoError(err)
 	s.Equal(password, plivo.rendered.Password)
+}
+
+// A vendor that sends the trunk's password on answer gets it from a sealed bridge, so on a
+// deployment with no keyring its call is refused before anything is made at Stream.
+func (s *AppsSuite) TestACallThatSendsAPasswordIsRefusedWithoutAKeyringBeforeAnythingIsMade() {
+	plivo, service, e164 := s.onAPlanVendor("plivo", s.config(), nil)
+	before := len(s.deployment.Requests(s.deployment.Key))
+
+	_, err := service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+	})
+
+	s.ErrorIs(err, ErrNoSealerToCall)
+	for _, request := range s.deployment.Requests(s.deployment.Key)[before:] {
+		s.False(request.Writes(), "a call that cannot be placed made %s %s at Stream", request.Method, request.Path)
+	}
+	s.Empty(plivo.dialed.To, "the call is not dialled")
+	count, err := s.store.ShardDB().NewSelect().Model((*store.CallBridge)(nil)).Where("customer_id = ?", s.customer).Count(s.ctx)
+	s.Require().NoError(err)
+	s.Zero(count, "no bridge is parked")
+}
+
+// Bandwidth authenticates by address and never sends a password, so its call needs no
+// keyring and its parked bridge keeps no password.
+func (s *AppsSuite) TestACallOnAVendorThatSendsNoPasswordNeedsNoKeyringAndParksNone() {
+	config := s.config()
+	i := slices.IndexFunc(config.Vendors, func(v Vendor) bool { return v.Vendor == "bandwidth" })
+	s.Require().GreaterOrEqual(i, 0)
+	s.Require().Equal(TrunkAllowlist, config.Vendors[i].Authenticates())
+	config.Vendors[i].Signalling = []string{"192.0.2.0/24"}
+	bandwidth, service, e164 := s.onAPlanVendor("bandwidth", config, nil)
+
+	_, err := service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+
+	var parked store.CallBridge
+	s.Require().NoError(s.store.ShardDB().NewSelect().Model(&parked).Where("customer_id = ?", s.customer).Scan(s.ctx))
+	s.Empty(parked.TrunkPasswordSealed)
+	token := bandwidth.dialed.AnswerURL[strings.LastIndex(bandwidth.dialed.AnswerURL, "/")+1:]
+	_, err = service.Answer(s.ctx, token)
+	s.Require().NoError(err)
+	s.NotEmpty(bandwidth.rendered.URI, "the plan bridges to the trunk")
+	s.Empty(bandwidth.rendered.Password)
 }
 
 func (s *AppsSuite) number() store.PhoneNumber {
@@ -309,6 +454,24 @@ func (s *AppsSuite) TestReleasingANumberDeletesItsTrunkAndRouteInItsApp() {
 
 	s.Empty(s.own.Trunks())
 	s.Empty(s.own.Rules())
+}
+
+func (s *AppsSuite) TestAnImportedNumberIsNeverGivenBackAtTheVendor() {
+	telnyx := s.vendorBeside("telnyx")
+	e164 := aNumber()
+	row, err := json.Marshal(map[string]any{
+		"id": rand.Int64N(1 << 50), "e164": e164, "vendor": telnyx.vendor, "country": "US",
+		"capabilities": []string{"voice"}, "monthly_cost_micros": 0, "customer_id": s.customer,
+		"tags": map[string]string{}, "purchased_at": time.Now().UTC(),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "phone_numbers", row))
+
+	s.ErrorIs(s.service.Release(s.ctx, s.customer, e164), store.ErrNoNumber)
+	s.Empty(telnyx.released, "the vendor is not asked to give it back")
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+	s.ErrorIs(err, store.ErrNoNumber, "nor are its calls pointed at an agent")
+	s.Empty(s.deployment.Trunks())
 }
 
 func (s *AppsSuite) TestReleasingStopsTheVendorSendingCallsFirst() {

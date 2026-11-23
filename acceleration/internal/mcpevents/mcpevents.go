@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -485,7 +486,7 @@ func (s *Service) eventSource(ctx context.Context, connection store.ConnectorCon
 	if err != nil {
 		return core.ResolvedBinding{}, nil, err
 	}
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return core.ResolvedBinding{}, nil, stack.Wrap(err)
 	}
@@ -594,13 +595,15 @@ func (s *Service) owners(configs []store.AgentConfig, connection store.Connector
 
 // Receive answers one delivery to a subscription's callback: the challenge a server checks the
 // callback with, or an event, which opens a conversation. A delivery not signed with the
-// subscription's own secret is refused before its body is read.
+// subscription's own secret is refused before its body is read, and counted for nobody: a signed
+// one is the subscription's app's hook, whatever is answered.
 func (s *Service) Receive(ctx context.Context, token string, header http.Header, body []byte) Reply {
 	sub, err := s.store.ConnectionEventSubscriptions.GetByToken(ctx, token)
 	if errors.Is(err, store.ErrNoConnectionEventSubscription) {
 		return Reply{Status: http.StatusGone, Body: failure("no such subscription")}
 	}
 	if err != nil {
+		s.logger.Error("could not read an MCP event subscription", "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	secret, err := s.openSecret(sub)
@@ -611,6 +614,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	if err := webhook.Verify(secret, header, body, time.Now()); err != nil {
 		return Reply{Status: http.StatusUnauthorized, Body: failure("the delivery is not signed with the subscription's secret")}
 	}
+	activity.NoteCustomer(ctx, sub.CustomerID, activity.AreaHooksIn)
 
 	var delivered webhook.Event
 	if err := json.Unmarshal(body, &delivered); err != nil {
@@ -635,6 +639,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		return Reply{Status: http.StatusGone, Body: failure("the connection is gone")}
 	}
 	if err != nil {
+		s.logger.Error("could not read an MCP event subscription's connection", "subscription", sub.ID, "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	if connection.Status != store.ConnectionConnected {
@@ -644,6 +649,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	}
 	owner, held, ok, err := s.declaration(ctx, connection, sub)
 	if err != nil {
+		s.logger.Error("could not read an MCP event subscription's config", "subscription", sub.ID, "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	if !ok {
@@ -664,6 +670,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	// once it is active, opens no second conversation.
 	fresh, err := s.store.DeliveriesSeen.First(ctx, store.DeliveryScopeConnectionEvent, store.ConnectionEventKey(held.ID, delivered.EventID))
 	if err != nil {
+		s.logger.Error("could not claim an MCP event delivery", "subscription", sub.ID, "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	// A retry of an event already taken is acknowledged without a second conversation, or the

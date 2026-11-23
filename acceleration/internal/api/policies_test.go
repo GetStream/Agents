@@ -181,6 +181,35 @@ func (s *PoliciesSuite) TestAQuotaSettingNeitherNumberIsStoredAsNoQuota() {
 	s.Nil(read.Quota, "a quota with no number is no opinion")
 }
 
+// TestAPolicyTheDatabaseCannotSaveIsAnsweredAsInternal (AI-3575): a write the database fails
+// is not the caller's to correct, so it is a 500 that quotes none of the query.
+func (s *PoliciesSuite) TestAPolicyTheDatabaseCannotSaveIsAnsweredAsInternal() {
+	s.failQueries(`INSERT INTO "policies"`)
+
+	for _, path := range []string{"/v1/policies/app", "/v1/policies/organization"} {
+		status, body := s.serverClient.call(http.MethodPut, path, map[string]any{"prompt_injection": true})
+
+		s.Equal(http.StatusInternalServerError, status, path)
+		s.Contains(string(body), `"code":"internal_error"`, path)
+		s.NotContains(string(body), "policies", path)
+		s.NotContains(string(body), "deadline", path)
+	}
+}
+
+// TestAPolicyTheDatabaseCannotReadIsAnsweredAsInternal (AI-3575): the read as much as the write.
+func (s *PoliciesSuite) TestAPolicyTheDatabaseCannotReadIsAnsweredAsInternal() {
+	s.failQueries(`FROM "policies"`)
+
+	for _, path := range []string{"/v1/policies/app", "/v1/policies/organization"} {
+		status, body := s.serverClient.call(http.MethodGet, path, nil)
+
+		s.Equal(http.StatusInternalServerError, status, path)
+		s.Contains(string(body), `"code":"internal_error"`, path)
+		s.NotContains(string(body), "policies", path)
+		s.NotContains(string(body), "deadline", path)
+	}
+}
+
 // put stores the policy the body describes.
 func (s *PoliciesSuite) put(body map[string]any) Policy {
 	var stored Policy

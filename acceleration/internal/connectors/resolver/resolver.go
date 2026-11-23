@@ -41,6 +41,27 @@ const maxAge = 30 * time.Second
 // measured.
 const auditWriteTimeout = 5 * time.Second
 
+// saveAttempts and saveFirstPause bound how often retrieve saves what a renewal left after its
+// checkpoint committed (saveAgain): the first save and up to two more, the first of them
+// 100 ms after it and the next 200 ms after that, 300 ms of waiting in all. Each retry takes
+// the credential store's lock again: the lock belongs to the session of one pool connection
+// (store.withCredentialLock), and the pg driver closes that connection on every failure but a
+// Postgres ERROR (isBadConn in github.com/uptrace/bun/driver/pgdriver v1.2.18), so a dropped
+// connection, the short failure this is for, ends the lock with it. The pauses give the pool time to open another
+// connection. Each retry is a whole Update on the refresh's detached context: a pool
+// connection (pgdriver's DialTimeout, 5 s), the lock's tries and the locked read (its
+// ReadTimeout, 10 s), then the save and the unlock (store's credentialDetachedTimeout, 2 s
+// each). No sum of those is the bound: retrieveTimeout (30 s), counted from the lock taken
+// for the refresh, ends the context, and the pauses then end the retries (wait). The caller
+// is not held for it: Resolve returns when its own ctx ends. Between two tries the lock is
+// free and the row says needs_reauthorization, so a Resolve then gets ErrNotConnected; while
+// the refresh runs a waiter waits on the lock instead. A choice, not measured; a database
+// down for longer still loses the renewal.
+const (
+	saveAttempts   = 3
+	saveFirstPause = 100 * time.Millisecond
+)
+
 // What LastError says after each outcome. core.CredentialState.LastError is shown to whoever
 // has to reconnect, so each says what to do. The wording follows the prototype's
 // (ResolveCredentials in internal/connectors/runtime.go:98-115 at cf62af0d), without the word
@@ -83,6 +104,11 @@ var ErrNotConnected = errors.New("resolver: the connection is not connected")
 // a later call may not. The connection stays connected; the *core.OutcomeError it wraps
 // carries the provider's Retry-After, if it sent one.
 var ErrTemporarilyUnavailable = errors.New("resolver: the provider could not renew the credential just now")
+
+// errMovedSinceCheckpoint says a retried save found the connection other than its checkpoint
+// left it: a reconnect, new credentials or a delete came first, and the renewal must not
+// overwrite them.
+var errMovedSinceCheckpoint = errors.New("resolver: the connection changed after the refresh's checkpoint")
 
 // Config is what a Resolver reads from.
 type Config struct {
@@ -237,7 +263,10 @@ func (r *Resolver) Invalidate(ctx context.Context, ref core.ConnectionRef, rejec
 // Revoke moves a connected connection to needs_reauthorization and drops its cached
 // credential, because the provider said the grant ended (a verified core.Signal of kind why).
 // A connection that is not connected keeps its status: pending has no grant to end, and
-// needs_reauthorization and disconnected already say what a revocation would.
+// needs_reauthorization and disconnected already say what a revocation would. One that a
+// renewal's checkpoint left (lostRefresh) gets the signal's last_error, status unchanged, and
+// its audit row: the renewal's save may be retried (saveAgain), and a retry finds the
+// connection moved and leaves it, so the revocation stands.
 //
 // It names no credential, unlike Invalidate, and checks no revision: the provider ended the
 // grant itself, so stored credentials another router renewed a moment ago end with it. It
@@ -258,7 +287,8 @@ func (r *Resolver) Revoke(ctx context.Context, ref core.ConnectionRef, why core.
 	moved, revision := false, 0
 	var ended core.CredentialChange
 	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
-		if state.Status != store.ConnectionConnected {
+		checkpointed := state.Status == store.ConnectionNeedsReauthorization && state.LastError == lostRefresh
+		if state.Status != store.ConnectionConnected && !checkpointed {
 			return false, nil
 		}
 		if !endedAt.IsZero() && state.ConnectedAt.After(endedAt.Add(time.Second)) {
@@ -283,7 +313,8 @@ func (r *Resolver) Revoke(ctx context.Context, ref core.ConnectionRef, why core.
 // the credential the stored credentials still hold, the scheme is asked to renew it whatever
 // its expiry (core.RetrieveOptions.Refused); once they have moved past it, another router
 // already renewed it. ctx only bounds the wait for the lock and the reads; the scheme runs
-// on a detached context.
+// on a detached context, and so does saveAgain, which tries a save that failed after the
+// checkpoint again.
 func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connection store.ConnectorConnection, req core.CredentialRequest) (core.AccessCredential, error) {
 	scheme, found := r.schemes[connection.AuthScheme]
 	if !found {
@@ -299,7 +330,14 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 		// the provider's own word for it.
 		ended             core.OutcomeKind
 		code, description string
+		// atCheckpoint is the state the checkpoint committed, and final the state the final
+		// save writes after it, set once fn returned without an error: the save to retry.
+		atCheckpoint, final *core.CredentialState
+		// detached is the context the scheme runs on, made once the lock is taken.
+		detached context.Context
+		cancel   = func() {}
 	)
+	defer func() { cancel() }()
 	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, checkpoint func() error) (bool, error) {
 		committed = state
 		if state.Status != store.ConnectionConnected {
@@ -325,14 +363,13 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 				ErrNotConnected, state.DefinitionRevision, connection.ConnectorID, reason))
 			return false, nil
 		}
-		manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, state.Metadata)
+		manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, state.Metadata)
 		if err != nil {
 			return false, err
 		}
 		before = *state
 		checkpointed := false
-		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), retrieveTimeout)
-		defer cancel()
+		detached, cancel = context.WithTimeout(context.WithoutCancel(ctx), retrieveTimeout)
 		got, next, err := scheme.Retrieve(detached, state.Credentials, manifest, core.RetrieveOptions{
 			ValidUntil: req.Deadline,
 			Refused:    req.Refused != nil && req.Refused.Revision == state.Revision,
@@ -342,6 +379,8 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 					return err
 				}
 				checkpointed = true
+				at := *state
+				atCheckpoint = &at
 				return nil
 			},
 		})
@@ -366,8 +405,15 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 			// the provider said. A checkpoint that committed stays.
 			return false, err
 		}
+		if checkpointed {
+			saving := *state
+			final = &saving
+		}
 		return checkpointed || changed(before, *state), nil
 	})
+	if err != nil && final != nil {
+		committed, err = r.saveAgain(detached, ref, *atCheckpoint, *final, err)
+	}
 	if err != nil {
 		return core.AccessCredential{}, stack.Wrap(err)
 	}
@@ -404,6 +450,61 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 			renewed: committed.Revision != before.Revision})
 	}
 	return credential, nil
+}
+
+// saveAgain saves final, the state a Retrieve left after its checkpoint committed
+// atCheckpoint, once its save failed with err: until it lands, the connection says
+// needs_reauthorization and credentials the provider may have rotated are held only in memory.
+// It retries while err is one a retry can fix (retryable), up to saveAttempts saves in all,
+// each in an Update of its own on ctx, the refresh's detached context. An attempt writes only
+// while the connection is still as the checkpoint left it, and finds a save that landed with
+// its answer lost done. It returns the state it committed, or logs the last error once with the
+// connection's id and returns it: the connection then keeps the checkpoint's status.
+func (r *Resolver) saveAgain(ctx context.Context, ref core.ConnectionRef, atCheckpoint, final core.CredentialState, err error) (*core.CredentialState, error) {
+	attempts, pause := 1, saveFirstPause
+	for attempts < saveAttempts && retryable(err) && wait(ctx, pause) {
+		attempts, pause = attempts+1, 2*pause
+		var committed *core.CredentialState
+		err = r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+			committed = state
+			if !changed(final, *state) {
+				return false, nil
+			}
+			if changed(atCheckpoint, *state) {
+				return false, stack.Wrap(errMovedSinceCheckpoint)
+			}
+			state.Credentials, state.ExpiresAt = final.Credentials, final.ExpiresAt
+			state.Status, state.LastError = final.Status, final.LastError
+			return true, nil
+		})
+		if err == nil {
+			return committed, nil
+		}
+	}
+	r.logger.Error("could not save a connector credential refresh; the connection needs a reconnect",
+		"connection", ref.ConnectionID, "attempts", attempts, "error", err)
+	return nil, err
+}
+
+// retryable says whether saving the same state again may pass: not when the connection moved
+// or is gone (store.ErrConnectorConnectionChanged, store.ErrNoConnectorConnection,
+// errMovedSinceCheckpoint), nor when the store or Postgres refused the row itself
+// (store.Unwritable). A dropped connection, a timeout or a lock may pass.
+func retryable(err error) bool {
+	return !errors.Is(err, store.ErrConnectorConnectionChanged) && !errors.Is(err, store.ErrNoConnectorConnection) &&
+		!errors.Is(err, errMovedSinceCheckpoint) && !store.Unwritable(err)
+}
+
+// wait pauses for d and says whether ctx is still live after it.
+func wait(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // audit records one change to a connection's grant, with the correlation ids ctx carries

@@ -451,7 +451,7 @@ func (s *Session) SawVideo() {
 	}
 	s.mu.Unlock()
 	if !seen && s.records != nil {
-		s.afterRow(func() { s.records.SawVideo(s.id) })
+		s.afterRow(func() { s.records.SawVideo(s.spec.CustomerID, s.id) })
 	}
 }
 
@@ -1074,7 +1074,7 @@ func (s *Session) SetToolTimeout(milliseconds int) {
 	}
 	if s.records != nil {
 		kind := string(s.spec.CallerKind)
-		s.afterRow(func() { s.records.ToolTimeout(s.id, kind, milliseconds) })
+		s.afterRow(func() { s.records.ToolTimeout(s.spec.CustomerID, s.id, kind, milliseconds) })
 	}
 }
 
@@ -1177,11 +1177,13 @@ func (s *Session) AwaitCommand(ctx context.Context, id, text, clientID string) (
 	return receipt, nil
 }
 
-// Report publishes a failure the watcher should see, without ending the session.
+// Report publishes a failure the watcher should see, without ending the session. It logs the
+// failure, since what the turns it fails keep says only which part failed.
 func (s *Session) Report(err error, context string) {
 	if err == nil {
 		return
 	}
+	s.logger.Warn("a failure reported to the session's watchers", "session", s.id, "context", context, "error", err)
 	s.broadcast(agent.Error{Err: err, Context: context})
 }
 
@@ -1677,13 +1679,13 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 	s.mu.Unlock()
 	if s.records != nil && voice {
-		s.records.Voiced(s.id)
+		s.records.Voiced(s.spec.CustomerID, s.id)
 	}
 	// Each time voice is started or stopped begins a call of its own, so every moment of a
 	// session is on exactly one call.
 	if s.calls != nil {
 		now := time.Now()
-		s.calls.Ended(s.nextCall(now), now.UTC())
+		s.calls.Ended(s.spec.CustomerID, s.nextCall(now), now.UTC())
 		s.calls.Started(row(s))
 	}
 
@@ -2304,10 +2306,15 @@ func (s *Session) abandonTurns() {
 // failTurns records a failure against every turn still in flight and closes them. The turn
 // the prompt injection screen refused, with every reply that continued it, is closed as
 // refused, so what it asked is never replayed to a model; the others failed with it.
+// Callers read the reason back, so it names the part that failed and never the cause's text,
+// which whoever reported it logged.
 func (s *Session) failTurns(where string, cause error, refusedTurn string) {
-	reason := cause.Error()
+	reason := "the turn failed"
 	if where != "" {
-		reason = where + ": " + reason
+		reason = where + " failed"
+	}
+	if errors.Is(cause, policy.ErrPromptInjection) {
+		reason = policy.ErrPromptInjection.Error()
 	}
 
 	s.turnsMu.Lock()
@@ -2345,7 +2352,7 @@ func (s *Session) endTurn(turnID, status, failure string) {
 	if !open {
 		return
 	}
-	s.records.Responded(turn.id, status, failure, time.Now().UTC())
+	s.records.Responded(s.spec.CustomerID, turn.id, status, failure, time.Now().UTC())
 }
 
 // remember keeps what was said, which is all a review needs of a call.

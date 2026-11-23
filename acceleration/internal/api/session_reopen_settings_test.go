@@ -242,6 +242,46 @@ func (s *SessionReopenSettingsSuite) TestANegativeToolTimeoutOnAResumeIsRefused(
 		ResumeSessionRequest{ToolTimeoutMs: pointerTo(-1)}, nil))
 }
 
+// A resume that cannot carry the conversation on for a reason of the request's own, tools that
+// name one tool twice, is the caller's to change: a 400 that says why, not the 500 of a failure
+// that is ours.
+func (s *SessionReopenSettingsSuite) TestAResumeNamingOneToolTwiceIsRefusedAsABadRequest() {
+	ended := s.endedWith(0, nil)
+	twice := append(*s.declared("book_flight"), *s.declared("book_flight")...)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+ended+"/resume",
+		ResumeSessionRequest{Tools: &twice})
+
+	s.Equal(http.StatusBadRequest, status, string(body))
+	s.Contains(string(body), `"type":"invalid_request"`)
+	s.Contains(string(body), `"code":"invalid_request"`)
+	s.Contains(string(body), "tool book_flight is declared twice")
+}
+
+// A message to a stopped conversation whose agent config can no longer be run is the same: the
+// reopen is refused as a bad request, with the reason.
+func (s *SessionReopenSettingsSuite) TestAMessageToAConversationWhoseConfigCannotRunIsRefusedAsABadRequest() {
+	var config AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "reopened-" + s.utils.uuid(), "mode": "text"}, &config))
+	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: &config.Id})
+	s.Require().Eventually(func() bool { return s.stored(opened.Id) }, settleFor, 20*time.Millisecond,
+		"the row is written")
+	s.serverClient.stopSession(opened.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), config.Id)
+	s.Require().NoError(err)
+	stored.Harness = "gone"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &stored))
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
+		SayRequest{Text: "where is my order"})
+
+	s.Equal(http.StatusBadRequest, status, string(body))
+	s.Contains(string(body), `"type":"invalid_request"`)
+	s.Contains(string(body), `"code":"invalid_request"`)
+	s.Contains(string(body), `there is no harness called \"gone\"`)
+}
+
 // endedWith is a conversation the backend opened with timeout and tools, whose row was
 // written and which was then stopped.
 func (s *SessionReopenSettingsSuite) endedWith(timeout int, tools *[]SessionTool) string {

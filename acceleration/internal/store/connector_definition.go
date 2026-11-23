@@ -78,6 +78,17 @@ func (d *ConnectorDefinition) Validate() error {
 		done()
 }
 
+// Resolve is the definition's manifest resolved for one connection (core.Manifest.Resolve),
+// marked built-in when the definition is stored under BuiltinCustomer.
+func (d ConnectorDefinition) Resolve(scheme string, inputs, metadata map[string]string) (core.ResolvedManifest, error) {
+	resolved, err := d.Manifest.Resolve(scheme, inputs, metadata)
+	if err != nil {
+		return core.ResolvedManifest{}, err
+	}
+	resolved.Builtin = d.CustomerID == BuiltinCustomer
+	return resolved, nil
+}
+
 // ConnectorDefinitions are the connector manifests, built-in and custom, by revision, in the
 // shared database.
 type ConnectorDefinitions struct {

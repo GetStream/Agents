@@ -2,21 +2,27 @@ name: Publish Kotlin SDK
 
 # Publishes io.getstream:stream-agents-android-core to the Stream repository (stream-io-repo.com).
 #
-# Only release-kotlin-* branches publish, and gradle.properties' `version` must match the branch:
+# A GitHub release of the whole repo publishes, and so do release-kotlin-* branches, whose
+# gradle.properties `version` must match the branch:
+# - Publishing a release tagged vX.Y.Z or X.Y.Z publishes X.Y.Z from the tagged commit, whatever
+#   gradle.properties says, then tags that commit `sdk-kotlin-vX.Y.Z`. The commit must be on main.
+#   Nothing is published for a pre-release, for another tag (sdk-js-v*, sdks/go/v*, a suffix such
+#   as -rc.1), or when X.Y.Z is not newer than the last `sdk-kotlin-v*` tag or already published.
+#   A pre-release made a release later publishes nothing either.
 # - A push to release-kotlin-X.Y.Z-SNAPSHOT (version=X.Y.Z-SNAPSHOT) publishes snapshot
 #   X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT, which expires after 7 days. X.Y.Z must be newer than the last
 #   release.
 # - A pull request from release-kotlin-X.Y.Z (version=X.Y.Z) fails unless X.Y.Z is newer than the
 #   last `sdk-kotlin-v*` tag and not already published. Merging it into main publishes the
-#   release, then tags the commit `sdk-kotlin-vX.Y.Z`.
+#   release, then tags the commit `sdk-kotlin-vX.Y.Z`. This is how a Kotlin-only release, such as
+#   a patch between releases of the repo, is made: it makes no GitHub release.
 # - Any other push to main publishes nothing, even one that sets a new version: only the merge of
 #   a pull request from release-kotlin-X.Y.Z does. Other pull requests do not run the jobs.
 #   If the run of a release merge says nothing is published, re-run all its jobs: the lookup of
 #   its pull request can lag right after the merge.
-#
-# There is no GitHub release: publishing one starts the Python release (release.yml), and the
-# repository's releases are the Python packages'.
 on:
+  release:
+    types: [ published ]
   push:
     branches: [ "main", "release-kotlin-*-SNAPSHOT" ]
     paths:
@@ -39,7 +45,7 @@ jobs:
   version:
     name: Check the version
     # Of the pull requests, only a release's: one from a branch named release-kotlin-X.Y.Z.
-    if: github.event_name == 'push' || startsWith(github.head_ref, 'release-kotlin-')
+    if: github.event_name == 'push' || github.event_name == 'release' || startsWith(github.head_ref, 'release-kotlin-')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,8 +65,52 @@ jobs:
         env:
           BRANCH: ${{ github.head_ref || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
+          # A release of the whole repo, tagged vX.Y.Z or X.Y.Z, publishes X.Y.Z from its commit.
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            if [ "$PRERELEASE" = true ]; then
+              echo "::notice::Nothing is published: $TAG is a pre-release."
+              echo "channel=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "::notice::Nothing is published: $TAG is not a release of the whole repo, vX.Y.Z or X.Y.Z."
+              echo "channel=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            version="${BASH_REMATCH[1]}"
+            last=$(git tag -l 'sdk-kotlin-v*' | sed 's/^sdk-kotlin-v//' | sort -V | tail -1)
+            if [ "$version" = "$last" ]; then
+              echo "::notice::Nothing is published: $version is already released."
+              echo "channel=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$(printf '%s\n%s\n' "$last" "$version" | sort -V | tail -1)" != "$version" ]; then
+              echo "::notice::Nothing is published: $version is lower than the last release, $last."
+              echo "channel=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # The checkout fetched every branch (fetch-depth: 0), main with them.
+            git rev-parse -q --verify refs/remotes/origin/main >/dev/null || { echo "::error::origin/main was not fetched"; exit 1; }
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::$TAG is on $GITHUB_SHA, which is not on main"; exit 1
+            fi
+            pom="https://stream-io-repo.com/io/getstream/stream-agents-android-core/$version/stream-agents-android-core-$version.pom"
+            if curl -sfI "$pom" >/dev/null; then
+              echo "::notice::Nothing is published: $version is already published."
+              echo "channel=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            {
+              echo "version=$version"
+              echo "channel=releases"
+              echo "coordinate=io.getstream:stream-agents-android-core:$version"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # A push to main is a release only as the merge of a pull request from release-kotlin-X.Y.Z.
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "$BRANCH" = main ]; then
             heads=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
@@ -113,7 +163,7 @@ jobs:
   publish:
     name: Build, sign and stage
     needs: version
-    if: github.event_name == 'push' && needs.version.outputs.channel != 'none'
+    if: (github.event_name == 'push' || github.event_name == 'release') && needs.version.outputs.channel != 'none'
     runs-on: ubuntu-latest
     # The signing key is a GetStream organization secret: this environment does not limit it, and any
     # workflow in this repository can read it. AI-3372 tracks limiting it to the release jobs.

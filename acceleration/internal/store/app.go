@@ -117,8 +117,8 @@ func (r *Apps) Get(ctx context.Context, id string) (App, error) {
 // That is the same reading the authenticator takes: a deployment naming a customer without
 // having written an app row for it must not have every end user turned away because of it.
 // Stream writes settings in Postgres and no operation of the router does, so nothing forgets
-// the key: a change is seen once the cache's TTL has passed, as the settings an API key is
-// read with (APIKeys.GetLive) are.
+// the key: a change is seen once the cache's TTL has passed, which is an hour. The settings
+// an API key is read with (APIKeys.GetLive) are cached for a minute only.
 func (r *Apps) GetSettings(ctx context.Context, appID string) (AppSettings, error) {
 	if appID == "" {
 		return AppSettings{}, stack.Wrap(errors.New("store: an app id is required"))

@@ -599,8 +599,9 @@ public class AgentSession internal constructor(
                 throw e
             } catch (e: Exception) {
                 // The model can only say something useful about a tool that did not work if
-                // it is told that it did not work.
-                Command.ToolResult(call.id, error = e.message ?: e.toString(), requestId = call.requestId, turnId = call.turnId)
+                // it is told that it did not work. What it is told is the app's choice
+                // (`onToolError`), since it may repeat it.
+                Command.ToolResult(call.id, error = toolFailure(call, e, backend.onToolError), requestId = call.requestId, turnId = call.turnId)
             }
             try {
                 socket?.send(result)

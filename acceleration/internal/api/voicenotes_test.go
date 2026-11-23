@@ -184,6 +184,7 @@ func (s *VoiceNotesSuite) TestAVoiceNoteTheProviderFailsOnIsAModelFailureAndNoth
 
 	s.Equal(http.StatusServiceUnavailable, status)
 	s.Equal(codeModelFailed, failure.Code)
+	s.NotContains(failure.Message, "answered 500", "the vendor's words are left for the log")
 	s.nothingWasAsked(opened)
 }
 

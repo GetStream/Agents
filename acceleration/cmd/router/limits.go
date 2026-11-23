@@ -118,13 +118,25 @@ func limitNotices(settings config.Config, sender *limitnotice.Sender, logger *sl
 }
 
 // costAnomalies is what posts through sender when an organization's spend today jumps past its
-// own baseline, or nil when there is no sender or no Postgres to read the spend from. It runs
-// whatever the limits' mode: work is priced and recorded with limits off too.
+// own baseline, and each day the day before's activity digest, and deletes the activity past its
+// keep, or nil when there is no Postgres. With no sender it posts nothing and still deletes. It
+// runs whatever the limits' mode: work is priced and recorded with limits off too.
 func costAnomalies(db *store.Store, sender *limitnotice.Sender, logger *slog.Logger) *limitnotice.Anomalies {
-	if db == nil || sender == nil {
+	options, ok := costAnomalyOptions(db, sender, logger)
+	if !ok {
 		return nil
 	}
-	return limitnotice.NewAnomalies(limitnotice.AnomalyOptions{Store: db, Sender: sender, Logger: logger})
+	return limitnotice.NewAnomalies(options)
+}
+
+// costAnomalyOptions is how costAnomalies configures the check, and false when it does not run.
+// Without a sender, which needs a Slack token and channel, the check only deletes old activity:
+// the retention does not depend on Slack.
+func costAnomalyOptions(db *store.Store, sender *limitnotice.Sender, logger *slog.Logger) (limitnotice.AnomalyOptions, bool) {
+	if db == nil {
+		return limitnotice.AnomalyOptions{}, false
+	}
+	return limitnotice.AnomalyOptions{Store: db, Sender: sender, Logger: logger, Digest: sender != nil}, true
 }
 
 // usageCounters connects to the Redis the usage service keeps its spend counters in, or nil

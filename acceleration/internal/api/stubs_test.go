@@ -924,10 +924,14 @@ type stubConversation struct {
 // landed on.
 var conversing = make(chan *stubConversation, 16)
 
-func stsrouterStub() (*stsrouter.Router, error) {
+func stsrouterStub(writer *routing.Writer) (*stsrouter.Router, error) {
 	config := routing.ModalityConfig{
 		Providers: []routing.ProviderConfig{{
 			Provider: "stub", Model: "stub-sts", Languages: []string{"en"}, Realtime: true,
+			Voices: []routing.ModelVoice{
+				{ID: "alpha", Name: "Alpha", Description: "Warm, natural", Gender: "female", Default: true},
+				{ID: "beta", Name: "Beta", Description: "Clear, steady", Gender: "male"},
+			},
 			// What a session's speech-to-speech agent asks of its model (MessageHooksSuite).
 			Terms: []options.Term{options.InputTranscript, options.OutputTranscript},
 		}},
@@ -943,7 +947,7 @@ func stsrouterStub() (*stsrouter.Router, error) {
 		}
 		return stub, nil
 	})
-	return stsrouter.New(stsrouter.Options{Config: config, Registry: registry})
+	return stsrouter.New(stsrouter.Options{Config: config, Registry: registry, Writer: writer})
 }
 
 func newStubConversation(capabilities sts.Capabilities) *stubConversation {

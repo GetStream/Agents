@@ -268,28 +268,15 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 }
 
 // loggedCall is what every "model call timing" line says about whose call it was and what
-// served it. The line is logged with no request context, so the app is named here, under the
-// field the request lines name it with (api.NewLogHandler), or it could not be filtered by app.
-// A hedged response names its hedge and whether it was kept, so the attempt that lost can be
-// told apart from the one the caller got.
+// served it (routing.LoggedCall), and the host the provider sent it to. A hedged response names
+// its hedge and whether it was kept, so the attempt that lost can be told apart from the one
+// the caller got.
 func (s *Session) loggedCall(stat routing.Stat) []any {
-	fields := []any{"call", s.owner.CallID}
-	if stat.CustomerID != "" {
-		fields = append(fields, "app_id", stat.CustomerID)
-	}
-	if stat.AgentID != "" {
-		fields = append(fields, "agent_id", stat.AgentID)
-	}
-	fields = append(fields, "provider", s.config.Provider, "model", s.config.Model)
+	var served []any
 	if host := vendorHost(s.provider); host != "" {
-		fields = append(fields, "vendor_host", host)
+		served = []any{"vendor_host", host}
 	}
-	if s.config.Region != "" {
-		fields = append(fields, "region", s.config.Region)
-	}
-	if s.config.BYOK {
-		fields = append(fields, "byok", true)
-	}
+	fields := routing.LoggedCall(s.owner.CallID, stat.Owner, s.config, served...)
 	if hedge, hedged := stat.Attributes[routing.AttributeHedge]; hedged {
 		fields = append(fields, "hedge", hedge, "kept", stat.Attributes[routing.AttributeKept])
 	}
@@ -297,8 +284,9 @@ func (s *Session) loggedCall(stat routing.Stat) []any {
 }
 
 // vendorHost is the host a provider sends its requests to, for a provider that says
-// (openaicompat.LLM.Host). A provider that says nothing is one not built on openaicompat
-// (mock), or one whose native adapter takes an instance endpoint (openai, anthropic Messages).
+// (openaicompat.LLM.Host, and the native openai and anthropic Messages adapters). Each says
+// its default endpoint's host too, so every call names where it ran. A provider that says
+// nothing is one with no endpoint to name (mock).
 func vendorHost(provider Provider) string {
 	var inner any = provider
 	if wrapped, ok := provider.(started); ok {

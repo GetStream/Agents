@@ -89,6 +89,7 @@ func (a *Agent) respondNative(ctx context.Context, text string, images []llm.Ima
 	a.history = append(a.history, llm.Message{Role: llm.User, Content: harness.Defang(text)})
 	a.heardText = text
 	a.lastParticipant = caller
+	a.lastWriter = writer{}
 	a.scheduled = routing.ScheduledTurn(ctx)
 	a.mu.Unlock()
 	a.turns.typedTurn()
@@ -106,6 +107,7 @@ func (a *Agent) hear(inbound InboundAudio) {
 	if a.bound.ID == "" {
 		a.bound = inbound.Participant
 		a.lastParticipant = inbound.Participant
+		a.lastWriter = writer{}
 		a.logger.Debug("bound the speech-to-speech session to a participant",
 			"participant", inbound.Participant.ID)
 	}
@@ -291,7 +293,11 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			return
 		default:
 			a.fail(ErrPlaybackFull, "sts")
-			go a.Close()
+			go func() {
+				if err := a.Close(); err != nil {
+					a.logger.Error("could not leave after the playback fell behind", "error", err)
+				}
+			}()
 			return
 		}
 	}
@@ -322,6 +328,7 @@ func (a *Agent) consumeSTS(p *pipeline, speech *stsrouter.Session, events <-chan
 		case sts.SpeechStarted:
 			a.mu.Lock()
 			a.lastParticipant = a.participantOr(typed.Participant)
+			a.lastWriter = writer{}
 			a.lastHeardAt = typed.At
 			a.mu.Unlock()
 
@@ -560,6 +567,7 @@ func (a *Agent) heardNative(transcript sts.InputTranscript) {
 	a.history = append(a.history, llm.Message{Role: llm.User, Content: harness.Defang(text)})
 	a.heardText = text
 	a.lastParticipant = participant
+	a.lastWriter = writer{}
 	a.lastHeardAt = time.Now()
 	a.scheduled = false
 	// SpeechStopped starts the wait. Transcription can finish after the reply, so it

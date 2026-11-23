@@ -142,23 +142,23 @@ func (d *dispatcher) checkedCall(ctx context.Context, r route, call llm.ToolCall
 	started := time.Now()
 	current, err := d.recheck(ctx, r)
 	if err != nil {
-		d.record(r, call, started, failure{kind: store.InvocationDenied}, err)
+		d.record(ctx, r, call, started, failure{kind: store.InvocationDenied}, err)
 		return nil, err
 	}
 	if r.binding.RequiresApproval(r.tool) || current.RequiresApproval(r.tool) {
 		allowed, parts, how, err := d.holdForApproval(ctx, r, call)
 		if !allowed {
-			d.record(r, call, started, how, err)
+			d.record(ctx, r, call, started, how, err)
 			return parts, err
 		}
 		started = time.Now()
 		if _, err := d.recheck(ctx, r); err != nil {
-			d.record(r, call, started, failure{kind: store.InvocationDenied}, err)
+			d.record(ctx, r, call, started, failure{kind: store.InvocationDenied}, err)
 			return nil, err
 		}
 	}
 	parts, how, err := d.call(ctx, r, call)
-	d.record(r, call, started, how, err)
+	d.record(ctx, r, call, started, how, err)
 	return parts, err
 }
 
@@ -214,8 +214,10 @@ func answerOf(exchange *core.Exchange) failure {
 // nothing the line does not (AI-1244). Example: a 403 whose body says why keeps that body; an
 // MCP isError, which comes in a 200, keeps the tool's words.
 //
-// Every call is also counted, by its connector and how it ended, and timed (metrics.go).
-func (d *dispatcher) record(r route, call llm.ToolCall, started time.Time, how failure, err error) {
+// Every call is also counted, by its connector and how it ended, and timed (metrics.go), and
+// reported to the agent for its own line (agent.ReportTool): the connector, the kind and the
+// row's error_message, the only words of the failure that line logs.
+func (d *dispatcher) record(ctx context.Context, r route, call llm.ToolCall, started time.Time, how failure, err error) {
 	sessionID := d.spec.ID
 	var arguments []store.ArgumentShape
 	if d.spec.Incognito {
@@ -245,6 +247,7 @@ func (d *dispatcher) record(r route, call llm.ToolCall, started time.Time, how f
 		row.ProviderStatus = &how.status
 	}
 	d.invocations.Record(row)
+	agent.ReportTool(ctx, agent.ToolReport{Connector: row.ConnectorID, ErrorCode: how.kind, Error: row.ErrorMessage})
 	if how.kind == "" {
 		return
 	}

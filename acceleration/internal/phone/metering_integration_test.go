@@ -4,8 +4,10 @@ package phone
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +27,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
 )
 
@@ -819,6 +822,57 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	s.Len(s.rows(ModelNumber), 2, "a number released is not billed again")
 }
 
+func (s *MeteringSuite) TestAnImportedRequestNamingANumbersComingMonthDoesNotStopItBeingBilled() {
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
+	s.Require().NoError(err)
+	s.row(ModelNumber)
+	next := monthAfter(bought.PurchasedAt, 1)
+	month := routing.UsageID("number", bought.Vendor, bought.E164,
+		strconv.FormatInt(bought.PurchasedAt.UTC().UnixMicro(), 10), next.Format("2006-01"))
+
+	// A request row as an export carries it, sent with the usage id of the number's next month.
+	other := "customer-" + uuid.NewString()
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &store.Request{UsageID: uuid.Must(uuid.NewV7()), CustomerID: other,
+		Modality: string(routing.Phone), Provider: s.vendor.vendor, Model: ModelNumber, StartedAt: next, Success: true}))
+	var row map[string]any
+	_, err = s.store.ExportCustomer(s.ctx, other, func(table string, encoded json.RawMessage) error {
+		if table == "requests" {
+			return json.Unmarshal(encoded, &row)
+		}
+		return nil
+	})
+	s.Require().NoError(err)
+	s.Require().NotNil(row)
+	row["usage_id"] = month.String()
+	encoded, err := json.Marshal(row)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "requests", encoded))
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "requests", encoded))
+
+	// Rows written to ship to a usage service that is not there, so they stay to be shipped.
+	client, err := usage.NewClient(usage.ClientOptions{URL: "http://127.0.0.1:1", Token: "token"})
+	s.Require().NoError(err)
+	writer := routing.NewWriter(routing.WriterOptions{Store: s.store, Usage: client, Logger: slog.New(slog.DiscardHandler)})
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		writer.Close(ctx)
+	})
+	recorder := routing.NewRecorderOn(routing.Phone, writer, s.prices, slog.New(slog.DiscardHandler))
+	_, err = Rentals{Store: s.store, Recorder: recorder, Logger: slog.New(slog.DiscardHandler)}.
+		Bill(s.ctx, bought.PurchasedAt.Add(-time.Hour), next.Add(time.Hour))
+	s.Require().NoError(err)
+
+	s.Require().Eventually(func() bool {
+		var billed []store.Request
+		s.Require().NoError(s.store.ShardDB().NewSelect().Model(&billed).
+			Where("customer_id = ?", s.customer).Where("usage_id = ?", month).Scan(s.ctx))
+		return len(billed) == 1 && billed[0].Billable && billed[0].ToShip && billed[0].APIKey == OriginNumberRental
+	}, 5*time.Second, 25*time.Millisecond, "the number's next month is billed")
+	s.Len(s.rows(ModelNumber), 3, "the month it was bought in, the next one, and the imported row once")
+}
+
 func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 	now := time.Now().UTC().Truncate(time.Second)
 	e164 := aNumber()
@@ -833,6 +887,26 @@ func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 
 	s.Never(func() bool { return len(s.rows(ModelNumber)) > 0 }, time.Second, 50*time.Millisecond,
 		"the month that began ten days ago began before the job was switched on")
+}
+
+func (s *MeteringSuite) TestAMovedCustomersBoughtNumberIsNotBilledAgainHere() {
+	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	now := time.Now().UTC().Truncate(time.Second)
+	// The month that began three days ago is the source's to bill, which held the number then.
+	row, err := json.Marshal(map[string]any{
+		"id": rand.Int64N(1 << 50), "e164": aNumber(), "vendor": s.vendor.vendor, "country": "US",
+		"capabilities": []string{"voice"}, "monthly_cost_micros": 1_000_000, "customer_id": s.customer,
+		"tags": map[string]string{}, "purchased_at": now.AddDate(0, -1, -3),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "phone_numbers", row))
+	rentals := Rentals{Store: s.store, Recorder: s.recorder, Logger: slog.New(slog.DiscardHandler)}
+
+	_, err = rentals.Bill(s.ctx, now.AddDate(0, 0, -30), time.Now().UTC())
+	s.Require().NoError(err)
+
+	s.Never(func() bool { return len(s.rows(ModelNumber)) > 0 }, time.Second, 50*time.Millisecond,
+		"the destination bills no month of a number it does not hold")
 }
 
 // row waits for the customer's one row of a model and reads it.

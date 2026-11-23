@@ -88,7 +88,7 @@ var seedStatements = []string{
 
 	`INSERT INTO call_legs (customer_id, organization_id, api_key, user_id, stream_app_pk, call_type, call_id,
 		stream_session_id, participant_session, vendor, vendor_call_id, direction, local_number, remote_number,
-		agent_id, dialed_at, started_at, ended_at, end_reason, token, placed_at, outcome, decided_at)
+		agent_id, dialed_at, started_at, ended_at, end_reason, token_hash, placed_at, outcome, decided_at)
 	SELECT 'customer-' || (n % 200), 'org-' || (n % 100), 'key-' || (n % 1000), 'user-' || (n % 20000),
 		CASE WHEN n % 7 <> 0 THEN 1 + n % 3 END, 'default', 'stream-' || n, 'sfu-' || n,
 		CASE WHEN n % 50 = 1 OR n % 100 BETWEEN 2 AND 9 THEN '' ELSE 'phone-' || n END, 'telnyx',
@@ -97,7 +97,7 @@ var seedStatements = []string{
 		at, CASE WHEN n % 50 <> 1 AND n % 100 NOT BETWEEN 2 AND 9 THEN at + interval '5 seconds' END,
 		CASE WHEN n % 100 NOT IN (0, 1) THEN at + interval '5 minutes' END,
 		CASE WHEN n % 100 IN (0, 1) THEN '' WHEN n % 100 < 10 THEN 'unanswered' ELSE 'left' END,
-		CASE WHEN n % 2 = 0 AND n % 100 IN (0, 2) THEN 'token-' || n END, CASE WHEN n % 2 = 0 THEN at END,
+		CASE WHEN n % 2 = 0 AND n % 100 IN (0, 2) THEN encode(sha256(convert_to('token-' || n, 'UTF8')), 'hex') END, CASE WHEN n % 2 = 0 THEN at END,
 		CASE WHEN n % 2 = 0 AND n % 100 > 10 THEN 'completed' END, CASE WHEN n % 2 = 0 AND n % 100 > 10 THEN at + interval '5 minutes' END
 	FROM generate_series(1, ?1) AS n, LATERAL (SELECT ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
 
@@ -309,7 +309,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				AgentID: "agent-7", CallType: "default", CallID: "stream-7", StartedAt: s.base})
 		}},
 		{name: "Calls.Finish", index: "calls_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Calls.Finish(ctx, "seeded-call-100", s.base)
+			return store.Calls.Finish(ctx, "customer-100", "seeded-call-100", s.base)
 		}},
 		{name: "Calls.ChangeModels", index: "calls_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Calls.ChangeModels(ctx, &Call{ID: "seeded-call-7", CustomerID: "customer-7", LLM: "gpt"})
@@ -345,7 +345,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Calls.Select(ctx, "customer-7", CallFilter{AgentID: "agent-7"})
 			return err
 		}},
-		{name: "Calls.Select by campaign", index: "calls_campaign_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Calls.Select by campaign", index: "calls_customer_campaign_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Calls.Select(ctx, "customer-10", CallFilter{CampaignID: "campaign-10"})
 			return err
 		}},
@@ -383,7 +383,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				RemoteNumber: "+16660000007", StreamSessionID: "explained-sfu", DialedAt: s.base})
 			return err
 		}},
-		{name: "CallLegs.Open placed", index: "call_legs_token_key", run: func(ctx context.Context, store *Store) error {
+		{name: "CallLegs.Open placed", index: "call_legs_token_hash_key", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CallLegs.Open(ctx, &CallLeg{Token: "token-2", CustomerID: "customer-2", CallType: "default",
 				CallID: "stream-2", Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15550000002",
 				RemoteNumber: "+16660000002", DialedAt: s.base})
@@ -429,10 +429,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.CallLegs.Placed(ctx, "customer-8", "telnyx", "vendor-8")
 			return err
 		}},
-		{name: "CallLegs.Unplace", index: "call_legs_token_key", run: func(ctx context.Context, store *Store) error {
+		{name: "CallLegs.Unplace", index: "call_legs_token_hash_key", run: func(ctx context.Context, store *Store) error {
 			return store.CallLegs.Unplace(ctx, "token-102")
 		}},
-		{name: "CallLegs.ChangeOutcome", index: "call_legs_token_key", run: func(ctx context.Context, store *Store) error {
+		{name: "CallLegs.ChangeOutcome", index: "call_legs_token_hash_key", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CallLegs.ChangeOutcome(ctx, PlacedWhere{Token: "token-100"}, func(*CallLeg) bool { return false })
 			return err
 		}},
@@ -441,7 +441,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				CallID: "stream-100", LocalNumber: "+15550000100", RemoteNumber: "+16660000100"}, func(*CallLeg) bool { return false })
 			return err
 		}},
-		{name: "CallLegs.GetByToken", index: "call_legs_token_key", run: func(ctx context.Context, store *Store) error {
+		{name: "CallLegs.GetByToken", index: "call_legs_token_hash_key", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CallLegs.GetByToken(ctx, "token-100")
 			return err
 		}},
@@ -449,7 +449,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.CallLegs.SelectPlaced(ctx, "customer-8", []string{"stream-8", "stream-208"})
 			return err
 		}},
-		{name: "CallLegs.ClearTokens", index: "call_legs_token_placed_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "CallLegs.ClearTokens", index: "call_legs_token_hash_placed_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CallLegs.ClearTokens(ctx, s.base.Add(-60*24*time.Hour))
 			return err
 		}},
@@ -459,16 +459,16 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				UserID: "user-7", CallerKind: "user", CreatedAt: s.base})
 		}},
 		{name: "Sessions.SetToolTimeout", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.SetToolTimeout(ctx, "seeded-session-7", "search", 1000)
+			return store.Sessions.SetToolTimeout(ctx, "customer-7", "seeded-session-7", "search", 1000)
 		}},
 		{name: "Sessions.Close", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.Close(ctx, "seeded-session-100", s.base, "left")
+			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, "left")
 		}},
 		{name: "Sessions.SawVideo", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.SawVideo(ctx, "seeded-session-7")
+			return store.Sessions.SawVideo(ctx, "customer-7", "seeded-session-7")
 		}},
 		{name: "Sessions.Voiced", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.Voiced(ctx, "seeded-session-7")
+			return store.Sessions.Voiced(ctx, "customer-7", "seeded-session-7")
 		}},
 		{name: "Sessions.Describe", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Describe(ctx, "customer-7", "seeded-session-7", "call 7", "", nil)
@@ -579,7 +579,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Responses.Finish", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Responses.Finish(ctx, "explained-response", ResponseCompleted, "", s.base)
+			return store.Responses.Finish(ctx, "customer-7", "explained-response", ResponseCompleted, "", s.base)
 		}},
 		{name: "Responses.Replies", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Responses.Replies(ctx, "customer-7", "conversation-7", []string{"turn-7"})

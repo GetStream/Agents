@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 -- A trunk made for one number, before trunks were shared or without a key to seal a shared
 -- one's password, is a row too: its password stays sealed to the number it was made for, and a
 -- line adopts it into its group.

@@ -15,6 +15,7 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/migrations"
 )
@@ -48,10 +49,10 @@ const (
 // Migrate applies every pending migration: the shared set to the shared database and the
 // shard set to this shard's, which for a deployment of one database is the same one.
 func (s *Store) Migrate(ctx context.Context) error {
-	if err := s.migrate(ctx, s.global, globalSet); err != nil {
+	if err := s.migrate(ctx, s.globalDSN, globalSet); err != nil {
 		return err
 	}
-	if err := s.migrate(ctx, s.shard, shardSet); err != nil {
+	if err := s.migrate(ctx, s.shardDSN, shardSet); err != nil {
 		return fmt.Errorf("store: shard: %w", err)
 	}
 	// Attached here rather than in a migration of their own, so that a table added later
@@ -65,10 +66,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) migrate(ctx context.Context, db *bun.DB, set migrationSet) error {
+func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error {
+	// A pool of its own with no read timeout: the serving pool gives up on a statement after
+	// the driver's 10 s, and a backfill or an index build on a large table takes longer. The
+	// server would go on running it, holding its locks, while the router restarted into it.
+	db := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), pgdriver.WithReadTimeout(0)))
+	defer db.Close() //nolint:errcheck // a pool the migration is done with
 	// Every shard's routers start against the shared database at once in a rollout, and
 	// two goose runs on one database collide, so one migrates while the others wait.
-	conn, err := db.DB.Conn(ctx)
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
@@ -99,7 +105,7 @@ func (s *Store) migrate(ctx context.Context, db *bun.DB, set migrationSet) error
 	}
 	// A provider of its own rather than goose's globals: the two sets record their versions
 	// in tables of their own, and the ledger migrates in the same process.
-	provider, err := goose.NewProvider("", db.DB, set.files, goose.WithStore(versions))
+	provider, err := goose.NewProvider("", db, set.files, goose.WithStore(versions))
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
@@ -129,6 +135,18 @@ func adoptLegacy(ctx context.Context, conn *sql.Conn, versions database.Store, s
 	}
 	if !head {
 		return fmt.Errorf("store: migrate %s: the database has not applied migration %d; start a release from before the migrations were split first", set.name, legacyHead)
+	}
+	// A migration past the single history's last is one the baseline does not hold, so the
+	// schema is not what the sets build on.
+	var unknown string
+	err = conn.QueryRowContext(ctx, `SELECT coalesce(string_agg(version_id::text, ', ' ORDER BY version_id), '') FROM (
+		SELECT DISTINCT ON (version_id) version_id, is_applied FROM goose_db_version ORDER BY version_id, id DESC) AS latest
+		WHERE is_applied AND version_id > $1`, legacyHead).Scan(&unknown)
+	if err != nil {
+		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+	}
+	if unknown != "" {
+		return fmt.Errorf("store: migrate %s: the database applied migrations %s, which no migration set has; undo them and remove their rows of goose_db_version first", set.name, unknown)
 	}
 	if err := versions.CreateVersionTable(ctx, conn); err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
@@ -272,6 +290,11 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The legs a join delivered after its call ended revives.
 	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
 		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},
+	// The placed leg a status post is about, by its token's hash, and the legs whose status
+	// url is still open.
+	{"shard", "call_legs_token_hash_key", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_key ON call_legs (token_hash)"},
+	{"shard", "call_legs_token_hash_placed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_placed_idx ON call_legs (placed_at) " +
+		"WHERE token_hash IS NOT NULL"},
 	// The queued image jobs of each kind, in the order a claim takes them.
 	{"global", "image_jobs_undecided", "CREATE INDEX CONCURRENTLY IF NOT EXISTS image_jobs_undecided ON image_jobs (next_attempt_at, id) " +
 		"WHERE state = 'queued' AND message = ''"},
@@ -280,6 +303,10 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A session's calls, which deleting the session sets free.
 	{"shard", "calls_session_started_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_session_started_idx ON calls (session_id, started_at DESC) " +
 		"WHERE session_id IS NOT NULL"},
+	// An agent's and a campaign's calls.
+	{"shard", "calls_customer_agent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_customer_agent_idx ON calls (customer_id, agent_id, started_at DESC)"},
+	{"shard", "calls_customer_campaign_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_customer_campaign_idx ON calls (customer_id, campaign_id, started_at DESC) " +
+		"WHERE campaign_id IS NOT NULL"},
 	// A response's alternatives, the responses sharing its parent.
 	{"shard", "agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
 }

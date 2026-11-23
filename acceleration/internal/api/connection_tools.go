@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -31,6 +33,9 @@ var errConnectionToolsOff = notConfigured("connections cannot be validated: conn
 // connection has moved past. 409: the request conflicts with the state of the resource, which
 // the caller can read again and retry (RFC 9110 section 15.5.10).
 var errStaleRevision = conflict("the connection's credentials changed since expected_revision: read it again and retry")
+
+// providerUnreachable is a validate's error when the provider did not answer.
+const providerUnreachable = "the provider could not be reached; validate again later"
 
 // ConnectionCredentials is what a credentials write sends. Values never come back: no
 // response carries them.
@@ -298,6 +303,11 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 	}
 	ref := core.ConnectionRef{CustomerID: connection.CustomerID, ConnectionID: connection.ID}
 	credentials, account, err := scheme.Complete(ctx, core.CompleteInput{Ref: ref, Manifest: manifest, Supplied: values})
+	// A token endpoint the router could not reach is no refusal, and its error names hosts and
+	// addresses.
+	if _, unreached := errors.AsType[net.Error](err); unreached {
+		return nil, err
+	}
 	if err != nil {
 		// A scheme's error names what is wrong, never the value (core AGENTS.md, «Secrets never
 		// print»; contracttest's TestAnErrorAboutAnUnusableValueDoesNotQuoteIt).
@@ -315,6 +325,11 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		// The credential store leaves the revision it committed here (core.CredentialStore).
 		committed = state
 		change.Previous = core.FingerprintsOf(s.connectors.Schemes, state.Credentials)
+		// A write that connects a connection that was not connected begins a grant, as a
+		// consent does (authorizations.go); one that replaces a connected one's keeps it.
+		if state.Status != store.ConnectionConnected {
+			state.ConnectedAt = time.Now().UTC()
+		}
 		state.Credentials = credentials
 		state.Status = store.ConnectionConnected
 		state.LastError = ""
@@ -405,7 +420,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 	if status := answered.status(); record.Code == "" && status >= http.StatusBadRequest {
 		record.Code = strconv.Itoa(status)
 	}
-	if err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, record); err != nil {
+	if err := s.store.ConnectorConnections.PutValidation(ctx, connection.CustomerID, connection.ID, record); err != nil {
 		return nil, err
 	}
 	return response, nil
@@ -724,6 +739,12 @@ func (s *Server) validationAfter(ctx context.Context, connection store.Connector
 			validation.Code = codeCredentialRejected
 		}
 		return &validationResponse{Body: validation}, nil
+	}
+	// A provider the router could not reach is kept as a fixed reason, since the error names
+	// hosts and addresses, the router's own among them; the request log has it.
+	if _, unreached := errors.AsType[net.Error](cause); unreached {
+		recordFailure(ctx, cause, stack.Trace(cause))
+		return failed(now, providerUnreachable), nil
 	}
 	// The error says what failed and where, never a credential: the transport applies those
 	// below everything that writes an error (core AGENTS.md, «Secrets never print»).

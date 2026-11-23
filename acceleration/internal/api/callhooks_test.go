@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -192,6 +193,26 @@ func (s *CallHooksSuite) holdsNoNumber() {
 // loggedAs is id as the log spells it: a call named for the suite's number holds it masked.
 func (s *CallHooksSuite) loggedAs(id string) string {
 	return strings.Replace(id, s.e164, "+1•••"+s.e164[len(s.e164)-2:], 1)
+}
+
+// Defect (AI-3349): the access line of a call Stream signed naming no customer, as no
+// credential names one, though the number rung says whose call it is; or a call with a bad
+// signature naming the number's customer.
+func (s *CallHooksSuite) TestTheAccessLineOfASignedCallNamesTheNumbersCustomer() {
+	s.hold("default", s.callID)
+	served := func(parts ...string) bool {
+		return s.loggedLine(append([]string{`msg="served a request"`, " path=" + phone.CallHookPath + " "}, parts...)...)
+	}
+
+	forged, _ := s.deliver(phone.CallHookPath, s.arriving("default:"+s.callID), sign(s.arriving("default:"+s.callID), "not the secret"))
+	s.Require().Equal(http.StatusUnauthorized, forged)
+	s.Require().Eventually(func() bool { return served(" status=401 ") }, settleFor, 10*time.Millisecond)
+	s.True(served(" status=401 ", ` customer="" `))
+
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+	s.Require().Eventually(func() bool { return served(" status=200 ") }, settleFor, 10*time.Millisecond)
+	// No worker takes it, so it is refused in a 200, with the code it is counted under.
+	s.True(served(" status=200 ", " customer="+s.customerID()+" ", " error_code=unavailable "))
 }
 
 // thisTest is what the current test logged, so a line another test logged for a number
@@ -821,6 +842,18 @@ func (s *CallHooksSuite) TestAnEndedPlacedCallGetsACallSitesRow() {
 	s.Empty(left, "the call's resources are still released")
 }
 
+func (s *CallHooksSuite) TestACallSitesRowSaysNothingOfAStatsReadThatFailed() {
+	s.placed()
+	_, s.stats.failure = net.Dial("tcp", "stats.invalid:443")
+	s.Require().Error(s.stats.failure)
+
+	s.Require().Equal(http.StatusOK, s.end(`{}`))
+
+	row := s.callSitesRow()
+	s.Equal(callSitesUnread, row.Details["error_message"])
+	s.Contains(s.thisTest(), "stats.invalid", "the log keeps what the row does not say")
+}
+
 func (s *CallHooksSuite) TestAnEndedInboundCallsRowNamesTheNumbersSIPHost() {
 	s.holdBridged("default", s.callID, "sip:+15550100001@sip.example.com")
 
@@ -875,11 +908,13 @@ func (s *CallHooksSuite) sitesLine() string {
 }
 
 // recordedStats answers every stats read with one answer, and says which session it was
-// asked for once that answer is given. hold, when set, keeps the answer back until closed.
+// asked for once that answer is given. hold, when set, keeps the answer back until closed;
+// failure, when set, is answered instead.
 type recordedStats struct {
-	asked  chan string
-	answer *getstream.QueryCallSessionParticipantStatsResponse
-	hold   chan struct{}
+	asked   chan string
+	answer  *getstream.QueryCallSessionParticipantStatsResponse
+	hold    chan struct{}
+	failure error
 }
 
 func (r *recordedStats) read(ctx context.Context, _ *getstream.Stream, _, _, session string) (*getstream.QueryCallSessionParticipantStatsResponse, error) {
@@ -891,6 +926,9 @@ func (r *recordedStats) read(ctx context.Context, _ *getstream.Stream, _, _, ses
 		}
 	}
 	r.asked <- session
+	if r.failure != nil {
+		return nil, r.failure
+	}
 	return r.answer, nil
 }
 

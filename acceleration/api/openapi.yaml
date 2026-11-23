@@ -394,14 +394,37 @@ components:
         - latest
       type: object
     ActivityStep:
-      description: 'The furthest an organization got: none, dashboard_reads, agent_setup, conversations, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.'
+      description: 'The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.'
       enum:
         - none
         - dashboard_reads
         - agent_setup
+        - workers
         - conversations
+        - voice_video
+        - phone_sms
         - steady_use
       type: string
+    ActivityStepDay:
+      properties:
+        first_answered:
+          description: The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on.
+          format: date
+          type: string
+        step:
+          description: The step, one of furthest_step's but none and steady_use.
+          enum:
+            - dashboard_reads
+            - agent_setup
+            - workers
+            - conversations
+            - voice_video
+            - phone_sms
+          type: string
+      required:
+        - step
+        - first_answered
+      type: object
     AddContactsRequest:
       properties:
         contacts:
@@ -606,7 +629,7 @@ components:
             type: string
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.'
           type: string
         stt:
           type: string
@@ -915,7 +938,7 @@ components:
             type: string
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.'
           type: string
         stt:
           description: A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it.
@@ -6775,6 +6798,30 @@ components:
         - provider
         - requests
       type: object
+    ModelVoice:
+      description: A built-in voice a native speech model accepts by id.
+      properties:
+        default:
+          description: True when this is the model's default voice.
+          type: boolean
+        description:
+          description: Short description of the voice's tone, style or accent.
+          type: string
+        gender:
+          description: Voice presentation, such as female, male or neutral.
+          type: string
+        id:
+          description: The voice identifier the provider accepts in its voice field.
+          example: marin
+          type: string
+        name:
+          description: Display name for the voice.
+          example: Marin
+          type: string
+      required:
+        - id
+        - name
+      type: object
     NumberSearchResult:
       properties:
         numbers:
@@ -7013,10 +7060,17 @@ components:
           description: The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
           format: date-time
           type: string
+        steps:
+          description: Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused.
+          items:
+            $ref: '#/components/schemas/ActivityStepDay'
+          nullable: true
+          type: array
       required:
         - organization_id
         - since
         - furthest_step
+        - steps
         - areas
         - meters
         - shards
@@ -7948,6 +8002,11 @@ components:
           description: This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
           format: double
           type: number
+        voices:
+          description: The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+          items:
+            $ref: '#/components/schemas/ModelVoice'
+          type: array
       required:
         - health
         - languages
@@ -10649,7 +10708,7 @@ components:
             $ref: '#/components/schemas/SkillRequest'
           type: array
         sts:
-          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.'
+          description: 'A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.'
           type: string
         stt:
           type: string
@@ -20708,6 +20767,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         "404":
           $ref: '#/components/responses/NotFound'
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: Too Many Requests
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
@@ -21981,6 +22046,7 @@ paths:
         One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
         Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
         A router with shards cannot be the source of a move and answers 400 `not_configured`.
+        An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
         Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
       operationId: exportData
       responses:
@@ -22007,6 +22073,12 @@ paths:
           $ref: '#/components/responses/PaymentRequired'
         "403":
           $ref: '#/components/responses/Forbidden'
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: 'An export of this app is already running on this router: one runs at a time.'
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
@@ -22014,12 +22086,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: 'This deployment has no database to export from, or cannot record changes; or a write that was open when the export started is still open after 30 seconds: try again.'
+          description: 'This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or a write that was open when the export started is still open after 30 seconds: try again.'
       summary: Everything this app has, as newline-delimited JSON
   /v1/data/import:
     post:
       description: |-
-        Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+        Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
         An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
         Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
       operationId: importData
@@ -22068,6 +22140,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
           description: The file carries an export's rows, the app already has data here and `full` is not true.
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: A line of the file is over 64 MiB.
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
@@ -23539,7 +23617,7 @@ paths:
   /v1/ops/orgs/{org_id}/activity:
     get:
       description: |-
-        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen and furthest_step come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use.
+        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
 
         Stream staff only: it needs the ops key.
       operationId: getOrganizationActivity

@@ -1501,7 +1501,7 @@ func (s *StoreSuite) TestWithoutTheFlagEveryAppSeesTheCatalogItSawBefore() {
 // one or a deleted one.
 func (s *StoreSuite) TestAClientsGrantedConnectionsAreTheLiveOnesItIssuedAGrantTo() {
 	issued := func(connection ConnectorConnection, registration core.ClientRegistrationMethod, clientID string, grant bool) {
-		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, connection.ID, ConnectorConnectionClient{
+		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, connection.CustomerID, connection.ID, ConnectorConnectionClient{
 			Registration: registration, ClientID: clientID,
 		}))
 		if grant {

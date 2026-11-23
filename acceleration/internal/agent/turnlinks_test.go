@@ -175,6 +175,13 @@ func (s *AgentSuite) TestAToolCallIsLoggedWhenItComesBack() {
 	s.Contains(back, "duration_ms")
 	s.NotContains(back, "arguments", "what a caller's tool is given is theirs")
 	s.NotContains(back, "result", "what a caller's tool returns is theirs")
+	s.Equal("acme", back["customer"])
+	s.Equal("acme", back["app_id"], "the app is named as the model call line names it")
+	s.Equal(s.agentID, back["agent_id"])
+	s.Equal(true, back["success"])
+	s.Equal("", back["error_code"])
+	s.NotContains(back, "error", "a call that answered says no error")
+	s.NotContains(back, "connector", "a caller's tool belongs to no connector")
 	after, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "ok")
 	s.Equal(before+1, after)
 }
@@ -192,9 +199,126 @@ func (s *AgentSuite) TestAToolThatFailedIsLoggedAsAnError() {
 
 	s.says(participant, "where is my order")
 
-	s.Equal("error", s.loggedOnce(toolBack)["outcome"])
+	back := s.loggedOnce(toolBack)
+	s.Equal("error", back["outcome"])
+	s.Equal(false, back["success"])
+	s.Equal("error", back["error_code"])
+	s.Equal("stub: the order service is down", back["error"])
 	after, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "error")
 	s.Equal(before+1, after)
+}
+
+// failsWith has the caller ask for an order and the tool fail with err.
+func (s *AgentSuite) failsWith(err error) map[string]any {
+	s.logs = &logLines{}
+	s.ownsTools("")
+	s.runner.err = err
+	s.join(false)
+	s.model.reply = []string{"Let me check."}
+	s.asksFor("lookup_order", `{"order":"12"}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "where is my order")
+
+	return s.loggedOnce(toolBack)
+}
+
+func (s *AgentSuite) TestAToolThatRanOutOfTimeIsLoggedAsATimeout() {
+	back := s.failsWith(fmt.Errorf("stub: lookup_order did not answer within 30s: %w", context.DeadlineExceeded))
+
+	s.Equal("error", back["outcome"])
+	s.Equal(false, back["success"])
+	s.Equal("timeout", back["error_code"])
+	s.Equal("stub: lookup_order did not answer within 30s: context deadline exceeded", back["error"])
+}
+
+// A failure's words go in cut as a stored error is: a tool can fail with a whole page.
+func (s *AgentSuite) TestALongToolErrorIsCut() {
+	back := s.failsWith(errors.New(strings.Repeat("the order service is down. ", 400)))
+
+	logged, _ := back["error"].(string)
+	s.True(strings.HasSuffix(logged, "… [truncated]"), logged)
+	s.Less(len(logged), 8192)
+}
+
+// reportingTool answers its call with result and err after telling the agent report.
+type reportingTool struct {
+	report ToolReport
+	result string
+	err    error
+}
+
+func (r *reportingTool) Run(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+	ReportTool(ctx, r.report)
+	return llm.TextParts(r.result), r.err
+}
+
+// reportedBy has the caller ask for an order that runner carries out.
+func (s *AgentSuite) reportedBy(runner ToolRunner) map[string]any {
+	s.logs = &logLines{}
+	s.ownsTools("")
+	s.join(false)
+	s.agent.options.ToolRunner = runner
+	s.model.reply = []string{"Let me check."}
+	s.asksFor("lookup_order", `{"order":"12"}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "where is my order")
+
+	return s.loggedOnce(toolBack)
+}
+
+// A connector call cut off at its binding's timeout answers the model with words and no error:
+// only its runner's report says it failed.
+func (s *AgentSuite) TestAConnectorCallItsRunnerReportsFailedIsLoggedAsFailed() {
+	back := s.reportedBy(&reportingTool{report: ToolReport{Connector: "github", ErrorCode: "outcome_unknown"},
+		result: "outcome_unknown: lookup_order did not answer in time."})
+
+	s.Equal("ok", back["outcome"], "the agent got an answer for the model")
+	s.Equal("github", back["connector"])
+	s.Equal(false, back["success"])
+	s.Equal("outcome_unknown", back["error_code"])
+	s.NotContains(back, "error", "the runner said no words of the failure")
+}
+
+func (s *AgentSuite) TestAConnectorCallThatAnsweredNamesItsConnector() {
+	back := s.reportedBy(&reportingTool{report: ToolReport{Connector: "github"}, result: "order 12 ships tomorrow"})
+
+	s.Equal("github", back["connector"])
+	s.Equal(true, back["success"])
+	s.Equal("", back["error_code"])
+	s.NotContains(back, "error")
+}
+
+// The error a connector call returned can echo what its runner redacts, a path or a token, so
+// the line has the runner's words and code in its place.
+func (s *AgentSuite) TestAConnectorCallsErrorIsWhatItsRunnerReported() {
+	back := s.reportedBy(&reportingTool{
+		report: ToolReport{Connector: "github", ErrorCode: "customer_auth", Error: "the token was refused"},
+		err:    errors.New("stub: POST /orders/12/refund was refused"),
+	})
+
+	s.Equal("error", back["outcome"])
+	s.Equal(false, back["success"])
+	s.Equal("customer_auth", back["error_code"])
+	s.Equal("the token was refused", back["error"])
+	s.NotContains(fmt.Sprint(back), "/orders/12/refund", "the returned error is not logged")
+}
+
+// A caller's own tool fails in words of its own, which can carry its users' data: the line
+// says it failed and how, and leaves the words out.
+func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
+	back := s.reportedBy(&reportingTool{report: ToolReport{Client: true},
+		err: errors.New("no order for ana@example.com, call +1 555 010 0199")})
+
+	s.Equal("error", back["outcome"])
+	s.Equal(false, back["success"])
+	s.Equal("error", back["error_code"])
+	s.NotContains(back, "error")
+	s.NotContains(fmt.Sprint(back), "example.com")
+	s.NotContains(fmt.Sprint(back), "555")
 }
 
 // interruptsATool has the caller interrupt while a tool runs, the tool asking policy of the
@@ -252,7 +376,10 @@ func (s *AgentSuite) TestAToolCancelledByTheCallerIsLoggedAsCancelled() {
 	runner := &cancelledTool{began: make(chan struct{})}
 	s.interruptsATool(ToolPolicy{Cancels: true}, runner, runner.began)
 
-	s.Equal("cancelled", s.loggedOnce(toolBack)["outcome"])
+	back := s.loggedOnce(toolBack)
+	s.Equal("cancelled", back["outcome"])
+	s.Equal(false, back["success"])
+	s.Equal("cancelled", back["error_code"])
 	after, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "cancelled")
 	s.Equal(before+1, after)
 }

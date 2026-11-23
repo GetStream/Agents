@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -45,9 +46,13 @@ type SessionTools struct {
 	store *Store
 }
 
-// Upsert records what a session's model is offered, replacing what it was offered before: a
-// reopened session is offered what it has now.
-func (r *SessionTools) Upsert(ctx context.Context, sessionID string, tools []ToolDefinition) error {
+// Upsert records what a session of the customer's model is offered, replacing what it was
+// offered before: a reopened session is offered what it has now. A session the customer does
+// not have is ErrNoSession.
+func (r *SessionTools) Upsert(ctx context.Context, customerID, sessionID string, tools []ToolDefinition) error {
+	if customerID == "" {
+		return stack.Wrap(errors.New("store: a customer is required"))
+	}
 	if tools == nil {
 		tools = []ToolDefinition{}
 	}
@@ -55,13 +60,25 @@ func (r *SessionTools) Upsert(ctx context.Context, sessionID string, tools []Too
 	if err := row.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
-	_, err := r.store.shard.NewInsert().Model(row).
-		On("CONFLICT (session_id) DO UPDATE").
-		Set("tools = EXCLUDED.tools").
-		Set("updated_at = EXCLUDED.updated_at").
-		Exec(ctx)
+	encoded, err := json.Marshal(row.Tools)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
+	}
+	// INSERT ... SELECT, which the builder cannot write: the table has no customer, so the row
+	// is written only beside a session of the customer's, on a first write as on a replace.
+	result, err := r.store.shard.NewRaw(`INSERT INTO agent_session_tools (session_id, tools, updated_at)
+SELECT ?, ?::jsonb, ? WHERE EXISTS (SELECT 1 FROM agent_sessions WHERE id = ? AND customer_id = ?)
+ON CONFLICT (session_id) DO UPDATE SET tools = EXCLUDED.tools, updated_at = EXCLUDED.updated_at`,
+		row.SessionID, string(encoded), row.UpdatedAt, row.SessionID, customerID).Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
+	}
+	if written == 0 {
+		return unknownStoredSession(sessionID)
 	}
 	return nil
 }

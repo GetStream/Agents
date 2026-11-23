@@ -123,7 +123,8 @@ func (s *ConnectionToolsSuite) TestA429OrA5xxKeepsAStaticTokenConnected() {
 }
 
 // TestAProviderThatDoesNotAnswerKeepsAStaticTokenConnected: no answer at all (a closed port)
-// says nothing about the credential.
+// says nothing about the credential, and the reason kept names none of the addresses the dial
+// failed between (AI-3575).
 func (s *ConnectionToolsSuite) TestAProviderThatDoesNotAnswerKeepsAStaticTokenConnected() {
 	closed := httptest.NewTLSServer(http.NotFoundHandler())
 	closed.Close()
@@ -138,7 +139,8 @@ func (s *ConnectionToolsSuite) TestAProviderThatDoesNotAnswerKeepsAStaticTokenCo
 	s.Require().NotNil(got.LastValidation)
 	s.Equal(validationFailed, string(got.LastValidation.Status))
 	s.Empty(got.LastValidation.Code, "no status to name")
-	s.Equal(validation.Error, got.LastValidation.Error)
+	s.Equal(providerUnreachable, validation.Error)
+	s.Equal(providerUnreachable, got.LastValidation.Error)
 }
 
 // TestTheAnswerAValidateFailedOnDecidesNotTheSessionsDelete: a stateful MCP server answers
@@ -355,6 +357,24 @@ func (s *ConnectionToolsSuite) TestAValidateThatRenewsTheGrantShowsWhatItFound()
 	s.Equal(3, got.Revision, "the renewed credentials")
 	s.Require().NotNil(got.LastValidation)
 	s.Equal(validationConnected, string(got.LastValidation.Status))
+}
+
+// TestABuiltInsGrantIsRenewedWithTheOperatorsClient is the control for the operator's client
+// being only a built-in's: a grant imported for a built-in that takes it is issued to it, and
+// the resolver renews it with it.
+func (s *ConnectionToolsSuite) TestABuiltInsGrantIsRenewedWithTheOperatorsClient() {
+	access, refresh := s.codeGrant()
+	id := s.connectionTo(s.builtin(oauth2code.Name, 1, ""))
+	grant := s.importedGrant(access, "chat:write")
+	grant["values"].(map[string]string)[oauth2code.SuppliedRefreshToken] = refresh
+	grant["values"].(map[string]string)[oauth2code.SuppliedExpiresAt] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", grant, nil))
+	refreshes := s.provider.Refreshes()
+
+	s.Equal(validationConnected, string(s.validate(id).Status))
+
+	s.Equal(refreshes+1, s.provider.Refreshes(), "the validate renewed the grant")
+	s.Equal(ConnectionStatus(store.ConnectionConnected), s.get(id).Status)
 }
 
 // TestAnErrorThatEchoesTheCredentialIsStoredWithoutItAndCut (R1.2 of PR #874): go-sdk puts a
@@ -640,6 +660,9 @@ func (s *ConnectionToolsSuite) connectorWith(scheme, mcp string) string {
 	s.Require().NoError(err)
 	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	if scheme == oauth2code.Name {
+		s.withFakeClient(connector)
+	}
 	return connector
 }
 

@@ -29,7 +29,8 @@ public class AgentTool private constructor(
     // First, so this constructor and the public one taking words differ on the JVM.
     /**
      * Runs the tool. What it returns is given to the model as the result; throwing tells the
-     * model the tool failed and why. It is cancelled when the router gives up on the call.
+     * model the tool failed and why, in the error's message or what [StreamAgents.onToolError]
+     * says instead. It is cancelled when the router gives up on the call.
      */
     public val run: suspend (arguments: JsonObject) -> ToolOutput,
     /** What the model calls it. Must be unique within a session. */
@@ -273,3 +274,32 @@ public data class ToolOutput(
     /** What the tool shows. */
     val images: List<ImageSource> = emptyList(),
 )
+
+/** The most of a tool's failure the model is told, in UTF-16 units, as the other SDKs count it. */
+private const val MAX_FAILURE_CHARS = 1024
+
+/**
+ * What the model is told of [call] failing with [error]: what [onError] says, else the error's
+ * message, cut to 1,024 characters either way. A hook that throws is answered with no more than
+ * that the tool failed, since the message it was there to keep back is all there would be to say
+ * otherwise.
+ */
+internal fun toolFailure(
+    call: AgentEvent.ToolCall,
+    error: Throwable,
+    onError: ((call: AgentEvent.ToolCall, error: Throwable) -> String)?,
+): String {
+    if (onError == null) return clipped(error.message ?: error.toString())
+    return try {
+        clipped(onError(call, error))
+    } catch (_: Exception) {
+        "${call.name} failed"
+    }
+}
+
+/** [text], cut to [MAX_FAILURE_CHARS] with an ellipsis where it was cut, never inside an emoji's pair. */
+internal fun clipped(text: String): String {
+    if (text.length <= MAX_FAILURE_CHARS) return text
+    val end = if (text[MAX_FAILURE_CHARS - 1].isHighSurrogate()) MAX_FAILURE_CHARS - 1 else MAX_FAILURE_CHARS
+    return text.substring(0, end) + "…"
+}

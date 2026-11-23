@@ -347,7 +347,7 @@ func (c consents) connectionFor(ctx context.Context, request session.ConsentRequ
 		return store.ConnectorConnection{}, stack.Wrap(fmt.Errorf("%s takes only a static token or key, which the chat cannot ask for",
 			definition.ID))
 	}
-	profile, err := definition.Manifest.Resolve(scheme, nil, nil)
+	profile, err := definition.Resolve(scheme, nil, nil)
 	if err != nil {
 		return store.ConnectorConnection{}, stack.Wrap(err)
 	}
@@ -405,17 +405,22 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 	// The client comes from the app's own record or the operator's environment
 	// (ConnectorClients), so a connector that takes a client the app can give and finds none,
 	// or whose provider refused to register one (WWSD feedback #31, Gong), says how to give it
-	// one.
-	if errors.Is(err, oauth2code.ErrNoClient) || errors.Is(err, oauth2code.ErrRegistration) {
+	// one. A registration that never reached the provider is a network failure, whose text
+	// names hosts and addresses, so it is answered as one.
+	_, unreached := errors.AsType[net.Error](err)
+	if (errors.Is(err, oauth2code.ErrNoClient) || errors.Is(err, oauth2code.ErrRegistration)) && !unreached {
 		if failure, ok := missingOAuthClient(err, manifest, connection.ConnectorID, connectorCallbackURL(c.publicURL),
 			c.providerApps && whyNotManaged(latest.Manifest) == nil); ok {
 			return Authorization{}, failure
 		}
+		// The scheme wrote these for the backend to fix, and quotes the provider's refusal.
+		return Authorization{}, invalidRequest("the provider's consent could not be started: " + err.Error())
+	}
+	if refused, ok := errors.AsType[*oauth2code.ManifestError](err); ok {
+		return Authorization{}, invalidRequest("the provider's consent could not be started: " + refused.Reason)
 	}
 	if err != nil {
-		// A scheme's error carries no secret (core AGENTS.md, «Secrets never print»), and it
-		// is what the backend needs to fix: a missing client, an unreachable server.
-		return Authorization{}, invalidRequest("the provider's consent could not be started: " + err.Error())
+		return Authorization{}, err
 	}
 	if begun.Done {
 		return Authorization{}, invalidRequest(fmt.Sprintf("auth_scheme %q needs no consent", connection.AuthScheme))
@@ -908,7 +913,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 	}
 	s.auditGrant(ctx, connection.CustomerID, connection.ID, connection.ConnectorID, connection.OwnerType,
 		store.AuditGrantCreated, store.AuditReasonConsent, committed.Revision, row.ID, change)
-	s.recordClient(ctx, connection.ID, credentials)
+	s.recordClient(ctx, connection.CustomerID, connection.ID, credentials)
 	// A reconnect brings back the MCP event subscriptions its bindings declare, as a validate
 	// does: one a disconnect or a long wait dropped is made again. The consent itself is done,
 	// so a failure here is logged and the next validate tries again.
@@ -963,7 +968,7 @@ func (s *Server) recordRefusal(ctx context.Context, connection store.ConnectorCo
 	if code == "unauthorized_client" {
 		reason += " " + fmt.Sprintf(unauthorizedClientHint, connectorCallbackURL(s.publicURL))
 	}
-	err := s.store.ConnectorConnections.PutValidation(ctx, connection.ID, store.ConnectorConnectionValidation{
+	err := s.store.ConnectorConnections.PutValidation(ctx, connection.CustomerID, connection.ID, store.ConnectorConnectionValidation{
 		Revision: connection.Revision, Status: validationFailed,
 		Code: codeConsentRefused, Error: reason, CheckedAt: time.Now().UTC(),
 	})
@@ -1110,7 +1115,7 @@ func definitionManifest(definition store.ConnectorDefinition, connection store.C
 	maps.DeleteFunc(metadata, func(name, _ string) bool {
 		return !slices.ContainsFunc(definition.Manifest.Capture, func(rule core.CaptureRule) bool { return rule.Name == name })
 	})
-	return definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, metadata)
+	return definition.Resolve(connection.AuthScheme, connection.Inputs, metadata)
 }
 
 // openAttemptByID and openAttemptByState read an open attempt and open what it sealed. A

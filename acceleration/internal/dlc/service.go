@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -119,11 +121,28 @@ func (s *Service) Update(ctx context.Context, useCase *store.UseCase, numbers []
 	return s.assign(ctx, *useCase, numbers)
 }
 
+// assign sends numbers as the use case. A number the app does not hold, or one named twice,
+// is the caller's to correct; a store failure is not.
 func (s *Service) assign(ctx context.Context, useCase store.UseCase, numbers []string) error {
-	if err := s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers); err != nil {
-		return stack.Wrap(fmt.Errorf("%w: %w", ErrInvalid, err))
+	if len(numbers) > 0 {
+		held, err := s.store.PhoneNumbers.Select(ctx, useCase.CustomerID, store.PhoneNumberFilter{})
+		if err != nil {
+			return err
+		}
+		holds := make(map[string]bool, len(held))
+		for _, number := range held {
+			holds[number.E164] = true
+		}
+		for i, number := range numbers {
+			if !holds[number] {
+				return stack.Wrap(fmt.Errorf("%w: %s is not a number this app holds", ErrInvalid, number))
+			}
+			if slices.Contains(numbers[:i], number) {
+				return stack.Wrap(fmt.Errorf("%w: %s is named twice", ErrInvalid, number))
+			}
+		}
 	}
-	return nil
+	return s.store.UseCases.AssignNumbers(ctx, useCase.CustomerID, useCase.ID, numbers)
 }
 
 // Delete removes a use case the vendor does not hold.
@@ -217,7 +236,8 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 }
 
 // Hook takes a vendor's report on a brand or a campaign, verified, and moves whichever use
-// cases it is about.
+// cases it is about. A report on a campaign is counted as its use case's app's phone work. One on
+// a brand is not: the hook reads no app for it, and has every waiting use case registered.
 func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) error {
 	if s.registrar == nil {
 		return fmt.Errorf("%w: no registrar is configured", ErrRefused)
@@ -234,6 +254,7 @@ func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) err
 		if err != nil {
 			return err
 		}
+		activity.NoteCustomer(ctx, useCase.CustomerID, activity.AreaPhoneSMS)
 		return s.refresh(ctx, useCase, body)
 	}
 	if brandID != "" {

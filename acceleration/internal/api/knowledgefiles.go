@@ -69,6 +69,7 @@ func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A writer that cannot take a deadline still reads the file, only without one.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(fileReadTimeout))
 	r.Body = http.MaxBytesReader(w, r.Body, files.MaxBytes+maxFormOverhead)
 	form, err := r.MultipartReader()
@@ -89,6 +90,7 @@ func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if next.FormName() != "file" {
+			// A part that is not the file is skipped; the next read reports a broken form.
 			_ = next.Close()
 			continue
 		}
@@ -144,6 +146,7 @@ func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusAccepted)
+	// The status is sent: a caller that hung up meanwhile has nothing to be told.
 	_ = json.NewEncoder(w).Encode(indexedKnowledgeDocumentOf(document))
 }
 
@@ -168,6 +171,7 @@ func contentTypeOf(sent, source string) string {
 		return known
 	}
 	if byName := mime.TypeByExtension(extension); byName != "" {
+		// The system's own table of types parses.
 		media, _, _ := mime.ParseMediaType(byName)
 		return media
 	}

@@ -322,6 +322,16 @@ func (s *ConnectorsSuite) TestAnOperatorClientIsRefusedForACustomConnector() {
 	s.Contains(failure, "operator")
 }
 
+func (s *ConnectorsSuite) TestAnOperatorClientListedAfterAnotherIsRefusedForACustomConnector() {
+	sent := s.customConnector(s.customID())
+	sent["client"] = map[string]any{"registration": []string{"customer", "operator"}}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "operator")
+}
+
 func (s *ConnectorsSuite) TestAnOAuthConnectorWithoutClientRegistrationsIsRefused() {
 	sent := s.customConnector(s.customID())
 	delete(sent, "client")

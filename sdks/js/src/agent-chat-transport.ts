@@ -341,7 +341,12 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
       const lookup = (message: Message) => fed.get(message);
       const render = (messages: readonly M[]) => {
         const next = new Map<Message, M>();
-        const made = shown(messages).map((message) => {
+        // A reply the model failed to write is finished empty in the channel. The controller
+        // takes any finished reply as the answer and drops the error with it, so while the
+        // reply failed, an empty one is not shown: the error and its Try again stay.
+        const failed = chat.state.getLatestValue().activity?.kind === "failed";
+        const visible = failed ? shown(messages).filter((message) => !emptyReply(message)) : shown(messages);
+        const made = visible.map((message) => {
           const one = adapt(message);
           next.set(one, message);
           return one;
@@ -402,7 +407,8 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
             adapted = new WeakMap();
           }
         }
-        if (previous?.messages !== state.messages || thought) {
+        const failedChanged = (previous?.activity?.kind === "failed") !== (state.activity?.kind === "failed");
+        if (previous?.messages !== state.messages || thought || failedChanged) {
           render(state.messages);
         }
         if (previous?.hasOlderMessages !== state.hasOlderMessages) {
@@ -699,6 +705,22 @@ function branchError(error: unknown): unknown {
 
 function defaultWorkingText(skills: readonly string[]): string | undefined {
   return skills.length > 0 ? `Working on ${skills.map((skill) => skill.replace(/_/g, " ")).join(" and ")}` : undefined;
+}
+
+/**
+ * An agent's reply that finished with nothing in it: no text, attachments or UI, and no longer
+ * being written. One the router cut off has `interrupted`, which says so, and is not this.
+ */
+function emptyReply(message: object): boolean {
+  const attachments = messageField(message, "attachments");
+  return (
+    messageField(message, "ai_generated") === true &&
+    messageField(message, "generating") !== true &&
+    messageField(message, "interrupted") !== true &&
+    !messageField(message, "text") &&
+    !messageField(message, "ai_ui") &&
+    !(Array.isArray(attachments) && attachments.length > 0)
+  );
 }
 
 function transportActivity(

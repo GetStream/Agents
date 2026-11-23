@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -116,6 +117,32 @@ func (s *SessionResumeSuite) TestAConversationIsFollowedThroughTheRouterHoldingI
 	s.Require().NotNil(resumed["command"], "the command the socket waited on is reported")
 	s.Equal("interrupted", resumed["command"].(map[string]any)["state"],
 		"a reply the router stopped is told apart from one somebody cancelled")
+}
+
+// cmd/router closes the server before it ends the sessions still held, so the end of a
+// session is told to a socket on another node after the server's background work is gone.
+func (s *SessionResumeSuite) TestASocketElsewhereIsToldTheRouterIsRestartingAfterItsServerIsClosed() {
+	stopping, server, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	request := textSession(nil)
+	request.Llm = pointerTo("stuck/stuck-model")
+	opened := s.serverClient.on(stopping).createSession(request)
+	watching := s.serverClient.opens(s.events(opened.Id, "resumable=true"))
+	s.await(watching, "resumed")
+
+	ctx, cancel := context.WithTimeout(context.Background(), settleFor)
+	defer cancel()
+	s.Require().NoError(server.Close(ctx))
+	s.Require().NoError(sessions.Shutdown())
+
+	s.Require().NoError(watching.SetReadDeadline(time.Now().Add(2 * settleFor)))
+	for {
+		var received map[string]any
+		if err := watching.ReadJSON(&received); err != nil {
+			s.True(websocket.IsCloseError(err, websocket.CloseServiceRestart),
+				"a resumable socket on another node is told the router is restarting: %v", err)
+			return
+		}
+	}
 }
 
 // inWriting opens a conversation that keeps no transcript, the cheapest session with an

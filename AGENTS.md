@@ -25,7 +25,8 @@ Work happens on the `main` branch here, and the agents docs live in getstream.io
 ## SDK changes
 
 When you need to make an SDK change start by only changing Go
-Leave a note in the sdk skill at the bottom that other SDKs also need to udpate.
+Leave a note that the other SDKs also need to update, as a new file in `.claude/skills/sdk/notes/`
+(see «SDK updates» in the sdk skill). Never add it to the end of the skill itself.
 We run this periodically, you don't need to change all SDKs at once.
 Go goes first, and later on we update the others.
 
@@ -297,8 +298,18 @@ module-level `logger = logging.getLogger(__name__)`. Use `debug` for lifecycle, 
 
 ## Changelog
 
-- Lives in `CHANGELOG.md` at the repo root.
-- Organised by version heading (`# v0.4.0`), then sections: **Breaking Changes**, **New Features**, **Bug Fixes**.
+- Lives in the root `CHANGELOG.md`, not the Dart package's own `CHANGELOG.md`. A pull request does not edit it: when every PR added
+  lines at the same place, any two open PRs conflicted there. One exception: a PR that breaks a
+  published SDK's API (Go: a renamed or removed field or signature) adds one line under
+  `# Unreleased` → **Breaking Changes**.
+- It is written once per release, with the `release` skill (`.claude/skills/release/SKILL.md`).
+  A release is one version of the whole repo (router, SDKs, Python packages, apps): a `vX.Y.Z`
+  tag on `main`, whose GitHub release also publishes the Python packages. Router deploy tags
+  (`accelerate-v*`) and SDK tags get no section.
+- The release PR turns `# Unreleased` and every user-facing PR merged since the previous release
+  into one version heading (`# v0.4.0`), with sections **Breaking Changes**, **New Features**,
+  **Bug Fixes**.
 - Only include user-facing changes (public API breaks, features, fixes). Skip docs-only and CI-only commits.
 - Reference PR numbers inline, e.g. `(#374)`.
-- To generate: `git log <last-tag>..HEAD --oneline --no-merges`, then classify each commit.
+- To generate: follow step 2 of the `release` skill, which lists the PRs merged since the previous
+  release tag; then classify each one.

@@ -529,6 +529,45 @@ func (s *OAuthClientsSuite) TestTheAppsOwnClientNeverStandsInForTheOperators() {
 	s.False(ok, "no operator client in an empty environment")
 }
 
+// TestACustomDefinitionNamingTheOperatorsClientNeverGetsItFromTheEnvironment: a custom
+// definition stored with registration operator and client.env GITHUB, as an import stored them
+// before it was held to the API's rules, gets no client. The built-in github, with the same
+// client.env, gets the environment's.
+func (s *OAuthClientsSuite) TestACustomDefinitionNamingTheOperatorsClientNeverGetsItFromTheEnvironment() {
+	environment := map[string]string{"GITHUB_MCP_CLIENT_ID": "operators", "GITHUB_MCP_CLIENT_SECRET": "operators-secret"}
+	lookup := ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })
+	custom := "custom_imported" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	s.storeDefinition(custom, custom, `{"registration": ["operator"], "auth_method": "client_secret_post", "env": "GITHUB"}`)
+
+	_, customFound, customErr := lookup(context.Background(), s.ref(), s.resolved(custom), core.ClientOperator)
+	builtin, builtinFound, builtinErr := lookup(context.Background(), s.ref(), s.resolved("github"), core.ClientOperator)
+
+	s.Require().NoError(customErr)
+	s.False(customFound, "a custom definition's manifest is its customer's")
+	s.Require().NoError(builtinErr)
+	s.True(builtinFound)
+	s.Equal(oauth2code.Client{ID: "operators", Secret: "operators-secret"}, builtin)
+}
+
+// TestACustomDefinitionNamedAsABuiltInNeverGetsTheOperatorsRecord: a custom definition whose
+// manifest's id is github's finds no record of the operator's app kept for the app's github,
+// which the built-in finds.
+func (s *OAuthClientsSuite) TestACustomDefinitionNamedAsABuiltInNeverGetsTheOperatorsRecord() {
+	s.providerApp("github", core.ClientOperator, "operators-record-secret", "")
+	custom := "custom_imported" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	s.storeDefinition(custom, "github", `{"registration": ["operator"], "auth_method": "client_secret_post"}`)
+	lookup := ConnectorClients(s.store, s.sealer, func(string) string { return "" })
+
+	_, customFound, customErr := lookup(context.Background(), s.ref(), s.resolved(custom), core.ClientOperator)
+	builtin, builtinFound, builtinErr := lookup(context.Background(), s.ref(), s.resolved("github"), core.ClientOperator)
+
+	s.Require().NoError(customErr)
+	s.False(customFound, "the record is the built-in's")
+	s.Require().NoError(builtinErr)
+	s.True(builtinFound)
+	s.Equal("operators-record-secret", builtin.Secret)
+}
+
 func (s *OAuthClientsSuite) TestASecretMovedToAnotherConnectorDoesNotOpen() {
 	s.put("github", confidentialClient("github-secret"))
 	s.put("gong", confidentialClient("gong-secret"))
@@ -712,7 +751,7 @@ func (s *OAuthClientsSuite) put(connector string, client ConnectorOAuthClientReq
 // lookup is what oauth2_code finds for the app's connection to connector, with no operator
 // variables set.
 func (s *OAuthClientsSuite) lookup(connector string, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-	manifest := core.ResolvedManifest{ConnectorID: connector}
+	manifest := core.ResolvedManifest{ConnectorID: connector, Builtin: !strings.HasPrefix(connector, store.CustomPrefix)}
 	if connector == "github" {
 		manifest = githubManifest()
 	}
@@ -755,10 +794,38 @@ sources:
 	return id
 }
 
+// storeDefinition writes a custom definition id of the test's app straight into the table,
+// as an import wrote one: its manifest's own id is manifestID, its client client (JSON), its
+// endpoints an MCP server and a token endpoint of its customer's.
+func (s *OAuthClientsSuite) storeDefinition(id, manifestID, client string) {
+	manifest := `{"id": "` + manifestID + `", "revision": 1, "name": "Imported", "schemes": ["oauth2_code"],
+		"endpoints": {"mcp": "https://mcp.example/mcp", "authorize": "https://example.com/authorize", "token": "https://example.com/token"},
+		"client": ` + client + `, "sources": [{"kind": "mcp", "endpoint": "mcp"}]}`
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
+		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES (?, ?, 1, 'Imported', ?::jsonb)",
+		s.customerID(), id, manifest)
+	s.Require().NoError(err)
+}
+
+// resolved is the latest revision of connector as the test's app sees it, resolved for an
+// oauth2_code connection as a consent resolves it.
+func (s *OAuthClientsSuite) resolved(connector string) core.ResolvedManifest {
+	definition, err := s.store.ConnectorDefinitions.Latest(context.Background(), s.customerID(), connector)
+	s.Require().NoError(err)
+	resolved, err := definition.Resolve(oauth2code.Name, nil, nil)
+	s.Require().NoError(err)
+	return resolved
+}
+
+// ref is a connection of the test's app.
+func (s *OAuthClientsSuite) ref() core.ConnectionRef {
+	return core.ConnectionRef{CustomerID: s.customerID(), ConnectionID: s.utils.uuid()}
+}
+
 // githubManifest is the part of the built-in github manifest the lookup reads: its id and the
 // prefix of the operator's variables (providers/github.yaml, client.env).
 func githubManifest() core.ResolvedManifest {
-	return core.ResolvedManifest{ConnectorID: "github", Client: core.ClientPolicy{Env: "GITHUB"}}
+	return core.ResolvedManifest{ConnectorID: "github", Builtin: true, Client: core.ClientPolicy{Env: "GITHUB"}}
 }
 
 func oauthClientPath(connector string) string {

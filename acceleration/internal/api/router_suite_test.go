@@ -35,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -408,6 +409,8 @@ type RouterSuite struct {
 	// logs, set by a suite before it starts the harness, is where the router logs, as text at
 	// debug and up, for a suite about what it warns of. Nil discards them.
 	logs io.Writer
+	// failing makes the queries that a test names with failQueries fail.
+	failing *failingQueries
 	// telnyxPublicKey, set by a suite about Telnyx's call webhook before it starts the
 	// harness, is the key Telnyx's requests are checked against. Nil leaves it unconfigured.
 	telnyxPublicKey ed25519.PublicKey
@@ -590,10 +593,20 @@ func (s *RouterSuite) SetupSuite() {
 	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
+	s.failing = &failingQueries{}
+	pgStore.GlobalDB().AddQueryHook(s.failing)
+	if pgStore.Sharded() {
+		pgStore.ShardDB().AddQueryHook(s.failing)
+	}
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
 	s.T().Cleanup(s.assertEveryRowNamesAKey)
+	queueFull := usageLostQueueFull(s)
+	s.T().Cleanup(func() {
+		s.Zero(usageLostQueueFull(s)-queueFull, "usage rows were lost to a full writer queue "+
+			"(suiteQueueSize) while this suite ran, by it or by a suite beside it")
+	})
 	if s.database != "" {
 		// Only a suite's own database is emptied, never the shared one. A run killed by
 		// -timeout skips its cleanups, and the database outlives it. A queued inbound row it
@@ -985,6 +998,28 @@ func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) 
 	return drop
 }
 
+// failQueries makes each query that contains value fail, until the test ends.
+func (s *RouterSuite) failQueries(value string) {
+	s.failing.value.Store(&value)
+	s.T().Cleanup(func() { s.failing.value.Store(nil) })
+}
+
+// failingQueries makes each query that contains a value fail. The query stops before Postgres
+// gets it, with the same error as when the database does not answer in time.
+type failingQueries struct{ value atomic.Pointer[string] }
+
+func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	value := f.value.Load()
+	if value == nil || !strings.Contains(event.Query, *value) {
+		return ctx
+	}
+	expired, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return expired
+}
+
+func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
+
 // channelBridgeOptions are the options channelBridge builds the bridge with, for a test to
 // build another router's bridge.
 func (s *RouterSuite) channelBridgeOptions(logger *slog.Logger) channelbridge.Options {
@@ -1054,9 +1089,7 @@ func (s *RouterSuite) registrations(listener *httptest.Server, logger *slog.Logg
 func (s *RouterSuite) telephonyRecorder(logger *slog.Logger) *routing.Recorder {
 	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), logger)
 	s.Require().NoError(err)
-	recorder := routing.NewRecorder(routing.Phone, s.store, s.live, list, logger)
-	s.T().Cleanup(recorder.Close)
-	return recorder
+	return routing.NewRecorderOn(routing.Phone, s.routerWriter(s.store, s.live, nil, logger), list, logger)
 }
 
 // vendorPriced is what used of a phone item costs at the vendor list's rates, as
@@ -1164,6 +1197,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	hearing.Probe()
 	transcriber, err := sttrouter.New(sttrouter.Options{
 		Config: heard, Registry: hearing, Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
@@ -1317,7 +1351,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	}
 	speaker, err := ttsrouter.New(ttsrouter.Options{
 		Config: ttsConfig, Registry: speaking, Store: s.store, Live: s.live, Voices: s.ttsVoices, Gate: gate,
-		Logger: logger,
+		Logger: logger, Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
@@ -1331,6 +1365,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		Live:         s.live,
 		Gate:         gate,
 		Logger:       logger,
+		Writer:       s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriptions.Close)
@@ -1343,42 +1378,47 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		Voices:    s.ttsVoices,
 		Gate:      gate,
 		Logger:    logger,
+		Writer:    s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(recordings.Close)
 
 	finding, err := searchrouter.New(searchrouter.Options{
 		Config: searchConfig(), Registry: searchRegistry(), Store: s.store, Live: s.live, Gate: gate,
-		Logger: logger,
+		Logger: logger, Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(finding.Close)
 
 	judging, err := decisionrouter.New(decisionrouter.Options{
 		Config: classifyConfig(), Registry: classifierRegistry(), Logger: logger,
+		Writer: s.routerWriter(nil, nil, nil, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(judging.Close)
 
 	imaging, err := imagerouter.New(imagerouter.Options{
 		Config: imageConfig(), Registry: painterRegistry(), Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(imaging.Close)
 
 	detecting, err := detectionrouter.New(detectionrouter.Options{
 		Config: detectionConfig(), Registry: detectorRegistry(), Gate: gate, Logger: logger,
+		Writer: s.routerWriter(nil, nil, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(detecting.Close)
 
 	reading, err := ocrrouter.New(ocrrouter.Options{
 		Config: ocrConfig(), Registry: ocrRegistry(), Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(reading.Close)
 
-	conversing, err := stsrouterStub()
+	conversing, err := stsrouterStub(s.routerWriter(nil, nil, nil, logger))
 	s.Require().NoError(err)
 	s.T().Cleanup(conversing.Close)
 
@@ -1508,6 +1548,7 @@ func (s *RouterSuite) sessionManager(
 		Directory:     directory,
 		Connectors:    connectors,
 		Logger:        logger,
+		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		// The policies a session's resume_history falls back to, as cmd/router passes them.
 		ResumeHistories: policies,
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
@@ -1552,11 +1593,56 @@ func (s *RouterSuite) assertEveryRowNamesAKey() {
 	}
 }
 
+// usageLostQueueFull is router_usage_lost_total{reason="queue_full"}, the rows a writer
+// dropped because its queue was full (internal/routing/writer.go).
+func usageLostQueueFull(s *RouterSuite) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_usage_lost_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "reason" && pair.GetValue() == "queue_full" {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// suiteQueueSize is how many rows each writer of the suite holds, where a deployment's holds
+// 20,000 (internal/routing/writer.go). A finished suite's routers and writers stay in memory
+// to the end of the package: goroutines of its nodes that never end, such as
+// Server.expireProxies, hold its Server. At 20,000 rows a writer, the package needed more
+// memory than CI's runner has (AI-3471). A writer drains its queue in batches of 200 as rows
+// arrive, and 1,000 is five such batches.
+const suiteQueueSize = 1_000
+
+// routerWriter is the writer a router or recorder builds for itself when given none
+// (routing.newRecorder), over pgStore and liveClient, with room for suiteQueueSize rows. It
+// writes what it holds when the suite ends, as the router's Close would.
+func (s *RouterSuite) routerWriter(pgStore *store.Store, liveClient *live.Client, gate routing.Gate, logger *slog.Logger) *routing.Writer {
+	options := routing.WriterOptions{Store: pgStore, Live: liveClient, Logger: logger, QueueSize: suiteQueueSize}
+	if counter, ok := gate.(interface{ Counted([]routing.Acked) }); ok {
+		options.Counted = counter.Counted
+	}
+	writer := routing.NewWriter(options)
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		writer.Close(ctx)
+	})
+	return writer
+}
+
 // shippingWriter is the writer the conversation model records through when the suite ships,
-// and nil, a writer of the router's own, when it does not.
+// and routerWriter's, the one the router would build for itself, when it does not.
 func (s *RouterSuite) shippingWriter(gate routing.Gate, logger *slog.Logger) *routing.Writer {
 	if !s.shipping {
-		return nil
+		return s.routerWriter(s.store, s.live, gate, logger)
 	}
 	if s.usage == nil {
 		s.usage = usagetest.Start(s.T(), usagetest.Options{Logger: logger})
@@ -1567,7 +1653,7 @@ func (s *RouterSuite) shippingWriter(gate routing.Gate, logger *slog.Logger) *ro
 	}
 	writer := routing.NewWriter(routing.WriterOptions{
 		Store: s.store, Live: s.live, Logger: logger, Gate: gate, Usage: s.usage.Client, Source: "router/suite/" + s.utils.uuid(),
-		Shipped: shipped,
+		Shipped: shipped, QueueSize: suiteQueueSize,
 	})
 	s.T().Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1662,9 +1748,7 @@ func (s *RouterSuite) meteringRecorder(logger *slog.Logger) *routing.Recorder {
 	if s.prices != nil {
 		pricer = s.prices
 	}
-	recorder := routing.NewRecorder(routing.Knowledge, s.store, s.live, pricer, logger)
-	s.T().Cleanup(recorder.Close)
-	return recorder
+	return routing.NewRecorderOn(routing.Knowledge, s.routerWriter(s.store, s.live, nil, logger), pricer, logger)
 }
 
 func (s *RouterSuite) knowledgeWriter(gate routing.Gate) *metered.Knowledge {
@@ -1806,6 +1890,7 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Live:          s.live,
 		Directory:     directory,
 		Logger:        logger,
+		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
 		},
@@ -1902,9 +1987,9 @@ func (s *RouterSuite) nodeDirectory(listener *httptest.Server, shard string, log
 // The node subscribes to its relay as it is made, each subscription on a Redis connection of
 // its own that rueidis gives 5 s to open, which a loaded machine can overrun. The node is then
 // made again until redisready's minute is up, each attempt with a Redis client of its own for
-// the relay, closed when the attempt fails: NewServer holds the subscriptions against the
-// process and goes on trying a failed one, so only closing the client ends what a node nobody
-// holds left subscribed, which would otherwise answer the relay beside the node that came up.
+// the relay, closed when the attempt fails. The node is closed when the test that made it ends,
+// as cmd/router closes it, which ends its subscriptions: they would otherwise hold the node,
+// and everything it was made with, to the end of the package.
 func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options) *Server {
 	server, err := redisready.Retry(s.shardRedisAddr, func() (*Server, error) {
 		redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.shardRedisAddr}, DisableCache: true})
@@ -1924,6 +2009,12 @@ func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options
 		return server, nil
 	})
 	s.Require().NoError(err)
+	// After redis.Close's cleanup, so it runs first: the subscriptions end on the cancel.
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.NoError(server.Close(ctx), "the node's background work did not end")
+	})
 	return server
 }
 

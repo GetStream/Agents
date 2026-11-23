@@ -724,6 +724,20 @@ func (Modality) Schema(registry huma.Registry) *huma.Schema {
 	return namedEnum(registry, "Modality", "What kind of work was done. The first nine are routed across providers; sts is speech to speech, one native audio model in place of a transcriber, a text model and a voice. decision_model is a decision model: it answers named questions about a piece of text with a typed value and the probability behind it rather than with prose, which is what a guardrail asks before a reply is spoken. image is pictures drawn from a prompt, detection is boxes found in one, and ocr is the text of a page read from a picture of it. Memory, knowledge and phone are recorded but not routed, since there is one memory store, one knowledge base and one vendor per number, so the provider paths do not serve them while the statistics paths do.", "stt", "tts", "llm", "sts", "search", "decision_model", "image", "detection", "ocr", "memory", "knowledge", "phone")
 }
 
+// ModelVoice is a built-in voice a native speech model accepts by ID.
+type ModelVoice struct {
+	Default     *bool   `json:"default,omitempty" doc:"True when this is the model's default voice."`
+	Description *string `json:"description,omitempty" doc:"Short description of the voice's tone, style or accent."`
+	Gender      *string `json:"gender,omitempty" doc:"Voice presentation, such as female, male or neutral."`
+	Id          string  `json:"id" example:"marin" doc:"The voice identifier the provider accepts in its voice field."`
+	Name        string  `json:"name" example:"Marin" doc:"Display name for the voice."`
+}
+
+func (*ModelVoice) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "A built-in voice a native speech model accepts by id."
+	return schema
+}
+
 // Provider is the Provider schema.
 type Provider struct {
 	Benchmark   *ProviderBenchmark `json:"benchmark,omitempty"`
@@ -738,6 +752,7 @@ type Provider struct {
 	Supports    []string           `json:"supports,omitempty" nullable:"false" example:"[\"keyterms\",\"diarize\"]" doc:"The options this model can be asked for, as the terms a request's options turn on: keyterms, diarize, similarity, semantic_turns and the like. A request whose options ask for one the model does not list is never routed to it, and is refused when nothing else could serve it. Left out when the model takes none."`
 	Tier        Tier               `json:"tier"`
 	UsageShare  *float64           `json:"usage_share,omitempty" doc:"This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics."`
+	Voices      []ModelVoice       `json:"voices,omitempty" nullable:"false" doc:"The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak."`
 }
 
 // RecordingSource Where the audio to work on comes from. A URL is what every vendor's batch API takes and what anything longer than a clip should use; inline bytes save a caller with a short local file from having to host it somewhere first.

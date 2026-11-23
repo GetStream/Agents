@@ -102,7 +102,7 @@ func (r *APIKeys) Insert(ctx context.Context, key *APIKey) error {
 // The expiry is checked here as well as in the query: a key cached while it was live must
 // stop working when it lapses, not when the cached copy does.
 func (r *APIKeys) GetLive(ctx context.Context, id string) (APIKeyOwner, error) {
-	owner, err := cached(ctx, r.store, cacheKey("key", id), func(ctx context.Context) (APIKeyOwner, error) {
+	owner, err := cachedFor(ctx, r.store, cacheKey("key", id), keyCacheTTL, func(ctx context.Context) (APIKeyOwner, error) {
 		var owner APIKeyOwner
 		err := r.store.global.NewSelect().Model((*APIKey)(nil)).
 			ColumnExpr("k.app_id, k.secret_sealed, k.kek_version, k.expires_at").
@@ -150,29 +150,32 @@ func (r *APIKeys) Touch(ctx context.Context, id string, interval time.Duration) 
 	return nil
 }
 
-// Revoke stops a key working, here and on every other replica. The row survives, because the
-// audit trail of which key made which call has to outlive the key.
-func (r *APIKeys) Revoke(ctx context.Context, id, by string) error {
+// Revoke stops one of an app's keys working, here and on every other replica. A key of
+// another app is ErrNoAPIKey. The row survives, because the audit trail of which key made
+// which call has to outlive the key. told says whether the replicas' cached copy was
+// dropped; when it was not, they take the key until that copy lapses.
+func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) (told bool, err error) {
 	now := time.Now().UTC()
 	result, err := r.store.global.NewUpdate().Model((*APIKey)(nil)).
 		Set("revoked_at = ?", now).
 		Set("revoked_by = ?", by).
 		Where("id = ?", id).
+		Where("app_id = ?", appID).
 		Where("revoked_at IS NULL").
 		Exec(ctx)
 	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
+		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
+		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
 	if affected == 0 {
-		return stack.Wrap(ErrNoAPIKey)
+		return false, stack.Wrap(ErrNoAPIKey)
 	}
-	r.store.forget(ctx, cacheKey("key", id))
+	told = r.store.forget(ctx, cacheKey("key", id))
 	r.touched.Delete(id)
-	return nil
+	return told, nil
 }
 
 // Select returns an app's keys, revoked ones included, newest first.
@@ -200,12 +203,15 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 			return auth.App{}, auth.ErrUnauthenticated
 		}
 		owner, err := r.GetLive(ctx, key)
-		if err != nil {
+		if errors.Is(err, ErrNoAPIKey) {
 			return auth.App{}, auth.ErrUnauthenticated
 		}
-		secret, err := sealer.Open(owner.Sealed)
 		if err != nil {
-			return auth.App{}, fmt.Errorf("unseal key %s: %w", key, err)
+			return auth.App{}, err
+		}
+		secret, err := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+		if err != nil {
+			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
 		}
 		if err := r.Touch(ctx, key, KeyUseInterval); err != nil {
 			slog.Default().Debug("could not record key use", "key", key, "error", err)

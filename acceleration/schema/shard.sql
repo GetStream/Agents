@@ -76,6 +76,8 @@ TABLE agent_sessions
     agent_id text NOT NULL DEFAULT ''::text
     agent_name text NOT NULL DEFAULT ''::text
     api_key text NOT NULL DEFAULT ''::text
+    call_id text
+    call_type text
     caller_kind text NOT NULL DEFAULT ''::text
     caller_tools jsonb
     closed_at timestamp with time zone
@@ -134,12 +136,16 @@ TABLE call_bridges
     customer_id text NOT NULL
     expires_at timestamp with time zone NOT NULL
     initial_digits text
-    token text NOT NULL
+    token text
+    token_hash text
     trunk_password text
+    trunk_password_kek_version integer
+    trunk_password_sealed bytea
     trunk_uri text NOT NULL
     trunk_username text
     vendor text NOT NULL
-    CONSTRAINT call_bridges_pkey PRIMARY KEY (token)
+    CONSTRAINT call_bridges_token_hash_key UNIQUE (token_hash)
+    CONSTRAINT call_bridges_token_key UNIQUE (token)
     CREATE INDEX call_bridges_expires_idx ON public.call_bridges USING btree (expires_at)
 
 TABLE call_legs
@@ -170,6 +176,7 @@ TABLE call_legs
     stream_session_id text NOT NULL DEFAULT ''::text
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     token text
+    token_hash text
     usage_categories text[] NOT NULL DEFAULT '{}'::text[]
     user_id text NOT NULL DEFAULT ''::text
     vendor text NOT NULL
@@ -189,6 +196,8 @@ TABLE call_legs
     CREATE UNIQUE INDEX call_legs_participant_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), participant_session) WHERE (participant_session <> ''::text)
     CREATE INDEX call_legs_placed_call_idx ON public.call_legs USING btree (customer_id, call_id, id DESC) WHERE (placed_at IS NOT NULL)
     CREATE INDEX call_legs_ringing_idx ON public.call_legs USING btree (dialed_at) WHERE ((ended_at IS NULL) AND (started_at IS NULL))
+    CREATE UNIQUE INDEX call_legs_token_hash_key ON public.call_legs USING btree (token_hash)
+    CREATE INDEX call_legs_token_hash_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
@@ -228,6 +237,7 @@ TABLE calls
     call_id text NOT NULL
     call_type text NOT NULL DEFAULT ''::text
     campaign_id text
+    config_id text
     contact_id text
     conversation_id text
     customer_id text NOT NULL
@@ -250,12 +260,13 @@ TABLE calls
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     to_number text
     tts text NOT NULL DEFAULT ''::text
+    user_id text NOT NULL DEFAULT ''::text
     voice text NOT NULL DEFAULT ''::text
     CONSTRAINT calls_pkey PRIMARY KEY (id)
     CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
     CREATE INDEX calls_agent_idx ON public.calls USING btree (agent_id, started_at DESC)
-    CREATE INDEX calls_campaign_idx ON public.calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL)
     CREATE INDEX calls_customer_agent_idx ON public.calls USING btree (customer_id, agent_id, started_at DESC)
+    CREATE INDEX calls_customer_campaign_idx ON public.calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL)
     CREATE INDEX calls_customer_idx ON public.calls USING btree (customer_id, started_at DESC)
     CREATE INDEX calls_session_started_idx ON public.calls USING btree (session_id, started_at DESC) WHERE (session_id IS NOT NULL)
     CREATE INDEX calls_tags_idx ON public.calls USING gin (tags)
@@ -367,6 +378,7 @@ TABLE requests
     ship_error text NOT NULL DEFAULT ''::text
     shipped_at timestamp with time zone
     sku text NOT NULL DEFAULT ''::text
+    source_usage_id uuid
     started_at timestamp with time zone NOT NULL
     success boolean NOT NULL
     tags jsonb NOT NULL DEFAULT '{}'::jsonb

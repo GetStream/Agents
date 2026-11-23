@@ -264,9 +264,15 @@ func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID str
 	if sameUserAgain && existing.ClaimedBy == userID {
 		return nil
 	}
-	return fmt.Errorf("guest %s was already claimed by %s", guestID, existing.ClaimedBy)
+	return stack.Wrap(fmt.Errorf("%w: %s was already claimed by %s", ErrGuestClaimed, guestID, existing.ClaimedBy))
 }
 
+// ErrGuestClaimed is a guest another user has already claimed.
+var ErrGuestClaimed = errors.New("store: guest claimed")
+
+// ErrNotAGuest is a user id that is not a guest of the customer.
+var ErrNotAGuest = errors.New("store: not a guest")
+
 func notAGuest(id, customerID string) error {
-	return stack.Wrap(fmt.Errorf("store: %s is not a guest of %s", id, customerID))
+	return stack.Wrap(fmt.Errorf("%w: %s is not a guest of %s", ErrNotAGuest, id, customerID))
 }

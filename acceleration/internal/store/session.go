@@ -330,9 +330,9 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 // SetToolTimeout records the tool_timeout_ms a running session was given since it opened, by
 // a caller of kind. Only the kind that opened it changes the row, as on Upsert. Zero is the
 // default.
-func (r *Sessions) SetToolTimeout(ctx context.Context, id, kind string, milliseconds int) error {
-	if id == "" {
-		return stack.Wrap(errors.New("store: a session id is required"))
+func (r *Sessions) SetToolTimeout(ctx context.Context, customerID, id, kind string, milliseconds int) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 	var timeout *int
 	if milliseconds > 0 {
@@ -341,6 +341,7 @@ func (r *Sessions) SetToolTimeout(ctx context.Context, id, kind string, millisec
 	_, err := r.store.shard.NewUpdate().Model((*AgentSession)(nil)).
 		Set("tool_timeout_ms = ?", timeout).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Where("caller_kind = ?", kind).
 		Exec(ctx)
 	if err != nil {
@@ -352,9 +353,9 @@ func (r *Sessions) SetToolTimeout(ctx context.Context, id, kind string, millisec
 // Close records that a session ended, and why: empty when nothing said. One that already
 // ended keeps the first time and reason: a session is left once, and a second close is the
 // same leaving reported again.
-func (r *Sessions) Close(ctx context.Context, id string, at time.Time, reason string) error {
-	if id == "" {
-		return stack.Wrap(errors.New("store: a session id is required"))
+func (r *Sessions) Close(ctx context.Context, customerID, id string, at time.Time, reason string) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()
@@ -366,6 +367,7 @@ func (r *Sessions) Close(ctx context.Context, id string, at time.Time, reason st
 		Set("state = ?", SessionClosed).
 		Set("end_reason = ?", reason).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Where("closed_at IS NULL").
 		Exec(ctx)
 	if err != nil {
@@ -376,14 +378,15 @@ func (r *Sessions) Close(ctx context.Context, id string, at time.Time, reason st
 
 // SawVideo records that the agent saw the user's video on a session. The session's clock is
 // left alone: the turn that looked at the video moves it.
-func (r *Sessions) SawVideo(ctx context.Context, id string) error {
-	if id == "" {
-		return stack.Wrap(errors.New("store: a session id is required"))
+func (r *Sessions) SawVideo(ctx context.Context, customerID, id string) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
 	_, err := r.store.shard.NewUpdate().Model((*AgentSession)(nil)).
 		Set("modality = ?", ModalityVideo).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Where("modality <> ?", ModalityVideo).
 		Exec(ctx)
 	if err != nil {
@@ -395,14 +398,15 @@ func (r *Sessions) SawVideo(ctx context.Context, id string) error {
 // Voiced records that voice was started on a session: a session that was text becomes a
 // voice one; one that saw video stays a video one. The call it joined is a row of its own
 // (Calls.Start).
-func (r *Sessions) Voiced(ctx context.Context, id string) error {
-	if id == "" {
-		return stack.Wrap(errors.New("store: a session id is required"))
+func (r *Sessions) Voiced(ctx context.Context, customerID, id string) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
 	_, err := r.store.shard.NewUpdate().Model((*AgentSession)(nil)).
 		Set("modality = ?", ModalityVoice).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Where("modality = ?", ModalityText).
 		Exec(ctx)
 	if err != nil {
@@ -554,7 +558,11 @@ func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
 		return stack.Wrap(fmt.Errorf("store: delete session documents: %w", err))
 	}
 	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentSession)(nil)).
+		// The copies of hidden messages go with the session, and the changes recorded of them,
+		// which hold the same words, are emptied (forgottenCopies). A data-modifying WITH runs
+		// whether or not it is read.
+		changes := forgottenCopies(db, customerID).Where("payload->>'session_id' = ?", id)
+		return db.NewDelete().With("changes", changes).Model((*AgentSession)(nil)).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
 			Exec(ctx)

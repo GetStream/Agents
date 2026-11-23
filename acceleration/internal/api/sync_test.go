@@ -25,6 +25,7 @@ func TestSyncSuite(t *testing.T) {
 // SetupSuite seeds the built-in connectors as a router start does, so a directory can bind
 // one. Seeding is idempotent, so suites running beside this one see the same rows.
 func (s *SyncSuite) SetupSuite() {
+	s.speechToSpeech = true
 	s.RouterSuite.SetupSuite()
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
@@ -324,6 +325,30 @@ func (s *SyncSuite) TestASyncedDirectorysPagesAreReadIntoItsKnowledge() {
 	s.Equal("https://example.com/pricing", listed[0].Url)
 	s.Equal("What a call costs", value(listed[0].Title))
 	s.Equal(24, value(listed[0].RefreshHours))
+}
+
+func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
+	s.failQueries("knowledge_urls")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}},
+	})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "store:")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *SyncSuite) TestASyncDeclaringAPageThatIsNotAFetchablePageIsRefusedInItsWords() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "mailto:sales@example.com"}},
+	})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "mailto:sales@example.com is not a page that can be fetched")
 }
 
 func (s *SyncSuite) TestASyncDeclaringAPageWithAUrlLongerThan2048CharactersIsRefused() {
@@ -949,4 +974,33 @@ func (s *SyncSuite) TestSyncingAnAgentStoresHowLongEachGroupKeepsToolOutput() {
 	})
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "tools[0].output_retention")
+}
+
+func (s *SyncSuite) TestSyncingANewVoiceAgentDefaultsToSTSFast() {
+	result := s.sync(map[string]any{"name": "live-sync", "hash": "v1", "instructions": "Be brief."})
+	s.Equal(stsDefaultTarget, value(result.Config.Sts))
+}
+
+func (s *SyncSuite) TestSyncingAnExistingCascadedAgentKeepsItCascaded() {
+	created := s.sync(map[string]any{"name": "legacy-cascade", "hash": "v1", "sts": "", "instructions": "Be brief."})
+	s.Nil(created.Config.Sts)
+
+	updated := s.sync(map[string]any{"name": "legacy-cascade", "hash": "v2", "instructions": "Be briefer."})
+	s.Nil(updated.Config.Sts, "updating an existing cascaded config without naming sts must keep it cascaded")
+}
+
+func (s *SyncSuite) TestSyncingANewVoiceAgentWithEmptySTSOrCascadeSettingsStaysCascaded() {
+	explicit := s.sync(map[string]any{"name": "sync-cascade", "hash": "v1", "sts": ""})
+	s.Nil(explicit.Config.Sts)
+
+	withSTT := s.sync(map[string]any{"name": "sync-stt", "hash": "v1", "stt": "stub/stub-model"})
+	s.Nil(withSTT.Config.Sts)
+
+	withGuardrail := s.sync(map[string]any{
+		"name": "sync-guardrail", "hash": "v1", "guardrail": webhookGuardrail("https://example.com/check"),
+	})
+	s.Nil(withGuardrail.Config.Sts)
+
+	text := s.sync(map[string]any{"name": "sync-text", "hash": "v1", "mode": "text"})
+	s.Nil(text.Config.Sts)
 }

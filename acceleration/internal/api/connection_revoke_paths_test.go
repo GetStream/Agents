@@ -268,7 +268,7 @@ func (s *AuthorizationsSuite) TestARevokeTheProviderRefusesStillRemovesTheClient
 // usersConnection is owner's connected connection to a connector at the fake with its revoke
 // endpoint at revoke; extra is more manifest YAML.
 func (s *AuthorizationsSuite) usersConnection(owner *testClient, revoke, extra string) string {
-	id := s.ownersConnection(s.revokingConnector("operator", revoke, extra), owner, "")
+	id := s.ownersConnection(s.withFakeClient(s.revokingConnector("customer", revoke, extra)), owner, "")
 	s.Require().Equal(s.landing(id, consentConnected), s.finishAs(owner, id))
 	return id
 }

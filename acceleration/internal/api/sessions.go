@@ -11,6 +11,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -51,7 +52,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 	if id != "" {
 		found, err := s.store.AgentConfigs.Get(ctx, customerID, id)
 		if err != nil {
-			return nil, errUnknownConfig
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
 		if teams.refuses(found) {
 			return nil, errUnknownConfig
@@ -67,7 +68,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return nil, notFound("there is no agent called " + named)
 	}
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	if teams.refuses(found) {
 		return nil, notFound("there is no agent called " + named)
@@ -217,7 +218,7 @@ func (s *Server) getSessionTokens(ctx context.Context, request *getSessionTokens
 	}
 	row, err := s.store.Sessions.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSession
+		return nil, unknownOr(err, store.ErrNoSession, errUnknownSession)
 	}
 	spent, err := s.tokensOf(ctx, customerID, sessionSpan(row))
 	if err != nil {
@@ -313,12 +314,20 @@ func (s *Server) saySession(ctx context.Context, request *saySessionRequest) (*s
 	if request.Body == nil || request.Body.Text == "" {
 		return nil, invalidRequest("there is nothing to say")
 	}
+	if found.Spec().Native() {
+		return nil, errSayNative
+	}
 
+	// Anything else that stops it is the voice's, whose text names its vendor.
 	if err := found.Say(ctx, request.Body.Text); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return nil, nil
 }
+
+// errSayNative refuses exact words to a speech-to-speech model, which says what it makes of a
+// prompt rather than a script.
+var errSayNative = invalidRequest("a speech-to-speech agent cannot say exact words: use respond")
 
 // respondSession answers a piece of text through the model.
 func (s *Server) respondSession(ctx context.Context, request *respondSessionRequest) (*respondSessionResponse, error) {
@@ -438,7 +447,7 @@ func (s *Server) getSessionCommand(ctx context.Context, request *getSessionComma
 
 	receipt, err := found.Command(request.RequestId)
 	if err != nil {
-		return nil, errUnknownCommand
+		return nil, unknownOr(err, conversation.ErrCommandNotFound, errUnknownCommand)
 	}
 	return &getSessionCommandResponse{Body: receiptOf(receipt)}, nil
 }
@@ -457,7 +466,8 @@ func (s *Server) interruptSessionCommand(ctx context.Context, request *interrupt
 	if err != nil {
 		// The stop was taken but its durable outcome is not known, so the caller is told
 		// to keep the intent and retry this command id rather than that it stopped.
-		return nil, unavailable(err.Error())
+		recordFailure(ctx, err, stack.Trace(err))
+		return nil, unavailable("the command's outcome could not be read; retry with the same request id")
 	}
 	return &interruptSessionCommandResponse{Body: receiptOf(receipt)}, nil
 }
@@ -498,12 +508,23 @@ func (s *Server) setSessionSettings(ctx context.Context, request *setSessionSett
 		settings.Verbosity = &verbosity
 	}
 	if err := found.SetSettings(ctx, settings); err != nil {
-		if errors.Is(err, session.ErrCardedToNative) {
-			return nil, errCardedSessionToNative
-		}
-		return nil, invalidRequest(err.Error())
+		return nil, settingsRefused(err)
 	}
 	return &setSessionSettingsResponse{Body: sessionOf(ctx, found)}, nil
+}
+
+// settingsRefused answers a move onto other models or another voice that failed with err.
+// Opening a model reads a customer's own model from the database and asks the vendor for a
+// word, and either failing is the router's; what is left is the move asked for.
+func settingsRefused(err error) error {
+	switch {
+	case errors.Is(err, session.ErrCardedToNative):
+		return errCardedSessionToNative
+	case dependencyFailed(err), errors.Is(err, llmrouter.ErrCustomModelKey):
+		return err
+	default:
+		return invalidRequest(err.Error())
+	}
 }
 
 // errCardedSessionToNative is what setSessionSettings and updateSession answer a move onto a
@@ -555,12 +576,13 @@ func (s *Server) storedOrLiveSession(ctx context.Context, id string) (session.Fo
 	if live, ok := s.sessions.Get(id, owner); ok {
 		return session.Found{Live: live}, nil
 	}
-	if s.store == nil {
+	// The store refuses an empty id as an error of its own, which is not ErrNoSession.
+	if s.store == nil || id == "" {
 		return session.Found{}, errUnknownSession
 	}
 	row, err := s.storedSession(ctx, owner.CustomerID, id)
 	if err != nil {
-		return session.Found{}, errUnknownSession
+		return session.Found{}, unknownOr(err, store.ErrNoSession, errUnknownSession)
 	}
 	// The row carries who opened it, which is what the live path checks through the
 	// manager. Skipping it here would let one of a customer's users read another's.

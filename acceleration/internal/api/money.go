@@ -19,29 +19,42 @@ import (
 // refuse only work that costs money, and are a 402 the caller fixes by paying or waiting for a
 // reset.
 func moneyError(err error) (APIError, bool) {
-	for _, refusal := range []struct {
-		kind   error
-		answer func(message string) APIError
-	}{
-		{policy.ErrSuspended, func(message string) APIError {
-			return APIError{Type: ErrorTypePermission, Code: codeAccountSuspended, Message: message}
-		}},
-		{policy.ErrNoCredits, func(message string) APIError { return paymentRequired(codeInsufficientCredits, message) }},
-		{policy.ErrTopUpRequired, func(message string) APIError { return paymentRequired(codeTopUpRequired, message) }},
-		{policy.ErrSystemLimit, func(message string) APIError { return paymentRequired(codeSystemLimitReached, message) }},
-		{policy.ErrBudgetSpent, func(message string) APIError { return paymentRequired(codeSpendLimitReached, message) }},
-		{policy.ErrUserLimit, func(message string) APIError {
-			return APIError{Type: ErrorTypeRateLimited, Code: codeUserLimitReached, Message: message}
-		}},
-		{policy.ErrSpendCheckUnavailable, func(message string) APIError {
-			return APIError{Type: ErrorTypeUnavailable, Code: codeSpendCheckUnavailable, Message: message}
-		}},
-	} {
+	for _, refusal := range moneyRefusals {
 		if found := refusalOf(err, refusal.kind); found != nil {
 			return refusal.answer(strings.TrimPrefix(found.Error(), "policy: ")), true
 		}
 	}
 	return APIError{}, false
+}
+
+// moneyRefusals are the refusals about money moneyError answers, each with its answer.
+var moneyRefusals = []struct {
+	kind   error
+	answer func(message string) APIError
+}{
+	{policy.ErrSuspended, func(message string) APIError {
+		return APIError{Type: ErrorTypePermission, Code: codeAccountSuspended, Message: message}
+	}},
+	{policy.ErrNoCredits, func(message string) APIError { return paymentRequired(codeInsufficientCredits, message) }},
+	{policy.ErrTopUpRequired, func(message string) APIError { return paymentRequired(codeTopUpRequired, message) }},
+	{policy.ErrSystemLimit, func(message string) APIError { return paymentRequired(codeSystemLimitReached, message) }},
+	{policy.ErrBudgetSpent, func(message string) APIError { return paymentRequired(codeSpendLimitReached, message) }},
+	{policy.ErrUserLimit, func(message string) APIError {
+		return APIError{Type: ErrorTypeRateLimited, Code: codeUserLimitReached, Message: message}
+	}},
+	{policy.ErrSpendCheckUnavailable, func(message string) APIError {
+		return APIError{Type: ErrorTypeUnavailable, Code: codeSpendCheckUnavailable, Message: message}
+	}},
+}
+
+// moneyCode reports whether code is one moneyError answers a refusal about money with.
+func moneyCode(code string) bool {
+	for _, refusal := range moneyRefusals {
+		if refusal.answer("").Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // spendCheckRetry is how soon a caller refused because spend could not be shared is told to

@@ -147,7 +147,7 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	}
 	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.ID)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	existing := agentConfigOf(config)
 	original := config
@@ -266,7 +266,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if message, ok := textSubagentComplaint(&config, patch.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.channelsComplaint(ctx, config); !ok {
+	if message, ok, err := s.channelsComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.storedSkillSandboxComplaint(ctx, config); err != nil {

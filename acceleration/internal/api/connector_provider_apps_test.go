@@ -459,7 +459,7 @@ func (s *ConnectorProviderAppsSuite) authorizeURL(connection string) *url.URL {
 func (s *ConnectorProviderAppsSuite) lookup(registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
 	return ConnectorClients(s.store, s.sealer, func(string) string { return "" })(context.Background(),
 		core.ConnectionRef{CustomerID: s.customerID(), ConnectionID: s.utils.uuid()},
-		core.ResolvedManifest{ConnectorID: "slack_bot"}, registration)
+		core.ResolvedManifest{ConnectorID: "slack_bot", Builtin: true}, registration)
 }
 
 // slackConnectorVerifiedWith stores a custom bot connector of the test's app that lists

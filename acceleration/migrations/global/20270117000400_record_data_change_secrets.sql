@@ -1,7 +1,9 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- The secret columns a change leaves out are passed by the trigger (Store.watchDataChanges) from
--- the one Go list (isSecret) rather than kept here as a second copy.
+-- the one Go list (isSecret) rather than kept here as a second copy, which only a trigger
+-- attached before reads, until Migrate replaces it.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION record_data_change() RETURNS trigger
     LANGUAGE plpgsql
@@ -12,6 +14,8 @@ DECLARE
     identity JSONB := '{}'::JSONB;
     column_name TEXT;
     handed_out BIGINT;
+    secrets TEXT[];
+    keys TEXT[];
 BEGIN
     IF TG_OP = 'DELETE' THEN
         subject := to_jsonb(OLD);
@@ -50,19 +54,28 @@ BEGIN
 
     -- TG_ARGV[3] is the table's secret columns as an array literal (store.isSecret, attached by
     -- Store.watchDataChanges), and TG_ARGV[4:] the columns naming the row. A trigger attached
-    -- before the list was passed would record the secrets, so it records nothing and fails.
-    IF coalesce(left(TG_ARGV[3], 1), '') <> '{' THEN
-        RAISE EXCEPTION 'record_data_change: % was attached without its secret columns', TG_TABLE_NAME;
+    -- before the list was passed names the row from TG_ARGV[3] on, and is still in place from
+    -- this migration until Migrate attaches the triggers again, or a router of the release
+    -- before restarts: its secrets are the columns isSecret's rule matches, so a write in
+    -- between neither fails nor records one.
+    IF coalesce(left(TG_ARGV[3], 1), '') = '{' THEN
+        secrets := TG_ARGV[3]::text[];
+        keys := TG_ARGV[4:];
+    ELSE
+        secrets := ARRAY(SELECT key FROM jsonb_object_keys(subject) AS key
+            WHERE key LIKE '%\_sealed' OR key LIKE '%\_secret\_hash'
+                OR key IN ('access_token', 'refresh_token', 'oauth_state', 'code_verifier'));
+        keys := TG_ARGV[3:];
     END IF;
 
-    FOREACH column_name IN ARRAY TG_ARGV[4:] LOOP
+    FOREACH column_name IN ARRAY keys LOOP
         identity := identity || jsonb_build_object(column_name, subject -> column_name);
     END LOOP;
 
     -- Credentials are left behind. A secret this deployment sealed is worth nothing to
     -- the one reading it, and an access token a customer's user granted to this
     -- deployment is not something to hand out because somebody asked for their data.
-    subject := subject - TG_ARGV[3]::text[];
+    subject := subject - secrets;
 
     -- A change is numbered when it is written and seen when its transaction commits, so no
     -- committed row tells a reader which lower number a transaction still running holds.

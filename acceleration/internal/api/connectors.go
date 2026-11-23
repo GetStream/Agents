@@ -29,12 +29,6 @@ var errNoCustomConnector = notFound("the app has no custom connector with this i
 // counted. Ten keeps the message a line a person reads; it is not measured.
 const usesNamed = 10
 
-// mcpSource is both the tool source a custom definition runs and the endpoint role it runs
-// against, as the built-in manifests write them (internal/connectors/providers/slack.yaml
-// and linear.yaml: sources: [{kind: mcp, endpoint: mcp}]). MCP is the only source so far
-// (architecture doc, «Layers and interfaces», the Source registry's first member).
-const mcpSource = "mcp"
-
 // Connector is one connector as the catalog shows it and a connection is created from: the
 // revision of its definition (store.ConnectorDefinition) the request read. It is the
 // non-secret part of the manifest: what a caller chooses between (schemes, inputs, scopes,
@@ -430,43 +424,16 @@ func (s *Server) customManifest(ctx context.Context, sent CustomConnectorRequest
 	var client core.ClientPolicy
 	if sent.Client != nil {
 		for _, registration := range sent.Client.Registration {
-			// An operator client is the deployment's own, read from the variables a
-			// built-in's client.env names, and the deployment has none registered with an
-			// app's own server.
-			if core.ClientRegistrationMethod(registration) == core.ClientOperator {
-				return core.Manifest{}, stack.Wrap(errors.New("client.registration cannot be operator for a custom connector: this deployment has no client registered with it"))
-			}
 			client.Registration = append(client.Registration, core.ClientRegistrationMethod(registration))
 		}
 		client.AuthMethod = core.ClientAuthMethod(sent.Client.AuthMethod)
 		client.Alg = sent.Client.Alg
 	}
-	// oauth2_code tries only the mechanisms client.registration names and fails with ErrNoClient when it
-	// names none (pickClient in internal/connectors/schemes/oauth2code/client.go), so such a
-	// definition could be stored and never connected.
-	if slices.Contains(sent.Schemes, "oauth2_code") && len(client.Registration) == 0 {
-		return core.Manifest{}, stack.Wrap(errors.New("client.registration is required with oauth2_code: name how the OAuth client is registered (customer, cimd or dcr)"))
-	}
-	// oauth2_client_credentials gets its token URL from endpoints.token (tokenEndpoint in
-	// internal/connectors/schemes/oauth2cc/scheme.go), and a custom request sets only the MCP endpoint, so
-	// such a definition could be stored and never connected.
-	if slices.Contains(sent.Schemes, "oauth2_client_credentials") {
-		return core.Manifest{}, stack.Wrap(errors.New("oauth2_client_credentials is not available for a custom connector: it needs a token endpoint a custom connector cannot set"))
-	}
-	manifest := core.Manifest{
-		ID: sent.ID,
-		// Validated at the first revision; the store numbers the one it is stored as.
-		Revision:    1,
-		Name:        strings.TrimSpace(sent.Name),
-		Category:    strings.TrimSpace(sent.Category),
-		Description: strings.TrimSpace(sent.Description),
-		Endpoints:   map[string]string{mcpSource: sent.Endpoint},
-		Schemes:     sent.Schemes,
-		Client:      client,
-		Scopes:      core.ScopePolicy{List: sent.Scopes},
-		Sources:     []core.SourceRule{{Kind: mcpSource, Endpoint: mcpSource}},
-	}
-	if err := manifest.Validate(); err != nil {
+	manifest, err := core.CustomManifest(core.CustomConnector{
+		ID: sent.ID, Name: sent.Name, Category: sent.Category, Description: sent.Description,
+		Endpoint: sent.Endpoint, Schemes: sent.Schemes, Scopes: sent.Scopes, Client: client,
+	})
+	if err != nil {
 		return core.Manifest{}, err
 	}
 	// Last, since it resolves the host: the checks above cost nothing.
