@@ -198,7 +198,7 @@ Run `error` codes (`internal/scheduling/scheduler.go:105`):
 | `thread_gone` | A thread task's thread no longer exists, or is not its user's thread of its customer | no |
 | `connection_removed` | A thread task's line (its connection) was removed | no |
 | `no_reply` | The agent said nothing and made no file to carry | yes |
-| `reply_failed` | The reply failed, or was cancelled or interrupted and, when run once more under `st_<run>_r1`, was cut off again (a thread task's first cut-off also gives it, and the retry runs it again) | yes |
+| `reply_failed` | The reply failed, or was cancelled or interrupted and, when run once more under `st_<run>_r1`, was cut off again (a text channel's or a thread task's first cut-off also gives it, and the retry runs it again) | yes |
 | `no_phone_number` | The user never texted this agent by SMS; a number used only on WhatsApp is not rung | yes |
 | `no_agent_number` | The config has no SMS line to ring from | yes |
 | `not_answered` | Nobody picked up within the 90 s ring | no |
