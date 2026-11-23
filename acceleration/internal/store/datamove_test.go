@@ -248,7 +248,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 	// It is what lets a guest come back as themselves; a moved guest is handed a new one.
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 
 	users := s.export("acme").of("users")
 	s.Require().Len(users, 1)
@@ -260,7 +260,7 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	s.capture("acme")
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 	s.Require().NoError(s.source.Guests.SetSecret(s.ctx, "acme", "guest-1", next))
@@ -280,7 +280,7 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 
 func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 	// A file the importer wrote could otherwise plant a secret it knows for a guest.
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
 
 	s.moveEdited("acme", "moved", "users", func(row map[string]any) {
 		row["refresh_secret_hash"] = "\\x" + hex.EncodeToString(GuestSecretHash("planted"))
@@ -296,7 +296,7 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	// What the router recorded of a user is the customer's data: an account arrives an account,
 	// and a claimed guest arrives claimed by the same account, so nobody else can claim it.
 	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
 
@@ -2376,7 +2376,7 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 // A user recorded here from their own token, then imported as the guest the source still had them
 // as, is recorded again from their next token.
 func (s *DataMoveSuite) TestAUserImportedOverOneSeenHereIsRecordedAgainOnTheirNextRequest() {
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
 	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
 	row, err := json.Marshal(s.export("acme").of("users")[0])
 	s.Require().NoError(err)

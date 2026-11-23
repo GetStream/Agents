@@ -467,7 +467,7 @@ type User struct {
 	// Kind is what the credential proved them to be, UserKindGuest or
 	// UserKindAuthenticated. Only a guest may be claimed.
 	Kind string `bun:"kind,notnull"`
-	// Minted says the router handed this guest out (RecordGuest). A guest Users.Seen
+	// Minted says the router handed this guest out (Users.InsertGuest). A guest Users.Seen
 	// wrote from a guest token is not: an app signs those itself, for any id it likes.
 	Minted bool   `bun:"minted,notnull"`
 	Name   string `bun:"name,notnull"`

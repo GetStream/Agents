@@ -13,7 +13,7 @@ func (s *StoreSuite) guest(app, secret string) string {
 	if secret != "" {
 		guest.RefreshSecretHash = GuestSecretHash(secret)
 	}
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &guest))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &guest))
 	return id
 }
 

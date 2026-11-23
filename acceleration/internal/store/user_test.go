@@ -263,7 +263,7 @@ func (s *StoreSuite) TestASightingNamingNoUserIsNotRecorded() {
 func (s *StoreSuite) TestAGuestTheRouterMintedStaysAGuestOnTheirOwnToken() {
 	// The token minted for them names no role, so it reads as a full user's.
 	app := s.freshApp()
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: app}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: app}))
 
 	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindAuthenticated))
 

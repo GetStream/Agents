@@ -819,8 +819,8 @@ func (s *StoreSuite) TestDeletingSomebodyElsesSessionDeletesNothing() {
 
 func (s *StoreSuite) TestGettingAGuestTwiceIsOneGuest() {
 	guest := &User{ID: "guest-1", CustomerID: "app", Name: "Guest", CreatedAt: s.base}
-	s.Require().NoError(s.store.RecordGuest(s.ctx, guest))
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", Name: "Renamed"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, guest))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", Name: "Renamed"}))
 
 	found, err := s.store.Guest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
@@ -828,7 +828,7 @@ func (s *StoreSuite) TestGettingAGuestTwiceIsOneGuest() {
 }
 
 func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	s.opened("theirs", "app", s.base, func(session *AgentSession) {
 		session.UserID = "guest-1"
 		session.CallerKind = "guest"
@@ -854,7 +854,7 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
 }
 
 func (s *StoreSuite) TestAGuestIsClaimedOnce() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 
@@ -872,13 +872,13 @@ func (s *StoreSuite) TestClaimingSomethingThatWasNeverAGuestFails() {
 }
 
 func (s *StoreSuite) TestAGuestCannotBeClaimedByItself() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
 	s.Require().Error(err)
 }
 
 func (s *StoreSuite) TestAGuestOfAnotherAppIsNotClaimable() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	_, err := s.store.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
 	s.Require().Error(err)
 }
@@ -981,7 +981,7 @@ func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 func (s *StoreSuite) guestWithSecret(id string) (string, []byte) {
 	secret, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: id, CustomerID: "app", Name: "Alice", CreatedAt: s.base, RefreshSecretHash: hash,
 	}))
 	return secret, hash
@@ -1003,7 +1003,7 @@ func (s *StoreSuite) TestAnAccountIsNobodysToClaim() {
 }
 
 func (s *StoreSuite) TestTheSameUserIdUnderTwoAppsIsTwoPeople() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Name: "Guest", CreatedAt: s.base,
 	}))
 	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
@@ -1141,7 +1141,7 @@ func (s *StoreSuite) TestARedactedToolCallStillCountsInToolUsage() {
 }
 
 func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	s.task("theirs", func(task *ScheduledTask) { task.UserID = "guest-1" })
 	s.task("sams", nil)
 	s.task("theirs", func(task *ScheduledTask) { task.CustomerID, task.UserID = "globex", "guest-1" })
@@ -1163,7 +1163,7 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 // A claim marked finished for anybody but the account that claimed the guest would have the
 // guest's own claim skip the steps it still owes, sent again.
 func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
 	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)

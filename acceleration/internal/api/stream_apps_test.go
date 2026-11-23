@@ -86,7 +86,7 @@ func (s *StreamAppsSuite) TestAClaimJoinsEachChannelInItsOwnApp() {
 	// A guest's conversations may span the time before and after the customer had an app
 	// of its own, and each is joined where it is.
 	guest := guestPrefix + s.utils.uuid()
-	s.Require().NoError(s.store.RecordGuest(context.Background(), &store.User{
+	s.Require().NoError(s.store.Users.InsertGuest(context.Background(), &store.User{
 		ID: guest, CustomerID: s.customerID(), Name: "Guest",
 	}))
 	before, after := "support-"+s.utils.uuid(), "support-"+s.utils.uuid()

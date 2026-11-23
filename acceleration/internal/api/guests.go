@@ -116,7 +116,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 		guest := &store.User{
 			ID: userID, CustomerID: customerID, Name: name, Custom: value(body.Custom), RefreshSecretHash: hash,
 		}
-		if err := s.store.RecordGuest(ctx, guest); err != nil {
+		if err := s.store.Users.InsertGuest(ctx, guest); err != nil {
 			return nil, err
 		}
 		rendered.RefreshSecret = &secret

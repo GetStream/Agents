@@ -699,7 +699,7 @@ func (s *GuestsSuite) assertStreamProfile(id, name string, custom map[string]any
 // over HTTP would reach Stream for the token.
 func (s *GuestsSuite) recordGuest() string {
 	id := guestPrefix + s.utils.uuid()
-	s.Require().NoError(s.store.RecordGuest(context.Background(), &store.User{
+	s.Require().NoError(s.store.Users.InsertGuest(context.Background(), &store.User{
 		ID: id, CustomerID: s.customerID(), Name: "Guest",
 	}))
 	return id

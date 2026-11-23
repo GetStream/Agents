@@ -104,11 +104,11 @@ func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string
 	return user.Email, nil
 }
 
-// RecordGuest stores a guest this app handed out, so it can later be claimed.
-func (s *Store) RecordGuest(ctx context.Context, guest *User) error {
+// InsertGuest stores a guest this app handed out, so it can later be claimed.
+func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
-	return s.Users.Insert(ctx, guest)
+	return r.Insert(ctx, guest)
 }
 
 // Guest returns one guest of a customer's. A user of some other kind is not one: an

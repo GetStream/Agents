@@ -454,7 +454,7 @@ func (s *ShardedStoreSuite) TestASessionAwayFromOneShardWhileAnotherRanIsNotOpen
 }
 
 func (s *ShardedStoreSuite) TestAGuestsSessionsInEveryShardAreClaimed() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	s.opened("here", "app", s.base, func(session *AgentSession) { session.UserID = "guest-1" })
 	there := &AgentSession{ID: "there", CustomerID: "app", AgentName: "docs", UserID: "guest-1", CallerKind: "guest", CreatedAt: s.base}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, there))
