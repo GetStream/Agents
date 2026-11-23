@@ -32,6 +32,7 @@ These rules are the choices this repo makes. General Go style is not repeated he
 
 - Errors, wrapping, logging and what reaches a caller: `errors.md` beside this file.
 - Postgres and Redis state, models, repositories and validation: `store.md` beside this file.
+- When to log and at which level, field names, redaction, and a value a tool reads back from a log: `logging.md` beside this file.
 - Tests: the `go-testing` skill (`.claude/skills/go-testing/SKILL.md`).
 - Timeouts on outbound calls and streams: the `security` skill (`.claude/skills/security/go.md`, "Abuse limits").
 - N+1 queries and batch sizes: the `loop_performance_bench` skill (`.claude/skills/loop_performance_bench/SKILL.md`).
