@@ -289,9 +289,9 @@ type SourceRule struct {
 	// beside it in the manifest. A tool left out may write. Left out of the JSON when empty,
 	// so the JSON of every manifest stored before it stays as it was.
 	ReadOnlyTools []string `yaml:"read_only_tools,omitempty" json:"read_only_tools,omitempty"`
-	// HTTPTools are the tools of an http source (SourceKindHTTP), which lists none itself, and
-	// set on no other kind. Left out of the JSON when empty, so the JSON of every manifest
-	// stored before it stays as it was.
+	// HTTPTools are the tools an http source (SourceKindHTTP) offers: it has no server that lists
+	// them, so the manifest does. No other kind sets them. Left out of the JSON when empty, so
+	// the JSON of every manifest stored before it stays as it was.
 	HTTPTools []HTTPTool `yaml:"http_tools,omitempty" json:"http_tools,omitempty"`
 }
 
