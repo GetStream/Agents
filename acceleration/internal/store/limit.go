@@ -296,15 +296,13 @@ func (r *Limits) Update(ctx context.Context, organizationID string, id int64, ch
 }
 
 // Delete removes a limit of the organization, or of any when organizationID is empty, and
-// records it, returning what it was.
-func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, audit LimitAudit) (Limit, error) {
-	var deleted Limit
+// records it.
+func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, audit LimitAudit) error {
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		before, err := limitOf(ctx, tx, organizationID, id, true)
 		if err != nil {
 			return err
 		}
-		deleted = before
 		if _, err := tx.NewDelete().Model(&before).WherePK().Exec(ctx); err != nil {
 			return err
 		}
@@ -312,12 +310,12 @@ func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, au
 			fieldChanges(limitFields(&before), nil)))
 	})
 	if errors.Is(err, ErrNoLimit) {
-		return Limit{}, ErrNoLimit
+		return ErrNoLimit
 	}
 	if err != nil {
-		return Limit{}, stack.Wrap(fmt.Errorf("store: delete limit: %w", err))
+		return stack.Wrap(fmt.Errorf("store: delete limit: %w", err))
 	}
-	return deleted, nil
+	return nil
 }
 
 // Select lists an organization's limits by id, after filter.After, LimitPage(filter.Limit) and

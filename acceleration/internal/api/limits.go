@@ -894,7 +894,7 @@ func (s *Server) deleteLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	_, err = s.store.Limits.Delete(ctx, existing.OrganizationID, id, audit)
+	err = s.store.Limits.Delete(ctx, existing.OrganizationID, id, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
