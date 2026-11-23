@@ -37,3 +37,27 @@ func TestALostRowIsLoggedWithEveryTextFieldMasked(t *testing.T) {
 		})
 	}
 }
+
+func TestTwoKeysMaskedAlikeAreBothLogged(t *testing.T) {
+	request := store.Request{
+		Tags: map[string]string{
+			"sip-15550002222": "call +15550004444", "sip-15550001111": "first", "sip-15550005555": "third", "plain": "kept",
+		},
+		// The masked key sorts before the one it masks to.
+		Attributes: map[string]string{"+1•••33": "named so already", "+15550003333": "masked"},
+	}
+
+	logged := loggable(request)
+
+	require.Equal(t, map[string]string{
+		"phone_caller": "first", "phone_caller#2": "call +1•••44", "phone_caller#3": "third", "plain": "kept",
+	}, logged.Tags,
+		"every value is kept, under its masked key in key order, and an unmasked key keeps its name")
+	require.Equal(t, map[string]string{"+1•••33": "named so already", "+1•••33#2": "masked"}, logged.Attributes,
+		"a key masking leaves alone keeps its name over one masked to it")
+	row, err := json.Marshal(logged)
+	require.NoError(t, err)
+	for _, digits := range []string{"5550001111", "5550002222", "5550003333", "5550004444", "5550005555"} {
+		require.NotContains(t, string(row), digits)
+	}
+}

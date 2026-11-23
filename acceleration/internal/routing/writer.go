@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -678,14 +680,33 @@ func loggable(request store.Request) store.Request {
 	return request
 }
 
-// redactLoggedValues is a copy of values with each key and value as loggable leaves it.
+// redactLoggedValues is a copy of values with each key and value as loggable leaves it. A key
+// that masking changes and that would land on a key already taken, as two sip- ids masked
+// alike would, gets the first free #2, #3 suffix, in key order, so replay keeps every value.
+// A key masking leaves alone keeps its name.
 func redactLoggedValues(name string, values map[string]string) map[string]string {
 	if values == nil {
 		return nil
 	}
 	redacted := make(map[string]string, len(values))
+	var masked []string
 	for key, value := range values {
-		redacted[redactLogged(name, key)] = redactLogged(name, value)
+		if redactLogged(name, key) != key {
+			masked = append(masked, key)
+			continue
+		}
+		redacted[key] = redactLogged(name, value)
+	}
+	slices.Sort(masked)
+	for _, key := range masked {
+		logged := redactLogged(name, key)
+		for n := 2; ; n++ {
+			if _, taken := redacted[logged]; !taken {
+				break
+			}
+			logged = redactLogged(name, key) + "#" + strconv.Itoa(n)
+		}
+		redacted[logged] = redactLogged(name, values[key])
 	}
 	return redacted
 }

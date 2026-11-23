@@ -177,7 +177,7 @@ func (s *UsageCommandsSuite) TestALostRowIsLoggedWithoutTheNumbersAndKeysItsText
 	writer.Close(ctx)
 	key := "sk-test" + strings.Repeat("0", 16)
 	lost := uuid.Must(uuid.NewV7())
-	tags := routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key, "sip-15550009909": "named"}
+	tags := routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key, "sip-15550009909": "named", "sip-15550009910": "also named"}
 	categories := []string{"sip-15550004404"}
 	routing.NewRecorderOn(routing.LLM, writer, nil, logger).Record(routing.ProviderConfig{Provider: "openai", Model: "gpt"}, routing.Stat{
 		Owner: routing.Owner{CustomerID: "app-1", Attribution: routing.Attribution{
@@ -187,8 +187,8 @@ func (s *UsageCommandsSuite) TestALostRowIsLoggedWithoutTheNumbersAndKeysItsText
 		UsageID: lost, StartedAt: time.Now().UTC(), Usage: routing.Usage{OutputTokens: 10},
 		Attributes: map[string]string{"note": "for +15550005505"},
 	})
-	held := []string{"5550001101", "5550002202", "5550003303", "5550004404", "5550005505", "5550006606", "5550007707", "5550009909", key}
-	s.Equal(routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key, "sip-15550009909": "named"}, tags,
+	held := []string{"5550001101", "5550002202", "5550003303", "5550004404", "5550005505", "5550006606", "5550007707", "5550009909", "5550009910", key}
+	s.Equal(routing.Tags{"caller": "call +15550003303 back", "pasted": "the key " + key, "sip-15550009909": "named", "sip-15550009910": "also named"}, tags,
 		"the session's own tags are not redacted in place")
 	s.Equal([]string{"sip-15550004404"}, categories, "nor its categories")
 	for _, text := range held {
@@ -211,6 +211,8 @@ func (s *UsageCommandsSuite) TestALostRowIsLoggedWithoutTheNumbersAndKeysItsText
 	s.Equal("key-a", rows[0].APIKey)
 	s.EqualValues(10, rows[0].OutputTokens)
 	s.Empty(rows[0].UserID, "a user id the log masks is left off, so the row bills to its app")
+	s.Equal("named", rows[0].Tags["phone_caller"], "two tag keys masked alike both come back")
+	s.Equal("also named", rows[0].Tags["phone_caller#2"])
 }
 
 func (s *UsageCommandsSuite) TestAReplayedRowWithAUserTheUsageServiceWouldRefuseIsWrittenWithoutIt() {
