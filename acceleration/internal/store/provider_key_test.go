@@ -114,10 +114,10 @@ func (s *StoreSuite) TestProviderKeyQueryBudgets() {
 		all()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(all)) }), "then the local cache answers")
 	}
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(3, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			_, err := s.store.ProviderKeys.Delete(s.ctx, "app", "openai", "global")
 			s.Require().NoError(err)
 		}))
-	}))
+	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
 }

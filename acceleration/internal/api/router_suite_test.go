@@ -252,6 +252,9 @@ type RouterSuite struct {
 	// limitsMode is the suite's ROUTER_LIMITS_MODE, for a suite to set before it starts the
 	// harness. Empty is enforce.
 	limitsMode config.LimitsMode
+	// privateModels lets the suite's custom models sit on a private address, as a self-hosted
+	// router's models.private_endpoints does; a suite sets it before it starts the harness.
+	privateModels bool
 	// owned are the apps the suite made or used, whose rows must all name a key.
 	ownedMu sync.Mutex
 	owned   []string
@@ -815,6 +818,7 @@ func (s *RouterSuite) SetupSuite() {
 		Episodes:              episodes,
 		SlackApps:             s.slackApps,
 		OperatorProviderApps:  s.operatorApps,
+		PrivateModelEndpoints: s.privateModels,
 	})
 	listener.Config.Handler = server.Handler()
 	listener.Start()
@@ -2466,11 +2470,28 @@ func (u testUtils) callID() string {
 	return "call-" + u.uuid()
 }
 
-// number is an E.164 number nobody else holds. It is random rather than read off the clock,
-// which ticks in microseconds on some machines and so repeats every ten thousand numbers,
-// and nothing a suite holds is ever released.
+// number is an E.164 number nobody else holds in this run: the next one of a sequence that
+// starts at a random place, so that runs on a kept database start in different places. A number
+// drawn at random could be one another suite of the run holds, and a held number is unique
+// (phone_numbers_held_idx). It is not read off the clock, which ticks in microseconds on some
+// machines and so repeats every ten thousand numbers.
 func (testUtils) number() string {
-	return fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
+	return fmt.Sprintf("+1512%07d", nextNumber())
+}
+
+// numbersFrom and numbersGiven make nextNumber's numbers; numbersAvailable is how many there
+// are in the seven digits of a number's last part.
+const numbersAvailable = 10_000_000
+
+var (
+	numbersFrom  = rand.Int64N(numbersAvailable)
+	numbersGiven atomic.Int64
+)
+
+// nextNumber is a number no other call in this process gave out, as the seven digits that follow
+// a prefix.
+func nextNumber() int64 {
+	return (numbersFrom + numbersGiven.Add(1)) % numbersAvailable
 }
 
 // testData makes what a test runs against. Nothing it makes is cleaned up.

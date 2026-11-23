@@ -668,6 +668,9 @@ var (
 	errNumberOnItsOwnCall = conflict("Every caller of this number joins one call: attach the number again so each caller gets a session of their own.")
 	errTelephonySuspended = APIError{Type: ErrorTypePermission, Code: codeTelephonySuspended,
 		Message: "This app's telephony is suspended. Contact Stream support."}
+	errVerificationRequired = APIError{Type: ErrorTypePermission, Code: codeVerificationRequired,
+		Message: "Verify your organization in the Stream dashboard to buy phone numbers. " +
+			"If you just did, try again in a minute."}
 )
 
 // clientPhoneFailures are the failures of a phone operation answered in their own words, as
@@ -687,6 +690,9 @@ var clientPhoneFailures = []error{
 func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrSuspended) {
 		return errTelephonySuspended
+	}
+	if errors.Is(err, phone.ErrVerificationRequired) {
+		return errVerificationRequired
 	}
 	// A number, a call and a transfer are all billed, so the organization's money refuses them
 	// as it refuses a model that costs money.

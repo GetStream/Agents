@@ -25,8 +25,8 @@ class AgentStats:
             still open counts up to now.
         tool_calls (ToolStats):
         tools (list[ToolStats]): One row per tool, most called first.
-        avg_turns (float | None): Turns a session took in the window, on average. A turn is a reply to the person, not a
-            rewound one or a delegated task's. Null when no session took one.
+        avg_turns (float | None): Turns a session took in the window, on average. A turn is a reply that was not
+            rewound, delegated work that came back after its turn ended included. Null when no session took one.
         sessions (int): Sessions that took a turn in the window: what a tool's session_share is out of.
     """
 

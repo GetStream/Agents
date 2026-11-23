@@ -7,8 +7,10 @@ declare(strict_types=1);
 namespace GetStream\VisionAgents\Generated;
 
 /**
- * What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for
- * now. Fixed once the campaign is created.
+ * What a campaign rings. standard rings the contacts it was given before launch, and completes
+ * once it is done with them. auto_enroll also takes contacts while scheduled, running or
+ * paused, starts each on the first step within calling hours, and runs until it is stopped.
+ * Fixed once the campaign is created.
  */
 enum CampaignType: string
 {

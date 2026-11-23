@@ -65,7 +65,7 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 }
 
 // errNativeTakesNoImages is a typed turn with images for a speech-to-speech agent.
-var errNativeTakesNoImages = errors.New("agent: a speech-to-speech agent takes no images on a typed turn")
+var errNativeTakesNoImages = invalid(errors.New("agent: a speech-to-speech agent takes no images on a typed turn"))
 
 // errNotJoined is a typed turn for an agent that has not joined, or has left.
 var errNotJoined = errors.New("agent: not joined")
@@ -813,7 +813,7 @@ func (a *Agent) nativeTools(delegating bool) ([]llm.Tool, error) {
 	}), nil
 }
 
-func (a *Agent) nativeDelegate(call llm.ToolCall) ([]llm.ContentPart, bool, error) {
+func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var arguments struct {
 		Skill  string `json:"skill"`
 		Prompt string `json:"prompt"`
@@ -835,7 +835,7 @@ func (a *Agent) nativeDelegate(call llm.ToolCall) ([]llm.ContentPart, bool, erro
 			history = append(history, message)
 		}
 	}
-	charged := a.chargedLocked(context.Background(), a.toolScheduled[call.ID])
+	charged := a.chargedLocked(context.WithoutCancel(ctx), a.toolScheduled[call.ID])
 	a.mu.Unlock()
 	id, err := a.harness.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
 	if err != nil {

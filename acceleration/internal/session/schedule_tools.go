@@ -26,6 +26,7 @@ const (
 	scheduledTaskNotFound = "scheduled_task_not_found"
 	tooManyTasks          = "too_many_tasks"
 	conflictCode          = "conflict"
+	taskChanged           = "task_changed"
 	serverSideOnly        = "server_side_only"
 	unknownConfig         = "unknown_config"
 )
@@ -408,9 +409,6 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		next, ok := schedule.Next(now)
 		missed := scheduling.SleptThrough(task)
 		if !ok && missed != nil {
-			if err := r.db.ScheduledTaskRuns.Insert(ctx, missed); err != nil {
-				return nil, err
-			}
 			task.State, task.NextRunAt = store.ScheduledTaskCompleted, nil
 			slept = missed
 			break
@@ -463,9 +461,19 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	default:
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
 	}
-	if err := r.db.ScheduledTasks.Update(ctx, &task); err != nil {
-		if errors.Is(err, store.ErrNoAgentConfig) {
+	if slept != nil {
+		err = r.db.ScheduledTasks.Close(ctx, &task, slept)
+	} else {
+		err = r.db.ScheduledTasks.Update(ctx, &task)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNoAgentConfig):
 			return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
+		case errors.Is(err, store.ErrTooManyScheduledTasks):
+			return refusal(tooManyTasks, fmt.Sprintf("the user already has %d tasks running, the most this agent allows; cancel one first, or pause one until it is wanted", r.maxActive())), nil
+		case errors.Is(err, store.ErrScheduledTaskChanged):
+			return refusal(taskChanged, "that task changed while you were changing it; read it again with list_scheduled_tasks and retry"), nil
 		}
 		return nil, err
 	}
@@ -614,22 +622,15 @@ func (r *scheduleRunner) snoozeTarget(task store.ScheduledTask, args updateArgs,
 	return target, nil
 }
 
-// room refuses the change when putting the task back among the active ones
-// would take its user over this agent's limit, or when its agent config is deleted: a
-// session opened before the delete still runs, but the task has nothing to run on.
+// room refuses putting the task back among the active ones when its agent config is
+// deleted: a session opened before the delete still runs, but the task has nothing to run
+// on. The save counts the user's active tasks against the limit, under its lock.
 func (r *scheduleRunner) room(ctx context.Context, task *store.ScheduledTask) ([]llm.ContentPart, error) {
 	if task.State == store.ScheduledTaskActive {
 		return nil, nil
 	}
 	if _, err := r.db.AgentConfigs.Get(ctx, r.spec.CustomerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
 		return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
-	}
-	count, err := r.db.ScheduledTasks.CountActive(ctx, r.spec.CustomerID, r.user, task.ConfigID)
-	if err != nil {
-		return nil, err
-	}
-	if count >= r.maxActive() {
-		return refusal(tooManyTasks, fmt.Sprintf("the user already has %d tasks running, the most this agent allows; cancel one first, or pause one until it is wanted", r.maxActive())), nil
 	}
 	return nil, nil
 }

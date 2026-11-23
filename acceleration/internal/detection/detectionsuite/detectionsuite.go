@@ -75,7 +75,7 @@ func (s *Suite) SetupSuite() {
 // Detect runs one request on the suite's provider and fails the test unless it succeeds.
 func (s *Suite) Detect(request detection.Request) detection.Result {
 	s.Require().NoError(request.Validate())
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), defaultTimeout)
 	defer cancel()
 	found, err := s.Provider.Detect(ctx, request)
 	s.Require().NoError(err)

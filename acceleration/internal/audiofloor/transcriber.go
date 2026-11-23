@@ -247,7 +247,7 @@ func NewTranscriber(client *Client, model string, languages []string, logger *sl
 }
 
 // Start opens the session. It asks the server nothing.
-func (t *Transcriber) Start(context.Context) error {
+func (t *Transcriber) Start(ctx context.Context) error {
 	var err error
 	if t.heard, err = t.client.NewStream(maxUtterance); err != nil {
 		return err
@@ -255,7 +255,7 @@ func (t *Transcriber) Start(context.Context) error {
 	if t.detector, err = gopus.NewSpeechDetector(SampleRate); err != nil {
 		return stack.Wrap(err)
 	}
-	t.ctx, t.cancel = context.WithCancel(context.Background())
+	t.ctx, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	go t.transcribe()
 	t.emitter.Send(stt.Connected{Provider: ProviderName, Model: t.model, At: time.Now()})
 	return nil

@@ -6,7 +6,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
-	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/migrations"
@@ -30,20 +28,14 @@ type migrationSet struct {
 	// marker is a table of this set that every database which ran the single history before
 	// the split holds, so such a database is told from a new one.
 	marker string
+	// squashed is the last version of the history squashed into the set's initial migration,
+	// whose schema is the one that history left.
+	squashed int64
 }
 
 var (
-	globalSet = migrationSet{name: "global", files: migrations.Global, table: "goose_global_version", marker: "agent_configs"}
-	shardSet  = migrationSet{name: "shard", files: migrations.Shard, table: "goose_shard_version", marker: "requests"}
-)
-
-const (
-	// legacyHead is the last version of the single history every database ran before the
-	// split. A database that applied it is marked as having applied the baseline of each set
-	// rather than running it.
-	legacyHead int64 = 20270103090000
-	// baseline is the version of each set's first migration, the schema at legacyHead.
-	baseline int64 = 20270110000000
+	globalSet = migrationSet{name: "global", files: migrations.Global, table: "goose_global_version", marker: "agent_configs", squashed: 20270124093000}
+	shardSet  = migrationSet{name: "shard", files: migrations.Shard, table: "goose_shard_version", marker: "requests", squashed: 20270126000000}
 )
 
 // Migrate applies every pending migration: the shared set to the shared database and the
@@ -100,14 +92,14 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
-	if err := adoptLegacy(ctx, conn, versions, set); err != nil {
-		return err
-	}
 	// A provider of its own rather than goose's globals: the two sets record their versions
 	// in tables of their own, and the ledger migrates in the same process.
 	provider, err := goose.NewProvider("", db, set.files, goose.WithStore(versions))
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+	}
+	if err := checkHistory(ctx, conn, provider, set); err != nil {
+		return err
 	}
 	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
@@ -115,112 +107,53 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	return ensureUsageIndexes(ctx, conn, set)
 }
 
-// adoptLegacy marks a database that ran the single history before the split as having
-// applied the set's baseline, which is the schema that history left. One that stopped short
-// of its last version cannot be adopted: the baseline would claim migrations it never ran.
-func adoptLegacy(ctx context.Context, conn *sql.Conn, versions database.Store, set migrationSet) error {
+// checkHistory refuses a database whose history the set's migrations no longer hold, which
+// the initial migration would otherwise be wrong about: one that ran the single history from
+// before the split, on which it would fail to create tables already there, and one that ran
+// part of the history squashed into it, whose missing migrations it would claim as applied.
+// One that ran the whole history holds the initial migration's schema and starts as it is, and
+// so does one cleaned of it once deployed, which holds no version of it. A version after the
+// squashed history with no file is a later release's, from before a rollback to this one.
+func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider, set migrationSet) error {
 	var recorded, legacy bool
 	err := conn.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL, to_regclass($2) IS NOT NULL", set.table, set.marker).Scan(&recorded, &legacy)
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
-	if recorded || !legacy {
+	if !recorded {
+		if legacy {
+			return fmt.Errorf("store: migrate %s: the database ran the migrations from before they were split; recreate it, or start a release from before the history was squashed first", set.name)
+		}
 		return nil
 	}
-	var head bool
-	err = conn.QueryRowContext(ctx, `SELECT to_regclass('goose_db_version') IS NOT NULL AND EXISTS (
-		SELECT 1 FROM goose_db_version WHERE version_id = $1 AND is_applied)`, legacyHead).Scan(&head)
+	known := map[int64]bool{0: true}
+	for _, source := range provider.ListSources() {
+		known[source.Version] = true
+	}
+	// A version counts by its latest row: rolling one back adds a row that is not applied.
+	rows, err := conn.QueryContext(ctx, `SELECT version_id FROM (
+		SELECT DISTINCT ON (version_id) version_id, is_applied FROM `+set.table+` ORDER BY version_id, id DESC) AS latest
+		WHERE is_applied`)
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
-	if !head {
-		return fmt.Errorf("store: migrate %s: the database has not applied migration %d; start a release from before the migrations were split first", set.name, legacyHead)
+	defer rows.Close()
+	var unknown, squashed bool
+	for rows.Next() {
+		var version int64
+		if err := rows.Scan(&version); err != nil {
+			return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		}
+		unknown = unknown || (!known[version] && version < set.squashed)
+		squashed = squashed || version == set.squashed
 	}
-	// A migration past the single history's last is one the baseline does not hold, so the
-	// schema is not what the sets build on.
-	var unknown string
-	err = conn.QueryRowContext(ctx, `SELECT coalesce(string_agg(version_id::text, ', ' ORDER BY version_id), '') FROM (
-		SELECT DISTINCT ON (version_id) version_id, is_applied FROM goose_db_version ORDER BY version_id, id DESC) AS latest
-		WHERE is_applied AND version_id > $1`, legacyHead).Scan(&unknown)
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
-	if unknown != "" {
-		return fmt.Errorf("store: migrate %s: the database applied migrations %s, which no migration set has; undo them and remove their rows of goose_db_version first", set.name, unknown)
+	if unknown && !squashed {
+		return fmt.Errorf("store: migrate %s: the database has not applied migration %d, the last of the history squashed into the initial one; recreate it, or start a release from before the history was squashed first", set.name, set.squashed)
 	}
-	if err := versions.CreateVersionTable(ctx, conn); err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
-	}
-	if err := versions.Insert(ctx, conn, database.InsertRequest{Version: 0}); err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
-	}
-	if err := versions.Insert(ctx, conn, database.InsertRequest{Version: baseline}); err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
-	}
-	slog.Default().Info("adopted a database that ran the single migration history", "set", set.name)
 	return nil
-}
-
-// DropStrays drops the tables of the other set that each database kept from before the split,
-// when every database carried every table: the shared set's on this shard, and the shard
-// set's on the shared database unless it is some shard's own too. It returns the tables it
-// dropped and those it left. A deployment of one database has none.
-//
-// It is not part of Migrate: a router of the release before the split, still serving during a
-// rollout, reads those tables. Run it once every router is on a release with two sets.
-func (s *Store) DropStrays(ctx context.Context) (dropped, left []string, err error) {
-	if !s.Sharded() {
-		return nil, nil, nil
-	}
-	if dropped, left, err = dropStrays(ctx, s.shard, globalSet); err != nil || s.globalIsShard {
-		return dropped, left, err
-	}
-	more, kept, err := dropStrays(ctx, s.global, shardSet)
-	return append(dropped, more...), append(left, kept...), err
-}
-
-// dropStrays drops the empty tables of the other set that db holds. Only an empty one is
-// dropped: rows in one are a state nobody should lose to a command, so it is left for a
-// person. A stray another stray points at is dropped on a later pass, once the one pointing
-// is gone.
-func dropStrays(ctx context.Context, db *bun.DB, other migrationSet) (dropped, left []string, err error) {
-	tables, err := createdTables(other)
-	if err != nil {
-		return nil, nil, err
-	}
-	var strays []string
-	for _, table := range tables {
-		var present, empty bool
-		if err := db.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", table).Scan(&present); err != nil {
-			return nil, nil, fmt.Errorf("store: strays: %w", err)
-		}
-		if !present {
-			continue
-		}
-		if err := db.NewRaw("SELECT NOT EXISTS (SELECT 1 FROM ?)", bun.Ident(table)).Scan(ctx, &empty); err != nil {
-			return nil, nil, fmt.Errorf("store: strays: %w", err)
-		}
-		if !empty {
-			left = append(left, table)
-			continue
-		}
-		strays = append(strays, table)
-	}
-	for len(strays) > 0 {
-		var kept []string
-		for _, table := range strays {
-			if _, err := db.ExecContext(ctx, "DROP TABLE ?", bun.Ident(table)); err != nil {
-				kept = append(kept, table)
-				continue
-			}
-			dropped = append(dropped, table)
-		}
-		if len(kept) == len(strays) {
-			return dropped, append(left, kept...), nil
-		}
-		strays = kept
-	}
-	return dropped, left, nil
 }
 
 // migrateLockFirst and migrateLockMost are the pause between two tries at the migrate lock:
@@ -365,19 +298,6 @@ var tableChange = regexp.MustCompile(`(?i)(CREATE TABLE (?:IF NOT EXISTS )?|DROP
 // setTables are the tables the set's migrations leave, read from their Up SQL in order. A
 // table is created by one set alone, except the change log both keep.
 func setTables(set migrationSet) ([]string, error) {
-	return migratedTables(set, false)
-}
-
-// createdTables are the tables the set's migrations ever create, a later one dropping or
-// renaming them included, which a database of the other set may still hold from before the
-// split.
-func createdTables(set migrationSet) ([]string, error) {
-	return migratedTables(set, true)
-}
-
-// migratedTables reads the set's tables from its migrations' Up SQL in order. ever keeps the
-// tables a later migration drops, and the old name of one it renames.
-func migratedTables(set migrationSet, ever bool) ([]string, error) {
 	files, err := fs.Glob(set.files, "*.sql")
 	if err != nil {
 		return nil, err
@@ -399,14 +319,10 @@ func migratedTables(set migrationSet, ever bool) ([]string, error) {
 						tables = append(tables, table)
 					}
 				case strings.HasPrefix(verb, "DROP"):
-					if !ever {
-						tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
-					}
+					tables = slices.DeleteFunc(tables, func(held string) bool { return held == table })
 				case renamed != "":
-					if i := slices.Index(tables, table); i >= 0 && !ever {
+					if i := slices.Index(tables, table); i >= 0 {
 						tables[i] = renamed
-					} else if i >= 0 && !slices.Contains(tables, renamed) {
-						tables = append(tables, renamed)
 					}
 				}
 			}

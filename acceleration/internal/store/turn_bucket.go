@@ -62,8 +62,8 @@ type TurnBucket struct {
 	RoundtripP99Ms   *float64  `bun:"-"`
 }
 
-// TurnBucketFilter picks a customer's turn buckets in [From, To). An agent id narrows them to
-// one agent.
+// TurnBucketFilter picks a customer's turn buckets: every hour [From, To) touches, whole. An
+// agent id narrows them to one agent.
 type TurnBucketFilter struct {
 	AgentID     string
 	Granularity Granularity
@@ -143,8 +143,10 @@ ON CONFLICT (customer_id, agent_id, bucket, leg, bin) DO UPDATE SET
 	return nil
 }
 
-// Select returns the conversational latency buckets for one customer, oldest first. A day is
-// the hours in it from the filter's From to its To.
+// Select returns the conversational latency buckets for one customer, oldest first. The rows
+// are hours, and every hour the window touches is read whole, rather than dropping the hour it
+// starts in. A day is those hours of one UTC day, as the request statistics' day is the
+// window's part of it, whatever the server's time zone.
 func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucketFilter) ([]TurnBucket, error) {
 	granularity, agentID, from, to := f.Granularity, f.AgentID, f.From, f.To
 	if !granularity.Valid() {
@@ -153,7 +155,7 @@ func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucke
 	if customerID == "" {
 		return nil, stack.Wrap(errors.New("store: customer id is required"))
 	}
-	bucket := fmt.Sprintf("date_trunc('%s', bucket)", granularity.truncateUnit())
+	bucket := fmt.Sprintf("date_trunc('%s', bucket, 'UTC')", granularity.truncateUnit())
 
 	type binRow struct {
 		AgentID string    `bun:"agent_id"`
@@ -175,8 +177,7 @@ func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucke
 			ColumnExpr("SUM(interrupted_count) AS interrupted_count").
 			ColumnExpr("SUM(audio_out_ms_total) AS audio_out_ms_total").
 			Where("customer_id = ?", customerID).
-			Where("bucket >= ?", from).
-			Where("bucket < ?", to).
+			Where(wholeBuckets(Hourly, "bucket"), from, to).
 			GroupExpr("customer_id, agent_id, " + bucket).
 			OrderExpr(bucket + " ASC, agent_id ASC")
 		bins := db.NewSelect().
@@ -185,8 +186,7 @@ func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucke
 			ColumnExpr(bucket+" AS bucket").
 			ColumnExpr("SUM(count) AS count").
 			Where("customer_id = ?", customerID).
-			Where("bucket >= ?", from).
-			Where("bucket < ?", to).
+			Where(wholeBuckets(Hourly, "bucket"), from, to).
 			GroupExpr("agent_id, leg, bin, " + bucket).
 			OrderExpr("bin ASC")
 		if agentID != "" {

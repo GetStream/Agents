@@ -59,7 +59,7 @@ One word, one meaning, in code, docs and API alike.
 | run | The record of one occurrence that came due, or of one run by hand: `running`, `delivered`, `failed` or `missed`, with `error` a reason code. Its `prompt` is the instructions as they were at the claim | `store.ScheduledTaskRun`, table `scheduled_task_runs`, unique per (`customer_id`, `task_id`, `scheduled_for`) for `trigger = schedule` | run `scheduled_for` 2026-10-26T09:00:00+01:00, `state` `delivered`, `delivered_to` `conversation` |
 | claim, lease | A worker's hold on a task: `leased_by` fences every later write of that worker, `lease_until` says when another worker may take it. Lease 1 min, renewed every 10 s | `ScheduledTasks.Claim`, `ScheduledTasks.Renew`, `scheduledLease`, `renewLeaseEvery` (`scheduler.go:19`, `:22`) | A pause clears `leased_by`; the next renewal finds no row and stops the delivery |
 | held | An occurrence that came due in quiet hours: the claim stays, the lease moves to the hold's end, the run stays `running` with `postponed_until` | `Postponed`, `ScheduledTasks.Postpone`, `ScheduledTaskRun.PostponedUntil` | Due 23:30 with quiet hours 22:00–07:00: held until 07:00, delivered then |
-| missed | A run not delivered because it was too late, the task slept through it, or a pause or edit settled it while it was held or in flight (S4). Not a failure: the failure streak is left as it is | `ScheduledTaskRunMissed`, `Missed`, `Scheduler.missed`, `SleptThrough` | A daily task the router could not reach for 25 h: yesterday's occurrence is `missed`, today's (59 min old) is delivered. With 3 h down, the one occurrence is 3 h old, past the 1 h grace, so it is `missed` and nothing is delivered |
+| missed | A run not delivered because it was too late, the task slept through it, a pause or edit settled it while it was held or in flight (S4), or it was run by hand and its router stopped before finishing it (written by the daily prune a day after it started). Not a failure: the failure streak is left as it is | `ScheduledTaskRunMissed`, `Missed`, `Scheduler.missed`, `SleptThrough` | A daily task the router could not reach for 25 h: yesterday's occurrence is `missed`, today's (59 min old) is delivered. With 3 h down, the one occurrence is 3 h old, past the 1 h grace, so it is `missed` and nothing is delivered |
 | reason | The short code a failed or missed run records; the full error goes to the logs only | `Reason*` constants (`scheduler.go:105`), `Failure.Reason` | `user_on_call`, `not_answered`, `task_paused` |
 | final | A failure another attempt would only repeat, or that would ring the user again: not retried | `Failure.Final`, `undeliveredFinally` | `not_answered`, `already_called` |
 | quiet hours | The part of the user's local day an occurrence is held through: `{start, end}` as "22:00", read in the task's zone; an end that does not read after the start (earlier or equal) wraps midnight | `QuietEnd` (`quiet.go:46`), `ScheduledTaskQuietHours` | `{"start": "22:00", "end": "07:00"}` |
@@ -96,6 +96,22 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestStoreSuite/TestAnOccurrenceWhoseWorkersKeepDyingIsFailedAtTheAttemptCap`,
   `TestStoreSuite/TestTheAttemptCapRecordsWhatThePlacedCallLeft`,
   `TestSchedulerSuite/TestACappedOccurrence*` (two tests).
+- **A failed finish is written again** (`FinishRetries`: 1 s, 2 s, 4 s): a run left running is
+  taken over once stale and delivered again.
+  `TestScheduledTasksSuite/TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce`.
+- **A run's words are texted once per channel.** The delivery takes (run, channel) on the run
+  before the send (`ScheduledTaskRuns.TakeText`, column `texted`) and gives it back when the send
+  fails; an attempt that finds it taken, such as a worker taking over a run whose finish was
+  lost, counts the run delivered on that channel without texting again. A failed send that
+  cannot be given back fails the occurrence finally unless a later channel lands it, since a
+  later attempt would count it delivered.
+  `TestScheduledTasksSuite/TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotTextedAgain`,
+  `TestScheduledTasksSuite/TestATextThatFailedAndCouldNotBeGivenBackFailsItsRun`,
+  `TestScheduledTasksSuite/TestATextKeptUnsentFailsItsRunThoughTheNextChannelFailedForNow`,
+  `TestStoreSuite/TestARunTakesEachTextChannelOnceUntilItIsGivenBack`.
+- **A first occurrence opens one session, retries included.** `openTaskSession` records it on
+  the task, and a delivery whose claimed copy names none reads the task back first.
+  `TestScheduledTasksSuite/TestAFirstOccurrenceRetriedTwiceFollowsUpInTheOneSessionItOpened`.
 - **An occurrence holds a slot 20 min at most** (`occurrenceBudget`), and running out is
   `timed_out`. `TestSchedulerSuite/TestAnOccurrenceThatOutlastsItsBudgetFails`,
   `TestSchedulerSuite/TestAnOccurrenceThatOutlastsItsBudgetIsTimedOutEvenWhenDeliveryAnswersWithACodedFailure`.
@@ -116,6 +132,19 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   not held. `TestSchedulerSuite/TestAHeldTaskIsDeliveredWhenTheHoldEnds`,
   `TestSchedulerSuite/TestAHeldOccurrenceIsCountedFromTheHoldAndNotFromWhenItCameDue`,
   `TestScheduledTasksSuite/TestAQuietTaskIsHeldUntilItsQuietHoursEnd`.
+- **A save never undoes a write it did not read.** `ScheduledTasks.Update` saves only while
+  `updated_at` is what the caller read, and refuses a copy read before a pause, an edit, a claim, a
+  hold, a finish or a session write (`SetSession`) with `ErrScheduledTaskChanged` (409
+  `task_changed` over the API). A lease renewal leaves `updated_at` alone, so an edit during a long
+  delivery still saves. A resume that slept through a one-shot records its missed run in the same
+  transaction (`ScheduledTasks.Close`), so a refused save leaves none.
+  `TestStoreSuite/TestASaveOfACopyReadBefore*` (six tests), `TestStoreSuite/TestAClosingRefusedAsChangedRecordsNoRun`.
+- **The active limit is counted under a lock.** A create, and a save that makes a task active
+  again, count the user's active tasks on the config under an advisory lock on customer, user and
+  config, so creates and resumes at once stop at `max_tasks_per_user`.
+  `TestStoreSuite/TestCreatesAtOnceStopAtTheActiveLimit`,
+  `TestStoreSuite/TestResumesAtOnceStopAtTheConfigsActiveLimit`,
+  `TestScheduledTasksSuite/TestResumesAtOnceStopAtTheActiveLimit`.
 - **A pause or edit writes a running run `missed`, held or in flight (S4).** An edited active
   one-shot comes due again as it now reads, unless its run placed a call: then it is completed.
   Only an edit that leaves a one-shot active while it is delivered keeps its claim and run.
@@ -328,7 +357,10 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduleResumeSuite/TestATaskAMovePaused*` (`internal/session`).
 - **History is kept 90 days.** `PruneScheduledTasks` (daily, `pruneScheduledTasks` in `cmd/router`) deletes
   runs finished, and completed or failed tasks last changed, over `ScheduledTasksKept` ago. An active or
-  paused task stays; its old runs do not. Each delete reads its table by an index
+  paused task stays; its old runs do not. A run by hand still running a day after it started
+  (`scheduledTaskManualRunLost`) is written `missed` first: only the router that took the request
+  finishes it (`TestStoreSuite/TestPruneWritesMissedARunByHandItsRouterLeftRunning`). Each delete
+  reads its table by an index
   (`scheduled_task_runs_finished_idx`, `scheduled_tasks_pruned_idx`), and the delete's state test must
   imply the tasks index's predicate (`TestPruneReadsItsIndexes`). `TestStoreSuite/TestPrune*` in
   `internal/store/scheduled_tasks_prune_test.go`.

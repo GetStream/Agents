@@ -1,6 +1,7 @@
 package stsrouter
 
 import (
+	"log/slog"
 	"math"
 	"strconv"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
 )
 
@@ -68,6 +70,8 @@ type Session struct {
 	// lease holds a minute of the conversation while it runs, so the other routers count it
 	// before its replies are recorded.
 	lease *routing.Lease
+	// timing is what the session's "speech-to-speech timing" line says of it.
+	timing timing
 
 	closeOnce sync.Once
 }
@@ -82,6 +86,20 @@ const stsTokensPerMinute = 2_000
 var leaseMinute = pricing.Quantities{
 	pricing.SessionSeconds: 60, pricing.AudioMs: 60_000,
 	pricing.InputTokens: stsTokensPerMinute / 2, pricing.OutputTokens: stsTokensPerMinute / 2,
+}
+
+// timing is what a session has taken and answered so far, for its timing line.
+type timing struct {
+	// tookMs is all the caller's audio the provider took, which heardMs only holds since the
+	// last reply.
+	tookMs                    float64
+	inputTokens, outputTokens int64
+	replies                   int
+	// firstByteMs is how long the caller waited for the first reply that answered a wait, and
+	// zero while none has: a reply nobody waited for, such as the greeting, reports no wait.
+	firstByteMs float64
+	// errorCode and errorMessage are the session's first failure, of a reply or of its own.
+	errorCode, errorMessage string
 }
 
 // reply is what the session remembers about one response until it completes.
@@ -100,6 +118,9 @@ func newSession(
 	owner routing.Owner,
 	recorder, backend *routing.Recorder,
 ) *Session {
+	// The session's rows, its side rows included, add up on a Spent of its own for its timing
+	// line, and still to what the socket that opened it spent.
+	owner.Spent = owner.Spent.Part()
 	session := &Session{
 		provider: provider,
 		config:   config,
@@ -129,6 +150,7 @@ func (s *Session) ProcessAudio(pcm sts.PcmData, participant sts.Participant) err
 	}
 	s.mu.Lock()
 	s.heardMs += pcm.DurationMs()
+	s.timing.tookMs += pcm.DurationMs()
 	s.mu.Unlock()
 	return nil
 }
@@ -273,6 +295,57 @@ func (s *Session) forward() {
 		}
 	}
 	s.recordTrailing()
+	s.logTiming()
+}
+
+// logTiming writes the session's one "speech-to-speech timing" line once its last row is
+// recorded: what the caller said and the replies, how long the first reply a caller waited for
+// kept them waiting, and what every row the session recorded cost, the rows of the models it
+// handed work to included. Its operation is the session's id, which its rows carry too. With
+// no reply that answered a wait, nothing was waited for, so the wait is left out rather than
+// logged as zero.
+func (s *Session) logTiming() {
+	costMicros, _, _ := s.owner.Spent.Total()
+	s.mu.Lock()
+	timed := s.timing
+	s.mu.Unlock()
+	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, s.config), "operation", s.id,
+		"audio_ms", int64(timed.tookMs), "input_tokens", timed.inputTokens, "output_tokens", timed.outputTokens,
+		"replies", timed.replies)
+	if timed.firstByteMs > 0 {
+		logged = append(logged, "ttfb_ms", timed.firstByteMs)
+	}
+	logged = append(logged, "duration_ms", milliseconds(time.Since(s.openedAt)), "cost_micros", costMicros,
+		"success", timed.errorCode == "", "error_code", timed.errorCode)
+	if timed.errorMessage != "" {
+		logged = append(logged, "error", store.SafeLogText(timed.errorMessage))
+	}
+	slog.Info("speech-to-speech timing", logged...)
+}
+
+func milliseconds(elapsed time.Duration) float64 { return float64(elapsed.Microseconds()) / 1000 }
+
+// answered counts a reply on the session's timing line, which waits for the first one a caller
+// waited for.
+func (s *Session) answered(complete sts.ResponseComplete) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.timing.replies++
+	s.timing.inputTokens += complete.Usage.InputTokens
+	s.timing.outputTokens += complete.Usage.OutputTokens
+	if s.timing.firstByteMs == 0 {
+		s.timing.firstByteMs = complete.TimeToFirstByteMs
+	}
+}
+
+// failed keeps the session's first failure for its timing line.
+func (s *Session) failed(failure sts.Error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.timing.errorCode != "" {
+		return
+	}
+	s.timing.errorCode, s.timing.errorMessage = errorCode(failure), failure.Error()
 }
 
 // recordTrailing records what the session streamed after its last reply settled, which no
@@ -337,6 +410,7 @@ func (s *Session) observe(event sts.Event) bool {
 		if !fresh {
 			return false
 		}
+		s.answered(typed)
 		audioMs := int64(heardMs)
 		carried := false
 		switch {
@@ -396,6 +470,7 @@ func (s *Session) observe(event sts.Event) bool {
 		s.recorder.Record(s.config, stat)
 
 	case sts.Error:
+		s.failed(typed)
 		// A failure that names a reply is settled by that reply's completion, so one
 		// reply is still one row. Anything else is a session-level failure.
 		if typed.ResponseID != "" && s.fail(typed.ResponseID, errorCode(typed)) {

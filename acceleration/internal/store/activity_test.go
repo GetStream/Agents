@@ -372,7 +372,7 @@ func (s *StoreSuite) began(into *Store, id, appID string, at, closed time.Time, 
 		ID: id, CustomerID: appID, AgentName: "agent-" + id, Modality: ModalityVoice, CreatedAt: at,
 	}))
 	if !closed.IsZero() {
-		s.Require().NoError(into.Sessions.Close(s.ctx, appID, id, closed, reason))
+		s.Require().NoError(into.Sessions.Close(s.ctx, appID, id, at, closed, reason))
 	}
 }
 

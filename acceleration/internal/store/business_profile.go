@@ -85,6 +85,23 @@ func (r *BusinessProfiles) Get(ctx context.Context, customerID string) (Business
 	return profile, nil
 }
 
+// GetByBrand returns the profile a vendor registered as brandID. A vendor reports on a brand
+// rarely and an app holds one profile, so the read has no index of its own.
+func (r *BusinessProfiles) GetByBrand(ctx context.Context, brandID string) (BusinessProfile, error) {
+	if brandID == "" {
+		return BusinessProfile{}, stack.Wrap(ErrNoBusinessProfile)
+	}
+	var profile BusinessProfile
+	err := r.store.global.NewSelect().Model(&profile).Where("vendor_brand_id = ?", brandID).Limit(1).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BusinessProfile{}, stack.Wrap(ErrNoBusinessProfile)
+	}
+	if err != nil {
+		return BusinessProfile{}, stack.Wrap(fmt.Errorf("store: business profile by brand: %w", err))
+	}
+	return profile, nil
+}
+
 // Upsert writes an app's profile, replacing what it said before. The brand the
 // vendor registered stays: it is the vendor's to change, through SetBrand.
 func (r *BusinessProfiles) Upsert(ctx context.Context, profile *BusinessProfile) error {

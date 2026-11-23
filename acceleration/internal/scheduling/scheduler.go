@@ -67,6 +67,11 @@ const maxConsecutiveFailures = 5
 // being in progress; a task whose retries run out has failed an occurrence.
 var DeliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
+// FinishRetries are the waits before an occurrence's outcome is written again after the write
+// failed, as a database that blinked fails it: a run left running is taken over by another
+// worker once it is stale, and delivered again.
+var FinishRetries = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
 // DeliverFunc delivers one claimed occurrence: it returns where the follow-up
 // landed (conversation, call, ...) and the session it landed in. An error is
 // a failed attempt; the occurrence counts failed when the retries run out.
@@ -193,11 +198,12 @@ type Scheduler struct {
 	// activity counts each occurrence settled under its task's app. Nil counts none.
 	activity *activity.Recorder
 
-	now        func() time.Time
-	lease      time.Duration
-	renewEvery time.Duration
-	retries    []time.Duration
-	budget     time.Duration
+	now           func() time.Time
+	lease         time.Duration
+	renewEvery    time.Duration
+	retries       []time.Duration
+	finishRetries []time.Duration
+	budget        time.Duration
 
 	kick    chan struct{}
 	slots   chan struct{}
@@ -214,18 +220,19 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		store:      db,
-		deliver:    deliver,
-		logger:     logger,
-		now:        time.Now,
-		lease:      scheduledLease,
-		renewEvery: renewLeaseEvery,
-		retries:    DeliveryRetries,
-		budget:     occurrenceBudget,
-		kick:       make(chan struct{}, 1),
-		slots:      make(chan struct{}, inFlight),
-		ctx:        ctx,
-		cancel:     cancel,
+		store:         db,
+		deliver:       deliver,
+		logger:        logger,
+		now:           time.Now,
+		lease:         scheduledLease,
+		renewEvery:    renewLeaseEvery,
+		retries:       DeliveryRetries,
+		finishRetries: FinishRetries,
+		budget:        occurrenceBudget,
+		kick:          make(chan struct{}, 1),
+		slots:         make(chan struct{}, inFlight),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -609,9 +616,18 @@ func (s *Scheduler) after(schedule *Schedule, scheduledFor time.Time, failed boo
 // claim an update or pause fenced cannot advance the task, and that is
 // reported rather than treated as a failure.
 func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.ScheduledTaskOutcome) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
-	defer cancel()
-	applied, err := s.store.ScheduledTasks.Finish(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, outcome)
+	write := func() (bool, error) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
+		defer cancel()
+		return s.store.ScheduledTasks.Finish(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, outcome)
+	}
+	applied, err := write()
+	for _, wait := range s.finishRetries {
+		if err == nil || !s.sleep(wait) {
+			break
+		}
+		applied, err = write()
+	}
 	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
 	switch {
 	case err != nil:
@@ -624,6 +640,18 @@ func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.Sched
 		log.Info("a scheduled task changed under its run; the schedule was left alone")
 	}
 	s.count(claim, outcome)
+}
+
+// sleep waits for d, and reports false when Close ends the wait first.
+func (s *Scheduler) sleep(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-s.ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // count counts an occurrence settled under claim in the activity record, once and not per

@@ -19,6 +19,10 @@ var ErrNoScheduledTask = errors.New("store: no such scheduled task")
 // ErrScheduledTaskIDTaken says a create named a task id the customer already holds.
 var ErrScheduledTaskIDTaken = errors.New("store: a scheduled task with that id already exists")
 
+// ErrScheduledTaskChanged says a save was of a copy of a task read before another write to it:
+// saving it would undo that write, a pause or a worker's advance of the schedule.
+var ErrScheduledTaskChanged = errors.New("store: the scheduled task changed since it was read")
+
 // ErrTooManyScheduledTasks says a create or resume would put a user over their
 // active-task limit on the task's agent config.
 var ErrTooManyScheduledTasks = errors.New("store: too many scheduled tasks")
@@ -35,6 +39,13 @@ const (
 // worker takes it over: the worker that claimed it renews the task's lease as
 // it goes, so a run this old in running belongs to one that died.
 const scheduledTaskStaleRun = 10 * time.Minute
+
+// scheduledTaskManualRunLost is how long a run made by hand may sit in running before Prune
+// writes it missed. No lease covers it: only the router that took the request finishes it, so
+// one that stopped mid-delivery leaves it running for good, and its task with it. Every wait a
+// delivery makes is bounded (a call rung and held, a reply, a busy conversation), together by
+// hours at most, so a run a day old in running belongs to a router that stopped.
+const scheduledTaskManualRunLost = 24 * time.Hour
 
 // maxScheduledTaskRunAttempts is how many times one occurrence is claimed
 // before it is failed rather than taken over again: the first claim, the one
@@ -59,6 +70,11 @@ const scheduledTaskRunPaused = "task_paused"
 // and no end recorded: scheduling.ReasonRungAlready, which leaves the run out
 // of the task's failure streak.
 const scheduledTaskRunRungAlready = "already_called"
+
+// scheduledTaskLimitLockSeed is the second argument to hashtextextended for the lock a user's
+// creates on one config take turns under while they count the active limit. The value only has
+// to differ from the other seeds.
+const scheduledTaskLimitLockSeed = 3496
 
 // ScheduledTask is something the agent agreed to do for one end user at a
 // wall-clock time in that user's zone, once or on a repeat.
@@ -196,16 +212,12 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 	task.UpdatedAt = now
 
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
+		if _, err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
 			return err
 		}
 		if maxActive > 0 {
-			count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
-			if err != nil {
+			if err := refuseOverLimit(ctx, tx, task, maxActive); err != nil {
 				return err
-			}
-			if count >= maxActive {
-				return ErrTooManyScheduledTasks
 			}
 		}
 		if _, err := tx.NewInsert().Model(task).Exec(ctx); err != nil {
@@ -218,7 +230,25 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 	}))
 }
 
-// refuseDeletedConfig refuses an active task on a deleted config. The caller read
+// refuseOverLimit refuses one more active task for the task's user on its config when they hold
+// maxActive already. Two creates or resumes at once would otherwise both count room for one more,
+// so the count is taken under a lock on the user and config held until the transaction ends.
+func refuseOverLimit(ctx context.Context, tx bun.Tx, task *ScheduledTask, maxActive int) error {
+	if err := lockUntilCommit(ctx, tx, task.CustomerID+"/"+task.UserID+"/"+task.ConfigID, scheduledTaskLimitLockSeed); err != nil {
+		return fmt.Errorf("store: lock scheduled task limit: %w", err)
+	}
+	count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
+	if err != nil {
+		return err
+	}
+	if count >= maxActive {
+		return ErrTooManyScheduledTasks
+	}
+	return nil
+}
+
+// refuseDeletedConfig refuses an active task on a deleted config, and returns the config's
+// scheduling settings (the zero value when there is no row). The caller read
 // the config live; a delete landing after that read pauses the config's tasks
 // once its own write is in (ScheduledTasks.PauseForConfig), so a task written
 // meanwhile would be left active on nothing. The config row is locked FOR SHARE
@@ -236,21 +266,24 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 // https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
 // A config is only ever soft-deleted (DeleteAgentConfig), so an id with no row
 // is not a delete and is left to the caller, which resolved it.
-func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID string) error {
-	var deleted []bool
-	err := tx.NewSelect().Model((*AgentConfig)(nil)).
-		ColumnExpr("deleted_at IS NOT NULL").
+func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID string) (AgentScheduling, error) {
+	var configs []AgentConfig
+	err := tx.NewSelect().Model(&configs).
+		Column("deleted_at", "scheduling").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", configID).
 		For("SHARE").
-		Scan(ctx, &deleted)
+		Scan(ctx)
 	if err != nil {
-		return fmt.Errorf("store: lock scheduled task config: %w", err)
+		return AgentScheduling{}, fmt.Errorf("store: lock scheduled task config: %w", err)
 	}
-	if len(deleted) > 0 && deleted[0] {
-		return unknownAgentConfig(configID)
+	if len(configs) == 0 {
+		return AgentScheduling{}, nil
 	}
-	return nil
+	if configs[0].DeletedAt != nil {
+		return AgentScheduling{}, unknownAgentConfig(configID)
+	}
+	return configs[0].Scheduling, nil
 }
 
 // lockScheduledTask locks a task's row before its transaction writes the
@@ -262,18 +295,22 @@ func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID st
 // deadlock (SQLSTATE 40P01). FOR NO KEY UPDATE is what the task's own UPDATE
 // takes, so it does not hold back a run insert's foreign key check (table
 // 13.3, https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
-func lockScheduledTask(ctx context.Context, tx bun.Tx, customerID, id string) error {
+// It returns the task's stored state, empty when there is no such task.
+func lockScheduledTask(ctx context.Context, tx bun.Tx, customerID, id string) (string, error) {
 	var locked []string
 	err := tx.NewSelect().Model((*ScheduledTask)(nil)).
-		Column("id").
+		Column("state").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", id).
 		For("NO KEY UPDATE").
 		Scan(ctx, &locked)
 	if err != nil {
-		return fmt.Errorf("store: lock scheduled task: %w", err)
+		return "", fmt.Errorf("store: lock scheduled task: %w", err)
 	}
-	return nil
+	if len(locked) == 0 {
+		return "", nil
+	}
+	return locked[0], nil
 }
 
 // Get returns one of a customer's tasks by id.
@@ -343,11 +380,26 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 // the one-shot forward would deliver it a second time. The caller reads the
 // task, changes it, and saves it back. An active one-shot whose settled
 // occurrence placed a call is completed instead: a second call is worse than
-// an edit missed.
+// an edit missed. A copy read before another write to the task is refused
+// (ErrScheduledTaskChanged): saving it would undo that write. A save that makes
+// a task active again is refused over the user's active limit on the config
+// (ErrTooManyScheduledTasks).
 func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error {
+	return r.update(ctx, task, nil)
+}
+
+// Close saves a task whose one-shot slept through its time while paused, with
+// the missed run of that occurrence, in one transaction: a save refused leaves
+// no run behind.
+func (r *ScheduledTasks) Close(ctx context.Context, task *ScheduledTask, missed *ScheduledTaskRun) error {
+	return r.update(ctx, task, missed)
+}
+
+func (r *ScheduledTasks) update(ctx context.Context, task *ScheduledTask, missed *ScheduledTaskRun) error {
 	if err := task.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
+	read := task.UpdatedAt
 	task.UpdatedAt = time.Now().UTC()
 	task.LeasedBy = ""
 	task.LeaseUntil = nil
@@ -355,13 +407,21 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 		task.Channels = []string{ScheduledTaskDeliveredConversation}
 	}
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		var scheduling AgentScheduling
 		if task.State == ScheduledTaskActive {
-			if err := refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
+			var err error
+			if scheduling, err = refuseDeletedConfig(ctx, tx, task.CustomerID, task.ConfigID); err != nil {
 				return err
 			}
 		}
-		if err := lockScheduledTask(ctx, tx, task.CustomerID, task.ID); err != nil {
+		stored, err := lockScheduledTask(ctx, tx, task.CustomerID, task.ID)
+		if err != nil {
 			return err
+		}
+		if task.State == ScheduledTaskActive && stored != "" && stored != ScheduledTaskActive {
+			if err := refuseOverLimit(ctx, tx, task, scheduling.MaxActive()); err != nil {
+				return err
+			}
 		}
 		oneShot := task.RRule == "" && task.State == ScheduledTaskActive && task.NextRunAt != nil
 		// The run of a one-shot's occurrence a worker holds: its lease is live
@@ -384,7 +444,7 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 			}
 		}
 		// A run made by hand is left to the delivery that made it, which
-		// always records its outcome.
+		// records its outcome, or to Prune once its router stopped.
 		settle := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").
@@ -427,6 +487,7 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 		result, err := save.
 			Where("customer_id = ?", task.CustomerID).
 			Where("id = ?", task.ID).
+			Where("updated_at = ?", read).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: save scheduled task: %w", err)
@@ -436,7 +497,21 @@ func (r *ScheduledTasks) Update(ctx context.Context, task *ScheduledTask) error 
 			return fmt.Errorf("store: save scheduled task: %w", err)
 		}
 		if affected == 0 {
+			// The row is locked, so it is either there and changed or not there at all.
+			found, err := tx.NewSelect().Model((*ScheduledTask)(nil)).
+				Where("customer_id = ?", task.CustomerID).
+				Where("id = ?", task.ID).
+				Exists(ctx)
+			if err != nil {
+				return fmt.Errorf("store: save scheduled task: %w", err)
+			}
+			if found {
+				return fmt.Errorf("%w: %s", ErrScheduledTaskChanged, task.ID)
+			}
 			return fmt.Errorf("%w: %s", ErrNoScheduledTask, task.ID)
+		}
+		if missed != nil {
+			return insertScheduledTaskRun(ctx, tx, missed)
 		}
 		return nil
 	}))
@@ -832,7 +907,7 @@ func (r *ScheduledTasks) Finish(ctx context.Context, customerID, runID, leasedBy
 		if err := tx.NewSelect().Model(&run).Where("id = ?", runID).Limit(1).Scan(ctx); err != nil {
 			return fmt.Errorf("store: finish scheduled task run: %w", err)
 		}
-		if err := lockScheduledTask(ctx, tx, customerID, run.TaskID); err != nil {
+		if _, err := lockScheduledTask(ctx, tx, customerID, run.TaskID); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
@@ -939,18 +1014,30 @@ WITH batch AS MATERIALIZED (
 DELETE FROM scheduled_tasks AS t USING batch WHERE t.customer_id = batch.customer_id AND t.id = batch.id`
 )
 
+// settleLostManualRunsSQL writes missed the runs made by hand still running a while after they
+// started, before ScheduledTasks.Prune deletes. It reads scheduled_task_runs_finished_idx by its
+// unfinished runs, the few in flight (TestPruneReadsItsIndexes).
+const settleLostManualRunsSQL = `
+UPDATE scheduled_task_runs SET state = 'missed', finished_at = now()
+WHERE finished_at IS NULL AND trigger = 'manual' AND state = 'running'
+AND started_at < now() - make_interval(secs => ?)`
+
 // Prune deletes the runs that finished, and the tasks that completed or failed,
 // more than ScheduledTasksKept ago, in batches until none is left, and says how many of each.
 // A task counts from updated_at, which the finish of its last run sets as the task leaves
 // active, but is kept while a run of it is unfinished or finished within ScheduledTasksKept:
 // a completed task can be run by hand without its row changing. An active or paused task is
-// never deleted, whatever its age; its old runs are.
+// never deleted, whatever its age; its old runs are. A run made by hand still running
+// scheduledTaskManualRunLost after it started is written missed first, so it finishes.
 //
 // SKIP LOCKED keeps two routers pruning at once off each other's rows. The runs batch locks
 // only run rows, and the tasks batch takes the task row before the runs it cascades to, as
 // every writer of both does (lockScheduledTask), so neither can deadlock with
 // ScheduledTasks.Finish.
 func (r *ScheduledTasks) Prune(ctx context.Context) (runs, tasks int64, err error) {
+	if _, err = r.store.global.ExecContext(ctx, settleLostManualRunsSQL, scheduledTaskManualRunLost.Seconds()); err != nil {
+		return 0, 0, stack.Wrap(fmt.Errorf("store: settle lost scheduled task runs: %w", err))
+	}
 	runs, err = r.pruneInBatches(ctx, scheduledTaskRunsPruned, pruneScheduledTaskRunsSQL)
 	if err != nil {
 		return runs, 0, stack.Wrap(fmt.Errorf("store: prune scheduled task runs: %w", err))
@@ -993,6 +1080,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 		err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("state = ?", ScheduledTaskPaused).
 			Set("leased_by = ''").
+			Set("lease_until = NULL").
 			Set("updated_at = now()").
 			Where("customer_id = ?", customerID).
 			Where("config_id = ?", configID).
@@ -1003,7 +1091,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 			return fmt.Errorf("store: pause scheduled tasks for config: %w", err)
 		}
 		// A run made by hand is left to the delivery that made it, which
-		// always records its outcome.
+		// records its outcome, or to Prune once its router stopped.
 		if _, err := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").

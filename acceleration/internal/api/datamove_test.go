@@ -223,6 +223,39 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnot
 	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
 }
 
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *DataMoveSuite) TestAnImportTheDatabaseCannotWriteIsAFailureWithNoDatabaseText() {
+	id := "custom_" + store.NewID()
+	s.failQueries(id)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(id, `"client": {"registration": ["customer"], "auth_method": "client_secret_post"}, "schemes": ["oauth2_code"],
+			"endpoints": {"mcp": "https://mcp.acme.example/mcp"}, "scopes": {"list": ["read"]}, "category": "CRM", "description": "Acme's CRM"`)}))
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(failure, "store:")
+}
+
+// A row Postgres refuses for what it holds is the export's to correct, and is told so without
+// Postgres's own words, which name the table's indexes and columns.
+func (s *DataMoveSuite) TestAnImportedAgentNamedLikeOneHereIsRefusedWithoutTheIndexName() {
+	agent := s.data.createAgentConfig()
+	var exported dataLine
+	for _, line := range s.export() {
+		if line.Table == "agent_configs" && strings.Contains(string(line.Row), agent.Id) {
+			exported = line
+		}
+	}
+	s.Require().NotEmpty(exported.Table)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true",
+		ndjson([]dataLine{{Table: "agent_configs", Row: s.withID(exported.Row, store.NewID())}}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "another row here already holds")
+	s.NotContains(failure, "agent_configs_name_idx")
+}
+
 // importedConnector is an export's line of a custom definition id whose manifest has fields,
 // JSON members, beside its id, name and MCP source.
 func (s *DataMoveSuite) importedConnector(id, fields string) dataLine {

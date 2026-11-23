@@ -48,7 +48,7 @@ func TestRegistryDoesNotKnowOtherCalls(t *testing.T) {
 
 func TestFinishSetupHangsUpBothLegsWhenTheCallEndedDuringSetup(t *testing.T) {
 	customer, stream := &fakeLeg{}, &fakeLeg{}
-	call := newCall(customer, stream, slog.New(slog.DiscardHandler))
+	call := newCall(t.Context(), customer, stream, slog.New(slog.DiscardHandler))
 	call.onBye(t.Context(), customerSide)
 
 	err := finishSetup(t.Context(), call, customer, stream)
@@ -60,7 +60,7 @@ func TestFinishSetupHangsUpBothLegsWhenTheCallEndedDuringSetup(t *testing.T) {
 
 func TestFinishSetupLeavesALiveCallAlone(t *testing.T) {
 	customer, stream := &fakeLeg{}, &fakeLeg{}
-	call := newCall(customer, stream, slog.New(slog.DiscardHandler))
+	call := newCall(t.Context(), customer, stream, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, finishSetup(t.Context(), call, customer, stream))
 	require.Empty(t, customer.calls())
