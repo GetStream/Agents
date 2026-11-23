@@ -211,6 +211,8 @@ type RouterSuite struct {
 	configs *store.Store
 	live    *live.Client
 	sealer  *auth.Sealer
+	// storeOptions are what the suite's store was opened with, for a node on the same databases.
+	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
@@ -588,6 +590,7 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
 	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)

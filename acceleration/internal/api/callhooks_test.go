@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -491,6 +492,42 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberIsStillDispatched() {
 		s.Equal(s.callID, call.CallID)
 	case <-time.After(settleFor):
 		s.Fail("the call never reached the worker")
+	}
+}
+
+// A peer shard that is down may have placed the call, so the delivery is answered for Stream
+// to make again, and nothing was acted on: delivered again once every shard answers, it is
+// dispatched.
+func (s *CallHooksSuite) TestAnArrivingCallAShardThatIsDownMayHavePlacedIsDeliveredAgain() {
+	s.hold("default", s.callID)
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	defer release()
+	options := s.storeOptions
+	own := cmp.Or(options.ShardDSN, options.DSN)
+	// Nothing answers on port 1.
+	options.Shards = map[string]string{"here": own, "gone": "postgres://postgres:postgres@127.0.0.1:1/gone?sslmode=disable"}
+	served, err := store.OpenShards(options)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
+
+	body := s.ringingNumber("default")
+	request, err := http.NewRequest(http.MethodPost, other.URL+"/v1/phone/hooks/stream", bytes.NewReader([]byte(body)))
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(signatureHeader, sign(body, suiteStreamSecret))
+	response, err := other.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	s.Equal(http.StatusServiceUnavailable, response.StatusCode)
+	s.nothingReaches(worker.Calls(), "a call a shard that is down may have placed was dispatched")
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", body))
+	select {
+	case call := <-worker.Calls():
+		s.Equal(s.callID, call.CallID)
+	case <-time.After(settleFor):
+		s.Fail("the call delivered again never reached the worker")
 	}
 }
 
