@@ -145,8 +145,8 @@ func New(options Options) (*Proxy, error) {
 	}
 	transport := options.Transport
 	if transport == nil {
-		// Unpooled: a POST must not ride a connection the origin is closing, since Go never sends one twice on
-		// HTTP/1.1, even with the GetBody a body the proxy keeps has (resendable).
+		// Unpooled: a POST must not ride a connection the origin is closing. Go never sends one twice on HTTP/1.1,
+		// even when resendable gave its body a GetBody.
 		transport = publicegress.NewUnpooledClient(0, nil).Transport
 	}
 	dial := options.Dial
