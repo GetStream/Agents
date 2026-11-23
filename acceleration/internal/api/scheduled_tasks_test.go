@@ -3982,6 +3982,40 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce()
 	s.Equal([]string{"Done."}, s.sink.to(writer))
 }
 
+// finishRefusedTwice texts a task's run with waits to write the finish again, the database
+// refusing its first two writes, and returns the run once the worker is done with it.
+func (s *ScheduledTasksSuite) finishRefusedTwice(waits int) store.ScheduledTaskRun {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
+	s.finishRetries = s.finishRetries[:waits]
+	s.failFinishes(2)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+	s.Require().Eventually(func() bool { return len(s.sink.to(writer)) == 1 && s.worker.Running() == 0 },
+		30*time.Second, 50*time.Millisecond, "the worker never texted the run and gave up or finished it")
+	runs := s.runsOf(task)
+	s.Require().Len(runs, 1)
+	return runs[0]
+}
+
+// A finish that failed is written again once per wait the worker is given, no more: one wait
+// writes it twice, both refused, and leaves the run running.
+func (s *ScheduledTasksSuite) TestAFinishIsNotWrittenAgainPastTheWaitsItIsGiven() {
+	s.Equal(store.ScheduledTaskRunRunning, s.finishRefusedTwice(1).State)
+}
+
+// Three waits write the finish a third time, once two refusals are past.
+func (s *ScheduledTasksSuite) TestAFinishIsWrittenAgainOncePerWaitItIsGiven() {
+	s.Equal(store.ScheduledTaskRunDelivered, s.finishRefusedTwice(3).State)
+}
+
 // A run whose text went out and whose outcome was never written, its worker stopped or its
 // database down past the finish's retries, is taken over; the words went out already.
 func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotTextedAgain() {
