@@ -2868,7 +2868,7 @@ impl ::std::convert::TryFrom<::std::string::String> for CampaignTimeZoneMode {
         value.parse()
     }
 }
-///What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+///What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 #[derive(
     ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
@@ -4721,6 +4721,25 @@ impl ::std::convert::TryFrom<::std::string::String> for ContactStage {
     ) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
+}
+///`ContactUpdateRequest`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+pub struct ContactUpdateRequest {
+    ///What to say to this person. Empty clears it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub instructions: ::std::option::Option<::std::string::String>,
+    ///An IANA zone. Empty clears it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub time_zone: ::std::option::Option<::std::string::String>,
+    ///With or without a country code.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub to_number: ::std::option::Option<::std::string::String>,
+    ///Replace all of the contact's variables. Same rules as on add.
+    #[serde(
+        default,
+        skip_serializing_if = ":: std :: collections :: BTreeMap::is_empty"
+    )]
+    pub variables: ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
 }
 ///`ContentPart`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]

@@ -6153,6 +6153,45 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ContactUpdateRequest
+    {
+
+        /// <summary>
+        /// What to say to this person. Empty clears it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("instructions")]
+        public string? Instructions { get; set; } = default!;
+
+        /// <summary>
+        /// An IANA zone. Empty clears it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("time_zone")]
+        public string? TimeZone { get; set; } = default!;
+
+        /// <summary>
+        /// With or without a country code.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("to_number")]
+        public string? ToNumber { get; set; } = default!;
+
+        /// <summary>
+        /// Replace all of the contact's variables. Same rules as on add.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("variables")]
+        public System.Collections.Generic.Dictionary<string, string>? Variables { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class ContentPart
     {
 
