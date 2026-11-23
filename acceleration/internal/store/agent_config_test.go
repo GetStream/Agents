@@ -300,5 +300,6 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }),
+		"begin, the write, the numbers it answers and commit: a write of a cached row runs detached in a transaction of its own")
 }

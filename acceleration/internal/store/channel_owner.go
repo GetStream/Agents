@@ -254,8 +254,22 @@ func refuseSecondLineAgent(ctx context.Context, tx bun.Tx, config *AgentConfig) 
 		if err := lockUntilCommit(ctx, tx, config.CustomerID+"/"+kind+"/"+number, channelLineLockSeed); err != nil {
 			return fmt.Errorf("store: lock channel line: %w", err)
 		}
+		// A line the stored config named already is not a new claim, so a config that shared a
+		// line before this rule can still be saved, as refuseSecondChannelAgent keeps a binding.
+		kept, err := tx.NewSelect().Model((*AgentConfig)(nil)).
+			Where("id = ?", config.ID).
+			Where("customer_id = ?", config.CustomerID).
+			Where("deleted_at IS NULL").
+			Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+			Exists(ctx)
+		if err != nil {
+			return fmt.Errorf("store: channel line owner: %w", err)
+		}
+		if kept {
+			continue
+		}
 		var owner AgentConfig
-		err := tx.NewSelect().Model(&owner).Column("id", "name").
+		err = tx.NewSelect().Model(&owner).Column("id", "name").
 			Where("customer_id = ?", config.CustomerID).
 			Where("id != ?", config.ID).
 			Where("channels_lines -> ? ->> 'number' = ?", kind, number).

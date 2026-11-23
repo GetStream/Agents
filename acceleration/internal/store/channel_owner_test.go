@@ -241,6 +241,24 @@ func (s *StoreSuite) TestASecondConfigNamingAnSMSNumberIsRefusedAndTheFirstStill
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, smsAgent(newID(), e164)), "another customer's number is theirs")
 }
 
+// Two configs that shared a line before the rule can each still be saved while they keep it.
+func (s *StoreSuite) TestAConfigThatSharedAnSMSNumberBeforeTheRuleStillSaves() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	first := smsAgent(customerID, e164)
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, first))
+	second := smsAgent(customerID, "+1555"+newID()[:7])
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, second))
+	// Put on the first's number as a router from before the rule could.
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").
+		Set("channels_lines = jsonb_build_object('sms', jsonb_build_object('number', ?::text))", e164).
+		Where("id = ?", second.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	second.Channels.Lines.SMS.Number = e164
+
+	second.Instructions = "Answer texts."
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, second))
+}
+
 // Two configs saved at once each pass the API's check before the write: one of them is the
 // line's agent, and the other is refused.
 func (s *StoreSuite) TestTwoConfigsSavedAtOnceNamingOneSMSNumberLeaveOneOnIt() {
