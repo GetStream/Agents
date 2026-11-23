@@ -346,10 +346,41 @@ func (s *StoreSuite) TestLimitGrantUseQueryBudgets() {
 	shards := len(s.store.shards())
 	reconcile := 0
 	if s.store.Sharded() {
-		reconcile = 3 + 3*shards
+		reconcile = 4 + 3*shards
 	}
 	s.Equal(reconcile, s.countQueries(func() {
 		_, err := s.store.LimitGrantUses.Reconcile(s.ctx)
 		s.Require().NoError(err)
-	}), "begin, the lock, and for each shard where it got, one page and where it gets to, then the end")
+	}), "begin, its limits, the lock, and for each shard where it got, one page and where it gets to, then the end")
+}
+
+func (s *ShardedStoreSuite) TestAReconcileKeepsItsLockWhileItWaitsOnAShard() {
+	// Only the shared database's connections are held to the short limit: the reconcile's lock
+	// is there, and its wait is on the shard.
+	reconciling, err := OpenShards(Options{DSN: s.limitedDSN(s.dsn), ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	defer reconciling.Close()
+	holder, err := s.store.ShardDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holder.Rollback() //nolint:errcheck // only ever holds the lock
+	_, err = holder.ExecContext(s.ctx, "LOCK TABLE requests IN ACCESS EXCLUSIVE MODE")
+	s.Require().NoError(err)
+
+	reconciled := make(chan error, 1)
+	go func() {
+		_, err := reconciling.LimitGrantUses.Reconcile(s.ctx)
+		reconciled <- err
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = 'requests'::regclass").Scan(&waiting))
+		return waiting > 0
+	}, 2*time.Second, 10*time.Millisecond, "the reconcile waits on the shard")
+	time.Sleep(3 * shortLimit)
+
+	_, err = s.other.LimitGrantUses.Reconcile(s.ctx)
+	s.Require().ErrorIs(err, ErrReconcileBusy, "the first reconcile still holds its lock")
+	s.Require().NoError(holder.Rollback())
+	s.NoError(<-reconciled)
 }
