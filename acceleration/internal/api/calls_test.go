@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -840,6 +841,60 @@ func (s *CallsSuite) TestAVoiceCallsTimelineStillCarriesItsFloorChecks() {
 	s.Require().Len(*timeline[0].FloorChecks, 1)
 	s.Equal(FloorCheckKindPause, (*timeline[0].FloorChecks)[0].Kind)
 	s.Empty(s.errorsAbout(call.ID))
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineIsAnsweredWithoutFloorChecksWhenTheirReadFails() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+	s.callEventsOnClosedRedis()
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline), "the checks are not worth failing the timeline over")
+
+	s.Require().Len(timeline, 1, "the turns are still read")
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks, "the checks the read could not return are not shown")
+	s.Require().Len(s.errorsAbout(call.ID), 1)
+	s.Contains(s.errorsAbout(call.ID)[0], `msg="could not read the floor checks for a timeline"`)
+	s.Contains(s.errorsAbout(call.ID)[0], "store: floor checks")
+}
+
+func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails() {
+	// The decisions are the whole of this answer, so a read that failed is no call that decided
+	// nothing: the caller is told something went wrong, and the access line is an ERROR.
+	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{{
+		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
+		At: time.Now(), Kind: "answer", Reason: "a complete thought",
+	}}))
+	s.callEventsOnClosedRedis()
+
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Equal(http.StatusInternalServerError, response.StatusCode)
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=ERROR")
+}
+
+// callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
+// makes come from a Redis that is closed, as an unreachable one is. The test's end puts them back.
+func (s *CallsSuite) callEventsOnClosedRedis() {
+	closed, err := store.OpenShards(store.Options{DSN: testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")),
+		Redis: store.Redis{Address: s.redisAddr}})
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	original := s.store.CallEvents
+	s.store.CallEvents = closed.CallEvents
+	s.T().Cleanup(func() { s.store.CallEvents = original })
 }
 
 // errorsAbout is the ERROR lines the router logged about the call with this row id.
