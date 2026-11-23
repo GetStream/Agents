@@ -58,6 +58,8 @@ type Service struct {
 	// heard is the calls whose participant events this process recorded lately (Heard), and
 	// unhooked the apps it lately logged as not delivering them.
 	heard, unhooked recently
+	// unopened are the legs OpenLeg could not write, for the leg sweep (RunLegSweep) to.
+	unopened unopenedLegs
 	// connecting, when set, runs in Connect between reading the phone's kept leave and
 	// connecting its leg, where a leave delivered at the same moment lands.
 	connecting func()

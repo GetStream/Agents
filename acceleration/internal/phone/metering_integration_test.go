@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -50,6 +51,8 @@ type MeteringSuite struct {
 	deployment *chattest.Server
 	customer   string
 	e164       string
+	// failing fails the writes of new legs' rows a test asks it to.
+	failing *failingLegWrites
 }
 
 func TestMeteringSuite(t *testing.T) { suite.Run(t, new(MeteringSuite)) }
@@ -65,12 +68,15 @@ func (s *MeteringSuite) SetupSuite() {
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
+	s.failing = &failingLegWrites{}
+	opened.ShardDB().AddQueryHook(s.failing)
 	s.redis, err = redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
 	s.Require().NoError(err)
 	s.T().Cleanup(s.redis.Close)
 }
 
 func (s *MeteringSuite) SetupTest() {
+	s.failing.fail(0)
 	s.withSandbox(dlc.Sandbox{})
 }
 
@@ -701,6 +707,46 @@ func (s *MeteringSuite) TestALegWhoseRowWasLostIsRecordedAgainByTheSweep() {
 	s.Len(s.rows(ModelCallMinutes), 1)
 }
 
+// A leg whose row a dropped connection fails to write is written again at once, and its call
+// billed.
+func (s *MeteringSuite) TestALegWhoseFirstWriteFailsIsBilled() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(1)
+	s.arrived(callID)
+	s.clock.advance(2 * time.Minute)
+
+	s.ended(defaultCallType, callID)
+
+	minutes := s.row(ModelCallMinutes)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 120}, minutes.Meters)
+	s.True(minutes.Billable)
+}
+
+// A leg whose row cannot be written while its call is up is written by the leg sweep, which
+// bills it from the join and the leave its phone had meanwhile.
+func (s *MeteringSuite) TestALegThatCouldNotBeWrittenIsWrittenAndBilledByTheSweep() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(openAttempts)
+	s.arrived(callID)
+	s.Empty(s.openLegs())
+	s.joined(defaultCallType, callID, "caller-1", "15125550199")
+	s.clock.advance(90 * time.Second)
+	s.left(defaultCallType, callID, "caller-1")
+	s.ended(defaultCallType, callID)
+
+	_, err := s.service.SweepLegs(s.ctx)
+	s.Require().NoError(err)
+
+	minutes := s.row(ModelCallMinutes)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 90}, minutes.Meters)
+	s.True(minutes.Billable)
+	s.Zero(s.kept(callID), "the join and the leave went to the leg")
+	_, err = s.service.SweepLegs(s.ctx)
+	s.Require().NoError(err)
+	s.Never(func() bool { return len(s.rows(ModelCallMinutes)) > 1 }, time.Second, 50*time.Millisecond,
+		"the next sweep writes it no more")
+}
+
 func (s *MeteringSuite) TestEveryLegOfAnEndedCallCountsTowardTheSandboxsMinutes() {
 	s.withSandbox(dlc.Sandbox{Enabled: true})
 	s.Require().NoError(s.service.gate.SetRecipients(s.ctx, s.customer, []string{"+15125550123", "+15125550124"}))
@@ -971,6 +1017,40 @@ func (l *meteringLogs) count(level, message string) int {
 	}
 	return lines
 }
+
+// failingLegWrites fails the next writes of a new leg's row, as a database that does not answer
+// in time does.
+type failingLegWrites struct {
+	mu   sync.Mutex
+	left int
+}
+
+// fail fails the next times writes.
+func (f *failingLegWrites) fail(times int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.left = times
+}
+
+func (f *failingLegWrites) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.HasPrefix(event.Query, `INSERT INTO "call_legs"`) {
+		return ctx
+	}
+	f.mu.Lock()
+	failing := f.left > 0
+	if failing {
+		f.left--
+	}
+	f.mu.Unlock()
+	if !failing {
+		return ctx
+	}
+	expired, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return expired
+}
+
+func (*failingLegWrites) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // meteringClock is the service's clock, moved by the test.
 type meteringClock struct {

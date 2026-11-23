@@ -2,6 +2,7 @@ package phone
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"strconv"
@@ -39,6 +40,17 @@ const (
 // the leg that opens after it: far longer than any delivery is late.
 const keepParticipantsFor = 24 * time.Hour
 
+// openAttempts and openFirstPause bound how often OpenLeg writes a leg's row before leaving it
+// to the leg sweep: the first write and two more, 100 ms and then 200 ms after the one before,
+// for a dropped connection or a failover. The call is up by then, so a leg with no row is a
+// call nobody is billed for. unopenedMost bounds the legs a process keeps for the sweep until
+// it stops; one past it is logged and not billed.
+const (
+	openAttempts   = 3
+	openFirstPause = 100 * time.Millisecond
+	unopenedMost   = 1000
+)
+
 // AttributeEndedBy says what ended a leg billed by anything other than its phone leaving or
 // the call ending: the sweep.
 const AttributeEndedBy = "ended_by"
@@ -48,7 +60,8 @@ const AttributeEndedBy = "ended_by"
 // (Connect); pass started for one already connected, as a call that arrived is, from the leg's
 // DialedAt, when the event announcing it was made, or now. Its country is where it rang unless
 // the leg names its own. An inbound leg its Stream session already has is not opened again. A
-// leg that cannot be recorded is logged, since the call is already up and its minutes are lost.
+// leg whose row cannot be written is tried again, then kept for the leg sweep (SweepLegs), which
+// writes it with the join and leave its phone had meanwhile, as a leg written late is.
 func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.CallLeg, started bool) {
 	if s.store == nil {
 		return
@@ -78,6 +91,29 @@ func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.Ca
 		leg.StartedAt = &leg.DialedAt
 	}
 	opened, err := s.store.CallLegs.Open(ctx, &leg)
+	pause := openFirstPause
+	for attempt := 1; attempt < openAttempts && err != nil && !opened && openAgain(err); attempt++ {
+		time.Sleep(pause)
+		pause *= 2
+		opened, err = s.store.CallLegs.Open(ctx, &leg)
+	}
+	if err != nil && !opened && openAgain(err) && s.unopened.add(leg) {
+		s.logger.Warn("could not record a call leg; the leg sweep records it", "call", leg.CallType+":"+leg.CallID,
+			"vendor", leg.Vendor, "direction", leg.Direction, "error", err)
+		return
+	}
+	s.recorded(ctx, leg, opened, err)
+}
+
+// openAgain says whether writing a leg's row again may pass: not when the store or Postgres
+// refused the row itself, nor for a placed leg that is gone or dialled already.
+func openAgain(err error) bool {
+	return !store.Unwritable(err) && !errors.Is(err, store.ErrNoPlacedCall)
+}
+
+// recorded follows a leg's write: a leg its phone joined, and maybe left, before it was written
+// is billed or started, and one that could not be written is logged.
+func (s *Service) recorded(ctx context.Context, leg store.CallLeg, opened bool, err error) {
 	switch {
 	case err != nil && !opened:
 		s.logger.Error("could not record a call leg; its minutes are not billed", "call", leg.CallType+":"+leg.CallID,
@@ -310,6 +346,61 @@ func (r *recently) forget(key string) {
 	delete(r.until, key)
 }
 
+// unopenedLegs are the legs whose row OpenLeg could not write, kept for the leg sweep, at most
+// unopenedMost of them.
+type unopenedLegs struct {
+	mu   sync.Mutex
+	legs []store.CallLeg
+}
+
+// add keeps leg, and reports false when unopenedMost are kept already.
+func (u *unopenedLegs) add(leg store.CallLeg) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.legs) >= unopenedMost {
+		return false
+	}
+	u.legs = append(u.legs, leg)
+	return true
+}
+
+// take hands over every leg kept.
+func (u *unopenedLegs) take() []store.CallLeg {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	legs := u.legs
+	u.legs = nil
+	return legs
+}
+
+// openUnopened writes the row of each leg OpenLeg could not, and follows it as OpenLeg would. A
+// write that fails in a way a retry may pass leaves it and those after it for the next sweep.
+func (s *Service) openUnopened(ctx context.Context) {
+	legs := s.unopened.take()
+	for i := range legs {
+		leg := legs[i]
+		opened, err := s.store.CallLegs.Open(ctx, &leg)
+		if err != nil && !opened && openAgain(err) {
+			for _, left := range legs[i:] {
+				if !s.unopened.add(left) {
+					s.recorded(ctx, left, false, err)
+				}
+			}
+			return
+		}
+		s.recorded(ctx, leg, opened, err)
+	}
+}
+
+// loseUnopened logs each leg still kept for the sweep when the sweep stops: its minutes are not
+// billed.
+func (s *Service) loseUnopened() {
+	for _, leg := range s.unopened.take() {
+		s.logger.Error("could not record a call leg before the router stopped; its minutes are not billed",
+			"call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor, "direction", leg.Direction)
+	}
+}
+
 // settleLegs bills the legs that ended whose phone joined. One that never connected was not
 // answered, which a vendor does not bill: it is logged, since a call hook that does not deliver
 // call.session_participant_joined would leave every placed call looking so.
@@ -406,9 +497,9 @@ func (s *Service) refused(ctx context.Context, leg store.CallLeg) bool {
 	return found
 }
 
-// SweepLegs ends the legs of this shard open longer than MaxCallLength, and checks the legs
-// that ended lately have their row, writing again any a process lost between ending the leg and
-// writing it. It reports how many legs it ended.
+// SweepLegs writes the legs OpenLeg could not, ends the legs of this shard open longer than
+// MaxCallLength, and checks the legs that ended lately have their row, writing again any a
+// process lost between ending the leg and writing it. It reports how many legs it ended.
 //
 // A leg whose phone joined and that nothing ended is logged at ERROR and recorded priced and
 // given away at MaxCallLength: a call that ran four hours is rare, a lost session_ended is not,
@@ -417,6 +508,7 @@ func (s *Service) SweepLegs(ctx context.Context) (int, error) {
 	if s.store == nil {
 		return 0, nil
 	}
+	s.openUnopened(ctx)
 	now := s.now()
 	ended, err := s.store.CallLegs.Sweep(ctx, now, MaxCallLength, legSweepBatch)
 	if err != nil {
@@ -474,13 +566,14 @@ func (s *Service) rebill(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// RunLegSweep sweeps every interval until ctx ends.
+// RunLegSweep sweeps every interval until ctx ends, and then logs the legs it never wrote.
 func (s *Service) RunLegSweep(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			s.loseUnopened()
 			return
 		case <-ticker.C:
 			if _, err := s.SweepLegs(ctx); err != nil {
