@@ -721,10 +721,14 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 	if err != nil {
 		return nil, err
 	}
-	// The checks, like the transcript, are worth having but not worth failing over.
-	checks, err := s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
-	if err != nil {
-		s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+	// The checks, like the transcript, are worth having but not worth failing over. A session
+	// held in writing has no Stream call, so it keeps none.
+	var checks []store.CallEvent
+	if call.CallID != "" {
+		checks, err = s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
+		if err != nil {
+			s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+		}
 	}
 
 	// The transcript is worth having but not worth failing over: the timings are the

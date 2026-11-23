@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +24,18 @@ type CallsSuite struct {
 	// base is when the calls in a test happened. It is a fixed hour, and the app is new in
 	// every test, so what is listed is only what the test itself started.
 	base time.Time
+	// logged is what the router logged, for the errors a read leaves.
+	logged *lockedLog
 }
 
 func TestCallsSuite(t *testing.T) {
 	runSuite(t, new(CallsSuite))
+}
+
+func (s *CallsSuite) SetupSuite() {
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
 }
 
 // SetupTest gives every test an app of its own, because the running calls are everything
@@ -767,6 +776,59 @@ func (s *CallsSuite) TestATimelineOfACallNobodyWroteDownHasTurnsWithoutWords() {
 	s.Equal("turn-1", timeline[0].TurnId)
 	s.Nil(timeline[0].Heard)
 	s.Nil(timeline[0].Said)
+}
+
+func (s *CallsSuite) TestATextSessionsTimelineReadsNoFloorChecksAndLogsNoError() {
+	// A session held in writing has no Stream call, so it has no call id to keep floor checks
+	// under; the read for them is refused by the store, and used to be logged as an error
+	// on every read of the timeline.
+	ctx := context.Background()
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
+	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		TurnID: "turn-1", StartedAt: call.StartedAt.Add(time.Second)}))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+
+	s.Require().Len(timeline, 1)
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks)
+	s.Empty(s.errorsAbout(call.ID), "reading a text session's timeline is not an error")
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineStillCarriesItsFloorChecks() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+
+	s.Require().Len(timeline, 1)
+	s.Require().NotNil(timeline[0].FloorChecks)
+	s.Require().Len(*timeline[0].FloorChecks, 1)
+	s.Equal(FloorCheckKindPause, (*timeline[0].FloorChecks)[0].Kind)
+	s.Empty(s.errorsAbout(call.ID))
+}
+
+// errorsAbout is the ERROR lines the router logged about the call with this row id.
+func (s *CallsSuite) errorsAbout(id string) []string {
+	var errors []string
+	for _, line := range strings.Split(s.logged.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "call="+id) {
+			errors = append(errors, line)
+		}
+	}
+	return errors
 }
 
 func (s *CallsSuite) TestAMembersLineMarkedAsTheAgentsIsTheMembersOnEveryReader() {
