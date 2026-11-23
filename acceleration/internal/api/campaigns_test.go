@@ -732,3 +732,18 @@ func (s *CampaignsSuite) TestLeavingAMessageWithASpeechToSpeechAgentIsRefusedAtL
 		map[string]any{"sequence": sequence}, nil))
 	s.launch(created)
 }
+
+// A delay is made a duration in nanoseconds, which a delay of 200 million minutes overflows:
+// the next attempt would land decades in the past and the rest would ring back to back.
+func (s *CampaignsSuite) TestADelayOverThirtyDaysIsRefused() {
+	created := s.create(map[string]any{"name": "may"})
+	sequence := created.Sequence
+	sequence.Steps[0].Attempts = []CampaignAttempt{{0}, {200000000}}
+
+	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/campaigns/"+created.Id,
+		map[string]any{"sequence": sequence})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "43200 minutes")
+	s.Len(s.get(created.Id).Sequence.Steps[0].Attempts, 4, "the sequence stored is unchanged")
+}
