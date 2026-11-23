@@ -846,6 +846,14 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### An inbound Slack message goes to the connection an agent binds
 
 With two app connections to the same workspace, the router now picks the connected one that a live agent config binds, instead of the newest (#2185).
+### JavaScript: a live UI patch is merged onto the card the router merges it onto
+
+`Conversation` merges an OpenUI patch onto the UI of the latest earlier turn that completed and was not interrupted, whatever its format, as the router does and as Kotlin has since #2089. It used to take the latest OpenUI card it held, so with an A2UI card in between, or after an interrupted reply, the live preview showed a card Stream Chat's copy then replaced. A patch whose base is not OpenUI now shows no UI on its turn, even a preview already merged onto an older card, and Stream Chat's copy is the one that shows.
+
+### The assistant and demo sample apps open sessions with their tools again
+
+The sample apps' agents name their tools in a tool group (`swift_assistant`: the assistants' device tools and `reserve_table`; `swift_demo`: `lookup_order` and `issue_refund`), which the router has required of a session's tools since #2088. Sync them again with `go run ./configure`.
+
 ### A hosted tool call in a group channel names the person who wrote
 
 In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.
@@ -867,6 +875,10 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### An imported row is held to what the API holds it to
 
 `POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. A moved voice arrives with its id, name and description and without its samples or bindings, whose audio and clone stay with the deployment that made them: add a recording and prepare it again. An import that names `voice_samples` or `voice_bindings` is refused. An imported request is never billable here and counts against the importing app's organization: the one it was last seen under here, else the one it is registered under, else none.
+
+### Only a number on the customer's own trunk moves in an import
+
+`/v1/data/import`, and a change applied after it, writes a `phone_numbers` row only when its vendor is exactly `sip_trunk`; any other row is skipped without an error. A number bought at a vendor stays in the vendor account of the deployment that bought it, and its bills already move with the requests, so the destination neither holds it nor bills its months again. A customer that moves keeps a bought number by buying or porting it at the destination. A number bought here and still held is never updated or deleted by an imported row or a replayed change, whatever id it names. An imported `sip_trunk` number is held to the API's rules (E.164, a vendor, a cost that is not negative), and no imported number keeps its `dlc_use_case_id`, which names a use case of the source.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 

@@ -2780,9 +2780,11 @@ exported. A moved deployment mints its own keys and re-authorizes its plugin con
 Voice recordings live in the bucket rather than in Postgres, so their rows move and copying
 the bucket is the operator's.
 
-A phone number still held moves only in E.164 form (`+15551234567`) and only while no other
-app here holds it; one given back moves as written. A moved number arrives detached: its
-trunk, route and call stay behind, so it is attached again where it arrives.
+Only a phone number on the app's own SIP trunk (vendor `sip_trunk`) moves, in E.164 form
+(`+15551234567`), and it arrives detached: its trunk, route, call and 10DLC use case stay
+behind, so it is attached again where it arrives. A number bought at a vendor does not move,
+held or given back; its bills move with the requests. The app keeps it by buying or porting
+it where it moves to.
 
 Changes are captured by a trigger per table writing into `data_changes`, gated on a row in
 `data_change_capture`: with nobody moving, the hot path costs one index probe. Exporting
