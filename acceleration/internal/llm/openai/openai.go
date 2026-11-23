@@ -219,6 +219,10 @@ func New(options Options) (*LLM, error) {
 	}, nil
 }
 
+// Host is the host requests go to, the default endpoint's included, as openaicompat.LLM.Host
+// says it, so a log line names where a call was served.
+func (l *LLM) Host() string { return llm.HostOf(l.options.BaseURL) }
+
 // Client exposes the underlying SDK client, so anything this package does not standardise
 // is still one call away.
 func (l *LLM) Client() *openai.Client { return &l.client }

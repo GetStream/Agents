@@ -92,15 +92,28 @@ func (s *StoreSuite) TestAPlacedLegIsFoundByItsToken() {
 	s.ErrorIs(err, ErrNoPlacedCall)
 }
 
+func (s *StoreSuite) TestAPlacedLegIsFoundByItsTokenWithOnlyItsHashStored() {
+	token := newID()
+	placed := s.placedLeg(token, nil)
+
+	found, err := s.store.CallLegs.GetByToken(s.ctx, token)
+	s.Require().NoError(err)
+	s.Equal(placed.ID, found.ID)
+	var row string
+	s.Require().NoError(s.store.shard.NewSelect().ColumnExpr("to_jsonb(cl)::text").TableExpr("call_legs AS cl").
+		Where("cl.id = ?", placed.ID).Scan(s.ctx, &row))
+	s.NotContains(row, token, "the leg holds the token a status post presents")
+}
+
 func (s *StoreSuite) TestAPlacedLegIsFoundByItsCallAndNumbers() {
 	s.placedLeg("first", nil)
-	s.placedLeg("again", nil)
+	again := s.placedLeg("again", nil)
 	s.placedLeg("transfer", func(leg *CallLeg) { leg.RemoteNumber = "+15125550142" })
 	where := PlacedWhere{CustomerID: "app", CallType: "default", CallID: "call", LocalNumber: "+15125550100", RemoteNumber: "+15125550199"}
 
 	found, err := s.store.CallLegs.ChangeOutcome(s.ctx, where, unchanged)
 	s.Require().NoError(err)
-	s.Equal("again", found.Token, "the newest match")
+	s.Equal(again.ID, found.ID, "the newest match")
 
 	where.StreamAppPK = 7
 	_, err = s.store.CallLegs.ChangeOutcome(s.ctx, where, unchanged)
@@ -292,9 +305,10 @@ func (s *StoreSuite) TestSelectPlacedReadsTheNewestPerCall() {
 	}), "one query a shard, however many calls")
 	tokens := map[string]string{}
 	for _, leg := range legs {
-		tokens[leg.CallID] = leg.Token
+		tokens[leg.CallID] = leg.TokenHash
 	}
-	s.Equal(map[string]string{"call": "second", "other": "other"}, tokens, "an arriving call's leg is no placed call")
+	s.Equal(map[string]string{"call": callTokenHash("second"), "other": callTokenHash("other")}, tokens,
+		"an arriving call's leg is no placed call")
 }
 
 func (s *StoreSuite) TestAPlacedLegNeedsItsTokenAndPlacing() {
@@ -398,10 +412,10 @@ INSERT INTO phone_calls (token, customer_id, call_type, call_id, vendor, vendor_
 	s.Require().NoError(err)
 	outcomes := map[string]string{}
 	for _, leg := range placed {
-		outcomes[leg.CallID] = leg.Token + "/" + leg.Outcome
+		outcomes[leg.CallID] = leg.TokenHash + "/" + leg.Outcome
 	}
-	s.Equal(map[string]string{"answered": "t-answered/completed", "unanswered": "t-unanswered/no_answer",
-		"by-numbers": "t-by-numbers/", "refused": "t-refused/busy"}, outcomes)
+	s.Equal(map[string]string{"answered": callTokenHash("t-answered") + "/completed", "unanswered": callTokenHash("t-unanswered") + "/no_answer",
+		"by-numbers": callTokenHash("t-by-numbers") + "/", "refused": callTokenHash("t-refused") + "/busy"}, outcomes)
 	var count int
 	s.Require().NoError(db.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM call_legs").Scan(&count))
 	s.Equal(5, count, "a placed call with a leg is that leg; only the one without becomes a leg of its own")

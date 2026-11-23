@@ -174,18 +174,30 @@ one (or another app) is synced there, not skipped. JavaScript and Go do this. Py
 
 ## SDK updates
 
-Each SDK has an `.sdk_update_log` file naming the spec and this skill it was last updated against, as git blob ids:
+Each SDK has an `.sdk_update_log` file naming the spec, this skill and the notes it was last updated against, as git ids:
 
 ```text
 spec <git blob id of acceleration/api/openapi.yaml>
 skill <git blob id of .claude/skills/sdk/SKILL.md>
+notes <git tree id of .claude/skills/sdk/notes>
 ```
 
-A blob id is the content's own, so it survives a squash merge where a commit SHA from a branch would not.
-What changed since is `git diff <spec> HEAD:acceleration/api/openapi.yaml`, and the same with `skill` for the
-notes below, which is how an update finds the few fields it has to add. After updating an SDK, write the ids
-of what it now matches: `git rev-parse HEAD:acceleration/api/openapi.yaml` and
-`git rev-parse HEAD:.claude/skills/sdk/SKILL.md`, or `git hash-object` on a file not yet committed.
+An id is the content's own, so it survives a squash merge where a commit SHA from a branch would not,
+as long as the branch's copy is what lands on `main`: if another PR changed the same files first, the
+merged result is a new id. What changed since is `git diff <spec> HEAD:acceleration/api/openapi.yaml`, the
+same with `skill` for the older notes further down this file, and `git diff <notes> HEAD:.claude/skills/sdk/notes`
+for the note files added or changed since. A log with no `notes` line has every note file to read. If git
+answers `bad object` for a logged id, that id never reached `main`: read every note file. That is how an
+update finds the few fields it has to add. After updating an SDK, write the ids of what it now matches:
+`git rev-parse HEAD:acceleration/api/openapi.yaml`, `git rev-parse HEAD:.claude/skills/sdk/SKILL.md` and
+`git rev-parse HEAD:.claude/skills/sdk/notes`. For files not yet committed, use `git hash-object <file>`
+for a blob, and for `notes` run `git add .claude/skills/sdk/notes` and then
+`git write-tree --prefix=.claude/skills/sdk/notes/`.
+
+A note for the other SDKs is a new file in `notes/`, named `<YYYY-MM-DD>-<ticket or short slug>.md`, never
+a paragraph added to this file: with one file per PR, two open PRs never conflict over their notes. A later
+PR that settles part of a note for some SDKs edits that note's file. The notes further down this file are
+the ones from before `notes/` existed; they stay where they are.
 
 ## Client side SDKs
 
@@ -954,3 +966,4 @@ Acting for another user in .NET connections (AI-3410, AI-3412): a `Connections` 
 A device naming a user on a connections call (AI-3412): the router answers every connections call from a user token with 403 `server_side_only` (the operations carry no `x-client-accessible`, so `refuseClientSide` stops it before the handler, `acceleration/internal/api/server.go:1262`), so a device with a `userId` is refused before sending. JavaScript (`sdks/js/src/connections.ts:137`) and PHP (`Backend::speakingFor`) already did; Python (`connections.py`, `Connections._client`), Go (`client/connections.go`, `Connections.api`), Ruby (`connections.rb`, `named`) and Rust (`connections.rs`, `acting`) now do. A device is a client with a user token: Python, Ruby and Rust key it on the SDK's own `server_side`, Go on `Authenticate` with a `UserID` and a `Token`, since `SetUser` keeps the secret (a Go client with a `Token` and no `UserID` counts as server side, as `ServerSide()` does). A Go `Backend` with the API secret and a `UserID` and no `Token` that names another user drops its own `UserID` for that call and sends the app's token with `X-Stream-User-Id`, as Python's `acting_for` does; before, it signed a token for its own user, which the proxy refused with 403. A client on a router that trusts the customer id (`as_user`/`SetUser` with `customer_id` and no API key) is not refused in those four: it sends no token and works against a dev router today; JavaScript still refuses it, because its page says `stream-auth-type=jwt` and the router reads it as the end user (`backend.ts:613`). Other SDKs need to update: .NET follows in the AI-3410 PR (`Connections.SendAsync`, `Connections.cs:152`).
 `agent.yaml`'s `greeting` may be its text alone, `greeting: Hello, how can I help?`, read as `{text, mode: variation}`; the mapping still says `exact`, and a mapping without `mode` is now `variation` too, so a folder loader always sends `mode`. The API's own default stays `exact`. Go is done (`GreetingSettings.UnmarshalYAML` in `sdks/go/agents/folder.go`). Other SDKs need to update: the folder loaders of JavaScript (`sdks/js/src/folder.ts`, `greeting()`), Python (`plugins/stream` `folder.py`, `_greeting`), .NET, Ruby, Rust and PHP should take the string form and default a missing `mode` to `variation`.
 Calls have an id of their own and a `session_id`: a session starts a new call each time voice is started or stopped on it, and an incognito session keeps none, so a session id is no longer a call id. `Call.id` is the call's own id; `Call` gains `session_id` (absent once the session is deleted) and loses `config_id` and `user_id`. `listCalls` (`GET /v1/agents/calls`) takes `session_id` and answers that session's calls newest first. Go is done: `client.Sessions.Timeline` and `Decisions` list the session's calls with `session_id` and `limit=1`, read the newest one's `getCallTimeline` or `getCallEvents`, and fail with `client.ErrNoCall` when the session has none (`sdks/go/client/sessions.go`). Other SDKs need to update: JavaScript, Python (`plugins/stream`), .NET, Ruby, Rust and PHP regenerate their clients, and any helper that passes a session id to `/v1/agents/calls/{id}` (its timeline, events, transcript or tokens) lists the session's calls first; Swift, Kotlin and Dart regenerate `Call` where they have it.
+STS models list their built-in voices on `Provider.voices` (`ModelVoice`: `id`, `name`, `description`, `gender`, `default`), omitted for non-STS providers, and new voice configs created via `createAgentConfig` or `syncAgent` now default `sts` to `sts-fast` when `sts` is omitted and no cascade settings are provided (explicit `sts: ""` selects the cascade). Go is regenerated (`sdks/go/acceleration/generated.go`). Other SDKs need to update: JavaScript, Python (`plugins/stream`), Swift, Kotlin, Dart, .NET, Ruby, Rust and PHP regenerate their OpenAPI types to pick up `Provider.voices` and `ModelVoice`.

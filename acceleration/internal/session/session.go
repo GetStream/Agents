@@ -451,7 +451,7 @@ func (s *Session) SawVideo() {
 	}
 	s.mu.Unlock()
 	if !seen && s.records != nil {
-		s.afterRow(func() { s.records.SawVideo(s.id) })
+		s.afterRow(func() { s.records.SawVideo(s.spec.CustomerID, s.id) })
 	}
 }
 
@@ -1074,7 +1074,7 @@ func (s *Session) SetToolTimeout(milliseconds int) {
 	}
 	if s.records != nil {
 		kind := string(s.spec.CallerKind)
-		s.afterRow(func() { s.records.ToolTimeout(s.id, kind, milliseconds) })
+		s.afterRow(func() { s.records.ToolTimeout(s.spec.CustomerID, s.id, kind, milliseconds) })
 	}
 }
 
@@ -1677,13 +1677,13 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 	s.mu.Unlock()
 	if s.records != nil && voice {
-		s.records.Voiced(s.id)
+		s.records.Voiced(s.spec.CustomerID, s.id)
 	}
 	// Each time voice is started or stopped begins a call of its own, so every moment of a
 	// session is on exactly one call.
 	if s.calls != nil {
 		now := time.Now()
-		s.calls.Ended(s.nextCall(now), now.UTC())
+		s.calls.Ended(s.spec.CustomerID, s.nextCall(now), now.UTC())
 		s.calls.Started(row(s))
 	}
 
@@ -2345,7 +2345,7 @@ func (s *Session) endTurn(turnID, status, failure string) {
 	if !open {
 		return
 	}
-	s.records.Responded(turn.id, status, failure, time.Now().UTC())
+	s.records.Responded(s.spec.CustomerID, turn.id, status, failure, time.Now().UTC())
 }
 
 // remember keeps what was said, which is all a review needs of a call.

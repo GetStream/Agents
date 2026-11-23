@@ -176,9 +176,9 @@ func (r *Calls) Start(ctx context.Context, call *Call) error {
 
 // Finish records that a call ended. A call that already ended keeps the first time: the
 // agent leaves once, and a second close is the same leaving reported again.
-func (r *Calls) Finish(ctx context.Context, id string, at time.Time) error {
-	if id == "" {
-		return stack.Wrap(errors.New("store: a call id is required"))
+func (r *Calls) Finish(ctx context.Context, customerID, id string, at time.Time) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a call id are required"))
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()
@@ -187,6 +187,7 @@ func (r *Calls) Finish(ctx context.Context, id string, at time.Time) error {
 	_, err := r.store.shard.NewUpdate().Model((*Call)(nil)).
 		Set("ended_at = ?", at).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Where("ended_at IS NULL").
 		Exec(ctx)
 	if err != nil {
@@ -198,8 +199,8 @@ func (r *Calls) Finish(ctx context.Context, id string, at time.Time) error {
 // ChangeModels rewrites the targets and voice a running call is on, after it was moved onto
 // other models mid-call.
 func (r *Calls) ChangeModels(ctx context.Context, call *Call) error {
-	if call.ID == "" {
-		return stack.Wrap(errors.New("store: a call id is required"))
+	if call.CustomerID == "" || call.ID == "" {
+		return stack.Wrap(errors.New("store: a customer and a call id are required"))
 	}
 
 	// Set rather than Column: the fields are nullzero, and a target a call no longer runs
@@ -212,6 +213,7 @@ func (r *Calls) ChangeModels(ctx context.Context, call *Call) error {
 		Set("sts = ?", call.STS).
 		Set("voice = ?", call.Voice).
 		Where("id = ?", call.ID).
+		Where("customer_id = ?", call.CustomerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: change call models: %w", err))

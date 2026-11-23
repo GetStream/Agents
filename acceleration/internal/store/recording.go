@@ -102,13 +102,17 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 }
 
 // Start marks a job as at the provider and records which one took it.
-func (r *Recordings) Start(ctx context.Context, id, provider, model string) error {
+func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model string) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
+	}
 	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
 		Set("status = ?", RecordingRunning).
 		Set("provider = ?", provider).
 		Set("model = ?", model).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: start recording: %w", err))
@@ -117,7 +121,10 @@ func (r *Recordings) Start(ctx context.Context, id, provider, model string) erro
 }
 
 // Finish writes the result a job produced, or the reason it produced none.
-func (r *Recordings) Finish(ctx context.Context, id, provider, model string, result json.RawMessage, failure error) error {
+func (r *Recordings) Finish(ctx context.Context, customerID, id, provider, model string, result json.RawMessage, failure error) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
+	}
 	now := time.Now().UTC()
 	status := RecordingCompleted
 	reason := ""
@@ -136,12 +143,16 @@ func (r *Recordings) Finish(ctx context.Context, id, provider, model string, res
 		Set("updated_at = ?", now).
 		Set("completed_at = ?", now).
 		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: finish recording: %w", err))
 	}
 	return nil
 }
+
+// ErrNoRecording is a recording id that the customer has no job for.
+var ErrNoRecording = errors.New("store: there is no recording")
 
 // Get returns one job a customer holds.
 func (r *Recordings) Get(ctx context.Context, customerID, id string) (Recording, error) {
@@ -159,7 +170,7 @@ func (r *Recordings) Get(ctx context.Context, customerID, id string) (Recording,
 		return recording, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return Recording{}, stack.Wrap(fmt.Errorf("store: there is no recording %s", id))
+		return Recording{}, stack.Wrap(fmt.Errorf("%w %s", ErrNoRecording, id))
 	}
 	if err != nil {
 		return Recording{}, stack.Wrap(fmt.Errorf("store: recording: %w", err))

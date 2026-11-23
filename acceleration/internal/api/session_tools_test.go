@@ -134,7 +134,7 @@ func (s *SessionToolsSuite) TestASessionTheRouterLetGoOfSaysWhereItsToolsCameFro
 	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: id, CustomerID: s.customerID(), AgentName: "support", AgentID: "support", State: store.SessionClosed,
 	}))
-	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), id, []store.ToolDefinition{
+	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), s.customerID(), id, []store.ToolDefinition{
 		{Name: "investigate_sdk", Description: "Read SDK source", Source: "worker"},
 		{Name: "lookup_order", Description: "find an order by its number"},
 	}))
@@ -344,7 +344,7 @@ func (s *SessionToolsSuite) TestASessionTheRouterLetGoOfListsWhatItWasOffered() 
 	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: id, CustomerID: s.customerID(), AgentName: "support", AgentID: "support", State: store.SessionClosed,
 	}))
-	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), id, []store.ToolDefinition{
+	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), s.customerID(), id, []store.ToolDefinition{
 		{Name: "lookup_order", Description: "find an order by its number", Parameters: map[string]any{"type": "object"}},
 	}))
 

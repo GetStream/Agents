@@ -22,7 +22,10 @@ client-side cache rueidis keeps alongside it answers without a round trip at all
 invalidates that local copy itself when the key is deleted, so every replica forgets a
 revoked key at once rather than each on its own timer. Postgres stays the only writer and
 the only truth: every write goes there first and drops the keys it changed, and the
-hour-long TTL is only the backstop for a deletion that did not land.
+hour-long TTL is only the backstop for a deletion that did not land. A key's owner is the
+exception: it is cached for a minute, so a key revoked where the deletion does not reach
+(in the database alone, or by `router keys revoke` without the routers' Redis) stops
+authenticating within a minute.
 
 The authenticator, `policy.Enforcer`, `api.Server`, `session.Manager` and the voice
 resolver and service all read through it. A deployment with no Redis address, or one whose

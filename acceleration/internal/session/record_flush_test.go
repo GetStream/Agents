@@ -320,6 +320,39 @@ func (s *RecordFlushSuite) TestATitleForASessionThatIsThereIsStored() {
 	s.NotContains(logged.String(), "level=ERROR")
 }
 
+func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOpen() {
+	row := s.row()
+	s.records.Opened(row, nil)
+
+	s.records.Closed("other-"+s.customer, row.ID, time.Now().UTC(), TimeoutHangup)
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	got, err := s.store.Sessions.Get(s.ctx, s.customer, row.ID)
+	s.Require().NoError(err)
+	s.Nil(got.ClosedAt, "the session is still open")
+	s.Equal(store.SessionRunning, got.State)
+	s.Empty(got.EndReason)
+}
+
+func (s *RecordFlushSuite) TestTheItemsOfATurnWhoseIdIsAnotherCustomersAreNotWritten() {
+	other := "other-" + s.customer
+	theirs := store.AgentSession{ID: rand.Text(), CustomerID: other, State: store.SessionRunning, CreatedAt: time.Now().UTC()}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &theirs))
+	turn := rand.Text()
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &store.AgentResponse{ID: turn, SessionID: theirs.ID, CustomerID: other}))
+	row := s.row()
+	s.records.Opened(row, nil)
+
+	s.records.Responding(store.AgentResponse{ID: turn, SessionID: row.ID, CustomerID: s.customer})
+	s.records.Item(store.AgentResponseItem{ResponseID: turn, SessionID: row.ID, Kind: "message", Text: "app's answer"})
+	s.records.Responded(s.customer, turn, store.ResponseCompleted, "", time.Now().UTC())
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	written, err := s.store.ResponseItems.Select(s.ctx, other, row.ID, store.ItemFilter{ResponseID: turn})
+	s.Require().NoError(err)
+	s.Empty(written, "no item was written under the other customer's turn")
+}
+
 func (s *RecordFlushSuite) TestATitleTheStoreCouldNotWriteStillLogsAnError() {
 	logged := &syncBuffer{}
 	broken, err := store.Open(s.dsn)

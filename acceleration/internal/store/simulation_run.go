@@ -144,8 +144,8 @@ func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []
 
 // Finish records how a run ended and what its conversations came to.
 func (r *SimulationRuns) Finish(ctx context.Context, run SimulationRun) error {
-	if run.ID == "" {
-		return stack.Wrap(errors.New("store: a run id is required"))
+	if run.CustomerID == "" || run.ID == "" {
+		return stack.Wrap(errors.New("store: a customer and a run id are required"))
 	}
 
 	now := time.Now().UTC()
@@ -154,6 +154,7 @@ func (r *SimulationRuns) Finish(ctx context.Context, run SimulationRun) error {
 	_, err := r.store.global.NewUpdate().Model(&run).
 		Column("state", "passed", "failed", "error", "finished_at").
 		Where("id = ?", run.ID).
+		Where("customer_id = ?", run.CustomerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: finish simulation run: %w", err))

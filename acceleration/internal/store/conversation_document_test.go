@@ -26,6 +26,23 @@ func (s *StoreSuite) documentIDs(scope DocumentScope) []string {
 	return ids
 }
 
+func (s *StoreSuite) TestAnotherCustomersDocumentUnderADocumentIdIsRefused() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.attached("one", "one", "", "jlahey", "first", s.base)
+
+	err := s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{
+		ID: "one", CustomerID: "somebody-else", OwnerUserID: "jlahey", SessionID: "theirs",
+		Name: "theirs.pdf", SHA256: "other", Markdown: "their text", CreatedAt: s.base.Add(time.Hour),
+	})
+
+	s.ErrorIs(err, ErrIDTaken, "the writer is told the id is not its own")
+	documents, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
+	s.Require().NoError(err)
+	s.Require().Len(documents, 1)
+	s.Equal("text of one", documents[0].Markdown, "app's document is as it was")
+}
+
 func (s *StoreSuite) TestADocumentIsOnlyReadForThePersonWhoSentIt() {
 	s.opened("one", "app", s.base, nil)
 	s.responded("one", "first", "read this", s.base)

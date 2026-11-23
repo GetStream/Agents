@@ -44,7 +44,7 @@ func (r *heldRecorder) Responding(row store.AgentResponse) {
 	r.responses = append(r.responses, row)
 }
 
-func (r *heldRecorder) Responded(id, status, failure string, _ time.Time) {
+func (r *heldRecorder) Responded(_, id, status, failure string, _ time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.finished = append(r.finished, finishedTurn{id: id, status: status, failure: failure})
@@ -60,23 +60,23 @@ func (r *heldRecorder) Described(string, string, string, string, map[string]any)
 
 func (r *heldRecorder) Chose(string, string, string, string) {}
 
-func (r *heldRecorder) ToolTimeout(string, string, int) {}
+func (r *heldRecorder) ToolTimeout(string, string, string, int) {}
 
-func (r *heldRecorder) Offered(string, []store.ToolDefinition) {}
+func (r *heldRecorder) Offered(string, string, []store.ToolDefinition) {}
 
-func (r *heldRecorder) SawVideo(id string) {
+func (r *heldRecorder) SawVideo(_, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.videos = append(r.videos, id)
 }
 
-func (r *heldRecorder) Voiced(string) {}
+func (r *heldRecorder) Voiced(string, string) {}
 
 func (r *heldRecorder) Flush(context.Context) error { return nil }
 
 func (r *heldRecorder) Opened(store.AgentSession, []store.ToolDefinition) {}
 
-func (r *heldRecorder) Closed(string, time.Time, EndReason) {}
+func (r *heldRecorder) Closed(string, string, time.Time, EndReason) {}
 
 func (r *heldRecorder) Close() {}
 

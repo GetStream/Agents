@@ -176,7 +176,10 @@ func (s *Server) getTranscription(ctx context.Context, request *getTranscription
 	}
 
 	job, err := s.store.Recordings.Get(ctx, customerID, request.Id)
-	if err != nil || job.Modality != string(Stt) {
+	if err != nil {
+		return nil, unknownOr(err, store.ErrNoRecording, notFound("no such transcription"))
+	}
+	if job.Modality != string(Stt) {
 		return nil, notFound("no such transcription")
 	}
 	return &getTranscriptionResponse{Body: transcriptionOf(job)}, nil
@@ -272,7 +275,10 @@ func (s *Server) getSpeech(ctx context.Context, request *getSpeechRequest) (*get
 	}
 
 	job, err := s.store.Recordings.Get(ctx, customerID, request.Id)
-	if err != nil || job.Modality != string(Tts) {
+	if err != nil {
+		return nil, unknownOr(err, store.ErrNoRecording, notFound("no such speech job"))
+	}
+	if job.Modality != string(Tts) {
 		return nil, notFound("no such speech job")
 	}
 	return &getSpeechResponse{Body: speechOf(job)}, nil
@@ -343,7 +349,7 @@ func (s *Server) finished(ctx context.Context, job store.Recording, provider, mo
 	if failure != nil {
 		s.logger.Error("a recording failed", "recording", job.ID, "modality", job.Modality, "error", failure)
 	}
-	if err := s.store.Recordings.Finish(ctx, job.ID, provider, model, result, failure); err != nil {
+	if err := s.store.Recordings.Finish(ctx, job.CustomerID, job.ID, provider, model, result, failure); err != nil {
 		s.logger.Error("could not write down a finished recording", "recording", job.ID, "error", err)
 		return
 	}
