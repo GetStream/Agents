@@ -324,7 +324,7 @@ func (r *ChannelInbounds) Finish(ctx context.Context, claimed ChannelInbound, at
 // Fail records that a claimed message's last attempt failed and it is given up,
 // at at, and calls forward, when not nil, to forward the message's delivery: when it has one,
 // and no other message of the delivery forwarded it. The event destinations key a forward by
-// the delivery only while it is queued (QueueEventDeliveries; FinishEventDelivery deletes it
+// the delivery only while it is queued (EventDeliveries.Queue; EventDeliveries.Finish deletes it
 // once sent), and one thread's messages are given up minutes apart, so a delivery whose two
 // messages were never written would otherwise reach a destination twice. A message counts as
 // forwarded once forward returned nil, so a forward that fails, or a router that stops before

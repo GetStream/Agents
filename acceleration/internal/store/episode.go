@@ -257,7 +257,7 @@ WITH closed AS (
 // EndCall ends, at now, the episodes in progress of the call callID in the app scope names,
 // each leased to holder for its summary until leaseUntil. A call id is unique
 // only within its app, so the scope is the app the call event came from, as
-// ReleaseCallResourcesInApp takes it. None is no error: a call under an agent config without
+// CallResources.Release takes it. None is no error: a call under an agent config without
 // episode cards has none.
 func (r *Episodes) EndCall(ctx context.Context, scope AppScope, callID string, now, leaseUntil time.Time, holder string) ([]ClosedEpisode, error) {
 	closed := []ClosedEpisode{}

@@ -29,7 +29,7 @@ type UserPhone struct {
 	Phone     string    `bun:"phone,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
 	// UpdatedAt is when the user was linked to Phone: the same number again leaves it, so what
-	// the number said since the link stays the user's (EpisodeCards).
+	// the number said since the link stays the user's (Episodes.Cards).
 	UpdatedAt time.Time `bun:"updated_at,notnull"`
 	// History is how much of the number's past a link request gives the user. Nil keeps what the
 	// same number had, and gives a new number's link its own time (user_phone_history).
@@ -101,7 +101,7 @@ const userLinkLockSeed = 2701
 // number the user had before keeps none of the user's history: its rows that share the user's
 // omni-channel get one of their own (detachLinked). The new number brings none of its own: its
 // rows that hold episodes are set aside (retireHistory), so the user reads only what it says
-// after the link, unless the link's History gives the user more of it (writeHistory, EpisodeCards).
+// after the link, unless the link's History gives the user more of it (writeHistory, Episodes.Cards).
 // A number another user of the app holds is ErrPhoneTaken. Linking a pair again with no History
 // changes nothing.
 func (r *UserPhones) Link(ctx context.Context, link *UserPhone) error {
@@ -118,7 +118,7 @@ func (r *UserPhones) Link(ctx context.Context, link *UserPhone) error {
 		}
 		// The link's time is Postgres's, as an SMS episode's start is (the inbound queue's
 		// created_at), so an SMS queued after the link is never dated before it by the skew of
-		// two clocks (EpisodeCards).
+		// two clocks (Episodes.Cards).
 		_, err := tx.NewInsert().Model(link).
 			Value("created_at", "statement_timestamp()").
 			Value("updated_at", "statement_timestamp()").
@@ -151,9 +151,9 @@ func (r *UserPhones) Link(ctx context.Context, link *UserPhone) error {
 	if err != nil {
 		return err
 	}
-	// After the link is committed, not in its transaction: a contact row MapContact makes at the
-	// same time either is committed before this reads it, or reads the link itself once it is
-	// made (ContactMapEntries.Map), so no row is left out of the pair.
+	// After the link is committed, not in its transaction: a contact row ContactMapEntries.Map
+	// makes at the same time either is committed before this reads it, or reads the link itself
+	// once it is made, so no row is left out of the pair.
 	return r.joinLinked(ctx, *link)
 }
 
@@ -337,7 +337,7 @@ func (r *UserPhones) streamUserAddresses(link UserPhone) []string {
 // made first, and its pin with it. The number is the link as stored, read under the link's
 // lock, not link.Phone: a join that comes after another PUT of the user joins the number that
 // PUT left. No card moves: a card is read by its message id (omnichannel.summaryOf), and the
-// cards of a person are those of every row pointing at their omni-channel (EpisodeCards). Two
+// cards of a person are those of every row pointing at their omni-channel (Episodes.Cards). Two
 // joins of one link take turns under its lock, so the second finds the first's rows on one
 // omni-channel already. Each half of the pair is found for each of the customer's agent
 // configs by the whole of contact_map_address, and born by contact_map_conversation, so a join
@@ -411,7 +411,7 @@ const retiredPrefix = "retired:"
 
 // reachedAt is a row's address as the person is reached at: the number of a row a link set
 // aside (retireHistory), any other row's address as it is. What still talks to the person on
-// a thread, call or card the row holds reads it (ThreadContact, the closed episodes' and the
+// a thread, call or card the row holds reads it (ContactMapEntries.GetByThread, the closed episodes' and the
 // cards' contact_address), so a reply's opt-out, sandbox and limit checks and a call's caller
 // check name the number. Example: retired:3f2a…:+15550100 is reached at +15550100.
 const reachedAt = `regexp_replace(cm.address, '^` + retiredPrefix + `[^:]*:', '')`
@@ -426,7 +426,7 @@ const reachedAt = `regexp_replace(cm.address, '^` + retiredPrefix + `[^:]*:', ''
 // person on its thread, call or cards still reads the number (reachedAt). The number's next
 // episode makes a row of its own, which joins the user (joinPartner). A row with no episode has nothing
 // to set aside and joins as it is (joinLinked); a config with episode_cards off keeps its rows
-// as they were, and EpisodeCards' link filter keeps their episodes from the user. Record
+// as they were, and Episodes.Cards' link filter keeps their episodes from the user. Record
 // counts as on: it writes the same episodes, which a session reads once the config turns on.
 // In tx, under the link's lock.
 func (r *UserPhones) retireHistory(ctx context.Context, tx bun.Tx, link UserPhone) error {

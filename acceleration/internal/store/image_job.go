@@ -133,7 +133,7 @@ ij.message, ij.failed, ij.outcome, ij.created_at, ij.finished_at`
 // Claim takes up to limit queued jobs due now, moves each one's next attempt to the end of
 // lease and counts the claim. The drawn picture is left out of what it returns. decided takes the jobs whose message is decided, which only
 // post; otherwise the ones still to be drawn. A job whose earlier claim's lease ran out, such as
-// one a router stopped in the middle of, is due again, as claimChatInboundQuery's rows are.
+// one a router stopped in the middle of, is due again, as ChatInbounds.Claim's rows are.
 func (r *ImageJobs) Claim(ctx context.Context, limit int, lease time.Duration, decided bool) ([]ImageJob, error) {
 	return claim[ImageJob](ctx, r.store.global, imageJobs, lease, limit, queuedImageJobs(decided), imageJobClaimed)
 }
