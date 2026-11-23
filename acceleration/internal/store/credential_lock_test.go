@@ -485,3 +485,14 @@ func (s *StoreSuite) TestClosingTheStoreClosesItsLockPool() {
 
 	s.Zero(router.locks.Stats().OpenConnections)
 }
+
+func (s *StoreSuite) TestAProviderAppLockIsHeldOnTheLockPool() {
+	router := s.router()
+	var locks, serving int
+	s.Require().NoError(router.ConnectorConfigTokens.WithProviderAppLock(s.ctx, "acme-app", "slack", func() error {
+		locks, serving = router.locks.Stats().InUse, router.GlobalDB().Stats().InUse
+		return nil
+	}))
+	s.Equal(1, locks, "the provider app lock keeps a lock pool connection")
+	s.Zero(serving, "and no serving one")
+}
