@@ -846,6 +846,9 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### Log and stored error text no longer keeps a connector's token
 
 The redaction that runs on every log line and on the error text the router stores now takes out a Slack token (`xoxb-`, `xoxp-`, `xoxe-`, `xapp-` and the other `xox` types), a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), a Google API key (`AIza`), an AWS access key id (`AKIA`, `ASIA`), a JSON Web Token and a PEM private key block, even with no keyword before it, and the values of `id_token`, `auth_token`, `private_key` and a JSON `"token"` key. A token after a JSON or percent escape (`\n`, `\u0026`, `%3D`) is taken out too. In a JSON answer the `"token"` key stays and its value reads `"[redacted]"`, so the stored text is still valid JSON. Names such as `max_tokens`, `input_tokens`, `"token_count"` and `keyterm`, and a dotted name that is not a JWT, are unchanged. Rows written before are not rewritten (AI-3543, #2184).
+### An inbound Slack message goes to the connection an agent binds
+
+With two app connections to the same workspace, the router now picks the connected one that a live agent config binds, instead of the newest (#2185).
 
 ### JavaScript: a reply the model couldn't write keeps its error and Try again
 
@@ -886,6 +889,10 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 ### Only a number on the customer's own trunk moves in an import
 
 `/v1/data/import`, and a change applied after it, writes a `phone_numbers` row only when its vendor is exactly `sip_trunk`; any other row is skipped without an error. A number bought at a vendor stays in the vendor account of the deployment that bought it, and its bills already move with the requests, so the destination neither holds it nor bills its months again. A customer that moves keeps a bought number by buying or porting it at the destination. A number bought here and still held is never updated or deleted by an imported row or a replayed change, whatever id it names. An imported `sip_trunk` number is held to the API's rules (E.164, a vendor, a cost that is not negative), and no imported number keeps its `dlc_use_case_id`, which names a use case of the source.
+
+### A request counts only toward its own organization's spend grants
+
+A request row's cost is added to a grant it names only when the grant belongs to the row's organization or to its app's (the organization the app is in, or the app itself for an app in none), both as the row is written and when the grant uses are reconciled. A grant scoped to an app, or to its key or user, counts only that app's rows. A use refused because the grant is not the row's is counted on `/metrics` as `router_usage_grant_uses_refused_total`. An imported request names no grant: it was drawn from the grants of the deployment that recorded it.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
@@ -1813,6 +1820,10 @@ In a channel of a type an agent config answers in (`chat_channels`), a tool call
 ### A member's line in a call's transcript is no longer read as the agent's
 
 A call's transcript, its timeline and a campaign's outcome read every line marked `source: agent` as the agent's, whoever wrote it, so a member of the channel the transcript is in could put words in the agent's mouth. A call now records the user the agent wrote as, and only that user's lines, or the agent id's, are the agent's; a person's typed turn reads as theirs too. A call from before this change reads as it did (AI-3265).
+
+### A database failure is a 500, not a 404
+
+When the router cannot read or change a row because the database failed, it now sends a 500 and logs the error. Before, it sent a 404, for example "no such session" or "no such agent config". A client then dropped a session that was still there, or a delete that failed looked done. A 404 now means only that the row does not exist. A session that names its agent by name gets a 500 for a database failure, not a 400 with the text of the database error. The voice socket sends "something went wrong" in its error frame when it cannot read the agent config, not the text of the error (AI-3491).
 
 ## Breaking Changes
 

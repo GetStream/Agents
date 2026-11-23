@@ -84,7 +84,7 @@ func (s *Server) getSimulation(ctx context.Context, request *getSimulationReques
 
 	simulation, err := s.store.Simulations.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulation
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	return &getSimulationResponse{Body: simulationOf(simulation)}, nil
 }
@@ -105,7 +105,7 @@ func (s *Server) updateSimulation(ctx context.Context, request *updateSimulation
 
 	existing, err := s.store.Simulations.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulation
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 
 	simulation := storedSimulation(*request.Body, customerID)
@@ -132,7 +132,7 @@ func (s *Server) deleteSimulation(ctx context.Context, request *deleteSimulation
 	}
 
 	if err := s.store.Simulations.Delete(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownSimulation
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	return nil, nil
 }
@@ -152,7 +152,7 @@ func (s *Server) runSimulation(ctx context.Context, request *runSimulationReques
 	}
 
 	if _, err := s.store.Simulations.Get(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownSimulation
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	run, err := s.simulations.Start(ctx, customerID, request.Id)
 	if err != nil {
@@ -205,7 +205,7 @@ func (s *Server) getSimulationRun(ctx context.Context, request *getSimulationRun
 
 	run, err := s.store.SimulationRuns.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulationRun
+		return nil, unknownOr(err, store.ErrNoSimulationRun, errUnknownSimulationRun)
 	}
 	cases, err := s.store.SimulationCases.Select(ctx, run.ID)
 	if err != nil {
@@ -229,7 +229,7 @@ func (s *Server) cancelSimulationRun(ctx context.Context, request *cancelSimulat
 
 	run, err := s.simulations.Cancel(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulationRun
+		return nil, unknownOr(err, store.ErrNoSimulationRun, errUnknownSimulationRun)
 	}
 	return &cancelSimulationRunResponse{Body: simulationRunOf(run, nil)}, nil
 }
@@ -284,7 +284,7 @@ func simulationComplaint(
 		return invalidRequest(err.Error())
 	}
 	if _, err := server.store.AgentConfigs.Get(ctx, customerID, simulation.ConfigID); err != nil {
-		return errUnknownConfig
+		return unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	return nil
 }
