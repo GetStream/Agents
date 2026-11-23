@@ -287,16 +287,6 @@ type tableShapes struct {
 	byName map[string]shape
 }
 
-// DataTables names the tables an export carries, parents first. It is public so a test
-// and the docs have one answer rather than two.
-func DataTables() []string {
-	names := make([]string, 0, len(dataTables))
-	for _, table := range dataTables {
-		names = append(names, table.name)
-	}
-	return names
-}
-
 // StartDataCapture records that a customer is moving, so their changes are written down
 // for the deployment they are moving to.
 //

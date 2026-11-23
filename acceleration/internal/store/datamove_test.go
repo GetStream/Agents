@@ -98,9 +98,12 @@ func (s *DataMoveSuite) TearDownSuite() {
 }
 
 func (s *DataMoveSuite) SetupTest() {
-	tables := strings.Join(append(DataTables(), "data_changes", "data_change_capture"), ", ")
+	tables := []string{"data_changes", "data_change_capture"}
+	for _, table := range dataTables {
+		tables = append(tables, table.name)
+	}
 	for _, store := range []*Store{s.source, s.destination} {
-		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+tables+" CASCADE")
+		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+strings.Join(tables, ", ")+" CASCADE")
 		s.Require().NoError(err)
 		store.SetStreamPins(StreamPins{})
 	}
@@ -228,7 +231,8 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
 	}
-	for _, table := range DataTables() {
+	for _, data := range dataTables {
+		table := data.name
 		shape, err := s.source.shapeOf(s.ctx, table)
 		s.Require().NoError(err)
 		for _, column := range shape.columns {
