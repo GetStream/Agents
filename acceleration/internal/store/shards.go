@@ -128,6 +128,10 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 	return found, nil
 }
 
+// ErrShardUnanswered is a read no shard that answered could settle while another did not: the
+// row may be on that one, so asking again once it answers may find it.
+var ErrShardUnanswered = errors.New("store: a shard that may hold it did not answer")
+
 // peerReadTimeout bounds a read of another shard's database that one shard's answer can settle
 // (answeringShards). Each is one indexed lookup, answered in milliseconds by a peer that is up,
 // even across regions. A peer partitioned away would otherwise hold the caller for pgdriver's

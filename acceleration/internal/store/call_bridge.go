@@ -104,7 +104,7 @@ func (r *CallBridges) Claim(ctx context.Context, token string) (CallBridge, erro
 		return claimed[0], nil
 	}
 	if err := errors.Join(failed...); err != nil {
-		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w", err))
+		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w: %w", ErrShardUnanswered, err))
 	}
 	// One message for a token that never existed, one that has been used and one that has
 	// expired: telling them apart would say whether a guessed token was ever real.

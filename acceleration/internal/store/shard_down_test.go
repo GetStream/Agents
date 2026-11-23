@@ -46,8 +46,10 @@ func (s *StoreSuite) TestABridgeNoAnsweringShardHoldsIsNotClaimedWhileAnotherIsD
 	down, _ := s.withAShardDown()
 
 	_, err := down.CallBridges.Claim(s.ctx, newID())
+	s.Require().ErrorIs(err, ErrShardUnanswered, "the shard that is down may hold it")
+	_, err = s.store.CallBridges.Claim(s.ctx, newID())
 	s.Require().Error(err)
-	s.NotContains(err.Error(), "not waiting to be claimed", "the shard that is down may hold it")
+	s.NotErrorIs(err, ErrShardUnanswered, "with every shard answering, it is not there")
 }
 
 func (s *StoreSuite) TestACallPlacedOnAShardThatAnswersIsFoundWhileAnotherIsDown() {
