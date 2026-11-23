@@ -389,7 +389,7 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxReportBytes+1))
 	if err != nil {
-		writeError(w, invalidRequest(err.Error()))
+		writeError(w, invalidRequest("could not read that report"))
 		return
 	}
 	if len(body) > maxReportBytes {
@@ -397,7 +397,9 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.dlc.Hook(r.Context(), r.Header, body); errors.Is(err, dlc.ErrRefused) {
-		writeError(w, unauthenticated(err.Error()))
+		// The reason can name the deployment's settings, which are the operator's to read.
+		s.logger.Warn("refused a 10DLC report", "error", err)
+		writeError(w, unauthenticated("that is not a report from the registrar"))
 		return
 	} else if err != nil {
 		writeFailure(w, r, err)

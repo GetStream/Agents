@@ -161,7 +161,6 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 	for _, region := range base.Regions() {
 		listed, err := base.Namespaces(ctx, region, "")
 		if err != nil {
-			logger.Error("could not list the knowledge bases, so no storage is recorded for the hour", "hour", at, "region", region, "error", err)
 			alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "region": region, "listing": err.Error()})
 			return fmt.Errorf("usage storage: list the knowledge bases in %s: %w", region, err)
 		}
@@ -171,7 +170,6 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 	}
 	theirs, err := pgStore.KnowledgeNamespaces.SelectInCustomerAccounts(ctx)
 	if err != nil {
-		logger.Error("could not list the knowledge bases in customers' own accounts, so no storage is recorded for the hour", "hour", at, "error", err)
 		alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "listing": err.Error()})
 		return fmt.Errorf("usage storage: %w", err)
 	}

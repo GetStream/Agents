@@ -17,7 +17,6 @@ package simulation
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -61,6 +60,17 @@ const (
 const (
 	runsAtOnce  = 4
 	casesAtOnce = 5
+)
+
+// What Start refuses before a run is written.
+var (
+	// ErrNoAudio is an audio simulation on a deployment with no speech models for the caller.
+	ErrNoAudio = errors.New(
+		"simulation: this deployment cannot give the caller a voice or ears, so it cannot run an audio simulation")
+	// ErrBusy is a run asked for while as many as the runner holds at once are going.
+	ErrBusy = errors.New("simulation: as many runs as can go at once are already going, so this one would have to wait")
+	// ErrClosed is a run asked of a runner that is shut down.
+	ErrClosed = errors.New("simulation: the runner is shut down")
 )
 
 // Options configures a Runner. The first three are required: a simulation is a
@@ -146,8 +156,7 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 		return store.SimulationRun{}, err
 	}
 	if simulation.Mode == store.SimulationAudio && (r.tts == nil || r.stt == nil) {
-		return store.SimulationRun{}, stack.Wrap(errors.New(
-			"simulation: this deployment cannot give the caller a voice or ears, so it cannot run an audio simulation"))
+		return store.SimulationRun{}, stack.Wrap(ErrNoAudio)
 	}
 	// The config is read once, here, rather than per conversation: a run is one agent
 	// asked the same thing several ways, and editing it halfway through would mean the
@@ -160,12 +169,11 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return store.SimulationRun{}, stack.Wrap(errors.New("simulation: the runner is shut down"))
+		return store.SimulationRun{}, stack.Wrap(ErrClosed)
 	}
 	if len(r.running) >= runsAtOnce {
 		r.mu.Unlock()
-		return store.SimulationRun{}, stack.Wrap(fmt.Errorf(
-			"simulation: %d runs are already going, so this one would have to wait", runsAtOnce))
+		return store.SimulationRun{}, stack.Wrap(ErrBusy)
 	}
 	r.mu.Unlock()
 
@@ -191,7 +199,7 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return store.SimulationRun{}, stack.Wrap(errors.New("simulation: the runner is shut down"))
+		return store.SimulationRun{}, stack.Wrap(ErrClosed)
 	}
 	// The run outlives the request that started it, so it takes the background rather than
 	// a context that is cancelled the moment the caller is answered.
@@ -349,13 +357,13 @@ func (r *Runner) play(
 		Target:     simulation.CallerTarget,
 	}, kase.Scenario)
 	if err != nil {
-		return errored(kase, err)
+		return r.errored(kase, "start the caller", err)
 	}
 	defer persona.Close()
 
 	over, err := r.hold(ctx, simulation, config, kase)
 	if err != nil {
-		return errored(kase, err)
+		return r.errored(kase, "open the conversation", err)
 	}
 	defer over.Close()
 
@@ -374,9 +382,10 @@ func (r *Runner) play(
 		// The conversation is still judged on what was said before it stopped. A run that
 		// ran out of turns is a failure with evidence, and only a run with no evidence at
 		// all is an error.
-		kase.Error = err.Error()
+		kase.Error = r.failed(kase, "finish the conversation", err)
 		if len(so) == 0 {
-			return errored(kase, err)
+			kase.State = store.SimulationErrored
+			return kase
 		}
 	}
 
@@ -388,7 +397,7 @@ func (r *Runner) play(
 		Target:     simulation.JudgeTarget,
 	}, "judge-"+kase.ID, simulation.Assertion, over.Session().Tools(), so)
 	if err != nil {
-		return errored(kase, err)
+		return r.errored(kase, "get a ruling", err)
 	}
 
 	kase.State = store.SimulationFailed
@@ -540,10 +549,29 @@ func ended(ctx context.Context, run store.SimulationRun) string {
 
 // errored is a conversation that never got as far as a ruling, which is not the same as one
 // that was ruled against.
-func errored(kase store.SimulationCase, err error) store.SimulationCase {
+func (r *Runner) errored(kase store.SimulationCase, step string, err error) store.SimulationCase {
 	kase.State = store.SimulationErrored
-	kase.Error = err.Error()
+	kase.Error = r.failed(kase, step, err)
 	return kase
+}
+
+// told is a failure this package words for whoever reads the case.
+type told struct{ reason string }
+
+func (t *told) Error() string { return t.reason }
+
+// errNoAnswer is an agent that said nothing in time. What its turn failed with, if anything,
+// is wrapped after it for the log.
+var errNoAnswer = &told{"simulation: the agent did not answer"}
+
+// failed logs why a conversation stopped and returns what its case says. Only a told reason
+// is kept: any other error can carry a model vendor's answer, a host or a query.
+func (r *Runner) failed(kase store.SimulationCase, step string, err error) string {
+	r.logger.Warn("a simulated conversation stopped", "case", kase.ID, "step", step, "error", err)
+	if reason, ok := errors.AsType[*told](err); ok {
+		return reason.reason
+	}
+	return "simulation: could not " + step
 }
 
 // turnsOf is how many times the caller may speak.

@@ -1347,6 +1347,16 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
 			return
 		}
+		// A credential that could not be checked (the key store down, a key that would not
+		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+		// runs after this.
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			s.logger.Error("could not check a credential", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+				"error", err, "stack", stack.Trace(err))
+			writeError(w, internalError())
+			return
+		}
 		if err == nil && principal.AppID != "" {
 			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
 			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -105,7 +106,7 @@ func (s *Server) listAgentLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	high, err := s.store.AgentLogs.HighWater(r.Context(), customer)
 	if err != nil {
-		writeError(w, unavailable("log storage unavailable"))
+		writeFailure(w, r, err)
 		return
 	}
 	f.Before = high + 1
@@ -116,7 +117,7 @@ func (s *Server) listAgentLogs(w http.ResponseWriter, r *http.Request) {
 	f.Limit++
 	rows, err := s.store.AgentLogs.Select(r.Context(), customer, f)
 	if err != nil {
-		writeError(w, unavailable("log storage unavailable"))
+		writeFailure(w, r, err)
 		return
 	}
 	more := len(rows) > limit
@@ -145,7 +146,7 @@ func (s *Server) getAgentLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, unavailable("log storage unavailable"))
+		writeFailure(w, r, err)
 		return
 	}
 	logJSON(w, entry)
@@ -181,6 +182,10 @@ func (s *Server) streamAgentLogs(w http.ResponseWriter, r *http.Request) {
 	for {
 		high, err := s.store.AgentLogs.HighWater(r.Context(), customer)
 		if err != nil {
+			// A reader that left ends it; anything else is the database's, for the access line.
+			if r.Context().Err() == nil {
+				recordFailure(r.Context(), err, stack.Trace(err))
+			}
 			return
 		}
 		if high < after {
@@ -193,6 +198,10 @@ func (s *Server) streamAgentLogs(w http.ResponseWriter, r *http.Request) {
 		f.Limit = 250
 		rows, err := s.store.AgentLogs.Select(r.Context(), customer, f)
 		if err != nil {
+			// A reader that left ends it; anything else is the database's, for the access line.
+			if r.Context().Err() == nil {
+				recordFailure(r.Context(), err, stack.Trace(err))
+			}
 			return
 		}
 		if len(rows) > 0 {

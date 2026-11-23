@@ -69,7 +69,7 @@ func (s *Scheme) discover(ctx context.Context, m core.ResolvedManifest) (server,
 	if d.Issuer == "" && (d.Authorize == "" || d.Token == "" || registers) {
 		mcp := m.Endpoints["mcp"]
 		if mcp == "" {
-			return server{}, errors.New("oauth2code: the manifest has no authorize and token endpoints, and no issuer or mcp endpoint to discover them from")
+			return server{}, &ManifestError{Reason: "the manifest has no authorize and token endpoints, and no issuer or mcp endpoint to discover them from"}
 		}
 		resource, err := s.protectedResource(ctx, mcp)
 		if err != nil {
@@ -101,7 +101,7 @@ func (s *Scheme) discover(ctx context.Context, m core.ResolvedManifest) (server,
 		d.HasMetadata = true
 	}
 	if d.Authorize == "" || d.Token == "" {
-		return server{}, errors.New("oauth2code: no authorize or token endpoint in the manifest or the authorization server metadata")
+		return server{}, &ManifestError{Reason: "no authorize or token endpoint in the manifest or the authorization server metadata"}
 	}
 	// Every endpoint, pinned or discovered, is held to the egress policy before it is used.
 	// The authorize URL goes to the browser, so egress never dials it and this is its only
@@ -136,7 +136,7 @@ func (s *Scheme) discover(ctx context.Context, m core.ResolvedManifest) (server,
 func (s *Scheme) checkEndpoint(ctx context.Context, endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-		return fmt.Errorf("oauth2code: endpoint %q is not an https URL without userinfo or fragment", endpoint)
+		return &ManifestError{Reason: "an authorization server endpoint is not an https URL without userinfo or fragment"}
 	}
 	bare := *u
 	bare.RawQuery, bare.ForceQuery = "", false
@@ -151,11 +151,11 @@ func (d server) checkPKCE() error {
 	switch {
 	case len(d.CodeChallengeMethods) > 0 && !slices.Contains(d.CodeChallengeMethods, "S256"):
 		// RFC 9700 section 2.1.1: S256 is the only method that does not expose the verifier.
-		return errors.New("oauth2code: the authorization server does not support PKCE S256")
+		return &ManifestError{Reason: "the authorization server does not support PKCE S256"}
 	case d.ViaResource && len(d.CodeChallengeMethods) == 0:
 		// MCP 2025-11-25 «Authorization Code Protection»: if code_challenge_methods_supported
 		// is absent, «MCP clients MUST refuse to proceed».
-		return errors.New("oauth2code: the MCP server's authorization server does not advertise PKCE")
+		return &ManifestError{Reason: "the MCP server's authorization server does not advertise PKCE"}
 	}
 	// Otherwise PKCE is sent anyway: RFC 7636 section 5, clients «SHOULD send the
 	// additional parameters ... to all servers», and a server without it ignores them.
@@ -231,8 +231,8 @@ func (s *Scheme) protectedResource(ctx context.Context, endpoint string) (protec
 		var metadata protectedResourceMetadata
 		found, err := s.getJSON(ctx, c.url, &metadata)
 		switch {
-		case ctx.Err() != nil:
-			return protectedResourceMetadata{}, ctx.Err()
+		case err != nil && ctx.Err() != nil:
+			return protectedResourceMetadata{}, err
 		case err != nil:
 			failures = append(failures, err)
 		case !found:
@@ -269,7 +269,7 @@ func (s *Scheme) authorizationServer(ctx context.Context, issuer string) (author
 	u, err := url.Parse(issuer)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		// RFC 8414 section 2: an issuer is an https URL with no query or fragment.
-		return authorizationServerMetadata{}, fmt.Errorf("oauth2code: issuer %q is not an https URL without query or fragment", issuer)
+		return authorizationServerMetadata{}, &ManifestError{Reason: "the issuer is not an https URL without query or fragment"}
 	}
 	root := u.Scheme + "://" + u.Host
 	// RFC 8414 section 3.1: «any terminating "/" MUST be removed».
@@ -287,8 +287,8 @@ func (s *Scheme) authorizationServer(ctx context.Context, issuer string) (author
 		var metadata authorizationServerMetadata
 		found, err := s.getJSON(ctx, candidate, &metadata)
 		switch {
-		case ctx.Err() != nil:
-			return authorizationServerMetadata{}, ctx.Err()
+		case err != nil && ctx.Err() != nil:
+			return authorizationServerMetadata{}, err
 		case err != nil:
 			failures = append(failures, err)
 		case !found:

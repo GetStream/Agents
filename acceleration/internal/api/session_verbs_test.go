@@ -53,6 +53,35 @@ func (s *SessionVerbsSuite) TestSayingNothingIsRefused() {
 	s.Contains(failure, "nothing to say")
 }
 
+func (s *SessionVerbsSuite) TestAModelOfTheCustomersOwnThatCannotBeReadIsAnInternalError() {
+	opened := s.serverClient.createSession(textSession(nil))
+	name := "own-" + s.utils.uuid()
+	s.failQueries(name)
+
+	for _, path := range []string{"/settings", ""} {
+		status, body := s.serverClient.call(http.MethodPatch, "/v1/agents/sessions/"+opened.Id+path,
+			SessionSettingsRequest{Llm: pointerTo("custom/" + name)})
+
+		s.Equal(http.StatusInternalServerError, status, path)
+		s.Contains(string(body), `"code":"internal_error"`, path)
+		s.NotContains(string(body), "store:", path)
+		s.NotContains(string(body), "deadline", path)
+	}
+}
+
+func (s *SessionVerbsSuite) TestAModelTheCustomerDoesNotHaveIsRefusedByName() {
+	opened := s.serverClient.createSession(textSession(nil))
+	name := "own-" + s.utils.uuid()
+
+	for _, path := range []string{"/settings", ""} {
+		status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/sessions/"+opened.Id+path,
+			SessionSettingsRequest{Llm: pointerTo("custom/" + name)})
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(failure, "not one of this customer's models", path)
+	}
+}
+
 func (s *SessionVerbsSuite) TestChangingASessionsModelsLeavesEveryOtherSessionOnItsOwn() {
 	opened, untouched := s.onACall(), s.onACall()
 

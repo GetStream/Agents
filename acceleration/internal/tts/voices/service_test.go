@@ -213,7 +213,7 @@ func (s *ServiceSuite) TestAPreparedVoiceBecomesTheIdTheProviderKnowsItBy() {
 
 func (s *ServiceSuite) TestAProviderThatRefusedTheRecordingsIsNotOfferedTheVoice() {
 	s.status = http.StatusUnprocessableEntity
-	s.reply = `{"detail":"too quiet"}`
+	s.reply = `{"detail":"too quiet","request_id":"req-8f2c","upstream":"clone-3.internal:8443"}`
 
 	voice := s.recorded()
 	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil),
@@ -223,7 +223,10 @@ func (s *ServiceSuite) TestAProviderThatRefusedTheRecordingsIsNotOfferedTheVoice
 	s.Require().NoError(err)
 	s.Require().Len(bindings, 1)
 	s.Equal(store.VoiceFailed, bindings[0].State)
-	s.Contains(bindings[0].Error, "too quiet")
+	s.Equal(prepareFailed, bindings[0].Error, "the voice endpoints answer with the binding's error")
+	for _, vendor := range []string{"too quiet", "req-8f2c", "clone-3.internal", "http 422", "elevenlabs"} {
+		s.NotContains(bindings[0].Error, vendor)
+	}
 
 	_, err = s.resolver.ResolveVoice(s.ctx, "acme", "elevenlabs", "founder")
 	s.ErrorIs(err, routing.ErrVoiceNotPrepared)
