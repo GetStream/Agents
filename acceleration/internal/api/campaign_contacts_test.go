@@ -481,6 +481,17 @@ func (s *CampaignContactsSuite) TestADraftsContactIsChanged() {
 	s.Equal([]string{"+442079460020"}, s.numbers(s.list(created.Id, "").Items))
 }
 
+func (s *CampaignContactsSuite) TestAChangeReadsANumberInALowerCaseCampaignCountry() {
+	created := s.draft(map[string]any{"default_country": "gb"})
+	s.add(created.Id, map[string]any{"contacts": []map[string]any{{"to_number": "020 7946 0021"}}})
+	contact := s.list(created.Id, "").Items[0]
+
+	var changed Contact
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, s.contactPath(created.Id, contact.Id),
+		map[string]any{"to_number": "020 7946 0020"}, &changed), "an add takes the same number")
+	s.Equal("+442079460020", changed.ToNumber)
+}
+
 func (s *CampaignContactsSuite) TestAChangeLeavesOutWhatItDoesNotName() {
 	created := s.draft(nil)
 	s.add(created.Id, map[string]any{"contacts": []map[string]any{{"to_number": "+14155550185", "time_zone": "America/Chicago",

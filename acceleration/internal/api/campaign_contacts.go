@@ -178,7 +178,7 @@ func (s *Server) updateCampaignContact(ctx context.Context, request *updateCampa
 		return nil, invalidRequest("a request body is required")
 	}
 	body := request.Body
-	country := cmp.Or(current.DefaultCountry, "US")
+	country := strings.ToUpper(cmp.Or(current.DefaultCountry, "US"))
 	changed, err := s.store.CampaignContacts.Update(ctx, current.ID, request.ContactId, func(found store.Contact) (store.Contact, error) {
 		input := ContactInput{
 			ToNumber:     found.ToNumber,
