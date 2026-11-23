@@ -247,6 +247,7 @@ func TestSafeLogTextTakesAnEncodedKeyAndAVendorRefusalOut(t *testing.T) {
 		"name with a plain equals":           "the key=value pair",
 		"a name=value after the phrase":      "Invalid API key provided: model=gpt-4o-mini-transcribe",
 		"a request id after the colon":       "Invalid API key: request_id=req_0123456789abcdef",
+		"a name=value before the verdict":    "API key model=gpt-4o-mini-transcribe is invalid",
 	} {
 		t.Run("keeps "+name, func(t *testing.T) {
 			require.Equal(t, text, SafeLogText(text))
