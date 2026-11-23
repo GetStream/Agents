@@ -120,8 +120,12 @@ final class LiveUI {
   bool observe(Conversation conversation) {
     var changed = false;
     for (final turn in conversation.turns) {
-      if (!turn.speaker.isAgent || turn.ui == null) continue;
-      final next = turn.ui!;
+      if (!turn.speaker.isAgent) continue;
+      final next = turn.ui;
+      if (next == null) {
+        if (_byTurn.remove(turn.id) != null) changed = true;
+        continue;
+      }
       if (_byTurn[turn.id] != next) {
         _byTurn[turn.id] = next;
         changed = true;
