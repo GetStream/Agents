@@ -501,6 +501,37 @@ func (s *StoreSuite) TestAContactStoppedMidCallThatFailsKeepsWhyItFailed() {
 	s.Equal("opted_out", settled.Reason)
 }
 
+// The contact settles each time, so only the dial's own state keeps a late answer off it.
+func (s *StoreSuite) TestALateClassificationChangesNothing() {
+	campaign := s.runningCampaign(5, "+15550001")
+	contact := s.claimDue("a", s.base, 10)[0].Contact
+	older := s.answered("a", campaign, contact, s.base, s.base.Add(time.Minute))
+	latest := s.answered("a", campaign, contact, s.base.Add(time.Minute), s.base.Add(time.Minute))
+	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1}))
+	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base.Add(time.Minute), time.Minute, 10)
+	s.Require().NoError(err)
+	again := s.base.Add(time.Hour)
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: latest.ID, Outcome: "no_response"},
+		contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &again}))
+
+	for _, late := range []CampaignAttempt{latest, older} {
+		s.Require().Len(s.claimDue("a", again, 10), 1)
+		again = again.Add(time.Hour)
+		s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: late.ID, Outcome: "other"},
+			contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &again}))
+	}
+
+	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
+	s.Require().NoError(err)
+	byID := map[string]CampaignAttempt{}
+	for _, attempt := range attempts {
+		byID[attempt.ID] = attempt
+	}
+	s.Equal("no_response", byID[latest.ID].Outcome, "a done dial")
+	s.Equal("abandoned", byID[older.ID].ClassifyState, "an abandoned dial")
+	s.Empty(byID[older.ID].Outcome)
+}
+
 func (s *StoreSuite) TestAClassificationPutOffIsReadAgainAtItsTimeByAnyRunner() {
 	campaign := s.runningCampaign(1, "+15550001")
 	claimed := s.claimDue("a", s.base, 10)[0]
