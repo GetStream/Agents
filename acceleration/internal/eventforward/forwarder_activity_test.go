@@ -46,7 +46,7 @@ func (s *ForwarderSuite) forwardedOnce(forwarder *Forwarder, record *activity.Re
 	record.Close()
 
 	var row forwardsCounted
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT requests, refused, last_refusal_code, organization_id FROM customer_activity
 WHERE app_id = ? AND area = ? AND client = ?`, customer, activity.AreaWebhooksOut, store.AuditSourceAPI).
 		Scan(&row.requests, &row.refused, &row.code, &row.organization))
@@ -60,7 +60,7 @@ func (s *ForwarderSuite) TestAForwardTheDestinationRefusesIsCountedRefusedUnderI
 	forwarder, record := s.countingForwarder(target.Client())
 	customer := s.destinationOf(forwarder, target.URL)
 	organization := "org-" + rand.Text()
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, customer, organization))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: customer, OrganizationID: organization}))
 
 	row := s.forwardedOnce(forwarder, record, customer)
 
@@ -119,7 +119,7 @@ func (s *ForwarderSuite) TestAForwardThatCouldNotBeSignedIsCountedAsNotSent() {
 		ID: uuid.NewString(), CustomerID: "customer-" + uuid.NewString(), ConnectorID: "slack_bot", URL: target.URL,
 		Forward: store.ForwardAll, SecretSealed: []byte("sealed by nobody"), KEKVersion: 1,
 	}
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 
 	row := s.forwardedOnce(forwarder, record, destination.CustomerID)
 

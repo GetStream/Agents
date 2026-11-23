@@ -153,11 +153,11 @@ func (s *StoreSuite) TestEachAppAreaClientAndDayIsARowOfItsOwn() {
 // when app_organizations holds the app's, so the day's digest leaves it out.
 func (s *StoreSuite) TestADeltaNamingNoOrganizationIsTheOneItsAppJoined() {
 	app, organization := "app-"+rand.Text(), "org-"+rand.Text()
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, app, organization))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: organization}))
 	hook := s.served(app, 1, s.base)
 	hook.OrganizationID = ""
 
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{hook}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{hook}))
 
 	s.Equal(organization, s.activityOf(app, "agent_setup", AuditSourceCLI).organizationID)
 }
@@ -166,11 +166,11 @@ func (s *StoreSuite) TestADeltaNamingNoOrganizationIsTheOneItsAppJoined() {
 // request named, which is the newer.
 func (s *StoreSuite) TestADeltaNamingAnOrganizationKeepsIt() {
 	app := "app-" + rand.Text()
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, app, "org-"+rand.Text()))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-" + rand.Text()}))
 	named := s.served(app, 1, s.base)
 	named.OrganizationID = "org-" + rand.Text()
 
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{named}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{named}))
 
 	s.Equal(named.OrganizationID, s.activityOf(app, "agent_setup", AuditSourceCLI).organizationID)
 }
@@ -182,7 +182,7 @@ func (s *StoreSuite) TestADeltaOfAnAppWithNoKnownOrganizationIsWrittenWithNone()
 	hook := s.served(app, 1, s.base)
 	hook.OrganizationID = ""
 
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{hook}))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{hook}))
 
 	s.Empty(s.activityOf(app, "agent_setup", AuditSourceCLI).organizationID)
 }
@@ -329,7 +329,7 @@ func (s *StoreSuite) TestTheFirstAnsweredDayOfAnAreaIsItsFirstDayEverWithAReques
 	day := func(n int) time.Time {
 		return s.base.UTC().Truncate(24 * time.Hour).Add(time.Duration(n) * 24 * time.Hour)
 	}
-	s.Require().NoError(s.store.RecordActivity(s.ctx, []ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(s.ctx, []ActivityDelta{
 		s.day("one", "agent_setup", AuditSourceCLI, day(-40).Add(time.Hour), 2, 2),
 		s.day("one", "agent_setup", AuditSourceCLI, day(-30).Add(time.Hour), 7, 0),
 		s.day("one", "agent_setup", AuditSourceCLI, day(1).Add(time.Hour), 3, 0),
@@ -338,7 +338,7 @@ func (s *StoreSuite) TestTheFirstAnsweredDayOfAnAreaIsItsFirstDayEverWithAReques
 		s.day("two", "conversations", AuditSourceSDK, day(-50).Add(time.Hour), 1, 0),
 	}))
 
-	days, err := s.store.ActivityFirstAnswered(s.ctx, []string{"one"})
+	days, err := s.store.Activities.FirstAnswered(s.ctx, []string{"one"})
 	s.Require().NoError(err)
 
 	s.Require().Len(days, 1, "%+v", days)

@@ -52,7 +52,7 @@ func (s *DigestSuite) SetupSuite() {
 }
 
 func (s *DigestSuite) SetupTest() {
-	_, err := s.db.DB().ExecContext(s.ctx, "TRUNCATE customer_activity, activity_digests, requests, cost_anomaly_notices")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "TRUNCATE customer_activity, activity_digests, requests, notices")
 	s.Require().NoError(err)
 	s.slack = newSlackServer()
 	s.T().Cleanup(s.slack.Close)
@@ -67,8 +67,9 @@ func (s *DigestSuite) router() *Anomalies {
 	slack := NewSlack("xoxb-test", "C123")
 	slack.baseURL = s.slack.URL
 	anomalies := NewAnomalies(AnomalyOptions{
-		Store: s.db, Poster: slack, Environment: "prod", Logger: slog.New(slog.DiscardHandler),
-		Every: 20 * time.Millisecond, Digest: true,
+		Store: s.db, Sender: NewSender(SenderOptions{Store: s.db.Notices, Poster: slack, Environment: "prod"}),
+		Logger: slog.New(slog.DiscardHandler),
+		Every:  20 * time.Millisecond, Digest: true,
 		Now: func() time.Time {
 			s.reads.Add(1)
 			return *s.clock.Load()
@@ -98,7 +99,7 @@ func (s *DigestSuite) active(organizationID, area string, daysAgo int, requests,
 	if refused > 0 {
 		delta.LastRefusalCode, delta.LastRefusalAt = "invalid_api_key", day
 	}
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{delta}))
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{delta}))
 }
 
 // digests is the digests posted.
@@ -137,7 +138,7 @@ func (s *DigestSuite) TestAnOrganizationIsNewOnItsFirstDayAndTheCountIsOfOrganiz
 	s.NotContains(newOrganizations, seen, "active the day before, so not new")
 	s.NotContains(digest, quiet, "not active yesterday")
 	var counted int
-	s.Require().NoError(s.db.DB().NewRaw("SELECT count(DISTINCT organization_id) FROM customer_activity"+
+	s.Require().NoError(s.db.GlobalDB().NewRaw("SELECT count(DISTINCT organization_id) FROM customer_activity"+
 		" WHERE day = '2026-03-09' AND organization_id <> ''").Scan(s.ctx, &counted))
 	s.Equal(2, counted)
 	s.True(strings.HasSuffix(digest, "\nActive orgs: 2 (day before: 3)"), digest)
@@ -195,7 +196,7 @@ func (s *DigestSuite) TestOnlyOneOfClaimsAtOnceWins() {
 	var claims sync.WaitGroup
 	for range 8 {
 		claims.Go(func() {
-			claimed, err := s.db.ClaimActivityDigest(s.ctx, day, stale)
+			claimed, err := s.db.ActivityDigests.Claim(s.ctx, day, stale)
 			s.NoError(err)
 			if claimed {
 				won.Add(1)
@@ -210,29 +211,29 @@ func (s *DigestSuite) TestOnlyOneOfClaimsAtOnceWins() {
 // Defect: a claim taken again once posted, or one never posted left unclaimed for good.
 func (s *DigestSuite) TestAClaimIsTakenAgainOnlyWhenStaleAndNotPosted() {
 	day := time.Date(2026, 3, 9, 0, 0, 0, 0, time.UTC)
-	claimed, err := s.db.ClaimActivityDigest(s.ctx, day, stale)
+	claimed, err := s.db.ActivityDigests.Claim(s.ctx, day, stale)
 	s.Require().NoError(err)
 	s.Require().True(claimed)
 
-	claimed, err = s.db.ClaimActivityDigest(s.ctx, day, stale)
+	claimed, err = s.db.ActivityDigests.Claim(s.ctx, day, stale)
 	s.Require().NoError(err)
 	s.False(claimed, "its claim is fresh")
 
 	s.aged()
-	claimed, err = s.db.ClaimActivityDigest(s.ctx, day, stale)
+	claimed, err = s.db.ActivityDigests.Claim(s.ctx, day, stale)
 	s.Require().NoError(err)
 	s.True(claimed, "its claim went stale before a post")
 
-	s.Require().NoError(s.db.MarkActivityDigestPosted(s.ctx, day))
+	s.Require().NoError(s.db.ActivityDigests.MarkPosted(s.ctx, day))
 	s.aged()
-	claimed, err = s.db.ClaimActivityDigest(s.ctx, day, stale)
+	claimed, err = s.db.ActivityDigests.Claim(s.ctx, day, stale)
 	s.Require().NoError(err)
 	s.False(claimed, "posted")
 }
 
 // aged makes every digest's claim older than stale.
 func (s *DigestSuite) aged() {
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE activity_digests SET claimed_at = now() - interval '1 hour'")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE activity_digests SET claimed_at = now() - interval '1 hour'")
 	s.Require().NoError(err)
 }
 
@@ -278,7 +279,8 @@ func (s *DigestSuite) TestACheckWithoutTheDigestPostsNone() {
 	slack := NewSlack("xoxb-test", "C123")
 	slack.baseURL = s.slack.URL
 	anomalies := NewAnomalies(AnomalyOptions{
-		Store: s.db, Poster: slack, Logger: slog.New(slog.DiscardHandler), Every: 20 * time.Millisecond,
+		Store: s.db, Sender: NewSender(SenderOptions{Store: s.db.Notices, Poster: slack}), Logger: slog.New(slog.DiscardHandler),
+		Every: 20 * time.Millisecond,
 		Now: func() time.Time {
 			s.reads.Add(1)
 			return *s.clock.Load()
@@ -303,7 +305,7 @@ func (s *DigestSuite) appActive(organizationID, appID, area string, daysAgo int,
 	if refused > 0 {
 		delta.LastRefusalCode, delta.LastRefusalAt = code, day
 	}
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{delta}))
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{delta}))
 }
 
 // Defect: the day before's count of organizations being a count of rows, so an organization with
@@ -416,7 +418,7 @@ func (s *DigestSuite) TestAnOrganizationsFirstAnsweredConversationIsListedWithTh
 // days are the UTC days table holds rows of, oldest first.
 func (s *DigestSuite) days(table string) []string {
 	var days []string
-	s.Require().NoError(s.db.DB().NewSelect().TableExpr(table).ColumnExpr("DISTINCT day::text").
+	s.Require().NoError(s.db.GlobalDB().NewSelect().TableExpr(table).ColumnExpr("DISTINCT day::text").
 		OrderExpr("1").Scan(s.ctx, &days))
 	return days
 }
@@ -432,7 +434,7 @@ func (s *DigestSuite) TestActivityPastFourHundredDaysIsDeletedOnceADay() {
 	for _, day := range []time.Time{
 		time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC), time.Date(2025, 2, 3, 0, 0, 0, 0, time.UTC),
 	} {
-		claimed, err := s.db.ClaimActivityDigest(s.ctx, day, stale)
+		claimed, err := s.db.ActivityDigests.Claim(s.ctx, day, stale)
 		s.Require().NoError(err)
 		s.Require().True(claimed)
 	}
@@ -466,11 +468,11 @@ func (s *DigestSuite) TestActivityIsDeletedWithoutASlackAndNothingIsPosted() {
 	for _, daysAgo := range []int{401, 399, 1} {
 		s.active(pinned, activity.AreaAgentSetup, daysAgo, 1, 0)
 	}
-	claimed, err := s.db.ClaimActivityDigest(s.ctx, time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC), stale)
+	claimed, err := s.db.ActivityDigests.Claim(s.ctx, time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC), stale)
 	s.Require().NoError(err)
 	s.Require().True(claimed)
 	for daysAgo, cost := range []int64{40_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000} {
-		s.Require().NoError(s.db.RecordRequest(s.ctx, &store.Request{
+		s.Require().NoError(s.db.Requests.Insert(s.ctx, &store.Request{
 			Modality: "llm", CustomerID: "app-" + pinned, OrganizationID: pinned, Provider: "openai", Model: "m",
 			StartedAt: time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC).AddDate(0, 0, -daysAgo), CostMicros: cost,
 			Billable: true, Success: true,
@@ -490,7 +492,9 @@ func (s *DigestSuite) TestActivityIsDeletedWithoutASlackAndNothingIsPosted() {
 
 	s.Equal([]string{"2025-02-04", "2026-03-09"}, s.days("customer_activity"))
 	s.Empty(s.days("activity_digests"), "the old day's digest went, none was posted for the day before")
-	s.Empty(s.days("cost_anomaly_notices"), "a spike today, and nothing noted that nobody would be told of")
+	var noted int
+	s.Require().NoError(s.db.GlobalDB().NewSelect().TableExpr("notices").ColumnExpr("count(*)").Scan(s.ctx, &noted))
+	s.Zero(noted, "a spike today, and nothing noted that nobody would be told of")
 	s.Empty(s.slack.posts())
 }
 
@@ -501,7 +505,7 @@ func (s *DigestSuite) TestTheKeepCountsFromTheUTCDayWhateverTheClocksZone() {
 	s.active(pinned, activity.AreaAgentSetup, 401, 1, 0)
 	s.active(pinned, activity.AreaAgentSetup, 400, 1, 0)
 
-	pruned, err := s.db.PruneActivity(s.ctx, time.Date(2026, 3, 11, 1, 0, 0, 0, time.FixedZone("UTC+14", 14*60*60)))
+	pruned, err := s.db.Activities.Prune(s.ctx, time.Date(2026, 3, 11, 1, 0, 0, 0, time.FixedZone("UTC+14", 14*60*60)))
 	s.Require().NoError(err)
 
 	s.Equal(1, pruned)
@@ -536,12 +540,12 @@ func (s *DigestSuite) TestADeleteThatFailedIsTriedAgainTheSameDay() {
 	pinned := organization()
 	s.active(pinned, activity.AreaAgentSetup, 401, 1, 0)
 	s.active(pinned, activity.AreaAgentSetup, 0, 1, 0)
-	_, err := s.db.DB().ExecContext(s.ctx, "ALTER TABLE activity_digests RENAME TO activity_digests_renamed")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "ALTER TABLE activity_digests RENAME TO activity_digests_renamed")
 	s.Require().NoError(err)
 	renamed := true
 	s.T().Cleanup(func() {
 		if renamed {
-			_, _ = s.db.DB().ExecContext(s.ctx, "ALTER TABLE activity_digests_renamed RENAME TO activity_digests")
+			_, _ = s.db.GlobalDB().ExecContext(s.ctx, "ALTER TABLE activity_digests_renamed RENAME TO activity_digests")
 		}
 	})
 	anomalies := NewAnomalies(AnomalyOptions{
@@ -554,10 +558,10 @@ func (s *DigestSuite) TestADeleteThatFailedIsTriedAgainTheSameDay() {
 	s.T().Cleanup(anomalies.Close)
 	anomalies.Start()
 	s.checked(0)
-	_, err = s.db.DB().ExecContext(s.ctx, "ALTER TABLE activity_digests_renamed RENAME TO activity_digests")
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "ALTER TABLE activity_digests_renamed RENAME TO activity_digests")
 	s.Require().NoError(err)
 	renamed = false
-	_, err = s.db.DB().ExecContext(s.ctx, "INSERT INTO activity_digests (day) VALUES ('2025-02-01')")
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "INSERT INTO activity_digests (day) VALUES ('2025-02-01')")
 	s.Require().NoError(err)
 	s.Require().Eventually(func() bool {
 		return len(s.days("activity_digests")) == 0

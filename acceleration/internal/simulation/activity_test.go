@@ -63,7 +63,7 @@ func (s *ActivitySuite) settled(state string) runsCounted {
 		row  runsCounted
 		code sql.NullString
 	)
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, `
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0), max(last_refusal_code)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
 		run.CustomerID, activity.AreaEvals, store.AuditSourceAPI).Scan(&row.requests, &row.refused, &code))

@@ -46,7 +46,7 @@ func (s *RunnerSuite) counted() dialsCounted {
 		row  dialsCounted
 		code sql.NullString
 	)
-	err := s.store.DB().QueryRowContext(s.ctx, `
+	err := s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0), max(last_refusal_code)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
 		s.customerID, activity.AreaPhoneSMS, store.AuditSourceAPI).Scan(&row.requests, &row.refused, &code)
@@ -126,7 +126,7 @@ func (s *RunnerSuite) TestADialTheRouterDidNotPlaceAsItStopsIsNotCounted() {
 	stop()
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-counting", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-counting", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 

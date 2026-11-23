@@ -6,6 +6,7 @@ type repos struct {
 	CustomModels                   *CustomModels
 	APIKeys                        *APIKeys
 	Activities                     *Activities
+	ActivityDigests                *ActivityDigests
 	AgentConfigs                   *AgentConfigs
 	AgentLogs                      *AgentLogs
 	AppOrganizations               *AppOrganizations
@@ -109,6 +110,7 @@ func (s *Store) wire() {
 		CustomModels:                   &CustomModels{store: s},
 		APIKeys:                        &APIKeys{store: s},
 		Activities:                     &Activities{store: s},
+		ActivityDigests:                &ActivityDigests{store: s},
 		AgentConfigs:                   &AgentConfigs{store: s},
 		AgentLogs:                      &AgentLogs{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},

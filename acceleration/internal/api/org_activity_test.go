@@ -251,7 +251,7 @@ func (s *OrganizationActivitySuite) answeredOn(area, client string, day time.Tim
 func (s *OrganizationActivitySuite) TestStepsListEveryStepAnsweredWithItsFirstDayInLadderOrder() {
 	d := time.Now().UTC().Truncate(24 * time.Hour).Add(-10 * 24 * time.Hour)
 	on := func(n int) time.Time { return d.Add(time.Duration(n) * 24 * time.Hour) }
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		s.answeredOn(activity.AreaDashboardReads, store.AuditSourceDashboard, on(0), 3, 0),
 		s.answeredOn(activity.AreaAgentSetup, store.AuditSourceCLI, on(1), 1, 0),
 		s.answeredOn(activity.AreaAgentSetup, store.AuditSourceCLI, on(4), 2, 0),
@@ -276,7 +276,7 @@ func (s *OrganizationActivitySuite) TestStepsListEveryStepAnsweredWithItsFirstDa
 func (s *OrganizationActivitySuite) TestAStepsFirstDayAndTheStepsListedReachBeyondSince() {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	ago := func(n int) time.Time { return today.Add(-time.Duration(n) * 24 * time.Hour) }
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		s.answeredOn(activity.AreaConversations, store.AuditSourceSDK, ago(45), 1, 0),
 		s.answeredOn(activity.AreaConversations, store.AuditSourceSDK, ago(1), 1, 0),
 		s.answeredOn(activity.AreaAgentSetup, store.AuditSourceCLI, ago(45), 1, 0),
@@ -613,7 +613,7 @@ func (s *OrganizationActivitySuite) TestStepsAreTheEarliestOfEveryAppOfTheOrgani
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	ago := func(n int) time.Time { return today.Add(-time.Duration(n) * 24 * time.Hour) }
 	other := ago(9).Add(time.Hour)
-	s.Require().NoError(s.store.RecordActivity(context.Background(), []store.ActivityDelta{
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
 		s.answeredOn(activity.AreaAgentSetup, store.AuditSourceCLI, ago(6), 1, 0),
 		s.answeredOn(activity.AreaConversations, store.AuditSourceSDK, ago(2), 1, 0),
 		{OrganizationID: s.app.organization.ID, AppID: second, Area: activity.AreaConversations,

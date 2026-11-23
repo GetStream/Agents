@@ -28,7 +28,7 @@ import (
 // Defect: a hook Stream signed, which no credential names, left out of the activity record, or
 // counted with no organization, so the app's organization shows no hooks in its digest.
 func (s *AppHooksSuite) TestAHookTheGatewayVouchedForIsCountedUnderItsAppAndOrganization() {
-	s.Require().NoError(s.store.JoinOrganization(context.Background(), s.customerID(), s.app.organization.ID))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: s.customerID(), OrganizationID: s.app.organization.ID}))
 
 	s.Require().Equal(http.StatusOK, s.fromApp(s.appPath(chat.MessageHookPath), s.message(s.config(s.customerID()))))
 
@@ -139,7 +139,7 @@ func (s *CallStatusSuite) TestAStatusPostIsCountedAsItsCallsPhoneWork() {
 func (s *CallStatusSuite) TestAPlanFetchIsCountedAsItsCallsPhoneWork() {
 	s.useApp(s.data.createApp())
 	token := s.utils.uuid()
-	s.Require().NoError(s.store.ParkBridge(context.Background(), &store.CallBridge{
+	s.Require().NoError(s.store.CallBridges.Insert(context.Background(), &store.CallBridge{
 		Token: token, CustomerID: s.customerID(), Vendor: "twilio", TrunkURI: "sip:trunk@trunk.sip.example.test",
 		CallID: s.utils.uuid(), ExpiresAt: time.Now().Add(time.Minute),
 	}))
@@ -169,7 +169,7 @@ func (s *EventForwardingSuite) TestAProviderAppsEventIsCountedUnderItsCustomer()
 // 200 plan, counted as answered or with no code.
 func (s *TelnyxHookSuite) TestACallToASuspendedAppIsCountedRefused() {
 	s.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
 	}))
 
@@ -186,7 +186,7 @@ func (s *TelnyxHookSuite) TestACallToASuspendedAppIsCountedRefused() {
 // ended but answered 200, counted as answered or with no code.
 func (s *CallHooksSuite) TestACallToASuspendedAppIsCountedRefused() {
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
 	}))
 
@@ -214,7 +214,7 @@ func (s *CallHooksSuite) TestACallNoWorkerCanTakeIsCountedRefused() {
 func (s *CallHooksSuite) TestACallToANumberWithAnAgentOnARouterWithNoSessionsIsCountedRefused() {
 	s.answerable()
 	s.hold("agent", s.callID)
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, s.config("echo/local-model")))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, s.config("echo/local-model")))
 	sessions := s.router.sessions
 	s.router.sessions = nil
 	defer func() { s.router.sessions = sessions }()
@@ -230,14 +230,21 @@ func (s *CallHooksSuite) TestACallToANumberWithAnAgentOnARouterWithNoSessionsIsC
 // number's app, a trunk password it cannot open, counted as answered.
 func (s *TelnyxHookSuite) TestACallWhoseTrunkPasswordCannotBeOpenedIsCountedRefused() {
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), s.e164, store.NumberAttachment{
-		TrunkID: "trunk-" + s.utils.uuid(), CallType: "default",
-		BridgeURI: "sip:" + s.e164 + "@trunk.sip.example.test", BridgeUsername: "trunk-user",
-		// Bytes no key sealed, so no version of the suite's key opens them.
-		BridgePasswordSealed: []byte("not sealed by any key"), BridgePasswordKEKVersion: 1,
+	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default"}
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		err := tx.SaveTrunk(store.StreamTrunk{
+			ID: attachment.TrunkID, BridgeURI: "sip:" + s.e164 + "@trunk.sip.example.test", BridgeUsername: "trunk-user",
+			// Bytes no key sealed, so no version of the suite's key opens them.
+			BridgePasswordSealed: []byte("not sealed by any key"), BridgePasswordKEKVersion: 1, Own: true,
+		})
+		if err != nil {
+			return err
+		}
+		return tx.Attach(s.e164, attachment)
 	}))
 
 	status, _, body := s.deliver(s.call(s.e164), true)

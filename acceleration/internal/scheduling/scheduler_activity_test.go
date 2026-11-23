@@ -43,7 +43,7 @@ func (s *SchedulerSuite) counted(task store.ScheduledTask) occurrencesCounted {
 		row  occurrencesCounted
 		code sql.NullString
 	)
-	err := s.db.DB().QueryRowContext(s.ctx, `
+	err := s.db.GlobalDB().QueryRowContext(s.ctx, `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0), max(last_refusal_code)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
 		task.CustomerID, activity.AreaScheduling, store.AuditSourceAPI).Scan(&row.requests, &row.refused, &code)
@@ -121,7 +121,7 @@ func (s *SchedulerSuite) TestAnOccurrenceSettledBeforeItsAdvanceIsNotCountedAgai
 		State: store.ScheduledTaskRunDelivered, DeliveredTo: "conversation",
 		Attempts: 1, StartedAt: &started, FinishedAt: &due,
 	}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &run))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &run))
 	stop := s.counting((&deliverer{}).deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -141,7 +141,7 @@ func (s *SchedulerSuite) TestAnOccurrenceWhoseWorkersKeepDyingIsCountedRefused()
 	started := time.Now().Add(-time.Hour)
 	stale := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: due,
 		Attempts: 3, StartedAt: &started}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &stale))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &stale))
 	stop := s.counting((&deliverer{}).deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -159,7 +159,7 @@ func (s *SchedulerSuite) TestAnOccurrenceSettledUnderAFencedClaimIsCounted() {
 	fence := func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		if claimed.Task.ID == task.ID {
 			// An edit during the delivery takes the claim away.
-			_, err := s.db.DB().ExecContext(ctx, `UPDATE scheduled_tasks SET claim_id = 'fenced' WHERE id = ?`, task.ID)
+			_, err := s.db.GlobalDB().ExecContext(ctx, `UPDATE scheduled_tasks SET claim_id = 'fenced' WHERE id = ?`, task.ID)
 			s.Require().NoError(err)
 		}
 		return "conversation", "", nil
@@ -183,7 +183,7 @@ func (s *SchedulerSuite) TestAnOccurrenceWhoseRunWasNotWrittenIsNotCounted() {
 	lose := func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		if claimed.Task.ID == task.ID {
 			// The run row gone, so FinishScheduledTaskRun's read of it fails.
-			_, err := s.db.DB().ExecContext(ctx, `DELETE FROM scheduled_task_runs WHERE id = ?`, claimed.Run.ID)
+			_, err := s.db.GlobalDB().ExecContext(ctx, `DELETE FROM scheduled_task_runs WHERE id = ?`, claimed.Run.ID)
 			s.Require().NoError(err)
 			delivered <- struct{}{}
 		}

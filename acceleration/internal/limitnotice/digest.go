@@ -267,7 +267,7 @@ func (a *Anomalies) postDigest(ctx context.Context, now time.Time) {
 		return
 	}
 	day := today.AddDate(0, 0, -1)
-	claimed, err := a.store.ClaimActivityDigest(ctx, day, stale)
+	claimed, err := a.store.ActivityDigests.Claim(ctx, day, stale)
 	if err != nil {
 		if ctx.Err() == nil {
 			a.logger.Error("could not claim the activity digest, trying again", "in", a.every, "error", err)
@@ -284,11 +284,11 @@ func (a *Anomalies) postDigest(ctx context.Context, now time.Time) {
 		}
 		return
 	}
-	if err := a.poster.Post(ctx, digestMessage(a.environment, a.links, digest)); err != nil {
+	if err := a.sender.poster.Post(ctx, digestMessage(a.sender.environment, a.sender.links, digest)); err != nil {
 		a.logger.Error("could not post the activity digest; it is retried", "day", day.Format(time.DateOnly), "error", err)
 		return
 	}
-	if err := a.store.MarkActivityDigestPosted(ctx, day); err != nil {
+	if err := a.store.ActivityDigests.MarkPosted(ctx, day); err != nil {
 		a.logger.Error("posted the activity digest, and could not record it; it may be posted again",
 			"day", day.Format(time.DateOnly), "error", err)
 		return
@@ -298,15 +298,15 @@ func (a *Anomalies) postDigest(ctx context.Context, now time.Time) {
 
 // dayDigest reads what organizations did on day, a UTC day.
 func (a *Anomalies) dayDigest(ctx context.Context, day time.Time) (DayDigest, error) {
-	areas, err := a.store.DayActivity(ctx, day)
+	areas, err := a.store.Activities.Day(ctx, day)
 	if err != nil {
 		return DayDigest{}, err
 	}
-	before, err := a.store.ActiveOrganizations(ctx, day.AddDate(0, 0, -1))
+	before, err := a.store.Activities.ActiveOrganizations(ctx, day.AddDate(0, 0, -1))
 	if err != nil {
 		return DayDigest{}, err
 	}
-	firstConversations, err := a.store.FirstAnswers(ctx, activity.AreaConversations, day)
+	firstConversations, err := a.store.Activities.FirstAnswers(ctx, activity.AreaConversations, day)
 	if err != nil {
 		return DayDigest{}, err
 	}

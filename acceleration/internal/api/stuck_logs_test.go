@@ -24,7 +24,7 @@ func loggedOneLine(level, msg, customer string) *regexp.Regexp {
 // logs it at Info with only the number, so nobody can tell whose number was called.
 func (s *TelnyxHookSuite) TestARejectedCallToASuspendedAppWarnsNamingTheApp() {
 	s.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
 	}))
 
@@ -56,7 +56,7 @@ func (s *AdmissionSuite) TestATelnyxCallRefusedForMoneyWarnsNamingTheApp() {
 func (s *CallStatusSuite) TestAPlanThatCannotBeServedIsLoggedNamingTheCallsApp() {
 	s.useApp(s.data.createApp())
 	token := s.utils.uuid()
-	s.Require().NoError(s.store.ParkBridge(context.Background(), &store.CallBridge{
+	s.Require().NoError(s.store.CallBridges.Insert(context.Background(), &store.CallBridge{
 		Token: token, CustomerID: s.customerID(), Vendor: "twilio", TrunkURI: "sip:trunk@trunk.sip.example.test",
 		CallID: s.utils.uuid(), ExpiresAt: time.Now().Add(time.Minute),
 	}))
