@@ -39,7 +39,7 @@ func (s *StoreSuite) TestAClaimedGuestTakesNoSecretOrProfile() {
 	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", id, GuestSecretHash("first"), GuestSecretHash("second"))
 	s.ErrorIs(err, ErrGuestSecretRefused)
 	s.Error(s.store.Users.SetGuestSecret(s.ctx, "app", id, GuestSecretHash("second")))
-	s.Error(s.store.Guests.SetProfile(s.ctx, "app", id, "Ann", nil))
+	s.Error(s.store.Users.SetGuestProfile(s.ctx, "app", id, "Ann", nil))
 	given, err := s.store.Users.GiveGuestSecret(s.ctx, "app", id, GuestSecretHash("second"))
 	s.Require().NoError(err)
 	s.False(given)
@@ -66,13 +66,13 @@ func (s *StoreSuite) TestAGuestIsGivenASecretOnlyWhenItHoldsNone() {
 func (s *StoreSuite) TestAGuestsProfileIsWhatTheBackendLastSaid() {
 	id := s.guest("app", "")
 
-	s.Require().NoError(s.store.Guests.SetProfile(s.ctx, "app", id, "Ann", map[string]any{"plan": "pro"}))
+	s.Require().NoError(s.store.Users.SetGuestProfile(s.ctx, "app", id, "Ann", map[string]any{"plan": "pro"}))
 
 	var guest User
 	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&guest).Where("customer_id = ? AND id = ?", "app", id).Scan(s.ctx))
 	s.Equal("Ann", guest.Name)
 	s.Equal(map[string]any{"plan": "pro"}, guest.Custom)
-	s.Error(s.store.Guests.SetProfile(s.ctx, "app", "never-recorded", "Bob", nil))
+	s.Error(s.store.Users.SetGuestProfile(s.ctx, "app", "never-recorded", "Bob", nil))
 }
 
 func (s *StoreSuite) TestGuestQueryBudgets() {
@@ -88,5 +88,5 @@ func (s *StoreSuite) TestGuestQueryBudgets() {
 		_, err := s.store.Users.GiveGuestSecret(s.ctx, "app", bare, GuestSecretHash("given"))
 		s.Require().NoError(err)
 	}))
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Guests.SetProfile(s.ctx, "app", id, "Ann", nil)) }))
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Users.SetGuestProfile(s.ctx, "app", id, "Ann", nil)) }))
 }

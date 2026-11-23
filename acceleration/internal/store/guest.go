@@ -16,12 +16,6 @@ import (
 // wrong, already used, or for a guest that has since been claimed.
 var ErrGuestSecretRefused = errors.New("store: that refresh secret does not belong to an unclaimed guest")
 
-// Guests are the users an app handed a guest token, as far as their refresh secret and their
-// profile go, in the shared database. Recording and claiming one is the users' own.
-type Guests struct {
-	store *Store
-}
-
 // NewGuestSecret returns a refresh secret to hand a guest and the hash to keep of it.
 //
 // 256 random bits, so the hash needs no salt or stretching: there is nothing to guess.
@@ -117,9 +111,9 @@ func (r *Users) GiveGuestSecret(ctx context.Context, customerID, id string, hash
 	return n > 0, nil
 }
 
-// SetProfile records what the app's backend says a guest is called, so the name a
+// SetGuestProfile records what the app's backend says a guest is called, so the name a
 // transcript shows and the one a returning guest is handed agree with what Stream holds.
-func (r *Guests) SetProfile(ctx context.Context, customerID, id, name string, custom map[string]any) error {
+func (r *Users) SetGuestProfile(ctx context.Context, customerID, id, name string, custom map[string]any) error {
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a guest id are required"))
 	}

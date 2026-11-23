@@ -176,7 +176,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		if err := s.updateGuestProfile(ctx, bound, requested, name, custom); err != nil {
 			return nil, err
 		}
-		if err := s.store.Guests.SetProfile(ctx, customerID, requested, name, custom); err != nil {
+		if err := s.store.Users.SetGuestProfile(ctx, customerID, requested, name, custom); err != nil {
 			return nil, err
 		}
 	}
