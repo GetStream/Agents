@@ -204,6 +204,38 @@ func (s *SocketCloseLogSuite) TestACloseFrameIsLoggedWithTheCallersCode() {
 	s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4000 ")
 }
 
+// closesAfterCommands sends commands commands the session answers with an error frame, then a
+// close frame of code while those answers are still being written.
+func (s *SocketCloseLogSuite) closesAfterCommands(connection *websocket.Conn, commands, code int) {
+	for range commands {
+		s.Require().NoError(connection.WriteJSON(map[string]any{"type": "not-a-command"}))
+	}
+	s.closesWith(connection, code)
+}
+
+func (s *SocketCloseLogSuite) TestACloseFrameAsAnEventIsWrittenIsLoggedWithTheCallersCode() {
+	// Catches the event write the reader's answer to the close refuses logged as client_gone:
+	// the command's answer reaches the writer as the close arrives, so most rounds race it.
+	for range 5 {
+		_, connection, id := s.watched(nil)
+
+		s.closesAfterCommands(connection, 1, 4006)
+
+		s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4006 ")
+	}
+}
+
+func (s *SocketCloseLogSuite) TestARelayedCloseFrameAsAFrameIsWrittenIsLoggedWithTheCallersCode() {
+	// The answers come back over the bus, so about one round in five races the close.
+	for range 25 {
+		_, connection, id := s.watched(s.other)
+
+		s.closesAfterCommands(connection, 20, 4006)
+
+		s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4006 ")
+	}
+}
+
 func (s *SocketCloseLogSuite) TestADroppedConnectionIsClientGoneWithNoCode() {
 	// Catches gorilla's 1006 for a dropped connection logged as a close frame the caller sent.
 	_, connection, id := s.watched(nil)
