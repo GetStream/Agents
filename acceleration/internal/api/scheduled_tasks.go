@@ -289,7 +289,10 @@ func (s *Server) scheduledTaskSession(ctx context.Context, customerID, userID, i
 		}
 	}
 	row, err := s.storedSession(ctx, customerID, id)
-	if err != nil || row.UserID != userID {
+	if err != nil {
+		return "", "", unknownOr(err, store.ErrNoSession, errUnknownSession)
+	}
+	if row.UserID != userID {
 		return "", "", errUnknownSession
 	}
 	// What reopenedFromRow needs to carry the conversation on.

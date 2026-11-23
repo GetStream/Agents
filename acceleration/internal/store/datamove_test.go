@@ -3531,6 +3531,16 @@ func (s *DataMoveSuite) TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped() 
 	s.Equal("", moved["ship_error"])
 }
 
+func (s *DataMoveSuite) TestAnImportedRequestNamesNoGrant() {
+	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme",
+		Provider: "openai", Model: "m", StartedAt: time.Now().UTC(), Success: true, Billable: true, CostMicros: 500,
+		LimitGrants: []int64{7, 8}}))
+
+	moved := s.movedRequest(false)
+
+	s.Empty(moved["limit_grants"], "the source's grant ids name other grants here")
+}
+
 // takenRequest writes a request of acme's with the id given, as two deployments' own
 // sequences can each hand out.
 func (s *DataMoveSuite) takenRequest(store *Store, id int64) *Request {
