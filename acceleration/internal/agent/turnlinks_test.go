@@ -322,12 +322,12 @@ func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
 	s.Equal(false, back["success"])
 	s.Equal("error", back["error_code"])
 	s.NotContains(back, "error")
-	// Fields carry clock-based ids, so a short piece of the words (555) can show up by chance:
-	// each field is checked for the whole words, email and number instead. The logger masks a
-	// number, so a leak of the words shows in the rest of them too.
+	// Every 10-character window of the words is checked against every field, so a slice of them
+	// cannot leak. A window is too long to match a clock-based id by chance. The logger masks a
+	// phone number, so the windows inside it never reach the line.
 	for key, value := range back {
-		for _, leaked := range []string{words, "no order for", "ana@example.com", "+1 555 010 0199"} {
-			s.NotContainsf(fmt.Sprint(value), leaked, "the field %s carries the caller's words", key)
+		for from := 0; from+10 <= len(words); from++ {
+			s.NotContainsf(fmt.Sprint(value), words[from:from+10], "the field %s carries the caller's words", key)
 		}
 	}
 }
