@@ -398,6 +398,9 @@ type Server struct {
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
 	exports   chan struct{}
+	// healthLogs throttles the line a dependency that did not answer the health check logs:
+	// every probe asks.
+	healthLogs quota.Throttle
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -1660,7 +1663,9 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 		dependencies["postgres"] = "not configured"
 	} else if err := s.store.Ping(ctx); err != nil {
 		// Anyone may read the health check, and the error names where the database is.
-		s.logger.Error("the database did not answer the health check", "error", err)
+		if s.healthLogs.Due("postgres", time.Minute) {
+			s.logger.Error("the database did not answer the health check", "error", err)
+		}
 		dependencies["postgres"] = "unavailable"
 		healthy = false
 	} else {
@@ -1670,7 +1675,9 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.live == nil {
 		dependencies["redis"] = "not configured"
 	} else if err := s.live.Ping(ctx); err != nil {
-		s.logger.Error("redis did not answer the health check", "error", err)
+		if s.healthLogs.Due("redis", time.Minute) {
+			s.logger.Error("redis did not answer the health check", "error", err)
+		}
 		dependencies["redis"] = "unavailable"
 		healthy = false
 	} else {
