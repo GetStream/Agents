@@ -843,9 +843,6 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
-### Deleting a user's connections also deletes their MCP event subscriptions
-
-The subscriptions of a deleted user's connections kept their sealed secrets and callback tokens. They now go in the same transaction as the connections.
 ### An inbound Slack message goes to the connection an agent binds
 
 With two app connections to the same workspace, the router now picks the connected one that a live agent config binds, instead of the newest (#2185).
