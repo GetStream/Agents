@@ -1439,6 +1439,37 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenForMoneyFailsUnderThe
 	s.Equal(codeInsufficientCredits, *kept.Error, "a worker taking the run over finds how the call went")
 }
 
+// A phone task whose call's session cannot open because the money cannot be checked is given back
+// once: the retry rings the user again, and its session refused the same way fails the run, final,
+// with the second call kept on the run, so the user is rung twice at most (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenWhileMoneyCannotBeCheckedIsGivenBackOnce() {
+	call := s.callOn("noted/noted-model")
+	s.uncheckable(call.writer)
+
+	outcome := s.letGo(s.dial(call))
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.False(failure.Final, "the check passes again on its own")
+	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Empty(kept.SessionID, "the call is given back so the retry rings again")
+
+	call.delivery.Earlier = codeSpendCheckUnavailable
+	again := s.takeCall(call)
+	outcome = s.letGo(s.dial(again))
+
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final, "the call was given back once")
+	kept, err = s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Equal(again.spec.ID, kept.SessionID, "the second call is not given back")
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeSpendCheckUnavailable, *kept.Error, "a worker taking the run over finds how the call went")
+}
+
 // A phone task whose call's turn the model answers is delivered by phone once the user hangs up,
 // as it always was (control: the same on the base).
 func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsAnsweredIsDelivered() {

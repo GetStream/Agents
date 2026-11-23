@@ -1255,6 +1255,10 @@ func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, call
 	if !errors.As(err, &failure) {
 		return err
 	}
+	// A retry's call was given back once already: the user is rung twice at most.
+	if !failure.Final && moneyCode(delivery.Earlier) {
+		failure.Final = true
+	}
 	if !failure.Final {
 		if err := s.store.ScheduledTaskRuns.ReleaseCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID); err != nil {
 			s.logger.Error("could not give back a scheduled task's call", "run", delivery.RunID, "error", err)
