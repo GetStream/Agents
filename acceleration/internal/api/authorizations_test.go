@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -577,6 +578,35 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connection_event_subscriptions WHERE connection_id = ?", id).Scan(&held))
 	s.Equal(1, held)
+}
+
+// TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError: the connection is deleted
+// after the consent stored its credentials and before the MCP events are subscribed. The
+// consent still answers connected; the missing connection is an expected outcome, logged at
+// Info, and the error line stays for any other failure.
+func (s *AuthorizationsSuite) TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError() {
+	id := s.connection("")
+	alice := s.browser()
+	callback := s.consent(alice.handOff(s.start(id)))
+	var once sync.Once
+	// The router's logger holds its lock while it writes a line, so the delete is made here, in
+	// the store, not through a request that would log.
+	s.logged.whenWritten(func(line string) {
+		if strings.Contains(line, "connector credential event") && strings.Contains(line, id) {
+			once.Do(func() {
+				_, err := s.store.GlobalDB().ExecContext(context.Background(),
+					"UPDATE connector_connections SET deleted_at = now() WHERE id = ?", id)
+				s.NoError(err)
+			})
+		}
+	})
+	s.T().Cleanup(func() { s.logged.whenWritten(nil) })
+
+	response := alice.finish(callback)
+
+	s.Equal(s.landing(id, consentConnected), response.Header.Get("Location"))
+	s.Empty(s.logged.lines("could not subscribe a reconnected connection's MCP events", id))
+	s.NotEmpty(s.logged.lines("a connection was deleted while its consent finished, so its MCP events were not subscribed", id))
 }
 
 // TestAConsentLeavesOneGrantCreatedRowNamingItsAttempt: T47's audit of a grant created at the
