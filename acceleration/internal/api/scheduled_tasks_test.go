@@ -3779,6 +3779,13 @@ func (s *ScheduledTasksSuite) TestAFirstOccurrenceRetriedTwiceFollowsUpInTheOneS
 	s.Equal(1, ran, "every attempt followed up in the one session")
 }
 
+// finishAtOnce has a finish that failed written again straight away, three times.
+func (s *ScheduledTasksSuite) finishAtOnce() {
+	retries := scheduling.FinishRetries
+	scheduling.FinishRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	s.T().Cleanup(func() { scheduling.FinishRetries = retries })
+}
+
 // failFinishes has the database refuse the next times writes that finish a run of the test's
 // customer, as one that blinked refuses them, until the test ends or mend.
 func (s *ScheduledTasksSuite) failFinishes(times int) (mend func()) {
@@ -3806,6 +3813,7 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce()
 	s.seedWriter(user, config, number, writer)
 	opened := s.openScheduling(user, config, nil)
 	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
 	s.failFinishes(1)
 	s.runWorker()
 	task := s.tasksOf(user)[0]
@@ -3827,6 +3835,7 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotT
 	s.seedWriter(user, config, number, writer)
 	opened := s.openScheduling(user, config, nil)
 	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
 	mend := s.failFinishes(1000)
 	s.runWorker()
 	task := s.tasksOf(user)[0]

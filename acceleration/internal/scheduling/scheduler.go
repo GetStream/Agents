@@ -67,10 +67,10 @@ const maxConsecutiveFailures = 5
 // being in progress; a task whose retries run out has failed an occurrence.
 var DeliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
-// finishRetries are the waits before an occurrence's outcome is written again after the write
+// FinishRetries are the waits before an occurrence's outcome is written again after the write
 // failed, as a database that blinked fails it: a run left running is taken over by another
 // worker once it is stale, and delivered again.
-var finishRetries = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+var FinishRetries = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 // DeliverFunc delivers one claimed occurrence: it returns where the follow-up
 // landed (conversation, call, ...) and the session it landed in. An error is
@@ -198,11 +198,12 @@ type Scheduler struct {
 	// activity counts each occurrence settled under its task's app. Nil counts none.
 	activity *activity.Recorder
 
-	now        func() time.Time
-	lease      time.Duration
-	renewEvery time.Duration
-	retries    []time.Duration
-	budget     time.Duration
+	now           func() time.Time
+	lease         time.Duration
+	renewEvery    time.Duration
+	retries       []time.Duration
+	finishRetries []time.Duration
+	budget        time.Duration
 
 	kick    chan struct{}
 	slots   chan struct{}
@@ -219,18 +220,19 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		store:      db,
-		deliver:    deliver,
-		logger:     logger,
-		now:        time.Now,
-		lease:      scheduledLease,
-		renewEvery: renewLeaseEvery,
-		retries:    DeliveryRetries,
-		budget:     occurrenceBudget,
-		kick:       make(chan struct{}, 1),
-		slots:      make(chan struct{}, inFlight),
-		ctx:        ctx,
-		cancel:     cancel,
+		store:         db,
+		deliver:       deliver,
+		logger:        logger,
+		now:           time.Now,
+		lease:         scheduledLease,
+		renewEvery:    renewLeaseEvery,
+		retries:       DeliveryRetries,
+		finishRetries: FinishRetries,
+		budget:        occurrenceBudget,
+		kick:          make(chan struct{}, 1),
+		slots:         make(chan struct{}, inFlight),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -620,7 +622,7 @@ func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.Sched
 		return s.store.ScheduledTasks.Finish(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, outcome)
 	}
 	applied, err := write()
-	for _, wait := range finishRetries {
+	for _, wait := range s.finishRetries {
 		if err == nil || !s.sleep(wait) {
 			break
 		}

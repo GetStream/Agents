@@ -96,7 +96,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestStoreSuite/TestAnOccurrenceWhoseWorkersKeepDyingIsFailedAtTheAttemptCap`,
   `TestStoreSuite/TestTheAttemptCapRecordsWhatThePlacedCallLeft`,
   `TestSchedulerSuite/TestACappedOccurrence*` (two tests).
-- **A failed finish is written again** (`finishRetries`: 1 s, 2 s, 4 s): a run left running is
+- **A failed finish is written again** (`FinishRetries`: 1 s, 2 s, 4 s): a run left running is
   taken over once stale and delivered again.
   `TestScheduledTasksSuite/TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce`.
 - **A run's words are texted once per channel.** The delivery takes (run, channel) on the run
