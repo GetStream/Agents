@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	llmoptions "github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -102,6 +103,9 @@ type Options struct {
 	CacheKey    string
 	OnModelCall func(llm.CallTiming)
 	Logger      *slog.Logger
+	// Call is the context of the call that the harness serves. The goroutines of the
+	// harness start under it, so a panic in one of them stops that call.
+	Call context.Context
 }
 
 // noted is something for the fast model to be told, and the skill it came from. The skill
@@ -335,14 +339,16 @@ func New(options Options) (*Harness, error) {
 		h.tasks.publish = options.Publish
 		h.tasks.lookup = options.Lookup
 		h.tasks.search = options.Search
+		h.tasks.call = options.Call
 		if options.Subagent == nil {
 			h.tasks.open(options.OpenSubagent)
 		}
 		h.running.Add(1)
-		go h.consumeTasks()
+		goroutine.Go(options.Call, h.consumeTasks)
 	}
 	if options.Controller != nil || options.Judge != nil {
 		h.flow = newFlow(options.Controller, h.emitter, h.logger)
+		h.flow.call = options.Call
 		h.flow.judge = options.Judge
 		h.flow.hearer = options.Hearer
 		h.flow.onModelCall = options.OnModelCall

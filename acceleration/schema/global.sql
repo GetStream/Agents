@@ -147,6 +147,7 @@ TABLE business_profiles
     authorized_contact_phone text NOT NULL DEFAULT ''::text
     authorized_contact_title text NOT NULL DEFAULT ''::text
     brand_name text NOT NULL DEFAULT ''::text
+    brand_requested_at timestamp with time zone
     brand_status text NOT NULL DEFAULT ''::text
     business_registration_country text NOT NULL DEFAULT ''::text
     business_verification_documents text[] NOT NULL DEFAULT '{}'::text[]
@@ -738,6 +739,7 @@ TABLE dlc_review_logs
 TABLE dlc_use_cases
     age_gated boolean NOT NULL DEFAULT false
     approved_at timestamp with time zone
+    campaign_requested_at timestamp with time zone
     channels jsonb NOT NULL DEFAULT '{}'::jsonb
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
@@ -986,6 +988,22 @@ TABLE organizations
     id text NOT NULL
     name text NOT NULL
     CONSTRAINT organizations_pkey PRIMARY KEY (id)
+
+TABLE phone_number_orders
+    action text NOT NULL
+    attempts integer NOT NULL DEFAULT 0
+    country text NOT NULL DEFAULT ''::text
+    created_at timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    e164 text NOT NULL
+    id bigint NOT NULL DEFAULT nextval('phone_number_orders_id_seq'::regclass)
+    monthly_cost_micros bigint NOT NULL DEFAULT 0
+    next_attempt_at timestamp with time zone NOT NULL
+    tags jsonb NOT NULL DEFAULT '{}'::jsonb
+    vendor text NOT NULL
+    CONSTRAINT phone_number_orders_action_check CHECK ((action = ANY (ARRAY['buy'::text, 'release'::text])))
+    CONSTRAINT phone_number_orders_pkey PRIMARY KEY (id)
+    CREATE INDEX phone_number_orders_due_idx ON public.phone_number_orders USING btree (next_attempt_at, id)
 
 TABLE phone_numbers
     attached_at timestamp with time zone
@@ -1347,6 +1365,7 @@ TABLE user_phones
     CREATE UNIQUE INDEX user_phones_phone ON public.user_phones USING btree (customer_id, stream_app_pk, phone)
 
 TABLE users
+    claim_finished_at timestamp with time zone
     claimed_at timestamp with time zone
     claimed_by text
     created_at timestamp with time zone NOT NULL DEFAULT now()

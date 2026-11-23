@@ -48,7 +48,7 @@ func TestInOrderSuite(t *testing.T) {
 
 func (s *InOrderSuite) SetupTest() {
 	s.provider = &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
-	s.voice = InOrder(s.provider)
+	s.voice = InOrder(context.Background(), s.provider)
 	s.T().Cleanup(func() { _ = s.voice.Close() })
 }
 
