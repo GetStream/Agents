@@ -167,6 +167,56 @@ func (s *StoreSuite) TestAnAttemptsReasonLeavesTheReasonAPlacedCallEndedUnder() 
 	s.Equal("not_answered", reason, "how the call ended is the run's reason")
 }
 
+// callTakenAfterAnAttemptFailed claims a due task, records an earlier attempt's reason on its run
+// and takes a call for it, as a worker does on the attempt that rings after one that failed.
+func (s *StoreSuite) callTakenAfterAnAttemptFailed() ClaimedScheduledTask {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", claimed[0].Run.ID, claimed[0].LeasedBy, "tier_limit_reached"))
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", claimed[0].Run.ID, "call-1")
+	s.Require().NoError(err)
+	s.Require().True(took)
+	return claimed[0]
+}
+
+func (s *StoreSuite) TestAnEarlierAttemptsReasonIsNotTheReasonOfTheCallTakenAfterIt() {
+	claimed := s.callTakenAfterAnAttemptFailed()
+
+	// The worker stops mid-call, before it records how the call ended.
+	reclaimed := s.staleRun("one", claimed.Run.ID)
+
+	s.Nil(reclaimed.Run.Error, "the call is the run's, the earlier attempt's reason is not")
+	took, reason, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", claimed.Run.ID, "call-2")
+	s.Require().NoError(err)
+	s.False(took, "the user is not rung again")
+	s.Empty(reason, "so the delivery fails as already called, not under the earlier attempt's reason")
+}
+
+func (s *StoreSuite) TestARunTakenOverMidCallAfterAFailedAttemptEndsAsAlreadyCalled() {
+	claimed := s.callTakenAfterAnAttemptFailed()
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("attempts = ?", maxScheduledTaskRunAttempts).
+		Set("started_at = ?", s.base.Add(-time.Hour)).
+		Where("id = ?", claimed.Run.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
+		Set("lease_until = ?", s.base.Add(-time.Minute)).
+		Where("customer_id = ?", "acme").
+		Where("id = ?", "one").Exec(s.ctx)
+	s.Require().NoError(err)
+
+	_, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+
+	run := s.run(claimed.Run.ID)
+	s.Equal(ScheduledTaskRunFailed, run.State)
+	s.Require().NotNil(run.Error)
+	s.Equal(scheduledTaskRunRungAlready, *run.Error)
+}
+
 func (s *StoreSuite) TestAFinishedRunTakesNoAttemptsReason() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })

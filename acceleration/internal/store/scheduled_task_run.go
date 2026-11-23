@@ -137,9 +137,16 @@ func (r *ScheduledTaskRuns) FinishManual(ctx context.Context, customerID, runID,
 // an earlier attempt, or a worker that stopped, placed a call for this
 // occurrence, so the user is not rung again. reason is then the one the run
 // records, such as how that call ended (SetCallReason), if any.
+//
+// Taking the call clears the run's error: with no call placed, the only error a running run
+// holds is the reason an earlier attempt failed under (SetAttemptReason), and once a call is
+// taken, how that call ends is the run's reason, as on a run that never had an earlier attempt.
+// A call given back (ReleaseCall) leaves the run with no reason until the next failed attempt
+// records its own.
 func (r *ScheduledTaskRuns) TakeCall(ctx context.Context, customerID, runID, sessionID string) (took bool, reason string, err error) {
 	result, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ?", sessionID).
+		Set("error = NULL").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
 		Where("state = ?", ScheduledTaskRunRunning).
