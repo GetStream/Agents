@@ -56,7 +56,6 @@ type ChatInbound struct {
 	Attempts int `bun:"attempts,notnull"`
 	// NextAttemptAt is when the message is due; on a claimed row, the end of the claim's lease.
 	NextAttemptAt time.Time  `bun:"next_attempt_at,notnull"`
-	ReceivedAt    time.Time  `bun:"received_at,notnull"`
 	FinishedAt    *time.Time `bun:"finished_at"`
 	// Heard is what the voice recording sent with the message said, once it was heard
 	// (ChatInbounds.KeepHeard); nil before.
@@ -83,7 +82,7 @@ type ChatInbounds struct {
 // chatInboundColumns are the columns a ChatInbound is read from, named rather than taken
 // with *, so a router older than a migration that adds one still reads the rows.
 const chatInboundColumns = "cd.seq, cd.stream_app_pk, cd.message_id, cd.customer_id, cd.deployment, cd.api_key, cd.body, " +
-	"cd.state, cd.attempts, cd.next_attempt_at, cd.received_at, cd.finished_at, cd.heard"
+	"cd.state, cd.attempts, cd.next_attempt_at, cd.finished_at, cd.heard"
 
 // Queue queues delivery to be answered, due at delivery.NextAttemptAt. A message already
 // queued under the same app and id, answered or given up within its keep, is not queued again:
