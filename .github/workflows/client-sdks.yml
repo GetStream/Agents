@@ -192,17 +192,20 @@ jobs:
       - name: generate.py tests
         run: uv run --no-project --with pytest --with pyyaml pytest -c /dev/null --rootdir=sdks/swift --confcutdir=sdks/swift sdks/swift/test_generate.py
 
-      # Both builds resolve into one checkout directory and compile into one DerivedData, so
-      # the Stream SDKs and WebRTC are fetched and built once a run rather than twice.
+      # Both builds resolve into one checkout directory, so the Stream SDKs and WebRTC are
+      # fetched once a run. Each compiles into its own DerivedData: swift_demo takes the
+      # versions its Package.resolved pins, the core build those Package.swift allows, and a
+      # module built from one StreamWebRTC's headers fails the build that has the other's.
       - uses: actions/cache/restore@v4
         id: packages
         with:
           path: ${{ runner.temp }}/spm
-          key: spm-${{ runner.os }}-xcode27-${{ hashFiles('Package.swift', 'examples/voice_agents/swift_demo/app/SwiftDemo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-xcode27-
+          key: swiftpm-${{ runner.os }}-xcode27-${{ hashFiles('Package.swift', 'examples/voice_agents/swift_demo/app/SwiftDemo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-xcode27-
 
       # The package is iOS only, so it is tested on a simulator rather than with `swift test`.
       - name: Build core tests
+        id: build-core
         timeout-minutes: 15
         run: |
           device=$(xcrun simctl list devices available -j | python3 -c "import json, sys; devices = json.load(sys.stdin)['devices']; print(next(d['udid'] for runtime, found in devices.items() if 'iOS' in runtime for d in found if d['name'].startswith('iPhone')))")
@@ -235,11 +238,15 @@ jobs:
         timeout-minutes: 10
         run: |
           xcodebuild -project SwiftDemo.xcodeproj -scheme SwiftDemo -destination 'generic/platform=iOS Simulator' \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/DerivedData" build
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/SwiftDemoDerivedData" build
 
-      # Saved even when a test fails, so a red run still leaves the next one a warm cache.
+      # Saved even when a test fails, so a red run still leaves the next one a warm cache. Not
+      # from a cancelled run or a failed core build, whose fetch may have stopped half way: a
+      # key once saved is restored as is and never saved again.
       - uses: actions/cache/save@v4
-        if: always() && steps.packages.outcome == 'success' && steps.packages.outputs.cache-hit != 'true'
+        if: >-
+          !cancelled() && steps.packages.outcome == 'success' && steps.build-core.outcome == 'success'
+          && steps.packages.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/spm
           key: ${{ steps.packages.outputs.cache-primary-key }}
