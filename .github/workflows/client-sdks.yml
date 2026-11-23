@@ -256,7 +256,8 @@ jobs:
           key: ${{ steps.packages.outputs.cache-primary-key }}
 
 concurrency:
-  group: ci-client-sdks-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  # The event is in the key so a pull request from a fork's `main` never joins main's push group.
+  group: ci-client-sdks-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   # A run on main is never cancelled: only a finished push run saves the Swift package cache (#2235,
   # #2225), and a newer push queues behind it. A pull request run still cancels the one before it.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
