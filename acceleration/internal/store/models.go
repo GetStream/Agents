@@ -81,7 +81,7 @@ type ChildAgent struct {
 // agent_configs.connectors.
 //
 // The JSON is the prototype's (ConnectorBinding in internal/store/models.go on
-// codex/connector-support at cf62af0d), and ConnectorConnections.Referenced finds a fixed
+// codex/connector-support at cf62af0d), and boundByConfig finds a fixed
 // binding by containment on {"connection": {"type": "fixed", "connection_id": ...}}, so a
 // change to these tags is a change to that query. core.Binding is the same thing for the
 // adapters, flattened and with a time.Duration; it has no JSON of its own, so it is not

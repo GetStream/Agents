@@ -168,9 +168,6 @@ func (s *StoreSuite) TestAConnectionIsOnlyItsOwnCustomers() {
 	s.Require().NoError(err)
 	s.Empty(listed)
 
-	_, err = s.store.ConnectorConnections.Referenced(s.ctx, "other-app", mine.ID)
-	s.ErrorIs(err, ErrNoConnectorConnection)
-
 	s.ErrorIs(s.store.ConnectorConnections.Delete(s.ctx, "other-app", mine.ID), ErrNoConnectorConnection)
 	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", mine.ID)
 	s.NoError(err, "another customer's delete leaves it alone")
@@ -245,15 +242,6 @@ func (s *StoreSuite) TestADeletedConnectionIsNotListed() {
 	s.Require().NoError(err)
 	s.Require().Len(listed, 1)
 	s.Equal(kept.ID, listed[0].ID)
-}
-
-func (s *StoreSuite) TestADeletedConnectionIsNotAskedAboutReferences() {
-	connection := s.connection("acme-app", nil)
-	s.bind("acme-app", fixedBinding(connection.ID))
-	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
-
-	_, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.ErrorIs(err, ErrNoConnectorConnection)
 }
 
 func (s *StoreSuite) TestADeletedConnectionCannotBeDeletedAgain() {
@@ -500,34 +488,13 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 	s.Nil(expires)
 }
 
-func (s *StoreSuite) TestAFixedBindingReferencesItsConnection() {
-	connection := s.connection("acme-app", nil)
-	s.bind("acme-app", fixedBinding(connection.ID))
-
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.True(referenced)
-}
-
-func (s *StoreSuite) TestAnUnboundConnectionIsNotReferenced() {
-	connection := s.connection("acme-app", nil)
-	other := s.connection("acme-app", nil)
-	s.bind("acme-app", fixedBinding(other.ID))
-
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
-}
-
 func (s *StoreSuite) TestASessionBindingReferencesNoConnection() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	// A session binding names no connection; it carries an id here only to show the type is
 	// what decides.
 	s.bind("acme-app", `[{"name": "acme", "connector_id": "acme", "connection": {"type": "session", "connection_id": "`+connection.ID+`"}}]`)
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
+	s.NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
 }
 
 func (s *StoreSuite) TestADeletedConfigReferencesNothing() {
@@ -535,18 +502,14 @@ func (s *StoreSuite) TestADeletedConfigReferencesNothing() {
 	configID := s.bind("acme-app", fixedBinding(connection.ID))
 	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", configID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
+	s.NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
 }
 
 func (s *StoreSuite) TestAnotherCustomersConfigReferencesNothingOfMine() {
 	connection := s.connection("acme-app", nil)
 	s.bind("other-app", fixedBinding(connection.ID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
+	s.NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
 }
 
 func (s *StoreSuite) TestTheStateItselfIsNotStored() {
@@ -1275,10 +1238,6 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		_, err := s.store.ConnectorConnections.Uses(s.ctx, "acme-app", ids)
 		s.Require().NoError(err)
 	}), "Uses")
-	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-		s.Require().NoError(err)
-	}), "Referenced")
 	for _, id := range ids {
 		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, "acme-app", id, ConnectorConnectionClient{
 			Registration: core.ClientDCR, ClientID: "dcr-client"}))

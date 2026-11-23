@@ -501,8 +501,7 @@ func (r *ConnectorConnections) DeleteUnbound(ctx context.Context, customerID, id
 }
 
 // boundByConfig is true for a connection cc that a live agent config of the same customer
-// binds as its fixed connection. ConnectorConnections.Referenced and DeleteUnbound both use
-// it, so what one reports bound the other refuses.
+// binds as its fixed connection: the connections DeleteUnbound refuses.
 //
 // A binding is matched by containment on the shape the prototype stored
 // ({"connection": {"type": "fixed", "connection_id": ...}}, ConnectorBinding in
@@ -701,26 +700,6 @@ func (r *ConnectorConnections) Uses(ctx context.Context, customerID string, ids 
 		uses[row.ConnectionID] = append(uses[row.ConnectionID], row)
 	}
 	return uses, nil
-}
-
-// Referenced reports whether a live agent config of the customer's binds
-// the live connection as its fixed connection, so deleting it would break that agent.
-func (r *ConnectorConnections) Referenced(ctx context.Context, customerID, id string) (bool, error) {
-	if customerID == "" || id == "" {
-		return false, stack.Wrap(errors.New("store: a customer and a connection id are required"))
-	}
-	var referenced bool
-	err := r.store.global.NewSelect().Model((*ConnectorConnection)(nil)).
-		ColumnExpr(boundByConfig).
-		Where("cc.customer_id = ? AND cc.id = ? AND cc.deleted_at IS NULL", customerID, id).
-		Scan(ctx, &referenced)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, stack.Wrap(fmt.Errorf("%w: %s", ErrNoConnectorConnection, id))
-	}
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: connector connection references: %w", err))
-	}
-	return referenced, nil
 }
 
 // validOwner is the owner rule the migration's connector_connections_owner CHECK holds.
