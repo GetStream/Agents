@@ -1795,6 +1795,25 @@ func (s *SessionSuite) TestACallersToolFailureIsReportedAsTheCallers() {
 	s.False(report.Client, "the router's words for a timeout are not the caller's")
 }
 
+// Closing the bridge answers a call in flight in the router's words, which the tool call's
+// line keeps: they are not the caller's own failure.
+func (s *SessionSuite) TestACallCutByTheCallEndingIsNotReportedAsTheCallers() {
+	asked := make(chan ToolCall, 1)
+	tools := newBridge(time.Minute, nil, func(call ToolCall) error { asked <- call; return nil })
+	ctx, report := agent.WithToolReport(context.Background())
+	finished := make(chan error, 1)
+	go func() {
+		_, err := tools.Run(ctx, llm.ToolCall{ID: "call-one", Name: "lookup_order", Arguments: "{}"})
+		finished <- err
+	}()
+	<-asked
+
+	tools.Close()
+
+	s.EqualError(<-finished, "the call ended before it finished")
+	s.False(report.Client)
+}
+
 func (s *SessionSuite) TestEndingACallStopsAToolWaitingOnAnAnswer() {
 	s.manages()
 	created := s.joins(Spec{
