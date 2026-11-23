@@ -161,16 +161,112 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfIts
 }
 
 func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfItsActivity() {
-	s.opened("chat", "app", s.base, nil)
-	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}
-	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOn("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
 	s.opened("another", "app", s.base.Add(time.Minute), nil)
 
 	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(buckets, 1)
 	s.EqualValues(2, buckets[0].Sessions)
+	s.EqualValues(2, buckets[0].Messages)
 	s.EqualValues(1, buckets[0].ActiveUsers)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnIsCountedOnTheDayItBeganWhateverTheWindow() {
+	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
+	session := s.opened("chat", "app", dayOne, nil)
+	s.turned(session, "chat-1", dayOne, nil)
+	s.carriedOn("chat", dayTwo)
+	s.turnedThere("chat", "chat-2", "chat-1", dayTwo, nil)
+
+	second, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, dayTwo, dayTwo.Add(24*time.Hour))
+	s.Require().NoError(err)
+	var sessions int64
+	for _, bucket := range second {
+		sessions += bucket.Sessions
+	}
+	s.Zero(sessions, "it began the day before")
+
+	first, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, dayOne, dayTwo)
+	s.Require().NoError(err)
+	s.Require().Len(first, 1)
+	s.EqualValues(1, first[0].Sessions)
+}
+
+func (s *ShardedStoreSuite) TestADayHoldingOnlyACarriedOnRowIsNotListed() {
+	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
+	session := s.opened("chat", "app", dayOne, nil)
+	s.turned(session, "chat-1", dayOne, nil)
+	s.carriedOn("chat", dayTwo)
+	s.turnedThere("chat", "chat-2", "chat-1", dayTwo.Add(24*time.Hour), nil)
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, dayTwo, dayTwo.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Empty(buckets, "nothing that counts happened that day")
+}
+
+func (s *ShardedStoreSuite) TestATurnRewoundInTheOtherShardIsNotCountedBeforeAToolsFirstUse() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.turned(session, "chat-2", s.base.Add(time.Minute), answeredAfter("chat-1"))
+	s.carriedOn("chat", s.base.Add(2*time.Minute))
+	rewound := s.base.Add(3 * time.Minute)
+	s.turnedThere("chat", "chat-gone", "chat-2", s.base.Add(2*time.Minute), &rewound)
+	s.turnedThere("chat", "chat-3", "chat-2", s.base.Add(3*time.Minute), nil)
+	s.calledToolThere("chat", "chat-3", "refund", s.base.Add(3*time.Minute))
+
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(2.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+}
+
+func (s *ShardedStoreSuite) TestTurnsAtTheSameInstantInTwoShardsAreOrderedById() {
+	// w, x, y and z share an instant. The first use is y, in the other shard, after x here and
+	// w there: three turns before it. Ordered by anything but the id, it would be z, here.
+	at := s.base.Add(time.Minute)
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.turned(session, "x", at, answeredAfter("chat-1"))
+	s.turned(session, "z", at, answeredAfter("x"))
+	s.calledTool(session, "z", "refund", at, map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	s.carriedOn("chat", at)
+	s.turnedThere("chat", "w", "chat-1", at, nil)
+	s.turnedThere("chat", "y", "w", at, nil)
+	s.calledToolThere("chat", "y", "refund", at)
+
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(3.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+}
+
+// carriedOn writes the row a session carried on in the other shard has there.
+func (s *ShardedStoreSuite) carriedOn(id string, at time.Time) {
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", AgentName: "docs",
+		ConfigID: "cfg-docs", UserID: "jlahey", CallerKind: "user", CreatedAt: at}))
+}
+
+// turnedThere records a turn of a session in the other shard, answered after parent.
+func (s *ShardedStoreSuite) turnedThere(sessionID, id, parent string, at time.Time, rewound *time.Time) {
+	s.Require().NoError(s.other.Responses.Insert(s.ctx, &AgentResponse{
+		ID: id, SessionID: sessionID, CustomerID: "app", ParentResponseID: parent, CreatedAt: at, RewoundAt: rewound,
+	}))
+}
+
+// calledToolThere records one call of tool and its result in a turn in the other shard.
+func (s *ShardedStoreSuite) calledToolThere(sessionID, responseID, tool string, at time.Time) {
+	s.Require().NoError(s.other.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
+		{ResponseID: responseID, Ordinal: 0, SessionID: sessionID, Kind: ItemToolCall, ToolName: tool,
+			Payload: map[string]any{"call_id": responseID}, At: at},
+		{ResponseID: responseID, Ordinal: 1, SessionID: sessionID, Kind: ItemToolResult, ToolName: tool,
+			Text: "done", Payload: map[string]any{"call_id": responseID}, At: at.Add(time.Second)},
+	}))
 }
 
 func (s *ShardedStoreSuite) TestASessionAwayFromOneShardWhileAnotherRanIsNotOpenThroughTheGap() {
