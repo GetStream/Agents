@@ -26,7 +26,7 @@ func TestSyncSuite(t *testing.T) {
 // one. Seeding is idempotent, so suites running beside this one see the same rows.
 func (s *SyncSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, because a sync is named by what the agent
@@ -118,12 +118,24 @@ func (s *SyncSuite) TestASyncNamingTheAgentTypeOrATypeTwiceIsRefused() {
 	s.Empty(s.configsNamed("rota"))
 }
 
-func (s *SyncSuite) TestSyncingAnAgentStoresWhetherItsToolsAreOfferedProgressively() {
-	result := s.sync(map[string]any{"name": "concierge", "hash": "v1", "tools": map[string]any{"progressive": true}})
-	s.True(value(result.Config.Tools.Progressive))
+func (s *SyncSuite) TestSyncingAnAgentStoresItsToolGroups() {
+	result := s.sync(map[string]any{"name": "concierge", "hash": "v1", "tools": []any{
+		map[string]any{"name": "booking", "loading": "summary", "tools": []any{"lookup_booking"}},
+	}})
+	s.Require().NotNil(result.Config.Tools)
+	s.Equal(ToolLoadingSummary, value((*result.Config.Tools)[0].Loading))
 
 	again := s.sync(map[string]any{"name": "concierge", "hash": "v2"})
-	s.True(value(again.Config.Tools.Progressive), "a directory that says nothing leaves what is stored")
+	s.Require().NotNil(again.Config.Tools, "a directory that says nothing leaves what is stored")
+	s.Equal([]string{"lookup_booking"}, (*again.Config.Tools)[0].Tools)
+}
+
+func (s *SyncSuite) TestSyncingTheToolSettingsOfBeforeGroupsIsRefused() {
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/sync",
+		map[string]any{"name": "concierge", "hash": "v1", "tools": map[string]any{"progressive": true}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Empty(s.configsNamed("concierge"))
 }
 
 func (s *SyncSuite) TestSyncingAnAgentStoresItsScheduling() {
@@ -211,8 +223,8 @@ func (s *SyncSuite) TestASyncPinningABatchTranscriberIsRefused() {
 
 func (s *SyncSuite) TestASyncLeavingAStoredBatchTranscriberAsItWasIsStored() {
 	pinned := "batch/" + batchModel
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, Models: store.AgentModels{STT: pinned}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	result := s.sync(map[string]any{"name": "support", "hash": "v1", "stt": pinned, "instructions": "Be brief."})
 
@@ -236,7 +248,7 @@ func (s *SyncSuite) TestASyncAllowingAnIPAddressAsADomainIsRefused() {
 				"sandbox_options": map[string]any{"allowed_domains": []string{"api.example.com", address}}})
 
 		s.Equal(http.StatusBadRequest, status, address)
-		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains: %q is not a domain", address), address)
+		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains has %q, which is not a domain", address), address)
 	}
 }
 
@@ -853,10 +865,10 @@ func (s *SyncSuite) TestASessionFromAnAgentWhoseSkillRunsScriptsWithoutASandboxD
 		"name": "forms", "hash": "v1", "mode": "text", "llm": "en-low-latency",
 		"sandbox": "daytona", "skills": pdfSkill(),
 	})
-	config, err := s.configs.AgentConfig(context.Background(), s.customerID(), result.Config.Id)
+	config, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), result.Config.Id)
 	s.Require().NoError(err)
-	config.Sandbox = ""
-	s.Require().NoError(s.configs.UpdateAgentConfig(context.Background(), &config))
+	config.Sandbox.Provider = ""
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &config))
 
 	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/sessions",
 		CreateSessionRequest{ConfigId: &config.ID})
@@ -923,16 +935,18 @@ func (s *SyncSuite) TestTwoSyncedSandboxBindingsGivingTheSandboxOneEnvVarAreRefu
 	s.Empty(s.configsNamed("builder"))
 }
 
-func (s *SyncSuite) TestSyncingAnAgentStoresHowLongItKeepsToolOutput() {
-	result := s.sync(map[string]any{"name": "concierge", "hash": "v1", "tools": map[string]any{"output_retention": "30d"}})
-	s.Equal("30d", value(result.Config.Tools.OutputRetention))
-
-	again := s.sync(map[string]any{"name": "concierge", "hash": "v2"})
-	s.Equal("30d", value(again.Config.Tools.OutputRetention), "a directory that says nothing leaves what is stored")
+func (s *SyncSuite) TestSyncingAnAgentStoresHowLongEachGroupKeepsToolOutput() {
+	result := s.sync(map[string]any{"name": "concierge", "hash": "v1", "tools": []any{
+		map[string]any{"name": "cards", "output_retention": "30d", "tools": []any{"charge_card"}},
+	}})
+	s.Require().NotNil(result.Config.Tools)
+	s.Equal("30d", value((*result.Config.Tools)[0].OutputRetention))
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
-		"name": "concierge", "hash": "v3", "tools": map[string]any{"output_retention": "3651d"},
+		"name": "concierge", "hash": "v3", "tools": []any{
+			map[string]any{"name": "cards", "output_retention": "3651d", "tools": []any{"charge_card"}},
+		},
 	})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "tools.output_retention")
+	s.Contains(failure, "tools[0].output_retention")
 }

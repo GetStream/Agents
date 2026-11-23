@@ -72,7 +72,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if err := pgStore.CreateAPIKey(ctx, &store.APIKey{
+	if err := pgStore.APIKeys.Insert(ctx, &store.APIKey{
 		ID:         key,
 		AppID:      app.ID,
 		Name:       *keyName,
@@ -99,7 +99,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 // second key rather than refusing.
 func resolveApp(ctx context.Context, pgStore *store.Store, appID, appName, orgName string) (store.App, error) {
 	if appID != "" {
-		app, err := pgStore.AppByID(ctx, appID)
+		app, err := pgStore.Apps.Get(ctx, appID)
 		if err == nil {
 			return app, nil
 		}
@@ -112,7 +112,7 @@ func resolveApp(ctx context.Context, pgStore *store.Store, appID, appName, orgNa
 		return store.App{}, errors.New("a new app needs an organization: pass --org")
 	}
 	org := store.Organization{Name: orgName}
-	if err := pgStore.CreateOrganization(ctx, &org); err != nil {
+	if err := pgStore.Organizations.Insert(ctx, &org); err != nil {
 		return store.App{}, err
 	}
 
@@ -121,7 +121,7 @@ func resolveApp(ctx context.Context, pgStore *store.Store, appID, appName, orgNa
 		name = orgName
 	}
 	app := store.App{ID: appID, OrganizationID: org.ID, Name: name}
-	if err := pgStore.CreateApp(ctx, &app); err != nil {
+	if err := pgStore.Apps.Insert(ctx, &app); err != nil {
 		return store.App{}, err
 	}
 	return app, nil

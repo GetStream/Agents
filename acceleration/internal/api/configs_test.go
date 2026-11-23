@@ -16,7 +16,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
-	"github.com/stretchr/testify/require"
 )
 
 type ConfigsSuite struct {
@@ -33,7 +32,7 @@ func TestConfigsSuite(t *testing.T) {
 func (s *ConfigsSuite) SetupSuite() {
 	s.connectors = core.Registry{Schemes: map[string]core.Scheme{"oauth2_code": namedScheme("oauth2_code")}}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, because a config's name has to be free and
@@ -296,8 +295,8 @@ func (s *ConfigsSuite) TestAConfigWritesNoEpisodeCardsUnlessItSaysSo() {
 // previous release reads decides, so both releases take it the same way.
 func (s *ConfigsSuite) TestAConfigWithBothCardColumnsOnReadsAsOn() {
 	created := s.createConfig(map[string]any{"name": "support"})
-	_, err := s.store.DB().ExecContext(context.Background(),
-		"UPDATE agent_configs SET episode_cards = true, episode_cards_record = true WHERE id = ?", created.Id)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
+		"UPDATE agent_configs SET episode_cards_on = true, episode_cards_record = true WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
 	var read AgentConfig
@@ -328,27 +327,73 @@ func (s *ConfigsSuite) TestEpisodeCardsTakesOnlyOffRecordOrOn() {
 // storedCards checks the two columns a config's mode is stored in.
 func (s *ConfigsSuite) storedCards(id string, on, record bool) {
 	s.T().Helper()
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
-	s.Equal(on, stored.EpisodeCards, "episode_cards")
-	s.Equal(record, stored.EpisodeCardsRecord, "episode_cards_record")
+	s.Equal(on, stored.EpisodeCards.On, "episode_cards_on")
+	s.Equal(record, stored.EpisodeCards.Record, "episode_cards_record")
 }
 
-// Tools are offered whole unless a config asks for them progressively, and an update that
-// leaves the setting out keeps it.
-func (s *ConfigsSuite) TestAConfigOffersToolsWholeUnlessItSaysProgressively() {
+// A config names its functions in tool groups, each offered whole unless it says otherwise,
+// and an update that leaves the groups out keeps them.
+func (s *ConfigsSuite) TestAConfigNamesItsToolsInGroups() {
 	unnamed := s.createConfig(map[string]any{"name": "support"})
-	s.False(value(unnamed.Tools.Progressive))
+	s.Require().NotNil(unnamed.Tools)
+	s.Empty(*unnamed.Tools, "a config names no function until it says so")
 
 	var patched AgentConfig
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch,
-		"/v1/agents/configs/"+unnamed.Id, map[string]any{"tools": map[string]any{"progressive": true}}, &patched))
-	s.True(value(patched.Tools.Progressive))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+unnamed.Id,
+		map[string]any{"tools": []any{
+			map[string]any{"name": "booking", "tools": []any{"lookup_booking"}},
+			map[string]any{"name": "refunds", "loading": "deferred", "tools": []any{"refund_booking", "void_ticket"}},
+		}}, &patched))
+	s.Require().NotNil(patched.Tools)
+	s.Require().Len(*patched.Tools, 2)
+	s.Equal(ToolLoadingFull, value((*patched.Tools)[0].Loading), "a group that says nothing is offered whole")
+	s.Equal(ToolLoadingDeferred, value((*patched.Tools)[1].Loading))
+	s.Equal([]string{"refund_booking", "void_ticket"}, (*patched.Tools)[1].Tools)
 
 	var saved AgentConfig
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut,
-		"/v1/agents/configs/"+unnamed.Id, map[string]any{"name": "support", "tools": map[string]any{}}, &saved))
-	s.True(value(saved.Tools.Progressive), "a setting left out on an update stays")
+		"/v1/agents/configs/"+unnamed.Id, map[string]any{"name": "support"}, &saved))
+	s.Require().NotNil(saved.Tools, "groups left out on an update stay")
+	s.Len(*saved.Tools, 2)
+}
+
+func (s *ConfigsSuite) TestAToolInTwoGroupsIsRefused() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs", map[string]any{
+		"name": "support", "tools": []any{
+			map[string]any{"name": "booking", "tools": []any{"lookup_booking"}},
+			map[string]any{"name": "lookups", "loading": "summary", "tools": []any{"lookup_booking"}},
+		},
+	})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "lookup_booking is already in tool group")
+}
+
+func (s *ConfigsSuite) TestAToolGroupWithALoadingThereIsNoneOfIsRefused() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs", map[string]any{
+		"name": "support", "tools": []any{map[string]any{"name": "booking", "loading": "lazy", "tools": []any{"lookup_booking"}}},
+	})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "loading")
+}
+
+func (s *ConfigsSuite) TestAFunctionTakingTheNameOfTheRoutersLoaderIsRefused() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs", map[string]any{
+		"name": "support", "tools": []any{map[string]any{"name": "mine", "tools": []any{"load_tool"}}},
+	})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "load_tool")
+}
+
+func (s *ConfigsSuite) TestTheToolSettingsOfBeforeGroupsAreRefused() {
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "support", "tools": map[string]any{"progressive": true}})
+
+	s.Equal(http.StatusBadRequest, status)
 }
 
 func (s *ConfigsSuite) TestAConfigRemembersItsScheduling() {
@@ -605,7 +650,7 @@ func (s *ConfigsSuite) TestAnAllowedDomainThatIsAnIPAddressIsRefused() {
 				"sandbox_options": map[string]any{"allowed_domains": []string{"api.example.com", address}}})
 
 		s.Equal(http.StatusBadRequest, status, address)
-		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains: %q is not a domain", address), address)
+		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains has %q, which is not a domain", address), address)
 	}
 
 	created := s.createConfig(map[string]any{"name": "researcher", "sandbox": "daytona",
@@ -615,7 +660,7 @@ func (s *ConfigsSuite) TestAnAllowedDomainThatIsAnIPAddressIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		map[string]any{"sandbox_options": map[string]any{"allowed_domains": []string{"203.0.113.7"}}})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, `"203.0.113.7" is not a domain`)
+	s.Contains(failure, `"203.0.113.7", which is not a domain`)
 }
 
 // webhookGuardrail is a guardrail.md asking the server at url.
@@ -692,57 +737,6 @@ func (s *ConfigsSuite) TestAPublicGuardrailWebhookIsKeptAsWritten() {
 	s.Equal(webhookGuardrail("https://[2001:4860:4860::8888]/check"), value(patched.Guardrail))
 }
 
-// TestAConfigStoredNamingPluginsAndMCPServersReadsWithoutThem: a row written before they were
-// refused still reads, in the config and in the list, and shows none of them, so a client that
-// saves what it read back is not refused for what it never set.
-func (s *ConfigsSuite) TestAConfigStoredNamingPluginsAndMCPServersReadsWithoutThem() {
-	config := s.storedWithPlugins()
-
-	status, raw := s.serverClient.call(http.MethodGet, "/v1/agents/configs/"+config.ID, nil)
-	s.Require().Equal(http.StatusOK, status)
-	var read map[string]any
-	s.Require().NoError(json.Unmarshal(raw, &read))
-	s.Equal("Be brief.", read["instructions"])
-	for _, key := range []string{"plugins", "plugin_events", "mcp_servers"} {
-		s.NotContains(read, key)
-	}
-	status, raw = s.serverClient.call(http.MethodGet, "/v1/agents/configs", nil)
-	s.Require().Equal(http.StatusOK, status)
-	s.Contains(string(raw), config.ID)
-	for _, key := range []string{`"plugins"`, `"plugin_events"`, `"mcp_servers"`} {
-		s.NotContains(string(raw), key)
-	}
-
-	for _, key := range []string{"id", "created_at", "updated_at", "sync_hash", "duration"} {
-		delete(read, key)
-	}
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+config.ID, read, nil))
-}
-
-// storedWithPlugins is a config whose row names a plugin, a plugin event and an MCP server, as
-// one saved before they were refused does: written into the columns, as no request can now.
-func (s *ConfigsSuite) storedWithPlugins() store.AgentConfig {
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "legacy-" + s.utils.uuid(), Mode: "text",
-		Instructions: "Be brief."}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
-	nameRetired(s.T(), s.store, config.ID)
-	return config
-}
-
-// nameRetired writes a plugin, a plugin event and an MCP server into the columns of config's
-// row, which the model no longer has, as a save before they were refused left them.
-func nameRetired(t *testing.T, stored *store.Store, config string) {
-	t.Helper()
-	result, err := stored.DB().ExecContext(context.Background(), `UPDATE agent_configs
-		SET plugins = '["linear"]', plugin_events = '[{"plugin":"linear","event":"issue.created"}]',
-		    mcp_servers = '[{"name":"wwsd","url":"https://mcp.wwsd.invalid/mcp"}]'
-		WHERE id = ?`, config)
-	require.NoError(t, err)
-	written, err := result.RowsAffected()
-	require.NoError(t, err)
-	require.EqualValues(t, 1, written)
-}
-
 func (s *ConfigsSuite) TestAVoiceConfigPinnedToABatchTranscriberIsRefused() {
 	pinned := "batch/" + batchModel
 
@@ -805,8 +799,8 @@ func (s *ConfigsSuite) TestPatchingAConfigOntoABatchTranscriberIsRefused() {
 func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() {
 	// Stored before saves were checked; its sessions are refused as they start instead.
 	pinned := "batch/" + batchModel
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, Models: store.AgentModels{STT: pinned}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	var updated, patched AgentConfig
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+config.ID,
@@ -820,7 +814,7 @@ func (s *ConfigsSuite) TestAConfigStoredWithABatchTranscriberCanStillBeEdited() 
 }
 
 func (s *ConfigsSuite) TestADeploymentWithoutATranscriberRouterRefusesNoConfig() {
-	config := store.AgentConfig{Mode: store.AgentModeVoice, STT: "batch/" + batchModel}
+	config := store.AgentConfig{Mode: store.AgentModeVoice, Models: store.AgentModels{STT: "batch/" + batchModel}}
 
 	for name, server := range map[string]*Server{"no streams": {}, "no stt router": {streams: &Streams{}}} {
 		_, ok := server.liveSTTComplaint(config, "")
@@ -1040,7 +1034,7 @@ func (s *ConfigsSuite) readConnectors(id string) (json.RawMessage, string) {
 	}
 	s.Require().NoError(json.Unmarshal(raw, &read))
 	var stored string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT connectors::text FROM agent_configs WHERE id = ?", id).Scan(&stored))
 	return read.Connectors, stored
 }
@@ -1058,7 +1052,7 @@ func (s *ConfigsSuite) TestABindingsPolicyIsReadBackExactlyAsItWasWritten() {
 	written, err := json.Marshal(bindings)
 	s.Require().NoError(err)
 	s.JSONEq(string(written), string(read))
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	cancellable := false
 	s.Equal(&store.BindingPolicy{PreSpeech: "Let me look in Slack.", OnInterrupt: store.InterruptWait, Cancellable: &cancellable},
@@ -1175,7 +1169,7 @@ func (s *ConfigsSuite) TestAFixedBindingToAnotherAppsConnectionIsRefused() {
 
 func (s *ConfigsSuite) TestAFixedBindingToADeletedConnectionIsRefused() {
 	connection := s.connection("")
-	s.Require().NoError(s.store.DeleteConnectorConnection(context.Background(), s.customerID(), connection))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(context.Background(), s.customerID(), connection))
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
 		map[string]any{"name": "support", "connectors": []map[string]any{fixedSlack("crm", connection)}})
@@ -1702,7 +1696,7 @@ func (s *ConfigsSuite) connection(owner string) string {
 // connectionTo is connection to another built-in connector.
 func (s *ConfigsSuite) connectionTo(connectorID, owner string) string {
 	ctx := context.Background()
-	definition, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), connectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), connectorID)
 	s.Require().NoError(err)
 	connection := &store.ConnectorConnection{
 		CustomerID: s.customerID(), ConnectorID: definition.ID, DefinitionRevision: definition.Revision,
@@ -1711,7 +1705,7 @@ func (s *ConfigsSuite) connectionTo(connectorID, owner string) string {
 	if owner != "" {
 		connection.OwnerType, connection.OwnerID = store.OwnerUser, owner
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(ctx, s.connectors, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, s.connectors, connection))
 	return connection.ID
 }
 
@@ -1889,7 +1883,7 @@ func (s *ConfigsSuite) TestTwoSandboxBindingsToDifferentConnectorsGivingOneEnvVa
 	manifest, err := core.ParseManifest(source)
 	s.Require().NoError(err)
 	manifest.ID = "custom_" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	custom := sessionGitHub("docs", true)
 	custom["connector_id"] = manifest.ID
@@ -2052,7 +2046,7 @@ func (s *ConfigsSuite) TestNessyBesideAConnectorWithOneOutboundSourceAmongSevera
 	readOnly := manifest.Sources[0]
 	readOnly.Outbound = new(false)
 	manifest.Sources = []core.SourceRule{readOnly, manifest.Sources[0]}
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	custom := sessionGitHubGranting("code", "create_issue")
 	custom["connector_id"] = manifest.ID
@@ -2259,19 +2253,19 @@ func (s *ConfigsSuite) TestABindingBesideNessyMayGrantExactlyTheToolsFlaggedRead
 func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveChecks() {
 	s.useInternalApp()
 	ctx := context.Background()
-	linear, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), "linear")
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
 	s.Require().NoError(err)
 	manifest := linear.Manifest
 	manifest.ID = "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest.Sources = []core.SourceRule{{Kind: "mcp", Endpoint: "mcp", ReadOnlyTools: []string{"list_issues"}}}
-	_, err = s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
 	id := s.connectionTo(manifest.ID, "")
 	manifest.Sources = []core.SourceRule{{Kind: "mcp", Endpoint: "mcp",
 		ReadOnlyTools: []string{"list_issues", "search_documentation"}}}
-	revised, err := s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	revised, err := s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
-	connection, err := s.store.ConnectorConnection(ctx, s.customerID(), id)
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
 	s.Require().Equal([]int{1, 2}, []int{connection.DefinitionRevision, revised.Revision})
 	s.listTools(id, "list_issues", "search_documentation", "save_issue")
@@ -2292,7 +2286,7 @@ func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveCh
 func (s *ConfigsSuite) TestReadOnlyOfAConnectorWithSeveralSourcesNeedsEverySourceToSayIt() {
 	s.useInternalApp()
 	ctx := context.Background()
-	linear, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), "linear")
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
 	s.Require().NoError(err)
 	manifest := linear.Manifest
 	manifest.ID = "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
@@ -2300,7 +2294,7 @@ func (s *ConfigsSuite) TestReadOnlyOfAConnectorWithSeveralSourcesNeedsEverySourc
 		{Kind: "mcp", Endpoint: "mcp", ReadOnlyTools: []string{"list_issues", "get_issue", "search_documentation"}},
 		{Kind: "mcp", Endpoint: "mcp", ReadOnlyTools: []string{"list_issues", "get_issue"}},
 		{Kind: "mcp", Endpoint: "mcp", Outbound: new(false)}}
-	_, err = s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
 	id := s.connectionTo(manifest.ID, "")
 	s.listTools(id, "list_issues", "get_issue", "search_documentation", "save_issue")
@@ -2328,7 +2322,7 @@ func (s *ConfigsSuite) TestAConnectionWhoseConnectorTheAppCanNoLongerSeeListsIts
 	s.useInternalApp()
 	id := s.connectionTo("nessy", "")
 	s.listTools(id, "org_lookup")
-	_, err := s.store.DB().NewUpdate().Model(&store.App{ID: s.customerID(), Settings: store.AppSettings{}}).
+	_, err := s.store.GlobalDB().NewUpdate().Model(&store.App{ID: s.customerID(), Settings: store.AppSettings{}}).
 		Column("settings").WherePK().Exec(context.Background())
 	s.Require().NoError(err)
 
@@ -2343,7 +2337,7 @@ func (s *ConfigsSuite) listTools(id string, names ...string) {
 	for _, name := range names {
 		tools = append(tools, store.ConnectorTool{Name: name, InputSchema: map[string]any{"type": "object"}})
 	}
-	s.Require().NoError(s.store.SetConnectorConnectionTools(context.Background(), s.customerID(), id, tools,
+	s.Require().NoError(s.store.ConnectorConnections.SetTools(context.Background(), s.customerID(), id, tools,
 		"digest", time.Now()))
 }
 
@@ -2627,7 +2621,7 @@ func (s *ConfigsSuite) TestAnUpdateKeepingABindingToAForceDeletedConnectorIsAcce
 	manifest, err := core.ParseManifest(source)
 	s.Require().NoError(err)
 	manifest.ID = "custom_" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	custom := sessionGitHubGranting("code", "create_issue")
 	custom["connector_id"] = manifest.ID
@@ -2640,47 +2634,35 @@ func (s *ConfigsSuite) TestAnUpdateKeepingABindingToAForceDeletedConnectorIsAcce
 	s.Equal(http.StatusOK, status)
 }
 
-// Tool output is kept as long as the session unless a config says otherwise, an update
-// that leaves the setting out keeps it, and an empty one removes it.
-func (s *ConfigsSuite) TestAConfigKeepsToolOutputForAsLongAsItSays() {
-	unnamed := s.createConfig(map[string]any{"name": "support"})
-	s.Nil(unnamed.Tools.OutputRetention)
+// A group keeps its tools' output as long as it says, and a group that says nothing as long
+// as the session.
+func (s *ConfigsSuite) TestAToolGroupKeepsItsOutputForAsLongAsItSays() {
+	created := s.createConfig(map[string]any{"name": "billing", "tools": []any{
+		map[string]any{"name": "cards", "output_retention": "7d", "tools": []any{"charge_card"}},
+		map[string]any{"name": "lookups", "tools": []any{"lookup_invoice"}},
+	}})
 
-	created := s.createConfig(map[string]any{"name": "billing", "tools": map[string]any{"output_retention": "7d"}})
-	s.Equal("7d", value(created.Tools.OutputRetention))
-
-	var saved AgentConfig
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut,
-		"/v1/agents/configs/"+created.Id, map[string]any{"name": "billing", "tools": map[string]any{"progressive": true}}, &saved))
-	s.Equal("7d", value(saved.Tools.OutputRetention), "a setting left out on an update stays")
-
-	var patched AgentConfig
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch,
-		"/v1/agents/configs/"+created.Id, map[string]any{"tools": map[string]any{"output_retention": "none"}}, &patched))
-	s.Equal("none", value(patched.Tools.OutputRetention))
-
-	var cleared AgentConfig
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch,
-		"/v1/agents/configs/"+created.Id, map[string]any{"tools": map[string]any{"output_retention": ""}}, &cleared))
-	s.Nil(cleared.Tools.OutputRetention)
+	s.Require().NotNil(created.Tools)
+	s.Equal("7d", value((*created.Tools)[0].OutputRetention))
+	s.Nil((*created.Tools)[1].OutputRetention)
 }
 
 func (s *ConfigsSuite) TestAToolOutputRetentionOutsideItsBoundsIsRefusedOnEveryWrite() {
 	created := s.createConfig(map[string]any{"name": "support"})
-	tooLong := map[string]any{"output_retention": "3651d"}
+	tooLong := []any{map[string]any{"name": "cards", "output_retention": "3651d", "tools": []any{"charge_card"}}}
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
 		map[string]any{"name": "billing", "tools": tooLong})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "tools.output_retention")
+	s.Contains(failure, "tools[0].output_retention")
 	status, failure = s.serverClient.failure(http.MethodPut, "/v1/agents/configs/"+created.Id,
 		map[string]any{"name": "support", "tools": tooLong})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "tools.output_retention")
+	s.Contains(failure, "tools[0].output_retention")
 	status, failure = s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
 		map[string]any{"tools": tooLong})
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "tools.output_retention")
+	s.Contains(failure, "tools[0].output_retention")
 }
 
 func callsExample() map[string]any {

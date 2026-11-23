@@ -12,7 +12,6 @@ import (
 
 	"github.com/uptrace/bun"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -39,9 +38,8 @@ func (s *PolicySuite) tiered() *tiered {
 	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	reads := &tierReads{}
-	db.DB().AddQueryHook(reads)
-	configs, err := appconfig.New(appconfig.Options{Store: db})
-	s.Require().NoError(err)
+	db.GlobalDB().AddQueryHook(reads)
+	configs := db
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 	t := &tiered{enforcer: enforcer, store: db, reads: reads, clock: time.Now()}
 	enforcer.now = func() time.Time { return t.clock }
@@ -50,9 +48,9 @@ func (s *PolicySuite) tiered() *tiered {
 }
 
 func (s *PolicySuite) recordedTier() string {
-	tier, err := s.store.TierOf(s.ctx, s.org)
+	tier, err := s.store.OrganizationTiers.Get(s.ctx, s.org)
 	s.Require().NoError(err)
-	return tier
+	return tier.Tier
 }
 
 func (s *PolicySuite) TestAnOrganizationWithNoTierIsReadOncePerTTL() {
@@ -69,9 +67,9 @@ func (s *PolicySuite) TestAnOrganizationWithNoTierIsReadOncePerTTL() {
 
 func (s *PolicySuite) TestARecordedTierIsReadAgainOnceTheTTLHasPassed() {
 	t := s.tiered()
-	s.Require().NoError(s.store.SetOrganizationTier(s.ctx, s.org, "tier-a", time.Now()))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(s.ctx, &store.OrganizationTier{OrganizationID: s.org, Tier: "tier-a", SeenAt: time.Now()}))
 	s.Require().Equal("tier-a", t.enforcer.tier(s.ctx, s.org))
-	s.Require().NoError(s.store.SetOrganizationTier(s.ctx, s.org, "tier-b", time.Now().Add(time.Second)))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(s.ctx, &store.OrganizationTier{OrganizationID: s.org, Tier: "tier-b", SeenAt: time.Now().Add(time.Second)}))
 
 	s.Equal("tier-a", t.enforcer.tier(s.ctx, s.org), "believed for the TTL")
 	t.clock = t.clock.Add(tierTTL)
@@ -114,7 +112,7 @@ func (s *PolicySuite) TestAnUnwrittenTierIsNotWrittenOverANewerOne() {
 	s.eventually(func() bool { return s.recordedTier() == "tier-a" }, 5*time.Second, 20*time.Millisecond)
 	t.clock = t.clock.Add(time.Second)
 	t.enforcer.Join(s.app, s.org, "tier-b")
-	s.Require().NoError(s.store.SetOrganizationTier(s.ctx, s.org, "tier-c", t.clock.Add(time.Second)))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(s.ctx, &store.OrganizationTier{OrganizationID: s.org, Tier: "tier-c", SeenAt: t.clock.Add(time.Second)}))
 
 	t.clock = t.clock.Add(tierTTL)
 	t.enforcer.tier(s.ctx, s.org)

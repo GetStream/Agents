@@ -106,7 +106,7 @@ func (s *Server) approveConnectionTools(ctx context.Context, request *approveCon
 	for _, tool := range connection.CachedTools {
 		listed[tool.Name] = tool.SchemaDigest
 	}
-	pins, err := s.store.ConnectorToolPins(ctx, connection.ID, connection.ConnectedAt)
+	pins, err := s.store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func (s *Server) approveConnectionTools(ctx context.Context, request *approveCon
 		return nil, conflict(fmt.Sprintf("the connection lists %s at another schema_digest than the one sent, "+
 			"so nothing was approved: read GET .../tools again", strings.Join(moved, ", ")))
 	}
-	err = s.store.ReapproveConnectorTools(ctx, connection, core.CorrelationOf(ctx).RequestID, approved)
+	err = s.store.ConnectorToolPins.Reapprove(ctx, connection, core.CorrelationOf(ctx).RequestID, approved)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return nil, errNoSuchConnection
 	}

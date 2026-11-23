@@ -67,23 +67,6 @@ final class ToolCallContext
     }
 
     /**
-     * Tells the people in the conversation how the call is going, such as "Found three
-     * flights, comparing prices". The agent puts it in its own words.
-     */
-    public function update(string $text): void
-    {
-        $this->sendUpdate($text, false);
-    }
-
-    /**
-     * `update()`, said word for word.
-     */
-    public function say(string $text): void
-    {
-        $this->sendUpdate($text, true);
-    }
-
-    /**
      * Keeps the call going if the person talks over the agent from here on, for a call that is
      * past the point of taking back, such as one that has started a payment.
      *
@@ -104,6 +87,29 @@ final class ToolCallContext
         if (!$answer->await()) {
             throw new CallNotHeldException($this->id);
         }
+    }
+
+    /**
+     * Tells the people in the conversation how the call is going.
+     *
+     * @param ?string $title replaces the call's display title while it runs, such as "Comparing 40 flights",
+     *     and on a voice call the agent tells the caller about it in its own words; null leaves it as it was
+     * @param ?array<string, mixed> $custom replaces the call's data whole, for their app to show, such as a
+     *     card under the message; it is kept once the call finishes, and null leaves it as it was
+     */
+    public function update(?string $title = null, ?array $custom = null): void
+    {
+        if ($this->send === null) {
+            return;
+        }
+        $frame = ['type' => 'tool_update', 'tool_call_id' => $this->id];
+        if ($title !== null && $title !== '') {
+            $frame['text'] = $title;
+        }
+        if ($custom !== null) {
+            $frame['custom'] = $custom;
+        }
+        ($this->send)($frame);
     }
 
     /**
@@ -130,12 +136,5 @@ final class ToolCallContext
     public function stop(): void
     {
         $this->stopping->cancel();
-    }
-
-    private function sendUpdate(string $text, bool $verbatim): void
-    {
-        if ($this->send !== null) {
-            ($this->send)(['type' => 'tool_update', 'tool_call_id' => $this->id, 'text' => $text, 'verbatim' => $verbatim]);
-        }
     }
 }

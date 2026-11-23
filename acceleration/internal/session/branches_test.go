@@ -256,7 +256,7 @@ func history(session *Session) []string {
 
 // response is a session's response as the store keeps it.
 func (s *BranchesSuite) response(session *Session, id string) store.AgentResponse {
-	response, err := s.store.SessionResponse(s.ctx, s.customer, session.ID(), id)
+	response, err := s.store.Responses.Get(s.ctx, s.customer, session.ID(), id)
 	s.Require().NoError(err)
 	return response
 }
@@ -500,13 +500,13 @@ func (s *BranchesSuite) TestTruncatingAUsersMemoriesDeletesTheCopiesOfTheirBranc
 	_, err := session.Regenerate(s.ctx, uuid.NewString(), second, options.LLM{})
 	s.Require().NoError(err)
 	s.settled(session)
-	copies, err := s.store.BranchMessages(s.ctx, s.customer, session.ID(), nil)
+	copies, err := s.store.BranchMessages.Select(s.ctx, s.customer, session.ID(), nil)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(copies)
 
 	s.Require().NoError(s.manager.TruncateMemories(s.ctx, s.customer, "employee-1"))
 
-	copies, err = s.store.BranchMessages(s.ctx, s.customer, session.ID(), nil)
+	copies, err = s.store.BranchMessages.Select(s.ctx, s.customer, session.ID(), nil)
 	s.Require().NoError(err)
 	s.Empty(copies)
 }
@@ -545,7 +545,7 @@ func (s *BranchesSuite) asksWithDocument(session *Session, text, name string) st
 	document := agent.Document{ID: store.NewID(), Name: name, Pages: 1, Text: "the text of " + name}
 	responseID := s.asksIn(agent.WithDocument(s.ctx, document), session, text)
 	spec := session.Spec()
-	s.Require().NoError(s.store.AddConversationDocument(s.ctx, &store.ConversationDocument{
+	s.Require().NoError(s.store.ConversationDocuments.Insert(s.ctx, &store.ConversationDocument{
 		ID: document.ID, CustomerID: s.customer, OwnerUserID: spec.Caller.UserID, SessionID: session.ID(),
 		ConversationID: spec.ConversationID, ResponseID: responseID, Name: name, Pages: 1, SHA256: "digest", Markdown: document.Text,
 	}))

@@ -64,7 +64,7 @@ func (s *MeteredSuite) accounts(keys keptKeys) (*Knowledge, *turbopuffertest.Ser
 		theirs.Config.Handler.ServeHTTP(w, r)
 	}))
 	s.T().Cleanup(theirs.front.Close)
-	base := NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, s.recorder, nil, s.store)
+	base := NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, s.recorder, nil, s.store.KnowledgeNamespaces)
 	base.WithCustomerAccounts(keys, func(region, key string) (knowledge.Backend, error) {
 		s.Equal(pricing.RegionUS, region)
 		return turbopuffer.New(turbopuffer.Options{APIKey: key, BaseURL: theirs.front.URL})
@@ -98,7 +98,7 @@ func (s *MeteredSuite) TestAnOwnerWhoKeepsATurbopufferKeyIsKeptInTheirOwnAccount
 	for _, credential := range theirs.credentials() {
 		s.Equal("Bearer "+customerTurbopufferKey, credential)
 	}
-	kept, recorded, err := s.store.KnowledgePlace(s.ctx, s.owner.CustomerID, "docs")
+	kept, recorded, err := s.store.KnowledgeNamespaces.GetPlace(s.ctx, s.owner.CustomerID, "docs")
 	s.Require().NoError(err)
 	s.True(recorded)
 	s.Equal(store.KnowledgePlace{Region: pricing.RegionUS, Account: store.KnowledgeAccountCustomer}, kept)

@@ -25,40 +25,46 @@ type Call struct {
 }
 
 // Line is how a running call reaches the session it runs for. The socket that delivered the
-// call puts it in the call's context (WithLine); without one, as outside a call, Update, Say
-// and DisallowInterruptions do nothing.
+// call puts it in the call's context (WithLine); without one, as outside a call,
+// DisallowInterruptions does nothing.
 type Line interface {
-	// Update says how the call is going, or with verbatim, words to say as written.
-	Update(ctx context.Context, id, text string, verbatim bool) error
 	// Hold asks for the call to keep going when the caller talks over the agent, and
 	// reports whether it was still running to be held.
 	Hold(ctx context.Context, id string) (bool, error)
+	// Update tells the session how the call is going.
+	Update(ctx context.Context, id string, update Update) error
+}
+
+// Update is what a running call tells the people in the conversation.
+type Update struct {
+	// Title replaces the call's display title while it runs, such as "Comparing 40
+	// flights", and on a voice call the agent tells the caller about it in its own words.
+	// Empty leaves the title as it was.
+	Title string
+	// Custom replaces the call's data whole, for their app to show, such as a card under
+	// the message. It is kept once the call finishes. Nil leaves it as it was.
+	Custom map[string]any
+}
+
+// Update sets the call's title while it runs, such as "Comparing 40 flights": SendUpdate
+// with a Title alone.
+func (c *Call) Update(ctx context.Context, title string) error {
+	return c.SendUpdate(ctx, Update{Title: title})
+}
+
+// SendUpdate tells the people in the conversation how the call is going: a new title, data
+// for their app to show, or both. Outside a call it does nothing.
+func (c *Call) SendUpdate(ctx context.Context, update Update) error {
+	line := lineFrom(ctx)
+	if line == nil {
+		return nil
+	}
+	return line.Update(ctx, c.ID, update)
 }
 
 // ErrNotHeld is why the context DisallowInterruptions returns is cancelled when the call
 // had already been stopped.
 var ErrNotHeld = errors.New("tools: the call was stopped before it could be held")
-
-// Update says how the call is going. The agent tells a voice caller in its own words once
-// nobody is talking, and a conversation shows it on the call's step until the call ends. A
-// newer update replaces one not yet said, and the result replaces both.
-func (c *Call) Update(ctx context.Context, text string) error {
-	line := lineFrom(ctx)
-	if line == nil {
-		return nil
-	}
-	return line.Update(ctx, c.ID, text, false)
-}
-
-// Say has the agent say text as written while the call runs, or post it in a text
-// conversation. A speech-to-speech model is asked for these words and may paraphrase them.
-func (c *Call) Say(ctx context.Context, text string) error {
-	line := lineFrom(ctx)
-	if line == nil {
-		return nil
-	}
-	return line.Update(ctx, c.ID, text, true)
-}
 
 // DisallowInterruptions keeps the call going from now on when the caller talks over the
 // agent, which is what a write that must not be left halfway wants. It returns the context

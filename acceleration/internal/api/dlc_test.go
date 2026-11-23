@@ -201,7 +201,7 @@ func (s *dlcRegistration) spend(field string, amount int) {
 
 func (s *DLCSuite) TestAUseCaseIsApprovedByStreamAndThenByTheVendor() {
 	number := store.PhoneNumber{CustomerID: s.customerID(), E164: s.utils.number(), Vendor: "telnyx"}
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &number))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &number))
 	sent := s.submitted()
 	s.Equal(UseCaseStatus(dlc.Submitted), sent.Status)
 
@@ -542,7 +542,7 @@ func (s *DLCSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
 
 func (s *DLCSuite) TestTheThirtyFirstMessageOfADayIsRefused() {
 	ctx := context.Background()
-	s.Require().NoError(s.store.SetSandboxRecipients(ctx, s.customerID(), []string{"+15551110000"}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(ctx, s.customerID(), []string{"+15551110000"}))
 	s.spend("messages", 29)
 	s.NoError(s.gate.Allow(ctx, s.customerID(), dlc.SMS, "+15551110000"))
 

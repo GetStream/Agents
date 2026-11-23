@@ -147,13 +147,21 @@ func (d *Directory) InAnotherShard(ctx context.Context, address string) (bool, e
 
 // sayShard says which shard this node is in, for holdFor.
 func (d *Directory) sayShard(ctx context.Context) {
-	if d.shard == "" {
+	commands := d.shardCommands()
+	if len(commands) == 0 {
 		return
 	}
-	command := d.redis.B().Set().Key(d.shards + d.address).Value(d.shard).Ex(holdFor).Build()
-	if err := d.redis.Do(ctx, command).Error(); err != nil {
+	if err := d.redis.Do(ctx, commands[0]).Error(); err != nil {
 		d.logger.Warn("could not say which shard this node is in", "shard", d.shard, "error", err)
 	}
+}
+
+// shardCommands say which shard this node is in, none for a node that has not been told.
+func (d *Directory) shardCommands() []rueidis.Completed {
+	if d.shard == "" {
+		return nil
+	}
+	return []rueidis.Completed{d.redis.B().Set().Key(d.shards + d.address).Value(d.shard).Ex(holdFor).Build()}
 }
 
 // Hold says this node is running a session, and goes on saying so until Release.
@@ -335,6 +343,16 @@ func (d *Directory) lookup(ctx context.Context, key string) (string, error) {
 
 // write says this node holds a session, for holdFor.
 func (d *Directory) write(ctx context.Context, sessionID string, held claim) {
+	for _, result := range d.redis.DoMulti(ctx, d.writeCommands(sessionID, held)...) {
+		if err := result.Error(); err != nil {
+			d.logger.Warn("could not say this node is running a session",
+				"session", sessionID, "error", err)
+			return
+		}
+	}
+}
+
+func (d *Directory) writeCommands(sessionID string, held claim) []rueidis.Completed {
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessions + sessionID).Value(d.address).Ex(holdFor).Build(),
 	}
@@ -346,13 +364,7 @@ func (d *Directory) write(ctx context.Context, sessionID string, held claim) {
 		commands = append(commands,
 			d.redis.B().Set().Key(d.channels+held.conversationID).Value(d.address).Ex(holdFor).Build())
 	}
-	for _, result := range d.redis.DoMulti(ctx, commands...) {
-		if err := result.Error(); err != nil {
-			d.logger.Warn("could not say this node is running a session",
-				"session", sessionID, "error", err)
-			return
-		}
-	}
+	return commands
 }
 
 // advertise says this node has workers for a customer, for holdFor.
@@ -361,15 +373,7 @@ func (d *Directory) write(ctx context.Context, sessionID string, held claim) {
 // cannot expire its members one at a time: a node that died is read past by its score and
 // swept out by the next node to renew.
 func (d *Directory) advertise(ctx context.Context, customerID string) {
-	key := d.workers + customerID
-	now := time.Now()
-	for _, result := range d.redis.DoMulti(ctx,
-		d.redis.B().Zadd().Key(key).ScoreMember().
-			ScoreMember(float64(now.Add(holdFor).UnixMilli()), d.address).Build(),
-		d.redis.B().Zremrangebyscore().Key(key).
-			Min("-inf").Max(strconv.FormatInt(now.UnixMilli(), 10)).Build(),
-		d.redis.B().Pexpire().Key(key).Milliseconds(holdFor.Milliseconds()).Build(),
-	) {
+	for _, result := range d.redis.DoMulti(ctx, d.advertiseCommands(customerID)...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say this node has workers for a customer",
 				"customer", customerID, "error", err)
@@ -378,24 +382,44 @@ func (d *Directory) advertise(ctx context.Context, customerID string) {
 	}
 }
 
+func (d *Directory) advertiseCommands(customerID string) []rueidis.Completed {
+	key := d.workers + customerID
+	now := time.Now()
+	return []rueidis.Completed{
+		d.redis.B().Zadd().Key(key).ScoreMember().
+			ScoreMember(float64(now.Add(holdFor).UnixMilli()), d.address).Build(),
+		d.redis.B().Zremrangebyscore().Key(key).
+			Min("-inf").Max(strconv.FormatInt(now.UnixMilli(), 10)).Build(),
+		d.redis.B().Pexpire().Key(key).Milliseconds(holdFor.Milliseconds()).Build(),
+	}
+}
+
 // publishOffer says what the workers here host for an agent, for holdFor.
 func (d *Directory) publishOffer(ctx context.Context, key offerKey, offer []byte) {
-	entry, err := json.Marshal(offerEntry{Until: time.Now().Add(holdFor).UnixMilli(), Offer: offer})
+	commands, err := d.offerCommands(key, offer)
 	if err != nil {
 		d.logger.Warn("could not say what this node's workers host", "agent", key.agentID, "error", err)
 		return
 	}
-	hash := d.offerKey(key)
-	for _, result := range d.redis.DoMulti(ctx,
-		d.redis.B().Hset().Key(hash).FieldValue().FieldValue(d.address, string(entry)).Build(),
-		d.redis.B().Pexpire().Key(hash).Milliseconds(holdFor.Milliseconds()).Build(),
-	) {
+	for _, result := range d.redis.DoMulti(ctx, commands...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say what this node's workers host",
 				"customer", key.customerID, "agent", key.agentID, "error", err)
 			return
 		}
 	}
+}
+
+func (d *Directory) offerCommands(key offerKey, offer []byte) ([]rueidis.Completed, error) {
+	entry, err := json.Marshal(offerEntry{Until: time.Now().Add(holdFor).UnixMilli(), Offer: offer})
+	if err != nil {
+		return nil, err
+	}
+	hash := d.offerKey(key)
+	return []rueidis.Completed{
+		d.redis.B().Hset().Key(hash).FieldValue().FieldValue(d.address, string(entry)).Build(),
+		d.redis.B().Pexpire().Key(hash).Milliseconds(holdFor.Milliseconds()).Build(),
+	}, nil
 }
 
 func (d *Directory) offerKey(key offerKey) string {
@@ -417,22 +441,40 @@ func (d *Directory) renew(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		d.renewAll(ctx)
+	}
+}
 
-		d.sayShard(ctx)
-		d.mu.Lock()
-		held := maps.Clone(d.held)
-		waiting := maps.Clone(d.waiting)
-		offered := maps.Clone(d.offered)
-		d.mu.Unlock()
+// renewAll says again everything this node holds, in one round trip however much that is.
+func (d *Directory) renewAll(ctx context.Context) {
+	d.mu.Lock()
+	held := maps.Clone(d.held)
+	waiting := maps.Clone(d.waiting)
+	offered := maps.Clone(d.offered)
+	d.mu.Unlock()
 
-		for sessionID, claimed := range held {
-			d.write(ctx, sessionID, claimed)
+	commands := d.shardCommands()
+	for sessionID, claimed := range held {
+		commands = append(commands, d.writeCommands(sessionID, claimed)...)
+	}
+	for customerID := range waiting {
+		commands = append(commands, d.advertiseCommands(customerID)...)
+	}
+	for key, offer := range offered {
+		offers, err := d.offerCommands(key, offer)
+		if err != nil {
+			d.logger.Warn("could not say what this node's workers host", "agent", key.agentID, "error", err)
+			continue
 		}
-		for customerID := range waiting {
-			d.advertise(ctx, customerID)
-		}
-		for key, offer := range offered {
-			d.publishOffer(ctx, key, offer)
+		commands = append(commands, offers...)
+	}
+	if len(commands) == 0 {
+		return
+	}
+	for _, result := range d.redis.DoMulti(ctx, commands...) {
+		if err := result.Error(); err != nil {
+			d.logger.Warn("could not renew what this node holds", "error", err)
+			return
 		}
 	}
 }

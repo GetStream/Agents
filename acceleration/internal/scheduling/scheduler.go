@@ -290,7 +290,7 @@ func (s *Scheduler) runDue(ctx context.Context) (time.Duration, bool) {
 		if free == 0 {
 			return 0, false
 		}
-		claimed, err := s.store.ClaimDueScheduledTasks(ctx, free, s.lease)
+		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not claim the scheduled tasks due", "error", err)
@@ -313,7 +313,7 @@ func (s *Scheduler) runDue(ctx context.Context) (time.Duration, bool) {
 			break
 		}
 	}
-	next, due, err := s.store.NextDueScheduledTask(ctx)
+	next, due, err := s.store.ScheduledTasks.NextDue(ctx)
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
@@ -502,7 +502,7 @@ func rungEarlier(earlier, later error) error {
 func (s *Scheduler) postpone(claim store.ClaimedScheduledTask, until time.Time) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
 	defer cancel()
-	held, err := s.store.PostponeScheduledTask(ctx, claim.Task.CustomerID, claim.Task.ID, claim.Run.ID, claim.ClaimID, until)
+	held, err := s.store.ScheduledTasks.Postpone(ctx, claim.Task.CustomerID, claim.Task.ID, claim.Run.ID, claim.LeasedBy, until)
 	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
 	switch {
 	case err != nil:
@@ -531,7 +531,7 @@ func (s *Scheduler) renewing(ctx context.Context, lose context.CancelCauseFunc, 
 			case <-ticker.C:
 			}
 			renew, cancel := context.WithTimeout(ctx, s.renewEvery)
-			held, err := s.store.RenewScheduledTaskLease(renew, claim.Task.CustomerID, claim.Task.ID, claim.ClaimID, s.lease)
+			held, err := s.store.ScheduledTasks.Renew(renew, claim.Task.CustomerID, claim.Task.ID, claim.LeasedBy, s.lease)
 			cancel()
 			if err != nil {
 				s.logger.Error("could not renew a scheduled task's lease",
@@ -597,7 +597,7 @@ func (s *Scheduler) after(schedule *Schedule, scheduledFor time.Time, failed boo
 func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.ScheduledTaskOutcome) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
 	defer cancel()
-	applied, err := s.store.FinishScheduledTaskRun(ctx, claim.Task.CustomerID, claim.Run.ID, claim.ClaimID, outcome)
+	applied, err := s.store.ScheduledTasks.Finish(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, outcome)
 	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
 	switch {
 	case err != nil:

@@ -44,7 +44,13 @@ public data class StreamCredentials(
     val apiKey: String,
     val user: User,
     val token: String,
-)
+) {
+    /** The key and the user, never the token: a logged credential is the commonest way one leaks. */
+    override fun toString(): String = "StreamCredentials(apiKey=$apiKey, user=$user, token=$REDACTED)"
+}
+
+/** What a credential is shown as where it is held but must not be printed. */
+internal const val REDACTED: String = "[redacted]"
 
 /**
  * Where the router is and who is asking.
@@ -106,6 +112,8 @@ public class Backend(
     }
 
     private val lock = Mutex()
+    /** What the model is told when one of the app's tools throws. See [StreamAgents.onToolError]. */
+    @Volatile internal var onToolError: ((call: AgentEvent.ToolCall, error: Throwable) -> String)? = null
     @Volatile private var identity: Identity? = null
     @Volatile private var cached: String? = null
 

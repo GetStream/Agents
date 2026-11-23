@@ -48,7 +48,7 @@ func (s *Server) listCustomModels(ctx context.Context, request *listCustomModels
 		return nil, invalidRequest(err.Error())
 	}
 	limit := store.CustomModelLimit(value(request.Limit.ptr()))
-	rows, err := s.store.CustomModels(ctx, customerID, limit, after)
+	rows, err := s.store.CustomModels.Select(ctx, customerID, store.CustomModelFilter{Limit: limit, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func (s *Server) createCustomModel(ctx context.Context, request *createCustomMod
 	if failure := s.fillCustomModel(ctx, &model, request.Body); failure != nil {
 		return nil, failure
 	}
-	if err := s.configs.CreateCustomModel(ctx, &model); err != nil {
+	if err := s.store.CustomModels.Insert(ctx, &model); err != nil {
 		return nil, storeFailure(err, errModelNameTaken)
 	}
 	return &createCustomModelResponse{Body: customModelOf(model)}, nil
@@ -95,7 +95,7 @@ func (s *Server) getCustomModel(ctx context.Context, request *getCustomModelRequ
 		return nil, errNoCustomModels
 	}
 
-	model, err := s.store.CustomModel(ctx, customerID, request.Id)
+	model, err := s.store.CustomModels.Get(ctx, customerID, request.Id)
 	if errors.Is(err, store.ErrNoCustomModel) {
 		return nil, errUnknownCustomModel
 	}
@@ -115,7 +115,7 @@ func (s *Server) updateCustomModel(ctx context.Context, request *updateCustomMod
 		return nil, errNoCustomModels
 	}
 
-	model, err := s.store.CustomModel(ctx, customerID, request.Id)
+	model, err := s.store.CustomModels.Get(ctx, customerID, request.Id)
 	if errors.Is(err, store.ErrNoCustomModel) {
 		return nil, errUnknownCustomModel
 	}
@@ -125,7 +125,7 @@ func (s *Server) updateCustomModel(ctx context.Context, request *updateCustomMod
 	if failure := s.fillCustomModel(ctx, &model, request.Body); failure != nil {
 		return nil, failure
 	}
-	if err := s.configs.UpdateCustomModel(ctx, &model); err != nil {
+	if err := s.store.CustomModels.Update(ctx, &model); err != nil {
 		if errors.Is(err, store.ErrNoCustomModel) {
 			return nil, errUnknownCustomModel
 		}
@@ -144,7 +144,7 @@ func (s *Server) deleteCustomModel(ctx context.Context, request *deleteCustomMod
 		return nil, errNoCustomModels
 	}
 
-	if err := s.configs.DeleteCustomModel(ctx, customerID, request.Id); err != nil {
+	if err := s.store.CustomModels.Delete(ctx, customerID, request.Id); err != nil {
 		if errors.Is(err, store.ErrNoCustomModel) {
 			return nil, errUnknownCustomModel
 		}

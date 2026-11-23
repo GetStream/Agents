@@ -2,6 +2,7 @@ package extract
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -70,7 +71,7 @@ const (
 // readDOC reads a Word 97-2003 document's text from its piece table ([MS-DOC] 2.9.177):
 // paragraphs, and tables row by row. The file keeps headings and lists as formatting
 // rather than text, and records no pages, so neither is read.
-func readDOC(data []byte) (Document, error) {
+func readDOC(ctx context.Context, data []byte) (Document, error) {
 	streams := map[string][]byte{"WordDocument": nil, "0Table": nil, "1Table": nil}
 	if _, err := oleStreams(data, streams); err != nil {
 		return Document{}, err
@@ -88,15 +89,15 @@ func readDOC(data []byte) (Document, error) {
 		tableStream = streams["1Table"]
 	}
 
-	text, err := docText(word, tableStream)
+	text, err := docText(ctx, word, tableStream)
 	if err != nil {
-		return Document{}, fail(Corrupt, DOC, err)
+		return Document{}, unreadable(ctx, DOC, err)
 	}
 	return Document{Pages: []Page{{Text: docMarkdown(text)}}}, nil
 }
 
 // docText reads the main document's characters out of the pieces they are stored in.
-func docText(word, tableStream []byte) ([]rune, error) {
+func docText(ctx context.Context, word, tableStream []byte) ([]rune, error) {
 	at := fibCsw
 	read16 := func() (int, error) {
 		if at+2 > len(word) {
@@ -160,9 +161,19 @@ func docText(word, tableStream []byte) ([]rune, error) {
 	descriptors := plc[(pieces+1)*4:]
 
 	var text []rune
+	// read is where the last piece ended. The pieces' character positions only increase, so
+	// a piece starting before it would read the same text again, once per such piece.
+	read := 0
 	for i := range pieces {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		start := int(binary.LittleEndian.Uint32(plc[i*4:]))
 		end := min(int(binary.LittleEndian.Uint32(plc[(i+1)*4:])), ccpText)
+		if start < read {
+			return nil, errors.New("the piece table goes back over text it already holds")
+		}
+		read = max(read, end)
 		if start >= end {
 			continue
 		}

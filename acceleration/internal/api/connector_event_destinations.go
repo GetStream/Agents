@@ -206,7 +206,7 @@ func (s *Server) createEventDestination(ctx context.Context, request *createEven
 	// The router's own events need no provider app.
 	connectorID := store.StreamSource
 	if request.ID != store.StreamSource {
-		definition, err := s.store.LatestConnectorDefinition(ctx, customerID, request.ID)
+		definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, request.ID)
 		if errors.Is(err, store.ErrNoConnectorDefinition) {
 			return nil, notFound("no such connector")
 		}
@@ -230,7 +230,7 @@ func (s *Server) createEventDestination(ctx context.Context, request *createEven
 		return nil, err
 	}
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
-	err = s.store.CreateEventDestination(ctx, &destination)
+	err = s.store.EventDestinations.Insert(ctx, &destination)
 	// 409: the request conflicts with the state of the resource (RFC 9110 section 15.5.10).
 	if errors.Is(err, store.ErrEventDestinationsFull) {
 		return nil, conflict(fmt.Sprintf("%s already has %d event destinations, the most it takes: delete one first",
@@ -257,7 +257,7 @@ func (s *Server) listEventDestinations(ctx context.Context, request *listEventDe
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.EventDestinations(ctx, customerID, request.ID, request.Limit, cursor)
+	found, err := s.store.EventDestinations.Select(ctx, customerID, store.EventDestinationFilter{ConnectorID: request.ID, Limit: request.Limit, After: cursor})
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +282,7 @@ func (s *Server) deleteEventDestination(ctx context.Context, request *eventDesti
 	if s.store == nil || s.eventForwarder == nil {
 		return nil, errNoEventForwarding
 	}
-	err := s.store.DeleteEventDestination(ctx, customerID, request.ID, request.DestinationID)
+	err := s.store.EventDestinations.Delete(ctx, customerID, request.ID, request.DestinationID)
 	if errors.Is(err, store.ErrNoEventDestination) {
 		return nil, notFound(noEventDestination)
 	}
@@ -303,8 +303,9 @@ func (s *Server) rotateEventDestinationSecret(ctx context.Context, request *even
 	if err != nil {
 		return nil, err
 	}
-	destination, err := s.store.RotateEventDestinationSecret(ctx, customerID, request.ID, request.DestinationID,
+	destination, err := s.store.EventDestinations.RotateSecret(ctx, customerID, request.ID, request.DestinationID,
 		secret.Sealed, secret.Version, eventforward.RotationOverlap(time.Now()))
+
 	if errors.Is(err, store.ErrNoEventDestination) {
 		return nil, notFound(noEventDestination)
 	}

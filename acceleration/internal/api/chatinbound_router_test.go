@@ -402,10 +402,10 @@ func (s *ChatInboundAppSuite) TestAnUnpinnedCallOnTheSameChannelIsNotTheDelivery
 	other := "someone-" + s.utils.uuid()
 	somebodyElse, releaseOther := s.dispatch.Register(other, dispatch.Registration{Capacity: 1})
 	defer releaseOther()
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+	s.heldCall(store.Call{
 		ID: s.utils.uuid(), CustomerID: other, CallID: s.utils.callID(), AgentID: s.channelID,
-		ConfigID: s.config(other), StartedAt: time.Now().UTC(),
-	}))
+		StartedAt: time.Now().UTC(),
+	}, s.config(other), "")
 
 	s.Equal(http.StatusOK, s.delivers(&s.RouterSuite, s.message(s.appID(), s.config(s.customerID()), ""), s.current))
 
@@ -532,7 +532,7 @@ func (d *chatInbounds) hooked(router *RouterSuite, path, body, secret string) in
 
 // queued is how many rows the endpoint queued for the channel.
 func (d *chatInbounds) queued(router *RouterSuite) int {
-	count, err := router.store.DB().NewSelect().Table("chat_inbound").
+	count, err := router.store.GlobalDB().NewSelect().Table("chat_inbound").
 		Where("position(? in body) > 0", []byte(fmt.Sprintf("%q", d.channelID))).Count(context.Background())
 	router.Require().NoError(err)
 	return count
@@ -647,7 +647,7 @@ func (s *ChatInboundAppSuite) config(customer string) string {
 
 func deliveredConfig(router *RouterSuite, customer string) string {
 	config := store.AgentConfig{CustomerID: customer, Name: "config-" + router.utils.uuid(), Mode: "text"}
-	router.Require().NoError(router.store.CreateAgentConfig(context.Background(), &config))
+	router.Require().NoError(router.store.AgentConfigs.Insert(context.Background(), &config))
 	return config.ID
 }
 

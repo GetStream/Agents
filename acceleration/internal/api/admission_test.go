@@ -21,7 +21,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/campaign"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
@@ -68,7 +67,7 @@ func (s *AdmissionSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
 	s.line = telnyxRinger{suite: &s.RouterSuite, private: private}
 	// A run cut short leaves its campaigns ringing, and this run's dialer would ring them.
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
 		store.Stopped, store.Scheduled, store.Running, store.Paused)
 	s.Require().NoError(err)
 }
@@ -255,7 +254,7 @@ func (s *AdmissionSuite) TestAUsersSpentLimitIsTooManyRequestsWithRetryAfter() {
 		Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.organization(), AppID: s.customerID(),
 		Interval: usage.Daily, LimitMicros: 1, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	spender := s.utils.uuid()
 	s.usage.Spend(s.T(), s.organization(), 1_000, func(event *usage.Event) { event.AppID, event.UserID = s.customerID(), spender })
 	asUser := s.signedIn(jwt.MapClaims{"user_id": spender}, auth.AuthTypeJWT, user, spender)
@@ -293,7 +292,7 @@ func (s *AdmissionSuite) TestAUserSpentForTheDayAndTheMonthRetriesAfterTheMonth(
 			Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.organization(), AppID: s.customerID(),
 			Interval: interval, LimitMicros: 1, UpdatedBy: "test",
 		}
-		s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+		s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	}
 	spender := s.utils.uuid()
 	s.usage.Spend(s.T(), s.organization(), 1_000, func(event *usage.Event) { event.AppID, event.UserID = s.customerID(), spender })
@@ -390,8 +389,7 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,
 // as another replica of the deployment.
 func (s *AdmissionSuite) otherRouter() *policy.Enforcer {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: s.usage.URL, Token: s.usage.Token})
 	s.Require().NoError(err)
 	_, holds := newRedisProxy(s.T())
@@ -558,10 +556,10 @@ func (s *AdmissionSuite) TestACallArrivingOverStreamForAnOrganizationThatMayNotP
 			s.SetupTest()
 			e164, callID := s.utils.number(), "phone-"+s.utils.uuid()
 			ctx := context.Background()
-			s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+			s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 				E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 			}))
-			s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164,
+			s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164,
 				store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID}))
 			if refused == codeAccountSuspended {
 				s.usage.Credit(s.T(), s.organization(), 10_000_000)
@@ -634,7 +632,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 		s.usage.Credit(s.T(), s.organization(), -10_000_000)
 		s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
 	default:
-		s.Require().NoError(s.store.SuspendTelephony(ctx, &store.TelephonySuspension{
+		s.Require().NoError(s.store.TelephonySuspensions.Upsert(ctx, &store.TelephonySuspension{
 			CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 		}))
 	}
@@ -649,7 +647,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	s.Never(func() bool { state, reason := read(); return state != CampaignStatePaused || reason != refused },
 		500*time.Millisecond, 20*time.Millisecond, "and it stays paused, with why, whatever its other slots were doing")
 	dialer.Close()
-	contacts, err := s.store.QueryContacts(ctx, created.Id, store.ContactFilter{})
+	contacts, err := s.store.CampaignContacts.Select(ctx, created.Id, store.ContactFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(contacts, 1)
 	s.Equal(store.Enrolled, contacts[0].Stage,
@@ -662,7 +660,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	case codeInsufficientCredits:
 		s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	default:
-		s.Require().NoError(s.store.LiftTelephonySuspension(ctx, s.customerID()))
+		s.Require().NoError(s.store.TelephonySuspensions.Delete(ctx, s.customerID()))
 	}
 	s.Require().Eventually(func() bool {
 		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
@@ -701,7 +699,7 @@ func (noOutcome) Classify(context.Context, store.Campaign, string, campaign.Step
 // from one of the app's numbers.
 func (s *AdmissionSuite) campaign(concurrency int) Campaign {
 	from := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: from, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	always := []CallingWindow{{Start: "00:00", End: "24:00"}}
@@ -960,7 +958,7 @@ func (s *AdmissionSuite) TestACallOverTheTiersCallsAtOnceIsATierLimitReached() {
 }
 
 func (s *AdmissionSuite) TestACallToSomebodyWhoOptedOutIsStillForbidden() {
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: "+15550001111", Channel: dlc.Voice, Source: "keyword",
 	}))
 

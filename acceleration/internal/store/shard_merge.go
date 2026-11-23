@@ -143,7 +143,7 @@ type spendRow struct {
 }
 
 // foldSpend keeps the limit biggest groups over the whole window and sums the rest into
-// spendOther, the way CustomerSpend's query does for one shard: rows with no value stay
+// spendOther, the way Requests.Spend's query does for one shard: rows with no value stay
 // their own group. It reads every shard's unfolded rows, so the folding is exact.
 func foldSpend(lists [][]spendRow, limit int) []SpendBucket {
 	type total struct {

@@ -264,7 +264,9 @@ func (s *ConnectorLoginSuite) TestAReconnectFinishedWithoutAHandBackIsPickedUpOn
 	s.Require().NoError(err)
 	s.Require().Contains(asked, `"status":"authorization_required"`)
 
-	s.setState(stale, func(state *core.CredentialState) { state.Status = store.ConnectionConnected })
+	s.setState(stale, func(state *core.CredentialState) {
+		state.Status, state.ConnectedAt = store.ConnectionConnected, time.Now().UTC()
+	})
 	said, err := s.call(d, "crm__call_tool", `{"tool":"whoami"}`)
 
 	s.Require().NoError(err)
@@ -436,7 +438,7 @@ func (s *ConnectorLoginSuite) TestAConnectionOnAnOutdatedRevisionStillOpens() {
 // seedCRM seeds the test's connector as a built-in at revision, with more manifest YAML in
 // extra, as a router start with that file does.
 func (s *ConnectorLoginSuite) seedCRM(revision int, extra string) {
-	s.Require().NoError(s.store.SeedConnectorDefinitions(s.ctx,
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx,
 		fstest.MapFS{s.connectorID + ".yaml": {Data: []byte(s.crmManifest(s.connectorID, revision) + extra)}}))
 }
 
@@ -628,7 +630,7 @@ func (s *ConnectorLoginSuite) TestABindingALoginOpensAuditsWithTheSession() {
 	s.False(opened, "the provider refused the token")
 	var rows []store.ConnectorAuditEvent
 	s.Require().Eventually(func() bool {
-		rows, err = s.store.ConnectorAuditEvents(s.ctx, s.customerID, store.AuditFilter{ConnectionID: mine})
+		rows, err = s.store.ConnectorAuditEvents.Select(s.ctx, s.customerID, store.AuditFilter{ConnectionID: mine})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	s.Equal(store.AuditGrantRevoked, rows[0].Action)
@@ -657,7 +659,7 @@ func (s *ConnectorLoginSuite) TestAnIncognitoSessionIsOfferedNoLogin() {
 // invocations is connection's call log, once it holds count rows and a moment more.
 func (s *ConnectorLoginSuite) invocations(connection string, count int) []store.ConnectorInvocation {
 	fetch := func() ([]store.ConnectorInvocation, error) {
-		return s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		return s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 	}
 	read := func() []store.ConnectorInvocation {
 		rows, err := fetch()
@@ -684,7 +686,7 @@ func (s *connectorFixture) pending(user, account string) string {
 		CustomerID: s.customerID, ConnectorID: s.connectorID, DefinitionRevision: s.revision,
 		OwnerType: store.OwnerUser, OwnerID: user, AuthScheme: bearer.Name, Inputs: map[string]string{"account": account},
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, s.registry, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, s.registry, connection))
 	return connection.ID
 }
 
@@ -694,7 +696,7 @@ func (s *ConnectorLoginSuite) noneConnection(user, account string) string {
 		CustomerID: s.customerID, ConnectorID: s.connectorID, DefinitionRevision: s.revision,
 		OwnerType: store.OwnerUser, OwnerID: user, AuthScheme: none.Name, Inputs: map[string]string{"account": account},
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, s.registry, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, s.registry, connection))
 	stored, _, err := none.New().Complete(s.ctx, core.CompleteInput{})
 	s.Require().NoError(err)
 	s.setState(connection.ID, func(state *core.CredentialState) {
@@ -703,12 +705,13 @@ func (s *ConnectorLoginSuite) noneConnection(user, account string) string {
 	return connection.ID
 }
 
-// connect is a consent finishing on id: account's token stored, the connection connected.
+// connect is a consent finishing on id: account's token stored, the connection connected, the
+// grant begun now (api/authorizations.go names it; the credential store stamps nothing).
 func (s *connectorFixture) connect(id, account string) {
 	stored, _, err := bearer.New().Complete(s.ctx, core.CompleteInput{Supplied: map[string]string{bearer.SuppliedToken: tokenOf(account)}})
 	s.Require().NoError(err)
 	s.setState(id, func(state *core.CredentialState) {
-		state.Credentials, state.Status = stored, store.ConnectionConnected
+		state.Credentials, state.Status, state.ConnectedAt = stored, store.ConnectionConnected, time.Now().UTC()
 	})
 }
 
@@ -794,7 +797,7 @@ func (s *ConnectorLoginSuite) TestADeclinedLoginEndsTheCallWithoutRunningIt() {
 	s.Contains(got.said, `"status":"declined"`)
 	s.Equal(persistent.AuthorizationDeclined, s.endedOf("call-1"))
 	never(s.T(), func() bool {
-		rows, err := s.store.ConnectorInvocations(s.ctx, s.customerID, mine, 0, nil)
+		rows, err := s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: mine, Limit: 0, After: nil})
 		return err != nil || len(rows) > 0
 	}, 300*time.Millisecond, 50*time.Millisecond, "nothing reached the provider")
 }
@@ -974,7 +977,7 @@ func (s *ConnectorLoginSuite) TestAStoppedReplysCallNeverRunsOnALaterLogin() {
 	s.Require().NoError(got.err)
 	s.Contains(got.said, `"status":"stopped"`)
 	never(s.T(), func() bool {
-		rows, err := s.store.ConnectorInvocations(s.ctx, s.customerID, mine, 0, nil)
+		rows, err := s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: mine, Limit: 0, After: nil})
 		return err != nil || len(rows) > 0
 	}, 300*time.Millisecond, 50*time.Millisecond, "the stopped request never reached the provider")
 }

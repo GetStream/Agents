@@ -72,7 +72,7 @@ func (s *RecordedCreateSuite) TestAGreetingSlowerThanTheRowIsStored() {
 	// Eventually runs its condition off the test goroutine, where a failed Require cannot stop the test.
 	s.Require().EventuallyWithT(func(c *assert.CollectT) {
 		require.NoError(c, m.records.Flush(s.ctx))
-		got, err := s.store.SessionResponses(s.ctx, s.customer, created.ID(), 10, nil)
+		got, err := s.store.Responses.Select(s.ctx, s.customer, created.ID(), store.ResponseFilter{Limit: 10})
 		require.NoError(c, err)
 		require.Len(c, got, 1)
 	}, settleFor, 20*time.Millisecond, "the greeting's turn is not stored")
@@ -86,7 +86,7 @@ func (s *RecordedCreateSuite) TestTheStoredToolsKeepSearch() {
 	s.Require().NoError(created.Close())
 	s.Require().NoError(m.records.Flush(s.ctx))
 
-	stored, err := s.store.SessionTools(s.ctx, created.ID())
+	stored, err := s.store.SessionTools.Get(s.ctx, created.ID())
 	s.Require().NoError(err)
 	names := make([]string, 0, len(stored))
 	for _, tool := range stored {
@@ -104,7 +104,7 @@ func (s *RecordedCreateSuite) TestASessionWhoseCallRefusedItLeavesNoRow() {
 	s.Require().NoError(m.records.Flush(s.ctx))
 
 	// Base 291f2e34c: no row, no activity and a peak of none.
-	rows, err := s.store.QuerySessions(s.ctx, s.customer, store.SessionFilter{Limit: 10})
+	rows, err := s.store.Sessions.Select(s.ctx, s.customer, store.SessionFilter{Limit: 10})
 	s.Require().NoError(err)
 	s.Empty(rows, "a session that never joined is listed")
 	to := time.Now().UTC().Add(time.Hour)
@@ -219,7 +219,7 @@ func (s *RecordedCreateSuite) queued(m *Manager, joining *Session, row store.Age
 	m.records.Opened(row, nil)
 	joining.startRecording()
 	s.Require().NoError(m.records.Flush(s.ctx))
-	rows, err := s.store.QuerySessions(s.ctx, s.customer, store.SessionFilter{Limit: 10})
+	rows, err := s.store.Sessions.Select(s.ctx, s.customer, store.SessionFilter{Limit: 10})
 	s.Require().NoError(err)
 	s.Require().Len(rows, 1)
 	return rows[0]

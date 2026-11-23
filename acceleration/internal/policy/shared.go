@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/redisscript"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
@@ -48,7 +49,7 @@ const reasonUnshared = "holds_unshared"
 //go:embed holds.lua
 var holdsSource string
 
-var holdsScript = rueidis.NewLuaScript(holdsSource)
+var holdsScript = redisscript.New(holdsSource)
 
 var (
 	holdsFlushed = promauto.NewCounter(prometheus.CounterOpts{

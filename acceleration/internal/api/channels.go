@@ -83,7 +83,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	}
 	account.SecretsSealed = sealed
 	account.SecretsKEKVersion = s.secrets.CurrentVersion()
-	if err := s.store.SaveChannelAccount(ctx, &account); err != nil {
+	if err := s.store.ChannelAccounts.Upsert(ctx, &account); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 
@@ -160,11 +160,11 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 		return nil, invalidRequest("a request body is required")
 	}
 
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Body.ConfigId)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Body.ConfigId)
 	if err != nil {
 		return nil, errUnknownConfig
 	}
-	if config.Channels.Identity != store.ChannelIdentityLink {
+	if config.Channels.Lines.Identity != store.ChannelIdentityLink {
 		return nil, invalidRequest(config.Name + " identifies a sender by their number, " +
 			"so there is nothing to link: set channels.identity to link to need a code")
 	}
@@ -187,7 +187,7 @@ func (s *Server) listChannelAccounts(ctx context.Context, _ *struct{}) (*listCha
 		return nil, errNoConfigs
 	}
 
-	found, err := s.store.ChannelAccounts(ctx, customerID)
+	found, err := s.store.ChannelAccounts.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +208,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 		return nil, errNoConfigs
 	}
 
-	found, err := s.store.ChannelAccounts(ctx, customerID)
+	found, err := s.store.ChannelAccounts.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +216,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 		if account.ID != request.Id {
 			continue
 		}
-		if err := s.store.DeleteChannelAccount(ctx, customerID, account.Kind, account.E164); err != nil {
+		if err := s.store.ChannelAccounts.Delete(ctx, customerID, account.Kind, account.E164); err != nil {
 			return nil, errUnknownAccount
 		}
 		return nil, nil
@@ -226,7 +226,7 @@ func (s *Server) disconnectChannel(ctx context.Context, request *disconnectChann
 
 // ownsNumber reports whether a number is one this app bought here.
 func (s *Server) ownsNumber(ctx context.Context, customerID, number string) (string, bool) {
-	held, err := s.store.Number(ctx, customerID, number)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, number)
 	if err != nil {
 		return "this app holds no number " + number + ": buy one with POST /v1/phone/numbers", false
 	}
@@ -322,11 +322,11 @@ func (s *Server) channelsComplaint(ctx context.Context, config store.AgentConfig
 // declaring it should not stop syncing meanwhile. Nothing answers on such a line until
 // it is connected, since a message arrives through the connected account.
 func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig) ([]string, string, bool) {
-	named := config.Channels.Lines()
+	named := config.Channels.Lines.Lines()
 	if len(named) == 0 {
 		return nil, "", true
 	}
-	if identity := config.Channels.Identity; identity != store.ChannelIdentityPhone && identity != store.ChannelIdentityLink {
+	if identity := config.Channels.Lines.Identity; identity != store.ChannelIdentityPhone && identity != store.ChannelIdentityLink {
 		return nil, "channels.identity is phone or link, not " + identity, false
 	}
 	var unconnected []string
@@ -335,7 +335,7 @@ func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig)
 		if !ok {
 			continue
 		}
-		if _, err := s.store.ChannelAccount(ctx, config.CustomerID, string(kind), number); errors.Is(err, store.ErrUnknownChannelAccount) {
+		if _, err := s.store.ChannelAccounts.GetByNumber(ctx, config.CustomerID, string(kind), number); errors.Is(err, store.ErrUnknownChannelAccount) {
 			unconnected = append(unconnected, "channels."+string(kind)+": this app has not connected "+number+
 				": connect it with POST /v1/agents/channels")
 		} else if err != nil {

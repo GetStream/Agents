@@ -14,7 +14,6 @@ module GetStream
     # The call a tool's block is running for, handed to it as the first argument:
     #
     #   tools.register("book_flight", description: "Book a flight", ...) do |tool_call_context, args|
-    #     tool_call_context.update("checking seats")
     #     tool_call_context.disallow_interruptions
     #     bookings.book(args["flight_id"], key: tool_call_context.id) unless tool_call_context.cancelled?
     #   end
@@ -66,19 +65,6 @@ module GetStream
         @lock.synchronize { @state == :cancelled }
       end
 
-      # Says how the call is going. A voice agent tells the caller in its own words once
-      # nobody is talking, and a conversation shows it on the call's step until the call
-      # ends. A newer update replaces one not yet said, and the result replaces both.
-      def update(text)
-        tell(text, false)
-      end
-
-      # Has the agent say text as written while the call runs, or post it in a text
-      # conversation. A speech-to-speech model is asked for these words and may paraphrase.
-      def say(text)
-        tell(text, true)
-      end
-
       # Keeps the call going from now on when the caller talks over the agent, which is what
       # a write that must not be left halfway wants. Only the call's timeout and its socket
       # ending stop it after this.
@@ -98,6 +84,24 @@ module GetStream
           @answered.wait(@lock) while @state == :asking
           raise CallNotHeldError, "the call #{id} was stopped before it could be held" if @state == :cancelled
         end
+        nil
+      end
+
+      # Tells the people in the conversation how the call is going. Outside a call it does
+      # nothing.
+      #
+      # @param title [String, nil] replaces the call's display title while it runs, such as
+      #   "Comparing 40 flights", and on a voice call the agent tells the caller about it in its
+      #   own words. Nil leaves the title as it was.
+      # @param custom [Hash, nil] replaces the call's data whole, for their app to show, such as
+      #   a card under the message. It is kept once the call finishes. Nil leaves it as it was.
+      def update(title = nil, custom: nil)
+        return nil unless @send && !id.empty?
+
+        frame = { type: "tool_update", tool_call_id: id }
+        frame[:text] = title unless title.nil? || title.empty?
+        frame[:custom] = custom unless custom.nil?
+        @send.call(frame)
         nil
       end
 
@@ -126,15 +130,6 @@ module GetStream
           @state = :cancelled
           @answered.broadcast
         end
-      end
-
-      private
-
-      def tell(text, verbatim)
-        return nil unless @send && !id.empty?
-
-        @send.call({ type: "tool_update", tool_call_id: id, text: text, verbatim: verbatim })
-        nil
       end
     end
   end

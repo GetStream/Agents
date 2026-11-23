@@ -63,7 +63,7 @@ func (s *Server) listCampaignContacts(ctx context.Context, request *listCampaign
 	}
 	limit := cmp.Or(request.Limit, defaultContactPage)
 	filter.Limit = limit + 1
-	found, err := s.store.QueryContacts(ctx, current.ID, filter)
+	found, err := s.store.CampaignContacts.Select(ctx, current.ID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (s *Server) addCampaignContacts(ctx context.Context, request *addCampaignCo
 	}
 	answer := AddContactsResponse{Refused: refused}
 	if len(contacts) > 0 {
-		added, duplicates, err := s.store.AddContacts(ctx, current.ID, contacts)
+		added, duplicates, err := s.store.CampaignContacts.InsertMany(ctx, current.ID, contacts)
 		if errors.Is(err, store.ErrCampaignLocked) {
 			return nil, errCampaignLocked
 		}
@@ -179,7 +179,7 @@ func (s *Server) updateCampaignContact(ctx context.Context, request *updateCampa
 	}
 	body := request.Body
 	country := cmp.Or(current.DefaultCountry, "US")
-	changed, err := s.store.UpdateContact(ctx, current.ID, request.ContactId, func(found store.Contact) (store.Contact, error) {
+	changed, err := s.store.CampaignContacts.Update(ctx, current.ID, request.ContactId, func(found store.Contact) (store.Contact, error) {
 		input := ContactInput{
 			ToNumber:     found.ToNumber,
 			Variables:    found.Variables,
@@ -229,7 +229,7 @@ func (s *Server) deleteCampaignContact(ctx context.Context, request *campaignCon
 	if current.State != store.Draft {
 		return nil, errContactsFixed
 	}
-	err = s.store.DeleteContact(ctx, current.ID, request.ContactId)
+	err = s.store.CampaignContacts.Delete(ctx, current.ID, request.ContactId)
 	switch {
 	case errors.Is(err, store.ErrNoCampaignContact):
 		return nil, errUnknownContact
@@ -247,7 +247,7 @@ func (s *Server) deleteCampaignContacts(ctx context.Context, request *campaignRe
 	if err != nil {
 		return nil, err
 	}
-	err = s.store.DeleteContacts(ctx, current.ID)
+	err = s.store.CampaignContacts.DeleteAll(ctx, current.ID)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, errCampaignLocked
 	}
@@ -272,7 +272,7 @@ func (s *Server) stopCampaignContact(ctx context.Context, request *campaignConta
 	if err != nil {
 		return nil, err
 	}
-	err = s.store.StopContact(ctx, current.ID, request.ContactId)
+	err = s.store.CampaignContacts.Stop(ctx, current.ID, request.ContactId)
 	if errors.Is(err, store.ErrNoCampaignContact) {
 		return nil, errUnknownContact
 	}
@@ -284,7 +284,7 @@ func (s *Server) stopCampaignContact(ctx context.Context, request *campaignConta
 
 // contactAnswer renders one contact of a campaign with every dial made to them.
 func (s *Server) contactAnswer(ctx context.Context, current store.Campaign, contactID string) (*campaignContactResponse, error) {
-	contact, attempts, err := s.store.CampaignContact(ctx, current.ID, contactID)
+	contact, attempts, err := s.store.CampaignContacts.Get(ctx, current.ID, contactID)
 	if errors.Is(err, store.ErrNoCampaignContact) {
 		return nil, errUnknownContact
 	}
@@ -331,7 +331,7 @@ func (s *Server) contactsOf(ctx context.Context, current store.Campaign, contact
 	for _, contact := range contacts {
 		ids = append(ids, contact.ID)
 	}
-	made, err := s.store.AttemptsMade(ctx, ids)
+	made, err := s.store.CampaignAttempts.Made(ctx, ids)
 	if err != nil {
 		return nil, err
 	}

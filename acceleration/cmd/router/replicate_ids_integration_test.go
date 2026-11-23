@@ -57,9 +57,9 @@ func (s *ReplicateIDsSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -125,21 +125,21 @@ func (s *ReplicateIDsSuite) numbersLive() func() {
 
 // drawn sets the target's phone number sequence to having handed out last.
 func (s *ReplicateIDsSuite) drawn(last int64) {
-	_, err := s.target.DB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence('phone_numbers', 'id'), ?)", last)
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, "SELECT setval(pg_get_serial_sequence('phone_numbers', 'id'), ?)", last)
 	s.Require().NoError(err)
 }
 
 // asInt4 makes the target's phone number sequence an int4 one, as a serial column's is. The
 // databases are this suite's own and are built again for every test.
 func (s *ReplicateIDsSuite) asInt4() {
-	_, err := s.target.DB().ExecContext(s.ctx, "ALTER SEQUENCE phone_numbers_id_seq AS integer")
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, "ALTER SEQUENCE phone_numbers_id_seq AS integer")
 	s.Require().NoError(err)
 }
 
 // numbersAlongsideAcme makes every insert of an acme number on the target insert a number of
 // another app's in the same statement, drawing from the sequence right after the acme row lands.
 func (s *ReplicateIDsSuite) numbersAlongsideAcme() {
-	_, err := s.target.DB().ExecContext(s.ctx, `
+	_, err := s.target.GlobalDB().ExecContext(s.ctx, `
 CREATE FUNCTION number_alongside() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
 	INSERT INTO phone_numbers (e164, vendor, country, customer_id) VALUES ('+15559999999', 'telnyx', 'US', 'alongside');
@@ -152,14 +152,14 @@ CREATE TRIGGER number_alongside AFTER INSERT ON phone_numbers FOR EACH ROW WHEN 
 // alongside is the id the number recorded alongside acme's drew.
 func (s *ReplicateIDsSuite) alongside() int64 {
 	var id int64
-	s.Require().NoError(s.target.DB().QueryRowContext(s.ctx, "SELECT id FROM phone_numbers WHERE customer_id = 'alongside'").Scan(&id))
+	s.Require().NoError(s.target.GlobalDB().QueryRowContext(s.ctx, "SELECT id FROM phone_numbers WHERE customer_id = 'alongside'").Scan(&id))
 	return id
 }
 
 // held says whether acme holds the number with the id given on the target.
 func (s *ReplicateIDsSuite) held(id int64) bool {
 	var held bool
-	s.Require().NoError(s.target.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.target.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT EXISTS (SELECT 1 FROM phone_numbers WHERE customer_id = 'acme' AND id = ?)", id).Scan(&held))
 	return held
 }
@@ -167,7 +167,7 @@ func (s *ReplicateIDsSuite) held(id int64) bool {
 // copiedNumber is a number of acme's as an export carries it, under the source's id, which
 // also makes its digits, so no two copied numbers are one.
 func copiedNumber(id int64) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"id":%d,"e164":"+1555%07d","vendor":"telnyx","country":"US","customer_id":"acme",`+
+	return json.RawMessage(fmt.Sprintf(`{"id":%d,"e164":"+1555%07d","vendor":"sip_trunk","country":"US","customer_id":"acme",`+
 		`"capabilities":["voice"],"monthly_cost_micros":0,"tags":{},"purchased_at":"2026-10-30T00:00:00Z"}`, id, id))
 }
 
@@ -182,7 +182,7 @@ func inserted(id int64) store.DataChange {
 func (s *ReplicateIDsSuite) numbered() (*store.PhoneNumber, error) {
 	s.recorded++
 	number := &store.PhoneNumber{E164: fmt.Sprintf("+1555%07d", 8000+s.recorded), Vendor: "telnyx", Country: "US", CustomerID: "other"}
-	return number, s.target.RecordNumber(s.ctx, number)
+	return number, s.target.PhoneNumbers.Insert(s.ctx, number)
 }
 
 func (s *ReplicateIDsSuite) TestANumberRecordedAfterACopyDrawsAnIDAboveTheCopiedOnes() {

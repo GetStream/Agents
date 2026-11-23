@@ -1,0 +1,124 @@
+//go:build integration
+
+package node
+
+import (
+	"context"
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
+)
+
+// DirectorySuite covers what a node says in Redis about what it holds.
+type DirectorySuite struct {
+	suite.Suite
+	ctx        context.Context
+	client     rueidis.Client
+	roundTrips *roundTrips
+	prefix     string
+}
+
+func TestDirectorySuite(t *testing.T) {
+	suite.Run(t, new(DirectorySuite))
+}
+
+func (s *DirectorySuite) SetupTest() {
+	address := os.Getenv("ROUTER_REDIS_ADDR")
+	if address == "" {
+		s.T().Skip("ROUTER_REDIS_ADDR not set")
+	}
+	s.Require().NoError(redisready.Ready(address))
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	s.ctx = context.Background()
+	s.roundTrips = &roundTrips{}
+	s.client = rueidishook.WithHook(client, s.roundTrips)
+	s.prefix = "directory-test:" + time.Now().Format(time.RFC3339Nano)
+}
+
+// A renewal says again everything the node holds in one round trip, however many sessions,
+// customers and offers that is, and what lapsed is back.
+func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
+	directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-a:1", Shard: "eu", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	for _, session := range []string{"s1", "s2", "s3"} {
+		directory.Hold(s.ctx, session, "agent-"+session, "messaging:"+session)
+	}
+	directory.Wait(s.ctx, "acme")
+	directory.Wait(s.ctx, "globex")
+	directory.Offer(s.ctx, "acme", "agent-s1", []byte(`{"tools":[]}`))
+	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
+	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
+	s.Require().NoError(err)
+	s.Require().Len(keys, 3*3+2+2+1)
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
+
+	before := s.roundTrips.sent.Load()
+	directory.renewAll(s.ctx)
+	s.Equal(int64(1), s.roundTrips.sent.Load()-before)
+
+	for _, key := range keys {
+		ttl, err := s.client.Do(s.ctx, s.client.B().Pttl().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Greater(ttl, int64(0), "%s is held again, for a while", key)
+	}
+	peer, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-b:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	peer.Close()
+	held, err := peer.NodeByConversation(s.ctx, "messaging:s3")
+	s.Require().NoError(err)
+	s.Equal("node-a:1", held)
+	waiting, err := peer.Waiting(s.ctx, "globex")
+	s.Require().NoError(err)
+	s.Equal([]string{"node-a:1"}, waiting)
+	offers, err := peer.Offers(s.ctx, "acme", "agent-s1")
+	s.Require().NoError(err)
+	s.JSONEq(`{"tools":[]}`, string(offers["node-a:1"]))
+}
+
+// roundTrips counts what is sent to Redis: a command, or a pipeline of them, is one.
+type roundTrips struct{ sent atomic.Int64 }
+
+func (r *roundTrips) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.Do(ctx, cmd)
+}
+
+func (r *roundTrips) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (r *roundTrips) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (r *roundTrips) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (r *roundTrips) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	r.sent.Add(1)
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	r.sent.Add(1)
+	return client.DoStream(ctx, cmd)
+}
+
+func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
+}

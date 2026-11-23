@@ -263,7 +263,7 @@ func (s *EpisodeCardsSuite) TestACallsCardIsSummarizedWhenItsNumberIsLinkedDurin
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/users/user-"+s.utils.uuid(),
 		`{"phone": "`+s.number+`"}`, nil))
 	var aside int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND address LIKE 'retired:%'", s.customerID()).Scan(&aside))
 	s.Require().Equal(1, aside, "the link set the call's row aside")
 	s.Equal(http.StatusOK, s.signedly(phone.CallHookPath, s.sessionEnded(call)))
@@ -341,7 +341,7 @@ func (s *EpisodeCardsSuite) TestACallUnderAConfigWithoutCardsEndsAsBefore() {
 	s.Never(func() bool { return len(s.chat.Requests(suiteStreamKey)) > before }, dropped, 20*time.Millisecond,
 		"the hook asked Stream something")
 	var episodes int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episodes))
 	s.Zero(episodes)
 }
@@ -356,7 +356,7 @@ func (s *EpisodeCardsSuite) sessionEnded(call string) string {
 func (s *EpisodeCardsSuite) callEpisode(call string) string {
 	var id string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT id FROM episodes WHERE customer_id = ? AND call_id = ?", s.customerID(), call).Scan(&id) == nil
 	}, settleFor, 10*time.Millisecond)
 	return id
@@ -365,7 +365,7 @@ func (s *EpisodeCardsSuite) callEpisode(call string) string {
 // episodeStatus is an episode's status as stored.
 func (s *EpisodeCardsSuite) episodeStatus(id string) string {
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(), "SELECT status FROM episodes WHERE id = ?", id).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), "SELECT status FROM episodes WHERE id = ?", id).Scan(&status))
 	return status
 }
 
@@ -400,8 +400,8 @@ func (s *EpisodeCardsSuite) readCall(call string) bool {
 func (s *EpisodeCardsSuite) omniChannel(number string) string {
 	var cid string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
-			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = ? AND address = ?",
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
+			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = ? AND address = ?",
 			s.customerID(), s.config.Id, store.ContactPhone, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
 	return strings.TrimPrefix(cid, "agent:")
@@ -417,7 +417,7 @@ func (s *EpisodeCardsSuite) cards(omni string, count int) []map[string]any {
 // contacts is how many contact map rows the test's agent has.
 func (s *EpisodeCardsSuite) contacts() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
-		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND agent_config_id = ?", s.customerID(), s.config.Id).Scan(&count))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT count(*) FROM contact_map WHERE customer_id = ? AND config_id = ?", s.customerID(), s.config.Id).Scan(&count))
 	return count
 }

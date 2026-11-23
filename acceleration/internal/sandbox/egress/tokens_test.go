@@ -86,11 +86,11 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, customer, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, customer, manifest)
 	s.Require().NoError(err)
 	connection := &store.ConnectorConnection{CustomerID: customer, ConnectorID: definition.ID, DefinitionRevision: definition.Revision,
 		OwnerType: store.OwnerApp, AuthScheme: bearer.Name}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, s.registry, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, s.registry, connection))
 	s.unbound = nil
 	s.grant = egress.Grant{Connection: core.ConnectionRef{CustomerID: customer, ConnectionID: connection.ID}, Binding: "forge",
 		Config: "config-1", Connector: definition.ID, Selection: "fixed", Scheme: bearer.Name, Placeholder: "va_ph_forge", Hosts: []string{"api.forge.example"}}
@@ -121,7 +121,7 @@ func (s *ResolverTokensSuite) TestEachCallGivesTheTokenTheConnectionHoldsThen() 
 func (s *ResolverTokensSuite) TestAConnectionThatIsNotConnectedOrIsGoneGivesNoCredential() {
 	s.hold("gho_first", store.ConnectionNeedsReauthorization)
 	_, reauthorize := s.tokens(s.ctx, s.grant)
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, s.grant.Connection.CustomerID, s.grant.Connection.ConnectionID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, s.grant.Connection.CustomerID, s.grant.Connection.ConnectionID))
 	_, deleted := s.tokens(s.ctx, s.grant)
 
 	s.ErrorIs(reauthorize, sandbox.ErrNoCredential)

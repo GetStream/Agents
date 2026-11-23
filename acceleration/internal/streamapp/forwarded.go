@@ -115,7 +115,7 @@ func (f *Forwarded) keep(ctx context.Context, app int64, token heldToken) (bool,
 	if err != nil {
 		return false, err
 	}
-	kept, err := f.store.KeepStreamAppToken(ctx, store.StreamAppToken{
+	kept, err := f.store.StreamAppTokens.Keep(ctx, &store.StreamAppToken{
 		StreamAppPK: app, CustomerID: token.customer, APIKey: token.apiKey,
 		Sealed: sealed, KEKVersion: f.sealer.CurrentVersion(), ExpiresAt: token.expires,
 	})
@@ -173,7 +173,7 @@ func (f *Forwarded) read(ctx context.Context, app int64) (heldToken, error) {
 	if ok && held.expires.Sub(f.now()) >= refreshBefore {
 		return held, nil
 	}
-	row, err := f.store.StreamAppToken(ctx, app)
+	row, err := f.store.StreamAppTokens.Get(ctx, app)
 	if errors.Is(err, store.ErrNoStreamAppToken) {
 		return heldToken{}, ErrNoIdentity
 	}

@@ -38,7 +38,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -75,7 +74,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 )
 
 // tracer records the spans this package opens around work a route pattern does not say.
@@ -134,13 +132,6 @@ type Options struct {
 	// providers alone.
 	Billable []pricing.Item
 	Store    *store.Store
-	// Configs reads and writes the tenant's configuration -- keys, policies, agent and
-	// router configs, voices -- through whatever cache is in front of Postgres. Built
-	// over Store when it is not given, in which case every read is a query.
-	Configs *appconfig.Store
-	// Users writes down the end users each app is seen acting for. Built over Store when
-	// it is not given, in which case it caches in this process alone.
-	Users *users.Recorder
 	// Activity counts every request an app makes, by area and client. A deployment without
 	// one keeps no activity record.
 	Activity *activity.Recorder
@@ -356,8 +347,7 @@ type Server struct {
 	prices             *pricing.Active
 	billable           []pricing.Item
 	store              *store.Store
-	configs            *appconfig.Store
-	users              *users.Recorder
+	configs            *store.Store
 	activity           *activity.Recorder
 	live               *live.Client
 	phone              *phone.Service
@@ -481,6 +471,12 @@ type Server struct {
 	// workers to another one.
 	draining  chan struct{}
 	drainOnce sync.Once
+
+	// stopBackground ends the work the server runs for as long as it lives, the relay's
+	// subscriptions and the expiry of its watchers, and background is that work, which Close
+	// waits for.
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 }
 
 // Option adjusts the options a server is built from. It exists for the settings a
@@ -538,20 +534,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	configs := options.Configs
-	if configs == nil && options.Store != nil {
-		var err error
-		if configs, err = appconfig.New(appconfig.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
-	recorder := options.Users
-	if recorder == nil && options.Store != nil {
-		var err error
-		if recorder, err = users.New(users.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
+	configs := options.Store
 	pricer := options.Pricer
 	if pricer == nil && options.Prices != nil {
 		pricer = options.Prices
@@ -574,7 +557,6 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		billable:           options.Billable,
 		store:              options.Store,
 		configs:            configs,
-		users:              recorder,
 		activity:           options.Activity,
 		live:               options.Live,
 		phone:              options.Phone,
@@ -673,11 +655,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	}
 	server.serverSide = serverSide
 
-	// The subscriptions outlive every request, so they are held against the process
-	// rather than against a context a handler brought with it. Closing the Redis client
-	// is what ends them, which is what shutting the deployment down already does.
+	// The subscriptions outlive every request, so they are held against the server rather
+	// than against a context a handler brought with it. Close is what ends them.
+	background, stopBackground := context.WithCancel(context.Background())
+	server.stopBackground = stopBackground
 	if options.Relay != nil {
-		if server.relayed, err = server.newRelayed(context.Background(), options.Relay); err != nil {
+		if server.relayed, err = server.newRelayed(background, options.Relay); err != nil {
+			stopBackground()
 			return nil, fmt.Errorf("api: subscribe to the session relay: %w", err)
 		}
 	}
@@ -730,6 +714,25 @@ func (s *Server) kickScheduled() {
 // closed normally stops waiting for work at all.
 func (s *Server) Drain() {
 	s.drainOnce.Do(func() { close(s.draining) })
+}
+
+// Close ends the work the server runs in the background, the relay's subscriptions among it,
+// and waits for it until ctx is done, returning ctx's error if it had not ended by then. A
+// watcher on another node is not served once it is called, so it comes after the HTTP
+// servers have stopped.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopBackground()
+	ended := make(chan struct{})
+	go func() {
+		s.background.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // methodNotAllowed is the answer to a method a route does not serve.
@@ -1414,7 +1417,7 @@ func (s *Server) vouchedKey(r *http.Request, principal auth.Principal) string {
 // caller asked for, and refusing the request they did ask for because of it would be the
 // wrong trade.
 func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
-	if s.users == nil || principal.UserID == "" {
+	if s.store == nil || principal.UserID == "" {
 		return
 	}
 	var err error
@@ -1422,11 +1425,11 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	case auth.KindAnonymous:
 		return
 	case auth.KindAuthenticated:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
 	case auth.KindGuest:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
 	default:
-		err = s.users.Named(ctx, principal.AppID, principal.UserID)
+		err = s.store.Users.Named(ctx, principal.AppID, principal.UserID)
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
@@ -1436,14 +1439,14 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 
 // recordEmail keeps the address a backend said its user signs in with (auth.EmailHeader),
 // which a consent for a connector whose manifest sets owner_email is checked against. Only a
-// server-side caller has one (auth.Principal.Email), and users.Recorder.Email does nothing
+// server-side caller has one (auth.Principal.Email), and store.Users.Email does nothing
 // without one or without a user, nor for the address it last wrote. A failure is logged, as
 // recordUser's is: the consent it would have served then finds no address and is refused.
 func (s *Server) recordEmail(ctx context.Context, principal auth.Principal) {
-	if s.users == nil {
+	if s.store == nil {
 		return
 	}
-	if err := s.users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
+	if err := s.store.Users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
 		s.logger.Error("could not record an end user's email", "customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
@@ -1790,8 +1793,8 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerStats(
-		ctx, string(request.Modality), customerID, granularity, request.From, request.To, tags)
+	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
 	}
@@ -1833,8 +1836,8 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTagStats(ctx, string(request.Modality), customerID,
-		request.Key, granularity, request.From, request.To)
+	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
@@ -1881,8 +1884,8 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTurnStats(
-		ctx, customerID, agentID, granularity, request.From, request.To)
+	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
 	}
@@ -1932,7 +1935,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	if scope := request.Scope.ptr(); scope != nil && *scope == spendScopeOrganization {
 		// An app in no organization is its own.
 		if organization := OrganizationFrom(ctx); organization != "" {
-			apps, err := s.store.OrganizationApps(ctx, organization)
+			apps, err := s.store.AppOrganizations.Apps(ctx, organization)
 			if err != nil {
 				return nil, err
 			}
@@ -1952,7 +1955,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		limit = *request.Limit.ptr()
 	}
 
-	buckets, err := s.store.CustomerSpend(ctx, customerID, groupBy,
+	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
@@ -2013,7 +2016,7 @@ func (s *Server) getTagKeys(ctx context.Context, request *getTagKeysRequest) (*g
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
-	found, err := s.store.CustomerTagKeys(ctx, customerID, request.From, request.To, tags)
+	found, err := s.store.Requests.TagKeys(ctx, customerID, request.From, request.To, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -2088,11 +2091,22 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
+	configID := value(request.Agent.ptr())
+	if configID != "" {
+		if _, err := s.store.AgentConfigs.Get(ctx, customerID, configID); err != nil {
+			return nil, errUnknownConfig
+		}
+	}
+
 	peak, err := s.store.CustomerConcurrencyPeak(ctx, customerID, request.From, request.To)
 	if err != nil {
 		return nil, err
 	}
-	overall, tools, err := s.store.CustomerToolUsage(ctx, customerID, request.From, request.To)
+	turns, err := s.store.CustomerTurns(ctx, customerID, configID, request.From, request.To)
+	if err != nil {
+		return nil, err
+	}
+	overall, tools, err := s.store.CustomerToolUsage(ctx, customerID, configID, request.From, request.To)
 	if err != nil {
 		return nil, err
 	}
@@ -2100,24 +2114,41 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 	stats := AgentStats{
 		PeakConcurrentSessions: peak.Sessions,
 		PeakAt:                 peak.At,
-		ToolCalls:              toolStatsOf(overall),
+		Sessions:               turns.Sessions,
+		AvgTurns:               share(turns.Turns, turns.Sessions),
+		ToolCalls:              toolStatsOf(overall, turns.Sessions),
 		Tools:                  make([]ToolStats, 0, len(tools)),
 	}
 	for _, tool := range tools {
-		stats.Tools = append(stats.Tools, toolStatsOf(tool))
+		stats.Tools = append(stats.Tools, toolStatsOf(tool, turns.Sessions))
 	}
 	return &getAgentStatsResponse{Body: stats}, nil
 }
 
-func toolStatsOf(usage store.ToolUsage) ToolStats {
+func toolStatsOf(usage store.ToolUsage, sessions int64) ToolStats {
 	return ToolStats{
-		Tool:      usage.Tool,
-		Calls:     usage.Calls,
-		Failed:    usage.Failed,
-		AvgTokens: usage.AvgTokens,
-		AvgMs:     usage.AvgMs,
-		P99Ms:     usage.P99Ms,
+		Tool:              usage.Tool,
+		Calls:             usage.Calls,
+		Failed:            usage.Failed,
+		Sessions:          usage.Sessions,
+		SessionShare:      share(usage.Sessions, sessions),
+		AvgTurnsBeforeUse: usage.AvgTurnsBeforeUse,
+		AvgTokens:         usage.AvgTokens,
+		AvgMs:             usage.AvgMs,
+		P99Ms:             usage.P99Ms,
+		Loading:           usage.Loading,
+		DefinitionTokens:  usage.DefinitionTokens,
+		SummaryTokens:     usage.SummaryTokens,
 	}
+}
+
+// share is part over whole, nil when whole is none.
+func share(part, whole int64) *float64 {
+	if whole == 0 {
+		return nil
+	}
+	ratio := float64(part) / float64(whole)
+	return &ratio
 }
 
 // runRollup aggregates every customer's request rows into a rollup table. It is a
@@ -2134,7 +2165,7 @@ func (s *Server) runRollup(ctx context.Context, request *runRollupRequest) (*run
 	}
 
 	granularity := granularityOf(request.Body.Granularity)
-	written, err := s.store.Rollup(ctx, granularity, request.Body.From, request.Body.To)
+	written, err := s.store.Buckets.Rollup(ctx, granularity, request.Body.From, request.Body.To)
 	if err != nil {
 		return nil, err
 	}
@@ -2410,13 +2441,16 @@ func (s *Server) registerServer(api huma.API) {
 		Path:        "/v1/stats/agents",
 		Summary:     "How the calling customer's agents ran, across all of them",
 		Description: "The most agents that were running at once, and which tools they called: how often, " +
-			"how much each call put in front of the model and how long it took.\n" +
+			"in how many sessions and after how many turns, how much each call put in front of the model, " +
+			"what the tool's definition costs every turn that carries it and how long a call took.\n" +
+			"With agent, the sessions, turns and tools are that agent config's alone; the peak is still " +
+			"every agent's.\n" +
 			"One figure for the whole window rather than a row per bucket, because neither a peak nor " +
 			"a percentile can be summed out of smaller ones.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The window's figures"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.getAgentStats)
 	huma.Register(api, huma.Operation{
 		OperationID: "runRollup",
@@ -2552,8 +2586,9 @@ type getActivityResponse struct {
 }
 
 type getAgentStatsRequest struct {
-	From time.Time `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To   time.Time `query:"to" doc:"End of the window, exclusive." required:"true"`
+	From  time.Time             `query:"from" doc:"Start of the window, inclusive." required:"true"`
+	To    time.Time             `query:"to" doc:"End of the window, exclusive." required:"true"`
+	Agent optionalParam[string] `query:"agent" doc:"The id of an agent config: only its sessions are counted. Omitted is every agent."`
 }
 
 type getAgentStatsResponse struct {
@@ -2564,18 +2599,26 @@ type getAgentStatsResponse struct {
 type AgentStats struct {
 	PeakConcurrentSessions int64       `json:"peak_concurrent_sessions" doc:"The most sessions open at the same time, each one an agent running. A session still open counts up to now."`
 	PeakAt                 *time.Time  `json:"peak_at" nullable:"true" doc:"When that peak was first reached. Null when no session was open in the window."`
+	Sessions               int64       `json:"sessions" doc:"Sessions that took a turn in the window: what a tool's session_share is out of."`
+	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one."`
 	ToolCalls              ToolStats   `json:"tool_calls" doc:"Every tool call in the window, as one. Its tool is empty."`
 	Tools                  []ToolStats `json:"tools" nullable:"false" doc:"One row per tool, most called first."`
 }
 
 // ToolStats is how often a tool ran and what it cost.
 type ToolStats struct {
-	Tool      string   `json:"tool"`
-	Calls     int64    `json:"calls"`
-	Failed    int64    `json:"failed" doc:"Calls that ended in an error."`
-	AvgTokens float64  `json:"avg_tokens" doc:"What a call put in front of the model, its arguments and its result, estimated at four characters a token."`
-	AvgMs     *float64 `json:"avg_ms" nullable:"true" doc:"From the call starting to its result. Null when none was timed."`
-	P99Ms     *float64 `json:"p99_ms" nullable:"true"`
+	Tool              string   `json:"tool"`
+	Calls             int64    `json:"calls"`
+	Failed            int64    `json:"failed" doc:"Calls that ended in an error."`
+	Sessions          int64    `json:"sessions" doc:"Sessions that called it at least once."`
+	SessionShare      *float64 `json:"session_share" nullable:"true" minimum:"0" doc:"Sessions that called it, out of the window's sessions, from 0 to 1. Null when no session took a turn."`
+	AvgTurnsBeforeUse *float64 `json:"avg_turns_before_use" nullable:"true" doc:"Turns a session took before its first call, on average: 0 is a call on the first turn. Null on the row over every tool."`
+	AvgTokens         float64  `json:"avg_tokens" doc:"What a call put in front of the model, its arguments and its result, estimated at four characters a token."`
+	AvgMs             *float64 `json:"avg_ms" nullable:"true" doc:"From the call starting to its result. Null when none was timed."`
+	P99Ms             *float64 `json:"p99_ms" nullable:"true"`
+	Loading           string   `json:"loading" doc:"How the latest call had the tool offered: full, summary or deferred. Empty when no call recorded it, as calls made before it was recorded and built-in tools."`
+	DefinitionTokens  *int64   `json:"definition_tokens" nullable:"true" doc:"What the tool's whole definition, its name, description and schema, costs every turn that carries it, estimated at four characters a token. Null when no call recorded it."`
+	SummaryTokens     *int64   `json:"summary_tokens" nullable:"true" doc:"What its definition costs offered as a summary. Null unless its loading is summary."`
 }
 
 type runRollupRequest struct {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/GetStream/Vision-Agents/sdks/go/tools"
 )
 
 // errNoSocket is why a running call could not reach its session: the socket it came on is
@@ -17,12 +19,19 @@ type toolLine struct {
 	holds *holds
 }
 
-func (l toolLine) Update(_ context.Context, id, text string, verbatim bool) error {
-	return l.send(Frame{"type": "tool_update", "tool_call_id": id, "text": text, "verbatim": verbatim})
-}
-
 func (l toolLine) Hold(ctx context.Context, id string) (bool, error) {
 	return l.holds.ask(ctx, id, func() error { return l.send(Frame{"type": "tool_hold", "tool_call_id": id}) })
+}
+
+func (l toolLine) Update(_ context.Context, id string, update tools.Update) error {
+	frame := Frame{"type": "tool_update", "tool_call_id": id}
+	if update.Title != "" {
+		frame["text"] = update.Title
+	}
+	if update.Custom != nil {
+		frame["custom"] = update.Custom
+	}
+	return l.send(frame)
 }
 
 // holds are the calls that asked to be held and wait on the router's tool_held or

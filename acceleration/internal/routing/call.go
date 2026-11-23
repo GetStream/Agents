@@ -63,7 +63,9 @@ type Meter struct {
 const ReserveTTL = 2 * time.Minute
 
 // reserve sets the meter's estimate aside under the stat's usage id, giving it one when it has
-// none, and answers the id reserved under: nil when nothing was.
+// none, and answers the id reserved under: nil when nothing was. The estimate is priced with
+// the stat's attributes, as its row will be, so work priced by them, such as a text by where
+// it goes, holds what it may cost.
 func (m Meter) reserve(stat *Stat) (uuid.UUID, error) {
 	if m.Estimate == nil || m.Recorder == nil || m.Free {
 		return uuid.Nil, nil
@@ -71,7 +73,9 @@ func (m Meter) reserve(stat *Stat) (uuid.UUID, error) {
 	if stat.UsageID == uuid.Nil {
 		stat.UsageID = uuid.Must(uuid.NewV7())
 	}
-	if err := m.Recorder.Reserve(m.Config, m.Owner, stat.UsageID, m.Estimate, cmp.Or(m.ReserveFor, ReserveTTL)); err != nil {
+	estimate := Stat{Attributes: stat.Attributes}
+	estimate.Use(m.Estimate)
+	if err := m.Recorder.ReserveStat(m.Config, m.Owner, stat.UsageID, estimate, cmp.Or(m.ReserveFor, ReserveTTL)); err != nil {
 		return uuid.Nil, refusedReservation{err}
 	}
 	return stat.UsageID, nil

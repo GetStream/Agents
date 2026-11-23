@@ -203,7 +203,7 @@ func (s *ChatLoginsSuite) echoRanOn(events *websocket.Conn) map[string]any {
 // attemptsOn is how many consents were begun on connection.
 func (s *ChatLoginsSuite) attemptsOn(connection string) int {
 	var attempts int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", connection).Scan(&attempts))
 	return attempts
 }

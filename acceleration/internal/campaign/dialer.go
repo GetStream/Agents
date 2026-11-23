@@ -48,7 +48,7 @@ func NewPhoneDialer(phone *phone.Service, sessions *session.Manager, store *stor
 // Dial places one call and stays on the line until the conversation is over. The agent config
 // is read at each dial, so a change to it reaches the next person rung.
 func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
-	config, err := d.store.AgentConfig(ctx, dial.Campaign.CustomerID, cmp.Or(dial.Step.ConfigID, dial.Campaign.ConfigID))
+	config, err := d.store.AgentConfigs.Get(ctx, dial.Campaign.CustomerID, cmp.Or(dial.Step.ConfigID, dial.Campaign.ConfigID))
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return Dialed{Result: Paused, Reason: reasonConfigMissing}, nil
 	}
@@ -150,7 +150,7 @@ func (d *phoneDialer) close(created *session.Session) {
 func callOutcome(ctx context.Context, st *store.Store, customerID, callID string) (outcome.Outcome, error) {
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	calls, err := st.PhoneCalls(ctx, customerID, []string{callID})
+	calls, err := st.CallLegs.SelectPlaced(ctx, customerID, []string{callID})
 	if err != nil {
 		return outcome.Unknown, err
 	}

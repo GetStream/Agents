@@ -54,7 +54,7 @@ func (s *RunnerSuite) SetupSuite() {
 
 func (s *RunnerSuite) SetupTest() {
 	// A claim reaches every running campaign in the database, so each test starts with none.
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, phone_calls CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, call_legs CASCADE")
 	s.Require().NoError(err)
 
 	// Tuesday 10:00 UTC, inside the default weekday hours.
@@ -84,14 +84,14 @@ func (s *RunnerSuite) launched(sequence Sequence, concurrency int, zone string, 
 	s.Require().NoError(err)
 	campaign := store.Campaign{CustomerID: s.customerID, Name: "renewals", ConfigID: "config-1",
 		FromNumber: "+15550100000", Concurrency: concurrency, Sequence: rawSequence, CallingHours: rawHours}
-	s.Require().NoError(s.store.CreateCampaign(s.ctx, &campaign))
+	s.Require().NoError(s.store.Campaigns.Insert(s.ctx, &campaign))
 	contacts := make([]store.Contact, len(numbers))
 	for i, number := range numbers {
 		contacts[i] = store.Contact{ToNumber: number, TimeZone: zone}
 	}
-	_, _, err = s.store.AddContacts(s.ctx, campaign.ID, contacts)
+	_, _, err = s.store.CampaignContacts.InsertMany(s.ctx, campaign.ID, contacts)
 	s.Require().NoError(err)
-	launched, err := s.store.LaunchCampaign(s.ctx, s.customerID, campaign.ID, store.Launch{
+	launched, err := s.store.Campaigns.Launch(s.ctx, s.customerID, campaign.ID, store.Launch{
 		StartAt: s.clock.now(), Now: s.clock.now(), APIKey: "key-a", UserID: "user-1", UsageCategories: []string{"sales"},
 	})
 	s.Require().NoError(err)
@@ -112,16 +112,16 @@ func (s *RunnerSuite) tick(runner *Runner) {
 }
 
 func (s *RunnerSuite) contact(campaign store.Campaign, number string) (store.Contact, []store.CampaignAttempt) {
-	contacts, err := s.store.QueryContacts(s.ctx, campaign.ID, store.ContactFilter{Number: number, Limit: 10})
+	contacts, err := s.store.CampaignContacts.Select(s.ctx, campaign.ID, store.ContactFilter{Number: number, Limit: 10})
 	s.Require().NoError(err)
 	s.Require().Len(contacts, 1)
-	contact, attempts, err := s.store.CampaignContact(s.ctx, campaign.ID, contacts[0].ID)
+	contact, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contacts[0].ID)
 	s.Require().NoError(err)
 	return contact, attempts
 }
 
 func (s *RunnerSuite) campaignNow(campaign store.Campaign) store.Campaign {
-	found, err := s.store.Campaign(s.ctx, campaign.CustomerID, campaign.ID)
+	found, err := s.store.Campaigns.Get(s.ctx, campaign.CustomerID, campaign.ID)
 	s.Require().NoError(err)
 	return found
 }
@@ -159,7 +159,7 @@ func (s *RunnerSuite) TestTwoRunnersTogetherKeepToTheCampaignsConcurrency() {
 	s.Require().Eventually(func() bool { return s.dialer.inFlight() == 1 }, 5*time.Second, 10*time.Millisecond)
 	s.runner.tick(s.ctx)
 	other.tick(s.ctx)
-	inProgress, err := s.store.QueryContacts(s.ctx, campaign.ID, store.ContactFilter{Stage: store.InProgress, Limit: 10})
+	inProgress, err := s.store.CampaignContacts.Select(s.ctx, campaign.ID, store.ContactFilter{Stage: store.InProgress, Limit: 10})
 	s.Require().NoError(err)
 
 	s.Len(inProgress, 1)
@@ -237,7 +237,7 @@ func (s *RunnerSuite) TestDoNotCallOptsTheNumberOut() {
 	s.Equal(store.ContactCompleted, contact.Stage)
 	s.Equal(OutcomeDoNotCall, contact.Outcome)
 	s.False(contact.Converted)
-	optOuts, err := s.store.OptOuts(s.ctx, s.customerID, 10, nil)
+	optOuts, err := s.store.OptOuts.Select(s.ctx, s.customerID, 10, nil)
 	s.Require().NoError(err)
 	s.Require().Len(optOuts, 1)
 	s.Equal("+15550000001", optOuts[0].Recipient)
@@ -250,7 +250,7 @@ func (s *RunnerSuite) TestDoNotCallOptsTheNumberOut() {
 
 func (s *RunnerSuite) TestAnOptOutAfterLaunchFailsTheContactBeforeItIsDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	s.Require().NoError(s.store.OptOut(s.ctx, &store.OptOut{CustomerID: s.customerID, Recipient: "+15550000001", Channel: "voice", Source: "api"}))
+	s.Require().NoError(s.store.OptOuts.Insert(s.ctx, &store.OptOut{CustomerID: s.customerID, Recipient: "+15550000001", Channel: "voice", Source: "api"}))
 
 	s.tick(s.runner)
 
@@ -265,7 +265,7 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	campaign := s.launched(s.single(), 2, "UTC", "+15550000001", "+15550000002")
 	// A router claimed both and died with the calls in flight; its lease has run out since.
 	died := s.clock.now()
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-dead", died, lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", died, lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 2)
 	outcomes := map[string]string{"+15550000001": "completed", "+15550000002": "no_answer"}
@@ -273,11 +273,11 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	for _, one := range claimed {
 		callID := uuid.NewString()
 		callIDs[one.Contact.ToNumber] = callID
-		s.Require().NoError(s.store.StartDial(s.ctx, &store.CampaignAttempt{CampaignID: campaign.ID, ContactID: one.Contact.ID,
+		s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &store.CampaignAttempt{CampaignID: campaign.ID, ContactID: one.Contact.ID,
 			StepID: "step_1", Attempt: 1, Dial: 1, CallID: callID, StartedAt: died}))
-		s.Require().NoError(s.store.InsertPhoneCall(s.ctx, &store.PhoneCall{Token: uuid.NewString(), CustomerID: s.customerID,
+		s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 			CallType: "default", CallID: callID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: one.Contact.ToNumber,
-			PlacedAt: died, Outcome: outcomes[one.Contact.ToNumber]}))
+			PlacedAt: &died, Outcome: outcomes[one.Contact.ToNumber]}))
 	}
 	s.transcripts.write(callIDs["+15550000001"], talked())
 	s.clock.advance(lease + time.Minute)
@@ -299,7 +299,7 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	_, err := s.store.ClaimDueContacts(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.clock.advance(lease + time.Minute)
 
@@ -316,7 +316,7 @@ func (s *RunnerSuite) TestATakeOverOfAnAttemptNeverDialedLeavesItUnused() {
 	s.tick(s.runner)
 	// Attempt 2 comes due, and a router claims it and dies before dialing it.
 	s.clock.advance(3 * 24 * time.Hour)
-	_, err := s.store.ClaimDueContacts(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.clock.advance(lease + time.Minute)
 
@@ -334,7 +334,7 @@ func (s *RunnerSuite) TestAPauseDuringTheFirstOfADoubleDialStopsTheSecond() {
 
 	s.runner.tick(s.ctx)
 	s.Require().Eventually(func() bool { return s.dialer.inFlight() == 1 }, 5*time.Second, 10*time.Millisecond)
-	s.Require().NoError(s.store.PauseCampaign(s.ctx, s.customerID, campaign.ID, ""))
+	s.Require().NoError(s.store.Campaigns.Pause(s.ctx, s.customerID, campaign.ID, ""))
 	close(s.dialer.hold)
 	s.runner.dialing.Wait()
 
@@ -350,10 +350,10 @@ func (s *RunnerSuite) TestAPauseDuringTheFirstOfADoubleDialStopsTheSecond() {
 func (s *RunnerSuite) TestAContactOfACampaignThatCannotBeReadFails() {
 	campaign := store.Campaign{CustomerID: s.customerID, Name: "broken", ConfigID: "config-1", FromNumber: "+15550100000",
 		Sequence: json.RawMessage(`{"bogus": true}`), CallingHours: json.RawMessage(`{"windows": {}}`)}
-	s.Require().NoError(s.store.CreateCampaign(s.ctx, &campaign))
-	_, _, err := s.store.AddContacts(s.ctx, campaign.ID, []store.Contact{{ToNumber: "+15550000001"}})
+	s.Require().NoError(s.store.Campaigns.Insert(s.ctx, &campaign))
+	_, _, err := s.store.CampaignContacts.InsertMany(s.ctx, campaign.ID, []store.Contact{{ToNumber: "+15550000001"}})
 	s.Require().NoError(err)
-	_, err = s.store.LaunchCampaign(s.ctx, s.customerID, campaign.ID, store.Launch{StartAt: s.clock.now(), Now: s.clock.now()})
+	_, err = s.store.Campaigns.Launch(s.ctx, s.customerID, campaign.ID, store.Launch{StartAt: s.clock.now(), Now: s.clock.now()})
 	s.Require().NoError(err)
 
 	s.tick(s.runner)
@@ -366,10 +366,10 @@ func (s *RunnerSuite) TestAContactOfACampaignThatCannotBeReadFails() {
 
 func (s *RunnerSuite) TestAContactClaimedJustBeforeAPauseIsNotDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-a", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
-	s.Require().NoError(s.store.PauseCampaign(s.ctx, s.customerID, campaign.ID, ""))
+	s.Require().NoError(s.store.Campaigns.Pause(s.ctx, s.customerID, campaign.ID, ""))
 
 	s.runner.attempt(s.ctx, claimed[0])
 
@@ -384,10 +384,10 @@ func (s *RunnerSuite) TestAContactClaimedJustBeforeAPauseIsNotDialed() {
 
 func (s *RunnerSuite) TestAContactStoppedJustAfterItWasClaimedIsNotDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-a", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
-	s.Require().NoError(s.store.StopContact(s.ctx, campaign.ID, claimed[0].Contact.ID))
+	s.Require().NoError(s.store.CampaignContacts.Stop(s.ctx, campaign.ID, claimed[0].Contact.ID))
 
 	s.runner.attempt(s.ctx, claimed[0])
 
@@ -404,7 +404,7 @@ func (s *RunnerSuite) TestAContactStoppedDuringTheFirstOfADoubleDialIsNotDialedA
 	s.runner.tick(s.ctx)
 	s.Require().Eventually(func() bool { return s.dialer.inFlight() == 1 }, 5*time.Second, 10*time.Millisecond)
 	contact, _ := s.contact(campaign, "+15550000001")
-	s.Require().NoError(s.store.StopContact(s.ctx, campaign.ID, contact.ID))
+	s.Require().NoError(s.store.CampaignContacts.Stop(s.ctx, campaign.ID, contact.ID))
 	close(s.dialer.hold)
 	s.runner.dialing.Wait()
 
@@ -419,7 +419,7 @@ func (s *RunnerSuite) TestAPausedCampaignFinishesItsCallAndSchedulesTheNext() {
 
 	s.runner.tick(s.ctx)
 	s.Require().Eventually(func() bool { return s.dialer.inFlight() == 1 }, 5*time.Second, 10*time.Millisecond)
-	s.Require().NoError(s.store.PauseCampaign(s.ctx, s.customerID, campaign.ID, ""))
+	s.Require().NoError(s.store.Campaigns.Pause(s.ctx, s.customerID, campaign.ID, ""))
 	close(s.dialer.hold)
 	s.runner.dialing.Wait()
 
@@ -438,7 +438,7 @@ func (s *RunnerSuite) TestAStoppedCampaignsContactInACallEndsStopped() {
 
 	s.runner.tick(s.ctx)
 	s.Require().Eventually(func() bool { return s.dialer.inFlight() == 1 }, 5*time.Second, 10*time.Millisecond)
-	s.Require().NoError(s.store.StopCampaign(s.ctx, s.customerID, campaign.ID, s.clock.now()))
+	s.Require().NoError(s.store.Campaigns.Stop(s.ctx, s.customerID, campaign.ID, s.clock.now()))
 	close(s.dialer.hold)
 	s.runner.dialing.Wait()
 
@@ -609,7 +609,7 @@ func (s *RunnerSuite) TestACampaignWhoseConfigIsGonePausesWithoutUsingAnAttempt(
 
 func (s *RunnerSuite) leavingAMessageWith(config store.AgentConfig, action string) store.Campaign {
 	config.CustomerID, config.Name = s.customerID, "agent-"+uuid.NewString()
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	sequence := s.single()
 	sequence.Steps[0].ConfigID = config.ID
 	sequence.Steps[0].Voicemail = VoicemailSetting{Action: action, Message: "Call us back."}
@@ -624,7 +624,7 @@ func (s *RunnerSuite) TestACampaignLeavingAMessageWithAConfigThatBecameSpeechToS
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
-	campaign := s.leavingAMessageWith(store.AgentConfig{STS: "stub/stub-sts"}, VoicemailLeaveMessage)
+	campaign := s.leavingAMessageWith(store.AgentConfig{Models: store.AgentModels{STS: "stub/stub-sts"}}, VoicemailLeaveMessage)
 
 	s.tick(runner)
 
@@ -644,7 +644,7 @@ func (s *RunnerSuite) TestACampaignWhoseSessionCouldNotOpenPausesBeforeRinging()
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
-	campaign := s.leavingAMessageWith(store.AgentConfig{VideoMaxFrames: 9}, VoicemailHangUp)
+	campaign := s.leavingAMessageWith(store.AgentConfig{Video: store.AgentVideo{MaxFrames: 9}}, VoicemailHangUp)
 
 	s.tick(runner)
 
@@ -658,7 +658,7 @@ func (s *RunnerSuite) TestACampaignWhoseSessionCouldNotOpenPausesBeforeRinging()
 
 func (s *RunnerSuite) TestASpeechToSpeechConfigIsOnlyRefusedAVoicemailMessage() {
 	// Telephony is suspended, so a call that reaches the phone service fails before any vendor.
-	s.Require().NoError(s.store.SuspendTelephony(s.ctx, &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(s.ctx, &store.TelephonySuspension{
 		CustomerID: s.customerID, Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	config, err := phone.DefaultConfig()
@@ -668,8 +668,8 @@ func (s *RunnerSuite) TestASpeechToSpeechConfigIsOnlyRefusedAVoicemailMessage() 
 	dialer := NewPhoneDialer(service, nil, s.store, slog.New(slog.DiscardHandler))
 
 	for action, reason := range map[string]string{VoicemailHangUp: "telephony_suspended", VoicemailLeaveMessage: reasonVoicemailNeedsExactWords} {
-		campaign := s.leavingAMessageWith(store.AgentConfig{STS: "stub/stub-sts"}, action)
-		contacts, err := s.store.QueryContacts(s.ctx, campaign.ID, store.ContactFilter{Limit: 1})
+		campaign := s.leavingAMessageWith(store.AgentConfig{Models: store.AgentModels{STS: "stub/stub-sts"}}, action)
+		contacts, err := s.store.CampaignContacts.Select(s.ctx, campaign.ID, store.ContactFilter{Limit: 1})
 		s.Require().NoError(err)
 		sequence, err := ParseSequence(campaign.Sequence)
 		s.Require().NoError(err)
@@ -732,7 +732,7 @@ func (s *RunnerSuite) TestAClassificationCutOffByCloseIsFreeForAnotherRouterAtOn
 
 	runner.Close()
 
-	claimed, err := s.store.ClaimClassifications(s.ctx, "router-b", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "router-b", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1, "not left leased to a router that is gone")
 	contact, _ := s.contact(campaign, "+15550000001")
@@ -831,7 +831,7 @@ func (s *RunnerSuite) TestAStoppingRouterRingsNoContactItAlreadyClaimed() {
 	runner := s.newRunner("router-e")
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-e", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-e", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -851,7 +851,7 @@ func (s *RunnerSuite) TestADialRecordedAsTheRouterStopsIsNotPlaced() {
 	runner := s.newRunner("router-f")
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-f", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-f", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -1049,15 +1049,15 @@ func (s *RunnerSuite) TestADialKeepsHowThePhoneSaysItsCallEnded() {
 func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
 	died := s.clock.now()
-	claimed, err := s.store.ClaimDueContacts(s.ctx, "router-dead", died, lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", died, lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	callID := uuid.NewString()
-	s.Require().NoError(s.store.StartDial(s.ctx, &store.CampaignAttempt{CampaignID: campaign.ID, ContactID: claimed[0].Contact.ID,
+	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &store.CampaignAttempt{CampaignID: campaign.ID, ContactID: claimed[0].Contact.ID,
 		StepID: "step_1", Attempt: 1, Dial: 1, CallID: callID, StartedAt: died}))
-	s.Require().NoError(s.store.InsertPhoneCall(s.ctx, &store.PhoneCall{Token: uuid.NewString(), CustomerID: s.customerID,
+	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 		CallType: "default", CallID: callID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
-		PlacedAt: died, Outcome: "busy"}))
+		PlacedAt: &died, Outcome: "busy"}))
 	s.clock.advance(lease + time.Minute)
 
 	s.tick(s.runner)
@@ -1073,7 +1073,7 @@ func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 
 func (s *RunnerSuite) TestACallsOutcomeIsReadFromThePhone() {
 	answeredAt := s.clock.now()
-	calls := map[string]store.PhoneCall{
+	calls := map[string]store.CallLeg{
 		"joined":    {AnsweredAt: &answeredAt},
 		"busy":      {Outcome: "busy"},
 		"undecided": {},
@@ -1082,8 +1082,10 @@ func (s *RunnerSuite) TestACallsOutcomeIsReadFromThePhone() {
 	for name, call := range calls {
 		ids[name] = uuid.NewString()
 		call.Token, call.CustomerID, call.CallType, call.CallID = uuid.NewString(), s.customerID, "default", ids[name]
-		call.Vendor, call.LocalNumber, call.RemoteNumber, call.PlacedAt = "twilio", "+15550100000", "+15550000001", s.clock.now()
-		s.Require().NoError(s.store.InsertPhoneCall(s.ctx, &call))
+		placed := s.clock.now()
+		call.Vendor, call.LocalNumber, call.RemoteNumber, call.PlacedAt = "twilio", "+15550100000", "+15550000001", &placed
+		call.Direction = store.Outbound
+		s.Require().NoError(s.store.CallLegs.Place(s.ctx, &call))
 	}
 
 	for name, want := range map[string]outcome.Outcome{"joined": outcome.Completed, "busy": outcome.Busy, "undecided": outcome.Unknown} {

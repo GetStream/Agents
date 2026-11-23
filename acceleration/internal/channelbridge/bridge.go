@@ -422,7 +422,7 @@ func (b *Bridge) Deliver(ctx context.Context, app store.ConnectorOAuthClient, me
 		// Off the request, so a provider that hangs up meanwhile leaves the message queued, or
 		// unclaimed, never claimed with no row.
 		accepting, cancel := b.detached(ctx)
-		fresh, err := b.store.AcceptChannelInbound(accepting, inboundRow(thread, config, message, forward), waited)
+		fresh, err := b.store.ChannelInbounds.Accept(accepting, inboundRow(thread, config, message, forward), waited)
 		cancel()
 		if err != nil {
 			return false, err
@@ -468,7 +468,7 @@ func (b *Bridge) admit(ctx context.Context, thread *store.ChannelThread, queued 
 		if source.oneToOne(message.Raw) {
 			thread.ChatPerson = message.AuthorID
 		}
-		if err := b.store.SetChannelThreadChatPerson(ctx, thread.ChannelID, thread.ChatPerson); err != nil {
+		if err := b.store.ChannelThreads.SetChatPerson(ctx, thread.ChannelID, thread.ChatPerson); err != nil {
 			return false, err
 		}
 	}
@@ -476,7 +476,7 @@ func (b *Bridge) admit(ctx context.Context, thread *store.ChannelThread, queued 
 	// any message after it (refusesReply). Every author counts, whatever data.chat.is_group
 	// says: a reply reaches whoever is in the chat.
 	if source := episodeSources[message.ConnectorID]; source.chats {
-		if err := b.store.AddChannelThreadMember(ctx, thread.ChannelID, source.recipientOf(message.AuthorID)); err != nil {
+		if err := b.store.ChannelThreadMembers.Insert(ctx, thread.ChannelID, source.recipientOf(message.AuthorID)); err != nil {
 			return false, err
 		}
 	}
@@ -558,7 +558,7 @@ func (b *Bridge) Send(reply conversation.FinishedReply) error {
 func (b *Bridge) reply(reply conversation.FinishedReply) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
-	thread, err := b.store.ChannelThread(ctx, strings.TrimPrefix(reply.CID, chatlog.ChannelType+":"))
+	thread, err := b.store.ChannelThreads.Get(ctx, strings.TrimPrefix(reply.CID, chatlog.ChannelType+":"))
 	if err != nil {
 		return err
 	}
@@ -571,7 +571,7 @@ func (b *Bridge) reply(reply conversation.FinishedReply) error {
 		return err
 	}
 	text := withFiles(reply.Text, reply.Files)
-	fresh, err := b.store.ClaimChannelThreadMessage(ctx, thread.ChannelID, store.ClaimReply, reply.MessageID)
+	fresh, err := b.store.ChannelThreadMessages.Claim(ctx, thread.ChannelID, store.ClaimReply, reply.MessageID)
 	if err != nil || !fresh {
 		return err
 	}
@@ -609,7 +609,7 @@ func (b *Bridge) reply(reply conversation.FinishedReply) error {
 	// Not sent, so not claimed: whoever hands it over next sends it.
 	releasing, done := context.WithTimeout(context.Background(), sendTimeout)
 	defer done()
-	if released := b.store.ReleaseChannelThreadMessage(releasing, thread.ChannelID, store.ClaimReply, reply.MessageID); released != nil {
+	if released := b.store.ChannelThreadMessages.Release(releasing, thread.ChannelID, store.ClaimReply, reply.MessageID); released != nil {
 		return errors.Join(err, released)
 	}
 	return err
@@ -676,7 +676,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 			"connector", message.ConnectorID, "customer", app.CustomerID, "connection", connection.ID,
 			"config", configs[0].ID, "not_answering", others)
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return store.ChannelThread{}, store.AgentConfig{}, nil, err
 	}
@@ -699,7 +699,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 	// channel that does not mention the bot, starts no thread: it is answered only on a
 	// thread a message that did linked before (AI-989).
 	if !rule.Addresses(read, connection.Metadata) {
-		linked, err := b.store.ChannelThreadLinked(ctx, app.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
+		linked, err := b.store.ChannelThreads.Linked(ctx, app.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
 		if err == nil && !linked && !startsThread(read) {
 			linked, err = b.wait(ctx, app.CustomerID, *message)
 		}
@@ -726,7 +726,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 		ThreadParts:    read.ThreadParts,
 		StreamAppPK:    app.StreamAppPK,
 	}
-	_, err = b.store.LinkChannelThread(ctx, &thread)
+	_, err = b.store.ChannelThreads.Link(ctx, &thread)
 	if err != nil {
 		return store.ChannelThread{}, store.AgentConfig{}, nil, err
 	}
@@ -766,14 +766,14 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 // that message answers it. The second look is after the reply is kept, so one of the two
 // always finds it.
 func (b *Bridge) wait(ctx context.Context, customerID string, message core.InboundMessage) (linked bool, err error) {
-	if _, err := b.store.WaitChannelThreadMessage(ctx, customerID, message); err != nil {
+	if _, err := b.store.WaitingMessages.Wait(ctx, customerID, message); err != nil {
 		return false, err
 	}
-	linked, err = b.store.ChannelThreadLinked(ctx, customerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
+	linked, err = b.store.ChannelThreads.Linked(ctx, customerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
 	if err != nil || !linked {
 		return false, err
 	}
-	return b.store.UnwaitChannelThreadMessage(ctx, customerID, message)
+	return b.store.WaitingMessages.Unwait(ctx, customerID, message)
 }
 
 // startsThread is whether a message is the first of its thread: its own id is a part of its
@@ -832,7 +832,7 @@ func (b *Bridge) recordStarter(ctx context.Context, thread store.ChannelThread, 
 	if err != nil {
 		return nil
 	}
-	return b.store.SetChannelThreadStarter(ctx, thread.ChannelID, person.Address)
+	return b.store.ChannelThreads.SetStarter(ctx, thread.ChannelID, person.Address)
 }
 
 // queuedEpisode opens the episode of a queued message (episode) under its agent config as the
@@ -845,7 +845,7 @@ func (b *Bridge) queuedEpisode(ctx context.Context, thread store.ChannelThread, 
 	if _, carded := episodeSources[message.ConnectorID]; !carded {
 		return omnichannel.Opened{}, nil
 	}
-	config, err := b.store.AgentConfig(ctx, message.CustomerID, message.ConfigID)
+	config, err := b.store.AgentConfigs.Get(ctx, message.CustomerID, message.ConfigID)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return omnichannel.Opened{}, nil
 	}
@@ -1026,7 +1026,7 @@ func withFiles(text string, files []sandbox.Attachment) string {
 
 // send posts one reply through the connection's manifest reply template and transport.
 func (b *Bridge) send(ctx context.Context, thread store.ChannelThread, text string) error {
-	connection, err := b.store.ConnectorConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	connection, err := b.store.ConnectorConnections.Get(ctx, thread.CustomerID, thread.ConnectionID)
 	if err != nil {
 		return err
 	}
@@ -1034,11 +1034,11 @@ func (b *Bridge) send(ctx context.Context, thread store.ChannelThread, text stri
 	if !found {
 		return stack.Wrap(fmt.Errorf("%w: %q", store.ErrUnregisteredScheme, connection.AuthScheme))
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return err
 	}
-	resolved, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	resolved, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return stack.Wrap(err)
 	}

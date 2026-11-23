@@ -130,13 +130,13 @@ func New(options Options) (*Runner, error) {
 // Abandon writes off the runs whose router stopped renewing them. Nothing else will finish
 // them: the conversations were held in that router, and it is gone.
 func (r *Runner) Abandon(ctx context.Context) error {
-	return r.store.AbandonSimulationRuns(ctx, time.Now().UTC())
+	return r.store.SimulationRuns.Abandon(ctx, time.Now().UTC())
 }
 
 // Start has the conversations a simulation asks for and returns the run they happen under.
 // It returns as soon as the run is written: the conversations outlive the request.
 func (r *Runner) Start(ctx context.Context, customerID, id string) (store.SimulationRun, error) {
-	simulation, err := r.store.Simulation(ctx, customerID, id)
+	simulation, err := r.store.Simulations.Get(ctx, customerID, id)
 	if err != nil {
 		return store.SimulationRun{}, err
 	}
@@ -147,7 +147,7 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 	// The config is read once, here, rather than per conversation: a run is one agent
 	// asked the same thing several ways, and editing it halfway through would mean the
 	// variations were not comparable.
-	config, err := r.store.AgentConfig(ctx, customerID, simulation.ConfigID)
+	config, err := r.store.AgentConfigs.Get(ctx, customerID, simulation.ConfigID)
 	if err != nil {
 		return store.SimulationRun{}, err
 	}
@@ -179,7 +179,7 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 	for i, scenario := range scenarios {
 		cases = append(cases, store.SimulationCase{Variation: i, Scenario: scenario})
 	}
-	if err := r.store.StartSimulationRun(ctx, &run, cases, time.Now().Add(holdFor)); err != nil {
+	if err := r.store.SimulationRuns.Start(ctx, &run, cases, time.Now().Add(holdFor)); err != nil {
 		return store.SimulationRun{}, err
 	}
 
@@ -208,11 +208,11 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 //
 // A run this router is not holding is stopped by the one that is, the next time it renews.
 func (r *Runner) Cancel(ctx context.Context, customerID, id string) (store.SimulationRun, error) {
-	run, err := r.store.SimulationRun(ctx, customerID, id)
+	run, err := r.store.SimulationRuns.Get(ctx, customerID, id)
 	if err != nil {
 		return store.SimulationRun{}, err
 	}
-	if err := r.store.StopSimulationRun(ctx, customerID, run.ID); err != nil {
+	if err := r.store.SimulationRuns.Stop(ctx, customerID, run.ID); err != nil {
 		return store.SimulationRun{}, err
 	}
 
@@ -355,7 +355,7 @@ func (r *Runner) play(
 	defer over.Close()
 
 	kase.CallID = over.Session().ID()
-	if err := r.store.StartSimulationCase(ctx, kase.ID, kase.CallID); err != nil {
+	if err := r.store.SimulationCases.Start(ctx, kase.ID, kase.CallID); err != nil {
 		r.logger.Error("could not record which call a conversation became",
 			"case", kase.ID, "error", err)
 	}
@@ -456,7 +456,7 @@ func (r *Runner) finish(ctx context.Context, kase store.SimulationCase) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
 
-	if err := r.store.FinishSimulationCase(written, kase); err != nil {
+	if err := r.store.SimulationCases.Finish(written, kase); err != nil {
 		r.logger.Error("could not record how a conversation went", "case", kase.ID, "error", err)
 	}
 }
@@ -466,7 +466,7 @@ func (r *Runner) settle(ctx context.Context, run store.SimulationRun) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
 
-	if err := r.store.FinishSimulationRun(written, run); err != nil {
+	if err := r.store.SimulationRuns.Finish(written, run); err != nil {
 		r.logger.Error("could not record how a run ended", "run", run.ID, "error", err)
 	}
 }
@@ -488,7 +488,7 @@ func (r *Runner) keep(ctx context.Context) {
 		held := slices.Collect(maps.Keys(r.running))
 		r.mu.Unlock()
 
-		stop, err := r.store.RenewSimulationRuns(ctx, held, time.Now().Add(holdFor))
+		stop, err := r.store.SimulationRuns.Renew(ctx, held, time.Now().Add(holdFor))
 		if err != nil {
 			r.logger.Error("could not renew the simulation runs this router holds", "error", err)
 		}

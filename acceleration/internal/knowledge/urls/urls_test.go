@@ -234,7 +234,7 @@ func (s *URLsSuite) TearDownSuite() {
 }
 
 func (s *URLsSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE knowledge_urls CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE knowledge_urls CASCADE")
 	s.Require().NoError(err)
 	_, err = s.store.ShardDB().ExecContext(s.ctx, "DELETE FROM requests WHERE modality = 'knowledge'")
 	s.Require().NoError(err)
@@ -412,7 +412,7 @@ func (s *URLsSuite) TestAPageWithARefreshIntervalIsReadAgainOnceItHasPassed() {
 
 	// Both were last read two days ago, which is past the one's interval and means nothing
 	// to the other, which only says when it is read again by being asked.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE knowledge_urls SET updated_at = now() - interval '48 hours'")
 	s.Require().NoError(err)
 	s.reader.serve("# Pricing\n\nA call costs a penny.\n\n# Support\n\nWe answer within a day.\n\n# Refunds\n\nWithin a month.\n", nil)
@@ -430,11 +430,11 @@ func (s *URLsSuite) TestAPageWithARefreshIntervalIsReadAgainOnceItHasPassed() {
 func (s *URLsSuite) TestAPageIsNotReadAgainBeforeItsIntervalHasPassed() {
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: 24})
 
-	due, err := s.store.DueKnowledgeURLs(s.ctx, time.Now().UTC().Add(23*time.Hour), 10)
+	due, err := s.store.KnowledgeURLs.SelectDue(s.ctx, time.Now().UTC().Add(23*time.Hour), 10)
 	s.Require().NoError(err)
 	s.Empty(due, "read an hour short of its interval")
 
-	due, err = s.store.DueKnowledgeURLs(s.ctx, time.Now().UTC().Add(25*time.Hour), 10)
+	due, err = s.store.KnowledgeURLs.SelectDue(s.ctx, time.Now().UTC().Add(25*time.Hour), 10)
 	s.Require().NoError(err)
 	s.Require().Len(due, 1)
 	s.Equal(page.ID, due[0].ID)
@@ -723,7 +723,7 @@ func (s *URLsSuite) TestAReadAKeyAskedForIsRecordedUnderThatKey() {
 
 func (s *URLsSuite) TestARefreshIsTheCrawlersOwnWork() {
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: 24})
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE knowledge_urls SET updated_at = now() - interval '48 hours'")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE knowledge_urls SET updated_at = now() - interval '48 hours'")
 	s.Require().NoError(err)
 	s.reader.serve("# Pricing\n\nA call costs a penny.\n\n# Support\n\nWe answer within a day.\n\n# Refunds\n\nWithin a month.\n", nil)
 	s.Eventually(func() bool {

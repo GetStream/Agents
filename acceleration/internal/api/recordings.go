@@ -124,7 +124,7 @@ func (s *Server) transcribeRecording(ctx context.Context, request *transcribeRec
 	if err := callbackComplaint(ctx, job.Callback); err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateRecording(ctx, &job); err != nil {
+	if err := s.store.Recordings.Insert(ctx, &job); err != nil {
 		return nil, err
 	}
 
@@ -175,7 +175,7 @@ func (s *Server) getTranscription(ctx context.Context, request *getTranscription
 		return nil, errNoRecordingStore
 	}
 
-	job, err := s.store.Recording(ctx, customerID, request.Id)
+	job, err := s.store.Recordings.Get(ctx, customerID, request.Id)
 	if err != nil || job.Modality != string(Stt) {
 		return nil, notFound("no such transcription")
 	}
@@ -252,7 +252,7 @@ func (s *Server) recordSpeech(ctx context.Context, request *recordSpeechRequest)
 	if err := callbackComplaint(ctx, job.Callback); err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateRecording(ctx, &job); err != nil {
+	if err := s.store.Recordings.Insert(ctx, &job); err != nil {
 		return nil, err
 	}
 
@@ -271,7 +271,7 @@ func (s *Server) getSpeech(ctx context.Context, request *getSpeechRequest) (*get
 		return nil, errNoRecordingStore
 	}
 
-	job, err := s.store.Recording(ctx, customerID, request.Id)
+	job, err := s.store.Recordings.Get(ctx, customerID, request.Id)
 	if err != nil || job.Modality != string(Tts) {
 		return nil, notFound("no such speech job")
 	}
@@ -343,7 +343,7 @@ func (s *Server) finished(ctx context.Context, job store.Recording, provider, mo
 	if failure != nil {
 		s.logger.Error("a recording failed", "recording", job.ID, "modality", job.Modality, "error", failure)
 	}
-	if err := s.store.FinishRecording(ctx, job.ID, provider, model, result, failure); err != nil {
+	if err := s.store.Recordings.Finish(ctx, job.ID, provider, model, result, failure); err != nil {
 		s.logger.Error("could not write down a finished recording", "recording", job.ID, "error", err)
 		return
 	}
@@ -351,7 +351,7 @@ func (s *Server) finished(ctx context.Context, job store.Recording, provider, mo
 		return
 	}
 
-	finished, err := s.store.Recording(ctx, job.CustomerID, job.ID)
+	finished, err := s.store.Recordings.Get(ctx, job.CustomerID, job.ID)
 	if err != nil {
 		s.logger.Error("could not read back a finished recording", "recording", job.ID, "error", err)
 		return

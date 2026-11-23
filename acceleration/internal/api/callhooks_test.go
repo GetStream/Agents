@@ -126,7 +126,7 @@ func (s *CallHooksSuite) TestACallDeliveredTwiceIsActedOnTwice() {
 
 func (s *CallHooksSuite) TestACallToASuspendedAppIsNotAnsweredAndIsEnded() {
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
@@ -231,7 +231,7 @@ func (s *CallHooksSuite) TestAnArrivingCallTheRouterRefusedIsCountedFailedWhenIt
 	// only here.
 	s.numberVendor = "vonage"
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	failed, completed := s.inboundCalls("vonage", "failed"), s.inboundCalls("vonage", "completed")
@@ -268,7 +268,7 @@ func (s *CallHooksSuite) TestALaterCallerInTheSameCallIsNotCountedRefused() {
 	s.numberVendor = "vonage"
 	s.hold("default", s.callID)
 	ctx := context.Background()
-	s.Require().NoError(s.store.SuspendTelephony(ctx, &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(ctx, &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 	arrived := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
@@ -285,7 +285,7 @@ func (s *CallHooksSuite) TestALaterCallerInTheSameCallIsNotCountedRefused() {
 		return err == nil && len(keys) == 1
 	}, settleFor, 10*time.Millisecond, "the refusal was never marked")
 	end("session-1", arrived.Add(10*time.Second))
-	s.Require().NoError(s.store.LiftTelephonySuspension(ctx, s.customerID()))
+	s.Require().NoError(s.store.TelephonySuspensions.Delete(ctx, s.customerID()))
 
 	// A worker takes the second caller: with none, the call is refused (no worker could take it)
 	// and counted failed, which is not what this test is about.
@@ -374,7 +374,7 @@ func (s *CallHooksSuite) TestACallOnANumberNobodyHoldsIsAcceptedAndDropped() {
 func (s *CallHooksSuite) TestACallOnAReleasedNumberIsNotAnswered() {
 	// The number is gone, so whoever holds it now is not this customer.
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.ReleaseNumber(
+	s.Require().NoError(s.store.PhoneNumbers.Release(
 		context.Background(), s.customerID(), s.e164, time.Now().UTC()))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
@@ -483,7 +483,7 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWithAnAgentIsAnsweredByIt() 
 		Tags: &map[string]string{"product": "voice", "team": "config"},
 	}, &created))
 	config := created.Id
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, config))
 
 	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("default"))
 
@@ -511,7 +511,7 @@ func (s *CallHooksSuite) answeredWithCalls(calls *AgentCalls) []llm.Tool {
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
 		Name: "agent-" + s.utils.uuid(), Llm: pointerTo("echo/local-model"), Calls: calls,
 	}, &created))
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, created.Id))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, created.Id))
 	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("default"))
 	return s.answered().ToolDefinitions()
 }
@@ -565,7 +565,7 @@ func (s *CallHooksSuite) answeredOn(llm string, calls *AgentCalls) *session.Sess
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
 		Name: "agent-" + s.utils.uuid(), Llm: pointerTo(llm), Calls: calls,
 	}, &created))
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, created.Id))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, created.Id))
 	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("default"))
 	return s.answered()
 }
@@ -642,7 +642,7 @@ func (s *CallHooksSuite) TestAnArrivingCallDeliveredTwiceKeepsItsAgentOnTheLine(
 	s.answerable()
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, config))
 
 	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
 	s.answered()
@@ -659,7 +659,7 @@ func (s *CallHooksSuite) TestACallToANumberWithAnAgentOnARouterWithNoSessionsIsR
 	s.answerable()
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, config))
 	sessions := s.router.sessions
 	s.router.sessions = nil
 	defer func() { s.router.sessions = sessions }()
@@ -673,7 +673,7 @@ func (s *CallHooksSuite) TestARouterWithNoDispatchPoolStillAnswersWithTheAgent()
 	s.answerable()
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, config))
 	pool := s.router.dispatch
 	s.router.dispatch = nil
 	defer func() { s.router.dispatch = pool }()
@@ -687,7 +687,7 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWithAnAgentIsNotGivenToAWait
 	s.answerable()
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, config))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 
@@ -701,8 +701,8 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWhoseAgentIsGoneIsRefused() 
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
 	ctx := context.Background()
-	s.Require().NoError(s.store.SetNumberAgent(ctx, s.customerID(), s.e164, config))
-	s.Require().NoError(s.store.DeleteAgentConfig(ctx, s.customerID(), config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.AgentConfigs.Delete(ctx, s.customerID(), config))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 
@@ -720,7 +720,7 @@ func (s *CallHooksSuite) TestAnArrivingCallWhoseAgentCannotOpenASessionIsEnded()
 	// The suite's own call name is no session id, so the agent's session fails to open.
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), s.e164, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, config))
 
 	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
 
@@ -734,7 +734,7 @@ func (s *CallHooksSuite) TestAnArrivingCallToADetachedNumberIsNotDispatched() {
 	// Stream until the vendor stops sending them.
 	s.hold("default", s.callID)
 	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
-	s.Require().NoError(s.store.InTrunkGroup(context.Background(), group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(context.Background(), group, func(_ context.Context, tx *store.TrunkGroupTx) error {
 		return tx.Detach(s.e164)
 	}))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
@@ -816,7 +816,7 @@ func (s *CallHooksSuite) TestAnEndedPlacedCallGetsACallSitesRow() {
 	s.Equal("session-1", row.Details["stream_session_id"])
 	s.NotContains(row.Details, "stream_sip_host", "a placed call's SIP host is on its call_placed row")
 	s.Equal("session-1", <-s.stats.asked)
-	left, err := s.store.CallResourcesInApp(context.Background(), store.AppScope{Unpinned: true}, "default", s.callID)
+	left, err := s.store.CallResources.Select(context.Background(), store.AppScope{Unpinned: true}, "default", s.callID)
 	s.Require().NoError(err)
 	s.Empty(left, "the call's resources are still released")
 }
@@ -916,7 +916,7 @@ func (s *CallHooksSuite) releasing() {
 
 // placed records the trunk an outbound call to the suite's call was given.
 func (s *CallHooksSuite) placed() {
-	s.Require().NoError(s.store.RecordCallResource(context.Background(), &store.CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(context.Background(), &store.CallResource{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(),
 		CallType: "default", CallID: s.callID, CustomerID: s.customerID(),
 	}))
@@ -936,9 +936,7 @@ func (s *CallHooksSuite) callSitesRow() *store.AgentLog {
 	ctx := context.Background()
 	var id int64
 	s.Require().Eventually(func() bool {
-		rows, err := s.store.AgentLogs(ctx, store.LogFilter{
-			CustomerID: s.customerID(), SessionID: s.callID, Limit: 250,
-		})
+		rows, err := s.store.AgentLogs.Select(ctx, s.customerID(), store.AgentLogFilter{SessionID: s.callID, Limit: 250})
 		s.Require().NoError(err)
 		for _, row := range rows {
 			if row.EventType == "call_sites" {
@@ -948,9 +946,9 @@ func (s *CallHooksSuite) callSitesRow() *store.AgentLog {
 		}
 		return false
 	}, settleFor, 50*time.Millisecond, "the ended call got no call_sites row")
-	row, err := s.store.AgentLog(ctx, s.customerID(), id)
+	row, err := s.store.AgentLogs.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
-	return row
+	return &row
 }
 
 // hold records the number for the suite's app and attaches it to a call.
@@ -961,7 +959,7 @@ func (s *CallHooksSuite) hold(callType, callID string) {
 // holdBridged is hold, with the Stream trunk the number's calls go to.
 func (s *CallHooksSuite) holdBridged(callType, callID, bridgeURI string) {
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164:        s.e164,
 		Vendor:      s.numberVendor,
 		Country:     "US",
@@ -969,10 +967,14 @@ func (s *CallHooksSuite) holdBridged(callType, callID, bridgeURI string) {
 		PurchasedAt: time.Now().UTC(),
 		Tags:        s.numberTags,
 	}))
-	s.Require().NoError(s.store.AttachNumber(
-		ctx, s.customerID(), s.e164, store.NumberAttachment{
-			TrunkID: "trunk-" + s.utils.uuid(), CallType: callType, CallID: callID, BridgeURI: bridgeURI,
-		}))
+	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: callType, CallID: callID}
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: s.numberVendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		if err := tx.SaveTrunk(store.StreamTrunk{ID: attachment.TrunkID, BridgeURI: bridgeURI, Own: true}); err != nil {
+			return err
+		}
+		return tx.Attach(s.e164, attachment)
+	}))
 }
 
 // arrive delivers a signed call.session_started for one call, as Stream would.

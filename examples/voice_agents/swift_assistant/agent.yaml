@@ -9,6 +9,13 @@ search: search-fast
 greeting:
   text: Hey, it's Juno. What's on your mind?
   mode: exact
+# The apps' own tools: the iOS, Android, Flutter, React and React Native assistants declare them
+# on their sessions, and the trip card adds reserve_table while a table is free. The router
+# offers a session only the tools a group here names, and refuses one that declares any other.
+tools:
+  - name: device
+    loading: full
+    tools: [get_local_context, get_location, list_events, add_reminder, send_email, reserve_table]
 # Each person's own Gmail and Linear. The first time the agent reaches for one the person has
 # not connected, its call waits on a sign-in shown on its step in the chat, and carries on once
 # they have. Google's MCP server reads, searches and drafts; sending is send_email, a tool on

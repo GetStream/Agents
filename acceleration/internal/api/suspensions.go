@@ -50,7 +50,7 @@ func (s *Server) getTelephonySuspension(ctx context.Context, request *telephonyS
 	if s.store == nil {
 		return nil, errNoSuspensions
 	}
-	suspension, err := s.store.TelephonySuspension(ctx, request.CustomerID)
+	suspension, err := s.store.TelephonySuspensions.Get(ctx, request.CustomerID)
 	if errors.Is(err, store.ErrNotSuspended) {
 		return nil, errNotSuspended
 	}
@@ -76,7 +76,7 @@ func (s *Server) suspendTelephony(ctx context.Context, request *suspendTelephony
 	if suspension.Reason == "" || suspension.SuspendedBy == "" {
 		return nil, invalidRequest("say why the app is suspended and who is suspending it")
 	}
-	if err := s.store.SuspendTelephony(ctx, &suspension); err != nil {
+	if err := s.store.TelephonySuspensions.Upsert(ctx, &suspension); err != nil {
 		return nil, err
 	}
 	s.logger.Info("suspended an app's telephony",
@@ -89,7 +89,7 @@ func (s *Server) liftTelephonySuspension(ctx context.Context, request *telephony
 	if s.store == nil {
 		return nil, errNoSuspensions
 	}
-	err := s.store.LiftTelephonySuspension(ctx, request.CustomerID)
+	err := s.store.TelephonySuspensions.Delete(ctx, request.CustomerID)
 	if errors.Is(err, store.ErrNotSuspended) {
 		return nil, errNotSuspended
 	}
