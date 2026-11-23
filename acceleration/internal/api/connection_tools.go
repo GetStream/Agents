@@ -315,6 +315,11 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		// The credential store leaves the revision it committed here (core.CredentialStore).
 		committed = state
 		change.Previous = core.FingerprintsOf(s.connectors.Schemes, state.Credentials)
+		// A write that connects a connection that was not connected begins a grant, as a
+		// consent does (authorizations.go); one that replaces a connected one's keeps it.
+		if state.Status != store.ConnectionConnected {
+			state.ConnectedAt = time.Now().UTC()
+		}
 		state.Credentials = credentials
 		state.Status = store.ConnectionConnected
 		state.LastError = ""
