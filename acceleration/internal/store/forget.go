@@ -117,9 +117,8 @@ func forgottenCopies(db bun.IDB, customerID string) *bun.UpdateQuery {
 // back to the app's, replaces their id with replacement on their resets, grants and campaigns,
 // and records entry, with these counts added to its changes, in the same transaction. The
 // changes recorded of their campaigns, deleted ones' included, name the replacement too
-// (renamedChanges). A
-// campaign's contacts and their attempts stay: they are the app's data about third parties,
-// not the user's.
+// (renamedChanges). A campaign's contacts and their attempts stay: they are the app's data
+// about third parties, not the user's.
 func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replacement string, entry *AuditEntry) (UserSettings, error) {
 	var counts UserSettings
 	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
