@@ -83,11 +83,13 @@ var (
 	// X-HTTP-Method-Override: POST as the POST, AI-2120) and the _method field Rails and Laravel
 	// read from a form. A parameter or header named so could make a read_only GET write.
 	httpMethodOverrides = []string{"x-http-method-override", "x-http-method", "x-method-override", "_method"}
-	// httpToolName is a name OpenAI and Anthropic both take for a function, in at most 63
-	// characters: the model is offered it as <alias>__<name> (internal/session), an alias is at
-	// most 63 characters (AgentConnectorBinding.name, internal/api/configs.go), and 63+2+63 is
-	// the 128 Anthropic caps a tool name at (^[a-zA-Z0-9_-]{1,128}$,
-	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools).
+	// httpToolName is a name of at most 63 characters: the model is offered it as
+	// <alias>__<name> (internal/session), an alias is at most 63 characters
+	// (AgentConnectorBinding.name, internal/api/configs.go), and 63+2+63 is the 128 Anthropic
+	// caps a tool name at (^[a-zA-Z0-9_-]{1,128}$,
+	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools). OpenAI caps
+	// a function name at 64 (the reference maxHTTPParameterName cites), so a longest alias and
+	// name do not fit it: the same holds for an MCP tool today.
 	httpToolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
 	// httpPath is visible ASCII (RFC 9110 section 5.5's vchar), so a path holds no space or
 	// line break, and no ? or #, so it has no query or fragment of its own.
@@ -149,7 +151,7 @@ func checkHTTPSource(fail func(field, format string, args ...any), field string,
 	}
 }
 
-// checkHTTPPath refuses a tool's path that has a query, a fragment, a dot segment, a stray brace
+// checkHTTPPath refuses a tool's path that has a query, a fragment, a leading // or a \, a dot segment, a stray brace
 // or a {name} that is not a required parameter of the tool.
 func checkHTTPPath(fail func(field, format string, args ...any), field string, tool HTTPTool) {
 	field += ".path"
@@ -158,6 +160,8 @@ func checkHTTPPath(fail func(field, format string, args ...any), field string, t
 		fail(field, "is over %d bytes", maxHTTPPath)
 	case !httpPath.MatchString(tool.Path):
 		fail(field, "%q does not start with / or holds a space, a ? or a #", tool.Path)
+	case strings.HasPrefix(tool.Path, "//") || strings.Contains(tool.Path, `\`):
+		fail(field, "%q starts with // or holds a \\, which a URL join can read as another host or path", tool.Path)
 	case slices.ContainsFunc(strings.Split(tool.Path, "/"), isDotSegment):
 		fail(field, "%q has a . or .. segment", tool.Path)
 	case strings.ContainsAny(placeholder.ReplaceAllString(tool.Path, ""), "{}"):

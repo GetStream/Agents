@@ -101,6 +101,7 @@ func (s *HTTPSourceSuite) TestAValidHTTPSourceIsAccepted() {
 }
 
 func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
+	noTool := func(change func(r *SourceRule)) Manifest { m := httpManifest(); change(&m.Sources[0]); return m }
 	for name, test := range map[string]struct {
 		manifest Manifest
 		refusal  string
@@ -120,6 +121,8 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"a space":              {withTool(func(t *HTTPTool) { t.Path = "/fore cast/{city}" }), `holds a space, a ? or a #`},
 		"a line break":         {withTool(func(t *HTTPTool) { t.Path = "/forecast/{city}\r\nX-HTTP-Method-Override: POST" }), `holds a space, a ? or a #`},
 		"a non-ASCII byte":     {withTool(func(t *HTTPTool) { t.Path = "/prévision/{city}" }), `holds a space, a ? or a #`},
+		"a leading //":         {withTool(func(t *HTTPTool) { t.Path = "//other.example/{city}" }), `starts with // or holds a \`},
+		"a backslash":          {withTool(func(t *HTTPTool) { t.Path = `/forecast\{city}` }), `starts with // or holds a \`},
 		"a .. segment":         {withTool(func(t *HTTPTool) { t.Path = "/forecast/../admin/{city}" }), `has a . or .. segment`},
 		"a . segment":          {withTool(func(t *HTTPTool) { t.Path = "/./{city}" }), `has a . or .. segment`},
 		"a trailing ..":        {withTool(func(t *HTTPTool) { t.Path = "/{city}/.." }), `has a . or .. segment`},
@@ -149,15 +152,19 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"65 parameters":     {withTool(func(t *HTTPTool) { t.Parameters = parameters(65) }), `http_tools[0].parameters: has 65 parameters, over 64`},
 		"an override header": {withSource(func(r *SourceRule) { r.Headers = map[string]string{"x-HTTP-method-OVERRIDE": "POST"} }),
 			`sources[0].headers.x-HTTP-method-OVERRIDE: names a method override`},
-		"read_only_tools":         {withSource(func(r *SourceRule) { r.ReadOnlyTools = []string{"get_forecast"} }), `sources[0].read_only_tools: is not set on an http source`},
-		"outbound false":          {withSource(func(r *SourceRule) { r.Outbound = new(false) }), `sources[0].outbound: is not false on an http source`},
-		"no tool name":            {withTool(func(t *HTTPTool) { t.Name = "" }), `http_tools[0].name: "" is not 1 to 63 letters, digits, _ or -`},
-		"a dot":                   {withTool(func(t *HTTPTool) { t.Name = "forecast.get" }), `"forecast.get" is not 1 to 63`},
-		"a space in a name":       {withTool(func(t *HTTPTool) { t.Name = "get forecast" }), `"get forecast" is not 1 to 63`},
-		"a name of 64":            {withTool(func(t *HTTPTool) { t.Name = strings.Repeat("x", 64) }), `is not 1 to 63`},
-		"a name twice":            {httpManifest(forecast(), forecast()), `http_tools[1].name: "get_forecast" is named twice`},
-		"a description over 1000": {withTool(func(t *HTTPTool) { t.Description = strings.Repeat("d", 1001) }), `http_tools[0].description: is over 1000 bytes`},
-		"129 tools":               {httpManifest(tools(129)...), `sources[0].http_tools: has 129 tools, over 128`},
+		"read_only_tools":   {withSource(func(r *SourceRule) { r.ReadOnlyTools = []string{"get_forecast"} }), `sources[0].read_only_tools: is not set on an http source`},
+		"outbound false":    {withSource(func(r *SourceRule) { r.Outbound = new(false) }), `sources[0].outbound: is not false on an http source`},
+		"no tool name":      {withTool(func(t *HTTPTool) { t.Name = "" }), `http_tools[0].name: "" is not 1 to 63 letters, digits, _ or -`},
+		"a dot":             {withTool(func(t *HTTPTool) { t.Name = "forecast.get" }), `"forecast.get" is not 1 to 63`},
+		"a space in a name": {withTool(func(t *HTTPTool) { t.Name = "get forecast" }), `"get forecast" is not 1 to 63`},
+		"a name of 64":      {withTool(func(t *HTTPTool) { t.Name = strings.Repeat("x", 64) }), `is not 1 to 63`},
+		"a name twice":      {httpManifest(forecast(), forecast()), `http_tools[1].name: "get_forecast" is named twice`},
+		"a description of 1001 bytes in 501 characters": {withTool(func(t *HTTPTool) { t.Description = strings.Repeat("é", 500) + "d" }), `http_tools[0].description: is over 1000 bytes`},
+		"outbound false on a source with no tool":       {noTool(func(r *SourceRule) { r.Outbound = new(false) }), `sources[0].outbound: is not false on an http source`},
+		"read_only_tools on a source with no tool":      {noTool(func(r *SourceRule) { r.ReadOnlyTools = []string{"x"} }), `sources[0].read_only_tools: is not set on an http source`},
+		"an override header on a source with no tool":   {noTool(func(r *SourceRule) { r.Headers = map[string]string{"X-HTTP-Method": "PUT"} }), `names a method override`},
+		"a description over 1000":                       {withTool(func(t *HTTPTool) { t.Description = strings.Repeat("d", 1001) }), `http_tools[0].description: is over 1000 bytes`},
+		"129 tools":                                     {httpManifest(tools(129)...), `sources[0].http_tools: has 129 tools, over 128`},
 		"http_tools on an mcp source": {Manifest{ID: "example", Revision: 1, Name: "Example", Schemes: []string{"bearer"},
 			Endpoints: map[string]string{SourceKindMCP: "https://api.example.com/mcp"},
 			Sources:   []SourceRule{{Kind: SourceKindMCP, Endpoint: SourceKindMCP, HTTPTools: []HTTPTool{forecast()}}}},
