@@ -883,6 +883,7 @@ func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails
 	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
 	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
 	s.Contains(served(), "level=ERROR")
+	s.Contains(served(), "store: call events")
 }
 
 // callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
