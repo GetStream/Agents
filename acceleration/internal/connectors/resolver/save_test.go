@@ -266,3 +266,36 @@ func (s *ResolverSuite) TestARevocationBetweenTwoSavesStands() {
 	s.Equal("The provider says its app was uninstalled from the account; reconnect the account", stored.LastError)
 	s.Contains(s.line("could not save a connector credential refresh"), "attempts=2", "a revoked connection is not tried again")
 }
+
+func (s *ResolverSuite) TestARefreshWhoseSaveLandsTakesNoSecondUpdate() {
+	ref := s.f.connected()
+	s.f.due()
+	saves := firstFails(nil, false)
+	saves.before = func(update int) {
+		if update == 2 {
+			s.f.consent(ref)
+		}
+	}
+
+	credential, err := s.f.routerSaving(s.f.srv.Client(), saves).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.Require().NoError(err, "a save that worked is not followed by another Update")
+	s.True(s.f.works(credential))
+	s.Equal(store.ConnectionConnected, s.f.stored(ref).Status)
+}
+
+func (s *ResolverSuite) TestASaveThatLandedWithItsAnswerLostIsNotWrittenAgain() {
+	ref := s.f.connected()
+	s.f.due()
+	saves := firstFails(dropped, true)
+	var landedAt time.Time
+	saves.before = func(update int) {
+		if update == 2 {
+			landedAt = s.f.stored(ref).UpdatedAt
+		}
+	}
+
+	_, err := s.f.routerSaving(s.f.srv.Client(), saves).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.Require().NoError(err)
+	s.Require().False(landedAt.IsZero(), "a second Update ran")
+	s.True(s.f.stored(ref).UpdatedAt.Equal(landedAt), "the landed row is left as it is")
+}
