@@ -11,6 +11,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
@@ -142,13 +143,35 @@ func answeringShards[T any](ctx context.Context, s *Store, read func(context.Con
 	return found, failed
 }
 
-// settledWithout logs each shard that failed a read the others' answers settled.
+// settledWithout logs each shard that failed a read the others' answers settled, at most once
+// a minute a shard: a shard that is down fails every call's reads until it is back.
 func (s *Store) settledWithout(ctx context.Context, read string, failed []error) {
 	for i, err := range failed {
-		if err != nil {
+		if err != nil && s.shardsDown.due(s.shardNames[i], time.Now()) {
 			slog.Default().WarnContext(ctx, "a shard did not answer, settled on the others", "read", read, "shard", s.shardNames[i], "error", err)
 		}
 	}
+}
+
+// shardWarnings is when each shard was last logged as not answering. Its keys are the shards'
+// names, so it holds at most one entry a shard.
+type shardWarnings struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// due reports whether shard may be logged at now, and counts it as logged if so.
+func (w *shardWarnings) due(shard string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if last, ok := w.last[shard]; ok && now.Sub(last) < time.Minute {
+		return false
+	}
+	if w.last == nil {
+		w.last = map[string]time.Time{}
+	}
+	w.last[shard] = now
+	return true
 }
 
 // whicheverShard reads a row from the shard holding it: this one first, where the row almost

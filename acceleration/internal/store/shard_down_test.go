@@ -5,6 +5,7 @@ package store
 import (
 	"bytes"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -60,6 +61,10 @@ func (s *StoreSuite) TestACallPlacedOnAShardThatAnswersIsFoundWhileAnotherIsDown
 	s.Require().Len(placed, 1)
 	s.Equal("trunk-1", placed[0].TrunkID)
 	s.Contains(logged.String(), "shard=gone", "the shard that did not answer is logged")
+
+	_, err = down.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", callID)
+	s.Require().NoError(err)
+	s.Equal(1, strings.Count(logged.String(), "shard=gone"), "a shard still down is logged once a minute, not on every call")
 }
 
 func (s *StoreSuite) TestACallNoAnsweringShardPlacedIsNotAnsweredWhileAnotherIsDown() {

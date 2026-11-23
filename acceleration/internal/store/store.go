@@ -53,6 +53,8 @@ type Store struct {
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
+	// shardsDown is when each shard that did not answer was last logged (settledWithout).
+	shardsDown shardWarnings
 	// globalIsShard says the shared database is also some shard's own, so its calls are not
 	// strays to drop.
 	globalIsShard bool
