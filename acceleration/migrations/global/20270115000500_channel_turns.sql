@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- A channel's running turn is one lease, whether the channel is an app chat's or a thread
 -- channel the channel bridge writes into: chat_channel_turns becomes channel_turns, and the

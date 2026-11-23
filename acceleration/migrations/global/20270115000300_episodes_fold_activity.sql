@@ -1,4 +1,5 @@
 -- +goose Up
+SET LOCAL lock_timeout = '5s';
 
 -- episode_activity was split from episodes only so a rollback could still read it; the store
 -- reads with unknown columns discarded, so its columns are the episode's again. The summary

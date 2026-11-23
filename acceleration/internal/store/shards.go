@@ -51,9 +51,10 @@ func OpenShards(options Options) (*Store, error) {
 		return nil, errors.New("store: dsn is required")
 	}
 	db := connect(options.DSN, maxConns)
-	s := &Store{global: db, shard: db}
+	s := &Store{global: db, shard: db, globalDSN: options.DSN, shardDSN: options.DSN}
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
 		s.shard = connect(options.ShardDSN, maxConns)
+		s.shardDSN = options.ShardDSN
 	}
 	own := cmp.Or(options.ShardDSN, options.DSN)
 	s.shardNames = []string{unnamedShard(own)}

@@ -1,28 +1,17 @@
 -- +goose Up
+
+-- A call belongs to a session. This adds the columns and the foreign key alone, so it holds the
+-- two tables' locks for a moment: the key is checked on new rows at once and on the rows already
+-- there later (20270127000200), the backfill runs in batches (20270127000000), the indexes are
+-- built without stopping writes (20270127000100) and the columns this replaces are dropped last
+-- (20270127000300). The lock waits at most 5 s behind a running query, past which the migration
+-- fails and the router's next start tries again.
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE calls
-    ADD COLUMN session_id text REFERENCES agent_sessions (id) ON DELETE SET NULL,
-    ADD COLUMN call_type text DEFAULT ''::text NOT NULL;
-
--- Every session held its one call under its own id, text sessions included, so each keeps
--- that call: the existing row gains the session and its Stream call, and a session whose row
--- was never written gets one.
-INSERT INTO calls (id, session_id, customer_id, stream_app_pk, call_id, call_type, conversation_id, agent_id, direction, started_at, ended_at)
-SELECT s.id, s.id, s.customer_id, s.stream_app_pk, COALESCE(s.call_id, ''), COALESCE(s.call_type, ''), s.conversation_id,
-    s.agent_id, 'inbound', s.created_at, s.closed_at
-FROM agent_sessions AS s
-ON CONFLICT (id) DO UPDATE SET
-    session_id = EXCLUDED.session_id,
-    call_type = EXCLUDED.call_type,
-    conversation_id = COALESCE(calls.conversation_id, EXCLUDED.conversation_id),
-    call_id = CASE WHEN calls.call_id = '' THEN EXCLUDED.call_id ELSE calls.call_id END;
-
-CREATE INDEX calls_session_idx ON calls USING btree (customer_id, session_id, started_at DESC) WHERE (session_id IS NOT NULL);
-
-CREATE INDEX calls_customer_agent_idx ON calls USING btree (customer_id, agent_id, started_at DESC);
-
-DROP INDEX calls_campaign_idx;
-
-CREATE INDEX calls_campaign_idx ON calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL);
+    ADD COLUMN session_id text,
+    ADD COLUMN call_type text DEFAULT ''::text NOT NULL,
+    ADD CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions (id) ON DELETE SET NULL NOT VALID;
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION log_agent_request() RETURNS trigger
@@ -42,27 +31,8 @@ BEGIN
 END $$;
 -- +goose StatementEnd
 
-ALTER TABLE calls
-    DROP COLUMN user_id,
-    DROP COLUMN config_id;
-
-ALTER TABLE agent_sessions
-    DROP COLUMN call_id,
-    DROP COLUMN call_type;
-
 -- +goose Down
-ALTER TABLE agent_sessions
-    ADD COLUMN call_id text,
-    ADD COLUMN call_type text;
-
-ALTER TABLE calls
-    ADD COLUMN user_id text DEFAULT ''::text NOT NULL,
-    ADD COLUMN config_id text;
-
-UPDATE agent_sessions AS s SET call_id = NULLIF(c.call_id, ''), call_type = NULLIF(c.call_type, '')
-FROM (SELECT DISTINCT ON (session_id) session_id, call_id, call_type FROM calls
-      WHERE session_id IS NOT NULL ORDER BY session_id, started_at DESC) AS c
-WHERE c.session_id = s.id;
+SET LOCAL lock_timeout = '5s';
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION log_agent_request() RETURNS trigger
@@ -81,14 +51,6 @@ BEGIN
  RETURN NEW;
 END $$;
 -- +goose StatementEnd
-
-DROP INDEX calls_campaign_idx;
-
-CREATE INDEX calls_campaign_idx ON calls USING btree (campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL);
-
-DROP INDEX calls_customer_agent_idx;
-
-DROP INDEX calls_session_idx;
 
 ALTER TABLE calls
     DROP COLUMN call_type,
