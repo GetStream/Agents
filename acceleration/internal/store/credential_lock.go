@@ -49,13 +49,14 @@ const (
 // 30 s), and the statements its callback runs through the store borrow a connection of the
 // serving pool (maxConns) for that one statement. On a pool of their own, locks stalled at a
 // provider can never take the serving pool, and a holder that asks for a serving connection
-// never waits on one another holder keeps. 16 lets that many refreshes stall at once before another
-// connection's credential has to wait, and adds that many to the 40 a router holds on the
-// shared database; idle ones close after 5 minutes (connect). A choice, not measured.
+// never waits on one another holder keeps. 16 lets that many refreshes stall at once before
+// another connection's credential has to wait, and adds that many to the 40 a router holds on
+// the shared database; idle ones close after 5 minutes (connect). A choice, not measured.
 const lockConns = 16
 
-// withCredentialLock runs fn on one lock pool connection that holds the session-level advisory lock on
-// the connection's credential state, and gives the lock and the connection back when fn returns.
+// withCredentialLock runs fn on one lock pool connection that holds the session-level advisory
+// lock on the connection's credential state, and gives the lock and the connection back when
+// fn returns.
 //
 // Session-level, not pg_advisory_xact_lock as connectors.go uses: checkpoint commits while
 // the lock must stay held, and a transaction-level lock goes with the commit. "Once acquired
@@ -121,8 +122,8 @@ func (s *Store) acquireCredentialLock(ctx context.Context, namespace, key int32)
 	}
 }
 
-// releaseCredentialLock unlocks and hands the connection back to the lock pool. pg_advisory_unlock
-// returns false when the lock was not held
+// releaseCredentialLock unlocks and hands the connection back to the lock pool.
+// pg_advisory_unlock returns false when the lock was not held
 // (https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS);
 // that, or an unlock that fails, closes the connection rather than return a session in a
 // state nobody knows.

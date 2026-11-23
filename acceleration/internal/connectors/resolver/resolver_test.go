@@ -97,9 +97,11 @@ func (s *ResolverSuite) TestRefreshesStalledAtTheTokenEndpointLeaveTheRouterItsS
 		err        error
 	}
 	results := make(chan result, refreshes)
+	resolving, stop := context.WithTimeout(s.f.ctx, 30*time.Second)
+	defer stop()
 	for _, ref := range refs {
 		go func() {
-			credential, err := r.Resolve(s.f.ctx, ref, core.CredentialRequest{})
+			credential, err := r.Resolve(resolving, ref, core.CredentialRequest{})
 			results <- result{credential, err}
 		}()
 	}
