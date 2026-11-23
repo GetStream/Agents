@@ -80,16 +80,15 @@ var (
 	// httpMethodOverrides are names, lowercase, in which a client names the method a host should
 	// run in place of the request's: the three headers the sandbox's egress proxy refuses
 	// (methodOverrides, internal/sandbox/egress/proxy.go; Google runs a GET with
-	// X-HTTP-Method-Override: POST as the POST, AI-2120) and the _method field Rails and Laravel
-	// read from a form. A parameter or header named so could make a read_only GET write.
+	// X-HTTP-Method-Override: POST as the POST, AI-2120) and the _method form field of Rails and
+	// Laravel. A parameter or header named so could make a read_only GET write.
 	httpMethodOverrides = []string{"x-http-method-override", "x-http-method", "x-method-override", "_method"}
 	// httpToolName is a name of at most 63 characters: the model is offered it as
 	// <alias>__<name> (internal/session), an alias is at most 63 characters
 	// (AgentConnectorBinding.name, internal/api/configs.go), and 63+2+63 is the 128 Anthropic
 	// caps a tool name at (^[a-zA-Z0-9_-]{1,128}$,
 	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools). OpenAI caps
-	// a function name at 64 (the reference maxHTTPParameterName cites), so a longest alias and
-	// name do not fit it: the same holds for an MCP tool today.
+	// a function name at 64 (see maxHTTPParameterName), so a longest alias and name do not fit it.
 	httpToolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
 	// httpPath is visible ASCII (RFC 9110 section 5.5's vchar), so a path holds no space or
 	// line break, and no ? or #, so it has no query or fragment of its own.

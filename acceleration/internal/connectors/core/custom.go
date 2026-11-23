@@ -35,9 +35,7 @@ type CustomConnector struct {
 //
 // SourceKindMCP is both the tool source and the endpoint role it runs against, as the built-in
 // manifests write them (internal/connectors/providers/linear.yaml: sources: [{kind: mcp,
-// endpoint: mcp}]), and SourceKindHTTP is both for an http connector. Its role is not
-// api_base, which a connection's direct call goes to (proxyBase, internal/api/connection_proxy.go),
-// so an http connector takes no direct call, as an MCP one takes none.
+// endpoint: mcp}]), and SourceKindHTTP is both for an http connector.
 func CustomManifest(c CustomConnector) (Manifest, error) {
 	// An operator client is the deployment's own, read from the variables a built-in's
 	// client.env names, and the deployment has none registered with an app's own server.
@@ -73,14 +71,12 @@ func CustomManifest(c CustomConnector) (Manifest, error) {
 		if c.Endpoint != "" {
 			return Manifest{}, stack.Wrap(errors.New("a custom connector has an MCP endpoint or an http base_url and tools, not both"))
 		}
-		// An http source offers only the tools it lists, so one with none could be stored and
-		// never offer a tool.
+		// An http source offers only the tools it lists: with none it never offers a tool.
 		if len(c.Tools) == 0 {
 			return Manifest{}, stack.Wrap(errors.New("an http custom connector needs at least one tool"))
 		}
-		// oauth2_code finds the authorization server from the manifest's issuer, authorize and token
-		// endpoints, which a custom connector cannot set, or from its MCP endpoint, which an http
-		// one has none of (discover in internal/connectors/schemes/oauth2code/discovery.go).
+		// oauth2_code discovers the authorization server from the manifest's issuer or endpoints, or
+		// its MCP endpoint (schemes/oauth2code/discovery.go): a custom http connector has none.
 		if slices.Contains(c.Schemes, "oauth2_code") {
 			return Manifest{}, stack.Wrap(errors.New("oauth2_code is not available for an http custom connector: it needs authorization server endpoints an http connector cannot set"))
 		}

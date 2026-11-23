@@ -2416,8 +2416,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 	s.Zero(s.definitionsNamed(id))
 }
 
-// customWeather is a manifest the API stores for a custom http connector custom_weather: one
-// read-only GET tool on an API taking a key.
+// customWeather is a custom http connector's manifest: one read-only GET tool on an API taking a key.
 const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://api.weather.example/v1"},
 	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
 	"method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
