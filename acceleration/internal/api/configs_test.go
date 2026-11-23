@@ -31,6 +31,7 @@ func TestConfigsSuite(t *testing.T) {
 // idempotent, so suites running beside this one see the same rows.
 func (s *ConfigsSuite) SetupSuite() {
 	s.connectors = core.Registry{Schemes: map[string]core.Scheme{"oauth2_code": namedScheme("oauth2_code")}}
+	s.speechToSpeech = true
 	s.RouterSuite.SetupSuite()
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }

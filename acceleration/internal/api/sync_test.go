@@ -25,6 +25,7 @@ func TestSyncSuite(t *testing.T) {
 // SetupSuite seeds the built-in connectors as a router start does, so a directory can bind
 // one. Seeding is idempotent, so suites running beside this one see the same rows.
 func (s *SyncSuite) SetupSuite() {
+	s.speechToSpeech = true
 	s.RouterSuite.SetupSuite()
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }

@@ -1508,6 +1508,9 @@ func (s *Server) defaultVoiceSTS(ctx context.Context, config *store.AgentConfig,
 		!config.FloorControl.IsZero() || config.Guardrail != "" {
 		return
 	}
+	if s.sessions != nil && !s.sessions.SpeaksNative() {
+		return
+	}
 	router, ok := s.routers[routing.STS]
 	if !ok {
 		return

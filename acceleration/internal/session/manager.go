@@ -1896,6 +1896,11 @@ func (m *Manager) SandboxesIn(region string) bool {
 	return m.options.Sandboxes.Serves(region)
 }
 
+// SpeaksNative reports whether this deployment's sessions can run a speech-to-speech model.
+func (m *Manager) SpeaksNative() bool {
+	return m.options.STS != nil
+}
+
 // Len is how many sessions this process is running, which is what a draining router waits
 // on before it ends the rest.
 func (m *Manager) Len() int {
