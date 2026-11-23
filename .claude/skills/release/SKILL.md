@@ -93,9 +93,14 @@ It must print `X.Y.Z` exactly. If it does not, stop: do not publish.
 ## 5. Publish the GitHub release (ask first)
 
 ```bash
-awk -v h='# vX.Y.Z' '$0==h{p=1;next} p&&/^# v[0-9]/{exit} p' CHANGELOG.md > <scratch>/notes.md
-gh release create vX.Y.Z -R GetStream/Agents --verify-tag --title vX.Y.Z --notes-file <scratch>/notes.md
+gh release create vX.Y.Z -R GetStream/Agents --verify-tag --title vX.Y.Z \
+  --generate-notes --notes-start-tag <previous tag> \
+  --notes "Changelog: https://github.com/GetStream/Agents/blob/vX.Y.Z/CHANGELOG.md (section \`# vX.Y.Z\`)"
 ```
+
+The body is GitHub's generated list of merged PRs, with the `--notes` line before it
+(`gh release create --help`: "Additional release notes can be prepended to automatically
+generated notes by using the `--notes` flag"). The CHANGELOG section is not copied into the body.
 
 ## 6. Check what was published
 
