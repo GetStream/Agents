@@ -197,6 +197,7 @@ TABLE call_legs
     CREATE UNIQUE INDEX call_legs_token_hash_key ON public.call_legs USING btree (token_hash)
     CREATE INDEX call_legs_token_hash_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
+    CREATE UNIQUE INDEX call_legs_transfer_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), vendor_call_id) WHERE ((placed_at IS NULL) AND (vendor_call_id IS NOT NULL))
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 

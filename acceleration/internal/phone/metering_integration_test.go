@@ -169,14 +169,14 @@ func (s *MeteringSuite) transfer(callID, human string) {
 func (s *MeteringSuite) TestTheCustomerWhoTransferredCanPressDigitsOnTheTransferLeg() {
 	s.transfer("call-"+uuid.NewString(), "+15125550124")
 
-	s.Require().NoError(s.service.SendDigits(s.ctx, s.customer, s.vendor.vendor, s.vendor.vendor+"-call", "12"))
-	s.Equal([]string{s.vendor.vendor + "-call:12"}, s.vendor.pressed)
+	s.Require().NoError(s.service.SendDigits(s.ctx, s.customer, s.vendor.vendor, s.vendor.called, "12"))
+	s.Equal([]string{s.vendor.called + ":12"}, s.vendor.pressed)
 }
 
 func (s *MeteringSuite) TestAnotherCustomerCannotPressDigitsOnATransferLeg() {
 	s.transfer("call-"+uuid.NewString(), "+15125550124")
 
-	err := s.service.SendDigits(s.ctx, "customer-"+uuid.NewString(), s.vendor.vendor, s.vendor.vendor+"-call", "12")
+	err := s.service.SendDigits(s.ctx, "customer-"+uuid.NewString(), s.vendor.vendor, s.vendor.called, "12")
 	s.ErrorIs(err, ErrCallNotFound)
 	s.Empty(s.vendor.pressed)
 }

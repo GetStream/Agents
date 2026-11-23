@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -603,8 +604,10 @@ type stub struct {
 	// apart from an empty answer.
 	searched int
 	// dialed is the last call this vendor was asked to place, so a test can see what the
-	// service passed on rather than only that it passed something.
+	// service passed on rather than only that it passed something, and called the id it
+	// gave that call, a new one each dial as a vendor's is.
 	dialed Outbound
+	called string
 	// inbound is the last number this vendor was told to send to a bridge, so a test can see
 	// the address the service passed on.
 	inbound Inbound
@@ -687,7 +690,8 @@ func (s *stub) Dial(_ context.Context, outbound Outbound) (Dialed, error) {
 	if s.err != nil {
 		return Dialed{}, s.err
 	}
-	return Dialed{VendorCallID: s.vendor + "-call", Status: "dialing"}, nil
+	s.called = s.vendor + "-call-" + uuid.NewString()
+	return Dialed{VendorCallID: s.called, Status: "dialing"}, nil
 }
 
 func (s *stub) SendDigits(_ context.Context, vendorCallID, digits string) error {
