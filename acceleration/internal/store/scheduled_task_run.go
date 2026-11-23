@@ -185,9 +185,8 @@ func (r *ScheduledTaskRuns) SetCallReason(ctx context.Context, customerID, runID
 }
 
 // ReleaseCall gives back a call TakeCall
-// took and could not place, so a later attempt may ring. A placed call refused
-// while the money could not be checked is given back once too (callEnded in
-// internal/api).
+// took and could not place, so a later attempt may ring. A placed call is
+// never given back: it is rung once (callEnded in internal/api).
 func (r *ScheduledTaskRuns) ReleaseCall(ctx context.Context, customerID, runID, sessionID string) error {
 	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ''").

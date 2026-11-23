@@ -1112,9 +1112,8 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 // is the one the user texts this agent from; the number rung from is the
 // agent's own text line. An occurrence rings once: the call's session is
 // taken on the run before it is placed, so neither a retry nor a worker
-// taking the run over rings the user again (callEnded). The one exception is
-// a placed call refused while the money could not be checked: it is given
-// back once, so the user is rung twice at most. A call the
+// taking the run over rings the user again (callEnded): a placed call is rung
+// once, whatever refuses it. A call the
 // occurrence has no time left to ring and hold is missed, not placed: it
 // would be hung up mid-sentence when the occurrence runs out. The call is
 // taken before anything else is checked, so an attempt after the one that
@@ -1214,9 +1213,8 @@ func callSpec(config store.AgentConfig, delivery scheduledDelivery, agentID stri
 
 // carryOutOnCall opens the session of a call a task placed and holds the
 // call until it is over. The user has been rung by now, so a failure is
-// final: another attempt would ring them again. The one exception is a
-// refusal because the money could not be checked, whose call is given back
-// (callEnded).
+// final: another attempt would ring them again, even after a refusal because
+// the money could not be checked (callEnded).
 func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery, spec session.Spec) (string, string, error) {
 	created, err := s.sessions.Create(ctx, spec)
 	if _, unanswered := errors.AsType[*session.CallUnansweredError](err); unanswered {
@@ -1247,29 +1245,16 @@ func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery,
 
 // callEnded records on the run the reason the call callID failed under, and
 // answers that failure: a worker taking the run over after this one stopped
-// finds the call placed, and records how it went rather than that it was. A
-// failure tried again is given back instead, as a call that was not placed is,
-// or the retry would ring nobody: the one such failure is a refusal because the
-// money could not be checked (unpaid), which passes again on its own, so the
-// retry rings again to run the turn again (AI-3597). That is done once: an
-// attempt after one that failed under a money code keeps its call, whatever
-// refuses it, and fails final.
+// finds the call placed, and records how it went rather than that it was. The
+// user has been rung, so every failure is final, a refusal because the money
+// could not be checked (unpaid) included: a retry would ring nobody, and a
+// second ring is the most intrusive way to try again (AI-3597).
 func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, callID string, err error) error {
 	var failure *scheduling.Failure
 	if !errors.As(err, &failure) {
 		return err
 	}
-	// The attempt before this one failed under a money code: its call was given back
-	// already, so this one is kept, and the user is rung twice at most.
-	if !failure.Final && moneyCode(delivery.Earlier) {
-		failure.Final = true
-	}
-	if !failure.Final {
-		if err := s.store.ScheduledTaskRuns.ReleaseCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID); err != nil {
-			s.logger.Error("could not give back a scheduled task's call", "run", delivery.RunID, "error", err)
-		}
-		return err
-	}
+	failure.Final = true
 	if err := s.store.ScheduledTaskRuns.SetCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
 		s.logger.Error("could not record how a scheduled task's call ended", "run", delivery.RunID, "error", err)
 	}
@@ -1326,17 +1311,15 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 // picked up, and stays on it until it ends, or until scheduledCallLimit,
 // when the agent hangs up. A turn the organization may not pay for, refused
 // before the agent answered anything on the call, leaves the agent silent:
-// the attempt fails under the money (turnRefusal), final unless the money
-// could not be checked, and the agent hangs up. A refusal after the agent
-// answered is a later turn's: the task was said. The call a retry places after
-// a refusal for money runs the turn again (replyCommand), once: its rerun
-// refused as well fails the run, final, and the call is kept (callEnded), so
-// the user is rung twice at most.
+// the attempt fails under the money (turnRefusal), final (callEnded), and the
+// agent hangs up. A refusal because the money could not be checked is final
+// too: a placed call is rung once. A refusal after the agent answered is a
+// later turn's: the task was said.
 func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session, delivery scheduledDelivery, events <-chan session.Event) error {
 	// The call's turn has an id of its own: a channel tried before the call
 	// left its turn in the conversation under the run's, which would be taken
 	// for this one and leave the agent silent on the call.
-	delivery.CommandID = replyCommand(created, delivery.CommandID+"_call", delivery.Earlier)
+	delivery.CommandID += "_call"
 	if err := s.followUpWithin(ctx, created, delivery); err != nil {
 		return undeliveredFinally(scheduling.ReasonFailed, err)
 	}

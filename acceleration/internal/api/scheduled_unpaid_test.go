@@ -1243,14 +1243,6 @@ func (s *TelnyxUnpaidSuite) takeCall(call ringing) ringing {
 	return call
 }
 
-// retried is the call the run's retry places after call failed under earlier, as
-// deliverWithRetries hands the next attempt the reason the last one failed under, ringing: it
-// takes the call again, which only a call given back lets it.
-func (s *TelnyxUnpaidSuite) retried(call ringing, earlier string) ringing {
-	call.delivery.Earlier = earlier
-	return s.ring(s.dial(s.takeCall(call)))
-}
-
 // dial has the router carry the task out on call, as deliverByPhone does once the vendor placed it.
 func (s *TelnyxUnpaidSuite) dial(call ringing) ringing {
 	done := make(chan callOutcome, 1)
@@ -1344,56 +1336,11 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedForMoneyFailsUnderTheMone
 	s.Equal(call.spec.ID, kept.SessionID, "the user is rung once")
 }
 
-// A phone task whose answered call's turn is refused because the money cannot be checked is tried
-// again, and the retry rings the user again and runs the turn again: the call is given back, as one
-// that was not placed is, and the retry is delivered once the check passes (AI-3597).
-func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedWhileMoneyCannotBeCheckedRingsAgainOnItsRetry() {
-	call := s.uncheckableCall()
-
-	s.sharedAgain()
-	again := s.retried(call, codeSpendCheckUnavailable)
-	again.edge.pickUp(again.writer)
-	s.answeredOn(again)
-	// The turn the first call's refusal left failed runs again, under the rerun's id: the call's
-	// session holds it, which it does not with the agent silent.
-	s.NotEmpty(s.callTurnUnder(again, again.delivery.CommandID+"_call"+rerunSuffix), "the task's turn ran again on the retry's call")
-	s.hangUp(again)
-	outcome := s.letGo(again)
-
-	s.Require().NoError(outcome.err)
-	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
-}
-
-// A phone task whose call's turn is refused because the money cannot be checked, and refused again
-// on the call its retry places, fails under the same code, final: the user is rung twice at most,
-// and the second call stays taken on the run (AI-3597).
-func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedAgainOnItsRetryFailsTheRun() {
-	call := s.uncheckableCall()
-	// The retry's call opens its session while the money can be checked, and is answered once it
-	// cannot again.
-	s.sharedAgain()
-	again := s.retried(call, codeSpendCheckUnavailable)
-	s.uncheckable(call.writer)
-
-	again.edge.pickUp(again.writer)
-	outcome := s.letGo(again)
-
-	var failure *scheduling.Failure
-	s.Require().ErrorAs(outcome.err, &failure)
-	s.Equal(codeSpendCheckUnavailable, failure.Reason)
-	s.True(failure.Final, "the turn ran again once")
-	s.True(refusedTurn(outcome.err), "the walk over the channels ends at the call")
-	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
-	s.Require().NoError(err)
-	s.Equal(again.spec.ID, kept.SessionID, "the second call is not given back")
-	s.Require().NotNil(kept.Error)
-	s.Equal(codeSpendCheckUnavailable, *kept.Error, "a worker taking the run over finds how the call went")
-}
-
-// uncheckableCall is a phone task's call answered while the organization's money cannot be checked,
-// whose turn was refused: the attempt failed under spend_check_unavailable, to be tried again, and
-// the call was given back to its run, which a retry may take again.
-func (s *TelnyxUnpaidSuite) uncheckableCall() ringing {
+// A phone task whose answered call's turn is refused because the money cannot be checked is
+// not tried again: the check would pass again on its own, but a retry would ring the user a second
+// time. The attempt fails final under the same code, after one ring, and the call stays taken on
+// the run (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedWhileMoneyCannotBeCheckedFailsFinalAfterOneRing() {
 	call := s.ringingOn("noted/noted-model")
 	s.uncheckable(call.writer)
 
@@ -1402,12 +1349,62 @@ func (s *TelnyxUnpaidSuite) uncheckableCall() ringing {
 
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(outcome.err, &failure)
-	s.Require().Equal(codeSpendCheckUnavailable, failure.Reason)
-	s.Require().False(failure.Final, "the check passes again on its own")
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final, "a second ring is not worth a check that passes again")
+	s.True(refusedTurn(outcome.err), "the walk over the channels ends at the call")
+	s.Empty(outcome.deliveredTo)
+	s.False(s.rungAgain(call), "the user is rung once")
 	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
 	s.Require().NoError(err)
-	s.Require().Empty(kept.SessionID, "the call is given back so the retry rings again")
-	return call
+	s.Equal(call.spec.ID, kept.SessionID, "the call is not given back")
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeSpendCheckUnavailable, *kept.Error, "a worker taking the run over finds how the call went")
+}
+
+// A phone task whose call's turn is refused for money is rung once whatever reason the attempts
+// before it failed under: an attempt that failed before it rang, such as the user being on a call,
+// leaves the next attempt's earlier reason something else than money (AI-3597 R2.1).
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedIsRungOnceWhateverTheAttemptsBetweenFailedUnder() {
+	call := s.callOn("noted/noted-model")
+	call.delivery.Earlier = "on_a_call"
+	call = s.ring(s.dial(call))
+	s.uncheckable(call.writer)
+
+	call.edge.pickUp(call.writer)
+	outcome := s.letGo(call)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final, "a retry would ring the user again")
+	s.True(refusedTurn(outcome.err))
+	s.False(s.rungAgain(call), "the user is rung once")
+}
+
+// A phone task on the channels text, then call, whose text failed first for another reason than
+// money, has that reason as the earlier one of every attempt (deliverChain records the first
+// channel's). The call refused for money while it cannot be checked is rung once all the same
+// (AI-3597 R2.1).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenIsRungOnceWhateverTheFirstChannelFailedUnder() {
+	call := s.callOn("noted/noted-model")
+	s.uncheckable(call.writer)
+	call.delivery.Earlier = "unreachable"
+
+	outcome := s.letGo(s.dial(call))
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final)
+	s.False(s.rungAgain(call), "the user is rung once")
+}
+
+// rungAgain is whether the run lets another attempt take a call after call failed: the store hands
+// one out only when the run has none taken.
+func (s *TelnyxUnpaidSuite) rungAgain(call ringing) bool {
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), call.task.CustomerID, call.run.ID, s.utils.uuid())
+	s.Require().NoError(err)
+	return took
 }
 
 // uncheckable takes down the Redis the router shares its holds through, and waits until the gate
@@ -1441,10 +1438,10 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenForMoneyFailsUnderThe
 	s.Equal(codeInsufficientCredits, *kept.Error, "a worker taking the run over finds how the call went")
 }
 
-// A phone task whose call's session cannot open because the money cannot be checked is given back
-// once: the retry rings the user again, and its session refused the same way fails the run, final,
-// with the second call kept on the run, so the user is rung twice at most (AI-3597).
-func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenWhileMoneyCannotBeCheckedIsGivenBackOnce() {
+// A phone task whose call's session cannot open because the money cannot be checked fails under
+// the same code, final, with the call kept on the run: the user was rung, and is rung once
+// (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenWhileMoneyCannotBeCheckedFailsFinal() {
 	call := s.callOn("noted/noted-model")
 	s.uncheckable(call.writer)
 
@@ -1453,21 +1450,10 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenWhileMoneyCannotBeChe
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(outcome.err, &failure)
 	s.Equal(codeSpendCheckUnavailable, failure.Reason)
-	s.False(failure.Final, "the check passes again on its own")
+	s.True(failure.Final, "a retry would ring the user again")
 	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
 	s.Require().NoError(err)
-	s.Empty(kept.SessionID, "the call is given back so the retry rings again")
-
-	call.delivery.Earlier = codeSpendCheckUnavailable
-	again := s.takeCall(call)
-	outcome = s.letGo(s.dial(again))
-
-	s.Require().ErrorAs(outcome.err, &failure)
-	s.Equal(codeSpendCheckUnavailable, failure.Reason)
-	s.True(failure.Final, "the call was given back once")
-	kept, err = s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
-	s.Require().NoError(err)
-	s.Equal(again.spec.ID, kept.SessionID, "the second call is not given back")
+	s.Equal(call.spec.ID, kept.SessionID, "the call is not given back")
 	s.Require().NotNil(kept.Error)
 	s.Equal(codeSpendCheckUnavailable, *kept.Error, "a worker taking the run over finds how the call went")
 }
