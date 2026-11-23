@@ -812,6 +812,31 @@ func (s *StoreSuite) TestADraftsContactCanBeChanged() {
 	s.Equal("Speak Dutch", stored[0].Instructions)
 }
 
+func (s *StoreSuite) TestAnAddLeavesAContactMidSequenceAlone() {
+	campaign := s.autoEnrollCampaign(s.base)
+	first, err := s.addOne(campaign, "+15550001")
+	s.Require().NoError(err)
+	later := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*Contact)(nil)).
+		Set("attempt = 2").Set("step_id = 'step_2'").Set("next_attempt_at = ?", later).
+		Where("id = ?", first.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	_, err = s.addOne(campaign, "+15550002")
+
+	s.Require().NoError(err)
+	kept := s.contactByNumber(campaign, "+15550001")
+	s.Equal(2, kept.Attempt)
+	s.Equal("step_2", kept.StepID)
+	s.Require().NotNil(kept.NextAttemptAt)
+	s.Equal(later, kept.NextAttemptAt.UTC())
+}
+
+func (s *StoreSuite) TestADraftsContactHasNoNextAttempt() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	s.Nil(s.contactByNumber(campaign, "+15550001").NextAttemptAt)
+}
+
 func (s *StoreSuite) TestOverlappingChangesToOneContactBothPersist() {
 	campaign := s.draftCampaign(newID(), "+15550001")
 	contact := s.contactByNumber(campaign, "+15550001")

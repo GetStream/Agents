@@ -492,6 +492,27 @@ func (s *CampaignContactsSuite) TestAChangeReadsANumberInALowerCaseCampaignCount
 	s.Equal("+442079460020", changed.ToNumber)
 }
 
+func (s *CampaignContactsSuite) TestAChangeKeepsAndChangesInstructions() {
+	created := s.draft(nil)
+	s.add(created.Id, map[string]any{"contacts": []map[string]any{{"to_number": "+14155550195", "instructions": "Speak slowly",
+		"variables": map[string]string{"first_name": "Cy"}}}})
+	contact := s.list(created.Id, "").Items[0]
+
+	var kept Contact
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, s.contactPath(created.Id, contact.Id),
+		map[string]any{"time_zone": "America/Chicago"}, &kept))
+	stored, _, err := s.store.CampaignContacts.Get(context.Background(), created.Id, contact.Id)
+	s.Require().NoError(err)
+	s.Equal("Speak slowly", stored.Instructions, "kept when the change leaves it out")
+	s.Equal(map[string]string{"first_name": "Cy"}, kept.Variables, "kept when the change leaves them out")
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, s.contactPath(created.Id, contact.Id),
+		map[string]any{"instructions": "Speak French"}, nil))
+	stored, _, err = s.store.CampaignContacts.Get(context.Background(), created.Id, contact.Id)
+	s.Require().NoError(err)
+	s.Equal("Speak French", stored.Instructions)
+}
+
 func (s *CampaignContactsSuite) TestAChangeLeavesOutWhatItDoesNotName() {
 	created := s.draft(nil)
 	s.add(created.Id, map[string]any{"contacts": []map[string]any{{"to_number": "+14155550185", "time_zone": "America/Chicago",
