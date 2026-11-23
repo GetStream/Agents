@@ -21,7 +21,23 @@ const defaultActivityPage = 500
 var (
 	errActivityReversed = invalidRequest("to may not be before from")
 	errActivitySpan     = invalidRequest(fmt.Sprintf("from and to may span at most %d days, what is kept", store.ActivityKeepDays))
+	errActivityFilters  = invalidRequest("cursor was handed out for another from, to, org_id or app_id")
 )
+
+// activityFilters is what a page of listActivity was read with, kept in its cursor so that the
+// next page is read with the same.
+type activityFilters struct {
+	From           string `json:"f"`
+	To             string `json:"t"`
+	OrganizationID string `json:"fo,omitempty"`
+	AppID          string `json:"fa,omitempty"`
+}
+
+// activityCursor is where a page of listActivity ended, and what it was read with.
+type activityCursor struct {
+	store.ActivityPosition
+	Filters activityFilters `json:"q"`
+}
 
 // ActivityDay is what one app of an organization did in one area of the API from one client on
 // one UTC day.
@@ -35,8 +51,8 @@ type ActivityDay struct {
 // OrganizationProgress is how far one organization got with Agents.
 type OrganizationProgress struct {
 	OrganizationId string            `json:"organization_id" doc:"The organization."`
-	FurthestStep   ActivityStep      `json:"furthest_step" doc:"The furthest step from from to to, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity reads it from since."`
-	Steps          []ActivityStepDay `json:"steps" nullable:"false" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from from to to, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them."`
+	FurthestStep   ActivityStep      `json:"furthest_step" doc:"The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since."`
+	Steps          []ActivityStepDay `json:"steps" nullable:"false" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them."`
 }
 
 // ActivityPage is a page of every organization's activity.
@@ -44,14 +60,16 @@ type ActivityPage struct {
 	Items         []ActivityDay          `json:"items" nullable:"false" doc:"One item per organization, day, app, area and client, sorted in that order."`
 	Organizations []OrganizationProgress `json:"organizations" nullable:"false" doc:"Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads."`
 	HasMore       bool                   `json:"has_more"`
-	NextCursor    *string                `json:"next_cursor,omitempty" doc:"Pass as cursor for the next page, with the same from and to. Absent on the last."`
+	NextCursor    *string                `json:"next_cursor,omitempty" doc:"Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last."`
 }
 
 type listActivityRequest struct {
-	From   time.Time `query:"from" timeFormat:"2006-01-02" required:"true" doc:"The first UTC day read, YYYY-MM-DD."`
-	To     time.Time `query:"to" timeFormat:"2006-01-02" required:"true" doc:"The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it."`
-	Limit  int       `query:"limit" minimum:"1" maximum:"1000" doc:"Up to 1000. Omitted is 500."`
-	Cursor string    `query:"cursor" doc:"The next_cursor of the previous page, sent with the same from and to."`
+	From   time.Time             `query:"from" timeFormat:"2006-01-02" required:"true" doc:"The first UTC day read, YYYY-MM-DD."`
+	To     time.Time             `query:"to" timeFormat:"2006-01-02" required:"true" doc:"The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it."`
+	OrgId  optionalParam[string] `query:"org_id" doc:"Narrow to the rows that name this organization. One with no row is an empty page."`
+	AppId  optionalParam[string] `query:"app_id" doc:"Narrow to this app's rows. One with no row is an empty page."`
+	Limit  int                   `query:"limit" minimum:"1" maximum:"1000" doc:"Up to 1000. Omitted is 500."`
+	Cursor string                `query:"cursor" doc:"The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused."`
 }
 
 type listActivityResponse struct{ Body ActivityPage }
@@ -68,16 +86,29 @@ func (s *Server) listActivity(ctx context.Context, request *listActivityRequest)
 	if request.To.Sub(request.From) >= store.ActivityKeepDays*24*time.Hour {
 		return nil, errActivitySpan
 	}
-	after, err := decodeCursor[store.ActivityPosition](&request.Cursor)
-	if err == nil && after != nil {
-		_, err = time.Parse(time.DateOnly, after.Day)
+	filters := activityFilters{
+		From: request.From.Format(time.DateOnly), To: request.To.Format(time.DateOnly),
+		OrganizationID: request.OrgId.Value, AppID: request.AppId.Value,
+	}
+	cursor, err := decodeCursor[activityCursor](&request.Cursor)
+	if err == nil && cursor != nil {
+		_, err = time.Parse(time.DateOnly, cursor.Day)
 	}
 	if err != nil {
 		return nil, invalidRequest(errBadCursor.Error())
 	}
+	var after *store.ActivityPosition
+	if cursor != nil {
+		if cursor.Filters != filters {
+			return nil, errActivityFilters
+		}
+		after = &cursor.ActivityPosition
+	}
 
 	limit := cmp.Or(request.Limit, defaultActivityPage)
-	rows, err := s.store.Activities.List(ctx, request.From, request.To, after, limit+1)
+	rows, err := s.store.Activities.List(ctx, store.ActivityFilter{
+		From: request.From, To: request.To, OrganizationID: filters.OrganizationID, AppID: filters.AppID,
+	}, after, limit+1)
 	if err != nil {
 		return nil, err
 	}
@@ -97,9 +128,9 @@ func (s *Server) listActivity(ctx context.Context, request *listActivityRequest)
 	}
 	if more {
 		last := kept[len(kept)-1]
-		answer.NextCursor = encodeCursor(store.ActivityPosition{
+		answer.NextCursor = encodeCursor(activityCursor{ActivityPosition: store.ActivityPosition{
 			OrganizationID: last.OrganizationID, Day: last.Day.Format(time.DateOnly), AppID: last.AppID, Area: last.Area, Client: last.Client,
-		})
+		}, Filters: filters})
 	}
 	return &listActivityResponse{Body: answer}, nil
 }
@@ -144,7 +175,9 @@ func (s *Server) registerActivity(api huma.API) {
 		Description: "What every organization's apps did in each area of the API, from each client, on each UTC " +
 			"day from from to to, one item per organization, day, app, area and client, with how far each " +
 			"organization on the page got, read from the rows that name the organization; for apps that stayed in it, " +
-			"as getOrganizationActivity tells it. Send from and to again with cursor for the next page. Rows are " +
+			"as getOrganizationActivity tells it. org_id and app_id narrow the items; with app_id, how far an " +
+			"organization got is still read from all its apps. Send from, to, org_id and app_id again with cursor " +
+			"for the next page. Rows are " +
 			"kept 400 days. A row of an app whose organization was not known when it was written names none and " +
 			"is left out. Today's counts keep rising until the UTC day ends: pull with to = yesterday.\n\n" +
 			"These definitions are the router's; count a dashboard by them:\n\n" +

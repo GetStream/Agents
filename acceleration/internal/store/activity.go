@@ -309,16 +309,31 @@ type ActivityPosition struct {
 	Client         string `json:"c"`
 }
 
-// List is up to limit rows of the UTC days from from to to, both included, after the position
-// after when it is not nil, by organization, day, app, area and client. Rows that name no
-// organization are left out, as in Day.
-func (r *Activities) List(ctx context.Context, from, to time.Time, after *ActivityPosition, limit int) ([]ActivityRow, error) {
+// ActivityFilter is which rows List reads: those of the UTC days from From to To, both
+// included, and when set, only those naming OrganizationID or of AppID.
+type ActivityFilter struct {
+	From, To       time.Time
+	OrganizationID string
+	AppID          string
+}
+
+// List is up to limit rows filter keeps, after the position after when it is not nil, by
+// organization, day, app, area and client. Rows that name no organization are left out, as in
+// Day. An organization's rows are read by its (organization_id, day) index, an app's by the
+// primary key.
+func (r *Activities) List(ctx context.Context, filter ActivityFilter, after *ActivityPosition, limit int) ([]ActivityRow, error) {
 	query := r.store.global.NewSelect().
 		TableExpr("customer_activity").
 		ColumnExpr("organization_id, app_id, day, area, client, first_at, last_at, requests, refused").
 		ColumnExpr("COALESCE(last_refusal_code, '') AS last_refusal_code").
-		Where("day BETWEEN ?::date AND ?::date", from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly)).
+		Where("day BETWEEN ?::date AND ?::date", filter.From.UTC().Format(time.DateOnly), filter.To.UTC().Format(time.DateOnly)).
 		Where("organization_id <> ''")
+	if filter.OrganizationID != "" {
+		query = query.Where("organization_id = ?", filter.OrganizationID)
+	}
+	if filter.AppID != "" {
+		query = query.Where("app_id = ?", filter.AppID)
+	}
 	if after != nil {
 		query = query.Where("(organization_id, day, app_id, area, client) > (?, ?::date, ?, ?, ?)",
 			after.OrganizationID, after.Day, after.AppID, after.Area, after.Client)

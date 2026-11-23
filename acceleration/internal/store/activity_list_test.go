@@ -52,7 +52,7 @@ func (s *StoreSuite) TestActivityListIsTheRangesRowsByOrganizationDayAppAreaAndC
 	day := s.base.UTC().Format(time.DateOnly)
 	next := s.base.UTC().AddDate(0, 0, 1).Format(time.DateOnly)
 
-	rows, err := s.store.Activities.List(s.ctx, s.base, s.base.AddDate(0, 0, 1), nil, 100)
+	rows, err := s.store.Activities.List(s.ctx, ActivityFilter{From: s.base, To: s.base.AddDate(0, 0, 1)}, nil, 100)
 	s.Require().NoError(err)
 
 	s.Equal([]listed{
@@ -75,7 +75,7 @@ func (s *StoreSuite) TestActivityListIsTheRangesRowsByOrganizationDayAppAreaAndC
 func (s *StoreSuite) TestActivityListGoesOnAfterAPositionWithNoRowLostOrRepeated() {
 	s.listFixture()
 	from, to := s.base, s.base.AddDate(0, 0, 1)
-	every, err := s.store.Activities.List(s.ctx, from, to, nil, 100)
+	every, err := s.store.Activities.List(s.ctx, ActivityFilter{From: from, To: to}, nil, 100)
 	s.Require().NoError(err)
 
 	// A limit of one ends a page between every two rows, so between rows tying on every key but one.
@@ -83,7 +83,7 @@ func (s *StoreSuite) TestActivityListGoesOnAfterAPositionWithNoRowLostOrRepeated
 		var walked []ActivityRow
 		var after *ActivityPosition
 		for range len(every) + 1 {
-			rows, err := s.store.Activities.List(s.ctx, from, to, after, limit)
+			rows, err := s.store.Activities.List(s.ctx, ActivityFilter{From: from, To: to}, after, limit)
 			s.Require().NoError(err)
 			s.Require().LessOrEqual(len(rows), limit)
 			if len(rows) == 0 {
@@ -161,4 +161,35 @@ func (s *StoreSuite) TestOrganizationDaysCountEachAnsweredDayOfTheAreasInTheRang
 	s.Require().NoError(err)
 
 	s.Equal(map[string]int{"org-a": 1, "org-b": 1}, days)
+}
+
+// Defect: OrganizationID or AppID not narrowing the rows, or one of them dropped when both are
+// set.
+func (s *StoreSuite) TestActivityListKeepsOnlyTheOrganizationAndAppAsked() {
+	s.listFixture()
+	day := s.base.UTC().Format(time.DateOnly)
+	next := s.base.UTC().AddDate(0, 0, 1).Format(time.DateOnly)
+	from, to := s.base, s.base.AddDate(0, 0, 1)
+
+	for _, test := range []struct {
+		filter ActivityFilter
+		want   []listed
+	}{
+		{ActivityFilter{OrganizationID: "org-b"}, []listed{{"org-b", day, "app-3", "agent_setup", AuditSourceCLI}}},
+		{ActivityFilter{AppID: "app-2"}, []listed{
+			{"org-a", day, "app-2", "agent_setup", AuditSourceSDK},
+			{"org-a", next, "app-2", "conversations", AuditSourceSDK},
+		}},
+		{ActivityFilter{OrganizationID: "org-a", AppID: "app-2"}, []listed{
+			{"org-a", day, "app-2", "agent_setup", AuditSourceSDK},
+			{"org-a", next, "app-2", "conversations", AuditSourceSDK},
+		}},
+		{ActivityFilter{OrganizationID: "org-b", AppID: "app-2"}, []listed{}},
+		{ActivityFilter{AppID: "app-9"}, []listed{}},
+	} {
+		test.filter.From, test.filter.To = from, to
+		rows, err := s.store.Activities.List(s.ctx, test.filter, nil, 100)
+		s.Require().NoError(err)
+		s.Equal(test.want, listedOf(rows), "%+v", test.filter)
+	}
 }

@@ -59,8 +59,13 @@ func activityPath(from, to time.Time, limit int) string {
 
 // walk is every page from from to to, limit items at a time, following next_cursor.
 func (s *OpsActivitySuite) walk(from, to time.Time, limit int) []ActivityPage {
+	return s.walkFiltered(from, to, limit, "")
+}
+
+// walkFiltered is walk with filter, a query string such as "&org_id=x", sent with every page.
+func (s *OpsActivitySuite) walkFiltered(from, to time.Time, limit int, filter string) []ActivityPage {
 	var pages []ActivityPage
-	path := activityPath(from, to, limit)
+	path := activityPath(from, to, limit) + filter
 	for {
 		var page ActivityPage
 		s.Require().Equal(http.StatusOK, s.staff.do(http.MethodGet, path, nil, &page))
@@ -71,7 +76,7 @@ func (s *OpsActivitySuite) walk(from, to time.Time, limit int) []ActivityPage {
 		}
 		s.Require().NotNil(page.NextCursor)
 		s.Require().Less(len(pages), 500, "the cursor does not move on")
-		path = activityPath(from, to, limit) + "&cursor=" + url.QueryEscape(*page.NextCursor)
+		path = activityPath(from, to, limit) + filter + "&cursor=" + url.QueryEscape(*page.NextCursor)
 	}
 }
 
@@ -251,7 +256,8 @@ func (s *OpsActivitySuite) TestARangeWithNoRowIsAnEmptyPage() {
 // or read as the first page.
 func (s *OpsActivitySuite) TestACursorThisListDidNotHandOutIsRefused() {
 	from := daysAgo(30, 0)
-	notADay := base64.RawURLEncoding.EncodeToString([]byte(`{"o":"org","d":"yesterday","a":"","r":"","c":""}`))
+	notADay := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"o":"org","d":"yesterday","a":"","r":"","c":"","q":{"f":"` + from.Format(time.DateOnly) + `","t":"` + from.Format(time.DateOnly) + `"}}`))
 
 	for _, cursor := range []string{"not base64!", notADay} {
 		status, payload := s.staff.call(http.MethodGet, activityPath(from, from, 0)+"&cursor="+url.QueryEscape(cursor), nil)
@@ -290,4 +296,103 @@ func (s *OpsActivitySuite) TestOnlyTheOpsKeyListsEveryOrganizationsActivity() {
 	s.Equal(http.StatusUnauthorized, s.unauthenticatedClient.do(http.MethodGet, path, nil, nil))
 	s.Equal(http.StatusUnauthorized, wrong.do(http.MethodGet, path, nil, nil))
 	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, path, nil, nil))
+}
+
+// listedOf is the app, area and client of every item of pages, and the organizations they tell.
+func listedOf(pages []ActivityPage) (items []string, organizations []OrganizationProgress) {
+	for _, page := range pages {
+		for _, item := range page.Items {
+			items = append(items, item.OrganizationId+"/"+item.AppId+"/"+item.Area)
+		}
+		organizations = append(organizations, page.Organizations...)
+	}
+	return items, organizations
+}
+
+// Defect: org_id or app_id not narrowing the rows, either one dropped when both are set, a
+// filter lost after the first page so paging under it lists other rows, a row lost or repeated
+// between filtered pages, or with app_id an organization's progress read from that app alone.
+func (s *OpsActivitySuite) TestOrgIdAndAppIdEachAloneAndTogetherListOnlyTheirRows() {
+	day := daysAgo(200, 50)
+	one, two := s.app, s.data.createApp()
+	second := store.App{OrganizationID: one.organization.ID, Name: "app-" + s.utils.uuid()}
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &second))
+	org, first, other := one.organization.ID, one.app.ID, two.organization.ID
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(one, first, activity.AreaAgentSetup, store.AuditSourceCLI, day, 1, 0),
+		s.on(one, first, activity.AreaWorkers, store.AuditSourceCLI, day, 1, 0),
+		s.on(one, second.ID, activity.AreaConversations, store.AuditSourceSDK, day, 1, 0),
+		s.on(two, two.app.ID, activity.AreaModelAPI, store.AuditSourceSDK, day, 1, 0),
+	}))
+
+	for _, test := range []struct {
+		filter string
+		items  []string
+		told   []string
+	}{
+		{"&org_id=" + org, []string{org + "/" + first + "/agent_setup", org + "/" + first + "/workers", org + "/" + second.ID + "/conversations"}, []string{org, org, org}},
+		{"&app_id=" + first, []string{org + "/" + first + "/agent_setup", org + "/" + first + "/workers"}, []string{org, org}},
+		{"&app_id=" + two.app.ID, []string{other + "/" + two.app.ID + "/model_api"}, []string{other}},
+		{"&org_id=" + org + "&app_id=" + second.ID, []string{org + "/" + second.ID + "/conversations"}, []string{org}},
+		{"&org_id=" + other + "&app_id=" + first, nil, nil},
+	} {
+		items, organizations := listedOf(s.walkFiltered(day, day, 1, test.filter))
+		// The apps' ids are random, so their order is; ElementsMatch still counts a repeated row.
+		s.ElementsMatch(test.items, items, test.filter)
+		var told []string
+		for _, progress := range organizations {
+			told = append(told, progress.OrganizationId)
+			if progress.OrganizationId == org {
+				s.Equal(activityStepConversations, progress.FurthestStep, "%s: the organization's own, of all its apps", test.filter)
+			}
+		}
+		s.Equal(test.told, told, test.filter)
+	}
+}
+
+// Defect: an organization or app with no row answered with a 404 or a 500 rather than an empty
+// page.
+func (s *OpsActivitySuite) TestAnUnknownOrgIdOrAppIdIsAnEmptyPage() {
+	day := daysAgo(30, 0)
+
+	for _, filter := range []string{"&org_id=org-" + s.utils.uuid(), "&app_id=app-" + s.utils.uuid()} {
+		status, payload := s.staff.call(http.MethodGet, activityPath(day, day, 0)+filter, nil)
+
+		s.Require().Equal(http.StatusOK, status, string(payload))
+		var page map[string]json.RawMessage
+		s.Require().NoError(json.Unmarshal(payload, &page))
+		s.JSONEq(`[]`, string(page["items"]), filter)
+		s.JSONEq(`[]`, string(page["organizations"]), filter)
+	}
+}
+
+// Defect: a cursor read under another org_id, app_id, from or to than the page it came from,
+// which goes on from a position in rows the new filters do not read, answered rather than
+// refused; or one read under the same refused.
+func (s *OpsActivitySuite) TestACursorSentWithOtherFiltersIsRefused() {
+	day := daysAgo(300, 50)
+	app := s.customerID()
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(s.app, app, activity.AreaAgentSetup, store.AuditSourceCLI, day, 1, 0),
+		s.on(s.app, app, activity.AreaWorkers, store.AuditSourceCLI, day, 1, 0),
+	}))
+	filter := "&org_id=" + s.app.organization.ID + "&app_id=" + app
+	var page ActivityPage
+	s.Require().Equal(http.StatusOK, s.staff.do(http.MethodGet, activityPath(day, day, 1)+filter, nil, &page))
+	s.Require().NotNil(page.NextCursor)
+	cursor := "&cursor=" + url.QueryEscape(*page.NextCursor)
+
+	for _, path := range []string{
+		activityPath(day, day, 1) + "&org_id=" + s.app.organization.ID + cursor,
+		activityPath(day, day, 1) + "&app_id=" + app + cursor,
+		activityPath(day, day, 1) + "&org_id=org-" + s.utils.uuid() + "&app_id=" + app + cursor,
+		activityPath(day, day, 1) + cursor,
+		activityPath(day.AddDate(0, 0, -1), day, 1) + filter + cursor,
+		activityPath(day, day.AddDate(0, 0, 1), 1) + filter + cursor,
+	} {
+		status, payload := s.staff.call(http.MethodGet, path, nil)
+		s.Equal(http.StatusBadRequest, status, path+": "+string(payload))
+		s.Contains(string(payload), "cursor", path)
+	}
+	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, activityPath(day, day, 1)+filter+cursor, nil, nil))
 }
