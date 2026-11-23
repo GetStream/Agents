@@ -843,6 +843,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### An inbound Slack message goes to the connection an agent binds
+
+With two app connections to the same workspace, the router now picks the connected one that a live agent config binds, instead of the newest (#2185).
+
 ### A Swift typed tool no longer crashes the app on deeply nested arguments
 
 An `AgentTool` declared with a `Decodable` arguments type decodes it from the arguments as the model wrote them, instead of turning them back into JSON first on the thread the tool runs on, which could run out of stack. Arguments nested more than 64 levels deep fail the call, and the model is told why, as with arguments that do not fit the type.
