@@ -348,6 +348,30 @@ func (s *AppsSuite) TestAParkedPasswordOpensOnlyForItsCustomerAndToken() {
 	}
 }
 
+// A bridge parked before the key rotated is opened with the key that sealed it, so a call
+// ringing through a rotation is still answered with its trunk's password.
+func (s *AppsSuite) TestAParkedPasswordOpensWithTheKeyThatSealedItAfterARotation() {
+	sealed, err := auth.NewSealerWithKeyring(1, map[int]string{1: "apps suite key one"})
+	s.Require().NoError(err)
+	plivo, service, e164 := s.onAPlanVendor("plivo", s.config(), sealed)
+	_, err = service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+	token := plivo.dialed.AnswerURL[strings.LastIndex(plivo.dialed.AnswerURL, "/")+1:]
+	trunks := s.deployment.Trunks()
+	s.Require().Len(trunks, 1)
+	password, _ := s.deployment.TrunkAuth(trunks[0])
+	s.Require().NotEmpty(password)
+
+	service.sealer, err = auth.NewSealerWithKeyring(2, map[int]string{1: "apps suite key one", 2: "apps suite key two"})
+	s.Require().NoError(err)
+	_, err = service.Answer(s.ctx, token)
+
+	s.Require().NoError(err)
+	s.Equal(password, plivo.rendered.Password)
+}
+
 // A vendor that sends the trunk's password on answer gets it from a sealed bridge, so on a
 // deployment with no keyring its call is refused before anything is made at Stream.
 func (s *AppsSuite) TestACallThatSendsAPasswordIsRefusedWithoutAKeyringBeforeAnythingIsMade() {

@@ -134,13 +134,16 @@ TABLE call_bridges
     customer_id text NOT NULL
     expires_at timestamp with time zone NOT NULL
     initial_digits text
-    token_hash text NOT NULL
+    token text
+    token_hash text
+    trunk_password text
     trunk_password_kek_version integer
     trunk_password_sealed bytea
     trunk_uri text NOT NULL
     trunk_username text
     vendor text NOT NULL
-    CONSTRAINT call_bridges_pkey PRIMARY KEY (token_hash)
+    CONSTRAINT call_bridges_token_hash_key UNIQUE (token_hash)
+    CONSTRAINT call_bridges_token_key UNIQUE (token)
     CREATE INDEX call_bridges_expires_idx ON public.call_bridges USING btree (expires_at)
 
 TABLE call_legs
@@ -170,6 +173,7 @@ TABLE call_legs
     stream_app_pk bigint
     stream_session_id text NOT NULL DEFAULT ''::text
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
+    token text
     token_hash text
     usage_categories text[] NOT NULL DEFAULT '{}'::text[]
     user_id text NOT NULL DEFAULT ''::text
@@ -180,8 +184,8 @@ TABLE call_legs
     CONSTRAINT call_legs_direction_check CHECK ((direction = ANY (ARRAY['inbound'::text, 'outbound'::text])))
     CONSTRAINT call_legs_outcome_check CHECK ((outcome = ANY (ARRAY['completed'::text, 'busy'::text, 'no_answer'::text, 'failed'::text, 'canceled'::text, 'unknown'::text])))
     CONSTRAINT call_legs_pkey PRIMARY KEY (id)
-    CONSTRAINT call_legs_placed_check CHECK (((placed_at IS NOT NULL) OR ((token_hash IS NULL) AND (outcome IS NULL))))
-    CONSTRAINT call_legs_token_key UNIQUE (token_hash)
+    CONSTRAINT call_legs_placed_check CHECK (((placed_at IS NOT NULL) OR ((token IS NULL) AND (outcome IS NULL))))
+    CONSTRAINT call_legs_token_key UNIQUE (token)
     CREATE INDEX call_legs_call_idx ON public.call_legs USING btree (call_type, call_id) WHERE (ended_at IS NULL)
     CREATE INDEX call_legs_ended_idx ON public.call_legs USING btree (ended_at) WHERE (started_at IS NOT NULL)
     CREATE UNIQUE INDEX call_legs_inbound_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), stream_session_id) WHERE (direction = 'inbound'::text)
@@ -190,7 +194,9 @@ TABLE call_legs
     CREATE UNIQUE INDEX call_legs_participant_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), participant_session) WHERE (participant_session <> ''::text)
     CREATE INDEX call_legs_placed_call_idx ON public.call_legs USING btree (customer_id, call_id, id DESC) WHERE (placed_at IS NOT NULL)
     CREATE INDEX call_legs_ringing_idx ON public.call_legs USING btree (dialed_at) WHERE ((ended_at IS NULL) AND (started_at IS NULL))
-    CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
+    CREATE UNIQUE INDEX call_legs_token_hash_key ON public.call_legs USING btree (token_hash)
+    CREATE INDEX call_legs_token_hash_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
+    CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 

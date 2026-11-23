@@ -885,7 +885,7 @@ Only a built-in connector takes the OAuth client the deployment keeps in its env
 
 ### Call bridges and placed calls keep no token or trunk password in the clear
 
-A call bridge parked for a vendor that fetches its plan on answer keeps the trunk's password sealed under the deployment's key, and is deleted by the phone sweep once it expires unfetched. Bridges and placed call legs keep only the SHA-256 of their token, and are found by it. Placing a call on Plivo now needs the deployment's key (`ROUTER_DEV_KEK` locally), and without it is refused before anything is made at Stream; Bandwidth, which authenticates by address, needs none and parks no password. Bridges parked while the migration runs are deleted, so those calls are not bridged; status posts for calls in flight still find their legs.
+A call bridge parked for a vendor that fetches its plan on answer keeps the trunk's password sealed under the deployment's key, and is deleted by the phone sweep once it expires unfetched. Bridges and placed call legs keep only the SHA-256 of their token, and are found by it. Placing a call on Plivo now needs the deployment's key (`ROUTER_DEV_KEK` locally), and without it is refused before anything is made at Stream; Bandwidth, which authenticates by address, needs none and parks no password. The migration only adds columns, so a router of the release before keeps working beside it during a deploy or after a rollback; it misses the status posts and bridges of calls the other release placed. Status posts for calls in flight before the migration still find their legs.
 
 ### A request counts only toward its own organization's spend grants
 

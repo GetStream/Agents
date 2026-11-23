@@ -161,7 +161,9 @@ func (r *CallLegs) Open(ctx context.Context, leg *CallLeg) (bool, error) {
 		if len(dialed) == 0 {
 			return false, stack.Wrap(ErrNoPlacedCall)
 		}
+		token := leg.Token
 		*leg = dialed[0]
+		leg.Token = token
 	} else {
 		result, err := r.store.shard.NewInsert().Model(leg).On("CONFLICT DO NOTHING").Returning("id").Exec(ctx)
 		if errors.Is(err, sql.ErrNoRows) {

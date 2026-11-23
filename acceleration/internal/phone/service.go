@@ -1457,8 +1457,8 @@ func (s *Service) park(
 		CallID:        callID,
 		ExpiresAt:     time.Now().UTC().Add(bridgeLifetime),
 	}
-	// Only a vendor that sends the password is given it, so only its bridge keeps one.
-	if outbound.Bridge.Password != "" && sendsPassword(s.registry, vendor) {
+	// Only a vendor that sends the password is given one, so only its bridge keeps one.
+	if outbound.Bridge.Password != "" {
 		if s.sealer == nil {
 			return "", stack.Wrap(ErrNoSealerToCall)
 		}
