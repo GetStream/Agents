@@ -2,7 +2,10 @@
 
 package store
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 func (s *StoreSuite) TestTheAgentOnANumberIsTheOneThatNamedIt() {
 	customerID := newID()
@@ -62,6 +65,124 @@ func (s *StoreSuite) TestADeletedAppConnectionIsNotFound() {
 	_, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
 
 	s.True(errors.Is(err, ErrNoConnectorConnection))
+}
+
+// accountConnection is an app connection of the workspace T0000TEAM in a status, made at
+// the base time plus age, so the order of two is not left to the clock.
+func (s *StoreSuite) accountConnection(customerID, status string, age time.Duration) ConnectorConnection {
+	connection := s.connection(customerID, nil)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
+		"UPDATE connector_connections SET account_id = 'T0000TEAM', status = ?, created_at = ? WHERE id = ?",
+		status, s.base.Add(age), connection.ID)
+	s.Require().NoError(err)
+	return connection
+}
+
+// AI-3503: a second connection to a workspace that no agent binds took every message from
+// the bound first one.
+func (s *StoreSuite) TestTheBoundAppConnectionOfAnAccountIsFoundBeforeANewerUnboundOne() {
+	older := s.accountConnection("acme-app", ConnectionConnected, 0)
+	s.bind("acme-app", fixedBinding(older.ID))
+	s.accountConnection("acme-app", ConnectionConnected, time.Hour)
+
+	found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+	s.Require().NoError(err)
+	s.Equal(older.ID, found.ID)
+}
+
+// The brief's second case: the newer bound connection is also the connected one.
+func (s *StoreSuite) TestTheConnectedOfTwoBoundAppConnectionsIsFoundWhenItIsTheNewer() {
+	older := s.accountConnection("acme-app", ConnectionNeedsReauthorization, 0)
+	s.bind("acme-app", fixedBinding(older.ID))
+	newer := s.accountConnection("acme-app", ConnectionConnected, time.Hour)
+	s.bind("acme-app", fixedBinding(newer.ID))
+
+	found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+	s.Require().NoError(err)
+	s.Equal(newer.ID, found.ID)
+}
+
+func (s *StoreSuite) TestTheConnectedOfTwoBoundAppConnectionsIsFoundWhenItIsTheOlder() {
+	older := s.accountConnection("acme-app", ConnectionConnected, 0)
+	s.bind("acme-app", fixedBinding(older.ID))
+	newer := s.accountConnection("acme-app", ConnectionNeedsReauthorization, time.Hour)
+	s.bind("acme-app", fixedBinding(newer.ID))
+
+	found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+	s.Require().NoError(err)
+	s.Equal(older.ID, found.ID)
+}
+
+// A bound connection that needs reauthorization still comes before a connected one nobody
+// binds: only a bound connection is answered, so the unbound one would drop the message.
+func (s *StoreSuite) TestABoundAppConnectionThatNeedsReauthorizationIsFoundBeforeAnUnboundConnectedOne() {
+	older := s.accountConnection("acme-app", ConnectionNeedsReauthorization, 0)
+	s.bind("acme-app", fixedBinding(older.ID))
+	s.accountConnection("acme-app", ConnectionConnected, time.Hour)
+
+	found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+	s.Require().NoError(err)
+	s.Equal(older.ID, found.ID)
+}
+
+// With no binding at all the newest is found, as on base, and the caller drops the message.
+func (s *StoreSuite) TestTheNewestOfTwoUnboundAppConnectionsIsFound() {
+	s.accountConnection("acme-app", ConnectionConnected, 0)
+	newer := s.accountConnection("acme-app", ConnectionConnected, time.Hour)
+
+	found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+	s.Require().NoError(err)
+	s.Equal(newer.ID, found.ID)
+}
+
+// Only what AgentConfigsBindingConnection counts as a binding makes a connection bound: a
+// test copy, a deleted config and another customer's config do not.
+func (s *StoreSuite) TestOnlyALiveConfigOfTheCustomerMakesAnAppConnectionBound() {
+	for name, bindNewer := range map[string]func(connectionID string){
+		"test copy": func(connectionID string) {
+			copied := s.bind("acme-app", fixedBinding(connectionID))
+			_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET tags = ?::jsonb WHERE id = ?", `{"draft_of": "x"}`, copied)
+			s.Require().NoError(err)
+		},
+		"deleted config": func(connectionID string) {
+			deleted := s.bind("acme-app", fixedBinding(connectionID))
+			_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", deleted)
+			s.Require().NoError(err)
+		},
+		"another customer's config": func(connectionID string) {
+			s.bind("other-app", fixedBinding(connectionID))
+		},
+	} {
+		s.Run(name, func() {
+			s.SetupTest()
+			older := s.accountConnection("acme-app", ConnectionConnected, 0)
+			s.bind("acme-app", fixedBinding(older.ID))
+			newer := s.accountConnection("acme-app", ConnectionConnected, time.Hour)
+			bindNewer(newer.ID)
+
+			found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+			s.Require().NoError(err)
+			s.Equal(older.ID, found.ID)
+		})
+	}
+}
+
+// Another customer's bound connection of the same workspace is never found for this one.
+func (s *StoreSuite) TestAnotherCustomersBoundAppConnectionOfTheSameAccountIsNotFound() {
+	own := s.accountConnection("acme-app", ConnectionConnected, 0)
+	other := s.accountConnection("other-app", ConnectionConnected, time.Hour)
+	s.bind("other-app", fixedBinding(other.ID))
+
+	found, err := s.store.AppConnectionByAccount(s.ctx, "acme-app", "acme", "T0000TEAM")
+
+	s.Require().NoError(err)
+	s.Equal(own.ID, found.ID)
 }
 
 func (s *StoreSuite) TestTheConfigsThatBindAConnectionAreFound() {
