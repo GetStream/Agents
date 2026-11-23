@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"syscall"
 
 	"github.com/uptrace/bun/driver/pgdriver"
 
@@ -35,26 +33,29 @@ func IsForeignKeyViolation(err error) bool {
 }
 
 // Transient reports whether err is a failure that may pass if the same statement is sent
-// again: the connection dropped or was refused, the statement timed out on either side, the
-// server is shutting down or full, a write reached a primary a failover demoted (read-only
-// transaction), or Postgres gave up on a serialization or a deadlock. A closed pool, a
-// violated constraint and a bad statement are not.
+// again: the connection dropped or was refused, the statement or the context ran out of
+// time, the server is shutting down or full, a write reached a primary a failover demoted
+// (read-only transaction), or Postgres gave up on a serialization or a deadlock. A closed
+// pool, a violated constraint, a bad statement and a local failure such as a missing file
+// are not.
 func Transient(err error) bool {
 	var refused pgdriver.Error
 	if errors.As(err, &refused) {
 		switch code := refused.Field('C'); code {
-		// 57014 is a statement cancelled by statement_timeout, or by the driver once the
-		// context ran out: the same wait as the context.DeadlineExceeded below.
+		// 57014 is a statement statement_timeout or an operator's pg_cancel_backend stopped.
+		// The driver sends no cancel of its own: a context that ran out is a net timeout.
 		case "25006", "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
 			return true
 		default:
 			return strings.HasPrefix(code, "08")
 		}
 	}
+	// A dial, read or write that failed is an *net.OpError; a deadline, the context's
+	// included, is a net.Error that timed out.
+	var op *net.OpError
 	var network net.Error
-	return errors.As(err, &network) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+	return errors.As(err, &op) || errors.As(err, &network) && network.Timeout() ||
+		errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // oneRow turns an update or delete that matched nothing into missing.
