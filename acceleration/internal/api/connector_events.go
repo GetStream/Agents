@@ -311,7 +311,7 @@ func readConnectorEvent(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 //	each signal -> the connections of its account -> Resolver.Revoke, with when it ended
 //	the messages -> ChannelBridge.Deliver, with app
 //	  none, none skipped and no signal -> an info line
-//	a provider app's delivery -> eventforward.Forward, queued for the customer's event
+//	a provider app's delivery -> eventforward.Forwarder.Forward, queued for the customer's event
 //	  destinations, handled when a signal or an answered message was in it
 //	                                                200, or 500 so the provider retries
 //
