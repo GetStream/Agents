@@ -1418,6 +1418,27 @@ func (s *TelnyxUnpaidSuite) uncheckable(person string) {
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
 }
 
+// A phone task whose call's session cannot open, the credit being spent after the call was placed,
+// fails under the refusal's code, final, and the run keeps that code for a worker that takes it
+// over (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenForMoneyFailsUnderTheMoney() {
+	call := s.callOn("noted/noted-model")
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
+	s.refusedForMoney(call.writer)
+
+	outcome := s.letGo(s.dial(call))
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeInsufficientCredits, failure.Reason)
+	s.True(failure.Final, "spent credit outlasts every retry of the run")
+	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Equal(call.spec.ID, kept.SessionID, "the user is rung once")
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeInsufficientCredits, *kept.Error, "a worker taking the run over finds how the call went")
+}
+
 // A phone task whose call's turn the model answers is delivered by phone once the user hangs up,
 // as it always was (control: the same on the base).
 func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsAnsweredIsDelivered() {

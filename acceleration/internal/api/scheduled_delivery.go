@@ -1181,13 +1181,19 @@ func callSpec(config store.AgentConfig, delivery scheduledDelivery, agentID stri
 
 // carryOutOnCall opens the session of a call a task placed and holds the
 // call until it is over. The user has been rung by now, so a failure is
-// final: another attempt would ring them again.
+// final: another attempt would ring them again. The one exception is a
+// refusal because the money could not be checked, whose call is given back
+// (callEnded).
 func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery, spec session.Spec) (string, string, error) {
 	created, err := s.sessions.Create(ctx, spec)
 	if _, unanswered := errors.AsType[*session.CallUnansweredError](err); unanswered {
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonNotAnswered, err))
 	}
 	if err != nil {
+		// A session the organization may not pay for fails under the refusal's code (unpaid).
+		if _, refused := moneyError(err); refused {
+			return "", "", s.callEnded(ctx, delivery, spec.ID, unpaid(err))
+		}
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonFailed, err))
 	}
 	if err := s.store.ScheduledTasks.SetSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
