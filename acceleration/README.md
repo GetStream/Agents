@@ -2138,9 +2138,25 @@ is left out when the request has none:
 | `request_size` | The request's `Content-Length`. None for a chunked body |
 | `user_id` | The end user of a request from a user's device, cut to 256 bytes. None for a backend's request, even one that names a user |
 | `build_version` | The release the router was built from. None in a local build |
+| `close_reason` | Why a session socket closed: the events socket (`/v1/agents/sessions/{id}/events`) and `/v1/agents/socket`. None for any other request or socket. The values are below |
+| `close_code` | The code of the close frame the caller sent, or of the one the router sent. None for `client_gone` and `timeout` |
+| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it |
 
 A socket is logged once, when it closes, so its `duration` is how long the connection lived
-rather than a time to respond and its status is the `101` of the upgrade. A `5xx` is logged
+rather than a time to respond and its status is the `101` of the upgrade. A session socket's
+`close_reason` is one of these:
+
+| `close_reason` | When |
+| --- | --- |
+| `client_closed` | The caller sent a close frame, or a `close` command (a `stop` on `/v1/agents/socket`) that ended the session. A command sent once the session had ended is not counted: the line says `session_ended` |
+| `client_gone` | The connection broke with no close frame, or a write to the caller failed |
+| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` |
+| `session_ended` | The session ended for another reason. `end_reason` says which |
+| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`) |
+| `server_error` | `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read. The caller is sent `1008` |
+| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`) |
+
+A `5xx` is logged
 at error instead, because an access log at a busy deployment is the one stream nobody reads
 all of. A preflight is not logged, nor is a `/health` probe answered below `400` with no error:
 the load balancer and kubelet ask every few seconds. A probe that fails is logged. The query

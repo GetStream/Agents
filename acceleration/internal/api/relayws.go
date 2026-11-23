@@ -66,6 +66,9 @@ type remoteSocket struct {
 	once     sync.Once
 	// halted is set before closed when the holder's router stopped the session.
 	halted atomic.Bool
+	// byCommand is set before closed when a close command this socket carried ended the
+	// session.
+	byCommand atomic.Bool
 }
 
 func (r *remoteSocket) close() { r.once.Do(func() { close(r.closed) }) }
@@ -88,6 +91,8 @@ type proxyWatcher struct {
 	// saying so has gone, and the watcher it left behind would otherwise hold a
 	// persistent conversation open and go on being offered the model's tool calls.
 	seen time.Time
+	// closing is set before a close command that ends the session is applied (closesSession).
+	closing atomic.Bool
 }
 
 // newRelayed starts both subscriptions and returns once they are live, so a session
@@ -191,12 +196,13 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 	go func() {
 		gone <- s.readRelayedCommands(connection, state, watcher, id)
 	}()
-	s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load))
+	recordClose(r.Context(), s.writeRelayedEvents(connection, state, socket, watcher, id, watching(r), gone, endingOf(asked, socket.halted.Load)))
 	return true
 }
 
 // writeRelayedEvents writes what arrives on the bus out to the caller, and keeps both the
-// socket and the watcher behind it alive.
+// socket and the watcher behind it alive. It says why the socket closed; the session's end
+// reason is the holder's to log.
 //
 // The ping and the refresh share a tick because they say the same thing in each
 // direction: this socket is still being read, and the watcher standing for it elsewhere
@@ -209,7 +215,7 @@ func (s *Server) writeRelayedEvents(
 	asked wanted,
 	gone <-chan error,
 	ended ending,
-) {
+) socketEnd {
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
 
@@ -218,13 +224,20 @@ func (s *Server) writeRelayedEvents(
 		case stopped := <-gone:
 			if errors.Is(stopped, errUnreadableFrame) {
 				refuseUnreadable(connection)
+				return socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
 			}
-			return
+			return readEnd(stopped)
 
 		case <-socket.closed:
 			code, reason := ended()
+			// The holder says whether the caller's close command ended the session: one sent
+			// after the end did not, and the end may reach this node after it.
+			end := sessionEnd(code)
+			if socket.byCommand.Load() && end.cause == sessionEnded {
+				end.cause = closedByClient
+			}
 			closeBeforeReader(connection, code, reason, gone)
-			return
+			return end
 
 		case payload := <-socket.frames:
 			if !asked.takesFrame(frameType(payload)) {
@@ -233,13 +246,13 @@ func (s *Server) writeRelayedEvents(
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.TextMessage, payload); err != nil {
 				s.logger.Debug("relayed session socket write failed", "error", err)
-				return
+				return socketEnd{cause: clientGone}
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return socketEnd{cause: clientGone}
 			}
 			if err := state.bus.Publish(context.Background(), state.bus.Commands(), relay.Request{
 				Type: relay.Refresh, Node: state.bus.Node(), Session: id, Watcher: watcher,
@@ -387,7 +400,7 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 	}
 
 	go s.runRelayedCommands(found, proxy)
-	go s.publishSessionEvents(ctx, state, events, request.Watcher, request.Session, key, found.Halted)
+	go s.publishSessionEvents(ctx, state, events, request.Watcher, request.Session, key, found.Halted, proxy.closing.Load)
 }
 
 // publishSessionEvents puts one session's events on the bus for the socket watching it
@@ -397,7 +410,7 @@ func (s *Server) publishSessionEvents(
 	state *relayed,
 	events <-chan session.Event,
 	watcher, id, key string,
-	halted func() bool,
+	halted, byCommand func() bool,
 ) {
 	// The events channel closing is either the session ending or the watcher being
 	// detached, and both end the watcher: dropping it here is what closes its command
@@ -429,11 +442,12 @@ func (s *Server) publishSessionEvents(
 	}
 
 	if err := state.bus.Publish(ctx, state.bus.Events(), relay.Response{
-		Type:    relay.Closed,
-		Node:    state.bus.Node(),
-		Owner:   key,
-		Watcher: watcher,
-		Halted:  halted(),
+		Type:      relay.Closed,
+		Node:      state.bus.Node(),
+		Owner:     key,
+		Watcher:   watcher,
+		Halted:    halted(),
+		ByCommand: byCommand(),
 	}); err != nil {
 		s.logger.Debug("could not relay the end of a session", "session", id, "error", err)
 	}
@@ -451,6 +465,11 @@ func (s *Server) runRelayedCommands(found *session.Session, proxy *proxyWatcher)
 		// The other node holds the socket's address, so only its user is counted here.
 		sender := routing.Caller{UserID: proxy.owner.UserID, ServerSide: proxy.owner.Kind == auth.KindServer,
 			Verified: proxy.owner.UserID != "" && proxy.owner.Kind.Verified()}
+		if command.Type == "close" {
+			if s.closesSession(found, proxy.seat.Owner) {
+				proxy.closing.Store(true)
+			}
+		}
 		s.applyCommand(found, proxy.seat, sender, command)
 	}
 }
@@ -506,6 +525,9 @@ func (r *relayed) deliver(payload []byte) {
 	if response.Type == relay.Closed {
 		if response.Halted {
 			socket.halted.Store(true)
+		}
+		if response.ByCommand {
+			socket.byCommand.Store(true)
 		}
 		socket.close()
 		return

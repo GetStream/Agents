@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -176,10 +177,20 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 	// Reading and writing each own the connection in one direction, which is what gorilla
 	// requires: two goroutines writing to one socket interleave frames.
 	gone := make(chan error, 1)
+	var closing atomic.Bool
 	go func() {
-		gone <- s.readCommands(connection, found, seat, CallerFrom(r.Context()))
+		gone <- s.readCommands(connection, found, seat, CallerFrom(r.Context()), &closing)
 	}()
-	s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
+	ended := s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
+	// A close command ends the session before the reader stops, so the writer sees the end first.
+	// One that came once the session had ended set no closing, and the end stays the session's.
+	if closing.Load() && ended.cause == sessionEnded {
+		ended.cause = closedByClient
+	}
+	if ended.cause == sessionEnded {
+		ended.endReason = found.EndedFor()
+	}
+	recordClose(r.Context(), ended)
 }
 
 // resuming is what a resumable watcher asked for: cursor is the last frame it was sent,
@@ -284,9 +295,9 @@ func (w wanted) takesFrame(kind string) bool {
 }
 
 // writeEvents pushes the conversation to the caller until the session ends or the socket
-// breaks. gone carries why the reader stopped, which is answered here because this is the
-// goroutine that writes.
-func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.Event, asked wanted, gone <-chan error, ended ending) {
+// breaks, and says why the socket closed. gone carries why the reader stopped, which is
+// answered here because this is the goroutine that writes.
+func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.Event, asked wanted, gone <-chan error, ended ending) socketEnd {
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
 
@@ -295,16 +306,20 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 		case stopped := <-gone:
 			switch {
 			case stopped == nil:
+				// The reader stops on a close command, whoever ended the session; watchSession
+				// tells the two apart.
 				closeSocket(connection, websocket.CloseNormalClosure, "the session ended")
+				return socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}
 			case errors.Is(stopped, errUnreadableFrame):
 				refuseUnreadable(connection)
+				return socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
 			}
-			return
+			return readEnd(stopped)
 		case event, open := <-events:
 			if !open {
 				code, reason := ended()
 				closeBeforeReader(connection, code, reason, gone)
-				return
+				return sessionEnd(code)
 			}
 			if !asked.takes(event) {
 				continue
@@ -316,13 +331,13 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(encoded); err != nil {
 				s.logger.Debug("session socket write failed", "error", err)
-				return
+				return socketEnd{cause: clientGone}
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return socketEnd{cause: clientGone}
 			}
 		}
 	}
@@ -367,8 +382,11 @@ type watcherCommand struct {
 // with it. A frame that is not JSON it can read ends the socket.
 //
 // It returns nil once a command closed the session, errUnreadableFrame for a frame that is not
-// a command, and the read's own error when the connection ended.
-func (s *Server) readCommands(connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller) error {
+// a command, and the read's own error when the connection ended. closing is set before a close
+// command that ends the session is applied (closesSession).
+func (s *Server) readCommands(
+	connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller, closing *atomic.Bool,
+) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -387,11 +405,22 @@ func (s *Server) readCommands(connection *websocket.Conn, found *session.Session
 		if json.Unmarshal(payload, &command) != nil {
 			return errUnreadableFrame
 		}
+		if command.Type == "close" {
+			closing.Store(s.closesSession(found, seat.Owner))
+		}
 
 		if !s.applyCommand(found, seat, sender, command) {
 			return nil
 		}
 	}
+}
+
+// closesSession is whether a close command from owner ends found: the manager still holds it.
+// A session that already left the manager was ended by something else, which a close command
+// sent as its end crossed it only follows.
+func (s *Server) closesSession(found *session.Session, owner session.Owner) bool {
+	_, held := s.sessions.Get(found.ID(), owner)
+	return held
 }
 
 // errNoApprovalWaits answers a tool_approval no call waits for.
