@@ -307,8 +307,9 @@ module-level `logger = logging.getLogger(__name__)`. Use `debug` for lifecycle, 
   get no section.
 - That PR turns `# Unreleased` and the PRs merged since the previous Python release into one version
   heading (`# v0.4.0`), with sections **Breaking Changes**, **New Features**, **Bug Fixes**.
-  The previous release is the newest Python one in `gh release list -R GetStream/Agents`; its tag
-  is `v0.6.9` or `0.7.0`, both styles exist.
+  The previous release is the newest Python one in `gh release list -R GetStream/Agents`. A Python
+  release's tag is the bare version (`vX.Y.Z` or `X.Y.Z`), with no `sdk-`, `sdks/go/` or
+  `accelerate-` prefix; `v0.6.9` and `0.7.0` both exist.
 - Only include user-facing changes (public API breaks, features, fixes). Skip docs-only and CI-only commits.
 - Reference PR numbers inline, e.g. `(#374)`.
 - To generate: `git log <previous release tag>..HEAD --oneline --no-merges`, then classify each commit.

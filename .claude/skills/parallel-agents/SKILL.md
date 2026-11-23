@@ -68,7 +68,7 @@ a mistake that actually happened.
   - A database that ran an earlier build of a PR can hold a version that a later merge lands below.
     Recreate that database.
 - **No shared append files.** An SDK note is a file of its own in `.claude/skills/sdk/notes/`, and
-  The root `CHANGELOG.md` is written only at a release, except one breaking-change line under
+  the root `CHANGELOG.md` is written only at a release, except one breaking-change line under
   `# Unreleased`. A branch from before that rule that still adds to the end of
   `.claude/skills/sdk/SKILL.md` or other lines to the root `CHANGELOG.md` moves its note to a file and
   drops those changelog lines.
