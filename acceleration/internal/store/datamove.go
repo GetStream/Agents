@@ -132,6 +132,8 @@ var dataTables = []dataTable{
 	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
+	// Who asked not to be reached: STOP and START at the source carry on here through the changes.
+	{name: "opt_outs", customer: "customer_id"},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
@@ -804,6 +806,15 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	}
 	if spec.copied != "" {
 		where = " WHERE NOT " + spec.copiedBefore(shape, columns)
+	}
+	if table == "opt_outs" {
+		// An opt-out live here under another id is this deployment's, and stays: the row arriving
+		// would break the one-live-row index, and dropping the live one would let the person be
+		// reached again. A revoked row is history beside it, and revokes only the row of its own id,
+		// so a START replayed from the source lifts only what the source sent. Two writes of one
+		// live opt-out here at the same moment can still fail the statement on that index.
+		where = " WHERE NOT (r.revoked_at IS NULL AND EXISTS (SELECT 1 FROM opt_outs AS h WHERE h.customer_id = r.customer_id" +
+			" AND h.recipient = r.recipient AND h.channel = r.channel AND h.revoked_at IS NULL AND h.id <> r.id))"
 	}
 	args := []any{string(row), customerID}
 	if table == "requests" {
