@@ -24,6 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -156,6 +157,9 @@ type utterance struct {
 
 // TTS is a streaming Cartesia text-to-speech session.
 type TTS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a redial.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -234,6 +238,7 @@ func (t *TTS) Start(ctx context.Context) error {
 	}
 	t.started = true
 	t.ctx = context.WithoutCancel(ctx)
+	t.call = ctx
 	t.mu.Unlock()
 
 	if err := t.dial(ctx); err != nil {
@@ -269,7 +274,7 @@ func (t *TTS) dial(ctx context.Context) error {
 	t.conn = conn
 	t.mu.Unlock()
 
-	go t.readLoop(conn)
+	goroutine.Go(t.call, func() { t.readLoop(conn) })
 	return nil
 }
 
@@ -543,7 +548,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		})
 		// A clean close mid-call is Cartesia's idle timeout, not the end of the
 		// session: the agent still has a caller and will need a voice for them.
-		go t.redial()
+		goroutine.Go(t.call, t.redial)
 		return
 	}
 	t.emitter.Send(tts.Error{
@@ -556,7 +561,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 	// A socket that dropped without a close frame can still accept writes into nothing,
 	// so it is closed to make the next send redial rather than speak to nobody.
 	conn.Close()
-	go t.redial()
+	goroutine.Go(t.call, t.redial)
 }
 
 func (t *TTS) handleMessage(message serverMessage) {

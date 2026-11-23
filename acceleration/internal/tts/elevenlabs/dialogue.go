@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -83,6 +84,9 @@ type dialogueServerMessage struct {
 // and audio is attributed by the order turns were started in, the way s2pro does it.
 // Barge-in has no cancel frame either, so it replaces the socket.
 type Dialogue struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a redial.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -154,6 +158,7 @@ func (d *Dialogue) Start(ctx context.Context) error {
 	}
 	d.started = true
 	d.ctx = context.WithoutCancel(ctx)
+	d.call = ctx
 	d.mu.Unlock()
 
 	if err := d.dial(ctx); err != nil {
@@ -161,7 +166,7 @@ func (d *Dialogue) Start(ctx context.Context) error {
 	}
 
 	d.emitter.Send(tts.Connected{Provider: ProviderName, Model: d.options.Model, At: time.Now()})
-	go d.keepAlive()
+	goroutine.Go(ctx, d.keepAlive)
 	return nil
 }
 
@@ -360,7 +365,7 @@ func (d *Dialogue) dial(ctx context.Context) error {
 		return stack.Wrap(fmt.Errorf("elevenlabs: register voice: %w", err))
 	}
 
-	go d.readLoop(conn, key)
+	goroutine.Go(d.call, func() { d.readLoop(conn, key) })
 	return nil
 }
 

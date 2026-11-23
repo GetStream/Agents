@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/mock"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -85,13 +86,13 @@ func (r *reservation) idOf() uuid.UUID {
 // keep renews the reservation while its response streams, until the returned func is called
 // (it settled) or maxReserved has passed. A renewal refused keeps what was held until it
 // expires.
-func (s *Session) keep(held *reservation) func() {
+func (s *Session) keep(ctx context.Context, held *reservation) func() {
 	if held == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
 	var once sync.Once
-	go func() {
+	goroutine.Go(ctx, func() {
 		ticker := time.NewTicker(reserveRenewEvery)
 		defer ticker.Stop()
 		limit := time.NewTimer(maxReserved)
@@ -108,7 +109,7 @@ func (s *Session) keep(held *reservation) func() {
 				_ = s.recorder.Reserve(s.config, s.owner, held.id, held.estimate, 2*reserveRenewEvery)
 			}
 		}
-	}()
+	})
 	return func() { once.Do(func() { close(done) }) }
 }
 
@@ -259,7 +260,7 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 	}
 	charged := s.charged(ctx)
 	settling := context.WithoutCancel(ctx)
-	settled := s.keep(held)
+	settled := s.keep(ctx, held)
 	// The response settles with its status alone, so what its failure said is taken from the
 	// event that reported it: the last one, as the stream's own Err keeps.
 	var failure string
@@ -640,12 +641,12 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	passedOver := s.passesOver(params)
 	if passedOver {
 		if alternate, err := s.fallback(ctx, params); err == nil {
-			return screened(alternate, verdict), nil
+			return screened(ctx, alternate, verdict), nil
 		}
 	}
 	stream, err := open(ctx, params)
 	if err == nil || passedOver || ctx.Err() != nil || s.fallback == nil || params.PreviousResponseID != "" || params.Conversation != "" {
-		return screened(stream, verdict), stack.Wrap(err)
+		return screened(ctx, stream, verdict), stack.Wrap(err)
 	}
 	var apiError *openai.Error
 	// 402 is the provider's billing, not the request: Gemini answers it for every request
@@ -658,7 +659,7 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 		return nil, stack.Wrap(errors.Join(err, fallbackErr))
 	}
 	routing.CountHandover(routing.LLM, s.config, err)
-	return screened(alternate, verdict), nil
+	return screened(ctx, alternate, verdict), nil
 }
 
 // passesOver reports whether a response is asked of the other candidates before this
@@ -712,11 +713,11 @@ func (s *Session) debit(ctx context.Context, charged routing.Caller, tokens int6
 }
 
 // screened attaches a verdict to a stream, when there is both.
-func screened(stream *llm.Stream, verdict <-chan error) *llm.Stream {
+func screened(ctx context.Context, stream *llm.Stream, verdict <-chan error) *llm.Stream {
 	if stream == nil || verdict == nil {
 		return stream
 	}
-	return stream.Screen(verdict)
+	return stream.Screen(ctx, verdict)
 }
 
 func (s *Session) addChild(child *Session) bool {
