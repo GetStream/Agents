@@ -300,11 +300,13 @@ module-level `logger = logging.getLogger(__name__)`. Use `debug` for lifecycle, 
 
 - Lives in `CHANGELOG.md` at the repo root. A pull request does not edit it: when every PR added
   lines at the same place, any two open PRs conflicted there.
-- It is written once per release, in the PR that prepares a `vX.Y.Z` tag on `main` (the Python
-  packages, `.github/workflows/release.yml`). Router deploy tags (`accelerate-v*`) and SDK tags
+- It is written once per release, in the PR that prepares a Python packages release
+  (`.github/workflows/release.yml`). Router deploy tags (`accelerate-v*`) and SDK tags
   get no section.
-- That PR turns `# Unreleased` and the PRs merged since the last `v` tag into one version
+- That PR turns `# Unreleased` and the PRs merged since the previous Python release into one version
   heading (`# v0.4.0`), with sections **Breaking Changes**, **New Features**, **Bug Fixes**.
+  The previous release is the newest Python one in `gh release list -R GetStream/Agents`; its tag
+  is `v0.6.9` or `0.7.0`, both styles exist.
 - Only include user-facing changes (public API breaks, features, fixes). Skip docs-only and CI-only commits.
 - Reference PR numbers inline, e.g. `(#374)`.
-- To generate: `git log <last v tag>..HEAD --oneline --no-merges`, then classify each commit.
+- To generate: `git log <previous release tag>..HEAD --oneline --no-merges`, then classify each commit.
