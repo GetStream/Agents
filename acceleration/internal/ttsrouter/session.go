@@ -287,8 +287,8 @@ func (s *Session) Close() error {
 func (s *Session) forward() {
 	defer close(s.forwarded)
 	defer close(s.events)
-	// Once the voice's events end, whether the session was closed, its context cancelled or
-	// the voice gave up, a sentence it has not completed never will be.
+	// Once the voice's events end, because the session was closed or the voice ended them on
+	// its own, a sentence it has not completed never will be.
 	defer s.abandonUnsettled()
 
 	for event := range s.provider.Events() {
