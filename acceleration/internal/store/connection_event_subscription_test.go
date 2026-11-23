@@ -310,6 +310,52 @@ func (s *StoreSuite) TestADeleteThatWaitsForAnInsertDropsWhatTheInsertCommitted(
 	s.Empty(held)
 }
 
+// Insert holds the connection lock until its insert commits, so a delete that
+// comes while the insert is between its lock and its INSERT waits for it and drops its row.
+func (s *StoreSuite) TestADeleteDuringAnInsertWaitsForItAndDropsItsRow() {
+	connection := s.connection("acme-app", nil).ID
+	// Another transaction holds the subscription's key, so Insert waits at its INSERT, after its lock.
+	holder := s.begin()
+	held := s.subscriptionOf("acme-app", connection)
+	held.ID, held.Arguments, held.CreatedAt, held.UpdatedAt = newID(), map[string]any{}, s.base, s.base
+	_, err := holder.NewInsert().Model(&held).Exec(s.ctx)
+	s.Require().NoError(err)
+	type inserted struct {
+		added bool
+		err   error
+	}
+	done := make(chan inserted, 1)
+	go func() {
+		sub := s.subscriptionOf("acme-app", connection)
+		added, err := s.store.ConnectionEventSubscriptions.Insert(s.ctx, &sub)
+		done <- inserted{added, err}
+	}()
+	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the insert waits for the held key")
+	deleted := make(chan error, 1)
+	go func() { deleted <- s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection) }()
+	s.Require().Eventually(func() bool { return s.waitingForALock() == 2 }, 5*time.Second, 10*time.Millisecond,
+		"the delete waits for the insert's lock")
+	s.Require().NoError(holder.Rollback())
+	var got inserted
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		s.FailNow("the insert never returned")
+	}
+	s.Require().NoError(got.err)
+	s.True(got.added)
+	select {
+	case err = <-deleted:
+	case <-time.After(5 * time.Second):
+		s.FailNow("the delete never returned")
+	}
+	s.Require().NoError(err)
+	rows, err := s.connectionEventSubscriptions("acme-app", connection)
+	s.Require().NoError(err)
+	s.Empty(rows)
+}
+
 // subscriptionOf is a subscription of customer's connection, not stored, with a token of its own.
 func (s *StoreSuite) subscriptionOf(customerID, connectionID string) ConnectionEventSubscription {
 	return ConnectionEventSubscription{
