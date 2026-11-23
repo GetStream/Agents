@@ -1476,7 +1476,7 @@ pub struct AgentScheduling {
 ///`AgentStats`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct AgentStats {
-    ///Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+    ///Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub avg_turns: ::std::option::Option<f64>,
     ///When that peak was first reached. Null when no session was open in the window.
