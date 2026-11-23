@@ -259,7 +259,10 @@ func (r *Resolver) Invalidate(ctx context.Context, ref core.ConnectionRef, rejec
 // Revoke moves a connected connection to needs_reauthorization and drops its cached
 // credential, because the provider said the grant ended (a verified core.Signal of kind why).
 // A connection that is not connected keeps its status: pending has no grant to end, and
-// needs_reauthorization and disconnected already say what a revocation would.
+// needs_reauthorization and disconnected already say what a revocation would. One that a
+// renewal's checkpoint left (lostRefresh) gets the signal's last_error, status unchanged: the
+// renewal's save may be retried (saveAgain), and a retry finds the connection moved and
+// leaves it, so the revocation stands.
 //
 // It names no credential, unlike Invalidate, and checks no revision: the provider ended the
 // grant itself, so stored credentials another router renewed a moment ago end with it. It
@@ -280,13 +283,17 @@ func (r *Resolver) Revoke(ctx context.Context, ref core.ConnectionRef, why core.
 	moved, revision := false, 0
 	var ended core.CredentialChange
 	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
-		if state.Status != store.ConnectionConnected {
+		checkpointed := state.Status == store.ConnectionNeedsReauthorization && state.LastError == lostRefresh
+		if state.Status != store.ConnectionConnected && !checkpointed {
 			return false, nil
 		}
 		if !endedAt.IsZero() && state.ConnectedAt.After(endedAt.Add(time.Second)) {
 			return false, nil
 		}
 		state.Status, state.LastError = store.ConnectionNeedsReauthorization, lastError
+		if checkpointed {
+			return true, nil
+		}
 		moved, revision = true, state.Revision
 		ended.Current = core.FingerprintsOf(r.schemes, state.Credentials)
 		return true, nil

@@ -248,3 +248,21 @@ func (s *ResolverSuite) TestARetriedSaveKeepsTheGrantsConnectedAt() {
 		time.Now().Add(-30*time.Minute).Truncate(time.Second)))
 	s.Equal(store.ConnectionNeedsReauthorization, s.f.stored(ref).Status, "the provider ended this grant")
 }
+
+func (s *ResolverSuite) TestARevocationBetweenTwoSavesStands() {
+	ref := s.f.connected()
+	s.f.due()
+	saves := firstFails(dropped, false)
+	saves.before = func(update int) {
+		if update == 2 {
+			s.Require().NoError(s.f.router(s.f.srv.Client()).Revoke(s.f.ctx, ref, core.SignalUninstalled, time.Time{}))
+		}
+	}
+
+	_, err := s.f.routerSaving(s.f.srv.Client(), saves).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.Error(err)
+	stored := s.f.stored(ref)
+	s.Equal(store.ConnectionNeedsReauthorization, stored.Status, "the uninstall stands")
+	s.Equal("The provider says its app was uninstalled from the account; reconnect the account", stored.LastError)
+	s.Contains(s.line("could not save a connector credential refresh"), "attempts=2", "a revoked connection is not tried again")
+}

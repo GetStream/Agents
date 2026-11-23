@@ -46,6 +46,8 @@ Revoke(ref, why, endedAt)         why is revoked, uninstalled or rotated, else r
   drop the cache entry
   under the lock, connected                -> needs_reauthorization, the why's last_error
                                               (any revision); otherwise nothing more
+  under the lock, a renewal's checkpoint   -> the why's last_error, status stays: a retried
+    (needs_reauthorization, lostRefresh)      save (saveAgain) finds it moved and leaves it
     connected_at after endedAt + 1 s       -> nothing more: a newer grant than the
                                               signal's (endedAt zero: never)
 ```
