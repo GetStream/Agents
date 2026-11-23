@@ -530,23 +530,26 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 	}
 	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		window := time.Now().UTC().Truncate(LinkValidFor)
-		onLine, fromSender, err := s.store.ChannelLinkFailures.Count(ctx, account.ID, message.From, window)
+		reserved, err := s.store.ChannelLinkFailures.Reserve(ctx, account.ID, message.From, window,
+			window.Add(-LinkValidFor), maxLinkFailures, maxLineLinkFailures)
 		if err != nil {
 			s.logger.Error("could not count the codes texted to a line", "channel", account.Kind, "error", err)
 			return store.ContactMapEntry{}, false
 		}
-		if fromSender >= maxLinkFailures || onLine >= maxLineLinkFailures {
+		if !reserved {
 			s.say(ctx, line, provider, message, Reply{Text: "Too many codes did not match. Try again in a few minutes."},
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
 		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
-		if err != nil {
-			if errors.Is(err, store.ErrUnknownChannelLink) {
-				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
-					s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
-				}
+		// The code was counted before it was tried, so that codes texted at once are counted one
+		// after the other; only one that matched nothing stays counted.
+		if !errors.Is(err, store.ErrUnknownChannelLink) {
+			if err := s.store.ChannelLinkFailures.Release(ctx, account.ID, message.From, window); err != nil {
+				s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
 			}
+		}
+		if err != nil {
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
 				answering(account.CustomerID, ""))
