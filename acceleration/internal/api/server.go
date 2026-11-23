@@ -2029,6 +2029,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		spend = append(spend, SpendBucket{
 			Bucket:          bucket.Bucket,
 			Value:           bucket.Value,
+			Other:           bucket.Other,
 			CostMicrosTotal: bucket.CostMicrosTotal,
 			RequestCount:    bucket.RequestCount,
 		})
@@ -2450,9 +2451,9 @@ func (s *Server) registerServer(api huma.API) {
 			"app alone; grouped by \"who:user\" the value is then <app_id>/<user_id>, since a user id is " +
 			"only unique within its app.\n" +
 			"Only the biggest values keep a series of their own, because a label such as customer_id " +
-			"has as many values as the customer has customers. The rest are summed into \"other\", and " +
-			"spend carrying no such label at all into the empty value, so the rows still add up to " +
-			"the total.\n" +
+			"has as many values as the customer has customers. The rest are summed into a row marked " +
+			"other, whose value is \"other\", and spend carrying no such label at all into the empty " +
+			"value, so the rows still add up to the total.\n" +
 			"Reads the request rows rather than the rollups, so today's spend is there without a " +
 			"rollup having run.",
 		// Declared rather than read off the input, so the default is documented without
@@ -2823,8 +2824,9 @@ type RollupResult struct {
 type SpendBucket struct {
 	Bucket          time.Time `json:"bucket"`
 	CostMicrosTotal int64     `json:"cost_micros_total" doc:"Millionths of a dollar, priced from the configured rates."`
+	Other           bool      `json:"other,omitempty" doc:"True on the row that is everything outside the biggest few, summed. Its value is \"other\", which a label can also have: a label of that value is a row of its own, without other."`
 	RequestCount    int64     `json:"request_count"`
-	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
+	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
 }
 
 // StatsBucket is the StatsBucket schema.

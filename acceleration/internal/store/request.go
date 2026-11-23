@@ -187,11 +187,13 @@ func measured(prefix string) string {
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a
-// modality or a cost label value; "other" is everything outside the biggest few and the
-// empty string is spend that carried no such label, so the rows still add up to the total.
+// modality or a cost label value; the row with Other is everything outside the biggest few,
+// with Value "other", and the empty string is spend that carried no such label, so the rows
+// still add up to the total. A label whose value is "other" is a row of its own, without Other.
 type SpendBucket struct {
 	Bucket          time.Time `bun:"bucket"`
 	Value           string    `bun:"value"`
+	Other           bool      `bun:"-"`
 	CostMicrosTotal int64     `bun:"cost_micros_total"`
 	RequestCount    int64     `bun:"request_count"`
 }
@@ -771,7 +773,8 @@ func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) 
 	return "", "", false
 }
 
-// spendOther is the value every group outside the biggest few is summed into.
+// spendOther is the value of the row every group outside the biggest few is summed into,
+// which SpendBucket.Other tells apart from a label of that value.
 const spendOther = "other"
 
 // Spend returns what one customer spent per bucket and group, oldest bucket first. It is the
@@ -780,7 +783,7 @@ const spendOther = "other"
 // groupBy is "modality", who asked (SpendGroupByApp and the rest), or a cost label key. Only
 // the limit biggest values over the whole window keep a group of their own: a label such as
 // customer_id has as many values as the customer has customers, and a chart of all of them
-// says nothing. The rest are summed into "other", and requests carrying no such label into
+// says nothing. The rest are summed into a row marked Other, and requests carrying no such label into
 // the empty value, so the rows still add up to the total; grouped by category, a row counts
 // once in each of its categories.
 //
