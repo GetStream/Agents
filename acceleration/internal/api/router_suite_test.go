@@ -35,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -594,6 +595,11 @@ func (s *RouterSuite) SetupSuite() {
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
 	s.T().Cleanup(s.assertEveryRowNamesAKey)
+	queueFull := usageLostQueueFull(s)
+	s.T().Cleanup(func() {
+		s.Zero(usageLostQueueFull(s)-queueFull, "usage rows were lost to a full writer queue "+
+			"(suiteQueueSize) while this suite ran, by it or by a suite beside it")
+	})
 	if s.database != "" {
 		// Only a suite's own database is emptied, never the shared one. A run killed by
 		// -timeout skips its cleanups, and the database outlives it. A queued inbound row it
@@ -1556,6 +1562,26 @@ func (s *RouterSuite) assertEveryRowNamesAKey() {
 		s.Failf("a usage row names no key", "customer %s, %s %s/%s, purpose %q, session %q, agent %q",
 			row.CustomerID, row.Modality, row.Provider, row.Model, row.Purpose, row.SessionID, row.AgentID)
 	}
+}
+
+// usageLostQueueFull is router_usage_lost_total{reason="queue_full"}, the rows a writer
+// dropped because its queue was full (internal/routing/writer.go).
+func usageLostQueueFull(s *RouterSuite) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_usage_lost_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "reason" && pair.GetValue() == "queue_full" {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // suiteQueueSize is how many rows each writer of the suite holds, where a deployment's holds
