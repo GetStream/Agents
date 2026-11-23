@@ -120,10 +120,11 @@ func (d scheduledDelivery) attribution() routing.Attribution {
 }
 
 // scheduledHandOff is what a peer reads of a scheduledDelivery it is handed: the ids that
-// name the task's occurrence and its owner, which it checks against the rows. Nothing else
-// the asker sends reaches the delivery, so a payload cannot name another conversation, zone,
-// key, prompt or due time. An asker sends the whole scheduledDelivery, so routers on either
-// side of this change still hand off to each other.
+// name the task's occurrence and its owner, which it checks against the rows, and the reason
+// the asker's last attempt failed under, which the run's row does not hold between attempts.
+// Nothing else the asker sends reaches the delivery, so a payload cannot name another
+// conversation, zone, key, prompt or due time. An asker sends the whole scheduledDelivery, so
+// routers on either side of this change still hand off to each other.
 type scheduledHandOff struct {
 	CustomerID string `json:"customer_id"`
 	TaskID     string `json:"task_id"`
@@ -131,6 +132,9 @@ type scheduledHandOff struct {
 	SessionID  string `json:"session_id"`
 	UserID     string `json:"user_id"`
 	CallerKind string `json:"caller_kind"`
+	// Earlier is taken only when it is a refusal for money (moneyCode): all it does is have
+	// replyCommand run a failed turn again.
+	Earlier string `json:"earlier"`
 }
 
 // scheduledPeerAnswer is what the node holding a conversation answers a
@@ -940,6 +944,9 @@ func (s *Server) deliverScheduledForPeer(w http.ResponseWriter, r *http.Request)
 	// another conversation, zone, key, prompt or due time would ring into that conversation,
 	// bill that key or say those words. Its work is the task's, as the asker attributes it.
 	delivery := s.occurrenceDelivery(r.Context(), claimed)
+	if moneyCode(handOff.Earlier) {
+		delivery.Earlier = handOff.Earlier
+	}
 	ctx := routing.WithAttribution(routing.WithScheduledTurn(r.Context()), delivery.attribution())
 	deliveredTo, sessionID, err := s.deliverChainHere(ctx, delivery)
 	switch {

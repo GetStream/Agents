@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -452,6 +453,12 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForMoneyInAnOpenSessionIsFinal() {
 // the agent while the organization had credit; the Redis its holds are shared through goes down
 // afterwards, so what costs money is refused because the money cannot be checked.
 func (s *TelnyxUnpaidSuite) uncheckableAfterOpening() (*testClient, Session) {
+	return s.uncheckableAfterOpeningOn(nil)
+}
+
+// uncheckableAfterOpeningOn is uncheckableAfterOpening with the session opened on node, or on the
+// suite's router when node is nil.
+func (s *TelnyxUnpaidSuite) uncheckableAfterOpeningOn(node *httptest.Server) (*testClient, Session) {
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
 	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
@@ -461,7 +468,11 @@ func (s *TelnyxUnpaidSuite) uncheckableAfterOpening() (*testClient, Session) {
 	s.Require().Eventually(func() bool {
 		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
 	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
-	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
+	opener := user
+	if node != nil {
+		opener = user.on(node)
+	}
+	opened := opener.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	s.sharing.stop()
 	s.Require().Eventually(func() bool {
 		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
@@ -605,6 +616,46 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedAgainOnItsRerunFailsTheR
 	s.Require().True(running)
 	rerun, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
 	s.Equal("failed", rerun, "the retry ran the turn again, and it was refused again")
+}
+
+// A conversation task whose session another router holds is handed to that router on every
+// attempt, with the reason the attempt before failed under: once a turn there is refused because
+// the money cannot be checked, the retry runs it again there, and the user gets the reply
+// (AI-3183).
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedOnAnotherRouterRunsAgainThereOnItsRetry() {
+	other, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	user, opened := s.uncheckableAfterOpeningOn(other)
+	task := s.userTask(user, opened.Id, "conversation")
+	before, retrying, restored := s.checkedAgainOnRetry()
+	type result struct {
+		run      store.ScheduledTaskRun
+		attempts int32
+	}
+	done := make(chan result, 1)
+	go func() {
+		run, attempts := s.settledByTheWorkerAfter(task, before)
+		done <- result{run, attempts}
+	}()
+	select {
+	case <-retrying:
+	case <-time.After(deliveryWait):
+		s.FailNow("the task was never tried again")
+	}
+	s.sharedAgain()
+	close(restored)
+
+	got := <-done
+	run, attempts := got.run, got.attempts
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(store.ScheduledTaskDeliveredConversation, run.DeliveredTo)
+	s.Equal(int32(2), attempts)
+	found, running := sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running, "the session is the other router's")
+	refused, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
+	s.Equal("failed", refused, "the first turn was refused")
+	state, said, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.Equal("completed", state, "the retry ran the turn again on the router holding the session")
+	s.NotEmpty(said, "the user got a reply")
 }
 
 // A text channel's turn refused because the money cannot be checked runs again on the attempt
