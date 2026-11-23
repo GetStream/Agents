@@ -5808,7 +5808,7 @@ export type components = {
             /** Format: date-time */
             readonly launched_at?: string;
             readonly name: string;
-            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
+            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
             readonly paused_reason?: string;
             readonly sequence: components["schemas"]["CampaignSequence"];
             /**
@@ -5864,7 +5864,7 @@ export type components = {
         readonly CampaignAttempt: {
             /**
              * Format: int64
-             * @description Minutes after the previous attempt started, pushed into the calling hours.
+             * @description Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
              */
             readonly delay_minutes: number;
         };
@@ -6830,7 +6830,7 @@ export type components = {
             readonly ended_at?: string;
             /** @description The outcome an answered call was read as: no_response when nobody but the agent spoke. */
             readonly outcome?: string;
-            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
+            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
             readonly result: string;
             /** Format: date-time */
             readonly started_at: string;

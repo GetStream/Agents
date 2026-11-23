@@ -46,10 +46,11 @@ class Campaign:
         launched_at (datetime.datetime | Unset):
         paused_reason (str | Unset): Why the router paused the campaign itself: the code of what refused its next call,
             for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached,
-            spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was
-            deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words
-            when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was
-            for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+            spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved
+            when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted,
+            session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its
+            step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is
+            rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
         start_at (datetime.datetime | Unset): When it was launched to start ringing.
         started_at (datetime.datetime | Unset): When it first rang anybody.
         stopped_at (datetime.datetime | Unset):
