@@ -161,7 +161,8 @@ func (r *ProviderKeys) Select(ctx context.Context, customerID string, filter Pro
 }
 
 // SelectDaytona returns every customer's Daytona keys, for a job that reaches each customer's
-// own account there, by customer and then region.
+// own account there, by customer and then region. SandboxDaytona is also the name
+// providerkeys gives the provider.
 func (r *ProviderKeys) SelectDaytona(ctx context.Context) ([]ProviderKey, error) {
 	keys := []ProviderKey{}
 	err := r.store.global.NewSelect().Model(&keys).
