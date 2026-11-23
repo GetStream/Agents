@@ -46,3 +46,21 @@ func (s *AgentSuite) TestAPanicInATranscriberGoroutineStopsItsCall() {
 
 	s.eventually(func() bool { return hasEnded(s.events) }, "the call with the panic did not stop")
 }
+
+// The agent opens a floor of chorus-asr's own under the context of the call. Thus a panic in
+// a goroutine of the floor, for example when it tells the transcriber to settle the words of
+// an utterance, stops that call.
+func (s *AgentSuite) TestActingWithAnotherTranscriberAPanicInTheFloorStopsItsCall() {
+	decided := s.floorRules(endsAtOnce)
+	s.earsSettlePanics = true
+	s.join(true)
+	caller := stt.Participant{ID: "alice"}
+	line := &callerLine{s: s, participant: caller}
+	line.say(300, false)
+	line.say(1200, true)
+	s.transcriberWrites(caller, 1, stt.ModeReplacement, "a table at seven thirty")
+	line.say(600, false)
+	s.eventually(func() bool { return decided.Load() > 0 }, "chorus-asr was never asked about the pause")
+
+	s.eventually(func() bool { return hasEnded(s.events) }, "the call with the panic did not stop")
+}

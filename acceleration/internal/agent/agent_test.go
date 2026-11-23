@@ -1006,6 +1006,9 @@ type AgentSuite struct {
 	// earsPause has the stub transcriber stand in for chorus-asr's, which an acting agent
 	// has ask about its callers' pauses (pausingSTT).
 	earsPause bool
+	// earsSettlePanics has the stub transcriber panic when it is told to settle its words
+	// (panicsOnSettleSTT).
+	earsSettlePanics bool
 
 	agent  *Agent
 	events *collector
@@ -1050,6 +1053,7 @@ func (s *AgentSuite) SetupTest() {
 	s.speculates = false
 	s.unified = false
 	s.floor, s.floorMode, s.earsPause = nil, "", false
+	s.earsSettlePanics = false
 	s.performing = ""
 	s.voiceName = ""
 	s.replacement = nil
@@ -1228,6 +1232,9 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		}
 		if s.earsPause {
 			return pausingSTT{s.ears}, nil
+		}
+		if s.earsSettlePanics {
+			return panicsOnSettleSTT{s.ears}, nil
 		}
 		return s.ears, nil
 	}, routing.OverrideRegion)
@@ -1459,6 +1466,12 @@ func (s *AgentSuite) actsOnChorusASR() {
 type pausingSTT struct{ *stubSTT }
 
 func (pausingSTT) AskOnPauses(audiofloor.Asker) {}
+
+// panicsOnSettleSTT is a stub transcriber that can be told to settle its words. It panics
+// when it is told, like a provider with a bug in it.
+type panicsOnSettleSTT struct{ *stubSTT }
+
+func (panicsOnSettleSTT) Finalize() error { panic("a bug in settling the words") }
 
 func (s *AgentSuite) says(participant stt.Participant, text string) {
 	s.saysAfter(participant, text, 0)
