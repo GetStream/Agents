@@ -97,9 +97,9 @@ ON CONFLICT (destination_id, id) DO NOTHING`,
 	return int(queued), nil
 }
 
-// Claim takes at most limit deliveries due at now, oldest due first, and moves
-// each one's next attempt to leaseUntil, so no other worker takes it while this one sends it.
-// Rows another worker is claiming at the same moment are skipped, not waited for.
+// Claim takes at most limit deliveries due at now, oldest due first, moves each one's next
+// attempt to leaseUntil, so no other worker takes it while this one sends it, and counts the
+// attempt. Rows another worker is claiming at the same moment are skipped, not waited for.
 //
 // It takes at most perDestination deliveries of one destination, less the ones of it the
 // caller is still sending (sending, by destination id). So one destination that never answers
@@ -122,8 +122,8 @@ func (r *EventDeliveries) Claim(ctx context.Context, now time.Time, limit, perDe
 //
 // It is not queue.go's claim: a delivery is known by two columns, the cap needs ranked's
 // window, and the destination's secrets come back in the same statement through a join the
-// claim's UPDATE has no place for. A claim does not count attempts either: Retry writes the
-// count the forwarder makes.
+// claim's UPDATE has no place for. Like queue.go's claim it counts the attempt, so a delivery
+// whose forwarder dies between the claim and the send still runs out of attempts.
 const claimEventDeliveriesQuery = `
 WITH sending AS (
     SELECT * FROM unnest(?::text[], ?::int[]) AS s (destination_id, count)
@@ -143,7 +143,7 @@ WITH sending AS (
     FOR UPDATE OF cedl SKIP LOCKED
 )
 UPDATE connector_event_deliveries AS cedl
-SET next_attempt_at = ?
+SET next_attempt_at = ?, attempts = cedl.attempts + 1
 FROM due, connector_event_destinations AS ced
 WHERE cedl.destination_id = due.destination_id AND cedl.id = due.id AND ced.id = cedl.destination_id
 RETURNING cedl.destination_id, cedl.id, cedl.headers, cedl.body, cedl.attempts, cedl.next_attempt_at, cedl.created_at,
@@ -189,11 +189,22 @@ func (r *EventDeliveries) Finish(ctx context.Context, destinationID, id string) 
 	return stack.Wrap(err)
 }
 
-// Retry records a failed attempt of a delivery, the attempts it has now, and when
-// the next one is due.
-func (r *EventDeliveries) Retry(ctx context.Context, destinationID, id string, attempts int, at time.Time) error {
+// Release gives back a claim that made no attempt: the attempt its claim counted is taken back,
+// and the delivery is due again after, on Postgres's clock, for a router that can send it.
+func (r *EventDeliveries) Release(ctx context.Context, destinationID, id string, after time.Duration) error {
 	_, err := r.store.global.NewUpdate().Model((*EventDelivery)(nil)).
-		Set("attempts = ?", attempts).
+		Set("attempts = greatest(attempts - 1, 0)").
+		Set("next_attempt_at = now() + make_interval(secs => ?)", after.Seconds()).
+		Where("destination_id = ?", destinationID).
+		Where("id = ?", id).
+		Exec(ctx)
+	return stack.Wrap(err)
+}
+
+// Retry records when the next attempt of a delivery is due. The attempt that failed was
+// counted by its claim.
+func (r *EventDeliveries) Retry(ctx context.Context, destinationID, id string, at time.Time) error {
+	_, err := r.store.global.NewUpdate().Model((*EventDelivery)(nil)).
 		Set("next_attempt_at = ?", at.UTC()).
 		Where("destination_id = ?", destinationID).
 		Where("id = ?", id).

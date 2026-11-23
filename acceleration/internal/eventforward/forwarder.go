@@ -504,6 +504,10 @@ func (f *Forwarder) sendDue() (wait time.Duration, again bool) {
 // it or refused it for good, else due again after the next wait, or gone when the waits ran
 // out.
 func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
+	if delivery.Attempts > len(f.retries)+1 {
+		f.giveUpUnsent(delivery)
+		return
+	}
 	ctx, cancel := context.WithTimeout(f.ctx, attemptTimeout)
 	err := f.send(ctx, delivery)
 	cancel()
@@ -516,20 +520,43 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	log := f.logger.With("connector", delivery.ConnectorID, "customer", delivery.CustomerID,
 		"destination", delivery.DestinationID, "webhook_id", delivery.ID)
 	var again retryable
-	attempts := delivery.Attempts + 1
+	// The claim counted this attempt.
+	attempts := delivery.Attempts
 	switch {
+	case errors.Is(err, auth.ErrKeyVersionUnavailable):
+		// Another router may hold the key version the secret was sealed with: this one sent
+		// nothing, so the delivery goes back to the queue with no attempt counted. It is due
+		// again a poll later, not at once, or this router, woken by its own finished send,
+		// would take it straight back each time and starve the router that can send it.
+		log.Error("this router cannot open an event destination's signing secret; the forward is left to another", "error", err)
+		err = f.store.EventDeliveries.Release(writing, delivery.DestinationID, delivery.ID, f.poll)
 	case err == nil:
 		f.count(delivery, "")
 		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	case errors.As(err, &again) && attempts <= len(f.retries):
 		log.Info("an event forward failed and is sent again", "attempts", attempts, "error", err)
-		err = f.store.EventDeliveries.Retry(writing, delivery.DestinationID, delivery.ID, attempts, time.Now().Add(f.retries[attempts-1]))
+		err = f.store.EventDeliveries.Retry(writing, delivery.DestinationID, delivery.ID, time.Now().Add(f.retries[attempts-1]))
 	default:
 		log.Warn("gave up an event forward", "attempts", attempts, "error", err)
 		f.count(delivery, givenUpCode(err))
 		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	}
 	if err != nil {
+		log.Error("could not record an event forward's attempt", "error", err)
+	}
+}
+
+// giveUpUnsent drops a delivery claimed more times than it may be tried: each claim before
+// this one counted its attempt, and a forwarder that died between its claim and its send, every
+// time, recorded nothing else.
+func (f *Forwarder) giveUpUnsent(delivery store.ClaimedEventDelivery) {
+	writing, done := context.WithTimeout(context.WithoutCancel(f.ctx), attemptTimeout)
+	defer done()
+	log := f.logger.With("connector", delivery.ConnectorID, "customer", delivery.CustomerID,
+		"destination", delivery.DestinationID, "webhook_id", delivery.ID)
+	log.Warn("gave up an event forward its earlier claims never finished", "attempts", delivery.Attempts)
+	f.count(delivery, codeNotSent)
+	if err := f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID); err != nil {
 		log.Error("could not record an event forward's attempt", "error", err)
 	}
 }

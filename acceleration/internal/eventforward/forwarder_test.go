@@ -97,6 +97,55 @@ func (s *ForwarderSuite) TestAForwardThatKeepsFailingIsGivenUpAfterItsRetries() 
 	s.Equal(int32(3), hits.Load(), "the first attempt and the two waits")
 }
 
+// A forwarder that dies between its claim and its send, every time, records no attempt; the
+// claims count them, so the delivery is given up once it was claimed as often as it may be
+// tried, and not claimed for ever.
+func (s *ForwarderSuite) TestAForwardWhoseSenderDiesEveryTimeIsGivenUpAfterItsAttempts() {
+	var hits atomic.Int32
+	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
+	stopped, err := New(Options{Store: s.store, Secrets: s.sealer, HTTP: target.Client()})
+	s.Require().NoError(err)
+	customer := s.destinationOf(stopped, target.URL)
+	s.Require().NoError(stopped.Forward(s.ctx, Event{CustomerID: customer, ConnectorID: "slack_bot", Body: []byte(`{"dies":1}`)}))
+	// The first attempt and the two waits of s.forwarder's, each claimed by a router that
+	// stopped before it sent, its lease over at once.
+	for range 3 {
+		now := time.Now()
+		claimed, err := s.store.EventDeliveries.Claim(s.ctx, now, 10, 10, nil, now)
+		s.Require().NoError(err)
+		s.Require().NotEmpty(claimed)
+	}
+	s.Equal(1, s.pending(customer))
+
+	s.forwarder(target.Client())
+
+	s.Require().Eventually(func() bool { return s.pending(customer) == 0 }, 5*time.Second, 10*time.Millisecond)
+	s.Zero(hits.Load(), "given up, not tried a fourth time")
+}
+
+// A router that does not hold the key version a destination's secret was sealed with sends
+// nothing and leaves the forward queued, with no attempt counted, for a router that holds it.
+func (s *ForwarderSuite) TestAForwardWhoseSecretThisRouterCannotOpenIsLeftToOneThatCan() {
+	var hits atomic.Int32
+	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
+	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "test key one", 2: "test key two"})
+	s.Require().NoError(err)
+	holder, err := New(Options{Store: s.store, Secrets: rotated, HTTP: target.Client(),
+		Retries: []time.Duration{time.Millisecond, time.Millisecond}, Poll: 10 * time.Millisecond})
+	s.Require().NoError(err)
+	customer := s.destinationOf(holder, target.URL)
+	s.forwarder(target.Client())
+
+	s.Require().NoError(holder.Forward(s.ctx, Event{CustomerID: customer, ConnectorID: "slack_bot", Body: []byte(`{"sealed":2}`)}))
+
+	s.Never(func() bool { return s.pending(customer) == 0 || hits.Load() > 0 }, 500*time.Millisecond, 10*time.Millisecond,
+		"a router on key version 1 alone neither sends it nor drops it")
+	holder.Start()
+	s.T().Cleanup(holder.Close)
+	s.Require().Eventually(func() bool { return s.pending(customer) == 0 }, 5*time.Second, 10*time.Millisecond)
+	s.Equal(int32(1), hits.Load())
+}
+
 // The spec: «3xx: Failure. Following redirects causes unnecessary load on both the sender and
 // the receiver» (https://www.standardwebhooks.com/).
 func (s *ForwarderSuite) TestARedirectIsNotFollowedNorSentAgain() {
