@@ -23516,19 +23516,19 @@ paths:
             description: The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it.
             format: date
             type: string
-        - description: Narrow to the rows that name this organization. One with no row is an empty page.
+        - description: Narrow to the rows that name this organization. Empty is no filter. One with no row is an empty page.
           explode: false
           in: query
           name: org_id
           schema:
-            description: Narrow to the rows that name this organization. One with no row is an empty page.
+            description: Narrow to the rows that name this organization. Empty is no filter. One with no row is an empty page.
             type: string
-        - description: Narrow to this app's rows. One with no row is an empty page.
+        - description: Narrow to this app's rows. Empty is no filter. One with no row is an empty page.
           explode: false
           in: query
           name: app_id
           schema:
-            description: Narrow to this app's rows. One with no row is an empty page.
+            description: Narrow to this app's rows. Empty is no filter. One with no row is an empty page.
             type: string
         - description: Up to 1000. Omitted is 500.
           explode: false

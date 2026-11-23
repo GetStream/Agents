@@ -66,8 +66,8 @@ type ActivityPage struct {
 type listActivityRequest struct {
 	From   time.Time             `query:"from" timeFormat:"2006-01-02" required:"true" doc:"The first UTC day read, YYYY-MM-DD."`
 	To     time.Time             `query:"to" timeFormat:"2006-01-02" required:"true" doc:"The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it."`
-	OrgId  optionalParam[string] `query:"org_id" doc:"Narrow to the rows that name this organization. One with no row is an empty page."`
-	AppId  optionalParam[string] `query:"app_id" doc:"Narrow to this app's rows. One with no row is an empty page."`
+	OrgId  optionalParam[string] `query:"org_id" doc:"Narrow to the rows that name this organization. Empty is no filter. One with no row is an empty page."`
+	AppId  optionalParam[string] `query:"app_id" doc:"Narrow to this app's rows. Empty is no filter. One with no row is an empty page."`
 	Limit  int                   `query:"limit" minimum:"1" maximum:"1000" doc:"Up to 1000. Omitted is 500."`
 	Cursor string                `query:"cursor" doc:"The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused."`
 }
