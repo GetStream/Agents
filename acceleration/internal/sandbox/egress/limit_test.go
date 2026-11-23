@@ -244,3 +244,20 @@ func (s *ProxySuite) TestAGrantsTunnelThatSpeaksPlainHTTPGivesBackOnlyItsPlace()
 
 	s.Equal(http.StatusTooManyRequests, past, "two tunnels are open, the limit")
 }
+
+// TestASandboxOfTheSameSessionOpensItsTunnelsWhileAnotherHoldsItsLimit: the count is the
+// proxy credential's, one per sandbox, not the session's: two credentials of one session each
+// hold their own limit.
+func (s *ProxySuite) TestASandboxOfTheSameSessionOpensItsTunnelsWhileAnotherHoldsItsLimit() {
+	s.capped(1)
+	other := egress.NewCredential()
+	s.put(other, egress.Record{Session: s.session, Grants: []egress.Grant{s.grant("va_ph_other", "api.github.test")}})
+	held, _, _ := s.open("api.github.test:443", s.credential)
+	s.Require().Equal(http.StatusOK, held)
+	past, _, _ := s.open("api.github.test:443", s.credential)
+	s.Require().Equal(http.StatusTooManyRequests, past)
+
+	status, _, _ := s.open("api.github.test:443", other)
+
+	s.Equal(http.StatusOK, status)
+}
