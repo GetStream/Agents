@@ -312,6 +312,13 @@ func (r *sessionRecorder) queueWrite(write recordWrite) {
 	case r.queue <- write:
 	default:
 		r.dropped.Add(1)
+		// An end dropped here leaves its row open, as one the store refused does.
+		switch {
+		case write.closed != "":
+			recordsLost.WithLabelValues(lostSessionEnd).Inc()
+		case write.callEnded != "":
+			recordsLost.WithLabelValues(lostCallEnd).Inc()
+		}
 	}
 }
 
@@ -532,26 +539,29 @@ func (r *sessionRecorder) writeItems(items []store.AgentResponseItem) {
 		}
 		return
 	}
-	// The batch holds the items of every session, so one whose session or response row was
-	// never written would fail all of them: each session's are written on their own instead.
-	var sessions []string
-	bySession := map[string][]store.AgentResponseItem{}
+	// The batch holds the items of every turn, and an item's key is its response, so one
+	// whose response row was never written would fail all of them: each turn's are written
+	// on their own instead. A batch of one turn already had its answer.
+	var responses []string
+	byResponse := map[string][]store.AgentResponseItem{}
 	for _, item := range batch {
-		if _, seen := bySession[item.SessionID]; !seen {
-			sessions = append(sessions, item.SessionID)
+		if _, seen := byResponse[item.ResponseID]; !seen {
+			responses = append(responses, item.ResponseID)
 		}
-		bySession[item.SessionID] = append(bySession[item.SessionID], item)
+		byResponse[item.ResponseID] = append(byResponse[item.ResponseID], item)
 	}
-	for _, session := range sessions {
-		own := bySession[session]
-		err := r.attempt(func(ctx context.Context) error { return r.store.ResponseItems.InsertMany(ctx, own) })
+	for _, response := range responses {
+		own := byResponse[response]
+		if len(responses) > 1 {
+			err = r.attempt(func(ctx context.Context) error { return r.store.ResponseItems.InsertMany(ctx, own) })
+		}
 		switch {
 		case store.IsForeignKeyViolation(err):
 			recordsLost.WithLabelValues(lostItems).Add(float64(len(own)))
-			r.logger.Warn("dropped what a turn did: its session or response was never recorded",
-				"session", session, "items", len(own))
+			r.logger.Warn("dropped what a turn did: its response was never recorded",
+				"session", own[0].SessionID, "response", response, "items", len(own))
 		case err != nil:
-			r.logger.Error("could not record what a turn did", "session", session, "error", err, "items", len(own))
+			r.logger.Error("could not record what a turn did", "response", response, "error", err, "items", len(own))
 		}
 	}
 }
@@ -569,7 +579,11 @@ func (r *sessionRecorder) attempt(do func(context.Context) error) error {
 		err := do(ctx)
 		cancel()
 		if err == nil || !store.Transient(err) {
-			r.failing = false
+			// Only an answer from the database says it is back: a write refused before it
+			// was sent says nothing either way.
+			if err == nil || store.Answered(err) {
+				r.failing = false
+			}
 			return err
 		}
 		if r.failing || time.Until(deadline) < wait {

@@ -34,15 +34,25 @@ func IsForeignKeyViolation(err error) bool {
 	return isViolation(err, foreignKeyViolation)
 }
 
+// Answered reports whether err is Postgres answering a statement, rather than a failure
+// before the statement reached it.
+func Answered(err error) bool {
+	var answer pgdriver.Error
+	return errors.As(err, &answer)
+}
+
 // Transient reports whether err is a failure that may pass if the same statement is sent
-// again: the connection dropped or was refused, the statement timed out, the server is
-// shutting down or full, or Postgres gave up on a serialization or a deadlock. A closed
-// pool, a violated constraint and a bad statement are not.
+// again: the connection dropped or was refused, the statement timed out on either side, the
+// server is shutting down or full, a write reached a primary a failover demoted (read-only
+// transaction), or Postgres gave up on a serialization or a deadlock. A closed pool, a
+// violated constraint and a bad statement are not.
 func Transient(err error) bool {
 	var refused pgdriver.Error
 	if errors.As(err, &refused) {
 		switch code := refused.Field('C'); code {
-		case "40001", "40P01", "53300", "57P01", "57P02", "57P03":
+		// 57014 is a statement cancelled by statement_timeout, or by the driver once the
+		// context ran out: the same wait as the context.DeadlineExceeded below.
+		case "25006", "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
 			return true
 		default:
 			return strings.HasPrefix(code, "08")

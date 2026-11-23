@@ -418,6 +418,25 @@ func (s *RecordFlushSuite) TestAnItemWhoseResponseIsMissingDoesNotStopAnotherSes
 	s.InDelta(lost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostItems)), 0, "the dropped item is not counted")
 }
 
+func (s *RecordFlushSuite) TestAnItemWhoseResponseIsMissingDoesNotStopItsSessionsStoredTurn() {
+	session := s.row()
+	s.records.Opened(session, nil)
+	stored := store.AgentResponse{ID: rand.Text(), SessionID: session.ID, CustomerID: s.customer, Said: "Can I change the address?"}
+	s.records.Responding(stored)
+
+	// Back to back, so both go in one batch: one item of the stored turn, one of a turn whose
+	// row was never written, in the same session.
+	s.records.Item(store.AgentResponseItem{ResponseID: stored.ID, Ordinal: 0, SessionID: session.ID,
+		Kind: store.ItemSaid, Text: "Yes, until it ships.", At: time.Now().UTC()})
+	s.records.Item(store.AgentResponseItem{ResponseID: rand.Text(), Ordinal: 0, SessionID: session.ID,
+		Kind: store.ItemSaid, Text: "Great, thanks.", At: time.Now().UTC()})
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, session.ID, store.ItemFilter{ResponseID: stored.ID, Limit: 10})
+	s.Require().NoError(err)
+	s.Len(items, 1, "the stored turn's item was dropped with its session's missing turn")
+}
+
 func (s *RecordFlushSuite) TestEndsThatCannotBeStoredAreCountedOnceTheRetriesRunOut() {
 	// Nothing listens on port 1, so every try is refused, the way a database that stays
 	// down refuses it.
@@ -431,10 +450,17 @@ func (s *RecordFlushSuite) TestEndsThatCannotBeStoredAreCountedOnceTheRetriesRun
 	start := time.Now()
 	records.Closed(s.customer, rand.Text(), time.Now().UTC(), TimeoutHangup)
 	(&callRecorder{records: records}).Ended(s.customer, rand.Text(), time.Now().UTC())
-	s.Require().NoError(records.Flush(s.bounded()))
+	// Bounded well past one retry budget, so a slow runner is not read as a hang.
+	ctx, cancel := context.WithTimeout(s.ctx, 3*recordRetryFor)
+	defer cancel()
+	s.Require().NoError(records.Flush(ctx))
 
-	// One budget in all: once a write ran out of retries, the next is tried once.
-	s.Less(time.Since(start), recordRetryFor*3/2, "the writer retried each write for a budget of its own")
+	// The first end is retried until its budget is all but spent, the last wait being at
+	// most recordRetryMost; tried once, it would be refused within milliseconds. Once it ran
+	// out, the next is tried once: one budget in all.
+	took := time.Since(start)
+	s.GreaterOrEqual(took, recordRetryFor-recordRetryMost, "the session end was not tried again")
+	s.Less(took, recordRetryFor*3/2, "the writer retried each write for a budget of its own")
 	s.InDelta(sessionsLost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostSessionEnd)), 0,
 		"the session end that was never stored is not counted")
 	s.InDelta(callsLost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostCallEnd)), 0,
