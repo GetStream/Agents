@@ -96,7 +96,7 @@ func (s *StoreSuite) TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingIt
 	s.Equal("not_answered", reason, "the taking over keeps how the call went")
 }
 
-// staleRun ages a claimed run past the stale window and lapses its task's lease, as a worker that
+// staleRun ages a claimed run past the stale window and lapses the lease of acme's task, as a worker that
 // died leaves them, and returns the claim that takes the run over.
 func (s *StoreSuite) staleRun(taskID, runID string) ClaimedScheduledTask {
 	_, err := s.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
@@ -105,6 +105,7 @@ func (s *StoreSuite) staleRun(taskID, runID string) ClaimedScheduledTask {
 	s.Require().NoError(err)
 	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = ?", s.base.Add(-time.Minute)).
+		Where("customer_id = ?", "acme").
 		Where("id = ?", taskID).Exec(s.ctx)
 	s.Require().NoError(err)
 	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
@@ -117,22 +118,32 @@ func (s *StoreSuite) staleRun(taskID, runID string) ClaimedScheduledTask {
 func (s *StoreSuite) TestAnAttemptsReasonIsReadByTheWorkerTakingTheRunOver() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("two", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("one", func(task *ScheduledTask) { task.CustomerID, task.NextRunAt = "globex", &due })
 	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
-	s.Require().Len(claimed, 1)
-	run := claimed[0].Run
+	s.Require().Len(claimed, 3)
+	claims := map[string]ClaimedScheduledTask{}
+	for _, claim := range claimed {
+		claims[claim.Task.CustomerID+"/"+claim.Task.ID] = claim
+	}
+	mine := claims["acme/one"]
+	run := mine.Run
 	s.Nil(run.Error, "a new run has no reason")
-	// Only the claim that holds the task, on the customer's own run, records a reason.
-	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, "a-lost-claim", "user_on_call"))
-	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "globex", run.ID, claimed[0].LeasedBy, "user_on_call"))
+	// Only the claim that holds the run's own task records a reason: not a lost claim, another
+	// task's, or another customer's task of the same id.
+	for _, leasedBy := range []string{"a-lost-claim", claims["acme/two"].LeasedBy, claims["globex/one"].LeasedBy} {
+		s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, leasedBy, "user_on_call"))
+	}
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "globex", run.ID, mine.LeasedBy, "user_on_call"))
 	s.Nil(s.run(run.ID).Error)
 
-	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, claimed[0].LeasedBy, "spend_check_unavailable"))
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, mine.LeasedBy, "spend_check_unavailable"))
 	reclaimed := s.staleRun("one", run.ID)
 
 	s.Require().NotNil(reclaimed.Run.Error)
 	s.Equal("spend_check_unavailable", *reclaimed.Run.Error, "the worker taking over reads why the last attempt failed")
-	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, claimed[0].LeasedBy, "user_on_call"))
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", run.ID, mine.LeasedBy, "user_on_call"))
 	s.Equal("spend_check_unavailable", *s.run(run.ID).Error, "the claim taken over records nothing more")
 }
 
