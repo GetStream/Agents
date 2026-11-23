@@ -453,8 +453,8 @@ func (r *Sessions) SetToolTimeout(ctx context.Context, customerID, id, kind stri
 // same leaving reported again. opened is when the router closing it opened it: a row another
 // router opened again since, carrying the session on, is that router's to close.
 func (r *Sessions) Close(ctx context.Context, customerID, id string, opened, at time.Time, reason string) error {
-	if customerID == "" || id == "" {
-		return stack.Wrap(errors.New("store: a customer and a session id are required"))
+	if customerID == "" || id == "" || opened.IsZero() {
+		return stack.Wrap(errors.New("store: a customer, a session id and when it opened are required"))
 	}
 	if at.IsZero() {
 		at = time.Now().UTC()

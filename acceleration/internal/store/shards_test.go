@@ -81,7 +81,7 @@ func (s *ShardedStoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 
 func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnce() {
 	s.opened("chat", "app", s.base, func(session *AgentSession) { session.Title = "before" })
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(time.Minute), ""))
 	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", Title: "after", CreatedAt: s.base}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
 
@@ -113,7 +113,7 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnceOnEve
 	_, err := s.store.Sessions.Pin(s.ctx, "app", "chat", true, s.base)
 	s.Require().NoError(err)
 	s.answered(s.store, "chat", s.base.Add(10*time.Minute))
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(11*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(11*time.Minute), ""))
 	// Answered between chat's last answer here and its first there, so on pages of one session
 	// each of chat's two rows falls on a page of its own.
 	s.opened("other", "app", s.base.Add(15*time.Minute), nil)
@@ -164,7 +164,7 @@ func (s *ShardedStoreSuite) pagesOfOne() []AgentSession {
 
 func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsFoundAsItIsThereFromTheShardItLeft() {
 	s.opened("chat", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(time.Minute), "left"))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(time.Minute), "left"))
 	s.carriedOn("chat", s.base.Add(time.Hour))
 
 	found, err := s.store.Sessions.Get(s.ctx, "app", "chat")
@@ -181,7 +181,7 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardKeepsWhatItsRowHe
 	})
 	s.answered(s.store, "chat", s.base.Add(10*time.Minute))
 	s.changed("chat", "review_score = ?", 4)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", time.Time{}, s.base.Add(11*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "chat", s.base, s.base.Add(11*time.Minute), ""))
 	s.carriedOn("chat", s.base.Add(time.Hour))
 
 	found, err := s.other.Sessions.Get(s.ctx, "app", "chat")
@@ -263,10 +263,10 @@ func (s *ShardedStoreSuite) TestALateRowFromARouterThatHeldASessionEarlierLeaves
 
 func (s *ShardedStoreSuite) TestSessionsOpenInTwoShardsAtOnceAreOnePeak() {
 	s.opened("here", "app", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "here", time.Time{}, s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "here", s.base, s.base.Add(10*time.Minute), ""))
 	there := &AgentSession{ID: "there", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base.Add(5 * time.Minute)}
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, there))
-	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "there", time.Time{}, s.base.Add(20*time.Minute), ""))
+	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "there", s.base.Add(5*time.Minute), s.base.Add(20*time.Minute), ""))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "app", s.base.Add(-time.Hour), s.base.Add(time.Hour))
 	s.Require().NoError(err)

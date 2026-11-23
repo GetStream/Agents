@@ -341,7 +341,6 @@ func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOp
 
 func (s *RecordFlushSuite) TestACloseQueuedByTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
 	row := s.row()
-	row.OpenedAt = row.CreatedAt.Truncate(time.Microsecond)
 	s.records.Opened(row, nil)
 	s.Require().NoError(s.records.Flush(s.bounded()))
 	// Another router carries the session on while the close of this one is still queued.
@@ -881,7 +880,8 @@ func (s *RecordFlushSuite) bounded() context.Context {
 }
 
 func (s *RecordFlushSuite) row() store.AgentSession {
-	return store.AgentSession{ID: rand.Text(), CustomerID: s.customer, State: store.SessionRunning, CreatedAt: time.Now().UTC()}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	return store.AgentSession{ID: rand.Text(), CustomerID: s.customer, State: store.SessionRunning, CreatedAt: now, OpenedAt: now}
 }
 
 // stored says whether the session's row is in Postgres. It is called from the callers'
