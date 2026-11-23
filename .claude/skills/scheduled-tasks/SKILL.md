@@ -182,6 +182,7 @@ Read the task, then its runs, then the logs, in that order.
 | The tools | the model never calls `schedule_task` | `scheduling.enabled` off, incognito, a guest or anonymous caller, or a `noauth` router |
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay |
 | Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it (`internal/api/session_delete.go:47`) |
+| User forgotten | task 404, its runs gone | `router usage forget-user` deleted every task of that user in the app, with its runs, and redacted the changes recorded of them (`ForgetUserTasks`) |
 
 Run `error` codes (`internal/scheduling/scheduler.go:105`):
 

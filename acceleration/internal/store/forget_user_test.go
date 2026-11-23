@@ -195,9 +195,10 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheRunsOfAnotherUsersTaskNamedLikeT
 		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
 	}
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
-	s.opened("x", "acme", s.base, func(session *AgentSession) { session.UserID = "sam" })
 	due := s.base.Add(-time.Minute)
 	s.task("x", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = &due })
+	// Opened after the task, so the session's change is the latest one by that id before the run's.
+	s.opened("x", "acme", s.base, func(session *AgentSession) { session.UserID = "sam" })
 	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
 
@@ -231,6 +232,81 @@ WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '
 
 	s.Equal([]string{"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_tasks delete reminder"},
 		s.taskChanges("acme"), "the write's change names them no more")
+}
+
+// forgetWaiting reports whether a ForgetUserTasks is waiting on a lock: a row, or an advisory one
+// a test holds.
+func (s *StoreSuite) forgetWaiting() bool {
+	var waiting bool
+	s.Require().NoError(s.store.global.NewRaw(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+	AND (query LIKE '%scheduled_task%' OR query LIKE '%data_changes%'))`).Scan(s.ctx, &waiting))
+	return waiting
+}
+
+func (s *StoreSuite) TestARunWriteTheForgetWaitsOnIsRedactedToo() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	due := s.base.Add(-time.Minute)
+	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	// As TakeCall writes it: the run's row alone, not its task's.
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // committed below; this only ends a failed test's transaction
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET session_id = 'call' WHERE customer_id = 'acme' AND task_id = 'reminder'")
+	s.Require().NoError(err)
+
+	forgotten := make(chan error, 1)
+	go func() {
+		_, err := s.store.ForgetUserTasks(s.ctx, "acme", "sam")
+		forgotten <- err
+	}()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the forget waits on the run's row")
+	s.Require().NoError(writing.Commit())
+	s.Require().NoError(<-forgotten)
+
+	s.ElementsMatch([]string{
+		"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_tasks delete reminder",
+		"scheduled_task_runs delete ", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
+	}, s.taskChanges("acme"), "the run write's change, which holds the task's instructions, names them no more")
+}
+
+func (s *StoreSuite) TestATaskOfTheUsersMadeWhileTheForgetRedactsIsKeptWithItsChanges() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = nil })
+	// The forget stops once it has redacted, until this connection lets it go on.
+	_, err := s.store.global.ExecContext(s.ctx, `CREATE FUNCTION forget_paused() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN PERFORM pg_advisory_xact_lock(hashtextextended('forget_paused', 0)); RETURN NULL; END $$`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.global.ExecContext(s.ctx, "DROP FUNCTION forget_paused() CASCADE")
+		s.Require().NoError(err)
+	}()
+	_, err = s.store.global.ExecContext(s.ctx,
+		"CREATE TRIGGER forget_paused AFTER UPDATE ON data_changes FOR EACH STATEMENT EXECUTE FUNCTION forget_paused()")
+	s.Require().NoError(err)
+	holding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holding.Rollback() //nolint:errcheck // rolled back below; this only ends a failed test's transaction
+	_, err = holding.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('forget_paused', 0))")
+	s.Require().NoError(err)
+
+	forgotten := make(chan error, 1)
+	go func() {
+		_, err := s.store.ForgetUserTasks(s.ctx, "acme", "sam")
+		forgotten <- err
+	}()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the forget waits once it has redacted")
+	s.task("late", func(task *ScheduledTask) { task.NextRunAt = nil })
+	s.Require().NoError(holding.Rollback())
+	s.Require().NoError(<-forgotten)
+
+	_, err = s.store.ScheduledTasks.Get(s.ctx, "acme", "late")
+	s.Require().NoError(err, "a task the forget's snapshot did not see is not deleted")
+	s.ElementsMatch([]string{
+		"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_tasks insert late",
+	}, s.taskChanges("acme"), "no task is deleted with a change naming them kept")
 }
 
 func (s *StoreSuite) TestAFollowerOfAnotherAppReadsOnFromItsCursorAfterAUserIsForgotten() {
