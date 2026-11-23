@@ -52,7 +52,8 @@ func (s *AgentSuite) TestAPanicInATranscriberGoroutineStopsItsCall() {
 // an utterance, stops that call.
 func (s *AgentSuite) TestActingWithAnotherTranscriberAPanicInTheFloorStopsItsCall() {
 	decided := s.floorRules(endsAtOnce)
-	s.earsSettlePanics = true
+	release := make(chan struct{})
+	s.earsSettlePanics = release
 	s.join(true)
 	caller := stt.Participant{ID: "alice"}
 	line := &callerLine{s: s, participant: caller}
@@ -60,6 +61,7 @@ func (s *AgentSuite) TestActingWithAnotherTranscriberAPanicInTheFloorStopsItsCal
 	line.say(1200, true)
 	s.transcriberWrites(caller, 1, stt.ModeReplacement, "a table at seven thirty")
 	line.say(600, false)
+	close(release)
 	s.eventually(func() bool { return decided.Load() > 0 }, "chorus-asr was never asked about the pause")
 
 	s.eventually(func() bool { return hasEnded(s.events) }, "the call with the panic did not stop")

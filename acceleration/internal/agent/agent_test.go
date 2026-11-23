@@ -1006,9 +1006,9 @@ type AgentSuite struct {
 	// earsPause has the stub transcriber stand in for chorus-asr's, which an acting agent
 	// has ask about its callers' pauses (pausingSTT).
 	earsPause bool
-	// earsSettlePanics has the stub transcriber panic when it is told to settle its words
-	// (panicsOnSettleSTT).
-	earsSettlePanics bool
+	// earsSettlePanics, if set, has the stub transcriber panic when it is told to settle its
+	// words, once the channel is closed (panicsOnSettleSTT).
+	earsSettlePanics chan struct{}
 
 	agent  *Agent
 	events *collector
@@ -1053,7 +1053,7 @@ func (s *AgentSuite) SetupTest() {
 	s.speculates = false
 	s.unified = false
 	s.floor, s.floorMode, s.earsPause = nil, "", false
-	s.earsSettlePanics = false
+	s.earsSettlePanics = nil
 	s.performing = ""
 	s.voiceName = ""
 	s.replacement = nil
@@ -1233,8 +1233,8 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		if s.earsPause {
 			return pausingSTT{s.ears}, nil
 		}
-		if s.earsSettlePanics {
-			return panicsOnSettleSTT{s.ears}, nil
+		if s.earsSettlePanics != nil {
+			return panicsOnSettleSTT{stubSTT: s.ears, release: s.earsSettlePanics}, nil
 		}
 		return s.ears, nil
 	}, routing.OverrideRegion)
@@ -1467,11 +1467,19 @@ type pausingSTT struct{ *stubSTT }
 
 func (pausingSTT) AskOnPauses(audiofloor.Asker) {}
 
-// panicsOnSettleSTT is a stub transcriber that can be told to settle its words. It panics
-// when it is told, like a provider with a bug in it.
-type panicsOnSettleSTT struct{ *stubSTT }
+// panicsOnSettleSTT is a stub transcriber that can be told to settle its words. When it is
+// told, it waits until release is closed and then panics, like a provider with a bug in it.
+// The wait lets a test send all its audio first: the call ends at the panic, and the edge
+// takes no more audio after that.
+type panicsOnSettleSTT struct {
+	*stubSTT
+	release <-chan struct{}
+}
 
-func (panicsOnSettleSTT) Finalize() error { panic("a bug in settling the words") }
+func (s panicsOnSettleSTT) Finalize() error {
+	<-s.release
+	panic("a bug in settling the words")
+}
 
 func (s *AgentSuite) says(participant stt.Participant, text string) {
 	s.saysAfter(participant, text, 0)
