@@ -162,7 +162,7 @@ func (e *Enforcer) Standing(ctx context.Context, organizationID string) (usage.S
 }
 
 // Funded is, for each of the organizations, whether it has credit that is not trial credit now:
-// the standing's Funded, read in the batches Standings makes. It reads nothing, and says false,
+// the standing's Funded, read in the batches Standings makes. It reads nothing, and says ok false,
 // with no enforcer or no usage service. An organization the service has no account for is not
 // funded.
 func (e *Enforcer) Funded(ctx context.Context, organizations []string) (map[string]bool, bool, error) {
@@ -174,7 +174,9 @@ func (e *Enforcer) Funded(ctx context.Context, organizations []string) (map[stri
 		// Funded does not read the tier, so none is named: the service answers on its default.
 		query.Organizations = append(query.Organizations, usage.StandingOrganization{OrganizationID: organization})
 	}
-	standings, err := e.settings.Usage.Standings(ctx, query)
+	read, cancel := context.WithTimeout(ctx, readTimeout)
+	standings, err := e.settings.Usage.Standings(read, query)
+	cancel()
 	if err != nil {
 		return nil, false, err
 	}

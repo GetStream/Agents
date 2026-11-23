@@ -491,6 +491,8 @@ func (s *OpsActivitySuite) TestFundedIsAbsentWithNoUsageService() {
 // says which organizations are funded.
 type OpsActivityFundedSuite struct {
 	opsActivityReader
+	// logged is what the router logged.
+	logged *lockedLog
 }
 
 func TestOpsActivityFundedSuite(t *testing.T) {
@@ -499,6 +501,8 @@ func TestOpsActivityFundedSuite(t *testing.T) {
 
 func (s *OpsActivityFundedSuite) SetupSuite() {
 	s.limited = true
+	s.logged = &lockedLog{}
+	s.logs = s.logged
 	s.opsActivityReader.SetupSuite()
 }
 
@@ -526,8 +530,10 @@ func fundedOn(pages []ActivityPage, organization string) []*bool {
 // a refund left uncounted.
 func (s *OpsActivityFundedSuite) TestEachOrganizationOnEachPageIsFundedByItsOwnNonTrialCredit() {
 	day := daysAgo(200, 100)
-	toppedUp, granted, trialOnly, trialAndGrant, refunded, spentOnly, noAccount :=
-		s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp()
+	toppedUp, granted, trialOnly, trialAndGrant, refunded, spentOnly, noAccount, spentTopUp :=
+		s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp()
+	s.credit(spentTopUp.organization.ID, usage.CreditTopUp, 5_000_000)
+	s.usage.Spend(s.T(), spentTopUp.organization.ID, 5_000_000)
 	s.credit(toppedUp.organization.ID, usage.CreditTopUp, 5_000_000)
 	s.credit(granted.organization.ID, usage.CreditGrant, 5_000_000)
 	s.credit(trialOnly.organization.ID, usage.CreditTrial, 5_000_000)
@@ -539,10 +545,10 @@ func (s *OpsActivityFundedSuite) TestEachOrganizationOnEachPageIsFundedByItsOwnN
 	want := map[string]bool{
 		toppedUp.organization.ID: true, granted.organization.ID: true, trialOnly.organization.ID: false,
 		trialAndGrant.organization.ID: true, refunded.organization.ID: false, spentOnly.organization.ID: false,
-		noAccount.organization.ID: false,
+		noAccount.organization.ID: false, spentTopUp.organization.ID: true,
 	}
 	var deltas []store.ActivityDelta
-	for _, app := range []testApp{toppedUp, granted, trialOnly, trialAndGrant, refunded, spentOnly, noAccount} {
+	for _, app := range []testApp{toppedUp, granted, trialOnly, trialAndGrant, refunded, spentOnly, noAccount, spentTopUp} {
 		deltas = append(deltas, s.on(app, app.app.ID, activity.AreaConversations, store.AuditSourceSDK, day, 1, 0))
 	}
 	s.Require().NoError(s.store.Activities.Add(context.Background(), deltas))
@@ -577,7 +583,39 @@ func (s *OpsActivityFundedSuite) TestFundedIsAbsentWhileTheUsageServiceDoesNotAn
 	s.Require().Len(down, 1)
 	s.Require().Len(down[0].Organizations, 1)
 	s.Nil(down[0].Organizations[0].Funded)
+	s.Contains(s.logged.String(), "could not read whether organizations are funded")
 	s.Equal(activityStepConversations, down[0].Organizations[0].FurthestStep, "how far it got is still told")
 	funded := true
 	s.Equal([]*bool{&funded}, fundedOn(up, s.app.organization.ID), "once the service answers again")
+}
+
+// Defect: a usage service that takes the call and never answers holding the page until the
+// caller gives up, rather than answering it with funded absent.
+func (s *OpsActivityFundedSuite) TestFundedIsAbsentWhileTheUsageServiceHangs() {
+	day := daysAgo(200, 100)
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(s.app, s.customerID(), activity.AreaConversations, store.AuditSourceSDK, day, 1, 0),
+	}))
+	stalled := make(chan struct{})
+	s.usageFront.stalled.Store(&stalled)
+	defer func() { s.usageFront.stalled.Store(nil); close(stalled) }()
+
+	answered := make(chan []byte, 1)
+	go func() {
+		status, payload := s.staff.call(http.MethodGet, activityPath(day, day, 0)+"&org_id="+url.QueryEscape(s.app.organization.ID), nil)
+		if status != http.StatusOK {
+			payload = nil
+		}
+		answered <- payload
+	}()
+	select {
+	case payload := <-answered:
+		s.Require().NotNil(payload, "the page is answered 200")
+		var page ActivityPage
+		s.Require().NoError(json.Unmarshal(payload, &page))
+		s.Require().Len(page.Organizations, 1)
+		s.Nil(page.Organizations[0].Funded)
+	case <-time.After(15 * time.Second):
+		s.Fail("the page waited on the usage service for 15 s")
+	}
 }
