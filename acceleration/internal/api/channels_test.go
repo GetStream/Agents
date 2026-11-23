@@ -848,6 +848,25 @@ func (s *ChannelsSuite) TestAClaimedCodeLeavesTheLineItsCountOfWrongCodes() {
 	s.Equal(tooManyCodes, s.reply(last, 1))
 }
 
+// A code the router could not try is no wrong code: the number is not held to it.
+func (s *ChannelsSuite) TestACodeThatCouldNotBeTriedIsNotCountedAsAWrongOne() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, store.ChannelIdentityLink)
+	writer := s.writer()
+	s.awayFromAWindowEdge()
+	s.failQueries(`DELETE FROM "channel_links"`)
+	for n := range 5 {
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "123456"))
+		s.Require().Equal(sendTheCode, s.reply(writer, n+1))
+	}
+	s.failing.value.Store(nil)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "no such code"))
+
+	s.Equal(sendTheCode, s.reply(writer, 6))
+}
+
 // Wrong codes of the window before count no more: the line takes codes again in the next one.
 func (s *ChannelsSuite) TestWrongCodesOfTheWindowBeforeDoNotCount() {
 	number := s.number()

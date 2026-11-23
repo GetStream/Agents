@@ -62,9 +62,21 @@ func (s *StoreSuite) TestAReleasedLinkCodeIsCountedNoMore() {
 		s.Require().True(reserved)
 	}
 
+	other, before := newID(), window.Add(-15*time.Minute)
+	for _, reserve := range []struct {
+		line, from string
+		window     time.Time
+	}{{line, "+15550002", window}, {other, "+15550001", window}, {line, "+15550001", before}} {
+		reserved, err := s.store.ChannelLinkFailures.Reserve(s.ctx, reserve.line, reserve.from, reserve.window, before, 5, 20)
+		s.Require().NoError(err)
+		s.Require().True(reserved)
+	}
+
 	s.Require().NoError(s.store.ChannelLinkFailures.Release(s.ctx, line, "+15550001", window))
 
-	s.Equal(4, s.linkFailures(line, window))
+	s.Equal(4+1, s.linkFailures(line, window), "the other number's code is still counted")
+	s.Equal(1, s.linkFailures(other, window), "another line's")
+	s.Equal(1, s.linkFailures(line, before), "the window before's")
 	again, err := s.store.ChannelLinkFailures.Reserve(s.ctx, line, "+15550001", window, window, 5, 20)
 	s.Require().NoError(err)
 	s.True(again)
@@ -86,6 +98,20 @@ func (s *StoreSuite) TestReservingALinkCodeForgetsWindowsPastTheirTime() {
 	kept, err := s.store.global.NewSelect().Model((*channelLinkFailure)(nil)).Where("account_id = ?", line).Count(s.ctx)
 	s.Require().NoError(err)
 	s.Zero(kept)
+}
+
+// A code of no number, or on no line, is refused rather than counted for every such message together.
+func (s *StoreSuite) TestALinkCodeOfNoNumberOrNoLineIsNotReserved() {
+	window := s.linkWindow()
+
+	_, noNumber := s.store.ChannelLinkFailures.Reserve(s.ctx, newID(), "", window, window, 5, 20)
+	_, noLine := s.store.ChannelLinkFailures.Reserve(s.ctx, "", "+15550001", window, window, 5, 20)
+
+	var invalid *ValidationError
+	s.Require().ErrorAs(noNumber, &invalid)
+	s.Equal("from_address", invalid.Field)
+	s.Require().ErrorAs(noLine, &invalid)
+	s.Equal("account_id", invalid.Field)
 }
 
 func (s *StoreSuite) TestChannelLinkFailureQueryBudgets() {
