@@ -149,14 +149,20 @@ func (s *Store) acquireCredentialLock(ctx context.Context, customerID string, na
 	if err != nil {
 		return bun.Conn{}, nil, fmt.Errorf("store: wait for a customer's credential lock slot: %w", err)
 	}
+	locked := false
+	defer func() {
+		if !locked {
+			leave()
+		}
+	}()
 	conn, err := s.tryCredentialLock(ctx, namespace, key)
 	if err != nil {
-		leave()
 		return bun.Conn{}, nil, err
 	}
+	locked = true
 	return conn, func() {
+		defer leave()
 		releaseCredentialLock(ctx, conn, namespace, key)
-		leave()
 	}, nil
 }
 
