@@ -2,6 +2,9 @@
 
 ## Features
 
+### The router can cancel the agent's echo on phone calls
+
+A phone with no echo cancellation of its own, a speakerphone above all, plays the agent's voice into its microphone and sends it back down the line, where the transcriber wrote it as the caller's words and barge-in took it for the caller talking over the agent. With `phone.echo_cancellation: true` (`ROUTER_PHONE_ECHO_CANCELLATION=true`) the router cancels it with AEC3 (WebRTC's echo canceller, in pure Go) before anything hears the caller: the agent's voice as its track sends it is taken out of each `sip-` participant's audio, across the gaps a phone leaves while its user is quiet. It is off by default, as a router built without `GOEXPERIMENT=simd` spends about 4.6% of a core on each phone caller. `phone.echo_max_delay` (`ROUTER_PHONE_ECHO_MAX_DELAY`, 1s by default, 128ms to 1.2s) is how late an echo is looked for. `router_agent_echo_lines_total` counts each line once it closes, and `router_agent_echo_return_loss_enhancement_db`, `router_agent_echo_return_loss_db` and `router_agent_echo_delay_seconds` observe only the lines whose canceller cleaned audio after the agent spoke; `router_agent_echo_gap_frames_total`, `router_agent_echo_voice_dropped_frames_total` and `router_agent_echo_canceller_resets_total` count the gaps it stepped over. chorus-asr's removal of the agent's own words from a transcript stays, for what the canceller leaves (#2080).
 ### Qwen4-Max is `qwen/qwen4-max`
 
 Alibaba's Qwen4-Max can be routed as `qwen/qwen4-max`, in the `high-quality` tier, with images in, tools and JSON Schema answers. It is reached on QwenCloud's Singapore endpoint with `DASHSCOPE_API_KEY`, the key the qwen realtime models take; `QWEN_BASE_URL` names another region's endpoint for a key made there. Thinking is off unless the model entry sets `thinking: true`, which takes `reasoning_effort` `low`, `high` or `xhigh`. It is $1.50 in, $4.50 out and $0.075 for a cache hit per 1M tokens.
