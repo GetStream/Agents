@@ -217,7 +217,7 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 	if m.options.SandboxBroker != metered.SandboxSecretsBroker {
 		return nil, stack.Wrap(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker))
 	}
-	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
+	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.CustomerID, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
 }
 
 // behindProxy refuses a sandbox config the egress proxy cannot serve. Every request goes there,

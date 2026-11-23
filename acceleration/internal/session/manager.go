@@ -225,7 +225,7 @@ type Manager struct {
 	sliceEvery time.Duration
 
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[Key]*Session
 	// kickScheduler wakes the scheduled-task worker after a scheduling tool
 	// makes or changes a task (SetSchedulerKick); nil where no worker runs.
 	kickScheduler func()
@@ -271,7 +271,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		hookPins:      map[string]hookPinned{},
 		options:       options,
 		logger:        options.Logger,
-		sessions:      map[string]*Session{},
+		sessions:      map[Key]*Session{},
 		conversations: options.Conversations,
 	}
 	if options.Conversations != nil && options.Store != nil {
@@ -438,9 +438,10 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		m.mu.Unlock()
 		return nil, stack.Wrap(errors.New("session: the manager is shut down"))
 	}
-	held, live := m.sessions[spec.ID]
+	held, live := m.sessions[Key{spec.CustomerID, spec.ID}]
+	another := m.heldByAnother(spec.CustomerID, spec.ID)
 	m.mu.Unlock()
-	if live && !replaces(spec, held) {
+	if another || live && !replaces(spec, held) {
 		return nil, stack.Wrap(ErrSessionExists)
 	}
 	// The id is the row's primary key whoever owns it, so one somebody already used would
@@ -1091,14 +1092,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		fail()
 		return nil, stack.Wrap(errors.New("session: the manager is shut down"))
 	}
-	if held, raced := m.sessions[created.id]; raced && !replaces(spec, held) {
+	if held, raced := m.sessions[created.Key()]; raced && !replaces(spec, held) || m.heldByAnother(spec.CustomerID, created.id) {
 		m.mu.Unlock()
 		turnedAway = true
 		created.handedOver.Store(true)
 		fail()
 		return nil, stack.Wrap(ErrSessionExists)
 	}
-	m.sessions[created.id] = created
+	m.sessions[created.Key()] = created
 	sessionsActive.Inc()
 	created.active.Store(true)
 	m.mu.Unlock()
@@ -1106,7 +1107,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// Said after the session is here to be found, so a peer that forwards a request on
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
-		m.options.Directory.Hold(ctx, created.id, spec.AgentID, spec.ConversationID)
+		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, spec.AgentID, spec.ConversationID)
 	}
 	// Asked again now the session is held: a status that came while the call was being
 	// joined found no session to end, and one that comes after this finds it. The session
@@ -1117,7 +1118,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		m.end(created, TimeoutUnanswered)
 	}
 	m.mu.Lock()
-	held, present := m.sessions[created.id]
+	held, present := m.sessions[created.Key()]
 	m.mu.Unlock()
 	if err == nil && held != created {
 		// Ended between going into the map and here, by a status, a takeover or shutdown:
@@ -1130,7 +1131,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// otherwise be renewed for a session nobody holds. One reopened under the id since
 		// holds its own.
 		if !present {
-			m.release(created.id)
+			m.release(created.Key())
 		}
 		return nil, err
 	}
@@ -1190,16 +1191,16 @@ func replaces(spec Spec, held *Session) bool {
 func (m *Manager) supersede(spec Spec) {
 	m.mu.Lock()
 	var left []*Session
-	for id, found := range m.sessions {
+	for key, found := range m.sessions {
 		if sameSeat(found.Spec(), spec) {
 			left = append(left, found)
-			delete(m.sessions, id)
+			delete(m.sessions, key)
 		}
 	}
 	m.mu.Unlock()
 
 	for _, found := range left {
-		m.release(found.id)
+		m.release(found.Key())
 	}
 
 	for _, found := range left {
@@ -1289,16 +1290,16 @@ func (m *Manager) awaitRetiring(ctx context.Context, customer, cid string) {
 func (m *Manager) takeOver(customer, cid string, thread bool) {
 	m.mu.Lock()
 	var left []*Session
-	for id, found := range m.sessions {
+	for key, found := range m.sessions {
 		if found.spec.CustomerID == customer && found.spec.Thread == thread && found.unwatchedFor(cid) {
 			left = append(left, found)
-			delete(m.sessions, id)
+			delete(m.sessions, key)
 		}
 	}
 	m.mu.Unlock()
 
 	for _, found := range left {
-		m.release(found.id)
+		m.release(found.Key())
 		m.logger.Info("reopening a conversation nobody was watching",
 			"session", found.id, "conversation", cid)
 		found.abandon()
@@ -1383,7 +1384,7 @@ func (m *Manager) Get(id string, owner Owner) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	found, ok := m.sessions[id]
+	found, ok := m.sessions[Key{owner.CustomerID, id}]
 	if !ok || !owner.Reaches(OwnerOf(found.Spec())) {
 		return nil, false
 	}
@@ -1688,9 +1689,10 @@ func (m *Manager) Close(id string, owner Owner) (bool, error) {
 		return false, nil
 	}
 
+	key := found.Key()
 	m.mu.Lock()
-	_, held := m.sessions[id]
-	delete(m.sessions, id)
+	_, held := m.sessions[key]
+	delete(m.sessions, key)
 	if held {
 		m.closing++
 		m.ended.Add(1)
@@ -1702,7 +1704,7 @@ func (m *Manager) Close(id string, owner Owner) (bool, error) {
 		}()
 	}
 	m.mu.Unlock()
-	m.release(id)
+	m.release(key)
 
 	return true, found.Close()
 }
@@ -1717,7 +1719,7 @@ func (m *Manager) end(found *Session, reason EndReason) {
 		return
 	}
 	defer done()
-	m.release(found.id)
+	m.release(found.Key())
 
 	found.noteEnd(reason)
 	m.logger.Info("ending the session", "session", found.id, "reason", reason)
@@ -1735,7 +1737,7 @@ func (m *Manager) hangUp(found *Session, reason EndReason) {
 	found.noteEnd(reason)
 	go func() {
 		defer done()
-		m.release(found.id)
+		m.release(found.Key())
 		m.logger.Info("ending the session", "session", found.id, "reason", reason)
 		if err := found.Close(); err != nil {
 			m.logger.Warn("could not close the session its agent hung up", "session", found.id, "error", err)
@@ -1748,10 +1750,10 @@ func (m *Manager) hangUp(found *Session, reason EndReason) {
 func (m *Manager) take(found *Session) (done func(), held bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if current, ok := m.sessions[found.id]; !ok || current != found {
+	if current, ok := m.sessions[found.Key()]; !ok || current != found {
 		return nil, false
 	}
-	delete(m.sessions, found.id)
+	delete(m.sessions, found.Key())
 	m.closing++
 	m.ended.Add(1)
 	return func() {
@@ -1766,13 +1768,12 @@ func (m *Manager) take(found *Session) (done func(), held bool) {
 // has joined it, reporting whether this node holds it.
 func (m *Manager) EndUnanswered(customerID, id string) bool {
 	m.mu.Lock()
-	found, held := m.sessions[id]
+	found, held := m.sessions[Key{customerID, id}]
 	m.mu.Unlock()
 	if !held {
 		return false
 	}
-	spec := found.Spec()
-	if OwnerOf(spec).CustomerID == customerID && spec.Phone != nil && !found.CallerJoined() {
+	if found.Spec().Phone != nil && !found.CallerJoined() {
 		m.end(found, TimeoutUnanswered)
 	}
 	return true
@@ -1790,13 +1791,13 @@ const voicemailWithin = 2 * time.Minute
 // The message is left in the background, as it takes a while to say.
 func (m *Manager) Machine(customerID, id string, machine phone.Machine) bool {
 	m.mu.Lock()
-	found, held := m.sessions[id]
+	found, held := m.sessions[Key{customerID, id}]
 	m.mu.Unlock()
 	if !held {
 		return false
 	}
 	spec := found.Spec()
-	if OwnerOf(spec).CustomerID != customerID || spec.Phone == nil || spec.Voicemail == nil {
+	if spec.Phone == nil || spec.Voicemail == nil {
 		return true
 	}
 	if machine == phone.MachineHuman {
@@ -1872,7 +1873,7 @@ const hangUpTimeout = 5 * time.Second
 const releaseTimeout = 2 * time.Second
 
 // release stops telling this deployment's other nodes that a session is here.
-func (m *Manager) release(id string) {
+func (m *Manager) release(key Key) {
 	if m.options.Directory == nil {
 		return
 	}
@@ -1880,19 +1881,39 @@ func (m *Manager) release(id string) {
 	// cancelled the moment the answer is written would leave the claim behind.
 	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 	defer cancel()
-	m.options.Directory.Release(ctx, id)
+	m.options.Directory.Release(ctx, key.CustomerID, key.ID)
 }
 
-// Running reports whether this process is running a session, whoever it belongs to.
+// Running reports whether this process is running a customer's session, whoever of the
+// customer's it belongs to.
 //
 // No owner is asked for, unlike Get, because which node holds a session is not a question
 // about who may see it: the node that answers checks that for itself.
-func (m *Manager) Running(id string) bool {
+func (m *Manager) Running(customerID, id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	_, running := m.sessions[id]
+	_, running := m.sessions[Key{customerID, id}]
 	return running
+}
+
+// HeldByAnother reports whether this process is running a session of the id for a customer
+// other than customerID. A session's row is keyed by its id alone, whoever's it is, so a second
+// customer's session under one is refused.
+func (m *Manager) HeldByAnother(customerID, id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.heldByAnother(customerID, id)
+}
+
+// heldByAnother is HeldByAnother with m.mu held.
+func (m *Manager) heldByAnother(customerID, id string) bool {
+	for key := range m.sessions {
+		if key.ID == id && key.CustomerID != customerID {
+			return true
+		}
+	}
+	return false
 }
 
 // SandboxesIn reports whether a session's sandbox can be made in region: a config naming a
@@ -2007,7 +2028,7 @@ func (m *Manager) Shutdown() error {
 	for _, found := range m.sessions {
 		running = append(running, found)
 	}
-	m.sessions = map[string]*Session{}
+	m.sessions = map[Key]*Session{}
 	m.mu.Unlock()
 
 	// Each close may wait for the agent to finish speaking, so every session stops being

@@ -128,6 +128,21 @@ func (s *ForwardedSessionSuite) TestAMessageArrivingOnTheWrongNodeIsAnsweredByTh
 	}
 }
 
+// Two customers may each run a session of one id, each on a node of its own: a request reaches
+// the session of the caller's own customer, wherever it lands.
+func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {
+	id := s.utils.uuid()
+	other := s.data.backendOfAnotherApp()
+	mine := s.serverClient.createSession(CreateSessionRequest{Id: &id, Incognito: pointerTo(true), Llm: pointerTo("llm-flow")})
+	theirs := other.on(s.other).createSession(CreateSessionRequest{Id: &id, Incognito: pointerTo(true), Llm: pointerTo("echo/echo-model")})
+	third := s.otherNode()
+
+	s.Equal(theirs.Llm, other.getSession(id).Llm, "landing on the node running the other customer's")
+	s.Equal(mine.Llm, s.serverClient.on(s.other).getSession(id).Llm, "landing on the node running the other customer's")
+	s.Equal(theirs.Llm, other.on(third).getSession(id).Llm, "landing on a node running neither")
+	s.Equal(mine.Llm, s.serverClient.on(third).getSession(id).Llm, "landing on a node running neither")
+}
+
 // wasAsked reports whether the model was given something to answer.
 func (s *ForwardedSessionSuite) wasAsked(text string) bool {
 	for _, request := range s.vision.requests() {

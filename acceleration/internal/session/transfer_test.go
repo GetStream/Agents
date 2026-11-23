@@ -186,7 +186,7 @@ func (s *TransferSuite) TestACallTransferredColdEndsItsSessionAsTransferred() {
 
 	s.transferred(events)
 	s.Require().Eventually(func() bool {
-		return created.State() == Ended && !s.manager.Running(created.ID())
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
 	}, settleFor, 20*time.Millisecond, "the session outlived the agent that left on the transfer")
 	s.Equal(EndTransferred, created.EndReason())
 	// The agent leaves the call by itself on a transfer, which is no agent dropping out.

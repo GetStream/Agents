@@ -407,6 +407,12 @@ type recordedTurn struct {
 // ID is the handle a caller holds the session by.
 func (s *Session) ID() string { return s.id }
 
+// Key is a session by its customer and id: two customers may each have a session of one id.
+type Key struct{ CustomerID, ID string }
+
+// Key is the session's customer and id, which a manager holds it by.
+func (s *Session) Key() Key { return Key{s.spec.CustomerID, s.id} }
+
 // current is the agent holding the conversation now.
 func (s *Session) current() *agent.Agent { return s.held.Load() }
 

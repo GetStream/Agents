@@ -31,9 +31,10 @@ const unreachableNode = "the node running this session could not be reached"
 // that process, so without this a request lands on a node that cannot answer it and is
 // told the session does not exist.
 //
-// Outermost of this server's own middlewares, so a request that belongs elsewhere is not
-// authenticated, logged or counted against a quota twice: the node that answers does all
-// three, and this one only hands it over.
+// Inside withCustomer, so a session is found by the caller's customer and its id: two
+// customers may each have a session of one id. The node that answers authenticates the caller
+// again, as it does every request it serves, and is the only one to log it or count it against
+// a quota.
 func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		address, elsewhere := s.owningNode(r)
@@ -91,7 +92,8 @@ func (s *Server) owningNode(r *http.Request) (string, bool) {
 }
 
 // nodeFor is the node the directory says runs the session a request is about, false when
-// the request is about none or this node runs it.
+// the request is about none, names no customer, or this node runs it. A request that names no
+// customer is answered here, where it is refused.
 func (s *Server) nodeFor(r *http.Request) (string, bool) {
 	if cid, ok := approvalInPath(r.URL.Path); ok {
 		if s.sessions != nil {
@@ -111,14 +113,18 @@ func (s *Server) nodeFor(r *http.Request) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if s.sessions != nil && s.sessions.Running(id) {
+	customer, ok := CustomerFrom(r.Context())
+	if !ok {
+		return "", false
+	}
+	if s.sessions != nil && s.sessions.Running(customer, id) {
 		return "", false
 	}
 
-	address, err := s.directory.Node(r.Context(), id)
+	address, err := s.directory.Node(r.Context(), customer, id)
 	if err != nil {
 		s.logger.Warn("could not find out which node is running a session",
-			"session", id, "error", err)
+			"customer", customer, "session", id, "error", err)
 		return "", false
 	}
 	return address, true
