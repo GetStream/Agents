@@ -248,6 +248,26 @@ func (s *SourceSuite) TestTextTheCapCutsInsideARuneIsStillText() {
 	s.True(strings.HasSuffix(text, core.TruncatedMarker))
 }
 
+// R1.3: the last byte under the 4 MiB cap is read: a body whose last byte there is not UTF-8 is
+// not text, under a cap even one byte lower too.
+func (s *SourceSuite) TestTheLastByteUnderTheCapIsRead() {
+	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/bad-byte-at-the-cap"}
+
+	result, err := s.call(s.binding(tool), "get", `{}`)
+
+	s.Require().NoError(err)
+	s.Equal(nonText, llm.TextOf(result.Parts))
+}
+
+// R1.3: a 4xx or a 5xx whose body is not text names its status and says so, never the bytes.
+func (s *SourceSuite) TestAToolErrorWithABodyThatIsNotTextSaysItIsNotText() {
+	_, err := s.call(s.binding(core.HTTPTool{Name: "broken", Method: http.MethodGet, Path: "/broken"}), "broken", `{}`)
+
+	var reported *core.ToolError
+	s.Require().ErrorAs(err, &reported)
+	s.Equal("The API answered 500 Internal Server Error: "+nonText, reported.Message)
+}
+
 // AI-3674, from the AI-3673 review (R1.3): revision 2 turns POST x into a read-only GET. A grant
 // made for one revision's x never opens the other's, so a connection still pinned to revision 1
 // never runs the POST under a grant made for the read-only GET, nor the reverse.
@@ -533,6 +553,9 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/huge-runes":
 		// The cut at 4 MiB falls inside the first é.
 		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20-1)+"éééé")
+	case "/bad-byte-at-the-cap":
+		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20-1))
+		_, _ = w.Write([]byte{0xff})
 	case "/missing":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "no such item")
