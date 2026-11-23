@@ -102,8 +102,9 @@ type scheduledDelivery struct {
 	APIKey          string   `json:"api_key,omitempty"`
 	UsageCategories []string `json:"usage_categories,omitempty"`
 	// Earlier is the reason the occurrence's run records so far (store.ScheduledTaskRun.Error),
-	// if any: the one its last attempt on this worker failed under (deliverWithRetries), or how a
-	// call placed for it ended (SetCallReason). replyCommand reads it.
+	// if any: the one its last attempt failed under (deliverWithRetries, which keeps it on the row
+	// for a worker that takes the run over), or how a call placed for it ended (SetCallReason).
+	// replyCommand reads it.
 	Earlier string `json:"earlier,omitempty"`
 }
 
@@ -121,7 +122,7 @@ func (d scheduledDelivery) attribution() routing.Attribution {
 
 // scheduledHandOff is what a peer reads of a scheduledDelivery it is handed: the ids that
 // name the task's occurrence and its owner, which it checks against the rows, and the reason
-// the asker's last attempt failed under, which the run's row does not hold between attempts.
+// the asker's last attempt failed under, as the asker read it from its claim.
 // Nothing else the asker sends reaches the delivery, so a payload cannot name another
 // conversation, zone, key, prompt or due time. An asker sends the whole scheduledDelivery, so
 // routers on either side of this change still hand off to each other.
