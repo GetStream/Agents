@@ -210,6 +210,34 @@ func boolName(name string, value bool) string {
 	return "not " + name
 }
 
+// TestABodyReachesTheHostWhole: a body the proxy keeps and one over keptBody, which streams after the bytes read,
+// reach the host as the sandbox sent them, sized or chunked.
+func (s *ProxySuite) TestABodyReachesTheHostWhole() {
+	s.readsUploadPack()
+	for _, size := range []int{keptBody, keptBody + 1, 3 * keptBody} {
+		for _, chunked := range []bool{false, true} {
+			what := fmt.Sprint(size, " ", boolName("chunked", chunked))
+			s.granted.forget()
+			body := strings.Repeat("0123456789abcdef", size/16+1)[:size]
+			var reader io.Reader = strings.NewReader(body)
+			if chunked {
+				reader = unsized{reader}
+			}
+			request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "https://api.github.test/o/r.git/git-upload-pack", reader)
+			s.Require().NoError(err)
+			request.Header.Set("Authorization", "Bearer "+s.placeholder)
+
+			response, _, err := s.send(s.sandbox(s.credential), request)
+
+			s.Require().NoError(err, what)
+			s.Equal(http.StatusOK, response.StatusCode, what)
+			requests := s.granted.requests()
+			s.Require().Len(requests, 1, what)
+			s.Equal(digest([]byte(body)), digest([]byte(requests[0].Body)), what)
+		}
+	}
+}
+
 // TestATrailerReachesTheHostAsOnTheBase: reading a body to its end fills its trailer, which ReverseProxy would then
 // send on, a method override in it included, after the trailer check; the host gets what it got on the base
 // (18962cc3e), where the body streamed (probe of this test there).
@@ -240,19 +268,25 @@ func (s *ProxySuite) TestATrailerReachesTheHostAsOnTheBase() {
 	}
 }
 
-// TestABodyCutShortIsNoRequest: a chunked body whose sandbox stops sending before its last chunk is no request the
-// host may apply, so the sandbox gets the 502 it got on the base (18962cc3e), where the body streamed.
+// TestABodyCutShortIsNoRequest: a chunked body that breaks before its last chunk, at a chunk that is no chunk or
+// where the sandbox stops sending, is no request the host may apply, so the sandbox gets the 502 it got on the base
+// (18962cc3e), where the body streamed.
 func (s *ProxySuite) TestABodyCutShortIsNoRequest() {
 	s.readsUploadPack()
-	conn := s.tunnel(&tls.Config{})
-	_, err := io.WriteString(conn, "POST /o/r.git/git-upload-pack HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer "+
-		s.placeholder+"\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n0000\r\n")
-	s.Require().NoError(err)
-	s.Require().NoError(conn.CloseWrite())
+	for _, broken := range []string{"zz\r\n", ""} {
+		s.granted.forget()
+		conn := s.tunnel(&tls.Config{})
+		_, err := io.WriteString(conn, "POST /o/r.git/git-upload-pack HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer "+
+			s.placeholder+"\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n0000\r\n"+broken)
+		s.Require().NoError(err)
+		if broken == "" {
+			s.Require().NoError(conn.CloseWrite())
+		}
 
-	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		response, err := http.ReadResponse(bufio.NewReader(conn), nil)
 
-	s.Require().NoError(err)
-	_ = response.Body.Close()
-	s.Equal(http.StatusBadGateway, response.StatusCode)
+		s.Require().NoError(err, broken)
+		_ = response.Body.Close()
+		s.Equal(http.StatusBadGateway, response.StatusCode, broken)
+	}
 }
