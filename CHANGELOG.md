@@ -1,5 +1,9 @@
 # Unreleased
 
+## Breaking Changes
+
+- The Dart SDK's `AgentEventKind` gains `reasoningDelta`, so a `switch` over it with no default needs the case (#2200).
+
 ## Features
 
 ### New voice agents default to `sts-fast` and STS providers expose built-in voices
@@ -71,10 +75,6 @@ Every server SDK's client has a tool registry for the whole app, and one call ru
 ### The Go SDK connects a user's own accounts
 
 `client.Connections()` creates, authorizes, reads, lists and deletes connections: `Create(ctx, client.ConnectionRequest{Connector: "linear", UserID: "alice"})`, then `Authorize(ctx, id, client.AuthorizeOptions{ReturnURL, UserID})` for the launch URL, handoff token and expiry of the consent, and `Get(ctx, id, client.ConnectionOptions{UserID})`, `List(ctx, client.ConnectionFilter{UserID, Connector})`, `Delete(ctx, id, client.ConnectionOptions{UserID})`. Every call takes the user as `UserID` of its options struct and sends it as both the owner and `X-Stream-User-Id`. An empty user is the app's own connection.
-
-### The Dart SDK shows an incognito session
-
-An incognito session has no Stream Chat channel, so a Flutter app had nothing to show its replies with. `Turn` now has `steps` (rounds of thinking and tool calls) and `isDone`, from the socket, and `session.turnMessages` is the conversation in the shape Stream's AI components read, a waiting call's approval card included. `AgentEventKind` gains `reasoningDelta`, so an exhaustive `switch` over it needs the case. `flutter_demo` has an incognito toggle (#2200).
 
 ### The Swift SDK shows an incognito session
 

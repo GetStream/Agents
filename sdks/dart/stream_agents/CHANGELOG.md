@@ -7,8 +7,6 @@
   row before; read that as `session.session`. `chat` and `voice` are now `sessions.create` with
   `startVoice` false and true.
 
-- `AgentEventKind` has `reasoningDelta`: a `switch` over it with no default needs the case.
-
 ✅ Added
 
 - `SessionOptions.watch` - false opens a session with no socket and no tools declared; turns go
@@ -24,10 +22,6 @@
   while it runs, such as "Comparing 40 flights", otherwise its display title, such as "Checking
   the weather", falling back to the tool's name.
 - `session.toolCallsForTurn(turnId)` - the calls one agent turn made, to show under its message.
-- `session.turnMessages` and `TurnMessage` - an incognito session's conversation, for Stream's AI
-  components.
-- `Turn.steps` (`ReasoningStep`, `ToolCallStep`) and `Turn.isDone` - a reply's thinking and tool
-  calls, from the socket.
 
 ## 0.7.0
 
