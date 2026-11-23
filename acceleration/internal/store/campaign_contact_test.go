@@ -838,8 +838,13 @@ func (s *StoreSuite) TestOverlappingChangesToOneContactBothPersist() {
 		})
 		s.NoError(err)
 	}()
-	// The second change waits on the first's lock; give it time to reach it before the first writes.
-	time.Sleep(200 * time.Millisecond)
+	// The first change writes only once the second is queued on its lock, so they overlap.
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the second change never waited on the first's lock")
 	close(release)
 	wait.Wait()
 

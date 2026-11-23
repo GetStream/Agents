@@ -34,9 +34,11 @@ const (
 
 // What kind of campaign it is.
 const (
-	// Standard is a campaign that rings the contacts it was given.
+	// Standard is a campaign that rings the contacts it was given before launch, and completes
+	// once it is done with them.
 	Standard = "standard"
-	// AutoEnroll is reserved: nothing creates one yet.
+	// AutoEnroll also takes contacts while it is scheduled, running or paused, and never
+	// completes on its own.
 	AutoEnroll = "auto_enroll"
 )
 
