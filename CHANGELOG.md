@@ -871,7 +871,7 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ### The sandbox egress proxy sends a request again after an HTTP/2 host's GOAWAY
 
-An HTTP/2 host that starts a graceful shutdown sends GOAWAY, which names the last request it processed. A POST the proxy was forwarding after that one got a 502 in the sandbox, since Go sends a request again only when it can send its body again. The proxy now keeps a body of up to 1 MiB in memory, so Go sends the request again on a new connection and the sandbox gets the host's answer. A larger body streams as before and still gets the 502 (AI-3463).
+An HTTP/2 host that starts a graceful shutdown sends GOAWAY, which names the last request it processed. A POST the proxy was forwarding after that one got a 502 in the sandbox, since Go sends a request again only when it can send its body again. The proxy now keeps a body of up to 1 MiB in memory, so Go sends the request again on a new connection and the sandbox gets the host's answer. A larger body streams as before and still gets the 502 (#2313, AI-3463).
 
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
