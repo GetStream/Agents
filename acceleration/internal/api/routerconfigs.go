@@ -128,6 +128,11 @@ func (s *Server) updateRouterConfig(ctx context.Context, request *updateRouterCo
 		len(auditDiff(routerConfigOf(existing), routerConfigOf(config))) == 0 {
 		return &updateRouterConfigResponse{Body: routerConfigOf(existing)}, nil
 	}
+	// That body is no sync of the file the hash names, such as a read sent back edited, so
+	// the hash is not kept on content it does not describe.
+	if config.SyncHash == existing.SyncHash {
+		config.SyncHash = ""
+	}
 	config.ID = existing.ID
 	config.CreatedAt = existing.CreatedAt
 	if err := s.store.RouterConfigs.Update(ctx, &config); err != nil {

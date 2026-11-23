@@ -447,6 +447,21 @@ func (s *ConnectorsSuite) TestTheSameDefinitionUnderAnotherHashRecordsTheHashOnT
 	s.Equal("hash-two", s.get(id).SyncHash, "so the next sync of the same file finds it unchanged")
 }
 
+// A client that copies the read connector into a create, edits it and keeps the hash the read
+// carried writes a revision no sync wrote.
+func (s *ConnectorsSuite) TestAnEditCarryingTheReadHashClearsIt() {
+	id := s.customID()
+	s.create(s.synced(s.customConnector(id), "hash-one"))
+	edited := s.synced(s.customConnector(id), s.get(id).SyncHash)
+	edited["name"] = "Renamed"
+
+	revised := s.create(edited)
+
+	s.Equal(2, revised.Revision)
+	s.Empty(revised.SyncHash)
+	s.Empty(s.get(id).SyncHash)
+}
+
 // A dashboard or API create sends no hash, so the next sync of the file sees a hash it did not
 // write, whether the definition changed or not.
 func (s *ConnectorsSuite) TestACreateThatIsNoSyncClearsTheHash() {

@@ -317,6 +317,11 @@ func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID stri
 				return err
 			}
 			manifest.Revision = latest.Revision + 1
+			// Another manifest under the latest's hash is no sync of the file that hash names,
+			// such as a read sent back edited, so the new revision carries none.
+			if syncHash == latest.SyncHash {
+				syncHash = ""
+			}
 		}
 
 		// Validated as it is stored, with the revision it is stored under.

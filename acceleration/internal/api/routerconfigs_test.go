@@ -200,6 +200,22 @@ func (s *RouterConfigsSuite) TestTheSameHashWithOtherContentIsStillWritten() {
 	read := s.readConfig(created.Id)
 	s.Equal("llm-flow", value(read.Stt.Target), "a body the hash does not describe is not dropped")
 	s.True(read.UpdatedAt.After(created.UpdatedAt))
+	s.Empty(read.SyncHash, "nor kept under a hash that names another file")
+}
+
+// A client that reads the config, edits it and sends the whole read back sends the hash too.
+func (s *RouterConfigsSuite) TestAReadSentBackEditedClearsTheHash() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	var read map[string]any
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/router/configs/"+created.Id, nil, &read))
+	s.Require().Equal("hash-one", read["sync_hash"])
+	read["stt"] = map[string]any{"target": "llm-flow"}
+
+	s.replaceConfig(created.Id, read)
+
+	after := s.readConfig(created.Id)
+	s.Equal("llm-flow", value(after.Stt.Target))
+	s.Empty(after.SyncHash)
 }
 
 func (s *RouterConfigsSuite) TestTheSameFileUnderAnotherHashRecordsTheNewHash() {
