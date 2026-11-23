@@ -307,48 +307,65 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		session.ConnectorSelections = []SessionConnectorSelection{}
 	}
 
-	// Only the customer's own row is updated: another customer's of the same id matches the
-	// conflict but not the WHERE, so nothing is written.
-	result, err := r.store.shard.NewInsert().Model(session).
-		On("CONFLICT (id) DO UPDATE").
-		Set("title = EXCLUDED.title").
-		Set("description = EXCLUDED.description").
-		Set("custom = EXCLUDED.custom").
-		Set("conversation_id = EXCLUDED.conversation_id").
-		Set("state = EXCLUDED.state").
-		Set("closed_at = NULL").
-		Set("end_reason = ''").
-		Set("updated_at = EXCLUDED.updated_at").
-		Set("opened_at = EXCLUDED.opened_at").
-		// Superseded by a run opened after this write's, the row stays superseded: the write is
-		// a late one, of a run that ended.
-		Set("superseded_at = CASE WHEN ?TableAlias.superseded_at > EXCLUDED.opened_at THEN ?TableAlias.superseded_at END").
-		// A reopened session's tool settings are kept for the kind of caller that opened it (the
-		// row's caller_kind, which a reopen does not change): an end user's device carrying on
-		// its backend's conversation neither clears the backend's tools nor sets its timeout.
-		Set("tool_timeout_ms = CASE WHEN ?TableAlias.caller_kind = EXCLUDED.caller_kind " +
-			"THEN EXCLUDED.tool_timeout_ms ELSE ?TableAlias.tool_timeout_ms END").
-		Set("caller_tools = CASE WHEN ?TableAlias.caller_kind = EXCLUDED.caller_kind " +
-			"THEN EXCLUDED.caller_tools ELSE ?TableAlias.caller_tools END").
-		// A session reopened from its row is opened without the memory it had, and what it
-		// remembered before is still in the store, so once true it stays true. Not known
-		// stays not known: NULL OR false is NULL.
-		Set("remembers = ?TableAlias.remembers OR EXCLUDED.remembers").
-		Where("?TableAlias.customer_id = EXCLUDED.customer_id").
-		// A write of a run opened before the one the row holds is late, from a router that held
-		// the session earlier, and changes nothing: the close that router queued next would
-		// otherwise close the run opened since. A write with no time is a router's from before
-		// opened_at was kept.
-		Where("EXCLUDED.opened_at IS NULL OR ?TableAlias.opened_at IS NULL OR ?TableAlias.opened_at <= EXCLUDED.opened_at").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
-	}
-	written, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
-	}
-	if written == 0 {
+	// No conflict target is named: every unique index arbitrates the insert, so it neither fails
+	// on one it did not name nor depends on which of them the table has. A row there already is
+	// then updated only if it is the customer's own. Twice at most: a row deleted between the
+	// insert and the update is inserted again.
+	for range 2 {
+		result, err := r.store.shard.NewInsert().Model(session).On("CONFLICT DO NOTHING").Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		written, err := result.RowsAffected()
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		if written == 1 {
+			return nil
+		}
+		result, err = r.store.shard.NewUpdate().With("saved", r.store.shard.NewValues(session)).
+			Model((*AgentSession)(nil)).TableExpr("saved").
+			Set("title = saved.title").
+			Set("description = saved.description").
+			Set("custom = saved.custom").
+			Set("conversation_id = saved.conversation_id").
+			Set("state = saved.state").
+			Set("closed_at = NULL").
+			Set("end_reason = ''").
+			Set("updated_at = saved.updated_at").
+			Set("opened_at = saved.opened_at").
+			// Superseded by a run opened after this write's, the row stays superseded: the write is
+			// a late one, of a run that ended.
+			Set("superseded_at = CASE WHEN ?TableAlias.superseded_at > saved.opened_at THEN ?TableAlias.superseded_at END").
+			// A reopened session's tool settings are kept for the kind of caller that opened it (the
+			// row's caller_kind, which a reopen does not change): an end user's device carrying on
+			// its backend's conversation neither clears the backend's tools nor sets its timeout.
+			Set("tool_timeout_ms = CASE WHEN ?TableAlias.caller_kind = saved.caller_kind " +
+				"THEN saved.tool_timeout_ms ELSE ?TableAlias.tool_timeout_ms END").
+			Set("caller_tools = CASE WHEN ?TableAlias.caller_kind = saved.caller_kind " +
+				"THEN saved.caller_tools ELSE ?TableAlias.caller_tools END").
+			// A session reopened from its row is opened without the memory it had, and what it
+			// remembered before is still in the store, so once true it stays true. Not known
+			// stays not known: NULL OR false is NULL.
+			Set("remembers = ?TableAlias.remembers OR saved.remembers").
+			Where("?TableAlias.customer_id = saved.customer_id").
+			Where("?TableAlias.id = saved.id").
+			// A write of a run opened before the one the row holds is late, from a router that held
+			// the session earlier, and changes nothing: the close that router queued next would
+			// otherwise close the run opened since. A write with no time is a router's from before
+			// opened_at was kept.
+			Where("saved.opened_at IS NULL OR ?TableAlias.opened_at IS NULL OR ?TableAlias.opened_at <= saved.opened_at").
+			Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		written, err = result.RowsAffected()
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		if written == 1 {
+			return nil
+		}
 		// Nothing written: the row is another customer's, or this customer's own of a run
 		// opened since, which a late write leaves as it is.
 		own, err := r.store.shard.NewSelect().Model((*AgentSession)(nil)).
@@ -358,11 +375,11 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		if err != nil {
 			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
 		}
-		if !own {
-			return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
+		if own {
+			return nil
 		}
 	}
-	return nil
+	return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
 }
 
 // Supersede makes the row Upsert just wrote in this shard, of a session carried on there that
