@@ -325,3 +325,31 @@ func (s *CallSuite) TestAMeterNamesTheRowsAttributes() {
 
 	s.Equal(map[string]string{"parent_session": "session-1"}, s.only(meter).Attributes)
 }
+
+// The row of free work costs nothing, and the row of a quoted fee costs the fee resold:
+// neither is what its quantities would cost from the price list (Recorder.QuoteStat), 2,000
+// and nothing.
+func (s *CallSuite) TestARecordedHookIsToldWhatTheStoredRowCosts() {
+	free := s.meter(priced)
+	free.Free = true
+	quoted := s.meter(number)
+	quoted.CostMicros = 1_150_000
+	for name, meter := range map[string]Meter{"priced": s.meter(priced), "free": free, "quoted": quoted} {
+		var costs []int64
+		meter.Recorded = func(_ Stat, costMicros int64) { costs = append(costs, costMicros) }
+
+		_, err := Call(s.ctx, meter, func(context.Context) (used, error) { return used{pricing.InputTokens: 1_000}, nil })
+		s.Require().NoError(err, name)
+
+		row := s.only(meter)
+		s.Equal([]int64{row.CostMicros}, costs, "%s: the line says what the row costs", name)
+		switch name {
+		case "priced":
+			s.EqualValues(2_000, row.CostMicros)
+		case "free":
+			s.Zero(row.CostMicros)
+		case "quoted":
+			s.Positive(row.CostMicros)
+		}
+	}
+}

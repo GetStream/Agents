@@ -2,9 +2,11 @@ package sttrouter
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt/deepgram"
 )
@@ -130,7 +132,8 @@ func (r *Recordings) Transcribe(
 
 	transcription, err := routing.Call(ctx, routing.Meter{
 		Recorder: r.Recorder(), Config: config, Owner: request.Owner(),
-		Code: func(error) string { return "transcribe_failed" },
+		Code:     func(error) string { return "transcribe_failed" },
+		Recorded: func(stat routing.Stat, costMicros int64) { logRecordingTiming(config, stat, costMicros) },
 	}, func(ctx context.Context) (stt.Transcription, error) {
 		return provider.Transcribe(ctx, recording.Source)
 	})
@@ -138,4 +141,17 @@ func (r *Recordings) Transcribe(
 		return stt.Transcription{}, config, err
 	}
 	return transcription, config, nil
+}
+
+// logRecordingTiming writes the "speech transcription timing" line of a whole recording, for
+// the row its transcription recorded. batch tells it from a session's line, its duration is
+// the request's, and with one answer for the whole file it has no first transcript to time.
+func logRecordingTiming(config routing.ProviderConfig, stat routing.Stat, costMicros int64) {
+	logged := append(routing.LoggedCall(stat.CallID, stat.Owner, config), "batch", true,
+		"audio_ms", stat.AudioMs, "duration_ms", stat.LatencyMs, "cost_micros", costMicros,
+		"success", stat.Success, "error_code", stat.ErrorCode)
+	if stat.ErrorMessage != "" {
+		logged = append(logged, "error", store.SafeLogText(stat.ErrorMessage))
+	}
+	slog.Info("speech transcription timing", logged...)
 }
