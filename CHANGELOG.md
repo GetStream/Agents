@@ -846,6 +846,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### Deleting a user's connections also deletes their MCP event subscriptions
 
 The subscriptions of a deleted user's connections kept their sealed secrets and callback tokens. They now go in the same transaction as the connections.
+### A hosted tool call in a group channel names the person who wrote
+
+In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.
+
 ### A connection keeps a rotated token when saving it fails once
 
 When a connector's provider rotates the refresh token on a refresh, and the save of the new tokens then fails briefly, for example on a dropped database connection, the router saves them again up to twice in the next 300 ms. Before, the connection stayed `needs_reauthorization` and the person had to reconnect the account. If every save fails, the router logs an error with the connection's id, and the connection still needs a reconnect (AI-3504).
@@ -859,6 +863,10 @@ An `AgentTool` declared with a `Decodable` arguments type decodes it from the ar
 ### A custom connector never gets the deployment's own OAuth client
 
 Only a built-in connector takes the OAuth client the deployment keeps in its environment (`<client.env>_MCP_CLIENT_ID` and `_SECRET`) or a record of the operator's app: a custom connector's manifest is its customer's, whatever its `client.registration` and `client.env` say. A data import now holds each connector definition to the rules the API applies to a custom connector, and refuses one the API would refuse with a 400, as it refuses a phone number it cannot take (AI-3474).
+
+### An imported row is held to what the API holds it to
+
+`POST /v1/data/import` and change replays run each row's own validation before writing it, so an import is refused with a 400 naming the field where the API would refuse the same row: a campaign's concurrency above 50 or a config's sandbox over its CPU, memory or disk bounds, among the rest. A moved voice arrives with its id, name and description and without its samples or bindings, whose audio and clone stay with the deployment that made them: add a recording and prepare it again. An import that names `voice_samples` or `voice_bindings` is refused. An imported request is never billable here and counts against the importing app's organization: the one it was last seen under here, else the one it is registered under, else none.
 
 ### A customer can no longer list or speak in another customer's cloned voice
 
