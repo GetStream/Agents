@@ -90,7 +90,8 @@ func itemsOf(pages []ActivityPage, organization string) []ActivityDay {
 
 // Defect: a page's rows that do not add up to what the organization's own read says for the
 // day: a row of another day, organization or app summed in, or one lost or read twice between
-// pages; or a page not telling every organization its items name.
+// pages; or a page not telling every organization its items name, or telling one the furthest
+// step of another on the page.
 func (s *OpsActivitySuite) TestTheRequestsOfEachOrganizationOnADayAddUpToItsOwnRead() {
 	day := daysAgo(60, 20)
 	one, two, three := s.app, s.data.createApp(), s.data.createApp()
@@ -134,6 +135,17 @@ func (s *OpsActivitySuite) TestTheRequestsOfEachOrganizationOnADayAddUpToItsOwnR
 		}
 		s.Equal(requests, listed, organization)
 		s.Equal(read, listed, organization)
+	}
+	for organization, step := range map[string]ActivityStep{
+		one.organization.ID: activityStepConversations, two.organization.ID: activityStepNone, three.organization.ID: activityStepDashboardReads,
+	} {
+		for _, page := range pages {
+			for _, progress := range page.Organizations {
+				if progress.OrganizationId == organization {
+					s.Equal(step, progress.FurthestStep, "furthest step of "+organization+" is its own, not another organization's on the page")
+				}
+			}
+		}
 	}
 }
 
