@@ -57,8 +57,7 @@ const (
 	helpReply    = "Reply STOP to unsubscribe."
 )
 
-// optOutSource is opt_outs.source for a texted keyword (20261006120200_opt_outs.sql: «keyword
-// (they texted STOP)»), as internal/channels records it.
+// optOutSource is opt_outs.source for a texted keyword, as internal/channels records it.
 const optOutSource = "keyword"
 
 // keyword answers a carrier keyword before any agent sees the message, on a connector whose
