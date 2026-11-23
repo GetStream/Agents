@@ -208,7 +208,9 @@ export function approverFor(chat: AgentChat<LocalMessage>): AIToolApprover {
       if (allowed && call.name === "add_reminder" && "Notification" in window && Notification.permission === "default") {
         void Notification.requestPermission();
       }
-      (await chat.session()).decide(call.id, { allowed });
+      // Read from the loaded messages, so a call asked before this page opened the session, after
+      // a reload or on another device, is answered too.
+      await chat.decide(call.id, { allowed });
     },
   };
 }

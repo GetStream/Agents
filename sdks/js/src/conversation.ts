@@ -127,6 +127,11 @@ export class Conversation {
   private readonly uiRawByTurn = new Map<string, PendingUI>();
   /** When the model last took each turn in flight up again, which a round of thinking is timed from. */
   private readonly resumedAt = new Map<string, number>();
+  /**
+   * The agent turns with UI that were interrupted. Their UI still shows, but the router never
+   * merges a patch onto it.
+   */
+  private readonly cut = new Set<string>();
 
   constructor(connected: boolean) {
     this.snapshot = Object.freeze({
@@ -307,6 +312,9 @@ export class Conversation {
       case "interrupted": {
         const turnId = text(frame, "turn_id");
         this.settleUI(turnId, now);
+        if (this.snapshot.turns[this.agentTurnIndex(turnId)]?.ui) {
+          this.cut.add(turnId);
+        }
         this.resumedAt.delete(turnId);
         this.amend(turnId, now, (turn) => ended(settled(turn, now)), false);
         return;
@@ -427,6 +435,10 @@ export class Conversation {
     if (content === undefined) {
       return;
     }
+    if (content === null) {
+      this.clearUI(turnId);
+      return;
+    }
     this.writeUI(
       turnId,
       Object.freeze({
@@ -460,13 +472,30 @@ export class Conversation {
     this.turns(next);
   }
 
+  /** The agent turn `turnId` without the UI it showed, such as a preview merged onto the wrong base. */
+  private clearUI(turnId: string): void {
+    const turns = this.snapshot.turns;
+    const index = this.agentTurnIndex(turnId);
+    const turn = turns[index];
+    if (!turn?.ui) {
+      return;
+    }
+    const { ui, ...kept } = turn;
+    const next = turns.slice();
+    next[index] = Object.freeze(kept);
+    this.turns(next);
+  }
+
   /**
-   * A turn's UI as it shows: what was written, or a patch merged onto the UI before it. Of OpenUI,
-   * only the statements `keep` says count. Undefined when there is nothing to show yet, and for a
-   * patch with no UI before it here, such as after a reload: Stream Chat's copy, which the router
-   * merged, is the one that shows.
+   * A turn's UI as it shows: what was written, or a patch merged onto the router's base. The base
+   * is the UI of the latest earlier turn that is complete and was not cut off, whatever its
+   * format, earlier than this one even when its UI comes late. Of OpenUI, only the statements
+   * `keep` says count. Undefined when there is nothing to show yet. Null for a patch whose base
+   * is not OpenUI, or that has none here, such as after a reload: the turn then shows no UI, even
+   * one merged onto an earlier base, and Stream Chat's copy, which the router merged, is the one
+   * that shows.
    */
-  private resolveUIContent(turnId: string, { format, mode, raw }: PendingUI, keep: OpenUIKeep): string | undefined {
+  private resolveUIContent(turnId: string, { format, mode, raw }: PendingUI, keep: OpenUIKeep): string | null | undefined {
     if (format !== "openui") {
       return raw;
     }
@@ -478,13 +507,23 @@ export class Conversation {
       return written;
     }
     const turns = this.snapshot.turns;
-    for (let index = turns.length - 1; index >= 0; index--) {
-      const earlier = turns[index];
-      if (earlier?.speaker === "agent" && earlier.id !== turnId && earlier.ui?.format === "openui" && earlier.ui.content) {
-        return mergeOpenUIStatements(earlier.ui.content, written);
-      }
+    const index = this.agentTurnIndex(turnId);
+    // A turn we never saw begin starts after every one there is.
+    const earlier = index === -1 ? turns : turns.slice(0, index);
+    // The router's base is the card it last completed whatever its format, never one it cut off
+    // or one still streaming; only OpenUI takes a patch.
+    const base = earlier.findLast(
+      (turn) =>
+        turn.speaker === "agent" &&
+        turn.id !== turnId &&
+        !this.cut.has(turn.id) &&
+        turn.ui?.status === "complete" &&
+        turn.ui.content !== "",
+    )?.ui;
+    if (base?.format !== "openui") {
+      return null;
     }
-    return undefined;
+    return mergeOpenUIStatements(base.content, written);
   }
 
   /**

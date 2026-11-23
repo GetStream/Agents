@@ -843,6 +843,14 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
+### JavaScript: a live UI patch is merged onto the card the router merges it onto
+
+`Conversation` merges an OpenUI patch onto the UI of the latest earlier turn that completed and was not interrupted, whatever its format, as the router does and as Kotlin has since #2089. It used to take the latest OpenUI card it held, so with an A2UI card in between, or after an interrupted reply, the live preview showed a card Stream Chat's copy then replaced. A patch whose base is not OpenUI now shows no UI on its turn, even a preview already merged onto an older card, and Stream Chat's copy is the one that shows.
+
+### The assistant and demo sample apps open sessions with their tools again
+
+The sample apps' agents name their tools in a tool group (`swift_assistant`: the assistants' device tools and `reserve_table`; `swift_demo`: `lookup_order` and `issue_refund`), which the router has required of a session's tools since #2088. Sync them again with `go run ./configure`.
+
 ### A hosted tool call in a group channel names the person who wrote
 
 In a channel an agent config answers through `chat_channels`, a call of a tool your backend hosts (a dispatch worker) named no user, so a backend acting for "the user who asked" (`tools.ToolCallContextFrom(ctx).User.ID`) got an empty id and had to refuse. Each call now names the writer of the message its turn answers, by user id and name: Anya's turn names Anya, and Ben's next one Ben, whether the config answers every message or only its mentions. A session opened with a user's token still names that user.
