@@ -1171,8 +1171,17 @@ func (s *ScheduledTasksSuite) TestDeletingASessionDeletesItsTasks() {
 
 	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
 	s.Empty(s.tasksOf(user), "the deleted conversation's tasks went with it")
-	changes, _, err := s.store.Changes(ctx, s.customerID(), 0, 1000)
-	s.Require().NoError(err)
+	// The conversation's last writes may still be open, and Changes stops below the first change
+	// of the lowest of them, so the delete is read once they have ended.
+	var last int64
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx,
+		"SELECT max(seq) FROM data_changes WHERE customer_id = ? AND table_name = 'scheduled_tasks'", s.customerID()).Scan(&last))
+	var changes []store.DataChange
+	s.Require().Eventually(func() bool {
+		read, cursor, err := s.store.Changes(ctx, s.customerID(), 0, 1000)
+		changes = read
+		return err == nil && cursor >= last
+	}, 10*time.Second, 10*time.Millisecond, "every change of the task is read")
 	var recorded int
 	for _, change := range changes {
 		if change.Table == "scheduled_tasks" {
