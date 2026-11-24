@@ -113,7 +113,7 @@ func (s *TelnyxUnpaidSuite) settledByTheWorkerAfter(task store.ScheduledTask, be
 		return s.router.DeliverScheduledTask(ctx, claimed)
 	}
 	logger := slog.New(slog.NewTextHandler(s.logged, nil))
-	worker := scheduling.NewScheduler(s.store, deliver, logger)
+	worker := s.newScheduler(deliver, logger)
 	worker.Start(context.Background())
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
@@ -167,7 +167,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseMoneyCannotBeCheckedIsRetried() 
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(codeSpendCheckUnavailable, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	s.Equal(int32(1+len(s.retries)), attempts, "tried again after each wait")
 }
 
 // A reply the agent finished in a thread of a suspended organization is not sent, and is no
@@ -374,7 +374,7 @@ func (s *TelnyxUnpaidSuite) TestATaskWhoseSessionCannotOpenWhileMoneyCannotBeChe
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(codeSpendCheckUnavailable, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	s.Equal(int32(1+len(s.retries)), attempts, "tried again after each wait")
 }
 
 // reservationRefused is an SMS the router refuses at its reservation, before Telnyx is asked, as
@@ -615,7 +615,7 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedAgainOnItsRerunFailsTheR
 	s.Empty(run.DeliveredTo)
 	s.Require().NotNil(run.Error)
 	s.Equal(codeSpendCheckUnavailable, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	s.Equal(int32(1+len(s.retries)), attempts, "tried again after each wait")
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
 	rerun, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
@@ -778,7 +778,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainOnItsRetr
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(scheduling.ReasonReplyFailed, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts)
+	s.Equal(int32(1+len(s.retries)), attempts)
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
 	state, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
@@ -889,9 +889,9 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnIsWaitedOutToItsEnd() {
 // A conversation turn still running when the reply window ends is delivered: the reply is the
 // conversation's, and comes when it comes.
 func (s *TelnyxUnpaidSuite) TestAConversationTurnStillRunningAtTheWindowIsDelivered() {
-	window := scheduledReplyWindow
-	scheduledReplyWindow = time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	_, done := s.heldConversationTurn(context.Background())
 
 	select {
@@ -1095,7 +1095,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 	defer model.answers()
 
 	s.retryAtOnce()
-	worker := scheduling.NewScheduler(s.store, s.router.DeliverScheduledTask, slog.New(slog.NewTextHandler(s.logged, nil)))
+	worker := s.newScheduler(s.router.DeliverScheduledTask, slog.New(slog.NewTextHandler(s.logged, nil)))
 	worker.Start(context.Background())
 	defer func() {
 		// A delivery that never returns would hold Close: the test fails on its own deadline.
