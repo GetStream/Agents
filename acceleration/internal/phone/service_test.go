@@ -1,6 +1,7 @@
 package phone
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -79,6 +80,23 @@ func (s *ServiceSuite) TestEveryVendorOfTheServiceHasItsCallSeriesAtZeroFromTheS
 	for _, vendor := range vendors {
 		s.True(has[vendor], vendor)
 	}
+}
+
+func (s *ServiceSuite) TestAPlacingTheDatabaseFailedIsAPlacingFailure() {
+	err := notPlaced(context.Background(), errors.New("lock timeout"))
+
+	s.ErrorIs(err, ErrNotPlaced)
+	s.ErrorIs(err, ErrPlacingFailed)
+}
+
+func (s *ServiceSuite) TestAPlacingCutOffByItsContextIsNoPlacingFailure() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := notPlaced(ctx, ctx.Err())
+
+	s.ErrorIs(err, ErrNotPlaced)
+	s.NotErrorIs(err, ErrPlacingFailed, "a shutdown rings the contact again at once")
 }
 
 // A call that fails before it is sent, for a reason a second try would meet again, is not

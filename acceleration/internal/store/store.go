@@ -197,7 +197,7 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults))
+	sqldb := sql.OpenDB(primaryOnly{pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults)})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
