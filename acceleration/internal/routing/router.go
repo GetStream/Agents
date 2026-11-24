@@ -247,6 +247,29 @@ func (a Admission) Labelled(tags Tags) Tags {
 	return merged
 }
 
+// Allowed narrows models to the ones the admission lets the customer's work go to: those on its
+// Models, and of them those whose handling of data its DataPolicy permits. None left is the
+// refusal a routed request gets.
+func (a Admission) Allowed(models []ProviderConfig) ([]ProviderConfig, error) {
+	candidates := make([]Candidate, len(models))
+	for i, model := range models {
+		candidates[i].Config = model
+	}
+	candidates, err := allowed(candidates, a.Models)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err = permitted(candidates, a.DataPolicy)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]ProviderConfig, len(candidates))
+	for i, candidate := range candidates {
+		kept[i] = candidate.Config
+	}
+	return kept, nil
+}
+
 // Options configures a Router. Store, Live and Voices are optional: without them the
 // router still routes, it just stops recording and stops resolving custom voices.
 type Options[P Provider] struct {
