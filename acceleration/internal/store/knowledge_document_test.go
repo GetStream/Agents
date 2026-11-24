@@ -197,3 +197,50 @@ func (s *StoreSuite) TestARemovalDeletesOnlyTheDocumentItStillHolds() {
 	s.Require().NoError(err)
 	s.True(deleted)
 }
+
+func (s *StoreSuite) TestARemovalTakenAfterAPostHoldsTheDocumentUnderAnotherKey() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	first, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.knowledgeDocument("acme-app", "docs", "faq.md")
+	_, _, err = s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+
+	deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, first)
+	s.Require().NoError(err)
+	s.False(deleted)
+}
+
+func (s *StoreSuite) TestARemovalSaysWhenItTookTheDocument() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	before, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+
+	_, _, err = s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+
+	taken, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.True(taken.UpdatedAt.After(before.UpdatedAt))
+}
+
+func (s *StoreSuite) TestOnlyTheDocumentWhoseRemovalFailedSaysSo() {
+	mine, other := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "hours.md")
+	before, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.KnowledgeDocuments.FailRemoval(s.ctx, "other-app", mine.ID))
+	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.Equal(KnowledgeDocumentIndexed, untouched.State)
+	s.Require().NoError(s.store.KnowledgeDocuments.FailRemoval(s.ctx, "acme-app", mine.ID))
+
+	failed, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.Equal(KnowledgeDocumentFailed, failed.State)
+	s.Equal("Its removal did not finish. Delete it again.", failed.Error)
+	s.True(failed.UpdatedAt.After(before.UpdatedAt))
+	untouched, err = s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
+	s.Require().NoError(err)
+	s.Equal(KnowledgeDocumentIndexed, untouched.State)
+}

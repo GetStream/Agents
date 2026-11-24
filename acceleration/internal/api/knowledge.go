@@ -450,22 +450,23 @@ const removeAttempts = 5
 
 // removeKnowledgeDocument deletes a document's passages and then its row. The passages go
 // first: a document we have forgotten but are still answering out of is the failure worth
-// avoiding, and once the row is gone the same passages may be a new document's of its source.
+// avoiding.
 //
-// An upload, a post or a read can write passages while they are deleted. Each changes the key
-// the removal holds the row under, so the row is deleted only if none did, and otherwise the
-// passages are deleted again.
+// A read of its file can write passages while they are deleted, and the file can be uploaded
+// again. Both change the key the removal holds the row under, so the row is deleted only if it
+// still holds it, and otherwise the passages are deleted again.
 func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) (err error) {
 	owned := s.knowledgeFor(ctx, document.CustomerID, "")
 	defer func() {
 		if err == nil {
 			return
 		}
-		// A document written again meanwhile may have lost passages to the removal, so it is
-		// marked too, for a caller that hung up as well.
+		// A document read again meanwhile may have lost passages to the removal, so it is
+		// marked too, for a caller that hung up as well. A file still waiting to be read is
+		// left to its read, which writes every passage.
 		held, cancel := detachedWrite(ctx)
 		defer cancel()
-		if _, _, markErr := s.store.KnowledgeDocuments.Take(held, document.CustomerID, document.ID); markErr != nil && !errors.Is(markErr, store.ErrNoKnowledgeDocument) {
+		if markErr := s.store.KnowledgeDocuments.FailRemoval(held, document.CustomerID, document.ID); markErr != nil {
 			s.logger.Warn("could not mark a knowledge document whose removal failed", "id", document.ID, "error", markErr)
 		}
 	}()
@@ -611,14 +612,17 @@ func (s *Server) registerKnowledge(api huma.API) {
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/knowledge/documents/{id}",
 		Summary:     "Take a document out of a knowledge base",
-		Description: "The passages it was cut into are removed too, so the agent stops answering out of it.\n" +
+		Description: "The passages it was cut into are removed too, so the agent stops answering out of it. " +
+			"A document that keeps being written while it is removed is refused with a 409 and listed as " +
+			"failed, or as pending while a newer upload of it waits to be read, so it can be deleted again.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		DefaultStatus: http.StatusNoContent,
 		Responses: map[string]*huma.Response{
 			"204": {Description: "The document and its passages are gone"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+			http.StatusConflict},
 	}, s.deleteKnowledgeDocument)
 	huma.Register(api, huma.Operation{
 		OperationID: "listKnowledgeDocumentPassages",
@@ -681,7 +685,7 @@ type IndexedKnowledgeDocument struct {
 	Bytes       int64                  `json:"bytes" doc:"The size of the file uploaded, or of the text posted. 0 for a document written before sizes were kept."`
 	ContentType string                 `json:"content_type" doc:"The type the file was uploaded as, or text/markdown for text posted. Empty for a document written before types were kept." example:"application/pdf"`
 	CreatedAt   time.Time              `json:"created_at"`
-	Error       *string                `json:"error,omitempty" doc:"Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good."`
+	Error       *string                `json:"error,omitempty" doc:"Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good."`
 	Id          string                 `json:"id"`
 	Namespace   string                 `json:"namespace"`
 	Pages       int                    `json:"pages" doc:"How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet."`
@@ -698,7 +702,7 @@ func (*IndexedKnowledgeDocument) TransformSchema(_ huma.Registry, schema *huma.S
 	return schema
 }
 
-// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 type KnowledgeDocumentState string
 
 // Defines values for KnowledgeDocumentState.
@@ -719,7 +723,7 @@ func (e KnowledgeDocumentState) Valid() bool {
 }
 
 func (KnowledgeDocumentState) Schema(registry huma.Registry) *huma.Schema {
-	return namedEnum(registry, "KnowledgeDocumentState", "Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.", "pending", "indexed", "failed")
+	return namedEnum(registry, "KnowledgeDocumentState", "Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.", "pending", "indexed", "failed")
 }
 
 // IngestKnowledgeRequest is the IngestKnowledgeRequest schema.

@@ -270,8 +270,8 @@ const removalKey = "removing:"
 const removalUnfinished = "Its removal did not finish. Delete it again."
 
 // Take begins the removal of a document, and returns the key the removal holds it under and
-// how many passages to remove. Its file is no longer read: the row lets go of it, as it does
-// for a newer upload. The row says failed until it is removed, so a removal that stops part
+// how many passages to remove. The row lets go of its file, as it does for a newer upload, so
+// a read of it finds it was overtaken. The row says failed until it is removed, so a removal that stops part
 // way leaves a document that is listed, not shown as found, and can be removed again.
 func (r *KnowledgeDocuments) Take(ctx context.Context, customerID, id string) (key string, passages int, err error) {
 	if customerID == "" || id == "" {
@@ -297,6 +297,23 @@ func (r *KnowledgeDocuments) Take(ctx context.Context, customerID, id string) (k
 	return taken[0].ObjectKey, taken[0].Passages, nil
 }
 
+// FailRemoval says a document's removal did not finish, unless a file uploaded since waits to
+// be read.
+func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id string) error {
+	_, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
+		Set("state = ?", KnowledgeDocumentFailed).
+		Set("error = ?", removalUnfinished).
+		Set("updated_at = ?", time.Now().UTC()).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Where("object_key = ''").
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: fail knowledge document removal: %w", err))
+	}
+	return nil
+}
+
 // Interrupt makes the removal a document is under take its passages away again, for a read
 // that wrote some after the removal began. It is false when no removal holds the document.
 func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id string) (bool, error) {
@@ -313,8 +330,8 @@ func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id strin
 }
 
 // Delete forgets a document whose removal still holds it under key, once its passages are
-// gone, since they are not in this database. It is false when the document was uploaded,
-// posted or written for since the removal took it, and then it may have passages again.
+// gone, since they are not in this database. It is false when the removal no longer holds it,
+// and then it may have passages again.
 func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id, key string) (bool, error) {
 	if customerID == "" || id == "" || key == "" {
 		return false, stack.Wrap(errors.New("store: a customer, a knowledge document id and its removal's key are required"))

@@ -230,8 +230,7 @@ func (s *KnowledgeFilesSuite) TestAFileUploadedAgainWhileItsDocumentIsRemovedLea
 	s.Empty(s.listed())
 }
 
-// The document made once the row is gone is a new one, so nothing the removal still does may
-// reach its passages.
+// The document made once the row is gone is a new one, and keeps its passages.
 func (s *KnowledgeFilesSuite) TestADocumentMadeOnceItsSourceIsRemovedKeepsItsPassages() {
 	_, sent, _ := s.upload("new.md", []byte(sections(3)), "")
 	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
@@ -298,6 +297,26 @@ func (s *KnowledgeFilesSuite) TestARemovalThatFailsIsListedAndCanBeAskedAgain() 
 	s.Zero(s.passagesOf("fail.md"))
 	s.Empty(s.listed())
 	s.Equal(1, s.removals(sent.Id))
+}
+
+func (s *KnowledgeFilesSuite) TestARemovalThatFailsKeepsAFileUploadedMeanwhile() {
+	_, sent, _ := s.upload("kept.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	writing, write := s.holdWrite()
+	s.knowledge.onceBeforeDelete(func() error {
+		status, _, _ := s.upload("kept.md", []byte(sections(8)), "")
+		s.Equal(http.StatusAccepted, status)
+		s.reached(writing, "the upload was never read")
+		return errors.New("down")
+	})
+
+	s.Require().Equal(http.StatusInternalServerError, s.remove(sent.Id))
+	write()
+
+	read := s.settled(sent.Id)
+	s.Equal(KnowledgeDocumentStateIndexed, read.State)
+	s.Equal(8, read.Passages)
+	s.Equal(8, s.passagesOf("kept.md"))
 }
 
 func (s *KnowledgeFilesSuite) TestARemovalWhoseCallerHungUpCanBeAskedAgain() {
