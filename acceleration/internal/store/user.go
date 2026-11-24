@@ -155,6 +155,10 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 			err = redis.DoCache(write, redis.B().Get().Key(name).Cache(), userTTL).Error()
 		}
 		cancel()
+		// The key was deleted in between, so the user is not held: the next request records them.
+		if rueidis.IsRedisNil(err) {
+			return nil
+		}
 		if err != nil {
 			slog.Default().Error("could not cache a user in redis",
 				"customer", customerID, "user", userID, "error", err)

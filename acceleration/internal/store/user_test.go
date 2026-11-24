@@ -3,11 +3,14 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/redis/rueidis"
 )
 
 // settleFor is how long an invalidation has to reach the other replica. Redis pushes it as
@@ -318,6 +321,62 @@ func (s *StoreSuite) TestForgettingAUserOnOneReplicaForgetsThemOnTheReplicaThatW
 		_, found := s.userRow(app, "guest-1")
 		return found
 	}, settleFor, 10*time.Millisecond, "the replica that wrote the user is still answering from a stale cache")
+}
+
+// onceSet runs then, once, when the pipeline that writes a user's key has been answered.
+type onceSet struct {
+	roundTrips
+	then sync.Once
+	run  func()
+}
+
+func (o *onceSet) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	// rueidis reuses a command once it is sent.
+	set := multi[0].Commands()[0] == "SET"
+	replies := client.DoMulti(ctx, multi...)
+	if set {
+		o.then.Do(o.run)
+	}
+	return replies
+}
+
+func (s *StoreSuite) TestAUserForgottenWhileAReplicaWritesThemIsRecordedAgainByIt() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	app := s.freshApp()
+	hook := &onceSet{run: func() {
+		s.eraseUser(app, "guest-1")
+		s.store.Users.Forget(s.ctx, app, "guest-1")
+	}}
+	writer, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis(), redisHook: hook})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(writer.Close()) })
+	s.Require().NoError(writer.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
+	_, found := s.userRow(app, "guest-1")
+	s.Require().False(found, "the user is forgotten once their key is written")
+
+	s.Require().NoError(writer.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
+
+	_, found = s.userRow(app, "guest-1")
+	s.True(found, "the replica that wrote the user is still answering from a stale cache")
+}
+
+// Whether a read right after the write is answered by this replica's own old copy of the key is
+// a race, so it is run many times over.
+func (s *StoreSuite) TestAUserAReplicaHasJustWrittenIsForgottenByIt() {
+	other := s.replicaUsers()
+	for range 100 {
+		app := s.freshApp()
+		s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
+		s.eraseUser(app, "guest-1")
+		other.Forget(s.ctx, app, "guest-1")
+		s.Require().Eventually(func() bool {
+			s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
+			_, found := s.userRow(app, "guest-1")
+			return found
+		}, settleFor, time.Millisecond)
+	}
 }
 
 func (s *StoreSuite) TestAnAnonymousCallerNamingNoKindIsNotRecorded() {

@@ -2296,6 +2296,30 @@ func (s *DataMoveSuite) TestAnImportOfAVoiceDoesNotWaitForABindingBeingAddedToIt
 	s.Less(time.Since(began), time.Second)
 }
 
+// Imports of one voice at once wait for each other in turn.
+func (s *DataMoveSuite) TestImportsOfOneVoiceAtOnceAllLand() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	holding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", id)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 4)
+	for range 4 {
+		go func() { imported <- s.destination.ImportRow(s.ctx, "moved", "voices", row) }()
+	}
+	s.Require().Eventually(func() bool { return s.waitingHere() == 4 }, 2*time.Second, 10*time.Millisecond)
+	s.Require().NoError(holding.Commit())
+
+	for range 4 {
+		s.NoError(<-imported)
+	}
+}
+
 // An import naming a voice another customer holds here is refused without waiting on that
 // customer's row, which a binding being added to it holds.
 func (s *DataMoveSuite) TestAnImportOfAnotherCustomersVoiceIsRefusedWithoutWaitingForABindingBeingAddedToIt() {
@@ -2444,7 +2468,7 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByTheReplicaThat
 	destination, other := s.cachedDestination(), s.cachedDestination()
 	app := "moved-" + newID()
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	cursor := s.moveTo(destination, "acme", app)
 	_, err := destination.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = ? AND id = 'alice'", app)
 	s.Require().NoError(err)
