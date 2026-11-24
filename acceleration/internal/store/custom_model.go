@@ -97,9 +97,7 @@ func (r *CustomModels) Insert(ctx context.Context, model *CustomModel) error {
 	}
 
 	model.ID = newID()
-	if model.InputModalities == nil {
-		model.InputModalities = []string{}
-	}
+	model.InputModalities = orEmpty(model.InputModalities)
 	now := time.Now().UTC()
 	model.CreatedAt = now
 	model.UpdatedAt = now
@@ -127,9 +125,7 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 		return stack.Wrap(err)
 	}
 
-	if model.InputModalities == nil {
-		model.InputModalities = []string{}
-	}
+	model.InputModalities = orEmpty(model.InputModalities)
 	model.UpdatedAt = time.Now().UTC()
 	// The name the row had is read in the same statement, locked, so the one forgotten is the
 	// one a concurrent rename did not already replace.

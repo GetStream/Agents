@@ -79,9 +79,7 @@ func (r *Skills) Insert(ctx context.Context, skill *Skill) error {
 	skill.CreatedAt = now
 	skill.UpdatedAt = now
 	skill.DeletedAt = nil
-	if skill.Files == nil {
-		skill.Files = map[string]string{}
-	}
+	skill.Files = orEmptyMap(skill.Files)
 
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewInsert().Model(skill).Exec(ctx)
@@ -107,9 +105,7 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 	}
 
 	skill.UpdatedAt = time.Now().UTC()
-	if skill.Files == nil {
-		skill.Files = map[string]string{}
-	}
+	skill.Files = orEmptyMap(skill.Files)
 	// The config the row was in is read in the same statement, locked, so the one forgotten is
 	// the one a concurrent move did not already replace.
 	was := r.store.global.NewSelect().Model((*Skill)(nil)).Column("config_id").

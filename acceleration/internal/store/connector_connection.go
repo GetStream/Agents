@@ -206,18 +206,10 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 		connection.CreatedAt = now
 		connection.UpdatedAt = now
 		connection.DeletedAt = nil
-		if connection.Inputs == nil {
-			connection.Inputs = map[string]string{}
-		}
-		if connection.Metadata == nil {
-			connection.Metadata = map[string]string{}
-		}
-		if connection.GrantedScopes == nil {
-			connection.GrantedScopes = []string{}
-		}
-		if connection.CachedTools == nil {
-			connection.CachedTools = []ConnectorTool{}
-		}
+		connection.Inputs = orEmptyMap(connection.Inputs)
+		connection.Metadata = orEmptyMap(connection.Metadata)
+		connection.GrantedScopes = orEmpty(connection.GrantedScopes)
+		connection.CachedTools = orEmpty(connection.CachedTools)
 		_, err = tx.NewInsert().Model(connection).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: create connector connection: %w", err)
@@ -254,9 +246,7 @@ func (r *ConnectorConnections) SetTools(ctx context.Context, customerID, id stri
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
-	if tools == nil {
-		tools = []ConnectorTool{}
-	}
+	tools = orEmpty(tools)
 	raw, err := json.Marshal(tools)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: encode connector connection tools: %w", err))
