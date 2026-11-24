@@ -102,6 +102,13 @@ func (s *LoggedMessageSuite) TestAnUnreachedErrorAddsWhatFailed() {
 	s.Equal(`http: crm__lookup: the API could not be reached: Get "https://crm.example": EOF`, core.LoggedMessage(err, nil))
 }
 
+// R2.1 of AI-3674: an UnreachedError with no cause is its Message alone on the line.
+func (s *LoggedMessageSuite) TestAnUnreachedErrorWithNoCauseIsItsMessage() {
+	err := stack.Wrap(&core.UnreachedError{Message: "http: crm__lookup: the API could not be reached"})
+
+	s.Equal("http: crm__lookup: the API could not be reached", core.LoggedMessage(err, nil))
+}
+
 func (s *LoggedMessageSuite) TestNoErrorIsNoMessage() {
 	s.Empty(core.LoggedMessage(nil, nil))
 }

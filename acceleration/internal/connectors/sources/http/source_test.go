@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -147,17 +148,238 @@ func (s *SourceSuite) TestEachMethodSendsItsParametersWhereTheRuleSays() {
 	}
 }
 
-// Only what the tool declares is sent: an override the model adds goes nowhere (AC-6 of AI-3669,
-// whose refusal before sending is AI-3675's).
-func (s *SourceSuite) TestAnArgumentTheToolDoesNotDeclareIsNotSent() {
-	_, err := s.call(s.binding(echoTool()), contracttest.ToolEcho,
-		`{"text":"hi","_method":"DELETE","X-HTTP-Method-Override":"DELETE"}`)
+// AC-6 of AI-3669: an argument the tool does not declare is refused before anything is sent,
+// whatever it is named and whatever the method, with one sentence; the declared ones alone are
+// sent.
+func (s *SourceSuite) TestAnArgumentTheToolDoesNotDeclareIsRefusedBeforeSending() {
+	post := core.HTTPTool{Name: contracttest.ToolEcho, Method: http.MethodPost, Path: "/echo",
+		Parameters: map[string]core.HTTPParameter{"text": {Type: "string", Required: true}}}
+	for _, tool := range []core.HTTPTool{echoTool(), post} {
+		for _, arguments := range []string{
+			`{"text":"hi","_method":"DELETE"}`,
+			`{"text":"hi","X-HTTP-Method-Override":"DELETE"}`,
+			`{"text":"hi","x-http-method-override":"DELETE"}`,
+			`{"text":"hi","X-Method-Override":"DELETE","X-HTTP-Method":"DELETE"}`,
+			`{"text":"hi","Text":"hi"}`,
+			`{"text":"hi","extra":null}`,
+			`{"text":"hi","nested":{"_method":"DELETE"}}`,
+		} {
+			s.provider.reset()
+
+			_, err := s.call(s.binding(tool), contracttest.ToolEcho, arguments)
+
+			s.EqualError(err, "http: crm__echo: an argument is not one of the tool's parameters, so nothing was sent",
+				tool.Method+" "+arguments)
+			s.Empty(s.provider.requests(), tool.Method+" "+arguments)
+		}
+	}
+
+	_, err := s.call(s.binding(echoTool()), contracttest.ToolEcho, `{"text":"hi"}`)
 
 	s.Require().NoError(err)
 	sent := s.only()
 	s.Equal(http.MethodGet, sent.method)
 	s.Equal(url.Values{"text": {"hi"}}, sent.query)
-	s.Empty(sent.header.Get("X-HTTP-Method-Override"))
+}
+
+// S1.3 of AI-3674: a segment of the path as built that holds a {name} and is empty, . or .. names
+// another resource, so it is refused before anything is sent: the empty id that names the
+// collection, and the .. that {a}{b} makes of . and .. A value with a / stays one segment, as AC-6
+// of AI-3669 says ../admin does, and a value escaped already keeps its %, so neither is a dot
+// segment.
+func (s *SourceSuite) TestAPathValueThatNamesAnotherResourceIsRefusedBeforeSending() {
+	one := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{id}",
+		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}}}
+	inner := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{id}/notes",
+		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}}}
+	pair := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{a}{b}",
+		Parameters: map[string]core.HTTPParameter{"a": {Type: "string", Required: true}, "b": {Type: "string", Required: true}}}
+	number := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{id}",
+		Parameters: map[string]core.HTTPParameter{"id": {Type: "integer", Required: true}}}
+
+	for _, test := range []struct {
+		tool      core.HTTPTool
+		arguments string
+		// path is what the provider receives, "" when the call is refused.
+		path string
+	}{
+		{one, `{"id":""}`, ""},
+		{one, `{"id":"."}`, ""},
+		{one, `{"id":".."}`, ""},
+		{inner, `{"id":""}`, ""},
+		{inner, `{"id":".."}`, ""},
+		{pair, `{"a":".","b":"."}`, ""},
+		{pair, `{"a":"","b":""}`, ""},
+		{pair, `{"a":".","b":""}`, ""},
+		{pair, `{"a":"","b":".."}`, ""},
+		{one, `{"id":"../admin"}`, "/api/items/..%2Fadmin"},
+		{one, `{"id":"..%2F"}`, "/api/items/..%252F"},
+		{one, `{"id":"%2e%2e"}`, "/api/items/%252e%252e"},
+		{one, `{"id":"..."}`, "/api/items/..."},
+		{one, `{"id":" "}`, "/api/items/%20"},
+		{inner, `{"id":"7"}`, "/api/items/7/notes"},
+		{pair, `{"a":".","b":"x"}`, "/api/items/.x"},
+		{pair, `{"a":"","b":"."}`, ""},
+		{number, `{"id":0}`, "/api/items/0"},
+	} {
+		s.provider.reset()
+
+		_, err := s.call(s.binding(test.tool), "remove", test.arguments)
+
+		if test.path == "" {
+			s.EqualError(err, "http: crm__remove: a path parameter is empty, . or .., which names another resource "+
+				"than the tool's, so nothing was sent", test.tool.Path+" "+test.arguments)
+			s.Empty(s.provider.requests(), test.tool.Path+" "+test.arguments)
+			continue
+		}
+		s.Require().NoError(err, test.tool.Path+" "+test.arguments)
+		s.Equal(test.path, s.only().path, test.tool.Path+" "+test.arguments)
+	}
+}
+
+// AI-3673 refuses a manifest whose tool names a method override, or writes while saying it
+// reads, when it is stored; Open refuses one again, so a stored manifest that skipped validation
+// offers no tool and sends nothing.
+func (s *SourceSuite) TestOpenRefusesASourceThatBreaksARuleOfValidation() {
+	for name, change := range map[string]func(*core.SourceRule){
+		"a parameter _method": func(r *core.SourceRule) {
+			r.HTTPTools[0].Parameters["_method"] = core.HTTPParameter{Type: "string"}
+		},
+		"a parameter X-HTTP-Method-Override": func(r *core.SourceRule) {
+			r.HTTPTools[0].Parameters["X-HTTP-Method-Override"] = core.HTTPParameter{Type: "string"}
+		},
+		"a header x-method-override": func(r *core.SourceRule) { r.Headers["x-method-override"] = "DELETE" },
+		"a header X-HTTP-Method":     func(r *core.SourceRule) { r.Headers["X-HTTP-Method"] = "DELETE" },
+		"a read-only POST":           func(r *core.SourceRule) { r.HTTPTools[0].Method = http.MethodPost },
+		"a read-only DELETE":         func(r *core.SourceRule) { r.HTTPTools[0].Method = http.MethodDelete },
+	} {
+		tool := echoTool()
+		tool.ReadOnly = true
+		binding := s.binding(tool)
+		grants := s.grants(binding, contracttest.ToolEcho)
+		change(&binding.Manifest.Sources[0])
+
+		set, err := s.source.Open(s.ctx, binding, grants)
+
+		s.ErrorContains(err, `http: connector "custom_crm": sources[http]`, name)
+		s.Nil(set, name)
+	}
+	s.Empty(s.provider.requests())
+	tool := echoTool()
+	tool.ReadOnly = true
+	_, err := s.call(s.binding(tool), contracttest.ToolEcho, `{"text":"hi"}`)
+	s.Require().NoError(err, "the same source unchanged opens")
+}
+
+// R1.6 of AI-3674: a write's redirect is its answer, so a 307 or a 308 never sends its body
+// again, nor a DELETE to another path; a GET or a HEAD follows one within the origin.
+func (s *SourceSuite) TestOnlyAReadFollowsARedirect() {
+	for _, test := range []struct {
+		method, path string
+		// err is the tool error the model reads, "" when the redirect is followed.
+		err string
+	}{
+		{http.MethodPost, "/moved-307", "The API answered 307 Temporary Redirect"},
+		{http.MethodPost, "/moved-308", "The API answered 308 Permanent Redirect"},
+		{http.MethodPut, "/moved-307", "The API answered 307 Temporary Redirect"},
+		{http.MethodPatch, "/moved-308", "The API answered 308 Permanent Redirect"},
+		{http.MethodDelete, "/moved-307", "The API answered 307 Temporary Redirect"},
+		{http.MethodPost, "/moved-303", "The API answered 303 See Other"},
+		{http.MethodGet, "/moved-307", ""},
+		{http.MethodGet, "/moved-301", ""},
+		{http.MethodHead, "/moved-308", ""},
+	} {
+		s.provider.reset()
+		tool := core.HTTPTool{Name: "act", Method: test.method, Path: test.path,
+			Parameters: map[string]core.HTTPParameter{"q": {Type: "string"}}}
+
+		_, err := s.call(s.binding(tool), "act", `{"q":"x"}`)
+
+		received := s.provider.requests()
+		if test.err == "" {
+			s.Require().NoError(err, test.method+" "+test.path)
+			s.Require().Len(received, 2, test.method+" "+test.path)
+			s.Equal("/api/target", received[1].path, test.method+" "+test.path)
+			s.Equal(test.method, received[1].method, test.method+" "+test.path)
+			continue
+		}
+		var reported *core.ToolError
+		s.Require().ErrorAs(err, &reported, test.method+" "+test.path)
+		s.Equal(test.err, reported.Message, test.method+" "+test.path)
+		s.Len(received, 1, test.method+" "+test.path+": the target got nothing")
+	}
+}
+
+// A redirect to another origin is never followed, so the credential never reaches it: the
+// egress client's policy, which the toolset's client keeps for a GET.
+func (s *SourceSuite) TestARedirectToAnotherOriginNeverCarriesTheCredential() {
+	var reached []string
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = append(reached, r.Header.Get("Authorization"))
+	}))
+	defer other.Close()
+	first := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/steal", http.StatusTemporaryRedirect)
+	}))
+	defer first.Close()
+	transports, err := core.NewTransports(core.TransportsConfig{Resolver: tokenResolver{}, Timeout: requestTimeout,
+		NewClient: loopback(first.Client())})
+	s.Require().NoError(err)
+	binding := s.binding(echoTool())
+	binding.Manifest.Endpoints[Kind] = first.URL + "/api"
+	binding.HTTP = transports.Client(core.ConnectionRef{CustomerID: "app", ConnectionID: "crm-1"}, bearer.New())
+
+	_, err = s.call(binding, contracttest.ToolEcho, `{"text":"hi"}`)
+
+	s.Contains(core.LoggedMessage(err, nil), "egress: redirect to another host refused")
+	s.Empty(reached, "the other origin got no request at all")
+}
+
+// A client with no redirect policy of its own stops a read's redirects where net/http does.
+func (s *SourceSuite) TestAClientWithNoRedirectPolicyStopsAfterTenRedirects() {
+	binding := s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/loop"})
+	binding.HTTP.CheckRedirect = nil
+
+	_, err := s.call(binding, "get", `{}`)
+
+	s.Contains(core.LoggedMessage(err, nil), "stopped after 10 redirects")
+	s.Len(s.provider.requests(), 10, "the first request and the nine redirects before the tenth, which is not followed")
+}
+
+// S1.2 of AI-3674: an API that echoes the request's credential in its error does not put it in
+// the conversation: the tool error is redacted with the call's Exchange, as the log line is,
+// before it is cut, so a credential the cut falls in leaves no start of itself either.
+func (s *SourceSuite) TestAToolErrorEchoingTheCredentialIsRedacted() {
+	for path, want := range map[string]string{
+		"/echo-credential": `The API answered 403 Forbidden: {"error":"key Bearer [redacted] may not read this"}`,
+		"/echo-at-the-cut": "",
+	} {
+		tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: path}
+		set, err := s.source.Open(s.ctx, s.binding(tool), s.grants(s.binding(tool), "get"))
+		s.Require().NoError(err)
+		ctx, exchange := core.WithExchange(s.ctx)
+
+		_, err = set.Call(ctx, llm.ToolCall{Name: "crm__get", Arguments: `{}`})
+
+		var reported *core.ToolError
+		s.Require().ErrorAs(err, &reported, path)
+		s.NotContains(reported.Message, "tok", path)
+		s.NotContains(core.LoggedMessage(err, exchange.Redact), "tok", path)
+		if want != "" {
+			s.Equal(want, reported.Message, path)
+			continue
+		}
+		s.True(strings.HasSuffix(reported.Message, "Bearer [re"+core.TruncatedMarker), path)
+	}
+}
+
+// A call without an Exchange of its caller's is redacted all the same, with one of its own.
+func (s *SourceSuite) TestAToolErrorIsRedactedWithNoExchangeOfTheCallers() {
+	_, err := s.call(s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential"}), "get", `{}`)
+
+	var reported *core.ToolError
+	s.Require().ErrorAs(err, &reported)
+	s.Equal(`The API answered 403 Forbidden: {"error":"key Bearer [redacted] may not read this"}`, reported.Message)
 }
 
 func (s *SourceSuite) TestNoArgumentsAtAllAreAnEmptyObject() {
@@ -596,6 +818,23 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/bad-byte-at-the-cap":
 		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20-1))
 		_, _ = w.Write([]byte{0xff})
+	case "/moved-301", "/moved-303", "/moved-307", "/moved-308":
+		code, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/moved-"))
+		http.Redirect(w, r, "/api/target", code)
+	case "/target":
+		_, _ = io.WriteString(w, "moved here")
+	case "/loop":
+		http.Redirect(w, r, "/api/loop", http.StatusTemporaryRedirect)
+	case "/echo-credential":
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"key `+r.Header.Get("Authorization")+` may not read this"}`)
+	case "/echo-at-the-cut":
+		// The token starts 3 bytes before where core.CutResult cuts the tool error, "The API
+		// answered 403 Forbidden: " and this body: a cut made before redacting would keep "tok".
+		w.WriteHeader(http.StatusForbidden)
+		kept := core.MaxResultBytes - len(core.TruncatedMarker)
+		_, _ = io.WriteString(w, strings.Repeat("x", kept-3-len("The API answered 403 Forbidden: Bearer "))+
+			r.Header.Get("Authorization")+strings.Repeat("y", 2*len(core.TruncatedMarker)))
 	case "/no-content":
 		w.WriteHeader(http.StatusNoContent)
 	case "/missing":
