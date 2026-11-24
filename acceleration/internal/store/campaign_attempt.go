@@ -83,7 +83,9 @@ func (r *CampaignAttempts) Insert(ctx context.Context, attempt *CampaignAttempt)
 
 // End records how a dial ended: its result, and callOutcome, the phone outcome of the call
 // it placed, empty for none. A classifyAfter marks an answered call whose outcome is to be read
-// from its transcript once it is written. A dial deleted with its campaign is nothing to end.
+// from its transcript once it is written. A dial deleted with its campaign is nothing to end,
+// and one already ended is left as it is: a router whose call outlived its lease ends its dial
+// after the router that took the contact over ended and settled it.
 func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, result, callOutcome, callID, vendorCallID string, endedAt time.Time, classifyAfter *time.Time) error {
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a dial id are required"))
@@ -101,6 +103,7 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 		Set("classify_state = ?", classify).
 		Set("classify_after = ?", classifyAfter).
 		Where("id = ?", id).
+		Where("ended_at IS NULL").
 		// A dial has no customer of its own: it is its campaign's.
 		Where("campaign_id IN (SELECT id FROM campaigns WHERE customer_id = ?)", customerID).
 		Exec(ctx)
@@ -108,6 +111,19 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 		return stack.Wrap(fmt.Errorf("store: end dial: %w", err))
 	}
 	return nil
+}
+
+// CountResult counts a contact's dials of one attempt that ended with result.
+func (r *CampaignAttempts) CountResult(ctx context.Context, contactID string, attempt int, result string) (int, error) {
+	count, err := r.store.global.NewSelect().Model((*CampaignAttempt)(nil)).
+		Where("contact_id = ?", contactID).
+		Where("attempt = ?", attempt).
+		Where("result = ?", result).
+		Count(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: count dials: %w", err))
+	}
+	return count, nil
 }
 
 // Latest returns a contact's most recent dial, and false when it was never dialed.

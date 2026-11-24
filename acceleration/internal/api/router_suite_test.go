@@ -211,6 +211,8 @@ type RouterSuite struct {
 	configs *store.Store
 	live    *live.Client
 	sealer  *auth.Sealer
+	// storeOptions are what the suite's store was opened with, for a node on the same databases.
+	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
@@ -596,6 +598,7 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
 	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
@@ -638,7 +641,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.data = testData{suite: s}
 
 	s.chat = chattest.NewServer(s.T())
-	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
+	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, keyless: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
 		APIKey: suiteStreamKey, Secret: suiteStreamSecret, BaseURL: s.chat.URL, App: suiteStreamApp,
 	})}
 	s.stream = streamapp.NewClients(s.apps, streamapp.ClientsOptions{})
@@ -2673,6 +2676,9 @@ type suiteApps struct {
 	waiting map[string]bool
 	// nowhere are customers with no app to act in at all.
 	nowhere map[string]bool
+	// keyless are customers of a deployment with no Stream keys, which the deployment's own app
+	// answers ErrNoIdentity for whatever it is asked, as an unconfigured Deployment does.
+	keyless map[string]bool
 	// perApp answers as app mode does, where customers act in apps of their own.
 	perApp bool
 }
@@ -2686,7 +2692,7 @@ func (a *suiteApps) PerApp() bool {
 func (a *suiteApps) For(ctx context.Context, customer string) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting, nowhere := a.waiting[customer], a.nowhere[customer]
+	waiting, nowhere := a.waiting[customer], a.nowhere[customer] || a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
@@ -2712,11 +2718,13 @@ func (a *suiteApps) ForApp(ctx context.Context, customer string, app int64) (str
 func (a *suiteApps) ForAppReading(ctx context.Context, customer string, app int64) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting := a.waiting[customer]
+	waiting, keyless := a.waiting[customer], a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
 		return streamapp.Identity{}, streamapp.ErrDeploymentAppUnknown
+	case keyless:
+		return streamapp.Identity{}, streamapp.ErrNoIdentity
 	case ok && identity.StreamApp == app:
 		return identity, nil
 	}

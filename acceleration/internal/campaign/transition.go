@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -24,6 +25,10 @@ const (
 	Paused        Result = "paused"
 	// NotPlaced is a dial cut off by a shutdown before the vendor took it: nobody was rung.
 	NotPlaced Result = "not_placed"
+	// DialFailed is a dial that failed before the vendor was asked, for a reason that may pass:
+	// nobody was rung, and the contact is tried again shortly without using the attempt, up to
+	// maxDialFailures times an attempt.
+	DialFailed Result = "dial_failed"
 )
 
 const (
@@ -56,7 +61,7 @@ func (d Dialed) answered() bool {
 func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, contact store.Contact, dial int, dialed Dialed, started, now time.Time) (settle store.Settle, dialAgain bool) {
 	step := sequence.First()
 	settle = store.Settle{StepID: step.ID, Attempt: contact.Attempt, CallID: dialed.CallID, VendorCallID: dialed.VendorCallID}
-	if dial == 2 && (dialed.Result == Deferred || dialed.Result == Paused || dialed.Result == Refused || dialed.Result == NotPlaced) {
+	if dial == 2 && (dialed.Result == Deferred || dialed.Result == Paused || dialed.Result == Refused || dialed.Result == NotPlaced || dialed.Result == DialFailed) {
 		// Dial 1 already rang the person, so the attempt is used whatever stopped dial 2.
 		return unanswered(step, hours, zone, contact, started, settle), false
 	}
@@ -65,6 +70,9 @@ func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, conta
 		return afterCall(sequence, hours, zone, contact, dial, dialed, started, settle)
 	case Voicemail:
 		return unanswered(step, hours, zone, contact, started, settle), false
+	case DialFailed:
+		// Tried again as soon as a busy line is.
+		return enrolledAt(hours, zone, now.Add(concurrentRetry), settle), false
 	case Deferred:
 		at := now.Add(concurrentRetry)
 		if dialed.Reason != codeConcurrent {
@@ -155,6 +163,8 @@ func resultOf(err error) Dialed {
 		return Dialed{Result: Refused, Reason: code}
 	case errors.Is(err, phone.ErrNotDialable):
 		return Dialed{Result: InvalidNumber, Reason: reasonInvalidNumber}
+	case errors.Is(err, phone.ErrNotDialed):
+		return Dialed{Result: DialFailed, Reason: codeDialFailed}
 	}
 	// The vendor may have taken the call and rung the person.
 	return Dialed{Outcome: outcome.Unknown}
@@ -169,7 +179,10 @@ func unanswered(step Step, hours CallingHours, zone *time.Location, contact stor
 		return settle
 	}
 	settle.Attempt = attempt + 1
-	return enrolledAt(hours, zone, started.Add(time.Duration(step.Attempts[attempt].DelayMinutes)*time.Minute), settle)
+	// Validate refuses a delay over 30 days, but a sequence stored before it did may hold one
+	// that overflows a Duration, which would land the attempt in the past.
+	delay := min(int64(step.Attempts[attempt].DelayMinutes), math.MaxInt64/int64(time.Minute))
+	return enrolledAt(hours, zone, started.Add(time.Duration(delay)*time.Minute), settle)
 }
 
 // enrolledAt waits for the first opening at or after at. With none in sight the contact

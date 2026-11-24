@@ -351,6 +351,9 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 		if err := refuseSecondChannelAgent(ctx, tx, config, nil, false); err != nil {
 			return err
 		}
+		if err := refuseSecondLineAgent(ctx, tx, config); err != nil {
+			return err
+		}
 		if _, err := tx.NewInsert().Model(config).Exec(ctx); err != nil {
 			switch constraint(err) {
 			case "agent_configs_name_idx":
@@ -458,6 +461,9 @@ func (r *AgentConfigs) save(ctx context.Context, config *AgentConfig, read, unmo
 		if err := refuseSecondChannelAgent(ctx, tx, config, stored.Connectors, stored.TestCopy()); err != nil {
 			return err
 		}
+		if err := refuseSecondLineAgent(ctx, tx, config); err != nil {
+			return err
+		}
 		_, err = tx.NewUpdate().Model(config).
 			Column(configColumns...).
 			Where("ac.id = ?", config.ID).
@@ -500,13 +506,28 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 
 	var name string
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return tx.NewUpdate().Model((*AgentConfig)(nil)).
+		err := tx.NewUpdate().Model((*AgentConfig)(nil)).
 			Set("deleted_at = ?", time.Now().UTC()).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
 			Where("deleted_at IS NULL").
 			Returning("name").
 			Scan(ctx, &name)
+		if err != nil {
+			return err
+		}
+		// Read under the row's lock, which a number given this config waits on (liveConfig):
+		// no number can be pointed at it between this read and the commit.
+		answering, err := answeredBy(ctx, tx, customerID, id)
+		if err != nil {
+			return err
+		}
+		if len(answering) > 0 {
+			// Refused and rolled back: the cached config is still the live one.
+			name = ""
+			return &ConfigAnswersNumbersError{Numbers: answering}
+		}
+		return nil
 	}, func() []string {
 		// Named once the write answered: a commit that fails can still have landed.
 		if name == "" {
@@ -516,6 +537,9 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownAgentConfig(id)
+	}
+	if _, answers := errors.AsType[*ConfigAnswersNumbersError](err); answers {
+		return stack.Wrap(err)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete agent config: %w", err))
