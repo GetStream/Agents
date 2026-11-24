@@ -697,6 +697,19 @@ func (s *ChannelsSuite) TestTheNumberThatTextsACodeBecomesThatEndUser() {
 	s.Equal(owner, held.UserID)
 }
 
+// A code is never minted for a user id Stream keeps for itself.
+func (s *ChannelsSuite) TestACodeIsNotMintedForAReservedUserID() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
 // A code somebody saw go by must not claim a second number.
 func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	number := s.number()
