@@ -33,7 +33,7 @@ concurrency:
 jobs:
   release:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     # The registry's trusted publisher accepts only a token minted in this environment. The job
     # `if` above lets only a run from `main` enter it; the environment has no reviewer gate.
     environment: registry-publish

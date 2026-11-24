@@ -33,7 +33,7 @@ jobs:
   check:
     name: Check and tag
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     permissions:
       contents: write   # push the release tag
       actions: write    # start the publishing run on that tag
@@ -102,7 +102,7 @@ jobs:
   publish:
     name: Publish to pub.dev
     if: startsWith(github.ref, 'refs/tags/sdk-dart-v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     permissions:
       contents: read
       id-token: write   # pub.dev automated publishing (OIDC)

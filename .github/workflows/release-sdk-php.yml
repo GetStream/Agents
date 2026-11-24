@@ -38,7 +38,7 @@ concurrency:
 jobs:
   release:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     # SDK_PHP_SPLIT_TOKEN is this environment's secret, so no other workflow can read it. The job
     # `if` above lets only a run from `main` enter it; the environment has no reviewer gate.
     environment: registry-publish

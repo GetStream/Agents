@@ -58,7 +58,7 @@ jobs:
   # Every step runs after a failure (`!cancelled()`), so each SDK reports its result.
   sdks:
     if: github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     # For the Go SDK, the only Go here: it is installed on its own, with no go.work, by Go as
     # old as its go directive, so it is checked that way too. GOTOOLCHAIN=local keeps 1.25
     # from switching to a newer toolchain, which would prove nothing about 1.25.

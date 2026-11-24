@@ -46,7 +46,7 @@ jobs:
     name: Check the version
     # Of the pull requests, only a release's: one from a branch named release-kotlin-X.Y.Z.
     if: github.event_name == 'push' || github.event_name == 'release' || startsWith(github.head_ref, 'release-kotlin-')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     permissions:
       contents: read
       pull-requests: read   # the pull request a push to main merged
@@ -164,7 +164,7 @@ jobs:
     name: Build, sign and stage
     needs: version
     if: (github.event_name == 'push' || github.event_name == 'release') && needs.version.outputs.channel != 'none'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     # The signing key is a GetStream organization secret: this environment does not limit it, and any
     # workflow in this repository can read it. AI-3372 tracks limiting it to the release jobs.
     environment: release
@@ -220,7 +220,7 @@ jobs:
   upload:
     name: Upload to the Stream repository
     needs: [ version, publish ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     # The repository endpoint, bucket and credentials are GetStream organization secrets too: this
     # environment does not limit them either. AI-3372 tracks limiting them to the release jobs.
     environment: release

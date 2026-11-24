@@ -45,7 +45,7 @@ jobs:
   # macOS runner. A push to main builds them all.
   changes:
     if: github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     outputs:
       kotlin: ${{ steps.filter.outputs.kotlin }}
       dart: ${{ steps.filter.outputs.dart }}
@@ -78,7 +78,7 @@ jobs:
   kotlin:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.kotlin == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     defaults:
       run:
         working-directory: sdks/kotlin
@@ -125,7 +125,7 @@ jobs:
   dart:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.dart == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     steps:
       - uses: actions/checkout@v4
 

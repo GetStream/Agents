@@ -30,7 +30,7 @@ jobs:
   build:
     name: Build every package at the release version
     if: github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     env:
       # A version no release has, so the check never meets a real tag.
       TAG: v99.0.0
