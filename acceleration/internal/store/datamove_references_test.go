@@ -581,7 +581,7 @@ func (s *DataMoveSuite) TestABareIdOfAnotherCustomersRowIsNotFound() {
 	moved, err := here.AgentConfigs.Get(s.ctx, "acme", "own")
 	s.Require().NoError(err)
 	s.Equal(connection, moved.Connectors[0].Connection.ConnectionID)
-	_, err = here.Voices.Get(s.ctx, "acme", moved.Voice)
+	_, err = here.Voices.Get(s.ctx, "acme", moved.Models.Voice)
 	s.ErrorIs(err, ErrNoVoice)
 	_, err = here.ConnectorConnections.Get(s.ctx, "acme", connection)
 	s.ErrorIs(err, ErrNoConnectorConnection)
@@ -639,6 +639,7 @@ func (s *DataMoveSuite) TestARunOfATaskNotHereIsRefusedByItsKey() {
 		"scheduled_for": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z"}`))
 
 	s.ErrorIs(err, ErrInvalidImport)
+	s.ErrorIs(err, ErrNamesNoRow)
 	s.EqualError(err, `store: import scheduled_task_runs:{"id":"run"}: a row names a row that neither the export nor this app holds`)
 }
 
