@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/klippa-app/go-pdfium"
 	"github.com/klippa-app/go-pdfium/enums"
@@ -79,7 +80,7 @@ func (e *Extractor) engine() (*pdfEngine, error) {
 type pdfSession struct {
 	instance pdfium.Pdfium
 	document references.FPDF_DOCUMENT
-	stop     func() bool
+	stop     func()
 }
 
 // open takes a worker and opens the document in it. PDFium takes no context, so a file
@@ -93,7 +94,7 @@ func (e *Extractor) open(ctx context.Context, data []byte) (*pdfSession, error) 
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("extract: a PDF worker: %w", err))
 	}
-	stop := context.AfterFunc(ctx, func() { _ = instance.Kill() })
+	stop := killOnDone(ctx, instance)
 	opened, err := instance.OpenDocument(&requests.OpenDocument{File: &data})
 	if err != nil {
 		stop()
@@ -107,6 +108,24 @@ func (e *Extractor) open(ctx context.Context, data []byte) (*pdfSession, error) 
 		return nil, fail(Corrupt, PDF, fmt.Errorf("the PDF cannot be opened: %w", err))
 	}
 	return &pdfSession{instance: instance, document: opened.Document, stop: stop}, nil
+}
+
+// killOnDone kills the worker once ctx is done. The stop it returns, called once and before the
+// worker is closed, waits for a kill that has begun: PDFium's Kill and Close race when they
+// overlap.
+func killOnDone(ctx context.Context, instance pdfium.Pdfium) (stop func()) {
+	var killing sync.WaitGroup
+	killing.Add(1)
+	cancel := context.AfterFunc(ctx, func() {
+		defer killing.Done()
+		_ = instance.Kill()
+	})
+	return func() {
+		if cancel() {
+			killing.Done()
+		}
+		killing.Wait()
+	}
 }
 
 func (s *pdfSession) close() {
