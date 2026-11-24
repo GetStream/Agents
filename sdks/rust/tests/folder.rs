@@ -1147,7 +1147,12 @@ mod links {
     #[test]
     fn a_link_to_itself_is_refused() {
         let mut read = Vec::new();
-        for linked in ["instructions.md", "skills/loop.md", "knowledge/loop.md"] {
+        for linked in [
+            "instructions.md",
+            "skills/loop.md",
+            "knowledge/loop.md",
+            "simulations/loop.yaml",
+        ] {
             let (_temporary, root) = directory("jean");
             write(&root, "agent.yaml", "name: jean\n");
             link(&root, linked, root.join(linked));

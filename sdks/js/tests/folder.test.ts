@@ -694,7 +694,7 @@ describe("loadFolder", () => {
     await assert.rejects(() => loadFolder(path), /instructions\.md links outside the agent directory/);
   });
 
-  for (const linked of ["instructions.md", "skills/loop.md", "knowledge/loop.md"]) {
+  for (const linked of ["instructions.md", "skills/loop.md", "knowledge/loop.md", "simulations/loop.yaml"]) {
     it(`refuses ${linked} linked to itself, rather than going round or skipping it`, async () => {
       const path = await agentDir({});
       await link(path, linked, join(path, linked));

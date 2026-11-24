@@ -1188,13 +1188,12 @@ fn load_simulations(agent: &Path, path: &Path) -> Result<Option<Vec<Simulation>>
         .flatten()
         .map(|entry| entry.path())
         .filter(|file| {
-            file.is_file()
-                && file.extension().is_some_and(|extension| {
-                    matches!(
-                        extension.to_string_lossy().to_lowercase().as_str(),
-                        "yaml" | "yml"
-                    )
-                })
+            file.extension().is_some_and(|extension| {
+                matches!(
+                    extension.to_string_lossy().to_lowercase().as_str(),
+                    "yaml" | "yml"
+                )
+            })
         })
         .collect();
     files.sort();
@@ -1202,6 +1201,10 @@ fn load_simulations(agent: &Path, path: &Path) -> Result<Option<Vec<Simulation>>
     let mut simulations = Vec::new();
     let mut named: BTreeMap<String, String> = BTreeMap::new();
     for file in files {
+        // Before the check below, which takes a link going round in a loop for nothing there.
+        if !inside(agent, &file)?.is_file() {
+            continue;
+        }
         let raw = read_inside(agent, &file)?;
         let refused = |message: String| Error::folder(&file, message);
         let document =
