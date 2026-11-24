@@ -196,11 +196,10 @@ var dataTables = []dataTable{
 	// they hid and the switches that hid it go with their session.
 	{name: "agent_branch_switches", customer: "customer_id", shard: true},
 	{name: "agent_branch_messages", customer: "customer_id", shard: true},
-	// Nothing points at a log's id, so a copied log is given one of this deployment's
-	// (20261206120000_agent_logs_source_id.sql).
+	// Nothing points at a log's id, so a copied log is given one of this deployment's.
 	{name: "agent_logs", customer: "customer_id", copied: "source_id"},
 	// No foreign key points at a request's id. An agent log row names it as text, and
-	// Store.AgentLog only takes a request's error by that number from a row that carries none of
+	// AgentLogs.Get only takes a request's error by that number from a row that carries none of
 	// its own and whose time and agent are the request's, so a moved row cannot show the error
 	// of whichever request holds its number here. Its usage id is the unit of work wherever it is.
 	{name: "requests", customer: "customer_id", shard: true, across: "usage_id"},
@@ -231,7 +230,7 @@ var dataTables = []dataTable{
 //
 // isSecret is the one list: the export, the import and the record_data_change trigger
 // (watchDataChanges) all read it. A trigger attached before the list was passed applies the
-// same rule in SQL (20270117000400_record_data_change_secrets.sql): change both together.
+// same rule in SQL (record_data_change's own copy): change both together.
 func isSecret(column string) bool {
 	return strings.HasSuffix(column, "_sealed") || strings.HasSuffix(column, "_secret_hash") ||
 		slices.Contains(oauthSecrets, column)
@@ -240,8 +239,8 @@ func isSecret(column string) bool {
 // oauthSecrets are an OAuth grant's tokens and the state of one under way.
 var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
 
-// retiredTables are tables an export from an older release may carry that this schema dropped
-// (20270112000100_drop_plugin_tables.sql). An import skips their rows, inserts and deletes alike.
+// retiredTables are tables an export from an older release may carry that this schema dropped.
+// An import skips their rows, inserts and deletes alike.
 var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
 
 // DataChange is one thing that happened to one row.
@@ -286,16 +285,6 @@ func (s shape) secrets() []string {
 type tableShapes struct {
 	mu     sync.Mutex
 	byName map[string]shape
-}
-
-// DataTables names the tables an export carries, parents first. It is public so a test
-// and the docs have one answer rather than two.
-func DataTables() []string {
-	names := make([]string, 0, len(dataTables))
-	for _, table := range dataTables {
-		names = append(names, table.name)
-	}
-	return names
 }
 
 // StartDataCapture records that a customer is moving, so their changes are written down
@@ -804,7 +793,7 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 	return s.global
 }
 
-// lineColumns are what attaching a number, or giving it a line, writes on its row (AttachNumber,
+// lineColumns are what attaching a number, or giving it a line, writes on its row (PhoneNumbers.Attach,
 // TrunkGroupTx.SetLine): where its calls go and which agent answers them. The sealed bridge
 // password is one too, and an import never writes it (isSecret).
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
@@ -894,7 +883,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		switch {
 		case spec.isKey(shape, column):
 		case spec.name == "phone_numbers" && slices.Contains(lineColumns, column):
-			// A number on a trunk here was attached or given a line here (AttachNumber, SetLine),
+			// A number on a trunk here was attached or given a line here (PhoneNumbers.Attach, TrunkGroupTx.SetLine),
 			// since an imported row arrives off any trunk (identity). Where its calls go is then
 			// this deployment's, so the source's copy of the row, in a copy taken again or a
 			// change applied later, does not detach it. The agent is too only once attached:
@@ -1561,14 +1550,15 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 //
 // The users are resumed movedHoldersPerTransaction at a time, one transaction each, since each
 // takes one lock per user and config and the server holds only so many at once. One that fails
-// leaves the ones before it done, which running the cut-over again does not redo. Each waits
+// leaves the ones before it done, which running the cut-over again does not redo, and what
+// they did is returned with its error. Each waits
 // for a task row or a limit at most the serving connection's lock_timeout (3s): a create or
 // resume holds them only for its own transaction, and a cut-over that gives up is run again.
 //
 // It returns how many tasks it resumed, how many it left paused for want of a config, how many
 // for want of room, and the campaigns still running or scheduled there at the last catch-up.
 // Those it leaves paused and marked: a contact the source rang after that is still enrolled
-// here, and resuming the campaign here (ResumeCampaign) rings it again, so that is left to a
+// here, and resuming the campaign here (Campaigns.Resume) rings it again, so that is left to a
 // person. Any change of a campaign's state here clears the mark (transitionIn). Running it
 // again resumes nothing twice.
 func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed, skipped, overLimit int64, campaigns []string, err error) {
@@ -1598,7 +1588,7 @@ func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed
 			return err
 		})
 		if err != nil {
-			return 0, 0, 0, nil, stack.Wrap(err)
+			return resumed, skipped, overLimit, nil, stack.Wrap(err)
 		}
 		resumed, skipped, overLimit = resumed+r, skipped+k, overLimit+o
 	}
@@ -1608,7 +1598,7 @@ func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed
 		Where("move_paused").
 		Order("id").
 		Scan(ctx, &campaigns); err != nil {
-		return 0, 0, 0, nil, stack.Wrap(fmt.Errorf("store: moved campaigns: %w", err))
+		return resumed, skipped, overLimit, nil, stack.Wrap(fmt.Errorf("store: moved campaigns: %w", err))
 	}
 	return resumed, skipped, overLimit, campaigns, nil
 }
@@ -1828,19 +1818,18 @@ func (t dataTable) identity() string {
 	}
 	// A connector connection arrives without its credentials, so it arrives saying it needs
 	// one, rather than connected with nothing to connect with. Key version 0 and no
-	// expiry are what a connection without credentials holds (20261002193000_connector_connections.sql),
+	// expiry are what a connection without credentials holds,
 	// so the source credentials' key version and expiry do not come along either, on an import or
 	// on every change applied after it. Nor does its provider unit: a row in an import is
-	// whatever the importer wrote, and a unit stored from it would route another customer's
-	// events to this one. The reconnect it needs proves the unit again
-	// (SetConnectorConnectionProviderUnit).
+	// whatever the importer wrote, and the column still holds one unit per connector
+	// (connector_connections_provider_unit_idx), so it is emptied here.
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
 			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"
 	}
 	// A trunk arrives without its password, since the key that sealed it is the other
 	// deployment's, so it arrives at key version 0, which is what a trunk without one
-	// holds (20261007050000_sip_trunks.sql).
+	// holds.
 	if t.name == "sip_trunks" {
 		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0)"
 	}

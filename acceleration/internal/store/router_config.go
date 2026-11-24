@@ -204,7 +204,7 @@ func (r *RouterConfigs) GetByName(ctx context.Context, customerID, name string) 
 // customer holds few, and the API lists them all.
 func (r *RouterConfigs) Select(ctx context.Context, customerID string) ([]RouterConfig, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var configs []RouterConfig

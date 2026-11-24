@@ -94,7 +94,7 @@ func (s *Server) registerToolApprovals(api huma.API) {
 }
 
 // approveConnectionTools pins the tools named at the digests the connection's last validate
-// listed, when those are the digests sent, all or none (store.ReapproveConnectorTools).
+// listed, when those are the digests sent, all or none (store.ConnectorToolPins.Reapprove).
 func (s *Server) approveConnectionTools(ctx context.Context, request *approveConnectionToolsRequest) (*approvedConnectionToolsResponse, error) {
 	connection, err := s.reachableConnection(ctx, request.ID)
 	if err != nil {

@@ -88,6 +88,8 @@ def sync_detailed(
     that `createSession` answers the same field with, and so does a session refused for money:
     `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or
     `spend_limit_reached` (`payment_required`).
+    A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a
+    speech-to-speech conversation that spends it closes.
     The session lasts as long as the socket. Closing the socket, or sending `stop`, ends the
     conversation. A conversation that ends closes the socket.
 
@@ -133,6 +135,8 @@ def sync(
     that `createSession` answers the same field with, and so does a session refused for money:
     `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or
     `spend_limit_reached` (`payment_required`).
+    A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a
+    speech-to-speech conversation that spends it closes.
     The session lasts as long as the socket. Closing the socket, or sending `stop`, ends the
     conversation. A conversation that ends closes the socket.
 
@@ -174,6 +178,8 @@ async def asyncio_detailed(
     that `createSession` answers the same field with, and so does a session refused for money:
     `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or
     `spend_limit_reached` (`payment_required`).
+    A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a
+    speech-to-speech conversation that spends it closes.
     The session lasts as long as the socket. Closing the socket, or sending `stop`, ends the
     conversation. A conversation that ends closes the socket.
 
@@ -217,6 +223,8 @@ async def asyncio(
     that `createSession` answers the same field with, and so does a session refused for money:
     `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or
     `spend_limit_reached` (`payment_required`).
+    A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a
+    speech-to-speech conversation that spends it closes.
     The session lasts as long as the socket. Closing the socket, or sending `stop`, ends the
     conversation. A conversation that ends closes the socket.
 

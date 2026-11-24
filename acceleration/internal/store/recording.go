@@ -26,20 +26,16 @@ type Recording struct {
 	CustomerID string `bun:"customer_id,notnull"`
 	// Modality is stt for a transcription and tts for a recorded voice.
 	Modality string `bun:"modality,notnull"`
-	// Status is where the job has got to: RecordingQueued, RecordingRunning,
-	// RecordingCompleted or RecordingFailed.
+	// Status is where the job has got to: RecordingQueued, RecordingCompleted or
+	// RecordingFailed.
 	Status string `bun:"status,notnull"`
 	// Provider and Model are what served it, once routing has picked.
 	Provider string `bun:"provider,nullzero"`
 	Model    string `bun:"model,nullzero"`
-	// Source is the recording to transcribe: a URL, or empty when the audio was sent
-	// inline, which is not kept.
-	Source string `bun:"source,nullzero"`
 	// Text is what to say, for a voice job.
 	Text string `bun:"text,nullzero"`
-	// Options are what was asked for. Only the block for this modality is set.
+	// STT is what a transcription was asked for.
 	STT options.STT `bun:"stt,type:jsonb"`
-	TTS options.TTS `bun:"tts,type:jsonb"`
 	// Callback is a URL the finished job is POSTed to. Empty means the caller polls.
 	Callback string            `bun:"callback,nullzero"`
 	Tags     map[string]string `bun:"tags,type:jsonb"`
@@ -59,8 +55,6 @@ type Recording struct {
 const (
 	// RecordingQueued is accepted and not yet started.
 	RecordingQueued = "queued"
-	// RecordingRunning is at the provider.
-	RecordingRunning = "running"
 	// RecordingCompleted has a result.
 	RecordingCompleted = "completed"
 	// RecordingFailed has a reason instead.
@@ -96,31 +90,10 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 	recording.CreatedAt = now
 	recording.UpdatedAt = now
 	recording.Status = RecordingQueued
-	if recording.Tags == nil {
-		recording.Tags = map[string]string{}
-	}
+	recording.Tags = orEmptyMap(recording.Tags)
 
 	if _, err := r.store.shard.NewInsert().Model(recording).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create recording: %w", err))
-	}
-	return nil
-}
-
-// Start marks a job as at the provider and records which one took it.
-func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model string) error {
-	if customerID == "" || id == "" {
-		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
-	}
-	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
-		Set("status = ?", RecordingRunning).
-		Set("provider = ?", provider).
-		Set("model = ?", model).
-		Set("updated_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: start recording: %w", err))
 	}
 	return nil
 }

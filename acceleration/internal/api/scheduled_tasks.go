@@ -221,7 +221,7 @@ func (s *Server) createScheduledTask(ctx context.Context, request *createSchedul
 		task.ConfigID = config.ID
 	}
 
-	stored, err := s.store.UserTimezone(ctx, customerID, userID)
+	stored, err := s.store.Users.GetTimezone(ctx, customerID, userID)
 	if err != nil {
 		return nil, err
 	}

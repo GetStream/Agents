@@ -233,8 +233,8 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 	score := 2
 	app := AppScope{App: 2}
 	reads := []explainedRead{
-		{name: "Requests.Insert", index: "calls_customer_agent_idx", run: func(ctx context.Context, store *Store) error {
-			return store.Requests.Insert(ctx, &Request{Modality: "llm", CustomerID: "customer-7", AgentID: "agent-7",
+		{name: "Requests.InsertMany", index: "calls_customer_agent_idx", run: func(ctx context.Context, store *Store) error {
+			return insertRequest(ctx, store, &Request{Modality: "llm", CustomerID: "customer-7", AgentID: "agent-7",
 				CallID: "stream-7", Provider: "provider-1", Model: "model-1", StartedAt: s.base, Success: true})
 		}},
 		{name: "Requests.advanceIDs", index: "stt_requests_pkey", run: func(ctx context.Context, store *Store) error {
@@ -575,11 +575,27 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Ends(ctx, []SessionKey{{"customer-7", "seeded-session-7"}, {"customer-7", "seeded-session-207"}}, since)
 			return err
 		}},
-		{name: "Store.ClaimGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
-			if err := store.RecordGuest(ctx, &User{ID: "guest-7", CustomerID: "customer-7", CreatedAt: s.base}); err != nil {
+		{name: "Users.ClaimGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
+			if err := store.Users.InsertGuest(ctx, &User{ID: "guest-7", CustomerID: "customer-7", CreatedAt: s.base}); err != nil {
 				return err
 			}
-			_, err := store.ClaimGuest(ctx, "customer-7", "guest-7", "user-7")
+			_, err := store.Users.ClaimGuest(ctx, "customer-7", "guest-7", "user-7")
+			return err
+		}},
+		{name: "CallLegs.RenameUser", index: "call_legs_user_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.CallLegs.RenameUser(ctx, "customer-7", "user-207", "user-207-renamed")
+			return err
+		}},
+		{name: "CallLegs.CountUser", index: "call_legs_user_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.CallLegs.CountUser(ctx, "customer-7", "user-207")
+			return err
+		}},
+		{name: "AgentLogs.DeleteUser", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
+			_, err := store.AgentLogs.DeleteUser(ctx, "customer-7", "user-207")
+			return err
+		}},
+		{name: "AgentLogs.CountUser", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
+			_, err := store.AgentLogs.CountUser(ctx, "customer-7", "user-207")
 			return err
 		}},
 		{name: "BranchMessages.CountUser", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
@@ -688,22 +704,24 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Spend.Subject", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectApp, AppID: "customer-7"}, since)
+			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectApp, AppID: "customer-7"}, since, true)
 			return err
 		}},
 		{name: "Spend.Subject of a user", index: "requests_user_spend_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectUser, AppID: "customer-7",
-				UserID: "user-7"}, since)
+				UserID: "user-7"}, since, true)
 			return err
 		}},
 		{name: "Spend.Subject of a key", index: "requests_key_spend_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectAPIKey, AppID: "customer-7",
-				APIKey: "key-7"}, since)
+				APIKey: "key-7"}, since, true)
 			return err
 		}},
+		// Of an app in no organization, customer-7: the seed records no app under an organization,
+		// so a billed one's sum names none.
 		{name: "Spend.Subject of a category", index: "requests_category_spend_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectCategory,
-				Category: "team:team-7"}, since)
+			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "customer-7", Subject: usage.SubjectCategory,
+				Category: "team:team-7"}, since, false)
 			return err
 		}},
 		{name: "Spend.Daily", index: "requests_started_idx", run: func(ctx context.Context, store *Store) error {

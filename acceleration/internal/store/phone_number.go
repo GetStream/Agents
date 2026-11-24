@@ -162,9 +162,7 @@ func insertNumber(ctx context.Context, db bun.IDB, number *PhoneNumber) error {
 	}
 	// A vendor that says nothing about what a number carries is not the same as a null
 	// column, and the array is not nullable.
-	if number.Capabilities == nil {
-		number.Capabilities = []string{}
-	}
+	number.Capabilities = orEmpty(number.Capabilities)
 
 	if _, err := db.NewInsert().Model(number).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number: %w", err))
@@ -201,17 +199,6 @@ func (r *PhoneNumbers) InsertOnSIPTrunk(ctx context.Context, number *PhoneNumber
 		return stack.Wrap(ErrNoSIPTrunk)
 	}
 	return err
-}
-
-// Release marks a number as given back. The row stays, because what it cost while it was
-// held is still part of that month's bill.
-func (r *PhoneNumbers) Release(ctx context.Context, customerID, e164 string, at time.Time) error {
-	if customerID == "" || e164 == "" {
-		return stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return releaseNumber(ctx, tx, customerID, e164, at)
-	})
 }
 
 // Attach records which SIP trunk calls to a number arrive on and which Stream call they
@@ -319,7 +306,7 @@ func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) 
 // Select returns the numbers a customer holds, newest first.
 func (r *PhoneNumbers) Select(ctx context.Context, customerID string, filter PhoneNumberFilter) ([]PhoneNumber, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	query := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).
@@ -477,7 +464,8 @@ func (r *PhoneNumbers) HeldSince(ctx context.Context, since time.Time) ([]PhoneN
 	return held, nil
 }
 
-// releaseNumber marks a number as given back, in db.
+// releaseNumber marks a number as given back, in db. The row stays, because what it cost
+// while it was held is still part of that month's bill.
 func releaseNumber(ctx context.Context, db bun.IDB, customerID, e164 string, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
