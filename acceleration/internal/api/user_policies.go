@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -230,6 +231,21 @@ func (s *Server) userPolicyCaller(ctx context.Context) (string, error) {
 		return "", errNoPolicies
 	}
 	return customerID, nil
+}
+
+// reservedUserIDPrefix starts the user ids Stream keeps for itself, such as anonymous users'.
+const reservedUserIDPrefix = "!"
+
+// refuseReservedUserID refuses a user id, named in field, that Stream keeps for itself.
+//
+// Why: the router acts as the ids it is handed with the app's own credentials. Chat refuses
+// storing a reserved id on its own writes, but not the token the router signs locally or the
+// call it joins, so the router checks them where they come in.
+func refuseReservedUserID(field, userID string) (APIError, bool) {
+	if strings.HasPrefix(strings.TrimSpace(userID), reservedUserIDPrefix) {
+		return invalidRequest(field + " may not start with " + reservedUserIDPrefix + ": Stream keeps those user ids for itself"), true
+	}
+	return APIError{}, false
 }
 
 // checkUserID holds a user id to Stream Chat's rule, as a spend limit's is.
