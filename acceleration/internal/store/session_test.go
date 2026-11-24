@@ -1200,6 +1200,8 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 	}
 	row := &AgentSession{ID: "budgeted", CustomerID: "app", AgentID: "agent", ConversationID: "conversation",
 		State: SessionRunning, CreatedAt: at.Add(time.Minute), OpenedAt: at.Add(time.Minute)}
+	late := *row
+	late.OpenedAt = at
 	tools := []ToolDefinition{{Name: "lookup", Description: "Looks it up."}}
 	pages := func(listed []AgentSession, err error) error {
 		s.Len(listed, 11, "a page and the row that says there is another")
@@ -1207,6 +1209,10 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 	}
 	s.withinQueryBudgets([]queryBudget{
 		{"Upsert", 1, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		// The insert finds the row, which the update writes.
+		{"Upsert again", 2, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		// The update writes nothing, so the row is read to find it is the customer's own.
+		{"Upsert of a run opened before", 3, 0, func() error { return s.store.Sessions.Upsert(s.ctx, &late) }},
 		{"Supersede", 0, 1, func() error { return s.store.Sessions.Supersede(s.ctx, "app", row.ID, row.OpenedAt) }},
 		{"SetToolTimeout", 1, 0, func() error { return s.store.Sessions.SetToolTimeout(s.ctx, row.CustomerID, row.ID, "http", 900) }},
 		{"SawVideo", 1, 0, func() error { return s.store.Sessions.SawVideo(s.ctx, row.CustomerID, row.ID) }},
@@ -1241,6 +1247,14 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		{"SessionTools.Get", 1, 0, func() error { _, err := s.store.SessionTools.Get(s.ctx, row.CustomerID, row.ID); return err }},
 		{"Delete", 0, 2, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
 	})
+
+	// Run twice: only a read by the id alone would tell another customer's row from the
+	// customer's own deleted between the statements, which is inserted again.
+	var err error
+	s.Equal(6, s.countQueries(func() {
+		err = s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "seeded-00", CustomerID: "another-app", State: SessionRunning})
+	}), "Upsert under another customer's id")
+	s.ErrorIs(err, ErrIDTaken)
 }
 
 // refusedUnwritten checks err refused a row as invalid and that table holds none whose column is key.
