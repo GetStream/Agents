@@ -54,3 +54,17 @@ func (s *ImportableDefinitionSuite) TestAnHTTPConnectorWhoseAPIIsNotPublicIsRefu
 			": base_url must be a public https URL without userinfo, query or fragment", base)
 	}
 }
+
+// AI-3676 S1.1: an import has no request body limit to keep an http connector small, so core's caps refuse what the
+// API's schema would: a parameter's description over 1000 bytes and a base URL over 2048.
+func (s *ImportableDefinitionSuite) TestAnOversizedHTTPConnectorIsRefused() {
+	for name, manifest := range map[string]string{
+		"a 2 MiB parameter description": strings.Replace(importedHTTP, `"parameters": {"id": {"type": "string", "required": true}}`,
+			`"parameters": {"id": {"type": "string", "required": true}, "q": {"type": "string", "description": "`+strings.Repeat("x", 2<<20)+`"}}`, 1),
+		"a 4 KiB base_url": strings.Replace(importedHTTP, "https://8.8.8.8/api", "https://8.8.8.8/"+strings.Repeat("a", 4096), 1),
+	} {
+		_, err := importableDefinition(context.Background(), json.RawMessage(`{"id": "custom_crm", "manifest": `+manifest+`}`))
+
+		s.ErrorIs(err, ErrNotACustomConnector, name)
+	}
+}

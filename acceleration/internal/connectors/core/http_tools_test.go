@@ -149,7 +149,15 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"a brace":           {withTool(func(t *HTTPTool) { t.Parameters["a}b"] = HTTPParameter{Type: "string"} }), `"a}b" is not 1 to 64`},
 		"an empty name":     {withTool(func(t *HTTPTool) { t.Parameters[""] = HTTPParameter{Type: "string"} }), `"" is not 1 to 64`},
 		"a name of 65":      {withTool(func(t *HTTPTool) { t.Parameters[strings.Repeat("p", 65)] = HTTPParameter{Type: "string"} }), `is not 1 to 64`},
-		"65 parameters":     {withTool(func(t *HTTPTool) { t.Parameters = parameters(65) }), `http_tools[0].parameters: has 65 parameters, over 64`},
+		"a parameter description over 1000": {withTool(func(t *HTTPTool) {
+			t.Parameters["days"] = HTTPParameter{Type: "integer", Description: strings.Repeat("d", 1001)}
+		}), `http_tools[0].parameters.days.description: is over 1000 bytes`},
+		"a base_url over 2048": {func() Manifest {
+			m := httpManifest(forecast())
+			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2048)
+			return m
+		}(), `endpoints.http: is over 2048 bytes`},
+		"65 parameters": {withTool(func(t *HTTPTool) { t.Parameters = parameters(65) }), `http_tools[0].parameters: has 65 parameters, over 64`},
 		"an override header": {withSource(func(r *SourceRule) { r.Headers = map[string]string{"x-HTTP-method-OVERRIDE": "POST"} }),
 			`sources[0].headers.x-HTTP-method-OVERRIDE: names a method override`},
 		"read_only_tools":   {withSource(func(r *SourceRule) { r.ReadOnlyTools = []string{"get_forecast"} }), `sources[0].read_only_tools: is not set on an http source`},

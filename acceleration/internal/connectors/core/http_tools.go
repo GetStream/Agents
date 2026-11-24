@@ -57,10 +57,12 @@ const (
 	// OpenAI documents taking in one request.
 	maxHTTPTools = 128
 	// maxHTTPToolDescription is the cap a custom connector's own description has
-	// (CustomConnectorRequest.Description, internal/api/connectors.go).
+	// (CustomConnectorRequest.Description, internal/api/connectors.go), on a tool's description
+	// and on each of its parameters'.
 	maxHTTPToolDescription = 1000
 	// maxHTTPPath is the cap a custom connector's MCP endpoint URL has
-	// (CustomConnectorRequest.Endpoint, internal/api/connectors.go).
+	// (CustomConnectorRequest.Endpoint, internal/api/connectors.go), on a tool's path and on the
+	// http source's endpoint, its base URL.
 	maxHTTPPath = 2048
 	// maxHTTPParameters is the cap an agent config has on its connector bindings and its
 	// visible_tools (internal/api/configs.go).
@@ -176,6 +178,9 @@ func checkHTTPSource(fail func(field, format string, args ...any), field string,
 			}
 			if !slices.Contains(httpParameterTypes, tool.Parameters[name].Type) {
 				fail(field+".type", "%q is not one of %v", tool.Parameters[name].Type, httpParameterTypes)
+			}
+			if len(tool.Parameters[name].Description) > maxHTTPToolDescription {
+				fail(field+".description", "is over %d bytes", maxHTTPToolDescription)
 			}
 		}
 	}
