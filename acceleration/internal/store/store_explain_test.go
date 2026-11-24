@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -40,7 +41,15 @@ func (s *StoreSuite) seededDatabase() string {
 		return s.seededDSN
 	}
 	dsn := s.emptyDatabase("store_explain")
-	store, err := Open(dsn)
+	// Seeding is setup, not the store's own work: its inserts of seedRows may run past the
+	// serving statement limit and the driver's read timeout, which the DSN lifts for it.
+	parsed, err := url.Parse(dsn)
+	s.Require().NoError(err)
+	query := parsed.Query()
+	query.Set("statement_timeout", "0")
+	query.Set("read_timeout", "2m")
+	parsed.RawQuery = query.Encode()
+	store, err := Open(parsed.String())
 	s.Require().NoError(err)
 	defer store.Close()
 	s.Require().NoError(store.Migrate(s.ctx))
@@ -262,7 +271,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Requests.RenameUser", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-207", "user-207")
+			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-207", "user-207-renamed")
 			return err
 		}},
 		{name: "Requests.Spend", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {

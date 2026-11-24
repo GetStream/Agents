@@ -103,7 +103,7 @@ func (s *RouterSuite) scheduledTurnTools() []string {
 
 // deliveredByTheWorker makes task due, has a worker deliver it, and returns its settled run.
 func (s *RouterSuite) deliveredByTheWorker(task store.ScheduledTask) store.ScheduledTaskRun {
-	worker := scheduling.NewScheduler(s.store, s.router.DeliverScheduledTask, slog.New(slog.DiscardHandler))
+	worker := s.newScheduler(s.router.DeliverScheduledTask, slog.New(slog.DiscardHandler))
 	worker.Start(context.Background())
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)

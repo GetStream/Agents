@@ -239,6 +239,9 @@ const (
 	// grantReconcilePage is how many rows one read of a shard takes; where the reconcile got
 	// is kept after each, so one cut short goes on from there.
 	grantReconcilePage = 2_000
+	// grantReconcileHold is how long a reconcile holds its lock with nothing to say to the
+	// shared database, longer than the pass the policy service gives a reconcile.
+	grantReconcileHold = 5 * time.Minute
 )
 
 // ErrReconcileBusy is LimitGrantUses.Reconcile finding another router reconciling.
@@ -260,6 +263,11 @@ func (r *LimitGrantUses) Reconcile(ctx context.Context) (int, error) {
 		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
 	}
 	defer tx.Rollback() //nolint:errcheck // it writes nothing; ending it lets go of the lock
+	// The transaction holds the lock and sits idle while the shards are read, for longer than
+	// the serving limit would let it before ending the session and letting the lock go.
+	if err := boundTransaction(ctx, tx, statementTimeout, lockTimeout, grantReconcileHold); err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
+	}
 	var locked bool
 	if err := tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock(hashtextextended('limit_grant_reconciles', 0))").Scan(&locked); err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: lock: %w", err))

@@ -465,6 +465,16 @@ type Server struct {
 	// that finished just after a look waited up to 2 s to leave, and every thread task took 2 s
 	// at least. 100 ms is not a delay a person waiting for a text notices.
 	replyPoll time.Duration
+	// replyWindow bounds reading an answer for a channel (scheduledReplyWindow); phoneWindow is how
+	// long a ring is waited out (scheduledPhoneWindow), and callLimit how long a call a task placed
+	// may last (scheduledCallLimit). Each router holds its own, so a test that shortens them on its
+	// router changes no other suite's: the suites run in parallel in one process.
+	replyWindow time.Duration
+	phoneWindow time.Duration
+	callLimit   time.Duration
+	// resumedAt is the clock a resume counts a task's next run from. A test sets it to resume inside
+	// an hour the wall clock is not in.
+	resumedAt func() time.Time
 
 	// serverSide matches the requests the spec marks server-side only. What is registered on
 	// it is the patterns, and matching one is the answer; its handlers only name the operation
@@ -604,6 +614,10 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
+		replyWindow:        scheduledReplyWindow,
+		phoneWindow:        scheduledPhoneWindow,
+		callLimit:          scheduledCallLimit,
+		resumedAt:          time.Now,
 		quota:              options.Quota,
 		policies:           options.Policies,
 		connectors:         options.Connectors,
