@@ -154,7 +154,7 @@ func (s *RouterSuite) takeThreadTurn(channel, holder string) (bool, error) {
 		return false, err
 	}
 	return s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: thread.StreamAppPK,
-		CID: chatlog.ChannelType + ":" + channel, LeasedBy: holder, LeaseUntil: time.Now().Add(time.Minute)})
+		CID: chatlog.ChannelType + ":" + channel, LeasedBy: holder, Lease: time.Minute})
 }
 
 // releaseThreadTurn lets go of the turn holder leased in the thread channel channel.

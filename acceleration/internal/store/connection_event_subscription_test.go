@@ -65,27 +65,28 @@ func (s *StoreSuite) TestAConnectionsSubscriptionsAreOnlyItsCustomers() {
 func (s *StoreSuite) TestAClaimLeasesWhatIsDueAndNotWhatIsNot() {
 	due := s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
 	later := s.eventSubscription("acme-app", "conn-1", "config-1", "key-2")
-	future := s.base.Add(time.Hour)
+	future := time.Now().Add(time.Hour)
 	later.NextAttemptAt = &future
 	s.Require().NoError(s.store.ConnectionEventSubscriptions.Update(s.ctx, &later))
 
-	claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
-	again, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	again, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
 
 	s.Require().Len(claimed, 1)
 	s.Equal(due.ID, claimed[0].ID)
-	s.True(claimed[0].NextAttemptAt.Equal(s.base.Add(time.Minute)), "pushed to the lease's end")
+	s.WithinDuration(time.Now().Add(time.Minute), *claimed[0].NextAttemptAt, 5*time.Second, "pushed to the lease's end")
 	s.Empty(again, "a leased one is not taken again before its lease ends")
 }
 
 func (s *StoreSuite) TestAClaimWhoseLeaseRanOutCannotOverwriteTheClaimAfterIt() {
 	s.eventSubscription("acme-app", "conn-1", "config-1", "key-1")
-	slow, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	slow, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
 	s.Require().Len(slow, 1)
-	taken, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base.Add(2*time.Minute), 10, s.base.Add(3*time.Minute))
+	s.timePasses("connection_event_subscriptions", 2*time.Minute)
+	taken, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 
@@ -122,7 +123,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 	byA := make(chan claimed, 1)
 
 	go func() {
-		subs, err := claim[ConnectionEventSubscription](s.ctx, routerA.global, connectionEventSubscriptions, s.base, s.base.Add(time.Minute), 10, paused, "ces.*")
+		subs, err := claim[ConnectionEventSubscription](s.ctx, routerA.global, connectionEventSubscriptions, time.Minute, 10, paused, "ces.*")
 		byA <- claimed{subs, err}
 	}()
 	s.Require().Eventually(func() bool {
@@ -131,7 +132,7 @@ func (s *StoreSuite) TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce() {
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")
-	byB, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	byB, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
 	a := <-byA
 	s.Require().NoError(a.err)
@@ -168,7 +169,7 @@ func (s *StoreSuite) TestMakingAConnectionDueMakesEveryOneOfItsSubscriptionsDue(
 
 	s.Require().NoError(s.store.ConnectionEventSubscriptions.DueConnection(s.ctx, "acme-app", "conn-1", s.base))
 
-	claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base, 10, s.base.Add(time.Minute))
+	claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, 10, time.Minute)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Equal(sub.ID, claimed[0].ID)
@@ -201,7 +202,7 @@ func (s *StoreSuite) TestConnectionEventSubscriptionQueryBudgets() {
 	var claimed []ConnectionEventSubscription
 	s.Equal(1, s.countQueries(func() {
 		var err error
-		claimed, err = s.store.ConnectionEventSubscriptions.Claim(s.ctx, s.base.Add(time.Second), 20, s.base.Add(time.Minute))
+		claimed, err = s.store.ConnectionEventSubscriptions.Claim(s.ctx, 20, time.Minute)
 		s.Require().NoError(err)
 		s.Len(claimed, 20)
 	}), "Claim")

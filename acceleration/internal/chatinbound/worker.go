@@ -178,8 +178,7 @@ func (w *Worker) answerDue(ctx context.Context) (wait time.Duration, again bool)
 	if free == 0 {
 		return 0, false
 	}
-	now := time.Now()
-	claimed, err := w.store.ChatInbounds.Claim(ctx, now, free, now.Add(w.lease))
+	claimed, err := w.store.ChatInbounds.Claim(ctx, free, w.lease)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.logger.Error("could not take the chat inbound messages due", "error", err)

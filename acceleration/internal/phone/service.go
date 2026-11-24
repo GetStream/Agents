@@ -654,8 +654,7 @@ func (s *Service) SweepOrders(ctx context.Context) (int, error) {
 	if s.store == nil {
 		return 0, nil
 	}
-	now := s.now()
-	orders, err := s.store.PhoneNumberOrders.Claim(ctx, now, now.Add(orderRetry), orderSweepBatch)
+	orders, err := s.store.PhoneNumberOrders.Claim(ctx, orderRetry, orderSweepBatch)
 	if err != nil {
 		return 0, err
 	}
