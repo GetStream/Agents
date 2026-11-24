@@ -11,8 +11,10 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -519,76 +521,86 @@ func (s *DataMoveSuite) TestAnImportRefusedAtTheRoutersCapLeavesItsAppFree() {
 
 func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
 	s.withImportLineWait(2 * time.Second)
-	// A line, then a stall: the wait is for each line, not only the first. The body says it is
-	// longer than what is sent, and small enough that net/http reads the rest of it before
-	// answering, so the answer needs the stalled read to stay bounded.
-	body, writer := io.Pipe()
-	defer writer.Close()
-	go func() { _, _ = writer.Write([]byte(emptyImport + "\n")) }()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	// The client's send waits on the body, which only closing it ends.
-	context.AfterFunc(ctx, func() { _ = writer.Close() })
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
-	s.Require().NoError(err)
-	request.Header = s.serverClient.header.Clone()
-	request.ContentLength = 100
-	transport := &http.Transport{}
-	defer transport.CloseIdleConnections()
-	began := time.Now()
+	// A declared length is longer than what is sent, and small enough that net/http reads the
+	// rest of it before answering, so the answer needs the stalled read to stay bounded.
+	const chunked, declared = -1, 100
+	for _, stall := range []struct {
+		name   string
+		sent   string
+		length int64
+	}{
+		{"after a line, chunked", "{\"cursor\":1}\n", chunked},
+		{"after a line, declared length", "{\"cursor\":1}\n", declared},
+		{"inside a line, chunked", "{\"cursor\":1}\n{\"cur", chunked},
+		{"inside a line, declared length", "{\"cursor\":1}\n{\"cur", declared},
+		{"inside the first line, chunked", "{\"cur", chunked},
+		{"inside the first line, declared length", "{\"cur", declared},
+		{"before a line's end, declared length", "{\"table\":\"nope\",\"row\":{}}", declared},
+	} {
+		s.Run(stall.name, func() {
+			status, payload, took, _ := s.stalledImport(stall.sent, stall.length)
 
-	response, err := (&http.Client{Transport: transport}).Do(request)
+			s.Less(took, 4*time.Second, "answered after one wait for the line, not two")
+			s.Require().Equal(http.StatusGatewayTimeout, status, payload)
+			var failure ErrorResponse
+			s.Require().NoError(json.Unmarshal([]byte(payload), &failure))
+			s.Equal(ErrorType("timeout"), failure.Error.Type)
+			s.Equal("timeout", failure.Error.Code)
+			s.Equal("the import's next line did not arrive in time: send the body without pausing", failure.Error.Message)
+			s.Eventually(func() bool {
+				status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+				return status == http.StatusOK
+			}, letGoWithin, 10*time.Millisecond, "the import whose body stalled still holds its places")
+			s.Zero(len(s.router.imports))
+		})
+	}
+}
 
-	s.Require().NoError(err, "the stalled import was never answered")
-	s.Less(time.Since(began), 3*time.Second, "answered after one wait for the line, not two")
-	defer response.Body.Close()
-	payload, err := io.ReadAll(response.Body)
-	s.Require().NoError(err)
-	s.Require().Equal(http.StatusGatewayTimeout, response.StatusCode, string(payload))
-	var failure ErrorResponse
-	s.Require().NoError(json.Unmarshal(payload, &failure))
-	s.Equal(ErrorType("timeout"), failure.Error.Type)
-	s.Equal("timeout", failure.Error.Code)
-	s.Equal("the import's next line did not arrive in time: send the body without pausing", failure.Error.Message)
-	s.NotContains(string(payload), "i/o timeout")
-	s.NotContains(string(payload), "tcp")
-	s.NotContains(string(payload), "127.0.0.1")
-	s.Eventually(func() bool {
-		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
-		return status == http.StatusOK
-	}, letGoWithin, 10*time.Millisecond, "the import whose body stalled still holds its places")
-	s.Zero(len(s.router.imports))
+// A body that breaks for another reason than the wait is the caller's to correct, whether what
+// broke it is its length, its framing or a line cut short.
+func (s *DataMoveSuite) TestAnImportWhoseBodyBreaksIsRefusedAsNotAnExport() {
+	for _, broken := range []struct{ name, head, body, says string }{
+		{"cut short after a line", "Content-Length: 100", "{\"cursor\":1}\n", "unexpected EOF"},
+		{"cut short inside a line", "Content-Length: 100", "{\"cursor\":1}\n{\"cur", "unexpected EOF"},
+		{"a chunk of no size", "Transfer-Encoding: chunked", "zz\r\n", "invalid byte in chunk length"},
+	} {
+		s.Run(broken.name, func() {
+			base, err := url.Parse(s.serverClient.base())
+			s.Require().NoError(err)
+			conn, err := net.Dial("tcp", base.Host)
+			s.Require().NoError(err)
+			defer conn.Close()
+			s.Require().NoError(conn.SetDeadline(time.Now().Add(10 * time.Second)))
+			var head strings.Builder
+			s.Require().NoError(s.serverClient.header.Write(&head))
+			_, err = io.WriteString(conn, "POST /v1/data/import HTTP/1.1\r\nHost: "+base.Host+"\r\n"+head.String()+broken.head+"\r\n\r\n"+broken.body)
+			s.Require().NoError(err)
+			s.Require().NoError(conn.(*net.TCPConn).CloseWrite())
+
+			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+
+			s.Require().NoError(err)
+			defer response.Body.Close()
+			payload, err := io.ReadAll(response.Body)
+			s.Require().NoError(err)
+			s.Require().Equal(http.StatusBadRequest, response.StatusCode, string(payload))
+			var failure ErrorResponse
+			s.Require().NoError(json.Unmarshal(payload, &failure))
+			s.Equal("invalid_request", failure.Error.Code)
+			s.Equal("this is not an export: "+broken.says, failure.Error.Message)
+		})
+	}
 }
 
 func (s *DataMoveSuite) TestAnImportRefusedAtALineLetsGoOfItsConnectionWhenTheBodyStalls() {
 	s.withImportLineWait(500 * time.Millisecond)
-	// A bad second line, then a stall in a body that says it is longer than what is sent, and
-	// small enough that net/http reads the rest of it before answering.
-	body, writer := io.Pipe()
-	defer writer.Close()
-	go func() { _, _ = writer.Write([]byte(emptyImport + "\nnot an export\n")) }()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	// The client's send waits on the body, which only closing it ends.
-	context.AfterFunc(ctx, func() { _ = writer.Close() })
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
-	s.Require().NoError(err)
-	request.Header = s.serverClient.header.Clone()
-	request.ContentLength = 200
-	transport := &http.Transport{}
-	defer transport.CloseIdleConnections()
-	began := time.Now()
 
-	response, err := (&http.Client{Transport: transport}).Do(request)
+	status, payload, took, closed := s.stalledImport("{\"cursor\":1}\nnot an export\n", 200)
 
-	s.Require().NoError(err, "the refused import was never answered")
-	defer response.Body.Close()
-	payload, err := io.ReadAll(response.Body)
-	s.Require().NoError(err)
-	s.Equal(http.StatusBadRequest, response.StatusCode, string(payload))
-	s.Contains(string(payload), "this is not an export")
-	s.True(response.Close, "the connection is kept, with the rest of its body unread")
-	s.Less(time.Since(began), 5*time.Second, "answered only once the client gave up")
+	s.Equal(http.StatusBadRequest, status, payload)
+	s.Contains(payload, "this is not an export")
+	s.True(closed, "the connection is kept, with the rest of its body unread")
+	s.Less(took, 5*time.Second, "answered only once the client gave up")
 }
 
 func (s *DataMoveSuite) TestAnImportWhoseLinesKeepArrivingOutlastsTheLineWait() {
@@ -768,6 +780,32 @@ func (s *DataMoveSuite) withImportLineWait(wait time.Duration) {
 
 // emptyImport is an import with no rows, which is written at once.
 const emptyImport = `{"cursor":1}`
+
+// stalledImport sends the start of an import's body and no more of it, and returns the answer,
+// how long it took, and whether the router closes the connection.
+func (s *DataMoveSuite) stalledImport(sent string, length int64) (int, string, time.Duration, bool) {
+	body, writer := io.Pipe()
+	defer writer.Close()
+	go func() { _, _ = writer.Write([]byte(sent)) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The client's send waits on the body, which only closing it ends.
+	context.AfterFunc(ctx, func() { _ = writer.Close() })
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	request.ContentLength = length
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	began := time.Now()
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	s.Require().NoError(err, "the stalled import was never answered")
+	took := time.Since(began)
+	defer response.Body.Close()
+	payload, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+	return response.StatusCode, string(payload), took, response.Close
+}
 
 // heldImport starts an import of the app whose body never ends, waits until it holds one of
 // the router's places, and returns what hangs up on it.

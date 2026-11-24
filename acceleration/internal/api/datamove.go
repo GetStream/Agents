@@ -78,7 +78,7 @@ var errExportsBusy = unavailable("this router is running as many exports as it t
 var errImportRunning = APIError{Type: ErrorTypeConflict, Code: codeImportRunning,
 	Message: "an import of this app is already running: wait for it to finish"}
 
-// errImportStalled ends an import whose client sent no line for importLineWait.
+// errImportStalled ends an import whose client took longer than importLineWait to send a line.
 var errImportStalled = newAPIError(ErrorTypeTimeout, "the import's next line did not arrive in time: send the body without pausing")
 
 // errImportsBusy refuses an import while maxImports are running on this router.
@@ -257,7 +257,9 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
 			return
 		}
-		if !scanner.Scan() {
+		// A read that failed leaves what came before it as a last token, which is no line. The
+		// deadline stays then: passed, it ends net/http's read of the rest of the body at once.
+		if !scanner.Scan() || scanner.Err() != nil {
 			break
 		}
 		// The deadline is for the client's next line, not for writing this one: left on the

@@ -84,6 +84,11 @@ def _parse_response(
 
         return response_503
 
+    if response.status_code == 504:
+        response_504 = ErrorResponse.from_dict(response.json())
+
+        return response_504
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -121,7 +126,7 @@ def sync_detailed(
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
-    import ends when a line has taken a minute to arrive.
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
@@ -168,7 +173,7 @@ def sync(
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
-    import ends when a line has taken a minute to arrive.
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
@@ -210,7 +215,7 @@ async def asyncio_detailed(
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
-    import ends when a line has taken a minute to arrive.
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
@@ -255,7 +260,7 @@ async def asyncio(
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
-    import ends when a line has taken a minute to arrive.
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
