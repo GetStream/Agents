@@ -220,6 +220,36 @@ func (s *ExtractSuite) TestAReadStoppedAtTheDeadlineKillsItsWorkerBeforeClosingI
 	}
 }
 
+// A deadline that passes after the document opened kills the worker while the read closes it.
+// Run under -race, a close that does not wait for the kill is a data race in PDFium's
+// instance. Such a close can also leave the pool's lock held, so the next open never returns:
+// each open and close gets half a minute, on an extractor of the test's own.
+func (s *ExtractSuite) TestClosingAReadWaitsForAKillThatBeganAfterTheDocumentOpened() {
+	extractor := New(Options{})
+	data := s.fixture("manual.pdf")
+	for range 200 {
+		closed := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			session, err := extractor.open(ctx, data)
+			if err == nil {
+				cancel()
+				session.close()
+			}
+			closed <- err
+		}()
+
+		select {
+		case err := <-closed:
+			s.Require().NoError(err)
+		case <-time.After(30 * time.Second):
+			s.FailNow("an open has waited half a minute for a worker")
+		}
+	}
+	s.Require().NoError(extractor.Close())
+}
+
 // A deadline that passes while a page's objects are walked kills the worker between two of
 // its calls. The read then fails on the next call, whichever of the walk's calls it is.
 func (s *ExtractSuite) TestAWorkerKilledWhileAPageIsWalkedFailsTheRead() {
