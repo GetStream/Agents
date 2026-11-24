@@ -687,7 +687,6 @@ func (s *stubTTS) Interrupt() error {
 		for id := range s.active {
 			active = append(active, id)
 			delete(s.active, id)
-			s.settled[id] = struct{}{}
 		}
 	}
 	s.mu.Unlock()
@@ -7003,6 +7002,47 @@ func (s *AgentSuite) TestTwoTurnsOnOneReadingOfTheClockGetTwoIDs() {
 		// the delegated answer comes back finds it: the turns are still told apart.
 		first, second := turnStamp(), turnStamp()
 		s.NotEqual(first, second)
+	})
+}
+
+func (s *AgentSuite) TestTurnsStampedAtOnceGetAnIDEach() {
+	s.onFakeClock(func() {
+		// The cadence, the voice and the presence tick each start turns on goroutines of their
+		// own, so two can take a stamp at the same moment.
+		const takers, each = 8, 500
+		stamps := make([][]string, takers)
+		var wg sync.WaitGroup
+		for taker := range takers {
+			wg.Go(func() {
+				for range each {
+					stamps[taker] = append(stamps[taker], turnStamp())
+				}
+			})
+		}
+		wg.Wait()
+		unique := map[string]struct{}{}
+		for _, taken := range stamps {
+			for _, stamp := range taken {
+				unique[stamp] = struct{}{}
+			}
+		}
+		s.Len(unique, takers*each)
+	})
+}
+
+func (s *AgentSuite) TestTwoLinesSaidAtOnceAreTwoTurns() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.Require().NoError(s.agent.Say(s.ctx, "Hello."))
+		s.Require().NoError(s.agent.Say(s.ctx, "Welcome back."))
+		s.eventually(func() bool { return countOf[Said](s.reported()) == 2 }, "a line was never said")
+		var turns []string
+		for _, event := range s.reported() {
+			if said, ok := event.(Said); ok {
+				turns = append(turns, said.TurnID)
+			}
+		}
+		s.NotEqual(turns[0], turns[1])
 	})
 }
 
