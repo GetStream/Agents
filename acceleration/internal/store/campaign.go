@@ -136,9 +136,7 @@ func (r *Campaigns) Insert(ctx context.Context, campaign *Campaign) error {
 
 	campaign.ID = newID()
 	campaign.CreatedAt = time.Now().UTC()
-	if campaign.Tags == nil {
-		campaign.Tags = map[string]string{}
-	}
+	campaign.Tags = orEmptyMap(campaign.Tags)
 
 	if _, err := r.store.global.NewInsert().Model(campaign).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create campaign: %w", err))
@@ -393,10 +391,7 @@ func (r *Campaigns) Launch(ctx context.Context, customerID, id string, launch La
 		state = Scheduled
 	}
 	// The column holds an empty list, never NULL, for a request that named no categories.
-	categories := launch.UsageCategories
-	if categories == nil {
-		categories = []string{}
-	}
+	categories := orEmpty(launch.UsageCategories)
 
 	var launched Campaign
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {

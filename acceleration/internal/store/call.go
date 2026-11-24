@@ -159,9 +159,7 @@ func (r *Calls) Start(ctx context.Context, call *Call) error {
 			call.FromNumber, call.ToNumber = placed[0].LocalNumber, placed[0].RemoteNumber
 		}
 	}
-	if call.Tags == nil {
-		call.Tags = map[string]string{}
-	}
+	call.Tags = orEmptyMap(call.Tags)
 
 	result, err := r.store.shard.NewInsert().Model(call).
 		On("CONFLICT (id) DO UPDATE").
