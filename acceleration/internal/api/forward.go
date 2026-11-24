@@ -95,6 +95,10 @@ func (s *Server) owningNode(r *http.Request) (string, bool) {
 // the request is about none, names no customer, or this node runs it. A request that names no
 // customer is answered here, where it is refused.
 func (s *Server) nodeFor(r *http.Request) (string, bool) {
+	customer, ok := CustomerFrom(r.Context())
+	if !ok {
+		return "", false
+	}
 	if cid, ok := approvalInPath(r.URL.Path); ok {
 		if s.sessions != nil {
 			if _, running := s.sessions.ByConversationWhere(cid, nil); running {
@@ -110,10 +114,6 @@ func (s *Server) nodeFor(r *http.Request) (string, bool) {
 		return address, true
 	}
 	id, ok := sessionInPath(r.URL.Path)
-	if !ok {
-		return "", false
-	}
-	customer, ok := CustomerFrom(r.Context())
 	if !ok {
 		return "", false
 	}
