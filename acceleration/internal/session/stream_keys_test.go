@@ -84,7 +84,13 @@ func (s *StreamKeysSuite) TestInAppModeTheAppIsTheCustomers() {
 	// The deployment's variables are no help to a customer whose own app refuses its keys.
 	refused := s.streamAnswering(http.StatusUnauthorized, `{"StatusCode":401,"code":2,"message":"api_key not valid"}`)
 
-	s.NoError(unkeptIn(refused, true))
+	unkept := unkeptIn(refused, true)
+
+	s.Require().ErrorIs(unkept, ErrAppStreamKeysRejected)
+	s.NotErrorIs(unkept, ErrStreamKeysRejected)
+	s.NotContains(unkept.Error(), "STREAM_API_KEY")
+	s.Contains(unkept.Error(), "incognito: true")
+	s.NotContains(unkept.Error(), "api_key not valid", "a caller answering with Error() tells only our words")
 	s.NoError(unkeptIn(streamapp.ErrNoIdentity, true))
 }
 
