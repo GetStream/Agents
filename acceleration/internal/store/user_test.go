@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 )
 
 // settleFor is how long an invalidation has to reach the other replica. Redis pushes it as
@@ -362,21 +363,34 @@ func (s *StoreSuite) TestAUserForgottenWhileAReplicaWritesThemIsRecordedAgainByI
 	s.True(found, "the replica that wrote the user is still answering from a stale cache")
 }
 
-// Whether a read right after the write is answered by this replica's own old copy of the key is
-// a race, so it is run many times over.
-func (s *StoreSuite) TestAUserAReplicaHasJustWrittenIsForgottenByIt() {
-	other := s.replicaUsers()
-	for range 100 {
-		app := s.freshApp()
-		s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
-		s.eraseUser(app, "guest-1")
-		other.Forget(s.ctx, app, "guest-1")
-		s.Require().Eventually(func() bool {
-			s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
-			_, found := s.userRow(app, "guest-1")
-			return found
-		}, settleFor, time.Millisecond)
+// slowCopy answers a read of this replica's own copy late, after an invalidation on its way.
+type slowCopy struct{ roundTrips }
+
+func (c *slowCopy) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	result := client.DoCache(ctx, cmd, ttl)
+	if result.IsCacheHit() {
+		time.Sleep(100 * time.Millisecond)
 	}
+	return result
+}
+
+// The replica holds a copy of the key from the guest's sighting, which must not answer its read
+// after the account's write: that read would not track the key.
+func (s *StoreSuite) TestAGuestAReplicaHasJustWrittenAsAnAccountIsForgottenByIt() {
+	writer, line := s.storeOnRedisLineHooked(func(redisLine) rueidishook.Hook { return &slowCopy{} })
+	app := s.freshApp()
+	s.Require().NoError(writer.Users.Seen(s.ctx, app, "u", UserKindGuest))
+	line.slowInvalidations(30 * time.Millisecond)
+	s.Require().NoError(writer.Users.Seen(s.ctx, app, "u", UserKindAuthenticated))
+
+	s.eraseUser(app, "u")
+	s.store.Users.Forget(s.ctx, app, "u")
+
+	s.Eventually(func() bool {
+		s.Require().NoError(writer.Users.Seen(s.ctx, app, "u", UserKindAuthenticated))
+		_, found := s.userRow(app, "u")
+		return found
+	}, settleFor, 10*time.Millisecond, "the replica that wrote the user is still answering from a stale cache")
 }
 
 func (s *StoreSuite) TestAnAnonymousCallerNamingNoKindIsNotRecorded() {
