@@ -211,8 +211,8 @@ Run `error` codes (`internal/scheduling/scheduler.go:105`):
 A failure is retried after 30 s, 2 min and 10 min (`DeliveryRetries`) only when the failure
 is not final; with several channels, it is final only when every channel's failure is.
 
-Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all but the
-last; it also finds the job queue's `Failed to forward scheduled tasks`, which is noise):
+Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all of them;
+it also finds the job queue's `Failed to forward scheduled tasks`, which is noise):
 
 | Line | Level | Where |
 | --- | --- | --- |

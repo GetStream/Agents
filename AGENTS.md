@@ -59,7 +59,8 @@ docker compose exec -T postgres psql -U postgres -f - < /tmp/pg16.sql
 saved, and changing it leaves the stored ones unreadable. The router refuses the old
 `ROUTER_AUTH_KEK`: rename it to `ROUTER_DEV_KEK` and keep its value.
 
-The router refuses to start without the KEK. compose runs it with `ROUTER_LIMITS_MODE=off` unless `.env` sets
+In the default `api_key` auth mode, or with connectors on, the router refuses to start without
+the KEK. compose runs it with `ROUTER_LIMITS_MODE=off` unless `.env` sets
 it, since a local organization has no credit; set `enforce` there to work on limits.
 
 Logs: `docker compose logs -f router`.

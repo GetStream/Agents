@@ -44,8 +44,8 @@ services:
       ROUTER_USAGE_TOKEN: ${USAGE_INGEST_TOKEN:-local-usage-token}
       # The Redis the usage service mirrors spend to, which spend limits read every second.
       ROUTER_USAGE_REDIS_URL: redis://redis:6379
-      # Seals the secrets the router holds; the router refuses to start without it. Any random
-      # string works. Make it once and keep it, since changing it leaves the stored ones
+      # Seals the secrets the router holds. The router refuses to start without it in the
+      # default api_key auth mode or with connectors on. Any random string works. Make it once and keep it, since changing it leaves the stored ones
       # unreadable:  echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
       ROUTER_DEV_KEK: "${ROUTER_DEV_KEK:-}"
       # Off: an organization starts with no credit in the usage service above, and a voice
