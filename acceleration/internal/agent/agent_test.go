@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -6980,6 +6981,24 @@ func (s *AgentSuite) answerToSilentVoice() {
 		return countOf[Responded](s.reported()) == 2 && !s.agent.generating
 	}, "the answer was never written")
 	s.Require().False(s.agent.harness.Pending())
+}
+
+func (s *AgentSuite) TestTwoTurnsOnOneReadingOfTheClockGetTwoIDs() {
+	s.onFakeClock(func() {
+		// A fake clock stands still while the test runs, as a follow-up started the moment
+		// the delegated answer comes back finds it: the turns are still told apart.
+		first, second := turnStamp(), turnStamp()
+		s.NotEqual(first, second)
+	})
+}
+
+func (s *AgentSuite) TestATurnIsStampedWithTheTime() {
+	before := time.Now().UnixNano()
+	stamp, err := strconv.ParseInt(turnStamp(), 10, 64)
+	after := time.Now().UnixNano()
+	s.Require().NoError(err)
+	s.GreaterOrEqual(stamp, before)
+	s.LessOrEqual(stamp, after)
 }
 
 func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {

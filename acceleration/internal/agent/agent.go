@@ -1354,7 +1354,7 @@ func (a *Agent) Say(ctx context.Context, text string) error {
 
 // sayFor says words as they are, for purpose: PurposeGreeting, or empty for any other line.
 func (a *Agent) sayFor(text, purpose string) error {
-	turnID := fmt.Sprintf("%s%d", sayPrefix, time.Now().UnixNano())
+	turnID := sayPrefix + turnStamp()
 
 	// A conversation in writing has no voice to say it with, so it is reported as said
 	// instead: what a caller would have heard is what a reader reads.
@@ -2359,9 +2359,24 @@ var requests = []string{
 	"could you", "can you", "may i have", "go ahead with your",
 }
 
-// turnStamp names a turn. The clock is enough: a conversation cannot produce two turns
-// in the same nanosecond.
-func turnStamp() string { return strconv.FormatInt(time.Now().UnixNano(), 10) }
+// lastStamp is the last stamp turnStamp handed out in this process.
+var lastStamp atomic.Int64
+
+// turnStamp names a turn: the time in nanoseconds, moved one past the last stamp when the
+// clock reads no later than it. The agent tells turns apart by their ids, and a clock can
+// read the same twice: a coarse one, or the fake clock of a test, which stands still until
+// every goroutine waits, so a follow-up there could take the id of the turn that handed
+// its work over and be taken for a reply already heard.
+func turnStamp() string {
+	now := time.Now().UnixNano()
+	for {
+		last := lastStamp.Load()
+		next := max(now, last+1)
+		if lastStamp.CompareAndSwap(last, next) {
+			return strconv.FormatInt(next, 10)
+		}
+	}
+}
 
 // respond asks the harness to reply to a turn.
 func (a *Agent) respond(participant stt.Participant, text string, listened heard, images []llm.ImagePart) error {
