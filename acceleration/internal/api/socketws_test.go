@@ -200,6 +200,22 @@ func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAServerSideField() {
 	}
 }
 
+// The router's credentials act as whoever a session names the agent, so neither createSession
+// nor the socket lets a device name another user, an agent id or a display name for it.
+func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAnotherAgentIdentity() {
+	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
+		s.Run("user_id/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, map[string]any{"user_id": "someone-else"}, errDeviceAgentUser)
+		})
+		s.Run("agent_id/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, map[string]any{"agent_id": "support"}, errDeviceAgentID)
+		})
+		s.Run("user_name/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, map[string]any{"user_name": "Your Bank"}, errDeviceAgentUserName)
+		})
+	}
+}
+
 // assertSocketRefuses checks a device's start frame is refused as its create was, and that
 // both say the field's own refusal rather than another field's.
 func (s *SocketSessionSuite) assertSocketRefuses(device *testClient, sent map[string]any, refusal APIError) {
