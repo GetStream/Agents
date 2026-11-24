@@ -1397,7 +1397,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			return
 		}
 		if err == nil && principal.AppID != "" {
-			guest := s.guest(r.Context(), principal)
+			guest := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
 			// The authenticator asked whether the app admits a KindGuest. One this router minted
 			// it took for an account, so that is asked here.
 			if guest && principal.Kind != auth.KindGuest && !s.guestAdmitted(r.Context(), principal.AppID) {
@@ -1440,17 +1440,9 @@ func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal a
 		"requests from this level of user"))
 }
 
-// guest reports whether the caller is a guest: by kind, or one this router minted, whose token
-// reads as an account's. A backend naming a guest is a backend.
-func (s *Server) guest(ctx context.Context, principal auth.Principal) bool {
-	if principal.ServerSide {
-		return false
-	}
-	return s.guestUser(ctx, principal.AppID, principal.UserID, principal.Kind)
-}
-
-// guestUser is guest for a user an end user's credential of that kind named. Only an id the
-// router could have minted is looked up. One whose row cannot be read is taken for a guest, so
+// guestUser reports whether a user a credential of that kind named is a guest: by kind, or one
+// this router minted, whose token reads as an account's. A backend naming a guest is a backend.
+// Only an id the router could have minted is looked up. One whose row cannot be read is taken for a guest, so
 // that a database that is down does not make an account of one; nothing but what a guest is not
 // given is lost to a user of the app's own whose id starts the same way.
 func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) bool {

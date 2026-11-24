@@ -268,7 +268,7 @@ func (s *MintedGuestsSuite) TestAnAppThatAdmitsGuestsServesThemWhileTheirRowCann
 
 func (s *MintedGuestsSuite) TestAMintedGuestIsServedWhileTheAppsSettingsCannotBeRead() {
 	guest := s.recordedGuest()
-	s.failQueries(`"app"."settings"`)
+	s.failQueries(`"ap"."settings"`)
 
 	s.Equal(http.StatusOK, s.lists(guest))
 }
@@ -280,6 +280,18 @@ func (s *MintedGuestsSuite) TestWhileNoRowCanBeReadABackendMintsAndClaimsGuests(
 	s.mintedGuest()
 	s.Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: guest.userID, UserId: s.utils.uuid()}, nil))
+}
+
+// The key says which levels its app takes sooner than the cached settings do.
+func (s *MintedGuestsSuite) TestAGuestByRoleIsAdmittedAsTheirKeySays() {
+	s.closedToGuests()
+	settings, err := s.configs.Apps.GetSettings(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Require().False(settings.GuestAllowed())
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE apps SET settings = '{}' WHERE id = ?", s.customerID())
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusOK, s.lists(s.data.createGuest()))
 }
 
 // behindProxy is a client of a second router, one behind a proxy that declares kinds, as the user.
