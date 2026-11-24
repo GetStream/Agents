@@ -115,7 +115,7 @@ func (s *ConnectorSealerSuite) TestProxyWithConnectorsOnRefusesToStartWithoutAKe
 	_, err := newSecretSealer(s.T().Context(), s.settings)
 	s.ErrorContains(err, "connectors.enabled needs a key encryption keyring")
 	s.NotContains(err.Error(), "stream.tenancy")
-	s.ErrorContains(err, "set ROUTER_DEV_KEK on a laptop or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key")
+	s.ErrorContains(err, "set ROUTER_DEV_KEK on a laptop or in CI (once, to any random string such as `openssl rand -hex 32`, kept for good; compose reads it from .env), or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key")
 }
 
 func (s *ConnectorSealerSuite) TestProxyWithConnectorsOnBuildsTheSealerFromTheKeyring() {
@@ -704,7 +704,7 @@ func (s *ConnectorSealerSuite) TestAnAPIKeyStartWithoutTheKeyringUnwrapsNothing(
 
 	_, err := newAuthenticator(s.T().Context(), s.settings, configs, nil, slog.New(slog.DiscardHandler))
 	s.EqualError(err, "auth.mode=api_key needs a key encryption keyring to seal the secrets it holds: "+
-		"set ROUTER_DEV_KEK on a laptop or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
+		"set ROUTER_DEV_KEK on a laptop or in CI (once, to any random string such as `openssl rand -hex 32`, kept for good; compose reads it from .env), or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
 		"(ROUTER_AUTH_KMS_KEY) on a hosted router")
 	s.Equal(int64(0), fake.decrypts.Load())
 }
@@ -716,7 +716,7 @@ func (s *ConnectorSealerSuite) TestAnAPIKeyStartWithoutAKeyIsRefusedAsBefore() {
 	s.Require().NoError(err)
 	_, err = newAuthenticator(s.T().Context(), s.settings, configs, secrets, slog.New(slog.DiscardHandler))
 	s.EqualError(err, "auth.mode=api_key needs a key encryption keyring to seal the secrets it holds: "+
-		"set ROUTER_DEV_KEK on a laptop or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
+		"set ROUTER_DEV_KEK on a laptop or in CI (once, to any random string such as `openssl rand -hex 32`, kept for good; compose reads it from .env), or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
 		"(ROUTER_AUTH_KMS_KEY) on a hosted router")
 }
 

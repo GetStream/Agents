@@ -528,15 +528,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}
 
 	opened := false
-	// A new conversation is kept in Stream Chat by default, but a deployment without Chat
-	// credentials still holds it: what was said is worth keeping, not worth refusing the
-	// conversation for. Resuming or forking one needs the channel, so those still fail.
-	if spec.PersistConversation && spec.ConversationID == "" && spec.Recall == nil {
-		if _, err := m.Conversations(); err != nil {
-			m.logger.Warn("not keeping the conversation in Stream Chat", "error", err)
-			spec.PersistConversation = false
-		}
-	}
 	if cid, by, handed := m.handedOut(ctx, spec, stream); handed {
 		spec.ConversationID, spec.Dispatched, spec.HandedOutBy = cid, true, by
 		ctx = persistent.RouterOpensDispatched(ctx, cid)
@@ -573,6 +564,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		conv, previous, truncated, err = open(persistent.WithSession(reading, spec.ID), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
 		if errors.Is(err, streamapp.ErrReadOnly) {
 			return nil, ErrConversationReadOnly
+		}
+		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
+			return nil, stack.Wrap(unkept)
 		}
 		if err != nil {
 			return nil, stack.Wrap(err)
@@ -628,6 +622,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		var truncated bool
 		previous, truncated, err = service.ContextForCaller(reading, spec.CustomerID, spec.AgentID, spec.ConversationID, spec.Caller.UserID, spec.UserID)
+		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
+			return nil, stack.Wrap(unkept)
+		}
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}
@@ -2165,9 +2162,9 @@ func (m *Manager) guardrail(ctx context.Context, spec Spec, stream streamapp.Ide
 	})
 }
 
-// stream is the Stream app a new session acts in. A deployment with no Stream app still
-// holds a text conversation, so having none is not an error here: what needs one fails
-// where it needs it.
+// stream is the Stream app a new session acts in. Having none is not an error here: an
+// incognito session needs none, and what does need one, such as keeping the conversation
+// (unkeptIn), fails where it needs it.
 //
 // newCall is a call named after an id generated for this session, which no line can have been
 // made for yet, so no shard is asked about its lines.
