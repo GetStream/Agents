@@ -710,6 +710,10 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### The Go SDK's `CustomConnectorRequest.Endpoint` is a pointer
+
+`POST /v1/agents/connectors` now takes either an MCP `endpoint` or an `http` block with a `base_url` and its tools, so `endpoint` is optional and the generated Go type `CustomConnectorRequest.Endpoint` is now `*string`. Set it with a pointer (for example `Endpoint: &url`); a caller that set a plain string no longer compiles. The other SDKs are unchanged for existing callers (AI-3676).
+
 ### The Go SDK reads no items for a turn with no id
 
 `AgentResponse.Items`, on the handle `Responses.Create` returns, fails with `client.ErrUnnamedTurn` when the turn has no id: the router names none for an incognito session, a speech-to-speech session or the retry of a `request_id` already taken. It used to read every turn in the session instead, passed off as this turn's; a caller that relied on that now gets the error, and reads `Session.Responses.Items` for the whole session or follows `Session.Events` (AI-3571).
