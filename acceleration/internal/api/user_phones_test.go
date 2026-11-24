@@ -233,6 +233,15 @@ func (s *UserPhonesSuite) TestANumberAnotherUserHoldsIsAConflict() {
 	s.NotContains(string(payload), s.user)
 }
 
+// A number is never linked to a user id Stream keeps for itself.
+func (s *UserPhonesSuite) TestANumberIsNotLinkedToAReservedUserID() {
+	status, payload := s.serverClient.call(http.MethodPut, "/v1/agents/users/!anon", `{"phone": "`+s.person+`"}`)
+
+	s.Equal(http.StatusBadRequest, status, string(payload))
+	s.Contains(string(payload), "user_id may not start with !")
+	s.Empty(s.links())
+}
+
 // Catches a null that is refused or keeps the link, and a number still held after it.
 func (s *UserPhonesSuite) TestNullUnlinksAndFreesTheNumber() {
 	s.Require().Equal(http.StatusOK, s.put(s.user, `{"phone": "`+s.person+`"}`, nil))

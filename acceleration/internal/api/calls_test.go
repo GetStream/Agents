@@ -109,6 +109,35 @@ func (s *CallsSuite) TestAJoinTokenIsMintedForTheUserTheCallerAsksFor() {
 	s.Equal("thierry", claimed["user_id"])
 }
 
+// A user id Stream keeps for itself is never signed for, even in the customer's own app.
+func (s *CallsSuite) TestAJoinTokenIsNotMintedForAReservedUserID() {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	call := s.started(store.Call{StreamAppPK: id})
+
+	status, failure := s.serverClient.failure(http.MethodPost,
+		"/v1/agents/calls/"+call.ID+"/token", map[string]any{"user_id": "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
+// Neither the reader nor the agent a chat token is for may be a user id Stream keeps for itself.
+func (s *CallsSuite) TestAChatTokenIsNotMintedForAReservedUserID() {
+	for field, sent := range map[string]map[string]any{
+		"user_id":  {"agent_id": "agent-" + s.utils.uuid(), "user_id": "!anon"},
+		"agent_id": {"agent_id": "!anon"},
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/chat-token", sent)
+
+		s.Equal(http.StatusBadRequest, status, field)
+		s.Contains(failure, field+" may not start with !", field)
+		_, made := s.chat.User("!anon")
+		s.False(made, "no reserved user is made")
+	}
+}
+
 func (s *CallsSuite) TestAJoinTokenInASharedAppIsMintedOnlyForAUserTheCustomerHolds() {
 	// A Stream token is good for everything its user may do in the app, not for one call,
 	// and in the deployment's app every customer's users are side by side.

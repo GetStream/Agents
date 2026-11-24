@@ -162,6 +162,9 @@ func (s *Server) putUser(ctx context.Context, request *putUserRequest) (*putUser
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	if failure, refused := refuseReservedUserID("user_id", request.UserID); refused {
+		return nil, failure
+	}
 	if s.store == nil {
 		return nil, errNoUserLinks
 	}
