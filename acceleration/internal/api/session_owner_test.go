@@ -110,6 +110,53 @@ func (s *SessionOwnershipSuite) TestOneUsersConversationIsOutOfAnothersReach() {
 	s.assertDoesNotReach(s.data.createUser(), opened.Id)
 }
 
+// A user reopening their own conversation, which a session nobody is watching still holds,
+// carries on in a new session and ends the one left behind.
+func (s *SessionOwnershipSuite) TestReopeningYourOwnConversationEndsTheSessionNobodyWatches() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+
+	reopen := textSession(nil)
+	reopen.LegacyConversationId = opened.ConversationId
+	reopened := alice.createSession(reopen)
+
+	s.Equal(*opened.ConversationId, value(reopened.ConversationId))
+	s.False(s.manager.Running(s.customerID(), opened.Id), "the session left behind is ended")
+	s.True(s.manager.Running(s.customerID(), reopened.Id))
+}
+
+// Another user naming a conversation that is not theirs is told it is open, as a watched
+// one is answered, and the session holding it carries on, unwatched or not.
+func (s *SessionOwnershipSuite) TestAnotherUsersReopenLeavesTheSessionHoldingTheConversationRunning() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+
+	reopen := textSession(nil)
+	reopen.LegacyConversationId = opened.ConversationId
+	status, message := s.data.createUser().failure(http.MethodPost, "/v1/agents/sessions", reopen)
+
+	s.Equal(http.StatusConflict, status, message)
+	s.True(s.manager.Running(s.customerID(), opened.Id), "alice's session is still running")
+	s.assertReaches(alice, opened.Id)
+}
+
+// A caller only claiming the name of the user a backend opened a conversation for does not
+// reach that session, so it is told the conversation is open and the session carries on.
+func (s *SessionOwnershipSuite) TestClaimingTheNameABackendOpenedAConversationForLeavesItsSessionRunning() {
+	alice := s.data.createUser()
+	opened := s.serverClient.actingFor(alice).createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+
+	reopen := textSession(nil)
+	reopen.LegacyConversationId = opened.ConversationId
+	status, message := s.data.claiming(alice.userID).failure(http.MethodPost, "/v1/agents/sessions", reopen)
+
+	s.Equal(http.StatusConflict, status, message)
+	s.True(s.manager.Running(s.customerID(), opened.Id), "the backend's session is still running")
+}
+
 func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenReachesNothing() {
 	// A user id is only worth what proved it. An anonymous caller may name itself
 	// anything, so if the name were the whole of the identity, typing somebody else's

@@ -969,6 +969,9 @@ func Shared(custom map[string]any) bool {
 	return custom["support_access"] == "members"
 }
 
+// Shared reports whether the page is of a conversation open to every member of it (Shared).
+func (p Page) Shared() bool { return p.shared }
+
 // RefusedRead is a conversation the caller may not read, as against one that could not be
 // read: a store or Stream failure is not a refusal. Its text is the caller's to see.
 type RefusedRead string

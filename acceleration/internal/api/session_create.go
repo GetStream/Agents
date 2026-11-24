@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
@@ -58,7 +59,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
 	created, err := s.sessions.Create(ctx, spec)
-	if errors.Is(err, session.ErrSessionExists) {
+	if errors.Is(err, session.ErrSessionExists) || errors.Is(err, conversation.ErrAlreadyOpen) {
 		return nil, conflict(err.Error())
 	}
 	if errors.Is(err, session.ErrNoAgentCallType) {
@@ -308,7 +309,7 @@ func (s *Server) registerSessionCreate(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The agent is in the call"},
-			"409": errorResponse("A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered)"),
+			"409": errorResponse("A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered)"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.createSession)

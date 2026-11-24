@@ -550,7 +550,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// no session that holds it.
 		if spec.ConversationID != "" && persistent.Openable(ctx, spec.ConversationID) {
 			m.awaitRetiring(ctx, spec.CustomerID, spec.ConversationID)
-			m.takeOver(spec.CustomerID, spec.ConversationID, spec.Thread)
+			m.takeOver(ctx, service, OwnerOf(spec), spec.ConversationID, spec.Thread)
 		}
 		var truncated bool
 		open := service.OpenInApp
@@ -1295,18 +1295,33 @@ func (m *Manager) awaitRetiring(ctx context.Context, customer, cid string) {
 
 // takeOver ends the session holding the persistent conversation cid when nobody is
 // watching it, so reopening the conversation does not wait out that session's grace: the
-// client reopening it is most likely the one that stopped watching, after a crash. Only the
-// Router opening a thread channel (thread) takes over a session held on one.
-func (m *Manager) takeOver(customer, cid string, thread bool) {
+// client reopening it is most likely the one that stopped watching, after a crash. It runs
+// before the conversation's own check of who may open it, so it ends only a session owner
+// reaches, or one in a conversation shared with owner (sharedWith). Only the Router opening a
+// thread channel (thread) takes over a session held on one.
+func (m *Manager) takeOver(ctx context.Context, service *persistent.Service, owner Owner, cid string, thread bool) {
 	m.mu.Lock()
-	var left []*Session
-	for key, found := range m.sessions {
-		if found.spec.CustomerID == customer && found.spec.Thread == thread && found.unwatchedFor(cid) {
-			left = append(left, found)
-			delete(m.sessions, key)
+	var held []*Session
+	for _, found := range m.sessions {
+		if found.spec.CustomerID == owner.CustomerID && found.spec.Thread == thread && found.unwatchedFor(cid) {
+			held = append(held, found)
 		}
 	}
 	m.mu.Unlock()
+
+	var left []*Session
+	for _, found := range held {
+		if !owner.Reaches(OwnerOf(found.spec)) && !sharedWith(ctx, service, owner, found.spec.AgentID, cid) {
+			continue
+		}
+		// Asked again: the conversation's read let go of the lock, and somebody may watch it now.
+		m.mu.Lock()
+		if m.sessions[found.Key()] == found && found.unwatchedFor(cid) {
+			left = append(left, found)
+			delete(m.sessions, found.Key())
+		}
+		m.mu.Unlock()
+	}
 
 	for _, found := range left {
 		m.release(found)
@@ -1314,6 +1329,13 @@ func (m *Manager) takeOver(customer, cid string, thread bool) {
 			"session", found.id, "conversation", cid)
 		found.abandon()
 	}
+}
+
+// sharedWith reports whether the conversation cid is shared with owner: open to every member
+// of it, as the conversation's own read of it for owner says, owner being one of them.
+func sharedWith(ctx context.Context, service *persistent.Service, owner Owner, agentID, cid string) bool {
+	page, err := service.HistoryForCaller(ctx, owner.CustomerID, agentID, cid, "", owner.UserID)
+	return err == nil && page.Shared()
 }
 
 // sameSeat reports whether two specs put the same agent in the same call. A text session
