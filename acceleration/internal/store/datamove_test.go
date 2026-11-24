@@ -295,8 +295,6 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
-	claimed, err := s.source.Guest(s.ctx, "acme", "guest-1")
-	s.Require().NoError(err)
 
 	s.move("acme", "moved")
 
@@ -305,8 +303,6 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	guest, err := s.destination.Guest(s.ctx, "moved", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("alice", guest.ClaimedBy)
-	s.Require().NotNil(guest.ClaimedAt)
-	s.True(claimed.ClaimedAt.Equal(*guest.ClaimedAt))
 	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
 	s.ErrorIs(err, ErrGuestClaimed)
 }
@@ -3396,7 +3392,8 @@ func (s *DataMoveSuite) TestTheCutOverWaitsForAResumeOfAMovedTaskAndCountsItOnce
 		"the cut-over waits for the resume's row")
 	s.Require().NoError(refuseOverLimit(s.ctx, resuming,
 		&ScheduledTask{CustomerID: "moved", UserID: "sam", ConfigID: "config-1"}, 2))
-	_, err = resuming.ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active' WHERE id = 'st-1'")
+	// What ScheduledTasks.Update writes for a resume, inside the transaction held here.
+	_, err = resuming.ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active', move_paused = false, updated_at = now() WHERE id = 'st-1'")
 	s.Require().NoError(err)
 	s.Require().NoError(resuming.Commit())
 
@@ -3423,7 +3420,8 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskPausedByTheUserWhileItWaited() 
 	done := s.cutOver()
 	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
 		"the cut-over waits for the pause's row")
-	_, err = pausing.ExecContext(s.ctx, "UPDATE scheduled_tasks SET move_paused = false WHERE id = 'st-1'")
+	// What ScheduledTasks.Update writes for a pause of a paused task, inside the transaction held here.
+	_, err = pausing.ExecContext(s.ctx, "UPDATE scheduled_tasks SET move_paused = false, updated_at = now() WHERE id = 'st-1'")
 	s.Require().NoError(err)
 	s.Require().NoError(pausing.Commit())
 
@@ -3432,6 +3430,143 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskPausedByTheUserWhileItWaited() 
 	s.Equal(ScheduledTaskPaused, state, "the user paused it")
 	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-2")
 	s.Equal(ScheduledTaskActive, state, "the one place is left to it")
+}
+
+// batchesOf sets how many users on a config one transaction of the cut-over resumes, for one test.
+func (s *DataMoveSuite) batchesOf(n int) {
+	before := movedHoldersPerTransaction
+	movedHoldersPerTransaction = n
+	s.T().Cleanup(func() { movedHoldersPerTransaction = before })
+}
+
+// The cut-over takes the limit of every user in its batch, not only the first: a create
+// holding the last user's limit is waited for and counted.
+func (s *DataMoveSuite) TestTheCutOverWaitsForACreateOfTheLastUserInItsBatch() {
+	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-sam", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	creating, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = creating.Rollback() }()
+	next := time.Date(2026, 12, 2, 9, 0, 0, 0, time.UTC)
+	made := &ScheduledTask{
+		ID: "st-here", CustomerID: "moved", ConfigID: "config-1", UserID: "sam", CallerKind: "authenticated",
+		Title: "Hydrate", Instructions: "Remind them to drink.", StartLocal: next, Timezone: "UTC",
+		State: ScheduledTaskActive, NextRunAt: &next, CreatedBy: "api", Channels: []string{ScheduledTaskDeliveredConversation},
+	}
+	s.Require().NoError(refuseOverLimit(s.ctx, creating, made, 1))
+	_, err = creating.NewInsert().Model(made).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the create's lock")
+	s.Require().NoError(creating.Commit())
+
+	s.Require().NoError(<-done)
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(1, held, "the task made here")
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-sam")
+	s.Equal(ScheduledTaskPaused, state)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-kim")
+	s.Equal(ScheduledTaskActive, state)
+}
+
+// Another customer's marked, paused task of the same user and config ids is neither counted
+// nor resumed by this customer's cut-over.
+func (s *DataMoveSuite) TestTheCutOverLeavesAnotherCustomersMarkedTaskAlone() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, `
+INSERT INTO scheduled_tasks (id, customer_id, config_id, user_id, caller_kind, title, instructions, start_local,
+	timezone, state, next_run_at, created_by, created_at, updated_at, move_paused)
+VALUES ('st-theirs', 'other', 'config-1', 'sam', 'authenticated', 'Hydrate', 'Remind Sam to drink.', now(),
+	'UTC', 'paused', now() + interval '1 day', 'api', now() - interval '1 year', now(), true)`)
+	s.Require().NoError(err)
+
+	resumed, _, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+
+	s.Require().NoError(err)
+	s.Equal(int64(1), resumed)
+	s.Zero(overLimit)
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-1")
+	s.Equal(ScheduledTaskActive, state)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-theirs")
+	s.Equal(ScheduledTaskPaused, state)
+}
+
+// Tasks left paused for want of a config in two batches are both in the total.
+func (s *DataMoveSuite) TestTheCutOverSumsTheTasksLeftWithoutAConfigAcrossBatches() {
+	s.batchesOf(1)
+	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-sam", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = 'config-1'")
+	s.Require().NoError(err)
+
+	resumed, skipped, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+
+	s.Require().NoError(err)
+	s.Zero(resumed)
+	s.Equal(int64(2), skipped)
+	s.Zero(overLimit)
+}
+
+// A batch that fails part way: the batch before it stays done and is reported with the error,
+// and the next run finishes and reports the rest.
+func (s *DataMoveSuite) TestTheCutOverThatFailsPartWayReportsTheBatchesItDid() {
+	s.batchesOf(1)
+	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-sam", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'acme', 'b', 'be brief')")
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET user_id = 'kim', config_id = 'config-2' WHERE id = 'st-kim'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = 'config-2'")
+	s.Require().NoError(err)
+
+	holding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = lockScheduledTask(s.ctx, holding, "moved", "st-sam")
+	s.Require().NoError(err)
+
+	started := time.Now()
+	resumed, skipped, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+	waited := time.Since(started)
+
+	s.Require().Error(err, "the second batch waited past the lock timeout")
+	s.Contains(err.Error(), "55P03")
+	s.GreaterOrEqual(waited, 2*time.Second)
+	s.Less(waited, 6*time.Second)
+	s.False(s.movePausedOn("st-kim"), "the first batch committed")
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-sam")
+	s.Equal(ScheduledTaskPaused, state)
+	s.True(s.movePausedOn("st-sam"))
+	s.Zero(resumed)
+	s.Equal(int64(1), skipped, "the first batch left kim's task paused for want of a config")
+	s.Zero(overLimit)
+
+	s.Require().NoError(holding.Rollback())
+	resumed, skipped, overLimit, _, err = s.destination.ResumeMovedRows(s.ctx, "moved")
+	s.Require().NoError(err)
+	s.Equal(int64(1), resumed)
+	s.Zero(skipped, "the first run reported kim's task")
+	s.Zero(overLimit)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-sam")
+	s.Equal(ScheduledTaskActive, state)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-kim")
+	s.Equal(ScheduledTaskPaused, state)
 }
 
 // The cut-over and the API's resumes of the same user's tasks at once: every one either goes

@@ -299,7 +299,7 @@ func (s *StoreSuite) TestACampaignHoldsAtMostAHundredThousandContacts() {
 	campaign := s.draftCampaign(newID())
 	// Replica mode skips the row triggers (the data change capture and the campaign foreign
 	// key) for these setup rows only, which is most of what 99,999 rows cost: on a busy runner
-	// the insert outlasted the driver's 10s read timeout. AddContacts below runs with them.
+	// the insert outlasted the driver's 10s read timeout. InsertMany below runs with them.
 	err := s.store.GlobalDB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL session_replication_role = replica"); err != nil {
 			return err

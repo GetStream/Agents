@@ -15,8 +15,7 @@ import (
 )
 
 // What a change was made to (AuditEntry.ResourceType). Configuration, all of it: what an
-// agent does while it runs is traffic and is kept elsewhere
-// (20261008120000_audit_log.sql).
+// agent does while it runs is traffic and is kept elsewhere.
 const (
 	AuditAgentConfig  = "agent_config"
 	AuditSkill        = "skill"
@@ -26,17 +25,16 @@ const (
 	AuditPlugin       = "plugin"
 	AuditPolicy       = "policy"
 	// AuditResourcePriceList is the deployment's price list, which is no customer's: its rows
-	// have no customer_id, so no app's audit query lists them
-	// (20261110120000_audit_log_manage.sql).
+	// have no customer_id, so no app's audit query lists them.
 	AuditResourcePriceList = "price_list"
 	// AuditEndUser is an app's end user whose id was forgotten in the usage records, named by
-	// the id that replaced it, never by the one forgotten (20261111120000_usage_identity.sql).
+	// the id that replaced it, never by the one forgotten.
 	AuditEndUser = "end_user"
 	// AuditSpendLimit is one of the organization's spend limits, named by its id, or a grant or
-	// a reset, named grant:<id> and reset:<id> (20261112120000_limits.sql).
+	// a reset, named grant:<id> and reset:<id>.
 	AuditSpendLimit = "limit"
 	// AuditProviderKey is a key the customer keeps for their own account at a vendor, named
-	// <provider>/<region> (20261202130000_provider_keys.sql).
+	// <provider>/<region>.
 	AuditProviderKey = "provider_key"
 )
 
@@ -60,8 +58,7 @@ const (
 	AuditUpdated = "updated"
 	AuditDeleted = "deleted"
 	AuditSynced  = "synced"
-	// AuditCancelled is a scheduled price change called off before it took effect
-	// (20261110140000_audit_log_cancelled.sql).
+	// AuditCancelled is a scheduled price change called off before it took effect.
 	AuditCancelled = "cancelled"
 )
 

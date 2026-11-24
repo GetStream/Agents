@@ -220,8 +220,8 @@ func (r *AgentLogs) Get(ctx context.Context, customerID string, id int64) (Agent
 	if err != nil {
 		return AgentLog{}, stack.Wrap(fmt.Errorf("store: agent log: %w", err))
 	}
-	// The log row's own details carry the error since 20260914175000_agent_log_failures.sql,
-	// and are the answer. A request's id is only unique in the database that numbered it, with
+	// The log row's own details carry the error, and are the answer; a row written before they
+	// did carries none. A request's id is only unique in the database that numbered it, with
 	// shards or after a data move, which gives a moved request an id of its new deployment's, so
 	// an older row's request is found by that number only when it also started when the row
 	// says it happened, for the same agent: both writers log a request at its started_at.
@@ -249,4 +249,46 @@ func (r *AgentLogs) Get(ctx context.Context, customerID string, id int64) (Agent
 		}
 	}
 	return row, nil
+}
+
+// DeleteUser deletes an app's logs that name one of its end users, whose message and details
+// hold what they said and did, writeBatch of them per statement, and then makes the changes
+// recorded of the logs naming them, deleted ones' included, deletes with no payload
+// (forgottenChanges). It answers how many logs it deleted. A log written after the last batch
+// stays, for a run again to delete.
+func (r *AgentLogs) DeleteUser(ctx context.Context, appID, userID string) (int64, error) {
+	if appID == "" || userID == "" {
+		return 0, stack.Wrap(errors.New("store: an app and a user id are required"))
+	}
+	db := r.store.global
+	var deleted int64
+	for {
+		batch := db.NewSelect().Model((*AgentLog)(nil)).Column("id").
+			Where("customer_id = ? AND user_id = ?", appID, userID).Limit(writeBatch)
+		result, err := db.NewDelete().Model((*AgentLog)(nil)).Where("customer_id = ? AND id IN (?)", appID, batch).Exec(ctx)
+		if err != nil {
+			return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: %w", err))
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: %w", err))
+		}
+		deleted += n
+		if n < int64(writeBatch) {
+			break
+		}
+	}
+	if _, err := forgottenChanges(db, appID, "agent_logs").Where("payload->>'user_id' = ?", userID).Exec(ctx); err != nil {
+		return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: changes: %w", err))
+	}
+	return deleted, nil
+}
+
+// CountUser counts what DeleteUser would delete.
+func (r *AgentLogs) CountUser(ctx context.Context, appID, userID string) (int64, error) {
+	count, err := r.store.global.NewSelect().Model((*AgentLog)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Count(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: count user logs: %w", err))
+	}
+	return int64(count), nil
 }

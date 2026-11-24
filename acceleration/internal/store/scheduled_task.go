@@ -284,7 +284,7 @@ func lockTaskLimits(ctx context.Context, tx bun.Tx, customerID string, holders [
 // plain UPDATE of deleted_at, whose FOR NO KEY UPDATE conflicts only with
 // FOR SHARE and stronger (table 13.3,
 // https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
-// A config is only ever soft-deleted (DeleteAgentConfig), so an id with no row
+// A config is only ever soft-deleted (AgentConfigs.Delete), so an id with no row
 // is not a delete and is left to the caller, which resolved it.
 func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID string) (AgentScheduling, error) {
 	var configs []AgentConfig

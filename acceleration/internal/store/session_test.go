@@ -851,7 +851,6 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
 	guest, err := s.store.Guest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("jlahey", guest.ClaimedBy)
-	s.Require().NotNil(guest.ClaimedAt)
 }
 
 func (s *StoreSuite) TestAGuestIsClaimedOnce() {

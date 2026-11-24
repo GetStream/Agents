@@ -57,7 +57,7 @@ const threadTurnLease = askTimeout + 30*time.Second
 //	    Session.FollowUp(text, photos), its author         the person's message is already
 //	      (WithAuthor); a photo the agent cannot see       in the channel: none is written
 //	      or that cannot be fetched is dropped, with a
-//	      note to the turn (threadPhotos)
+//	      note to the turn (messagePhotos)
 //	    wait until the turn is over; close the session it opened; let go of the lease
 
 // linkedThread is the external thread a channel holds, when it is a thread channel of the
