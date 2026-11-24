@@ -72,8 +72,12 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 	if answer, unkept := unkeptAnswer(err); unkept {
 		// Stream's own answer is the operator's to read, never the caller's.
+		var cause error
+		if found, ok := errors.AsType[*session.UnkeptError](err); ok {
+			cause = found.Cause
+		}
 		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
-			"customer", customerID, "error", err)
+			"customer", customerID, "error", err, "cause", cause)
 		return nil, answer
 	}
 	if err != nil {

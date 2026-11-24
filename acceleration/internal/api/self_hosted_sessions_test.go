@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 )
 
 // SelfHostedSessionsSuite opens sessions on a router in deployment mode, as a self-hosted one
@@ -32,13 +34,8 @@ func (s *SelfHostedSessionsSuite) errorOf(method, path string, body any) (int, E
 }
 
 func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesTheKeysAndIncognito() {
-	// Every request to the deployment's app is refused as Stream refuses a key it does not
-	// know, so it does not matter which one the session makes first. It used to answer 400
-	// «QueryUsers failed with error: "api_key not valid"», naming neither.
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		s.chat.FailWith(method, "", http.StatusUnauthorized)
-		s.T().Cleanup(func() { s.chat.Heal(method, "") })
-	}
+	// It used to answer 400 «QueryUsers failed with error: "api_key not valid"», naming neither.
+	s.refuseTheKeys()
 
 	status, failure, body := s.errorOf(http.MethodPost, "/v1/agents/sessions", textSession(nil))
 
@@ -47,7 +44,32 @@ func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesTheKeysAnd
 	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
 	s.Contains(failure.Message, "STREAM_API_KEY")
 	s.Contains(failure.Message, "incognito: true")
-	s.NotContains(body, "boom", "Stream's own words stay in the log")
+	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
+}
+
+func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesTheKeysWithNothingOfStreams() {
+	// A fork answers with the error's own text (refusedRequest), which carried Stream's
+	// answer after the sentence until the refusal read as the sentence alone.
+	parent := s.serverClient.createSession(textSession(nil))
+	s.refuseTheKeys()
+
+	status, failure, body := s.errorOf(http.MethodPost, "/v1/agents/sessions/"+parent.Id+"/fork",
+		ForkSessionRequest{Messages: pointerTo(false)})
+
+	s.Equal(http.StatusBadRequest, status, body)
+	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
+	s.Contains(failure.Message, "incognito: true")
+	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
+}
+
+// refuseTheKeys has the deployment's app answer every request as Stream answers a key it does
+// not know, so it does not matter which one a session makes first.
+func (s *SelfHostedSessionsSuite) refuseTheKeys() {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		s.chat.RefuseWith(method, "", chattest.Refusal{Status: http.StatusUnauthorized, Code: 2,
+			Message: `QueryUsers failed with error: "api_key not valid"`})
+		s.T().Cleanup(func() { s.chat.Heal(method, "") })
+	}
 }
 
 func (s *SelfHostedSessionsSuite) TestASessionOnADeploymentWithNoStreamAppNamesTheKeysAndIncognito() {

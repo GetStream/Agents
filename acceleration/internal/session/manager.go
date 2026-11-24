@@ -524,15 +524,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}
 
 	opened := false
-	// A new conversation is kept in Stream Chat by default, but a deployment without Chat
-	// credentials still holds it: what was said is worth keeping, not worth refusing the
-	// conversation for. Resuming or forking one needs the channel, so those still fail.
-	if spec.PersistConversation && spec.ConversationID == "" && spec.Recall == nil {
-		if _, err := m.Conversations(); err != nil {
-			m.logger.Warn("not keeping the conversation in Stream Chat", "error", err)
-			spec.PersistConversation = false
-		}
-	}
 	if cid, by, handed := m.handedOut(ctx, spec, stream); handed {
 		spec.ConversationID, spec.Dispatched, spec.HandedOutBy = cid, true, by
 		ctx = persistent.RouterOpensDispatched(ctx, cid)
@@ -627,6 +618,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		var truncated bool
 		previous, truncated, err = service.ContextForCaller(reading, spec.CustomerID, spec.AgentID, spec.ConversationID, spec.Caller.UserID, spec.UserID)
+		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
+			return nil, stack.Wrap(unkept)
+		}
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -48,12 +49,27 @@ func (s *StreamKeysSuite) TestKeysStreamRefusesAreTheDeploymentsToFix() {
 
 	s.Require().ErrorIs(unkept, ErrStreamKeysRejected)
 	s.ErrorIs(unkept, refused, "Stream's answer stays for the log")
+	s.Equal(ErrStreamKeysRejected.Error(), unkept.Error(), "a caller answering with Error() tells only our words")
+	s.Equal(refused, errors.Unwrap(unkept))
+	s.Contains(unkept.(slog.LogValuer).LogValue().String(), "api_key not valid", "the log keeps Stream's answer")
+}
+
+func (s *StreamKeysSuite) TestATokenNotSignedWithTheKeysSecretIsTheDeploymentsToFix() {
+	// A real api key with the wrong secret: the Chat backend's invalidTokenSignature.
+	refused := s.streamAnswering(http.StatusUnauthorized,
+		`{"StatusCode":401,"code":43,"message":"QueryUsers failed with error: \"JWTAuth error: signature is not valid\""}`)
+
+	s.ErrorIs(unkeptIn(refused, false), ErrStreamKeysRejected)
 }
 
 func (s *StreamKeysSuite) TestADeploymentWithNoStreamAppIsTheDeploymentsToFix() {
-	unkept := unkeptIn(fmt.Errorf("conversation: %w", streamapp.ErrNoIdentity), false)
+	cause := fmt.Errorf("conversation: %w", streamapp.ErrNoIdentity)
 
-	s.ErrorIs(unkept, ErrNoStreamKeys)
+	unkept := unkeptIn(cause, false)
+
+	s.Require().ErrorIs(unkept, ErrNoStreamKeys)
+	s.Equal(ErrNoStreamKeys.Error(), unkept.Error())
+	s.ErrorIs(unkept, streamapp.ErrNoIdentity)
 }
 
 func (s *StreamKeysSuite) TestTheRefusalsNameTheSettingsAndIncognito() {
@@ -72,10 +88,19 @@ func (s *StreamKeysSuite) TestInAppModeTheAppIsTheCustomers() {
 	s.NoError(unkeptIn(streamapp.ErrNoIdentity, true))
 }
 
-func (s *StreamKeysSuite) TestAnyOtherStreamFailureIsLeftAlone() {
-	failed := s.streamAnswering(http.StatusInternalServerError, `{"StatusCode":500,"code":-1,"message":"boom"}`)
-
-	s.NoError(unkeptIn(failed, false))
+func (s *StreamKeysSuite) TestAnyOtherStreamRefusalIsLeftAlone() {
+	for name, answer := range map[string]struct {
+		status int
+		body   string
+	}{
+		"a 401 for another reason": {http.StatusUnauthorized, `{"StatusCode":401,"code":40,"message":"token expired"}`},
+		"a 403 not allowed":        {http.StatusForbidden, `{"StatusCode":403,"code":17,"message":"not allowed"}`},
+		"a 403 with code 2":        {http.StatusForbidden, `{"StatusCode":403,"code":2,"message":"product not enabled"}`},
+		"a 429":                    {http.StatusTooManyRequests, `{"StatusCode":429,"code":9,"message":"too many requests"}`},
+		"a 500":                    {http.StatusInternalServerError, `{"StatusCode":500,"code":-1,"message":"boom"}`},
+	} {
+		s.NoError(unkeptIn(s.streamAnswering(answer.status, answer.body), false), name)
+	}
 	s.NoError(unkeptIn(errors.New("conversation: closed"), false))
 	s.NoError(unkeptIn(nil, false))
 }
