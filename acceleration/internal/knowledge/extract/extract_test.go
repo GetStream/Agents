@@ -226,9 +226,12 @@ func (s *ExtractSuite) TestAReadCancelledBeforeItStartsKillsItsWorkerBeforeClosi
 // A deadline that passes after the document opened kills the worker while the read closes it.
 // Run under -race, a close that does not wait for the kill is a data race in PDFium's
 // instance. Such a close can also leave the pool's lock held, so the next open never returns:
-// each open and close gets half a minute, on an extractor of the test's own.
+// each open and close gets half a minute, on an extractor of the test's own whose engine has
+// started already.
 func (s *ExtractSuite) TestClosingAReadWaitsForAKillThatBeganAfterTheDocumentOpened() {
 	extractor := New(Options{})
+	_, err := extractor.engine()
+	s.Require().NoError(err)
 	data := s.fixture("manual.pdf")
 	for range 200 {
 		closed := make(chan error, 1)
