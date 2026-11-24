@@ -77,6 +77,28 @@ export class HostingRefusedError extends Error {
 }
 
 /**
+ * What the items of a turn with no id answer.
+ *
+ * The router names no turn for a session that records nothing (incognito), for a
+ * speech-to-speech session, whose model decides what a turn is, and for the retry of a
+ * `request_id` it already took. Reading that turn's items would read every turn in the
+ * session instead, so nothing is asked: an incognito session's answer is on
+ * `session.events()` alone, and the other two record theirs, which `session.responses.items`
+ * reads.
+ */
+export class UnnamedTurnError extends Error {
+  constructor() {
+    super(
+      "the turn has no id, so it has no items of its own to read: the router names no turn for an " +
+        "incognito session, a speech-to-speech session or the retry of a request_id already taken; " +
+        "follow the answer on session.events(), or read session.responses.items for a session that " +
+        "records its turns",
+    );
+    this.name = "UnnamedTurnError";
+  }
+}
+
+/**
  * The SDK was configured in a way that cannot work.
  *
  * Kept apart from RouterError because nothing was sent: there is no status, and the fix is

@@ -123,6 +123,7 @@ export {
   HostingRefusedError,
   RouterError,
   SocketClosedError,
+  UnnamedTurnError,
   type RouterErrorType,
 } from "./errors.js";
 

@@ -15,6 +15,7 @@ import {
   type SessionSort,
   type Sessions,
   Tools,
+  UnnamedTurnError,
 } from "../src/index.js";
 import { inPage, offPage } from "./device.js";
 import { TestRouter, type Connection } from "./router.js";
@@ -1119,6 +1120,29 @@ describe("responses", () => {
     await answering.items.all();
 
     assert.equal(router.last.query.get("response_id"), "response-1");
+  });
+
+  it("reads no items for a turn with no id rather than the whole conversation's", async () => {
+    // The router names no turn for an incognito session, a speech-to-speech one or the retry
+    // of a request id it already took.
+    router.serve("POST", "/v1/agents/sessions/session-1/responses", {
+      status: 202,
+      body: { id: "", session_id: "session-1", status: "running", created_at: new Date().toISOString() },
+    });
+    router.serve("GET", "/v1/agents/sessions/session-1/responses/items", {
+      body: { items: [item(0)], has_more: false },
+    });
+
+    const answering = await held.responses.create("Anything");
+
+    await assert.rejects(answering.items.all(), UnnamedTurnError);
+    await assert.rejects(answering.items.list(), UnnamedTurnError);
+    await assert.rejects(answering.items.unwind().next(), UnnamedTurnError);
+    assert.equal(
+      router.requestsTo("GET", "/v1/agents/sessions/session-1/responses/items").length,
+      0,
+      "the router is not asked for every turn in the session",
+    );
   });
 
   it("reads the whole conversation's items when nothing narrows it", async () => {
