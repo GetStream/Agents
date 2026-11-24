@@ -484,6 +484,16 @@ func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	s.Equal(http.StatusConflict, status)
 }
 
+func (s *GuestsSuite) TestAGuestIsNotClaimedByAReservedUserID() {
+	guest := s.recordGuest()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
 func (s *GuestsSuite) TestAGuestNobodyMintedCannotBeClaimed() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: s.utils.uuid(), UserId: s.utils.uuid()})
