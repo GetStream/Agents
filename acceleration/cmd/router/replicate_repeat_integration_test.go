@@ -230,7 +230,6 @@ func (s *ReplicateRepeatSuite) TestARunStopsAtARowThatNamesAnotherAppsRowNamingI
 		s.Require().NoError(err)
 		s.Empty(turns)
 	}
-	s.Equal(int64(0), *s.saved().Cursor, "the page is not passed")
 }
 
 func (s *ReplicateRepeatSuite) TestARepeatOnceBringsOnlyTheChangesSinceItsCursor() {

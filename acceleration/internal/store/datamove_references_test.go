@@ -142,7 +142,9 @@ func (s *DataMoveSuite) assertNamesNoRow(err error, n namingRow) {
 	s.ErrorContains(err, n.table+`:{`, n.table)
 	s.ErrorContains(err, `"`+n.key()+`":"`+n.id+`"`, n.table)
 	s.ErrorContains(err, "a row names a row that neither the export nor this app holds", n.table)
-	s.NotContains(err.Error(), n.named, "the row it names is not named back")
+	if n.table != "agent_branch_messages" { // whose key names its session
+		s.NotContains(err.Error(), n.named, "the row it names is not named back")
+	}
 }
 
 func (s *DataMoveSuite) TestAnImportedRowNamesOnlyTheImportersRows() {
@@ -215,7 +217,7 @@ func (s *DataMoveSuite) TestARowIsRefusedTheSameWhoeverHoldsTheRowItNames() {
 			cancel()
 
 			s.Require().NoError(tx.Rollback())
-			s.EqualError(theirs, missing.Error(), n.table)
+			s.EqualError(theirs, strings.ReplaceAll(missing.Error(), "nobody-s", n.named), n.table)
 			s.Require().ErrorIs(theirs, ErrInvalidImport, n.table)
 			s.Require().ErrorIs(missing, ErrInvalidImport, n.table)
 		}
@@ -266,9 +268,10 @@ func (s *DataMoveSuite) TestARowAnotherCustomerHoldsTheKeyOfIsRefusedAsThat() {
 // that names another.
 func (s *DataMoveSuite) TestRowsThatNameOthersMoveThereAndBackAndOn() {
 	session, campaign, contact, simulation := s.holding(s.source, "acme")
-	s.execute(s.source.global, "UPDATE simulations SET config_id = 'config-1', scenario = 'lost card', variations = 1")
+	naming := s.namingRows(s.source)
+	s.execute(s.source.global, "UPDATE simulations SET config_id = 'config-1', scenario = 'lost card', assertion = 'answered', variations = 1")
 	s.execute(s.source.global, "UPDATE campaigns SET config_id = 'config-1', from_number = '+15550001111', concurrency = 1")
-	for _, n := range s.namingRows(s.source) {
+	for _, n := range naming {
 		own := map[string]string{"session_id": session, "simulation_id": simulation, "contact_id": contact}[n.column]
 		if n.table == "campaign_attempts" {
 			n.row["campaign_id"] = campaign
@@ -455,6 +458,7 @@ var bareColumns = map[string][]string{
 	"agent_logs":             {"agent_id", "config_id", "details", "session_id", "source_id", "user_id"},
 	"requests": {"agent_id", "attributes", "call_id", "meters", "operation_id", "session_id",
 		"source_usage_id", "tags", "turn_id", "usage_categories", "usage_id", "user_id"},
+	"turn_stats_hourly":   {"agent_id"},
 	"turn_latency_hourly": {"agent_id"},
 	"customer_activity":   {"organization_id"},
 	"policies":            {"document"},
