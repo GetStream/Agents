@@ -1130,8 +1130,8 @@ export type paths = {
         readonly get: operations["listConnectors"];
         readonly put?: never;
         /**
-         * Add a custom MCP connector
-         * @description Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+         * Add a custom connector
+         * @description Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
          *
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
@@ -7197,13 +7197,15 @@ export type components = {
             readonly items: readonly components["schemas"]["CreditEntry"][];
             readonly next_cursor?: string;
         };
-        /** @description A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored. */
+        /** @description A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored. */
         readonly CustomConnectorRequest: {
             readonly category?: string;
             readonly client?: components["schemas"]["ConnectorClient"];
             readonly description?: string;
-            /** @description The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. */
-            readonly endpoint: string;
+            /** @description The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both. */
+            readonly endpoint?: string;
+            /** @description An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both. */
+            readonly http?: components["schemas"]["CustomHTTPAPI"];
             /** @description Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same. */
             readonly id: string;
             readonly name: string;
@@ -7211,6 +7213,38 @@ export type components = {
             readonly schemes: readonly string[] | null;
             /** @description The scopes a consent asks for, each an RFC 6749 scope token. */
             readonly scopes?: readonly string[] | null;
+        };
+        /** @description An HTTP API a custom connector calls, and the tools it offers an agent. */
+        readonly CustomHTTPAPI: {
+            /** @description The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored. */
+            readonly base_url: string;
+            /** @description At least one and at most 128, each name once. */
+            readonly tools: readonly components["schemas"]["CustomHTTPTool"][];
+        };
+        /** @description One value the model gives an http tool. */
+        readonly CustomHTTPParameter: {
+            readonly description?: string;
+            /** @description The model must give it. A parameter in the path must be required. */
+            readonly required?: boolean;
+            /** @enum {string} */
+            readonly type: "string" | "number" | "integer" | "boolean";
+        };
+        /** @description One tool of an http connector: one request, whose method and path are fixed. */
+        readonly CustomHTTPTool: {
+            /** @description What the tool does, which the model reads to know when to use it. Up to 1000 bytes. */
+            readonly description: string;
+            /** @enum {string} */
+            readonly method: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
+            /** @description 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __. */
+            readonly name: string;
+            /** @description The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused. */
+            readonly parameters?: {
+                readonly [key: string]: components["schemas"]["CustomHTTPParameter"];
+            };
+            /** @description Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required. */
+            readonly path: string;
+            /** @description The tool only reads. Only a GET or HEAD tool may say so. */
+            readonly read_only?: boolean;
         };
         readonly CustomModel: {
             readonly base_url: string;

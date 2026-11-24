@@ -7008,7 +7008,7 @@ namespace GetStream.VisionAgents.Models
     }
 
     /// <summary>
-    /// A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+    /// A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class CustomConnectorRequest
@@ -7024,10 +7024,16 @@ namespace GetStream.VisionAgents.Models
         public string? Description { get; set; } = default!;
 
         /// <summary>
-        /// The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
+        /// The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("endpoint")]
-        public string Endpoint { get; set; } = default!;
+        public string? Endpoint { get; set; } = default!;
+
+        /// <summary>
+        /// An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("http")]
+        public CustomHTTPAPI? Http { get; set; } = default!;
 
         /// <summary>
         /// Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
@@ -7049,6 +7055,96 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("scopes")]
         public System.Collections.Generic.List<string>? Scopes { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// An HTTP API a custom connector calls, and the tools it offers an agent.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPAPI
+    {
+
+        /// <summary>
+        /// The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("base_url")]
+        public string BaseUrl { get; set; } = default!;
+
+        /// <summary>
+        /// At least one and at most 128, each name once.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("tools")]
+        public System.Collections.Generic.List<CustomHTTPTool> Tools { get; set; } = new System.Collections.Generic.List<CustomHTTPTool>();
+
+    }
+
+    /// <summary>
+    /// One value the model gives an http tool.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPParameter
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string? Description { get; set; } = default!;
+
+        /// <summary>
+        /// The model must give it. A parameter in the path must be required.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("required")]
+        public bool? Required { get; set; } = default!;
+
+        /// <summary>
+        /// One of `string`, `number`, `integer`, `boolean`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One tool of an http connector: one request, whose method and path are fixed.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPTool
+    {
+
+        /// <summary>
+        /// What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string Description { get; set; } = default!;
+
+        /// <summary>
+        /// One of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("method")]
+        public string Method { get; set; } = default!;
+
+        /// <summary>
+        /// 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = default!;
+
+        /// <summary>
+        /// The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("parameters")]
+        public System.Collections.Generic.Dictionary<string, CustomHTTPParameter>? Parameters { get; set; } = default!;
+
+        /// <summary>
+        /// Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("path")]
+        public string Path { get; set; } = default!;
+
+        /// <summary>
+        /// The tool only reads. Only a GET or HEAD tool may say so.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("read_only")]
+        public bool? ReadOnly { get; set; } = default!;
 
     }
 

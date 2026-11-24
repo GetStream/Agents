@@ -2417,18 +2417,31 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 }
 
 // customWeather is a manifest the API stores for a custom http connector custom_weather: one
-// read-only GET tool on an API taking a key.
-const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://api.weather.example/v1"},
+// read-only GET tool on an API taking a key, at a public IP literal, so checking it resolves nothing.
+const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://8.8.8.8/v1"},
 	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
 	"description": "The forecast for a city.", "method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
 
-// TestAnImportedHTTPDefinitionIsRefused: a definition the API would store for an http connector
-// is refused, and writes nothing, until AI-3676 lifts it (importableDefinition).
-func (s *DataMoveSuite) TestAnImportedHTTPDefinitionIsRefused() {
+// TestAnImportedHTTPDefinitionIsStored: a definition the API would store for an http connector
+// is stored as the API stores it (AI-3676 lifts AI-3674's refusal).
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionIsStored() {
 	id, err := s.importDefinition(customWeather)
 
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	s.JSONEq(strings.Replace(customWeather, `"id": "custom_acme"`, `"id": "`+id+`"`, 1), stored)
+}
+
+// TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused: an import checks the base URL as the
+// API does (AI-3674 S1.5), and writes nothing.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1))
+
 	s.ErrorIs(err, ErrNotACustomConnector)
-	s.ErrorContains(err, "an http connector cannot be imported yet")
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
 	s.Zero(s.definitionsNamed(id))
 }
 

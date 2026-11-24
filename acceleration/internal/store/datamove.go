@@ -18,6 +18,7 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -845,7 +846,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		if customerID == BuiltinCustomer {
 			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
 		}
-		if row, err = importableDefinition(row); err != nil {
+		if row, err = importableDefinition(ctx, row); err != nil {
 			return err
 		}
 	}
@@ -1650,8 +1651,9 @@ func boughtHere(relation string) string {
 // the API would have stored it, so no field this release does not read arrives for one that does. Every imported
 // definition is a custom one, since the customer is forced onto the row (identity) and importRow refuses an import with
 // no customer, and only the API's rules keep a custom manifest from naming the operator's client or anything else the
-// router would trust a built-in with (core.Manifest.AsCustom).
-func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
+// router would trust a built-in with (core.Manifest.AsCustom). An http one's base URL must be a public https URL, as
+// the API checks it (customManifest in internal/api/connectors.go).
+func importableDefinition(ctx context.Context, row json.RawMessage) (json.RawMessage, error) {
 	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var fields map[string]json.RawMessage
@@ -1674,11 +1676,13 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 	}
-	// The http source runs a stored tool before the call-time checks of AI-3675 exist, and the
-	// API stores no http connector before AI-3676, so no import stores one either, even one the
-	// rules above let through. AI-3676 lifts this.
+	// One answer for every refusal, without egress's own error, as the API answers (an app imports its own export):
+	// that error tells a name that does not resolve from one that resolves to a private address.
 	if core.HTTPSource(custom.Sources) != nil {
-		return nil, fmt.Errorf("store: imported connector definition %q: %w: an http connector cannot be imported yet", id, ErrNotACustomConnector)
+		if err := egress.ValidatePublicHTTPSURL(ctx, custom.Endpoints[core.SourceKindHTTP]); err != nil {
+			return nil, fmt.Errorf("store: imported connector definition %q: %w: base_url must be a public https URL without userinfo, query or fragment",
+				id, ErrNotACustomConnector)
+		}
 	}
 	if fields["manifest"], err = json.Marshal(custom); err != nil {
 		return nil, stack.Wrap(err)

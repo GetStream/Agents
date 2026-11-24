@@ -5275,7 +5275,7 @@ pub struct CreditPage {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub next_cursor: ::std::option::Option<::std::string::String>,
 }
-///A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+///A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[derive(Default)]
@@ -5286,8 +5286,12 @@ pub struct CustomConnectorRequest {
     pub client: ::std::option::Option<ConnectorClient>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub description: ::std::option::Option<::std::string::String>,
-    ///The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
-    pub endpoint: ::std::string::String,
+    ///The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub endpoint: ::std::option::Option<::std::string::String>,
+    ///An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub http: ::std::option::Option<CustomHttpapi>,
     ///Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
     pub id: ::std::string::String,
     pub name: ::std::string::String,
@@ -5297,6 +5301,165 @@ pub struct CustomConnectorRequest {
     ///The scopes a consent asks for, each an RFC 6749 scope token.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub scopes: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+}
+///One value the model gives an http tool.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomHttpParameter {
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub description: ::std::option::Option<::std::string::String>,
+    ///The model must give it. A parameter in the path must be required.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub required: ::std::option::Option<bool>,
+    #[serde(rename = "type")]
+    pub type_: CustomHttpParameterType,
+}
+///`CustomHttpParameterType`
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum CustomHttpParameterType {
+    #[serde(rename = "string")]
+    String,
+    #[serde(rename = "number")]
+    Number,
+    #[serde(rename = "integer")]
+    Integer,
+    #[serde(rename = "boolean")]
+    Boolean,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for CustomHttpParameterType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::String => f.write_str("string"),
+            Self::Number => f.write_str("number"),
+            Self::Integer => f.write_str("integer"),
+            Self::Boolean => f.write_str("boolean"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for CustomHttpParameterType {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "string" => Ok(Self::String),
+            "number" => Ok(Self::Number),
+            "integer" => Ok(Self::Integer),
+            "boolean" => Ok(Self::Boolean),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for CustomHttpParameterType {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CustomHttpParameterType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///One tool of an http connector: one request, whose method and path are fixed.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomHttpTool {
+    ///What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+    pub description: ::std::string::String,
+    pub method: CustomHttpToolMethod,
+    ///1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+    pub name: ::std::string::String,
+    ///The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+    #[serde(
+        default,
+        skip_serializing_if = ":: std :: collections :: BTreeMap::is_empty"
+    )]
+    pub parameters: ::std::collections::BTreeMap<::std::string::String, CustomHttpParameter>,
+    ///Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+    pub path: ::std::string::String,
+    ///The tool only reads. Only a GET or HEAD tool may say so.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub read_only: ::std::option::Option<bool>,
+}
+///`CustomHttpToolMethod`
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum CustomHttpToolMethod {
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "HEAD")]
+    Head,
+    #[serde(rename = "POST")]
+    Post,
+    #[serde(rename = "PUT")]
+    Put,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for CustomHttpToolMethod {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Get => f.write_str("GET"),
+            Self::Head => f.write_str("HEAD"),
+            Self::Post => f.write_str("POST"),
+            Self::Put => f.write_str("PUT"),
+            Self::Patch => f.write_str("PATCH"),
+            Self::Delete => f.write_str("DELETE"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for CustomHttpToolMethod {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "GET" => Ok(Self::Get),
+            "HEAD" => Ok(Self::Head),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "PATCH" => Ok(Self::Patch),
+            "DELETE" => Ok(Self::Delete),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for CustomHttpToolMethod {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CustomHttpToolMethod {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///An HTTP API a custom connector calls, and the tools it offers an agent.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[derive(Default)]
+pub struct CustomHttpapi {
+    ///The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+    pub base_url: ::std::string::String,
+    ///At least one and at most 128, each name once.
+    pub tools: ::std::vec::Vec<CustomHttpTool>,
 }
 ///`CustomModel`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]

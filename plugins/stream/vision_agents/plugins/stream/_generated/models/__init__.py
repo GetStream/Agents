@@ -241,6 +241,12 @@ from .credit_entry import CreditEntry
 from .credit_entry_kind import CreditEntryKind
 from .credit_page import CreditPage
 from .custom_connector_request import CustomConnectorRequest
+from .custom_http_parameter import CustomHTTPParameter
+from .custom_http_parameter_type import CustomHTTPParameterType
+from .custom_http_tool import CustomHTTPTool
+from .custom_http_tool_method import CustomHTTPToolMethod
+from .custom_http_tool_parameters import CustomHTTPToolParameters
+from .custom_httpapi import CustomHTTPAPI
 from .custom_model import CustomModel
 from .custom_model_page import CustomModelPage
 from .custom_model_request import CustomModelRequest
@@ -913,6 +919,12 @@ __all__ = (
     "CreditEntryKind",
     "CreditPage",
     "CustomConnectorRequest",
+    "CustomHTTPAPI",
+    "CustomHTTPParameter",
+    "CustomHTTPParameterType",
+    "CustomHTTPTool",
+    "CustomHTTPToolMethod",
+    "CustomHTTPToolParameters",
     "CustomModel",
     "CustomModelPage",
     "CustomModelRequest",
