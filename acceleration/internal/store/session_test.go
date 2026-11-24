@@ -1164,15 +1164,15 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 // guest's own claim skip the steps it still owes, sent again.
 func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
 	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
-	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
+	s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
 	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
+	s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
 	guest, err := s.store.Users.GetGuest(s.ctx, "acme", "guest-1")
 	s.Require().NoError(err)
 	s.Require().Nil(guest.ClaimFinishedAt, "finished before the claim, or by another account")
 
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
 
 	guest, err = s.store.Users.GetGuest(s.ctx, "acme", "guest-1")
 	s.Require().NoError(err)

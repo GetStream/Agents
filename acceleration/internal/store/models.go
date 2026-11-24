@@ -484,7 +484,7 @@ type User struct {
 	// guest. A guest is claimed once: a second claim naming somebody else would move one
 	// person's conversations onto another's account.
 	ClaimedBy string `bun:"claimed_by,nullzero"`
-	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (FinishGuestClaim), nil
+	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (Users.FinishGuestClaim), nil
 	// while a claim that set ClaimedBy has not got that far.
 	ClaimFinishedAt *time.Time `bun:"claim_finished_at"`
 	// RefreshSecretHash is the SHA-256 of the refresh secret this guest was last handed

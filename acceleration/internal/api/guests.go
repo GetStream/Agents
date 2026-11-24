@@ -339,7 +339,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 			"guest", guestID, "user", userID, "error", err)
 	}
 	// Last, so a claim that stopped before here is finished by the same claim sent again.
-	if err := s.store.FinishGuestClaim(ctx, customerID, guestID, userID); err != nil {
+	if err := s.store.Users.FinishGuestClaim(ctx, customerID, guestID, userID); err != nil {
 		return nil, err
 	}
 

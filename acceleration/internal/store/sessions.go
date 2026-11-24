@@ -269,11 +269,11 @@ func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID str
 
 // FinishGuestClaim records that every step of userID's claim of a guest ran, so the same claim
 // sent again has nothing left to do. A guest userID has not claimed is left as it is.
-func (s *Store) FinishGuestClaim(ctx context.Context, customerID, guestID, userID string) error {
+func (r *Users) FinishGuestClaim(ctx context.Context, customerID, guestID, userID string) error {
 	if customerID == "" || guestID == "" || userID == "" {
 		return stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
 	}
-	_, err := s.global.NewUpdate().Model((*User)(nil)).
+	_, err := r.store.global.NewUpdate().Model((*User)(nil)).
 		Set("claim_finished_at = ?", time.Now().UTC()).
 		Where("id = ?", guestID).
 		Where("customer_id = ?", customerID).
