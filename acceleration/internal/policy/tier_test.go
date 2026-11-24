@@ -79,25 +79,25 @@ func (s *PolicySuite) TestARecordedTierIsReadAgainOnceTheTTLHasPassed() {
 func (s *PolicySuite) TestARequestsTierIsWrittenAtMostOncePerTTL() {
 	t := s.tiered()
 
-	t.enforcer.Join(s.app, s.org, "tier-a")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-a")
 	s.eventually(func() bool { return s.recordedTier() == "tier-a" }, 5*time.Second, 20*time.Millisecond)
-	t.enforcer.Join(s.app, s.org, "tier-b")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-b")
 	s.Equal("tier-b", t.enforcer.tier(s.ctx, s.org), "the request's tier is the one rows carry at once")
 	s.never(func() bool { return s.recordedTier() == "tier-b" }, 300*time.Millisecond, 20*time.Millisecond,
 		"a second write within the TTL")
 
 	t.clock = t.clock.Add(tierTTL)
-	t.enforcer.Join(s.app, s.org, "tier-b")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-b")
 
 	s.eventually(func() bool { return s.recordedTier() == "tier-b" }, 5*time.Second, 20*time.Millisecond)
 }
 
 func (s *PolicySuite) TestATierNamedWithinTheTTLOfTheLastWriteIsWrittenOnceTheOrganizationGoesQuiet() {
 	t := s.tiered()
-	t.enforcer.Join(s.app, s.org, "tier-a")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-a")
 	s.eventually(func() bool { return s.recordedTier() == "tier-a" }, 5*time.Second, 20*time.Millisecond)
 	t.clock = t.clock.Add(time.Second)
-	t.enforcer.Join(s.app, s.org, "tier-b")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-b")
 
 	t.clock = t.clock.Add(tierTTL)
 
@@ -108,10 +108,10 @@ func (s *PolicySuite) TestATierNamedWithinTheTTLOfTheLastWriteIsWrittenOnceTheOr
 
 func (s *PolicySuite) TestAnUnwrittenTierIsNotWrittenOverANewerOne() {
 	t := s.tiered()
-	t.enforcer.Join(s.app, s.org, "tier-a")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-a")
 	s.eventually(func() bool { return s.recordedTier() == "tier-a" }, 5*time.Second, 20*time.Millisecond)
 	t.clock = t.clock.Add(time.Second)
-	t.enforcer.Join(s.app, s.org, "tier-b")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-b")
 	s.Require().NoError(s.store.OrganizationTiers.Upsert(s.ctx, &store.OrganizationTier{OrganizationID: s.org, Tier: "tier-c", SeenAt: t.clock.Add(time.Second)}))
 
 	t.clock = t.clock.Add(tierTTL)
@@ -129,14 +129,14 @@ func (s *PolicySuite) TestAFailedWriteIsWrittenAgainByTheNextRequest() {
 	t.enforcer.config = broken.enforcer.config
 
 	// seeTier rather than Join, so no membership write is reading the store being swapped.
-	t.enforcer.seeTier(s.org, "tier-a")
+	t.enforcer.seeTier(s.T().Context(), s.org, "tier-a")
 	s.eventually(func() bool {
 		t.enforcer.tiersMu.Lock()
 		defer t.enforcer.tiersMu.Unlock()
 		return t.enforcer.tiers[s.org].written == ""
 	}, 5*time.Second, 20*time.Millisecond, "the failed write is forgotten")
 	t.enforcer.config = working
-	t.enforcer.seeTier(s.org, "tier-a")
+	t.enforcer.seeTier(s.T().Context(), s.org, "tier-a")
 
 	s.eventually(func() bool { return s.recordedTier() == "tier-a" }, 5*time.Second, 20*time.Millisecond,
 		"written within the TTL, since the first write never landed")
@@ -144,7 +144,7 @@ func (s *PolicySuite) TestAFailedWriteIsWrittenAgainByTheNextRequest() {
 
 func (s *PolicySuite) TestAFailedReadKeepsTheLastTier() {
 	t := s.tiered()
-	t.enforcer.Join(s.app, s.org, "tier-a")
+	t.enforcer.Join(s.T().Context(), s.app, s.org, "tier-a")
 	s.eventually(func() bool { return s.recordedTier() == "tier-a" }, 5*time.Second, 20*time.Millisecond)
 	s.Require().NoError(t.store.Close())
 	t.clock = t.clock.Add(tierTTL)

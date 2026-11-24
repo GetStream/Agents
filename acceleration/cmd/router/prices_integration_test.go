@@ -593,6 +593,26 @@ func (s *PriceSyncSuite) TestDriftNamesARowByItsUsageIDWhereItHasOne() {
 	s.Contains(out.String(), "(usage "+usageID+")")
 }
 
+func (s *PriceSyncSuite) TestDriftLeavesOutWorkOnTheCustomersOwnKey() {
+	pgStore := s.started()
+	s.recordWithVendorCost(pgStore, "grok-4.7", 1_000, 1_000)
+	// Priced at the BYOK fee, at no cost at the vendor's rates: the vendor bills the customer.
+	s.Require().NoError(pgStore.Requests.Insert(s.ctx, &store.Request{
+		Modality: "llm", CustomerID: "app", Provider: "grok", Model: "grok-4.7", StartedAt: time.Now(),
+		CostMicros: 200, BaseCostMicros: 0, PriceVersion: "byok", BYOK: true, Billable: true, Success: true,
+		Attributes: map[string]string{store.VendorCostAttribute: "1000"},
+	}))
+	var out bytes.Buffer
+
+	s.Require().NoError(runPricesDrift(s.ctx, []string{"--json"}, s.settings, &out))
+
+	var models []driftedModel
+	s.Require().NoError(json.Unmarshal(out.Bytes(), &models))
+	s.Require().Len(models, 1)
+	s.Equal(1, models[0].Rows, "only the row on the operator's key")
+	s.Equal("ok", models[0].Status)
+}
+
 // recordWithVendorCost records an LLM row the list priced at cost, of work the vendor said
 // cost vendorCost.
 func (s *PriceSyncSuite) recordWithVendorCost(router *store.Store, model string, cost, vendorCost int64) {

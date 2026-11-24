@@ -78,7 +78,7 @@ func (s *TurnTracingSuite) spans() map[string]sdktrace.ReadOnlySpan {
 func (s *TurnTracingSuite) TestEveryStageOfATurnIsASpanOfItsOwnLength() {
 	current := s.turn()
 
-	traceTurn(s.owner, "turn-1", current)
+	traceTurn(s.T().Context(), s.owner, "turn-1", current)
 
 	spans := s.spans()
 	s.Require().Contains(spans, "agent.turn")
@@ -95,8 +95,24 @@ func (s *TurnTracingSuite) TestEveryStageOfATurnIsASpanOfItsOwnLength() {
 	s.Equal(600*time.Millisecond, spans["agent.turn"].EndTime().Sub(spans["agent.turn"].StartTime()))
 }
 
+func (s *TurnTracingSuite) TestATurnIsTracedUnderTheCallItIsPartOf() {
+	call, span := turnSpans().Tracer("test").Start(s.T().Context(), "session.create")
+	defer span.End()
+	tracker := newTurnTracker(s.owner, nil)
+	tracker.within(call)
+	at := time.Now().Add(-time.Second)
+	tracker.begin("turn-1", stt.Participant{ID: "caller"}, at.Add(100*time.Millisecond), at, 0)
+
+	tracker.interrupt("turn-1", interruption{cause: causeAPI})
+
+	turn := s.spans()["agent.turn"]
+	s.Require().NotNil(turn)
+	s.Equal(span.SpanContext().TraceID(), turn.SpanContext().TraceID())
+	s.Equal(span.SpanContext().SpanID(), turn.Parent().SpanID())
+}
+
 func (s *TurnTracingSuite) TestTheTurnSaysWhoItWasFor() {
-	traceTurn(s.owner, "turn-1", s.turn())
+	traceTurn(s.T().Context(), s.owner, "turn-1", s.turn())
 
 	var attributes []string
 	for _, attribute := range s.spans()["agent.turn"].Attributes() {
@@ -154,7 +170,7 @@ func (s *TurnTracingSuite) TestATurnTheFirstReportToldTakesNoOtherCauseInItsSpan
 }
 
 func (s *TurnTracingSuite) TestATurnNobodyInterruptedSaysNoCause() {
-	traceTurn(s.owner, "turn-1", s.turn())
+	traceTurn(s.T().Context(), s.owner, "turn-1", s.turn())
 
 	for _, attribute := range s.attributes() {
 		s.NotContains(attribute, "turn.interrupt.")
@@ -167,7 +183,7 @@ func (s *TurnTracingSuite) TestAStageThatNeverRanIsNotRecorded() {
 	cut.firstAudioAt, cut.queuedAt, cut.pulledAt = time.Time{}, time.Time{}, time.Time{}
 	cut.interrupted = true
 
-	traceTurn(s.owner, "turn-1", cut)
+	traceTurn(s.T().Context(), s.owner, "turn-1", cut)
 
 	spans := s.spans()
 	s.Contains(spans, "turn.cadence")
@@ -176,7 +192,7 @@ func (s *TurnTracingSuite) TestAStageThatNeverRanIsNotRecorded() {
 }
 
 func (s *TurnTracingSuite) TestATurnThatNeverStartedIsNotRecorded() {
-	traceTurn(s.owner, "turn-1", &openTurn{})
+	traceTurn(s.T().Context(), s.owner, "turn-1", &openTurn{})
 
 	s.Empty(s.recorded.Ended())
 }

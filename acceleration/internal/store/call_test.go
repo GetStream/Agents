@@ -56,6 +56,24 @@ func (s *StoreSuite) TestWritingToAChannelReachesTheLastConversationOnIt() {
 	s.Equal("chat_support", found.ConfigID)
 }
 
+// A call names its session by id, and the agent config was read off whichever customer's
+// session had it.
+func (s *StoreSuite) TestAChannelsAgentConfigIsReadOffTheCustomersOwnSession() {
+	agentID := "agent-of-a-borrowed-id"
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "session-of-a-borrowed-id", CustomerID: "globex", ConfigID: "globex_support"}))
+	call := Call{
+		ID: "call-of-a-borrowed-id", SessionID: "session-of-a-borrowed-id", CustomerID: "acme",
+		CallID: "call-1", AgentID: agentID, StartedAt: s.base,
+	}
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+
+	found, err := s.store.CallByAgentInApp(s.ctx, AppScope{Unpinned: true}, agentID)
+
+	s.Require().NoError(err)
+	s.Equal("acme", found.CustomerID)
+	s.Empty(found.ConfigID, "globex's agent config is not acme's")
+}
+
 // sessionCall starts call as one of its session's, kept under configID: the session's row
 // first, as the session's recorder writes them, since the call names it.
 func (s *StoreSuite) sessionCall(into *Store, call Call, configID string) {
@@ -331,4 +349,22 @@ func (s *StoreSuite) TestAnotherCustomersWriteToACallIdChangesNothing() {
 			s.Equal(before, after, "app's call is as it was")
 		})
 	}
+}
+
+func (s *StoreSuite) TestAnotherCustomersCallByTheSameIdIsNotOpenedAgain() {
+	call := Call{ID: "one", CustomerID: "app", CallID: "call-1", AgentID: "agent-theirs", StartedAt: s.base}
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "app", call.ID, s.base.Add(time.Minute)))
+	before, err := s.store.Calls.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	err = s.store.Calls.Start(s.ctx, &Call{
+		ID: "one", CustomerID: "somebody-else", CallID: "call-2", AgentID: "agent-other", StartedAt: s.base.Add(time.Hour),
+	})
+	s.Require().ErrorIs(err, ErrIDTaken)
+
+	after, err := s.store.Calls.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's call is as it was, still ended")
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call), "app starting its own call again is not refused")
 }

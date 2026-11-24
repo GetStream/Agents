@@ -24,6 +24,16 @@ var tracer = tracing.Tracer("store")
 // deletion that did not land.
 const cacheTTL = time.Hour
 
+// forgetWait is how long the deletion of cached rows, or one try at it again, waits on Redis.
+// It is longer than cacheWait: a deletion that is answered late still tells every replica,
+// where a read that waits that long is better answered from Postgres.
+const forgetWait = 2 * time.Second
+
+// cacheWait is how long a read of the cache waits on one answer from Redis before going to
+// Postgres instead.
+// Redis answers in a millisecond or two; one that takes this long is down or cut off.
+const cacheWait = 250 * time.Millisecond
+
 // keyCacheTTL is how long a key's owner is cached. It is short because a key revoked where
 // the deletion does not reach, in the database alone or when Redis drops the DEL, has to
 // stop authenticating within a minute rather than an hour.
@@ -33,6 +43,19 @@ const keyCacheTTL = time.Minute
 // it creates the row, so the expiry is what lets one go, and every name asked for once would
 // otherwise be kept for cacheTTL.
 const missTTL = time.Minute
+
+// forgetAttempts is how many times a deletion Redis did not take is tried again, the first
+// forgetBackoff after it and each one twice as long after the last. forgetSlots bounds how
+// many are being retried at once, so a Redis that is down costs a few goroutines and not one
+// per write. forgetGrace is how long Close lets them run before it stops them: past the last
+// attempt of one that began as Close did, when Redis answers it promptly. One that waits on a
+// slow Redis can still be cut short at its third attempt.
+const (
+	forgetAttempts = 3
+	forgetBackoff  = 100 * time.Millisecond
+	forgetSlots    = 64
+	forgetGrace    = forgetBackoff << forgetAttempts
+)
 
 // Redis says where a Redis server is. An empty Address is none.
 type Redis struct {
@@ -67,7 +90,11 @@ func (s *Store) openRedis(options Options) error {
 			aside(messages)
 			s.Users.invalidate(messages)
 		}
-		return build(option)
+		client, err := build(option)
+		if err != nil {
+			return nil, err
+		}
+		return rueidishook.WithHook(client, cacheReadBound{}), nil
 	}
 	cache, err := rueidisaside.NewClient(rueidisaside.ClientOption{ClientOption: options.Redis.option(), ClientBuilder: shared})
 	if err != nil {
@@ -122,6 +149,11 @@ func cached[T any](ctx context.Context, s *Store, name string, load func(context
 }
 
 // cachedFor is cached with a TTL of the caller's own.
+//
+// Each Redis command of the read waits on Redis's answer for cacheWait (cacheReadBound), so a
+// Redis that cannot be reached costs that and not the caller's whole deadline. load runs on
+// the caller's context, unbounded by that wait, and so does rueidisaside's wait for a load
+// another caller of this router is running: the readers of a cold key share one load.
 func cachedFor[T any](ctx context.Context, s *Store, name string, ttl time.Duration, load func(context.Context) (T, error)) (T, error) {
 	var value T
 	if s.cache == nil {
@@ -132,18 +164,24 @@ func cachedFor[T any](ctx context.Context, s *Store, name string, ttl time.Durat
 	defer span.End()
 
 	var refused error
-	encoded, err := s.cache.Get(ctx, ttl, name, func(ctx context.Context, _ string) (string, error) {
-		loaded, err := load(ctx)
-		if err != nil {
+	var loaded T
+	var hasLoaded bool
+	encoded, err := s.cache.Get(context.WithValue(ctx, cacheReadKey{}, true), ttl, name, func(ctx context.Context, _ string) (string, error) {
+		var err error
+		if loaded, err = load(ctx); err != nil {
 			refused = err
 			return "", err
 		}
+		hasLoaded = true
 		raw, err := json.Marshal(loaded)
 		return string(raw), err
 	})
 	switch {
 	case refused != nil:
 		return value, stack.Wrap(refused)
+	case err != nil && hasLoaded:
+		slog.Default().Error("could not cache a row in redis", "key", name, "error", err)
+		return loaded, nil
 	case err != nil:
 		slog.Default().Error("could not read a cached row from redis, reading postgres", "key", name, "error", err)
 		return load(ctx)
@@ -153,6 +191,60 @@ func cachedFor[T any](ctx context.Context, s *Store, name string, ttl time.Durat
 		return value, stack.Wrap(fmt.Errorf("store: decode %s: %w", name, err))
 	}
 	return value, nil
+}
+
+// cacheReadKey marks the context of a cached read, whose Redis commands cacheReadBound bounds.
+type cacheReadKey struct{}
+
+// cacheReadBound gives cacheWait to be answered to each command sent on a cached read's
+// context, and to each one sent on a context with no deadline. The second are rueidisaside's
+// own, its client marker and the release of a load's lock, which a cached read and the
+// readers waiting on its load wait for, and the store's sends that outlive a request (forget).
+// A command on a context with a deadline of its own keeps it. A stream is read after the call
+// returns, so it is left alone.
+type cacheReadBound struct{}
+
+func boundCacheRead(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, deadline := ctx.Deadline(); deadline && ctx.Value(cacheReadKey{}) == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, cacheWait)
+}
+
+func (cacheReadBound) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	ctx, cancel := boundCacheRead(ctx)
+	defer cancel()
+	return client.Do(ctx, cmd)
+}
+
+func (cacheReadBound) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	ctx, cancel := boundCacheRead(ctx)
+	defer cancel()
+	return client.DoMulti(ctx, multi...)
+}
+
+func (cacheReadBound) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	ctx, cancel := boundCacheRead(ctx)
+	defer cancel()
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (cacheReadBound) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	ctx, cancel := boundCacheRead(ctx)
+	defer cancel()
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (cacheReadBound) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(rueidis.PubSubMessage)) error {
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (cacheReadBound) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return client.DoStream(ctx, cmd)
+}
+
+func (cacheReadBound) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	return client.DoMultiStream(ctx, multi...)
 }
 
 // found is a row looked up together with whether there was one, so that a row nobody holds
@@ -165,10 +257,10 @@ type found[T any] struct {
 // forget drops cached rows from Redis, which drops them from every replica's local cache
 // too, in one round trip.
 //
-// A deletion that does not land is logged rather than returned: the write it followed has
-// already happened, and refusing it afterwards would tell the caller their change was
-// rejected when it was not. The TTL is what covers the difference. It reports whether the
-// deletion landed, false without Redis, for a caller that tells a person so.
+// A deletion that does not land is tried again in the background rather than returned: the
+// write it followed has already happened, and refusing it afterwards would tell the caller
+// their change was rejected when it was not. It reports whether the deletion landed now, false
+// without Redis, for a caller that tells a person so.
 //
 // The deletion goes out even when the request has been cancelled since the write: rueidis
 // returns the context's error before it sends anything, so neither the DEL nor the EXISTS
@@ -177,7 +269,10 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 	if s.cache == nil || len(names) == 0 {
 		return false
 	}
-	ctx = context.WithoutCancel(ctx)
+	// A deadline of its own, so cacheReadBound leaves the deletion its forgetWait rather than
+	// a cached read's wait.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), forgetWait)
+	defer cancel()
 	client := s.cache.Client()
 	// Each key is deleted on its own: a Redis Cluster refuses one DEL whose keys sit in
 	// different hash slots, and the keys one write changes usually do.
@@ -195,12 +290,75 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 		commands = append(commands, client.B().Del().Key(name).Build(), client.B().Exists().Key(name).Build())
 	}
 	replies := client.DoMulti(ctx, commands...)
-	landed := true
+	var missed []string
+	var failed error
 	for i, name := range names {
 		if err := replies[2*i].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
-			slog.Default().Error("could not drop a cached row", "key", name, "error", err)
-			landed = false
+			missed, failed = append(missed, name), err
 		}
 	}
-	return landed
+	if len(missed) > 0 {
+		s.forgetLater(missed, failed, false)
+	}
+	return len(missed) == 0
+}
+
+// forgetLater tries again, a few times and in the background, a deletion Redis did not take.
+// The usual cause is a connection Redis dropped, which the client dials again at once. A
+// deletion still not taken after that, or one with no slot left to retry in, is what the TTL
+// covers. With every set, each attempt deletes all of names whatever the last one answered:
+// the keys of a COMMIT whose answer was lost, which may land at any time during them.
+func (s *Store) forgetLater(names []string, err error, every bool) {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	if s.closed {
+		slog.Default().Error("could not drop cached rows, and the store is closing", "keys", names, "error", err)
+		return
+	}
+	select {
+	case s.retries <- struct{}{}:
+	default:
+		slog.Default().Error("could not drop cached rows, and no retry is free", "keys", names, "error", err)
+		return
+	}
+	s.retrying.Add(1)
+	go func() {
+		defer s.retrying.Done()
+		defer func() { <-s.retries }()
+		client := s.cache.Client()
+		wait := forgetBackoff
+		var missed []string
+		for range forgetAttempts {
+			timer := time.NewTimer(wait)
+			select {
+			case <-s.closing.Done():
+				timer.Stop()
+				slog.Default().Error("could not drop cached rows before the store closed", "keys", names, "error", err)
+				return
+			case <-timer.C:
+			}
+			// One DEL per key, as forget sends them, since a cluster refuses one across slots.
+			commands := make(rueidis.Commands, 0, len(names))
+			for _, name := range names {
+				commands = append(commands, client.B().Del().Key(name).Build())
+			}
+			missed = nil
+			attempt, cancel := context.WithTimeout(s.closing, forgetWait)
+			for i, reply := range client.DoMulti(attempt, commands...) {
+				if failed := reply.Error(); failed != nil && !errors.Is(failed, rueidis.Nil) {
+					missed, err = append(missed, names[i]), failed
+				}
+			}
+			cancel()
+			if !every {
+				if names = missed; len(names) == 0 {
+					return
+				}
+			}
+			wait *= 2
+		}
+		if len(missed) > 0 {
+			slog.Default().Error("gave up dropping cached rows", "keys", missed, "attempts", forgetAttempts, "error", err)
+		}
+	}()
 }

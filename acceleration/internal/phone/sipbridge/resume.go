@@ -103,7 +103,7 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	reg := newRegistry()
 	reg.add(state.Customer.CallID, customer)
 	reg.add(state.Stream.CallID, stream)
-	call := newCall(customer, stream, cfg.Logger)
+	call := newCall(ctx, customer, stream, cfg.Logger)
 	call.onChange = cfg.OnChange
 	call.media = state.Media
 	handle(srv, reg, call)

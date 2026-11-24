@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
 )
@@ -58,7 +59,7 @@ func (u *utterance) FirstFrameQueued(time.Time) {}
 // say, and neither may wait on a consumer, so Speaking is sent from a goroutine of its own.
 func (u *utterance) FirstAudiblePulled(at time.Time) {
 	if u.pulledAt.CompareAndSwap(0, at.UnixNano()) {
-		go u.agent.announce(u, at, 0)
+		goroutine.Go(u.agent.ctx, func() { u.agent.announce(u, at, 0) })
 	}
 }
 

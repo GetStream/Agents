@@ -494,7 +494,7 @@ func (s *ScheduledTasksSuite) runWorker() {
 		s.attempts.Add(1)
 		return s.router.DeliverScheduledTask(ctx, claimed)
 	}
-	worker := scheduling.NewScheduler(s.store, deliver, slog.New(slog.DiscardHandler))
+	worker := s.newScheduler(deliver, slog.New(slog.DiscardHandler))
 	worker.Start(context.Background())
 	s.worker = worker
 	s.router.SetSchedulerKick(worker.Kick)
@@ -1161,6 +1161,8 @@ func (s *ScheduledTasksSuite) TestDeletingASessionDeletesItsTasks() {
 	user := s.data.createUser()
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
 		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","in":"PT2H","timezone":"Europe/Amsterdam"}`})
+	ctx := context.Background()
+	s.Require().NoError(s.store.StartDataCapture(ctx, s.customerID(), time.Hour, time.Second))
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
@@ -1169,6 +1171,55 @@ func (s *ScheduledTasksSuite) TestDeletingASessionDeletesItsTasks() {
 
 	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
 	s.Empty(s.tasksOf(user), "the deleted conversation's tasks went with it")
+	changes, _, err := s.store.Changes(ctx, s.customerID(), 0, 1000)
+	s.Require().NoError(err)
+	var recorded int
+	for _, change := range changes {
+		if change.Table == "scheduled_tasks" {
+			recorded++
+			s.Equal(store.ChangeDelete, change.Op, "no change of the task holds its words")
+			s.Empty(change.Payload)
+		}
+	}
+	s.GreaterOrEqual(recorded, 2, "the task's insert, emptied, and its delete")
+}
+
+func (s *ScheduledTasksSuite) TestASessionWhoseTasksCouldNotBeDeletedIsKeptToDeleteAgain() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	opened := s.openScheduling(user, config, nil)
+	ctx := context.Background()
+	next := time.Now().Add(time.Hour)
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &store.ScheduledTask{
+		CustomerID: s.customerID(), ConfigID: config, UserID: user.userID, APIKey: s.app.key,
+		CallerKind: "authenticated", SessionID: opened.Id, Title: "Stretch", Instructions: "Remind them to stretch.",
+		StartLocal: time.Now().UTC(), Timezone: "Europe/Amsterdam", NextRunAt: &next,
+		State: store.ScheduledTaskActive, CreatedBy: "api",
+	}, 25))
+	// The store refuses to delete this app's tasks until the trigger is dropped.
+	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE FUNCTION tasks_kept() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN IF OLD.customer_id = '`+s.customerID()+`' THEN RAISE EXCEPTION 'tasks kept'; END IF; RETURN OLD; END $$`)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE TRIGGER tasks_kept BEFORE DELETE ON scheduled_tasks FOR EACH ROW EXECUTE FUNCTION tasks_kept()")
+	s.Require().NoError(err)
+	dropped := false
+	drop := func() {
+		if !dropped {
+			_, err := s.store.GlobalDB().ExecContext(ctx, "DROP FUNCTION tasks_kept() CASCADE")
+			s.Require().NoError(err)
+			dropped = true
+		}
+	}
+	defer drop()
+
+	s.Equal(http.StatusInternalServerError, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/sessions/"+opened.Id, nil, nil),
+		"the session is kept while its tasks are")
+	s.Len(s.tasksOf(user), 1)
+
+	drop()
+	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
+	s.Empty(s.tasksOf(user), "deleting it again deletes its tasks")
 }
 
 func (s *ScheduledTasksSuite) TestDeletingAConfigPausesItsTasks() {
@@ -1469,6 +1520,143 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotResumeATaskWhileItsConfigIsDelet
 	s.whileDeleting(config, func() { s.say(user, opened.Id, "turn it back on") })
 	s.Contains(s.ranResult(watching), `"error":"unknown_config"`)
 	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
+}
+
+// whileChanging makes a request while another write to the task is under way: the write is in
+// and not committed when the request reads the task, and commits once the request waits on it.
+func (s *ScheduledTasksSuite) whileChanging(id, set string, request func()) {
+	ctx := context.Background()
+	changing, err := s.store.GlobalDB().BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = changing.Rollback() }()
+	_, err = changing.ExecContext(ctx, "UPDATE scheduled_tasks SET "+set+", updated_at = now() WHERE id = ?", id)
+	s.Require().NoError(err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		request()
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity"+
+			" WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the request saved the task without waiting for the write under way")
+	s.Require().NoError(changing.Commit())
+	<-done
+}
+
+func (s *ScheduledTasksSuite) TestAnEditOfATaskPausedMeanwhileIsRefusedAndLeavesItPaused() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+
+	var status int
+	var failure ErrorResponse
+	s.whileChanging(created.Id, "state = 'paused'", func() {
+		status, failure = s.taskFailure(user, http.MethodPatch, "/v1/agents/scheduled-tasks/"+created.Id,
+			UpdateScheduledTaskRequest{Title: pointerTo("Renamed")})
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal("task_changed", failure.Error.Code)
+	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskPaused, task.State)
+	s.Equal("Stretch", task.Title)
+}
+
+func (s *ScheduledTasksSuite) TestAPauseOfATaskEditedMeanwhileIsRefusedAndKeepsTheEdit() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+
+	var status int
+	var failure ErrorResponse
+	s.whileChanging(created.Id, "title = 'Renamed'", func() {
+		status, failure = s.taskFailure(user, http.MethodPost, "/v1/agents/scheduled-tasks/"+created.Id+"/pause", nil)
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal("task_changed", failure.Error.Code)
+	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
+}
+
+func (s *ScheduledTasksSuite) TestAResumeOfATaskEditedMeanwhileIsRefusedAndKeepsTheEdit() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	path := "/v1/agents/scheduled-tasks/" + created.Id
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, path+"/pause", nil, nil))
+
+	var status int
+	var failure ErrorResponse
+	s.whileChanging(created.Id, "title = 'Renamed'", func() {
+		status, failure = s.taskFailure(user, http.MethodPost, path+"/resume", nil)
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal("task_changed", failure.Error.Code)
+	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskPaused, task.State)
+	s.Equal("Renamed", task.Title)
+}
+
+func (s *ScheduledTasksSuite) TestResumesAtOnceStopAtTheActiveLimit() {
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Scheduling.MaxTasksPerUser = pointerTo(5)
+	})
+	user := s.data.createUser()
+	var ids []string
+	for range 4 {
+		for range 5 {
+			ids = append(ids, s.createTask(user, taskRequest(config)).Id)
+		}
+		for _, id := range ids[len(ids)-5:] {
+			s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+id+"/pause", nil, nil))
+		}
+	}
+
+	var wg sync.WaitGroup
+	statuses := make(chan int, len(ids))
+	for _, id := range ids {
+		wg.Go(func() {
+			status, _ := user.call(http.MethodPost, "/v1/agents/scheduled-tasks/"+id+"/resume", nil)
+			statuses <- status
+		})
+	}
+	wg.Wait()
+	close(statuses)
+	answered := map[int]int{}
+	for status := range statuses {
+		answered[status]++
+	}
+	s.Equal(map[int]int{http.StatusOK: 5, http.StatusConflict: 15}, answered)
+	active := 0
+	for _, task := range s.tasksOf(user) {
+		if task.State == store.ScheduledTaskActive {
+			active++
+		}
+	}
+	s.Equal(5, active)
+}
+
+func (s *ScheduledTasksSuite) TestTheAgentIsToldATaskChangedUnderItsEdit() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	before := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + created.Id + `","action":"snooze","in":"PT30M"}`})
+	s.whileChanging(created.Id, "state = 'paused'", func() { s.say(user, opened.Id, "half an hour later, please") })
+	s.Contains(s.ranResult(watching), `"error":"task_changed"`)
+	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskPaused, task.State)
+	s.Require().NotNil(task.NextRunAt)
+	s.True(before.NextRunAt.Equal(*task.NextRunAt), "the snooze did not move the task")
 }
 
 func (s *ScheduledTasksSuite) TestADueTaskIsNotCountedOnItsUsersDay() {
@@ -2762,9 +2950,9 @@ func (s *ScheduledTasksSuite) pausedInTheSecondPass(id string) time.Time {
 
 // resumingAt has a resume count from now rather than the wall clock.
 func (s *ScheduledTasksSuite) resumingAt(now time.Time) {
-	kept := resumedAt
-	resumedAt = func() time.Time { return now }
-	s.T().Cleanup(func() { resumedAt = kept })
+	kept := s.router.resumedAt
+	s.router.resumedAt = func() time.Time { return now }
+	s.T().Cleanup(func() { s.router.resumedAt = kept })
 }
 
 // utcTaskRequest is taskRequest in UTC, so a task's local start is its instant.
@@ -3401,9 +3589,7 @@ func (s *ScheduledTasksSuite) TestAnUnreachablePhoneFallsBackToWhatsApp() {
 }
 
 func (s *ScheduledTasksSuite) TestAPhoneOnlyTaskFailsWhenNoCallCanBePlaced() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAtOnce()
 
 	user := s.data.createUser()
 	config := s.agentToRing(user)
@@ -3554,20 +3740,22 @@ func (s *ScheduledTasksSuite) TestACallThatOutlastsTheWaitIsUserOnCall() {
 }
 
 func (s *ScheduledTasksSuite) TestACallNobodyPicksUpIsNotAnswered() {
-	window := scheduledPhoneWindow
-	scheduledPhoneWindow = 50 * time.Millisecond
-	s.T().Cleanup(func() { scheduledPhoneWindow = window })
+	window := s.router.phoneWindow
+	s.router.phoneWindow = 50 * time.Millisecond
+	s.T().Cleanup(func() { s.router.phoneWindow = window })
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
 	opened := s.openScheduling(user, config, nil)
 	found, live := s.router.sessions.Get(opened.Id, s.ownerOf(user))
 	s.Require().True(live)
 
+	started := time.Now()
 	err := s.router.holdCall(context.Background(), found, scheduledDelivery{})
 	s.Equal(scheduling.ReasonNotAnswered, scheduling.ReasonOf(err), "the ring ran out: %v", err)
+	s.Less(time.Since(started), deliveryWait, "the ring was the router's 50 ms, not the default 90 s")
 	s.True(s.failure(err).Final, "the user is not rung again")
 
-	scheduledPhoneWindow = time.Minute
+	s.router.phoneWindow = time.Minute
 	held := make(chan error, 1)
 	go func() { held <- s.router.holdCall(context.Background(), found, scheduledDelivery{}) }()
 	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
@@ -3587,9 +3775,9 @@ func (s *ScheduledTasksSuite) ownerOf(user *testClient) session.Owner {
 
 func (s *ScheduledTasksSuite) TestAReplyNeverWrittenIsNoReply() {
 	s.retryAtOnce()
-	window := scheduledReplyWindow
-	scheduledReplyWindow = time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	number, writer := s.lineNumber(), s.writerNumber()
 	s.connectWhatsApp(number)
 	config := s.agentOnWhatsApp(number)
@@ -3626,11 +3814,31 @@ func (s *ScheduledTasksSuite) TestAFailureOnEveryChannelIsListedUnderTheFirstCha
 	s.Equal(scheduling.ReasonUnreachable, *s.failedRun(s.tasksOf(user)[0]).Error)
 }
 
-// retryAtOnce has a failed occurrence tried again straight away, twice.
+// retryAtOnce has a failed occurrence tried again straight away, twice, by the workers the test
+// starts next (newScheduler).
 func (s *RouterSuite) retryAtOnce() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAfter(time.Millisecond, time.Millisecond)
+}
+
+// retryAfter has the workers the test starts next retry a failed occurrence after waits. They are
+// the suite's, never the scheduler's own: suites run in parallel, and one that changed a value
+// every worker reads changed the retries of the others' workers mid-test.
+func (s *RouterSuite) retryAfter(waits ...time.Duration) {
+	s.retries = waits
+	s.T().Cleanup(func() { s.retries = nil })
+}
+
+// newScheduler is a scheduled-task worker delivering with deliver, retrying as the test set
+// (retryAfter, finishAtOnce), else as the scheduler does.
+func (s *RouterSuite) newScheduler(deliver scheduling.DeliverFunc, logger *slog.Logger) *scheduling.Scheduler {
+	worker := scheduling.NewScheduler(s.store, deliver, logger)
+	if s.retries != nil {
+		worker.SetRetries(s.retries)
+	}
+	if s.finishRetries != nil {
+		worker.SetFinishRetries(s.finishRetries)
+	}
+	return worker
 }
 
 // failedRun waits for the task's latest run to fail, and returns it.
@@ -3741,6 +3949,224 @@ func (s *ScheduledTasksSuite) TestARetriedOccurrenceTextsTheReplyItAlreadyHas() 
 	s.Equal(1, s.model().turnsOn("<scheduled_task"), "the retry ran no second turn")
 }
 
+// A task with no session gets one at its first occurrence, recorded on the task; the claim's
+// copy of the task predates it, and every retry that read that copy opened another.
+func (s *ScheduledTasksSuite) TestAFirstOccurrenceRetriedTwiceFollowsUpInTheOneSessionItOpened() {
+	s.retryAtOnce()
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	s.sink.fail(writer, 2)
+	now := time.Now()
+	next := now.Add(-time.Minute)
+	task := store.ScheduledTask{
+		CustomerID: s.customerID(), ConfigID: config, UserID: user.userID, APIKey: s.app.key,
+		CallerKind: "authenticated", Title: "Stretch",
+		Instructions: "Remind them to stretch.",
+		StartLocal:   now.UTC(), Timezone: "Europe/Amsterdam",
+		NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "api",
+		Channels: []string{"whatsapp"},
+	}
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 25))
+	s.runWorker()
+
+	run := s.delivered(task)
+	s.Equal(int32(3), s.attempts.Load(), "the occurrence was delivered once and retried twice")
+	s.Equal(s.taskReloaded(task).SessionID, run.SessionID)
+	s.Equal([]string{"Done."}, s.sink.to(writer))
+	s.scheduledMu.Lock()
+	defer s.scheduledMu.Unlock()
+	ran := 0
+	for _, model := range s.scheduled {
+		if model.turnsOn("<scheduled_task") > 0 {
+			ran++
+		}
+	}
+	s.Equal(1, ran, "every attempt followed up in the one session")
+}
+
+// finishAtOnce has a finish that failed written again straight away, three times, by the workers
+// the test starts next (newScheduler).
+func (s *ScheduledTasksSuite) finishAtOnce() {
+	s.finishRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	s.T().Cleanup(func() { s.finishRetries = nil })
+}
+
+// failFinishes has the database refuse the next times writes that finish a run of the test's
+// customer, as one that blinked refuses them, until the test ends or mend.
+func (s *ScheduledTasksSuite) failFinishes(times int) (mend func()) {
+	name := "failing_finish_" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	db := s.store.GlobalDB()
+	_, err := db.ExecContext(context.Background(), "CREATE SEQUENCE "+name)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := db.ExecContext(context.Background(), "DROP SEQUENCE IF EXISTS "+name)
+		s.Require().NoError(err)
+	})
+	// A sequence counts the refusals: it is not rolled back with the write it refuses.
+	return s.trigger(name, "scheduled_task_runs", "UPDATE",
+		"NEW.customer_id = '"+s.customerID()+"' AND NEW.state <> 'running'",
+		fmt.Sprintf("IF nextval('%s') <= %d THEN RAISE EXCEPTION 'the finish fails'; END IF;", name, times))
+}
+
+// A worker whose one write of the outcome failed left the run running, for another worker to
+// take over once it was stale and text the person again.
+func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce() {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
+	s.failFinishes(1)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+
+	run := s.delivered(task)
+	s.Equal("whatsapp", run.DeliveredTo)
+	s.Equal(1, run.Attempts, "the worker that texted the run finished it")
+	s.Equal([]string{"Done."}, s.sink.to(writer))
+}
+
+// finishRefusedTwice texts a task's run with waits to write the finish again, the database
+// refusing its first two writes, and returns the run once the worker is done with it.
+func (s *ScheduledTasksSuite) finishRefusedTwice(waits int) store.ScheduledTaskRun {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
+	s.finishRetries = s.finishRetries[:waits]
+	s.failFinishes(2)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+	s.Require().Eventually(func() bool { return len(s.sink.to(writer)) == 1 && s.worker.Running() == 0 },
+		30*time.Second, 50*time.Millisecond, "the worker never texted the run and gave up or finished it")
+	runs := s.runsOf(task)
+	s.Require().Len(runs, 1)
+	return runs[0]
+}
+
+// A finish that failed is written again once per wait the worker is given, no more: one wait
+// writes it twice, both refused, and leaves the run running.
+func (s *ScheduledTasksSuite) TestAFinishIsNotWrittenAgainPastTheWaitsItIsGiven() {
+	s.Equal(store.ScheduledTaskRunRunning, s.finishRefusedTwice(1).State)
+}
+
+// Three waits write the finish a third time, once two refusals are past.
+func (s *ScheduledTasksSuite) TestAFinishIsWrittenAgainOncePerWaitItIsGiven() {
+	s.Equal(store.ScheduledTaskRunDelivered, s.finishRefusedTwice(3).State)
+}
+
+// A run whose text went out and whose outcome was never written, its worker stopped or its
+// database down past the finish's retries, is taken over; the words went out already.
+func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsTextWentOutIsNotTextedAgain() {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
+	mend := s.failFinishes(1000)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+	s.Require().Eventually(func() bool { return len(s.sink.to(writer)) == 1 && s.worker.Running() == 0 },
+		30*time.Second, 50*time.Millisecond, "the worker never texted the run and gave up finishing it")
+	mend()
+	// The run is as old as a stale one, and the claim's lease has run out.
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx,
+		"UPDATE scheduled_task_runs SET started_at = now() - interval '11 minutes' WHERE customer_id = ?", s.customerID())
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx,
+		"UPDATE scheduled_tasks SET lease_until = now() - interval '1 second' WHERE customer_id = ?", s.customerID())
+	s.Require().NoError(err)
+	s.worker.Kick()
+
+	run := s.delivered(task)
+	s.Equal(2, run.Attempts, "another claim took the run over")
+	s.Equal("whatsapp", run.DeliveredTo)
+	s.Equal([]string{"Done."}, s.sink.to(writer), "the person is texted once")
+}
+
+// A text that failed and whose claim could not be given back stays taken: the retry found it
+// taken and counted the run delivered, though nobody was texted.
+func (s *ScheduledTasksSuite) TestATextThatFailedAndCouldNotBeGivenBackFailsItsRun() {
+	s.retryAtOnce()
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	s.sink.fail(writer, 1)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	task := s.tasksOf(user)[0]
+	s.trigger("failing_release_"+strings.ReplaceAll(s.utils.uuid(), "-", ""), "scheduled_task_runs", "UPDATE",
+		"NEW.task_id = '"+task.ID+"' AND 'whatsapp' = ANY(OLD.texted) AND NOT ('whatsapp' = ANY(NEW.texted))",
+		"RAISE EXCEPTION 'the release fails';")
+	// Due before the worker starts, so its first look claims it.
+	s.makeDue(task)
+	s.runWorker()
+
+	run := s.settledRun(task)
+	s.Require().Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Equal(scheduling.ReasonFailed, *run.Error, "recorded under the send's own reason")
+	s.Equal(int32(1), s.attempts.Load(), "the occurrence was not tried again")
+	s.Empty(s.sink.to(writer))
+}
+
+// A later channel failing for now made the occurrence retried, and the retry found the first
+// channel's unsent text taken and counted the run delivered.
+func (s *ScheduledTasksSuite) TestATextKeptUnsentFailsItsRunThoughTheNextChannelFailedForNow() {
+	s.retryAtOnce()
+	whatsAppLine, smsLine := s.lineNumber(), s.lineNumber()
+	onWhatsApp, bySMS := s.writerNumber(), s.writerNumber()
+	s.connectWhatsApp(whatsAppLine)
+	s.seedSMSLine(smsLine)
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Channels = &AgentChannels{
+			Whatsapp: &ChannelLineRequest{Number: whatsAppLine},
+			Sms:      &ChannelLineRequest{Number: smsLine},
+		}
+	})
+	user := s.data.createUser()
+	s.seedWriter(user, config, whatsAppLine, onWhatsApp)
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
+		CustomerID: s.customerID(), ConfigID: config, Kind: "sms",
+		Address: bySMS, UserID: user.userID,
+	}))
+	s.sink.fail(onWhatsApp, 1)
+	s.sink.fail(bySMS, 1)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp", "sms"})
+	task := s.tasksOf(user)[0]
+	s.trigger("failing_release_"+strings.ReplaceAll(s.utils.uuid(), "-", ""), "scheduled_task_runs", "UPDATE",
+		"NEW.task_id = '"+task.ID+"' AND 'whatsapp' = ANY(OLD.texted) AND NOT ('whatsapp' = ANY(NEW.texted))",
+		"RAISE EXCEPTION 'the release fails';")
+	// Due before the worker starts, so its first look claims it.
+	s.makeDue(task)
+	s.runWorker()
+
+	run := s.settledRun(task)
+	s.Require().Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Equal(int32(1), s.attempts.Load(), "the occurrence was not tried again")
+	s.Empty(s.sink.to(onWhatsApp))
+	s.Empty(s.sink.to(bySMS), "no channel texted the words a second time")
+}
+
 func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrenceIsRetried() {
 	s.retryAtOnce()
 	number, writer := s.lineNumber(), s.writerNumber()
@@ -3764,9 +4190,9 @@ func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrence
 
 func (s *ScheduledTasksSuite) TestARetryWaitsForAReplyStillBeingWritten() {
 	s.retryAtOnce()
-	window := scheduledReplyWindow
-	scheduledReplyWindow = 6 * time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = 6 * time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	number, writer := s.lineNumber(), s.writerNumber()
 	s.connectWhatsApp(number)
 	config := s.agentOnWhatsApp(number)
@@ -3889,7 +4315,7 @@ func (s *ScheduledTasksSuite) TestATurnInterruptedByItsRouterStoppingRunsAgainOn
 	_, err := s.cutOff(stopping, task, run, func() { s.Require().NoError(sessions.Shutdown()) })
 	s.Require().Error(err)
 	// A stopped router's claim on the session runs out; the test does not wait for it.
-	stopping.directory.Release(context.Background(), opened.Id)
+	stopping.directory.Release(context.Background(), s.customerID(), opened.Id)
 
 	deliveredTo, err := s.deliverRun(task, run)
 

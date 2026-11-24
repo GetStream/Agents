@@ -372,7 +372,7 @@ func (s *StoreSuite) began(into *Store, id, appID string, at, closed time.Time, 
 		ID: id, CustomerID: appID, AgentName: "agent-" + id, Modality: ModalityVoice, CreatedAt: at,
 	}))
 	if !closed.IsZero() {
-		s.Require().NoError(into.Sessions.Close(s.ctx, appID, id, closed, reason))
+		s.Require().NoError(into.Sessions.Close(s.ctx, appID, id, at, closed, reason))
 	}
 }
 
@@ -498,4 +498,24 @@ func (s *ShardedStoreSuite) TestSessionsAreReadFromEveryShard() {
 	s.Require().Len(latest, 2)
 	s.Equal("there-new", latest[0].ID)
 	s.Equal("here-new", latest[1].ID)
+}
+
+func (s *StoreSuite) TestABacklogOfActivityDaysPastTheirKeepIsPrunedWhole() {
+	s.inSmallBatches()
+	now := s.base
+	var deltas []ActivityDelta
+	for days := range 3 {
+		deltas = append(deltas, s.day("acme", "agent_setup", AuditSourceCLI, now.AddDate(0, 0, -ActivityKeepDays-1-days), 1, 0))
+	}
+	deltas = append(deltas, s.day("acme", "agent_setup", AuditSourceCLI, now, 1, 0))
+	s.Require().NoError(s.store.Activities.Add(s.ctx, deltas))
+
+	var pruned int
+	var err error
+	deletes := s.statementsLike("DELETE FROM customer_activity", func() { pruned, err = s.store.Activities.Prune(s.ctx, now) })
+
+	s.Require().NoError(err)
+	s.Equal(3, pruned)
+	s.Equal(1, s.activityRows("acme"), "today's row is kept")
+	s.Equal(4, deletes, "a row per statement, then the one that finds none")
 }

@@ -29,9 +29,26 @@ type logMask struct {
 //
 // Known limit: a number written without + (Vonage and Plivo send it so) is masked only when it
 // is the whole value of a number, caller, to or from attribute, or the user part of a sip: or
-// tel: URI there, so one echoed inside an error text stays. A rule for any bare digit run would
+// tel: URI there, or follows phone:, so one echoed bare inside an error text stays. A rule for any bare digit run would
 // mask ids, timestamps and model names such as claude-sonnet-4-20250514.
+//
+// An end user's id is the customer's to choose and is often an email, and a channel user's is
+// phone: and the sender's number, which can come without +. router usage forget-user cannot
+// reach a log, so neither may be in one: a phone: id is masked as a number anywhere, and under
+// endUserKeys an email keeps only its domain. Only there, since a sip: URI under to or from is
+// an email's shape too.
 var logMasks = []logMask{
+	{
+		keys:    endUserKeys,
+		may:     func(text string) bool { return strings.Contains(text, "@") },
+		pattern: email,
+		mask:    func(string) string { return "•••@" },
+	},
+	{
+		may:     func(text string) bool { return strings.Contains(text, "phone:") },
+		pattern: phoneUser,
+		mask:    func(match string) string { return "phone:" + maskPhone(match) },
+	},
 	{
 		may:     func(text string) bool { return strings.Contains(text, "sip-") },
 		pattern: regexp.MustCompile(`sip-(?:\+|%2[Bb])?[0-9]{7,}`),
@@ -56,6 +73,14 @@ var logMasks = []logMask{
 }
 
 var (
+	// endUserKeys are the attributes that hold an end user's id, id among them for an audit
+	// resource such as user:<app>/<user id>.
+	endUserKeys = []string{"user", "user_id", "participant", "bound", "id"}
+	// email is the part of an email address before its domain, whatever shape either has: a
+	// name and spaces before it are masked too, and a scheme such as email: is kept.
+	email = regexp.MustCompile(`[^@:]+@`)
+	// phoneUser is phone: and a number with no +, which the rule for + and digits masks.
+	phoneUser = regexp.MustCompile(`phone:[0-9](?:[ ().-]{0,2}[0-9]){6,14}`)
 	// nationalNumber is a whole value that is a number with no +, alone or as the user part of
 	// a sip: or tel: URI, whose host is kept.
 	nationalNumber = regexp.MustCompile(`^((?:sip|tel):)?(\(?[0-9](?:[ ().-]{0,2}[0-9]){6,14})(@\S+)?$`)

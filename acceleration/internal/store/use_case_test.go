@@ -4,6 +4,7 @@ package store
 
 import (
 	"fmt"
+	"time"
 )
 
 // useCase creates a draft use case for a customer.
@@ -29,6 +30,44 @@ func (s *StoreSuite) TestAnAppsFirstUseCaseIsItsDefaultUntilAnotherTakesOver() {
 	s.False(first.IsDefault)
 	_, err = s.store.UseCases.Get(s.ctx, newID(), second.ID)
 	s.ErrorIs(err, ErrUnknownUseCase, "another app does not see it")
+}
+
+// Two creates at once for an app with no use case both find none. The one whose default lands
+// second is the app's second use case, not a failed create.
+func (s *StoreSuite) TestACreateRacingTheAppsFirstUseCaseIsItsSecond() {
+	customerID := newID()
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // a no-op once committed
+	first := UseCase{ID: newID(), CustomerID: customerID, Name: "support", IsDefault: true, Status: "draft",
+		UseCaseType: "CUSTOMER_CARE", MessageSamples: []string{}, CreatedAt: s.base, UpdatedAt: s.base}
+	_, err = tx.NewInsert().Model(&first).Exec(s.ctx)
+	s.Require().NoError(err)
+	second := UseCase{CustomerID: customerID, Name: "reminders", Status: "draft", UseCaseType: "CUSTOMER_CARE"}
+	created := make(chan error, 1)
+	go func() { created <- s.store.UseCases.Insert(s.ctx, &second) }()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database() AND query LIKE 'INSERT INTO \"dlc_use_cases\"%'").Scan(&waiting))
+		return waiting == 1
+	}, 5*time.Second, 10*time.Millisecond, "the second create found no use case, and waits on the first's default")
+
+	s.Require().NoError(tx.Commit())
+
+	select {
+	case err := <-created:
+		s.Require().NoError(err)
+	case <-time.After(5 * time.Second):
+		s.FailNow("the second create never returned")
+	}
+	s.False(second.IsDefault)
+	held, err := s.store.UseCases.Select(s.ctx, customerID, 10, nil)
+	s.Require().NoError(err)
+	s.Len(held, 2)
+	first, err = s.store.UseCases.Get(s.ctx, customerID, first.ID)
+	s.Require().NoError(err)
+	s.True(first.IsDefault)
 }
 
 // Two reviewers acting on the same use case at once must not both win.
@@ -121,6 +160,13 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 		_, err := s.store.UseCases.GetByID(s.ctx, useCase.ID)
 		s.Require().NoError(err)
 	}), "GetByID")
+	s.Equal(1, s.countQueries(func() {
+		requested, err := s.store.UseCases.RequestCampaign(s.ctx, useCase.ID, s.base)
+		s.Require().NoError(err)
+		s.True(requested)
+	}), "RequestCampaign")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID, s.base)) }),
+		"ForgetCampaignRequest")
 	useCase.Status, useCase.Vendor, useCase.VendorCampaignID = "submitted", "telnyx", "campaign-"+useCase.ID
 	s.Equal(2+2, s.countQueries(func() {
 		s.Require().NoError(s.store.UseCases.Move(s.ctx, &useCase, "draft", &ReviewLog{Actor: "vendor", Notes: "Registered campaign-" + useCase.ID + "."}))

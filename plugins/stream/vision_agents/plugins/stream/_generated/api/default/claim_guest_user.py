@@ -110,7 +110,8 @@ def sync_detailed(
     knows that a given guest is a given account -- it is the thing that just authenticated them. A page
     allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole
     attack.
-    A guest already claimed is refused rather than moved again.
+    A guest another account already claimed is refused. The same claim sent again finishes whatever the
+    first left undone, and moves nothing twice.
 
     Args:
         body (ClaimGuestRequest):
@@ -149,7 +150,8 @@ def sync(
     knows that a given guest is a given account -- it is the thing that just authenticated them. A page
     allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole
     attack.
-    A guest already claimed is refused rather than moved again.
+    A guest another account already claimed is refused. The same claim sent again finishes whatever the
+    first left undone, and moves nothing twice.
 
     Args:
         body (ClaimGuestRequest):
@@ -183,7 +185,8 @@ async def asyncio_detailed(
     knows that a given guest is a given account -- it is the thing that just authenticated them. A page
     allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole
     attack.
-    A guest already claimed is refused rather than moved again.
+    A guest another account already claimed is refused. The same claim sent again finishes whatever the
+    first left undone, and moves nothing twice.
 
     Args:
         body (ClaimGuestRequest):
@@ -220,7 +223,8 @@ async def asyncio(
     knows that a given guest is a given account -- it is the thing that just authenticated them. A page
     allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole
     attack.
-    A guest already claimed is refused rather than moved again.
+    A guest another account already claimed is refused. The same claim sent again finishes whatever the
+    first left undone, and moves nothing twice.
 
     Args:
         body (ClaimGuestRequest):

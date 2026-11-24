@@ -51,7 +51,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	s.Require().NoError(err)
 	directory.Close()
 	for _, session := range []string{"s1", "s2", "s3"} {
-		directory.Hold(s.ctx, session, "agent-"+session, "messaging:"+session)
+		directory.Hold(s.ctx, "acme", session, "agent-"+session, "messaging:"+session)
 	}
 	directory.Wait(s.ctx, "acme")
 	directory.Wait(s.ctx, "globex")
@@ -59,7 +59,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	s.Require().Len(keys, 3*3+2+2+1)
+	s.Require().Len(keys, 3*4+2+2+1)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -83,6 +83,62 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	offers, err := peer.Offers(s.ctx, "acme", "agent-s1")
 	s.Require().NoError(err)
 	s.JSONEq(`{"tools":[]}`, string(offers["node-a:1"]))
+}
+
+// Two customers may each run a session of one id, on different nodes: each is found by its own
+// customer, whichever node said so last.
+func (s *DirectorySuite) TestTwoCustomersSessionsOfOneIdAreFoundApart() {
+	first := s.directoryAt("node-a:1")
+	second := s.directoryAt("node-b:1")
+	first.Hold(s.ctx, "acme", "order-42", "", "")
+	second.Hold(s.ctx, "globex", "order-42", "", "")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.nodeOf(peer, "acme", "order-42"))
+	s.Equal("node-b:1", s.nodeOf(peer, "globex", "order-42"))
+}
+
+// A router of the release before holds a session under its id alone, and is still found.
+func (s *DirectorySuite) TestASessionHeldUnderItsIdAloneIsFound() {
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Set().Key(s.prefix+":session:order-42").Value("node-a:1").Build()).Error())
+
+	s.Equal("node-a:1", s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
+}
+
+// A router of the release before reads a session's node by its id alone.
+func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsIdAlone() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", "", "")
+
+	held, err := s.client.Do(s.ctx, s.client.B().Get().Key(s.prefix+":session:order-42").Build()).ToString()
+	s.Require().NoError(err)
+	s.Equal("node-a:1", held)
+}
+
+func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
+	directory := s.directoryAt("node-a:1")
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+
+	directory.Release(s.ctx, "acme", "order-42")
+
+	s.Empty(s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
+	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:order-42").Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Zero(exists, "a router of the release before would still forward to it")
+}
+
+// directoryAt is a node's directory at address, renewing nothing for the test's length.
+func (s *DirectorySuite) directoryAt(address string) *Directory {
+	directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: address, Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	return directory
+}
+
+// nodeOf is where directory says a customer's session runs.
+func (s *DirectorySuite) nodeOf(directory *Directory, customer, session string) string {
+	address, err := directory.Node(s.ctx, customer, session)
+	s.Require().NoError(err)
+	return address
 }
 
 // roundTrips counts what is sent to Redis: a command, or a pipeline of them, is one.

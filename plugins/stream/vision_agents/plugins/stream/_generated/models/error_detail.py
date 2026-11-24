@@ -24,42 +24,43 @@ class ErrorDetail:
             server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed,
             unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent
             config, router config or voice, or another skill of the same agent config, already has the name, so another name
-            will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and
-            one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409:
-            the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer,
-            failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the
-            call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client
-            for the connector, and the message names each way the connector lets the app give it one), invalid_config (a
-            400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent
-            config was declared or given a function that none of the config's tool groups names, and the message names it),
-            insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until
-            credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's
-            spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval,
-            the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent,
-            on the organization, an app, a key, a usage category or a team, and the message says which and when it resets,
-            so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the
-            request is for is spent, which stops that user and no one else, and Retry-After says when its window ends),
-            spend_check_unavailable (a 503: the router could not share what the organization is spending with the other
-            routers for a while, so work that costs money is refused until it can; a model that costs nothing is still
-            served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which
-            spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same
-            interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at
-            that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset
-            or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team),
-            invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away),
-            too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the
-            organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country
-            the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an
-            agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message
-            names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is
-            refused, one for a model that costs nothing included, until it is restored; the message says to contact
-            support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to
-            try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt
-            injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not
-            fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or
-            GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has
-            more pages or text than one may, alone or with the files the conversation already holds, and the message names
-            the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a
+            will do), import_running (a 409: an import of the app is already running on this router, which runs one at a
+            time, so the same import once it ends can succeed), channel_connection_taken (a 409: another live agent config
+            binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message
+            names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and
+            the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status
+            came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a
+            400: a consent found no OAuth client for the connector, and the message names each way the connector lets the
+            app give it one), invalid_config (a 400: an agent config a run names does not start a session),
+            tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the
+            config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is
+            spent, so work that costs money is refused until credit is added; a model that costs nothing is still served),
+            system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever
+            its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one
+            of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team,
+            and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a
+            429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and
+            Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the
+            organization is spending with the other routers for a while, so work that costs money is refused until it can; a
+            model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a
+            400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a
+            limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the
+            subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the
+            subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where
+            the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than
+            366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may),
+            tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a
+            transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at
+            once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits
+            allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and
+            every request is refused, one for a model that costs nothing included, until it is restored; the message says to
+            contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says
+            when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the
+            prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input
+            does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG,
+            WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response
+            has more pages or text than one may, alone or with the files the conversation already holds, and the message
+            names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a
             password, one that is damaged or one with no text in it, which retrying the same file does not fix),
             invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and
             team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _
@@ -86,8 +87,10 @@ class ErrorDetail:
             until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead),
             invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one),
             invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it
-            replaces) and too_many_tasks (a 409: the user is at their active-task limit). More may be added, so a client
-            should expect one it does not know.
+            replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task
+            changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved,
+            and reading it again and retrying can succeed). More may be added, so a client should expect one it does not
+            know.
         doc_url (str): Where the code is explained.
         message (str): What went wrong, for a person to read. Its wording may change; branch on code.
         type_ (ErrorType): The kind of failure, which decides the status it is answered with: invalid_request 400,
