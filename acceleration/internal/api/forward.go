@@ -225,10 +225,11 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 	return true, false
 }
 
-// answeringNode is the node running the session that answers a message, picked as liveSessionOn
-// picks one here: the hook's customer's, and in the deployment's app the customer's the channel
-// names or else the store does. While neither does, it is the only customer's writing as the
-// agent, and store.ErrAmbiguousHook when there are more.
+// answeringNode is the node running the session that answers a message, by customer as
+// liveSessionOn picks one here: the hook's customer's, and in the deployment's app the customer's
+// the channel names or else the store does. While neither does, it is the only customer's writing
+// as the agent, and store.ErrAmbiguousHook when there are more. A claim does not say which app
+// its session is in: the node it names checks that again (origin.owns).
 func (s *Server) answeringNode(ctx context.Context, origin hookOrigin, event messageEvent) (string, error) {
 	if !origin.deployment {
 		return s.directory.NodeByAgent(ctx, origin.customer, event.ChannelID)

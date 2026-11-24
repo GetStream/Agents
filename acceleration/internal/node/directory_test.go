@@ -170,6 +170,14 @@ func (s *DirectorySuite) TestAClaimOnAnAgentThatLapsedIsFoundNowhere() {
 	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
 }
 
+// A router of the release before holds a conversation under its cid alone, and an approval in it
+// is still carried there.
+func (s *DirectorySuite) TestAConversationHeldUnderItsCidAloneIsFound() {
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Set().Key(s.prefix+":channel:messaging:general").Value("node-a:1").Build()).Error())
+
+	s.Equal("node-a:1", s.answeringIn(s.directoryAt("node-c:1"), "acme", "messaging:general"))
+}
+
 // A router of the release before reads a session's agent and conversation by their ids alone.
 func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsAgentAndConversationAlone() {
 	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "messaging:general")

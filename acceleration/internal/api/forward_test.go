@@ -178,6 +178,22 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerOnAChannelTwoCustome
 		"one of the customers' sessions answered a message nothing says is theirs")
 }
 
+// The same when the message lands on the node running one of them: that session does not answer
+// a message nothing says is its customer's while another customer's writes as the agent elsewhere.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsNotAnsweredHereWhileAnotherCustomerWritesInItsChannel() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.data.backendOfAnotherApp().createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"the other customer's session here answered a message nothing says is theirs")
+}
+
 // Two customers may each run a session of one id, each on a node of its own: a request reaches
 // the session of the caller's own customer, wherever it lands.
 func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {

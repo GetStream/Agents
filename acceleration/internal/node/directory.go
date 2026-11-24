@@ -61,8 +61,9 @@ type Directory struct {
 	address  string
 	shard    string
 	sessions string
-	// agents and channels are a session's agent and conversation by their ids alone, which only
-	// a router of the release before reads.
+	// agents and channels are a session's agent and conversation by their ids alone, which a
+	// router of the release before reads. Here only channels is read, when a customer's own key
+	// is not there.
 	agents      string
 	channels    string
 	writingAs   string
@@ -222,17 +223,7 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 // when the customer's is not there. Ids are still unique across customers in every row that
 // release writes, and the node it names answers only a session of the caller's own.
 func (d *Directory) Node(ctx context.Context, customerID, sessionID string) (string, error) {
-	results := d.redis.DoMulti(ctx,
-		d.redis.B().Get().Key(d.sessionKey(heldSession{customerID, sessionID})).Build(),
-		d.redis.B().Get().Key(d.sessions+sessionID).Build())
-	for _, result := range results {
-		address, err := result.ToString()
-		if rueidis.IsRedisNil(err) {
-			continue
-		}
-		return address, err
-	}
-	return "", nil
+	return d.lookup(ctx, d.sessionKey(heldSession{customerID, sessionID}), d.sessions+sessionID)
 }
 
 // NodeByAgent is the same for a customer's session writing as an agent, which is what an
@@ -277,8 +268,13 @@ func (d *Directory) NodesByAgent(ctx context.Context, agentID string) (map[strin
 
 // NodeByConversation is the same for a customer's session answering in a conversation, by the
 // channel's cid, which is what an answer to a call held for a person's approval names.
+//
+// A router of the release before says only the cid (node:channel:<cid>), so that key is read when
+// the customer's is not there, as Node reads a session's. The node it names answers an approval
+// only for a session of the caller's own, and a customer whose session holds the cid on a node of
+// this release is found by its own key first.
 func (d *Directory) NodeByConversation(ctx context.Context, customerID, conversationID string) (string, error) {
-	return d.lookup(ctx, d.answeringKey(customerID, conversationID))
+	return d.lookup(ctx, d.answeringKey(customerID, conversationID), d.channels+conversationID)
 }
 
 // Wait says this node has a dispatch worker connected for a customer, and goes on saying
@@ -395,12 +391,20 @@ func (d *Directory) HandedOut(ctx context.Context, customerID, cid string) ([]by
 // and is still the only node that can answer for them.
 func (d *Directory) Close() { d.cancel() }
 
-func (d *Directory) lookup(ctx context.Context, key string) (string, error) {
-	address, err := d.redis.Do(ctx, d.redis.B().Get().Key(key).Build()).ToString()
-	if rueidis.IsRedisNil(err) {
-		return "", nil
+// lookup is the first of keys that is set, in one round trip, and empty when none is.
+func (d *Directory) lookup(ctx context.Context, keys ...string) (string, error) {
+	gets := make([]rueidis.Completed, 0, len(keys))
+	for _, key := range keys {
+		gets = append(gets, d.redis.B().Get().Key(key).Build())
 	}
-	return address, err
+	for _, result := range d.redis.DoMulti(ctx, gets...) {
+		address, err := result.ToString()
+		if rueidis.IsRedisNil(err) {
+			continue
+		}
+		return address, err
+	}
+	return "", nil
 }
 
 // sessionKey is where a customer's session is held: node:session:<customer>:<id>. A session id

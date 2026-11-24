@@ -590,7 +590,7 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 			theirs := found.Spec().CustomerID
 			if _, another := s.sessions.ByAgentWhere(event.ChannelID, func(customer string, app int64) bool {
 				return customer != theirs && origin.owns(customer, app)
-			}); another {
+			}); another || s.anotherWritesAs(ctx, event.ChannelID, theirs) {
 				return nil, false, store.ErrAmbiguousHook
 			}
 			return found, true, nil
@@ -600,6 +600,27 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		return customer == owner && origin.owns(customer, app)
 	})
 	return found, running, nil
+}
+
+// anotherWritesAs reports whether the directory says a session of a customer other than theirs
+// writes as an agent, on any node: a channel nothing says is one customer's is then not theirs to
+// answer, wherever the message lands. A directory that cannot be read leaves this node's own
+// sessions to say.
+func (s *Server) anotherWritesAs(ctx context.Context, agentID, theirs string) bool {
+	if s.directory == nil {
+		return false
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, agentID)
+	if err != nil {
+		s.logger.Warn("could not find out whose sessions write as an agent", "agent", agentID, "error", err)
+		return false
+	}
+	for customer := range nodes {
+		if customer != theirs {
+			return true
+		}
+	}
+	return false
 }
 
 // storedOwnerOf is the customer the store says a channel in the hook's app is: its last call's,
