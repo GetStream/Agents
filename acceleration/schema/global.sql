@@ -139,8 +139,8 @@ TABLE audit_log
     CONSTRAINT audit_log_source_check CHECK ((source = ANY (ARRAY['dashboard'::text, 'cli'::text, 'sdk'::text, 'api'::text, 'manage'::text]))) NOT VALID
     CREATE INDEX audit_log_agent_idx ON public.audit_log USING btree (customer_id, agent_id, created_at DESC, id DESC)
     CREATE INDEX audit_log_customer_idx ON public.audit_log USING btree (customer_id, created_at DESC, id DESC)
-    CREATE INDEX audit_log_resource_idx ON public.audit_log USING btree (customer_id, resource_type, created_at DESC, id DESC)
     CREATE INDEX audit_log_limit_idx ON public.audit_log USING btree (resource_id) WHERE (resource_type = 'limit'::text)
+    CREATE INDEX audit_log_resource_idx ON public.audit_log USING btree (customer_id, resource_type, created_at DESC, id DESC)
 
 TABLE business_profiles
     authorized_contact_email text NOT NULL DEFAULT ''::text
