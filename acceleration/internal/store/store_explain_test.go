@@ -572,7 +572,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Sessions.Ends", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Sessions.Ends(ctx, []string{"seeded-session-7", "seeded-session-207"}, since)
+			_, err := store.Sessions.Ends(ctx, []SessionKey{{"customer-7", "seeded-session-7"}, {"customer-7", "seeded-session-207"}}, since)
 			return err
 		}},
 		{name: "Store.ClaimGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {

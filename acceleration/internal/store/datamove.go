@@ -79,7 +79,9 @@ func refusedRow(table string, err error) error {
 // row it points at.
 type dataTable struct {
 	name string
-	// customer is the column holding the customer id, empty when parent owns the row.
+	// customer is the column holding the customer id, empty when parent owns the row. A table
+	// with a parent may hold one as well, empty on its rows from before it was kept: the row is
+	// then the customer's whose parent it is.
 	customer string
 	// parent and parentColumn name the row this one belongs to.
 	parent       string
@@ -184,7 +186,7 @@ var dataTables = []dataTable{
 	{name: "opt_outs", customer: "customer_id", order: "revoked_at IS NULL"},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
-	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
+	{name: "agent_session_tools", customer: "customer_id", parent: "agent_sessions", parentColumn: "session_id", shard: true},
 	// After the sessions their session_id points at.
 	{name: "calls", customer: "customer_id", shard: true},
 	{name: "agent_responses", customer: "customer_id", shard: true},
@@ -751,9 +753,15 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 	}
 
 	if t.parent != "" {
+		// Two customers may each have a parent of one id: a row naming its customer is the one of
+		// the parent of that customer's.
+		named := ""
+		if t.customer != "" {
+			named = fmt.Sprintf(" AND (t.%[1]s IS NULL OR t.%[1]s = p.customer_id)", t.customer)
+		}
 		return fmt.Sprintf(
-			"SELECT %s FROM %s AS t JOIN %s AS p ON p.id = t.%s WHERE p.customer_id = ?",
-			subject.String(), t.name, t.parent, t.parentColumn), []any{customerID}
+			"SELECT %s FROM %s AS t JOIN %s AS p ON p.id = t.%s WHERE p.customer_id = ?%s",
+			subject.String(), t.name, t.parent, t.parentColumn, named), []any{customerID}
 	}
 	where := t.customer + " = ?"
 	if t.filter != "" {
@@ -926,6 +934,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			" AND h.recipient = r.recipient AND h.channel = r.channel AND h.revoked_at IS NULL AND h.id <> r.id))"
 	}
 	args := []any{string(row), customerID}
+	read := args
+	if spec.customer == "" {
+		read = args[:1]
+	}
+	if spec.customer != "" && spec.parent != "" {
+		// The customer forced onto the row, then checked against its parent.
+		args = append(args, customerID)
+	}
 	if table == "requests" {
 		// The organization a request counts against is the app's here, whatever the row says.
 		// It is in the shared database and requests in this shard's, so it is read first. An app
@@ -935,10 +951,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			return err
 		}
 		args = append(args, organization)
-	}
-	read := args
-	if spec.customer == "" {
-		read = args[:1]
+		read = args
 	}
 	if err := validateImported(ctx, db, spec, shape, columns, picked, subject, read); err != nil {
 		if refused := refusedRow(table, err); refused != nil {
@@ -2018,6 +2031,12 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		}
 	}
 	if spec.parent != "" {
+		// Two customers may each have a parent of one id: a row naming its customer is only the
+		// one of the customer replaying it.
+		if spec.customer != "" {
+			conditions = append(conditions, fmt.Sprintf("(t.%[1]s IS NULL OR t.%[1]s = ?)", spec.customer))
+			args = append(args, customerID)
+		}
 		conditions = append(conditions, fmt.Sprintf(
 			"EXISTS (SELECT 1 FROM %s AS p WHERE p.id = t.%s AND p.customer_id = ?)",
 			spec.parent, spec.parentColumn))

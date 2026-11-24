@@ -2186,6 +2186,59 @@ func (s *DataMoveSuite) pinnedSession(customerID string, app int64) string {
 	return id
 }
 
+// A session's tools name their customer, and two customers may each have a session of one id
+// once the tools are keyed by both: an export carries none naming another customer under the id
+// of the customer's own session.
+func (s *DataMoveSuite) TestAnExportCarriesNoToolsNamingAnotherCustomer() {
+	id := s.pinnedSession("acme", 0)
+	s.toolsNaming(s.source, id, "globex")
+
+	s.Empty(s.export("acme").of("agent_session_tools"))
+}
+
+// An exported row of a session's tools names the source's customer, and an import writes the
+// customer importing it.
+func (s *DataMoveSuite) TestImportedToolsAreTheImportersOwn() {
+	id := s.pinnedSession("acme", 0)
+	s.Require().NoError(s.source.SessionTools.Upsert(s.ctx, "acme", id, []ToolDefinition{{Name: "lookup_order"}}))
+
+	s.move("acme", "initech")
+
+	var customer string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT customer_id FROM agent_session_tools WHERE session_id = ?", id).Scan(&customer))
+	s.Equal("initech", customer)
+	tools, err := s.destination.SessionTools.Get(s.ctx, "initech", id)
+	s.Require().NoError(err)
+	s.Equal([]ToolDefinition{{Name: "lookup_order"}}, tools)
+}
+
+// A replayed delete of a session's tools is scoped to the customer replaying it, whose session
+// of the id does not make another customer's tools under it theirs.
+func (s *DataMoveSuite) TestADeletedToolsChangeLeavesToolsNamingAnotherCustomer() {
+	id := uuid.NewString()
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "acme", AgentID: "agent", UserID: "user"}))
+	s.toolsNaming(s.destination, id, "globex")
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "agent_session_tools", Op: ChangeDelete, At: time.Now(),
+		Key: json.RawMessage(fmt.Sprintf(`{"session_id": %q}`, id)),
+	}}))
+
+	var left int
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM agent_session_tools WHERE session_id = ?", id).Scan(&left))
+	s.Equal(1, left, "globex's tools are still there")
+}
+
+// toolsNaming writes tools under a session's id naming another customer than the session's.
+func (s *DataMoveSuite) toolsNaming(store *Store, session, customer string) {
+	_, err := store.GlobalDB().ExecContext(s.ctx,
+		`INSERT INTO agent_session_tools (session_id, customer_id, tools, updated_at) VALUES (?, ?, '[{"name":"refund_order"}]', now())`,
+		session, customer)
+	s.Require().NoError(err)
+}
+
 // pinOnDestination is the pin a moved session arrived with, nil for none.
 func (s *DataMoveSuite) pinOnDestination(id string) *int64 {
 	var pin *int64

@@ -723,6 +723,25 @@ func (s *ImageJobsSuite) TestTheSameCallAskingForAnotherPictureIsAnotherJob() {
 	s.Len(s.queued(), 2)
 }
 
+// Two customers may each have a session of one id, and a turn's id is its time, so the same
+// call of the same turn asking for the same picture is two pictures when two customers ask.
+func (s *ImageJobsSuite) TestTheSameCallOfAnotherCustomersSessionOfTheIdIsAnotherPicture() {
+	worker := s.worker()
+	request := imagejobs.Request{
+		CustomerID: s.customer, CID: s.cid, AgentUser: "illustrator", SessionID: s.session, TurnID: "turn-1",
+		ToolCallID: "draw-1", Target: "stub/draw", Prompt: "a yellow watering can",
+	}
+	_, err := worker.Queue(s.ctx, request)
+	s.Require().NoError(err)
+	request.CustomerID = "somebody-else"
+
+	queued, err := worker.Queue(s.ctx, request)
+
+	s.Require().NoError(err)
+	s.True(queued, "somebody-else's call is not app's run again")
+	s.Len(s.queued(), 2)
+}
+
 func (s *ImageJobsSuite) queued() []store.ImageJob {
 	var jobs []store.ImageJob
 	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&jobs).Where("cid = ?", s.cid).Scan(s.ctx))
