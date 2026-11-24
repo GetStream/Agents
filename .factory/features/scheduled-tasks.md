@@ -108,7 +108,9 @@ when that run is still ahead. With no run pending, or with the current run alrea
 every move must be 15 minutes out (`scheduling.CheckMove`, `scheduling.go:63`). A schedule
 written to a failed task is held to the same check, since its resume takes the next run from
 that schedule. The agent's `schedule_task` sets a first run 15 minutes out at the soonest
-(`scheduling.CheckFirst`); a backend's create over REST has no floor.
+(`scheduling.CheckFirst`); a backend's create over REST has no floor. The agent's
+`reschedule` counts a new zone, repeat or until as a move, as a PATCH counts every schedule
+it writes; a new title or instructions alone is not one.
 
 A task's `last_run_at` is when a run last finished, in UTC (`max(finished_at)`,
 `internal/store/scheduled_tasks.go:845`). A run's `scheduled_for` is when the occurrence was

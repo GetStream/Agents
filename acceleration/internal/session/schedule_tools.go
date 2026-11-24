@@ -580,8 +580,10 @@ func (r *scheduleRunner) rescheduled(task *store.ScheduledTask, args updateArgs,
 	// passed goes to the next occurrence, its COUNT counted from there, as a
 	// create does. One that does not, or names the stored start again,
 	// re-parses it, a change of title, instructions or repeat, and keeps
-	// counting from it.
-	moved := args.At != nil || args.In != nil
+	// counting from it. A new zone, repeat or until can still bring the run
+	// sooner, so it is held to the floor as a new time is; a change of title or
+	// instructions alone leaves the run where it is.
+	moved := args.At != nil || args.In != nil || args.Timezone != nil || args.Repeat != nil || args.Until != nil
 	next, ok := parsed.Next(now)
 	if parsed.MovesStartFrom(task.StartLocal) {
 		next, ok = parsed.FromNow(now)

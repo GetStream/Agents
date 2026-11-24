@@ -673,6 +673,81 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRescheduleATaskSoonerThanAQuarte
 	s.Equal(created.NextRunAt, read.NextRunAt)
 }
 
+// A new zone reads the task's clock elsewhere, which moves its run as a new time does.
+func (s *ScheduledTasksSuite) TestTheAgentCannotMoveATaskSoonerThanAQuarterHourByChangingItsZone() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	// Five minutes from now in UTC, which two hours west is two hours later.
+	clock := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Minute)
+	body := taskRequest(config)
+	body.Schedule = ScheduledTaskSchedule{At: pointerTo(clock.Format("2006-01-02T15:04:05")), Timezone: pointerTo("Etc/GMT+2")}
+	created := s.createTask(user, body)
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + created.Id + `","action":"reschedule","timezone":"UTC"}`})
+
+	s.say(user, opened.Id, "I meant that in UTC")
+
+	s.Contains(s.ranResult(watching), `"error":"interval_too_short"`)
+	var read ScheduledTask
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+created.Id, nil, &read))
+	s.Equal(created.NextRunAt, read.NextRunAt)
+}
+
+// repeatedAtSoon writes a task as one that started days back, in UTC, at the minute five
+// minutes from now reads, with the repeat, until, state and next run given, and answers
+// that minute today.
+func (s *ScheduledTasksSuite) repeatedAtSoon(id string, daysBack int, rrule string, until *time.Time, state string, next *time.Time) time.Time {
+	clock := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Minute)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+		Set("start_local = ?", clock.AddDate(0, 0, -daysBack)).Set("timezone = ?", "UTC").Set("rrule = ?", rrule).
+		Set("until_date = ?", until).Set("state = ?", state).Set("next_run_at = ?", next).
+		Where("customer_id = ?", s.customerID()).Where("id = ?", id).
+		Exec(context.Background())
+	s.Require().NoError(err)
+	return clock
+}
+
+// A new repeat can put an occurrence before the run it replaces.
+func (s *ScheduledTasksSuite) TestTheAgentCannotMoveATaskSoonerThanAQuarterHourByChangingItsRepeat() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, utcTaskRequest(config))
+	tomorrow := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Minute).AddDate(0, 0, 1)
+	// Weekly from six days back: its next run is tomorrow, and daily would be today.
+	s.repeatedAtSoon(created.Id, 6, "FREQ=WEEKLY", nil, store.ScheduledTaskActive, &tomorrow)
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + created.Id + `","action":"reschedule","repeat":"FREQ=DAILY"}`})
+
+	s.say(user, opened.Id, "make it every day")
+
+	s.Contains(s.ranResult(watching), `"error":"interval_too_short"`)
+	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Require().NotNil(stored.NextRunAt)
+	s.True(tomorrow.Equal(*stored.NextRunAt), "moved to %s", stored.NextRunAt)
+}
+
+// A later until sets a finished repeat going again, at its next occurrence.
+func (s *ScheduledTasksSuite) TestTheAgentCannotRearmAFinishedRepeatSoonerThanAQuarterHour() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, utcTaskRequest(config))
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Truncate(24 * time.Hour)
+	clock := s.repeatedAtSoon(created.Id, 3, "FREQ=DAILY", &yesterday, store.ScheduledTaskCompleted, nil)
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + created.Id + `","action":"reschedule","until":"` + clock.AddDate(0, 1, 0).Format("2006-01-02") + `"}`})
+
+	s.say(user, opened.Id, "keep it going another month")
+
+	s.Contains(s.ranResult(watching), `"error":"interval_too_short"`)
+	s.Equal(store.ScheduledTaskCompleted, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
+}
+
 func (s *ScheduledTasksSuite) TestTheAgentMovesATaskPastItsNextRunUnderAQuarterHourButNotBeforeIt() {
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()

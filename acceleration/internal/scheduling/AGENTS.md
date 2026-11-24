@@ -255,11 +255,16 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduledTasksSuite/TestATaskIsRefusedInWordsWhenNoZoneIsKnown`.
 - **A run moved earlier lands 15 min from now at the soonest** (`MinMove`), and so does the
   first run of a task the agent makes (`CheckFirst`) and a schedule written to a failed task,
-  whose resume takes its next run from it unchecked. A backend's REST create has no floor.
+  whose resume takes its next run from it unchecked. The agent's reschedule counts a new zone,
+  repeat or until as a move; a new title or instructions alone is not one. A backend's REST
+  create has no floor.
   `TestAMoveLandsNoSoonerThanMinMoveUnlessItKeepsTheCurrentRun` (unit),
   `TestAFirstRunLandsNoSoonerThanMinMove` (unit),
   `TestScheduledTasksSuite/TestANextSoonerThanAQuarterHourIsRefused`,
   `TestScheduledTasksSuite/TestTheAgentCannotScheduleATaskSoonerThanAQuarterHour`,
+  `TestScheduledTasksSuite/TestTheAgentCannotMoveATaskSoonerThanAQuarterHourByChangingItsZone`,
+  `TestScheduledTasksSuite/TestTheAgentCannotMoveATaskSoonerThanAQuarterHourByChangingItsRepeat`,
+  `TestScheduledTasksSuite/TestTheAgentCannotRearmAFinishedRepeatSoonerThanAQuarterHour`,
   `TestScheduledTasksSuite/TestAFailedTaskCannotBeRescheduledSoonerThanAQuarterHour`.
 - **A scheduled turn sets no run going.** It is never on the user's day, so a task that made
   the next one would run on uncounted. A tool call the agent asks for in it carries
