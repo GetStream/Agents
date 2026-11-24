@@ -98,9 +98,12 @@ func (s *DataMoveSuite) TearDownSuite() {
 }
 
 func (s *DataMoveSuite) SetupTest() {
-	tables := strings.Join(append(DataTables(), "data_changes", "data_change_capture"), ", ")
+	tables := []string{"data_changes", "data_change_capture"}
+	for _, table := range dataTables {
+		tables = append(tables, table.name)
+	}
 	for _, store := range []*Store{s.source, s.destination} {
-		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+tables+" CASCADE")
+		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+strings.Join(tables, ", ")+" CASCADE")
 		s.Require().NoError(err)
 		store.SetStreamPins(StreamPins{})
 	}
@@ -228,7 +231,8 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
 	}
-	for _, table := range DataTables() {
+	for _, data := range dataTables {
+		table := data.name
 		shape, err := s.source.shapeOf(s.ctx, table)
 		s.Require().NoError(err)
 		for _, column := range shape.columns {
@@ -244,7 +248,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 	// It is what lets a guest come back as themselves; a moved guest is handed a new one.
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 
 	users := s.export("acme").of("users")
 	s.Require().Len(users, 1)
@@ -256,10 +260,10 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	s.capture("acme")
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.Guests.SetSecret(s.ctx, "acme", "guest-1", next))
+	s.Require().NoError(s.source.Users.SetGuestSecret(s.ctx, "acme", "guest-1", next))
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
@@ -276,7 +280,7 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 
 func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 	// A file the importer wrote could otherwise plant a secret it knows for a guest.
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
 
 	s.moveEdited("acme", "moved", "users", func(row map[string]any) {
 		row["refresh_secret_hash"] = "\\x" + hex.EncodeToString(GuestSecretHash("planted"))
@@ -291,19 +295,19 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	// What the router recorded of a user is the customer's data: an account arrives an account,
 	// and a claimed guest arrives claimed by the same account, so nobody else can claim it.
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
-	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	_, err := s.source.Users.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
 
-	_, err = s.destination.Guest(s.ctx, "moved", "alice")
+	_, err = s.destination.Users.GetGuest(s.ctx, "moved", "alice")
 	s.Error(err, "an account is nobody's guest to claim")
-	guest, err := s.destination.Guest(s.ctx, "moved", "guest-1")
+	guest, err := s.destination.Users.GetGuest(s.ctx, "moved", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("alice", guest.ClaimedBy)
-	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
+	_, err = s.destination.Users.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
 	s.ErrorIs(err, ErrGuestClaimed)
 }
 
@@ -1724,7 +1728,7 @@ func (s *DataMoveSuite) TestAnImportedConfigOverTheSandboxLimitsIsRefused() {
 
 func (s *DataMoveSuite) TestAnImportedRequestIsNotBilledAndCountsAgainstTheAppsOwnOrganization() {
 	s.Require().NoError(s.destination.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "acme", OrganizationID: "acme-org"}))
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
 		CustomerID: "acme", OrganizationID: "another-org", Billable: true, CostMicros: -5_000_000,
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
@@ -1740,7 +1744,7 @@ func (s *DataMoveSuite) TestAnImportedRequestOfAnAppRegisteredButUnseenHereCount
 	s.Require().NoError(s.destination.Organizations.Insert(s.ctx, &org))
 	app := App{OrganizationID: org.ID, Name: "moving"}
 	s.Require().NoError(s.destination.Apps.Insert(s.ctx, &app))
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
 		CustomerID: app.ID, OrganizationID: "another-org", Provider: "deepgram", Model: "flux",
 		StartedAt: time.Now().UTC(), Success: true}))
 	exported := s.export(app.ID).of("requests")
@@ -2374,7 +2378,7 @@ func (s *DataMoveSuite) TestATurnRollupRowDeletedAtTheSourceIsDeletedByTheReplay
 // drops that, so their next request records them again.
 func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainOnTheirNextRequest() {
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	cursor := s.move("acme", "moved")
 	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "alice", UserKindAuthenticated))
 
@@ -2392,7 +2396,7 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 	destination := s.cachedDestination()
 	app := "moved-" + newID()
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
 	cursor := s.moveTo(destination, "acme", app)
 	s.Require().NoError(destination.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
 
@@ -2409,7 +2413,7 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 // A user recorded here from their own token, then imported as the guest the source still had them
 // as, is recorded again from their next token.
 func (s *DataMoveSuite) TestAUserImportedOverOneSeenHereIsRecordedAgainOnTheirNextRequest() {
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
 	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
 	row, err := json.Marshal(s.export("acme").of("users")[0])
 	s.Require().NoError(err)
@@ -4094,15 +4098,18 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 
 	s.move("acme", "moved")
 
-	later := time.Now().Add(time.Minute)
-	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	var left float64
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
+	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -4417,7 +4424,7 @@ func (s *DataMoveSuite) TestAMovedBoughtNumberDoesNotArrive() {
 	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000126", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000126", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.source, "acme", "+15550000126", time.Time{}))
 
 	s.move("acme", "acme")
 	s.move("acme", "acme")
@@ -4634,7 +4641,7 @@ func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALin
 
 func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGaveBack() {
 	attached := s.numberAttachedHere("+15550000135")
-	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000135", time.Now()))
+	s.Require().NoError(giveBack(s.ctx, s.source, "acme", "+15550000135", time.Now()))
 
 	s.move("acme", "acme")
 
@@ -4756,7 +4763,7 @@ func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.destination.PhoneNumbers.Release(s.ctx, "acme", "+15550000115", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.destination, "acme", "+15550000115", time.Time{}))
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
 	}))
@@ -4863,7 +4870,7 @@ func (s *DataMoveSuite) movedRequest(old bool) map[string]any {
 }
 
 func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEveryTime() {
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
 	first := s.movedRequest(true)
@@ -4876,7 +4883,7 @@ func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEve
 func (s *DataMoveSuite) TestAnImportedRequestIsGivenAUsageIDOfItsOwnAndIsNeverShipped() {
 	usageID := uuid.Must(uuid.NewV7())
 	shippedAt := time.Now().UTC().Add(-time.Minute)
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true, ToShip: true,
 		ShippedAt: &shippedAt, ShipError: "missing_api_key"}))
 
@@ -4891,7 +4898,7 @@ func (s *DataMoveSuite) TestAnImportedRequestIsGivenAUsageIDOfItsOwnAndIsNeverSh
 }
 
 func (s *DataMoveSuite) TestAnImportedRequestNamesNoGrant() {
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme",
 		Provider: "openai", Model: "m", StartedAt: time.Now().UTC(), Success: true, Billable: true, CostMicros: 500,
 		LimitGrants: []int64{7, 8}}))
 
@@ -5015,7 +5022,7 @@ func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
 }
 
 func (s *DataMoveSuite) TestADeletedRequestFromBeforeUsageIDsIsReplayedToo() {
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 	moved := s.movedRequest(true)
 	sourceID := int64(s.export("acme").of("requests")[0]["id"].(float64))
@@ -5163,7 +5170,7 @@ func (s *DataMoveSuite) TestAMovedRequestLeavesTheSequenceOfItsIDAlone() {
 
 	s.move("acme", "acme")
 	usageID := uuid.Must(uuid.NewV7())
-	s.Require().NoError(s.destination.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.destination, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
 	own := s.requestsByUsage()[usageID.String()]
@@ -5385,7 +5392,7 @@ func (s *DataMoveSuite) TestMigrateBuildsTheIndexCopiedLogsAreKnownByAgain() {
 
 func (s *DataMoveSuite) TestACopiedRequestOfAnAgentIsLoggedHereOnlyByItsCopiedLog() {
 	// With one database, the trigger on requests logs a request of an agent where it is written.
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme", AgentID: "agent",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{Modality: "stt", CustomerID: "acme", AgentID: "agent",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 	logged := s.export("acme").of("agent_logs")
 	s.Require().Len(logged, 1, "the source logged the request")
@@ -5505,15 +5512,15 @@ func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
 		ConfigID: "config", Scenario: "ask where the order is", Assertion: "it says where"}
 	s.Require().NoError(s.source.Simulations.Insert(s.ctx, &simulation))
 	run := SimulationRun{CustomerID: "acme", SimulationID: simulation.ID, Mode: SimulationText}
-	leaseUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, time.Hour))
+	s.Require().NotNil(run.LeaseUntil)
 
 	s.importAsOlder("acme", "acme", map[string]map[string]string{"simulation_runs": {"lease_until": "held_until"}})
 
 	moved, err := s.destination.SimulationRuns.Get(s.ctx, "acme", run.ID)
 	s.Require().NoError(err)
 	s.Require().NotNil(moved.LeaseUntil)
-	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
+	s.True(run.LeaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", run.LeaseUntil, moved.LeaseUntil)
 }
 
 // An export from a release before agent_configs grouped its columns names four of them as they

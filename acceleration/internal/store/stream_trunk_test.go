@@ -137,7 +137,7 @@ func (s *StoreSuite) TestATrunksNumbersAreTheNumbersHeldOnIt() {
 	s.lined(group, "+15125551236", "trunk-1")
 	s.lined(group, "+15125551237", "trunk-2")
 	s.lined(TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "twilio"}, "+15125551238", "trunk-1")
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551235", s.base))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551235", s.base))
 
 	numbers := map[string][]string{}
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
@@ -163,7 +163,7 @@ func (s *StoreSuite) TestReleasingANumberClearsItsAttachedAt() {
 	s.Require().NoError(err)
 	s.Require().NotNil(attached.AttachedAt)
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base))
 
 	numbers, err := s.store.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)

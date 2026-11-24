@@ -397,8 +397,10 @@ func (s *CallHooksSuite) TestACallOnANumberNobodyHoldsIsAcceptedAndDropped() {
 func (s *CallHooksSuite) TestACallOnAReleasedNumberIsNotAnswered() {
 	// The number is gone, so whoever holds it now is not this customer.
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.PhoneNumbers.Release(
-		context.Background(), s.customerID(), s.e164, time.Now().UTC()))
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: s.numberVendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(context.Background(), group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(s.e164, time.Now().UTC())
+	}))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 

@@ -140,9 +140,7 @@ func (t *TrunkGroupTx) Trunks() ([]StreamTrunk, error) {
 // another group is refused rather than taken over.
 func (t *TrunkGroupTx) SaveTrunk(trunk StreamTrunk) error {
 	trunk.CustomerID, trunk.StreamAppPK, trunk.Vendor = t.group.CustomerID, t.group.StreamAppPK, t.group.Vendor
-	if trunk.BridgePasswordSealed == nil {
-		trunk.BridgePasswordSealed = []byte{}
-	}
+	trunk.BridgePasswordSealed = orEmpty(trunk.BridgePasswordSealed)
 	if err := trunk.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
