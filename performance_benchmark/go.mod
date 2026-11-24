@@ -1,6 +1,6 @@
 module github.com/GetStream/Vision-Agents/performance_benchmark
 
-go 1.27.0
+go 1.27.4
 
 require (
 	github.com/GetStream/Vision-Agents/sdks/go v0.0.0
@@ -40,7 +40,7 @@ require (
 	github.com/pion/turn/v5 v5.1.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/thesyncim/gopus v0.1.1 // indirect
+	github.com/thesyncim/gopus v0.2.7 // indirect
 	github.com/thesyncim/skipset v0.19.0 // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect

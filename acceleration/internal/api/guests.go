@@ -333,6 +333,9 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if guestID == "" || userID == "" {
 		return nil, invalidRequest("a guest id and a user id are required")
 	}
+	if failure, refused := refuseReservedUserID("user_id", userID); refused {
+		return nil, failure
+	}
 	if guestID == userID {
 		return nil, invalidRequest("a guest cannot be claimed by itself")
 	}

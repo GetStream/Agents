@@ -59,8 +59,8 @@ that checkout: `STREAM_CHAT_RN_DIR=~/Projects/stream-chat-react-native npx expo 
 reads `stream-chat-expo` and `stream-chat-react-native-core` from its source, and SDK changes
 reload in the app. Native changes to the SDK still need an install and a rebuild.
 
-The chat asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`. The app needs `stream-chat-expo` 10.1.0 or newer, whose `ai-components` entry has
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. The app needs `stream-chat-expo` 10.1.0 or newer, whose `ai-components` entry has
 `AIConversation` and the rest of the AI components.
 
 On iOS, if the app crashes at launch in `dyld` with a missing symbol, reinstall the pods without

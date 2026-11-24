@@ -2636,10 +2636,10 @@ func (d testData) backendOfAnotherApp() *testClient {
 // pointer because the absent key means something other than the zero one.
 func pointerTo[T any](value T) *T { return &value }
 
-// textSession asks for a conversation in writing, which needs no call.
+// textSession asks for a conversation in writing, which needs no call, on the default models,
+// so a device may open it as a backend does.
 func textSession(id *string) CreateSessionRequest {
-	target := "en-low-latency"
-	return CreateSessionRequest{Id: id, Llm: &target}
+	return CreateSessionRequest{Id: id}
 }
 
 // inProject lists the sessions in one project, which is how a test sharing a fixture's app
