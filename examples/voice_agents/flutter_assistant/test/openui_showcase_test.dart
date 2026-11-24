@@ -1,10 +1,10 @@
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_assistant/brand_theme.dart';
-import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 import 'package:flutter_assistant/trip_components.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
+import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 
 class _TestMessage with AIMessage {
   _TestMessage(this.id, this.uiDocument);

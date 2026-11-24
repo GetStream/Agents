@@ -3,11 +3,11 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:stream_agents/stream_agents.dart';
 import 'package:stream_chat/stream_chat.dart' as stream;
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
 import 'package:stream_chat_flutter_ai_a2ui/stream_chat_flutter_ai_a2ui.dart';
 import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
-import 'package:stream_agents/stream_agents.dart';
 
 import 'assistant.dart';
 import 'device_tools.dart';

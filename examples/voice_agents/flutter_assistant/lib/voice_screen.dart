@@ -3,12 +3,12 @@ import 'dart:async';
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:stream_agents/stream_agents.dart';
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
 import 'package:stream_chat_flutter_ai_a2ui/stream_chat_flutter_ai_a2ui.dart';
 import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 import 'package:stream_core_flutter/core.dart';
 import 'package:stream_video_flutter/stream_video_flutter.dart' as video;
-import 'package:stream_agents/stream_agents.dart';
 
 import 'agent_chat.dart';
 import 'assistant.dart';

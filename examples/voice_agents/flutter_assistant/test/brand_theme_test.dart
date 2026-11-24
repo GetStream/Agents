@@ -2,13 +2,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_assistant/brand_theme.dart';
-import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 import 'package:flutter_assistant/trip_components.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
+import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 
 import 'support/ui_message.dart';
 
