@@ -1492,30 +1492,27 @@ packages:
   stream_chat_flutter_ai:
     dependency: "direct main"
     description:
-      path: "packages/stream_chat_flutter_ai"
-      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
-      resolved-ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
-      url: "https://github.com/GetStream/stream-chat-flutter-ai.git"
-    source: git
-    version: "0.2.0"
+      name: stream_chat_flutter_ai
+      sha256: "1e540a8260dbdd5e9da3ded08c7cbc13458f7111ccc1471e34f95edb8692129b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
   stream_chat_flutter_ai_a2ui:
     dependency: "direct main"
     description:
-      path: "packages/stream_chat_flutter_ai_a2ui"
-      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
-      resolved-ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
-      url: "https://github.com/GetStream/stream-chat-flutter-ai.git"
-    source: git
-    version: "0.2.0"
+      name: stream_chat_flutter_ai_a2ui
+      sha256: "3dc4e8f738bf1823eb9aebf753e81f735fc3e45a207314b40c406b579d6e1034"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
   stream_chat_flutter_ai_openui:
     dependency: "direct main"
     description:
-      path: "packages/stream_chat_flutter_ai_openui"
-      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
-      resolved-ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
-      url: "https://github.com/GetStream/stream-chat-flutter-ai.git"
-    source: git
-    version: "0.2.0"
+      name: stream_chat_flutter_ai_openui
+      sha256: "78685d5081ab08a2ec67dfe67e6fcfe9d06c3fc0cfe630ee20dd8ff33215d157"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
   stream_core:
     dependency: transitive
     description:
