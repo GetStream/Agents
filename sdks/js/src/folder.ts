@@ -661,7 +661,7 @@ const REPLACED = new Map([
  *   text: enabled
  * greeting:
  *   text: Hello, how can I help?
- *   mode: variation
+ *   mode: exact
  * floor_control:
  *   model: stream/chorus-asr
  *   max_wait_ms: 800
@@ -726,7 +726,12 @@ export function parseDeclaration(content: string, where = AGENT_FILE): Declarati
     } else if (key === "dispatch") {
       declared.dispatch = dispatch(mapping(nested, inline, key, where), where);
     } else if (key === "greeting") {
-      declared.greeting = greeting(mapping(nested, inline, key, where), where);
+      // Its text alone, `greeting: Hello`, or a mapping of text and mode.
+      if (inline.startsWith("[") || inline.startsWith("{")) {
+        throw new ConfigurationError(`${where}: greeting is its text, or a mapping of text and mode`);
+      }
+      const text = nested.length === 0 ? scalar(inline) : undefined;
+      declared.greeting = greeting(text !== undefined ? { text } : mapping(nested, inline, key, where), where);
     } else if (key === "connectors") {
       declared.connectors = connectors(indented, inline, where);
     } else if (key === "channels") {
@@ -1444,7 +1449,13 @@ function dispatch(declared: Record<string, string>, where: string): Schemas["Age
   return { ...(incoming ? { incoming_call: incoming } : {}), ...(text ? { text } : {}) };
 }
 
-/** What the agent says as it joins: `text`, and a `mode` of `exact` or `variation`. */
+/**
+ * What the agent says as it joins: `text`, and a `mode` of `exact` or `variation`.
+ *
+ * One that names no mode is a variation, as Go's loader reads agent.yaml, so the same file
+ * greets the same way whichever SDK syncs it. The API's own default, for a greeting built in
+ * code, stays `exact`.
+ */
 function greeting(declared: Record<string, string>, where: string): Schemas["Greeting"] {
   for (const key of Object.keys(declared)) {
     if (key !== "text" && key !== "mode") {
@@ -1454,8 +1465,8 @@ function greeting(declared: Record<string, string>, where: string): Schemas["Gre
   if (!declared["text"]) {
     throw new ConfigurationError(`${where}: a greeting needs text`);
   }
-  const mode = declared["mode"] as Schemas["GreetingMode"] | "" | undefined;
-  return { text: declared["text"], ...(mode ? { mode } : {}) };
+  const mode = (declared["mode"] || "variation") as Schemas["GreetingMode"];
+  return { text: declared["text"], mode };
 }
 
 const DEFAULT_UI_COMPONENTS = "ui/components.json";

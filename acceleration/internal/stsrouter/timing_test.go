@@ -66,7 +66,7 @@ func (s *STSRouterSuite) timedSession() (*Session, *stubSTS, *timingLog) {
 	recorder := routing.NewRecorder(routing.STS, nil, nil, nil, slog.Default())
 	config := routing.ProviderConfig{Provider: "stub", Model: "stub-model", Region: "eu"}
 	owner := routing.Owner{CustomerID: "acme", AgentID: "concierge", CallID: "default:" + rand.Text()}
-	session := newSession(context.Background(), provider, config, owner, recorder, recorder.For(routing.LLM))
+	session := newSession(context.Background(), provider, config, owner, recorder, recorder.For(routing.LLM), nil)
 	s.T().Cleanup(func() {
 		_ = session.Close()
 		recorder.Close()

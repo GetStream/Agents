@@ -139,7 +139,7 @@ func (r *BranchMessages) Delete(ctx context.Context, customerID, sessionID strin
 
 // DeleteUser deletes every copy of a hidden message in the sessions of an app's end user, on
 // every shard, and answers how many it deleted. The changes recorded of those copies are
-// emptied with them, since they hold the same words (forgottenCopies).
+// emptied with them, since they hold the same words (forgottenChanges).
 func (r *BranchMessages) DeleteUser(ctx context.Context, appID, userID string) (int64, error) {
 	if appID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: an app and a user id are required"))
@@ -147,7 +147,7 @@ func (r *BranchMessages) DeleteUser(ctx context.Context, appID, userID string) (
 	sessions := "(SELECT id FROM agent_sessions WHERE customer_id = ? AND user_id = ?)"
 	deleted, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
 		// A data-modifying WITH runs to the end whether or not the statement reads it.
-		changes := forgottenCopies(db, appID).Where("payload->>'session_id' IN "+sessions, appID, userID)
+		changes := forgottenChanges(db, appID, "agent_branch_messages").Where("payload->>'session_id' IN "+sessions, appID, userID)
 		return db.NewDelete().With("changes", changes).Model((*AgentBranchMessage)(nil)).
 			Where("customer_id = ?", appID).
 			Where("session_id IN "+sessions, appID, userID).
