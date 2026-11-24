@@ -185,6 +185,13 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 			return invalidRequest(fmt.Sprintf("team %q is not the team %q the token was signed for, which the session is counted under", *team, signed)), true
 		}
 	}
+	for _, named := range [][2]string{
+		{"user_id", value(request.UserId)}, {"agent_id", value(request.AgentId)}, {"memory.user_id", memoryUserID(request.Memory)},
+	} {
+		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
+			return failure, true
+		}
+	}
 	// A zone nobody knows is refused where it is named, rather than at the first task
 	// that would have run in it.
 	if zone := value(request.Timezone); zone != "" {
@@ -296,6 +303,14 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// memoryUserID is the user id a session's memory names, empty when it names none.
+func memoryUserID(memory *SessionMemory) string {
+	if memory == nil {
+		return ""
+	}
+	return value(memory.UserId)
 }
 
 // registerSessionCreate declares the operations served in session_create.go.
