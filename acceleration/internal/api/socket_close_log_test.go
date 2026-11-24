@@ -356,3 +356,20 @@ func (s *SocketCloseLogSuite) TestAVoiceSocketNamingACallIsARefusal() {
 
 	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
 }
+
+// Catches a device naming a conversation another session holds open logged as a failure of the
+// router's own.
+func (s *SocketCloseLogSuite) TestAVoiceSocketForAConversationHeldOpenIsARefusal() {
+	opened := s.data.createUser().createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+	id := rand.Text()
+	connection := s.data.createUser().withRequestID(id).opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "session": map[string]any{"conversation_id": *opened.ConversationId, "agent_id": opened.AgentId},
+	}))
+	_, _ = s.socketEnd(connection)
+
+	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
+	s.Empty(lineWith(s.logged, "level=ERROR", `msg="could not open a socket session"`, " request_id="+id))
+}

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"maps"
 	"strings"
 	"time"
 
@@ -209,4 +210,46 @@ func (s *SessionSuite) TestATakeOverEndsOnlyASessionHoldingTheChannelAsItDoes() 
 		s.True(strings.Contains(err.Error(), "already open"), err.Error())
 		s.NotEqual(Ended, held.State())
 	}
+}
+
+// A conversation no longer open to its members is its owner's alone, but the session another
+// member holds on it is not: the open is refused, and ends nothing.
+func (s *SessionSuite) TestATakeOverLeavesAMembersSessionOnAConversationNoLongerShared() {
+	server, spec := s.sharedConversation()
+	owners := spec
+	spec.Caller.UserID = "bob"
+	bob, err := s.manager.Create(s.ctx, spec)
+	s.Require().NoError(err)
+	s.restamp(server, "support_access", "owner")
+
+	_, err = s.manager.Create(s.ctx, owners)
+
+	s.Require().ErrorIs(err, persistent.ErrAlreadyOpen)
+	s.NotEqual(Ended, bob.State())
+}
+
+// Two customers' Stream apps may each have a channel of one id.
+func (s *SessionSuite) TestATakeOverLeavesAnotherCustomersSessionOnAChannelOfTheSameID() {
+	server, spec := s.sharedConversation()
+	alice, err := s.manager.Create(s.ctx, spec)
+	s.Require().NoError(err)
+	s.restamp(server, "support_customer_id", "other")
+	spec.CustomerID, spec.Caller.UserID = "other", "bob"
+
+	_, err = s.manager.Create(s.ctx, spec)
+
+	s.Require().NoError(err)
+	s.NotEqual(Ended, alice.State())
+}
+
+// restamp changes a custom field of sharedConversation's channel.
+func (s *SessionSuite) restamp(server *chattest.Server, field, to string) {
+	const channelID = "support-12345678-1234-1234-1234-123456789abe"
+	channel, found := server.Channel(channelID)
+	s.Require().True(found)
+	custom := maps.Clone(channel["custom"].(map[string]any))
+	custom[field] = to
+	_, err := server.Client.Chat().UpdateChannelPartial(s.ctx, "agent", channelID,
+		&getstream.UpdateChannelPartialRequest{Set: map[string]any{"custom": custom}})
+	s.Require().NoError(err)
 }
