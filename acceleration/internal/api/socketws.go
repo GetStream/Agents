@@ -147,6 +147,11 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		refuseWith(refusedByRouter, errSocketCall)
 		return
 	}
+	if err := s.dropUnlistedReturnURL(ctx, customerID, &start.Session); err != nil {
+		s.logger.Error("could not read the app policy of a socket session", "error", err)
+		refuseWith(serverFailed, internalError())
+		return
+	}
 
 	edge, err := socketedge.New(socketedge.Options{
 		SampleRate: start.SampleRate,

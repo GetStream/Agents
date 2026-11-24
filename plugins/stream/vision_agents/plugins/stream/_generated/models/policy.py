@@ -71,6 +71,13 @@ class Policy:
                 agent config's tool group or connector binding the tool is in applies, so an agent can shorten it and never
                 lengthen it. It applies to tool calls recorded after it is set. Deleting a session deletes all of it at once.
                 Example: 30d.
+            device_return_urls (list[str] | None | Unset): What an end user's device may name as a session's return_url: web
+                origins (https, or http on a loopback host), such as https://app.example, any page of which a device may name,
+                and native apps' own schemes in reverse domain form, such as com.example.app, without the colon. A return_url an
+                end user's device sends whose origin or scheme is not listed is dropped, and the session's consents go back to
+                the dashboard; a server-side caller needs no entry. Each entry is matched exactly, with no wildcards. Only an
+                app's policy has them: an organization's that sets them is refused. Example: ['https://app.example',
+                'com.example.app'].
     """
 
     allowed_models: list[str] | Unset = UNSET
@@ -83,6 +90,7 @@ class Policy:
     resume_history: ResumeHistory | Unset = UNSET
     tags: PolicyTags | Unset = UNSET
     tool_output_retention: str | Unset = UNSET
+    device_return_urls: list[str] | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -118,6 +126,15 @@ class Policy:
 
         tool_output_retention = self.tool_output_retention
 
+        device_return_urls: list[str] | None | Unset
+        if isinstance(self.device_return_urls, Unset):
+            device_return_urls = UNSET
+        elif isinstance(self.device_return_urls, list):
+            device_return_urls = self.device_return_urls
+
+        else:
+            device_return_urls = self.device_return_urls
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -141,6 +158,8 @@ class Policy:
             field_dict["tags"] = tags
         if tool_output_retention is not UNSET:
             field_dict["tool_output_retention"] = tool_output_retention
+        if device_return_urls is not UNSET:
+            field_dict["device_return_urls"] = device_return_urls
 
         return field_dict
 
@@ -198,6 +217,25 @@ class Policy:
 
         tool_output_retention = d.pop("tool_output_retention", UNSET)
 
+        def _parse_device_return_urls(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                device_return_urls_type_0 = cast(list[str], data)
+
+                return device_return_urls_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        device_return_urls = _parse_device_return_urls(
+            d.pop("device_return_urls", UNSET)
+        )
+
         policy = cls(
             allowed_models=allowed_models,
             balance_warning_micros=balance_warning_micros,
@@ -209,6 +247,7 @@ class Policy:
             resume_history=resume_history,
             tags=tags,
             tool_output_retention=tool_output_retention,
+            device_return_urls=device_return_urls,
         )
 
         policy.additional_properties = d

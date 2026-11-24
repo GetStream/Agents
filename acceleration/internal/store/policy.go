@@ -75,6 +75,9 @@ type PolicyDocument struct {
 	// ToolOutputRetention is the longest any of the scope's sessions keeps what its tools
 	// were given and gave back. An agent config can shorten it and never lengthen it.
 	ToolOutputRetention options.Retention `json:"tool_output_retention,omitempty"`
+	// DeviceReturnURLs are the web origins and native app schemes an end user's device may
+	// name as a session's return_url; on an app's document only.
+	DeviceReturnURLs []string `json:"device_return_urls,omitempty"`
 }
 
 // PolicyDataPolicy is what a policy requires of what a provider does with what it is sent. It

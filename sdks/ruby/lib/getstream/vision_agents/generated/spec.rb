@@ -2788,7 +2788,7 @@ module GetStream
           required: %w[status vendor_call_id].freeze, open: false
         }.freeze,
         "Policy" => {
-          properties: %w[allowed_models balance_warning_micros budget data_policy prompt_injection quota require_own_stream_app resume_history tags tool_output_retention].freeze,
+          properties: %w[allowed_models balance_warning_micros budget data_policy device_return_urls prompt_injection quota require_own_stream_app resume_history tags tool_output_retention].freeze,
           required: [].freeze, open: false
         }.freeze,
         "PolicyDataPolicy" => {

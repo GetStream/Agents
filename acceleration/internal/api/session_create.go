@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -35,6 +36,9 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 	if failure := s.refuseCall(ctx, customerID, *request.Body); failure != nil {
 		return nil, failure
+	}
+	if err := s.dropUnlistedReturnURL(ctx, customerID, request.Body); err != nil {
+		return nil, err
 	}
 
 	// A config is read before the session is created rather than inside it, so a caller
@@ -289,6 +293,103 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// dropUnlistedReturnURL takes out of a new session's request a return_url an end user's device
+// sent whose origin or native app scheme the app's policy does not list in device_return_urls.
+// The launch page takes the handoff from that page, so which pages may is the app's to decide;
+// the session goes on, and its consents go back to the dashboard, as when none is sent.
+func (s *Server) dropUnlistedReturnURL(ctx context.Context, customerID string, request *CreateSessionRequest) error {
+	returnURL := value(request.ReturnUrl)
+	if returnURL == "" || ServerSideFrom(ctx) {
+		return nil
+	}
+	listed, err := s.devicesMayReturnTo(ctx, customerID, returnURL)
+	if err != nil || listed {
+		return err
+	}
+	request.ReturnUrl = nil
+	// The origin or scheme alone: a return_url's path and query are the app's own.
+	s.logger.Info("dropped a device's return_url its app's policy does not list",
+		"customer", customerID, "return_to", returnURLKey(returnURL))
+	return nil
+}
+
+// carriedReturnURL is the return_url a session carried on or forked from one that openedBy
+// opened goes on with: a device's only while the app's policy still lists it, since the app
+// may have taken it out since.
+func (s *Server) carriedReturnURL(ctx context.Context, customerID string, openedBy auth.Kind, returnURL string) (string, error) {
+	if returnURL == "" || openedBy == auth.KindServer {
+		return returnURL, nil
+	}
+	listed, err := s.devicesMayReturnTo(ctx, customerID, returnURL)
+	if err != nil || !listed {
+		return "", err
+	}
+	return returnURL, nil
+}
+
+// devicesMayReturnTo is whether the app's policy lists returnURL's origin or native app
+// scheme in device_return_urls.
+func (s *Server) devicesMayReturnTo(ctx context.Context, customerID, returnURL string) (bool, error) {
+	if s.configs == nil {
+		return false, nil
+	}
+	policy, err := s.configs.Policies.Get(ctx, store.ScopeApp, customerID)
+	if err != nil {
+		return false, err
+	}
+	key := returnURLKey(returnURL)
+	for _, entry := range policy.DeviceReturnURLs {
+		if returnURLKey(entryURL(entry)) == key {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// checkDeviceReturnURL is why entry cannot be in device_return_urls, or nil: a web origin
+// checkReturnURL takes, or a native app's scheme without its colon.
+func checkDeviceReturnURL(entry string) error {
+	if strings.Contains(entry, "*") {
+		return errors.New("an entry is matched exactly and has no wildcards: list each origin or scheme")
+	}
+	if err := checkReturnURL(entryURL(entry)); err != nil {
+		return err
+	}
+	if !strings.Contains(entry, ":") {
+		return nil
+	}
+	if origin, err := originOf(entry); err != nil || strings.TrimSuffix(entry, "/") != origin {
+		return errors.New("not an origin written in lowercase with no path and no default port, such as " +
+			"https://app.example, or a native app's scheme without its colon, such as com.example.app")
+	}
+	return nil
+}
+
+// entryURL is a device_return_urls entry as a return_url: a native app's scheme becomes a URL of it.
+func entryURL(entry string) string {
+	if strings.Contains(entry, ":") {
+		return entry
+	}
+	return entry + ":/"
+}
+
+// returnURLKey is what a device_return_urls entry must match for raw, a URL checkReturnURL
+// took: a native app's scheme, or else the origin.
+func returnURLKey(raw string) string {
+	if returnsToNativeApp(raw) {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		return parsed.Scheme
+	}
+	origin, err := originOf(raw)
+	if err != nil {
+		return ""
+	}
+	return origin
 }
 
 // registerSessionCreate declares the operations served in session_create.go.

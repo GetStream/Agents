@@ -116,10 +116,10 @@ class CreateSessionRequest:
             browser comes back to it with connection_id and status added to its query. The same rules as
             createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the
             rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is
-            kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device
-            may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller
-            alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent
-            lands.
+            kept with the session, so a chat carried on after it ended and a fork go back to it too. A server-side caller
+            may send any. An end user's device's is kept only when it is of a web origin or native app scheme its app's
+            policy lists in device_return_urls; any other is dropped, and the session is opened as if none had been sent. A
+            device's return_url goes on to a chat carried on or forked only while the policy still lists it.
         search (str | Unset): Omit it and the config decides, or search-fast when there is no config.
         start_voice (bool | Unset): Start voice as the session opens, as startSessionVoice does: the agent joins the
             call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the
