@@ -414,7 +414,8 @@ func (s *LifecycleSuite) TestASandboxDaytonaDidNotStopIsReported() {
 
 	s.run(box)
 
-	s.Eventually(func() bool { return strings.Contains(s.logs.String(), "Daytona has not stopped a sandbox") },
+	logs := s.logs
+	s.Eventually(func() bool { return strings.Contains(logs.String(), "Daytona has not stopped a sandbox") },
 		5*time.Second, 10*time.Millisecond)
 	s.Contains(s.logs.String(), `level=WARN msg="Daytona has not stopped a sandbox that is billed as stopped" sandbox=sandbox-1 billed_as=stopped state=started`)
 }
