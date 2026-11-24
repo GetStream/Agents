@@ -6687,7 +6687,7 @@ type DetectionOptions struct {
 	// MinConfidence Drop boxes scored below this. Only a model that scores its boxes is asked.
 	MinConfidence *float64 `json:"min_confidence,omitempty"`
 
-	// Overwrites Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+	// Overwrites Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.
 	Overwrites *map[string]interface{} `json:"overwrites,omitempty"`
 
 	// Providers A priority list of where to try, in the order given, which wins over target when it holds anything.

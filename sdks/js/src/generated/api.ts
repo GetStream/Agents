@@ -7403,7 +7403,7 @@ export type components = {
              * @description Drop boxes scored below this. Only a model that scores its boxes is asked.
              */
             readonly min_confidence?: number;
-            /** @description Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused. */
+            /** @description Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused. */
             readonly overwrites?: {
                 readonly [key: string]: unknown;
             };
