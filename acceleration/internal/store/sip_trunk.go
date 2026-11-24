@@ -82,7 +82,7 @@ func (r *SIPTrunks) Insert(ctx context.Context, trunk *SIPTrunk) error {
 // Select returns a customer's trunks, newest first.
 func (r *SIPTrunks) Select(ctx context.Context, customerID string) ([]SIPTrunk, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var trunks []SIPTrunk
 	err := r.store.global.NewSelect().Model(&trunks).

@@ -185,7 +185,7 @@ func (r *SimulationRuns) Get(ctx context.Context, customerID, id string) (Simula
 // to and what every simulation has come to lately, which is the same question asked twice.
 func (r *SimulationRuns) Select(ctx context.Context, customerID string, filter SimulationRunFilter) ([]SimulationRun, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	limit := filter.Limit
 	if limit <= 0 {

@@ -306,7 +306,7 @@ func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) 
 // Select returns the numbers a customer holds, newest first.
 func (r *PhoneNumbers) Select(ctx context.Context, customerID string, filter PhoneNumberFilter) ([]PhoneNumber, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	query := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).
