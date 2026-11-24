@@ -1117,6 +1117,10 @@ func (c Config) validateShard() error {
 		return errors.New("config: redis.shard.addr is a shard's half of redis.addr: set redis.addr")
 	}
 	if len(c.Postgres.Shards) == 0 {
+		if c.Postgres.ShardDSN != "" {
+			return errors.New("config: postgres.shard_dsn writes calls where readers only look if postgres.shards lists it: " +
+				"set postgres.shards to every shard, this one's included")
+		}
 		return nil
 	}
 	if c.Shard == "" {

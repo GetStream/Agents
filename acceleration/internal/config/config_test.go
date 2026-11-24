@@ -1353,6 +1353,14 @@ func (s *ConfigSuite) TestAShardRedisWithoutTheSharedOneIsRefused() {
 	s.ErrorContains(err, "set redis.addr")
 }
 
+func (s *ConfigSuite) TestAShardDatabaseWithoutTheShardListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shards")
+}
+
 func (s *ConfigSuite) TestShardsThatLeaveThisOneOutAreRefused() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
