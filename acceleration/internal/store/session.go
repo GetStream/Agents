@@ -724,7 +724,7 @@ func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
 // the other half, for when what the caller has is words rather than a filter.
 func (r *Sessions) Select(ctx context.Context, customerID string, filter SessionFilter) ([]AgentSession, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	// Relevance is a search's: without words there is no rank to sort on.
 	if filter.Order.By == SessionSortRelevance {
@@ -761,7 +761,7 @@ func (r *Sessions) Select(ctx context.Context, customerID string, filter Session
 // conversations.
 func (r *Sessions) Search(ctx context.Context, customerID, text string, filter SessionFilter) ([]AgentSession, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if text == "" {
 		return r.Select(ctx, customerID, filter)

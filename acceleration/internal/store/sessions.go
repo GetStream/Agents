@@ -18,7 +18,7 @@ func (r *Users) Insert(ctx context.Context, user *User) error {
 		return stack.Wrap(errors.New("store: a user id is required"))
 	}
 	if user.CustomerID == "" {
-		return stack.Wrap(errors.New("store: customer id is required"))
+		return stack.Wrap(errCustomerRequired)
 	}
 	if user.Kind == "" {
 		return stack.Wrap(errors.New("store: a user kind is required"))

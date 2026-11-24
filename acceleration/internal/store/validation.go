@@ -1,10 +1,14 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
 )
+
+// errCustomerRequired is a call that named no customer.
+var errCustomerRequired = errors.New("store: customer id is required")
 
 // ValidationError is a row the store refused to write because a field breaks the model's
 // rules. Nothing was written.

@@ -683,7 +683,7 @@ func (r *AgentConfigs) NameCalling(ctx context.Context, customerID, child, excep
 // customer holds few, and the API lists them all.
 func (r *AgentConfigs) Select(ctx context.Context, customerID string) ([]AgentConfig, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var configs []AgentConfig
