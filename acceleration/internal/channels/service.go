@@ -515,7 +515,7 @@ func (s *Service) recordConversation(ctx context.Context, created *session.Sessi
 	kept, err := s.sessions.Create(ctx, spec)
 	if err != nil {
 		logger.Error("could not open the conversation another router recorded first, answering in this one",
-			"agent", spec.AgentName, "error", err)
+			"agent", spec.AgentName, "kept", spec.ConversationID, "opened", opened, "error", err)
 		return created, nil
 	}
 	if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
