@@ -145,7 +145,6 @@ api.SessionTool sessionToolOf(AgentTool tool) => api.SessionTool(
   },
 );
 
-
 api.ModelOverwrites? overwritesOf(ModelOverwrites? overwrites) => overwrites == null
     ? null
     : api.ModelOverwrites(
