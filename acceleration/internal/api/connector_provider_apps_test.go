@@ -245,14 +245,54 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenThatPostgresRefusesI
 		customer.WriteString(rand.Text())
 	}
 	logged := len(s.linesWith(configTokenLost))
+	sent := s.slack.NewConfigToken()
 
-	_, err := s.router.configToken(context.Background(), customer.String(), "slack_bot", s.slack.NewConfigToken())
+	_, err := s.router.configToken(context.Background(), customer.String(), "slack_bot", sent)
 
 	s.Require().Error(err)
 	s.True(store.Unwritable(err), "the failure is one a retry cannot fix: %v", err)
 	lost := s.linesWith(configTokenLost)
 	s.Require().Len(lost, logged+1)
 	s.Contains(lost[len(lost)-1], "attempts=1")
+	s.NotContains(lost[len(lost)-1], "[redacted]", "the refresh token the call sent is not logged")
+	s.NotContains(lost[len(lost)-1], sent)
+}
+
+// A save whose connection Postgres ends (a failover, a dropped connection) is a failure a
+// retry fixes: Postgres reports it as an error of its own, which is not a row it refuses.
+func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseSaveLosesItsConnectionIsSavedByTheNextAndUsedWithoutAnotherRotation() {
+	s.create("Acme")
+	s.expireConfigToken()
+	rotations := s.slack.ConfigTokenRotations()
+	logged := len(s.linesWith(configTokenLost))
+	ctx := context.Background()
+	db := s.store.GlobalDB()
+	// Hold the customer's row, so the save waits on it while its backend is ended.
+	tx, err := db.BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "SELECT 1 FROM connector_config_tokens WHERE customer_id = ? FOR UPDATE", s.customerID())
+	s.Require().NoError(err)
+
+	statuses := make(chan int, 1)
+	go func() {
+		status, _ := s.put(ConnectorProviderAppRequest{Name: "Acme"})
+		statuses <- status
+	}()
+	var pid int
+	s.Require().Eventually(func() bool {
+		return db.QueryRowContext(ctx, `SELECT pid FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'INSERT INTO "connector_config_tokens"%'`).Scan(&pid) == nil
+	}, 30*time.Second, 5*time.Millisecond, "the save waits for the row")
+	_, err = db.ExecContext(ctx, "SELECT pg_terminate_backend(?)", pid)
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Rollback())
+
+	s.Equal(http.StatusOK, <-statuses)
+	s.Equal(rotations+1, s.slack.ConfigTokenRotations())
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"}, nil))
+	s.Equal(rotations+1, s.slack.ConfigTokenRotations(), "the pair saved after the dropped connection is the one kept")
+	s.Len(s.linesWith(configTokenLost), logged, "a save that landed on its second try is no failure")
 }
 
 func (s *ConnectorProviderAppsSuite) TestAConfigTokenStillGoodIsNotRotated() {
