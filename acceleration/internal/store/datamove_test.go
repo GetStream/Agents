@@ -2220,6 +2220,59 @@ func (s *DataMoveSuite) pinnedSession(customerID string, app int64) string {
 	return id
 }
 
+// A session's tools name their customer, and two customers may each have a session of one id
+// once the tools are keyed by both: an export carries none naming another customer under the id
+// of the customer's own session.
+func (s *DataMoveSuite) TestAnExportCarriesNoToolsNamingAnotherCustomer() {
+	id := s.pinnedSession("acme", 0)
+	s.toolsNaming(s.source, id, "globex")
+
+	s.Empty(s.export("acme").of("agent_session_tools"))
+}
+
+// An exported row of a session's tools names the source's customer, and an import writes the
+// customer importing it.
+func (s *DataMoveSuite) TestImportedToolsAreTheImportersOwn() {
+	id := s.pinnedSession("acme", 0)
+	s.Require().NoError(s.source.SessionTools.Upsert(s.ctx, "acme", id, []ToolDefinition{{Name: "lookup_order"}}))
+
+	s.move("acme", "initech")
+
+	var customer string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT customer_id FROM agent_session_tools WHERE session_id = ?", id).Scan(&customer))
+	s.Equal("initech", customer)
+	tools, err := s.destination.SessionTools.Get(s.ctx, "initech", id)
+	s.Require().NoError(err)
+	s.Equal([]ToolDefinition{{Name: "lookup_order"}}, tools)
+}
+
+// A replayed delete of a session's tools is scoped to the customer replaying it, whose session
+// of the id does not make another customer's tools under it theirs.
+func (s *DataMoveSuite) TestADeletedToolsChangeLeavesToolsNamingAnotherCustomer() {
+	id := uuid.NewString()
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "acme", AgentID: "agent", UserID: "user"}))
+	s.toolsNaming(s.destination, id, "globex")
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "agent_session_tools", Op: ChangeDelete, At: time.Now(),
+		Key: json.RawMessage(fmt.Sprintf(`{"session_id": %q}`, id)),
+	}}))
+
+	var left int
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM agent_session_tools WHERE session_id = ?", id).Scan(&left))
+	s.Equal(1, left, "globex's tools are still there")
+}
+
+// toolsNaming writes tools under a session's id naming another customer than the session's.
+func (s *DataMoveSuite) toolsNaming(store *Store, session, customer string) {
+	_, err := store.GlobalDB().ExecContext(s.ctx,
+		`INSERT INTO agent_session_tools (session_id, customer_id, tools, updated_at) VALUES (?, ?, '[{"name":"refund_order"}]', now())`,
+		session, customer)
+	s.Require().NoError(err)
+}
+
 // pinOnDestination is the pin a moved session arrived with, nil for none.
 func (s *DataMoveSuite) pinOnDestination(id string) *int64 {
 	var pin *int64
@@ -4848,4 +4901,107 @@ func (s *DataMoveSuite) TestAConfigFromAnOlderReleaseKeepsItsRenamedSettings() {
 	s.Equal(config.Sandbox, moved.Sandbox)
 	s.Equal(config.EpisodeCards, moved.EpisodeCards)
 	s.Equal(config.Channels, moved.Channels)
+}
+
+func (s *StoreSuite) TestAnExportOutlastsTheIdleLimitOfAServingTransaction() {
+	limited := s.limitedStore()
+	s.boundConfig("app")
+
+	rows := 0
+	_, err := limited.ExportCustomer(s.ctx, "app", func(string, json.RawMessage) error {
+		if rows == 0 {
+			// A reader slower than the limit leaves every transaction of the export idle.
+			time.Sleep(3 * shortLimit)
+		}
+		rows++
+		return nil
+	})
+
+	s.Require().NoError(err)
+	s.Positive(rows)
+}
+
+func (s *StoreSuite) TestAnExportStatementOutlastsTheServingStatementLimit() {
+	limited := s.limitedStore()
+	s.boundConfig("app")
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holder.Rollback() //nolint:errcheck // only ever holds the lock
+	_, err = holder.ExecContext(s.ctx, "LOCK TABLE skills IN ACCESS EXCLUSIVE MODE")
+	s.Require().NoError(err)
+	release := time.AfterFunc(3*shortLimit, func() { _ = holder.Rollback() })
+	defer release.Stop()
+
+	_, err = limited.ExportCustomer(s.ctx, "app", func(string, json.RawMessage) error { return nil })
+
+	s.Require().NoError(err, "the read of skills waited on the lock past the serving limit")
+}
+
+func (s *DataMoveSuite) TestABacklogOfChangesIsPrunedWhole() {
+	kept := writeBatch
+	writeBatch = 1
+	s.T().Cleanup(func() { writeBatch = kept })
+	s.TestPruningDropsWhatNobodyCanResumeFrom()
+}
+
+// cutAfterFirstPrune cancels its context once a statement pruning data_changes has run.
+type cutAfterFirstPrune struct{ cancel context.CancelFunc }
+
+func (c cutAfterFirstPrune) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (c cutAfterFirstPrune) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, "DELETE FROM data_changes") {
+		c.cancel()
+	}
+}
+
+func (s *DataMoveSuite) TestAPruneCutShortAfterOneBatchHasDroppedTheLowestChangeAndSaidSo() {
+	kept := writeBatch
+	writeBatch = 1
+	s.T().Cleanup(func() { writeBatch = kept })
+	s.capture("acme")
+	for _, name := range []string{"one", "two", "three"} {
+		s.seedAgentConfig(s.source, "acme", name)
+	}
+	s.age()
+	var seqs []int64
+	s.Require().NoError(s.source.GlobalDB().NewRaw("SELECT seq FROM data_changes WHERE customer_id = 'acme' ORDER BY seq").Scan(s.ctx, &seqs))
+	s.Require().Len(seqs, 3)
+	// The lowest is rewritten, so it is the last row a read in no order meets.
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_changes SET at = at WHERE seq = ?", seqs[0])
+	s.Require().NoError(err)
+	var database string
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	parsed, err := url.Parse(os.Getenv(DSNEnvVar))
+	s.Require().NoError(err)
+	parsed.Path = "/" + database
+	pruning, err := Open(parsed.String())
+	s.Require().NoError(err)
+	defer pruning.Close()
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	pruning.GlobalDB().AddQueryHook(cutAfterFirstPrune{cancel: cancel})
+
+	_, err = pruning.PruneDataChanges(ctx, 7*24*time.Hour)
+
+	s.Require().ErrorIs(err, context.Canceled)
+	var left []int64
+	s.Require().NoError(s.source.GlobalDB().NewRaw("SELECT seq FROM data_changes WHERE customer_id = 'acme' ORDER BY seq").Scan(s.ctx, &left))
+	s.Equal(seqs[1:], left, "the lowest went first")
+	var through int64
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pruned_through FROM data_change_capture WHERE customer_id = 'acme'").Scan(&through))
+	s.Equal(seqs[0], through)
+}
+
+func (s *DataMoveSuite) TestACaptureStartGivenLongerThanTheStatementLimitGivesUpAsWritesOpen() {
+	before := s.beginAt(sql.LevelRepeatableRead)
+	defer before.Rollback() //nolint:errcheck // only holds the starts
+	s.writeIn(before, "acme", "looked before the start")
+
+	err := s.source.StartDataCapture(s.ctx, "acme", time.Hour, 30*time.Second)
+
+	s.ErrorIs(err, ErrWritesOpen, "not a statement the statement limit ended: %v", err)
 }

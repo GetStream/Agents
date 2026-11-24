@@ -34,6 +34,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/emit"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -102,6 +103,9 @@ type Edge struct {
 
 	client *rtc.Client
 	call   *rtc.Call
+	// ctx is the context of the call that Join got. The goroutines that decode the audio
+	// of a participant start under it.
+	ctx context.Context
 
 	mu sync.Mutex
 	// listening holds what stops the decoding of each subscribed track, so a track that
@@ -164,6 +168,7 @@ var publisherPeer = pc.PeerConfig{Config: webrtc.Configuration{ICEServers: []web
 // agent's own audio track.
 func (e *Edge) Join(ctx context.Context) error {
 	started := time.Now()
+	e.ctx = ctx
 	client, err := e.connect()
 	if err != nil {
 		return err
@@ -207,15 +212,17 @@ func (e *Edge) Join(ctx context.Context) error {
 		"subscribe_ms", subscribeMs,
 		"publish_ms", float64(time.Since(publishStarted).Microseconds())/1000,
 		"join_ms", float64(time.Since(started).Microseconds())/1000)
-	go e.reportICE(ctx, started)
+	goroutine.Go(ctx, func() { e.reportICE(ctx, started) })
 
 	e.logger.Info("joined the call",
 		"user", e.options.User.ID, "session", e.call.SessionID.Load(), "tracks", len(subscriptions))
 	sfu := e.SFU()
 	e.logger.Info("joined an sfu", "sfu_edge", sfu.Edge, "sfu_host", sfu.Host)
-	go watchSFU(e.SFU, sfuCheckEvery, e.leftDone, func(was, now agent.SFU) {
-		e.logger.Info("moved to another sfu",
-			"was_sfu_edge", was.Edge, "sfu_edge", now.Edge, "sfu_host", now.Host)
+	goroutine.Go(ctx, func() {
+		watchSFU(e.SFU, sfuCheckEvery, e.leftDone, func(was, now agent.SFU) {
+			e.logger.Info("moved to another sfu",
+				"was_sfu_edge", was.Edge, "sfu_edge", now.Edge, "sfu_host", now.Host)
+		})
 	})
 	return nil
 }
@@ -516,7 +523,7 @@ func (e *Edge) listen(remote rtc.OnTrackReceived) {
 	e.quality.listening(stream)
 
 	e.logger.Debug("listening to a participant", "participant", participant.UserID)
-	go e.hear(reader, stream, participant, stop)
+	goroutine.Go(e.ctx, func() { e.hear(reader, stream, participant, stop) })
 }
 
 // hear hands one participant's decoded audio to the agent until the track ends or stop is

@@ -25,6 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -160,6 +161,9 @@ type utterance struct {
 
 // TTS is a streaming Inworld text-to-speech session.
 type TTS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a redial.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -241,6 +245,7 @@ func (t *TTS) Start(ctx context.Context) error {
 	}
 	t.started = true
 	t.ctx = context.WithoutCancel(ctx)
+	t.call = ctx
 	t.mu.Unlock()
 
 	if err := t.dial(ctx); err != nil {
@@ -248,7 +253,7 @@ func (t *TTS) Start(ctx context.Context) error {
 	}
 
 	t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
-	go t.keepAlive()
+	goroutine.Go(ctx, t.keepAlive)
 	return nil
 }
 
@@ -276,7 +281,7 @@ func (t *TTS) dial(ctx context.Context) error {
 	t.conn = conn
 	t.mu.Unlock()
 
-	go t.readLoop(conn)
+	goroutine.Go(t.call, func() { t.readLoop(conn) })
 	return nil
 }
 
@@ -599,7 +604,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 			Clean:    true,
 			At:       time.Now(),
 		})
-		go t.redial()
+		goroutine.Go(t.call, t.redial)
 		return
 	}
 	t.emitter.Send(tts.Error{

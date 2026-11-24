@@ -4,12 +4,11 @@ package daytona
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rand"
 	"encoding/json"
 	"log/slog"
 	"maps"
-	"net/url"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -33,8 +32,12 @@ type ProxySuite struct {
 	ctx      context.Context
 	platform *platform
 	redis    rueidis.Client
-	// timeout is the sandbox's Timeout; zero is the default.
+	// timeout is the sandbox's Timeout; zero is the default. session is the test's own session,
+	// whose records alone it reads, store the store its broker writes, and logs its sandbox's log.
 	timeout time.Duration
+	session string
+	store   *egress.Store
+	logs    *lockedLog
 }
 
 func TestProxySuite(t *testing.T) {
@@ -56,7 +59,8 @@ func (s *ProxySuite) SetupTest() {
 	s.ctx = context.Background()
 	s.platform = newPlatform()
 	s.T().Cleanup(s.platform.server.Close)
-	s.timeout = 0
+	s.timeout, s.session = 0, "session-"+rand.Text()
+	s.store, s.logs = egress.NewStore(s.redis), &lockedLog{}
 }
 
 // disconnected is a grant whose connection gives the sandbox no credential.
@@ -68,8 +72,8 @@ const caCert = "-----BEGIN CERTIFICATE-----\nY2E=\n-----END CERTIFICATE-----\n"
 
 // proxied is a sandbox of config whose github grant the egress proxy broker at proxy holds.
 func (s *ProxySuite) proxied(config sandbox.Config, proxy string, more ...sandbox.Grant) *Sandbox {
-	broker, err := egress.NewBroker(egress.BrokerOptions{Store: egress.NewStore(s.redis), URL: proxy,
-		CACert: []byte(caCert), Session: "session-1",
+	broker, err := egress.NewBroker(egress.BrokerOptions{Store: s.store, URL: proxy,
+		CACert: []byte(caCert), Session: s.session,
 		Tokens: func(_ context.Context, grant sandbox.Grant) (sandbox.Token, error) {
 			if grant.Binding == disconnected.Binding {
 				return sandbox.Token{}, sandbox.ErrNoCredential
@@ -79,7 +83,7 @@ func (s *ProxySuite) proxied(config sandbox.Config, proxy string, more ...sandbo
 		Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
 	box, err := New(Options{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Config: config, Grants: append([]sandbox.Grant{github}, more...),
-		Broker: broker, Timeout: s.timeout})
+		Broker: broker, Timeout: s.timeout, Logger: slog.New(slog.NewTextHandler(s.logs, nil))})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = box.Close() })
 	return box
@@ -87,10 +91,10 @@ func (s *ProxySuite) proxied(config sandbox.Config, proxy string, more ...sandbo
 
 // TestTheSandboxReachesTheProxyAlone: Daytona's network allow list is the proxy's address
 // alone, with no domain list and no OutboundProxyUrl, which would bring Daytona's netleash in,
-// whatever domains the config allows. The sandbox's own env holds the placeholder alone, and
-// every command and run gets the proxy with the sandbox's credential and the CA env, which
-// netleash would replace in the sandbox's. The CA file and its bundle come before any code,
-// once per sandbox.
+// whatever domains the config allows. The sandbox's own env holds the placeholder alone, every
+// command and run gets the CA env, which netleash would replace in the sandbox's, and each run
+// of code alone gets the proxy, with a credential of its own that ends with the run. The CA file
+// and its bundle come before any code, once per sandbox.
 func (s *ProxySuite) TestTheSandboxReachesTheProxyAlone() {
 	const proxy = "http://203.0.113.7:8091"
 	cases := []sandbox.Config{
@@ -130,15 +134,19 @@ func (s *ProxySuite) TestTheSandboxReachesTheProxyAlone() {
 		return proxied
 	}
 	s.Len(s.platform.executed(), 2*len(cases))
+	credentials := map[string]bool{}
 	for _, ran := range s.platform.executed() {
 		envs, _ := ran["envs"].(map[string]any)
 		s.Equal(withProxy(envs), envs, "every run")
+		credentials[envs["HTTPS_PROXY"].(string)] = true
 	}
+	s.Len(credentials, 2*len(cases), "a credential of its own")
+	s.Empty(s.records(), "each ended with its run")
 	s.Len(s.platform.rawCommands, 2*len(cases))
 	for _, raw := range s.platform.rawCommands {
 		var command struct{ Envs map[string]any }
 		s.Require().NoError(json.Unmarshal([]byte(raw), &command))
-		s.Equal(withProxy(command.Envs), command.Envs, "every command")
+		s.Equal(runEnv, command.Envs, "every command, with no proxy credential")
 	}
 	var uploads []string
 	for i := range cases {
@@ -173,6 +181,9 @@ func (s *ProxySuite) TestAnHTTPSProxyIsReachedThroughATunnelCheckedBeforeEveryRu
 		s.platform.commands)
 	for _, ran := range s.platform.executed() {
 		s.Regexp(`^http://sbx:[A-Z2-7]{26}@127\.0\.0\.1:3128$`, ran["envs"].(map[string]any)["HTTPS_PROXY"])
+	}
+	for _, raw := range s.platform.rawCommands {
+		s.NotContains(raw, "sbx:", "the setup and the tunnel's check get no proxy credential")
 	}
 	s.platform.mu.Lock()
 	s.platform.commandExit = 1
@@ -484,20 +495,60 @@ func (s *ProxySuite) TestACAFileThatCouldNotBeWrittenIsWrittenBeforeTheNextRun()
 	s.Len(s.platform.ran, 1)
 }
 
-// TestClosingTheSandboxEndsItsProxyCredential: its record is gone, which the proxy answers
-// with a 407.
-func (s *ProxySuite) TestClosingTheSandboxEndsItsProxyCredential() {
+// TestTheEndOfARunEndsItsProxyCredential: its record is gone once the run has ended, which the
+// proxy answers with a 407, whether its code ran or failed.
+func (s *ProxySuite) TestTheEndOfARunEndsItsProxyCredential() {
 	box := s.proxied(sandbox.Config{}, "http://203.0.113.7:8091")
-	_, err := box.Run(s.ctx, "print(1)", nil)
+	held, release := s.platform.outlasting(s.T(), box)
+	s.Require().Len(s.records(), 1, "during the run")
+	release()
+	s.Require().NoError(<-held)
+	s.Empty(s.records(), "after it")
+
+	s.platform.mu.Lock()
+	s.platform.runStatus, s.platform.runBody = http.StatusInternalServerError, `{"message":"the toolbox failed"}`
+	s.platform.mu.Unlock()
+	_, err := box.Run(s.ctx, "print(2)", nil)
+
+	s.Require().Error(err)
+	s.Len(s.platform.executed(), 2)
+	s.Empty(s.records(), "after a run that failed")
+
+	ctx, cancel := context.WithCancel(s.ctx)
+	stall, arrived, ran := make(chan struct{}), make(chan struct{}, 1), make(chan error, 1)
+	s.platform.mu.Lock()
+	s.platform.stall, s.platform.arrived = stall, arrived
+	s.platform.mu.Unlock()
+	go func() {
+		_, err := box.Run(ctx, "print(3)", nil)
+		ran <- err
+	}()
+	<-arrived
+	s.Require().Len(s.records(), 1)
+	cancel()
+	s.ErrorContains(<-ran, "context canceled")
+	close(stall)
+	s.Empty(s.records(), "after a run its caller gave up on")
+}
+
+// TestARunsEndTheStoreRefusedLeavesItsRecordToExpire: the run answers with its code's result,
+// and the log says the credential lasts until its record expires.
+func (s *ProxySuite) TestARunsEndTheStoreRefusedLeavesItsRecordToExpire() {
+	refusing, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, DisableCache: true})
 	s.Require().NoError(err)
-	credential, _ := box.mount.Proxy.User.Password()
-	sum := sha256.Sum256([]byte(credential))
-	key := "sandbox:egress:" + hex.EncodeToString(sum[:])
-	s.Require().EqualValues(1, s.exists(key))
+	s.store = egress.NewStore(refusing)
+	box := s.proxied(sandbox.Config{}, "http://203.0.113.7:8091")
+	held, release := s.platform.outlasting(s.T(), box)
+	left := s.records()
+	s.Require().Len(left, 1)
+	s.T().Cleanup(func() { s.NoError(s.redis.Do(context.Background(), s.redis.B().Del().Key(left[0]).Build()).Error()) })
 
-	s.Require().NoError(box.Close())
+	refusing.Close()
+	release()
 
-	s.Zero(s.exists(key))
+	s.Require().NoError(<-held, "the code's answer")
+	s.Equal(left, s.records(), "until it expires")
+	s.Contains(s.logs.String(), `msg="the run's credential could not be ended; it lasts until it expires"`)
 }
 
 // TestACloseARunOutlastsStillEndsItsProxyCredential: Close waits for the run until its timeout,
@@ -506,27 +557,27 @@ func (s *ProxySuite) TestACloseARunOutlastsStillEndsItsProxyCredential() {
 	box := s.proxied(sandbox.Config{}, "http://203.0.113.7:8091")
 	box.timeout = time.Second
 	ran, release := s.platform.outlasting(s.T(), box)
-	s.platform.mu.Lock()
-	var setup struct{ Envs map[string]string }
-	s.Require().NoError(json.Unmarshal([]byte(s.platform.rawCommands[0]), &setup))
-	s.platform.mu.Unlock()
-	proxy, err := url.Parse(setup.Envs["HTTPS_PROXY"])
-	s.Require().NoError(err)
-	credential, _ := proxy.User.Password()
-	sum := sha256.Sum256([]byte(credential))
-	key := "sandbox:egress:" + hex.EncodeToString(sum[:])
-	s.Require().EqualValues(1, s.exists(key))
+	s.Require().Len(s.records(), 1)
 
 	s.ErrorIs(box.Close(), context.DeadlineExceeded)
 
-	s.Zero(s.exists(key))
+	s.Empty(s.records())
 	release()
 	s.NoError(<-ran)
-	s.Zero(s.exists(key))
+	s.Empty(s.records())
 }
 
-func (s *ProxySuite) exists(key string) int64 {
-	exists, err := s.redis.Do(s.ctx, s.redis.B().Exists().Key(key).Build()).AsInt64()
+// records are the keys of the egress records of the test's session.
+func (s *ProxySuite) records() []string {
+	keys, err := s.redis.Do(s.ctx, s.redis.B().Keys().Pattern("sandbox:egress:*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	return exists
+	var held []string
+	for _, key := range keys {
+		raw, err := s.redis.Do(s.ctx, s.redis.B().Get().Key(key).Build()).AsBytes()
+		var record egress.Record
+		if err == nil && json.Unmarshal(raw, &record) == nil && record.Session == s.session {
+			held = append(held, key)
+		}
+	}
+	return held
 }

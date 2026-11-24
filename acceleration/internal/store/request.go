@@ -485,7 +485,7 @@ FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
     AS r (customer_id, agent_id, call_id, started_at, ordinal)
 CROSS JOIN LATERAL (
     SELECT COALESCE(s.config_id, '') AS config_id, COALESCE(calls.session_id, '') AS session_id
-    FROM calls LEFT JOIN agent_sessions AS s ON s.id = calls.session_id
+    FROM calls LEFT JOIN agent_sessions AS s ON s.customer_id = calls.customer_id AND s.id = calls.session_id
     WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
         AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
     ORDER BY calls.started_at DESC
@@ -715,18 +715,40 @@ func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64
 	return total, nil
 }
 
-// RenameUser replaces an app's end user id with replacement on every shard's requests, and in
-// the changes recorded of their requests in the same statement (renamedChanges), and answers
-// how many rows it rewrote. A request recorded after the statement keeps its change as it is.
+// RenameUser replaces an app's end user id with replacement on every shard's requests,
+// writeBatch of them per statement, and in the changes recorded of their requests in each of
+// those statements (renamedChanges), and answers how many rows it rewrote. A request recorded
+// after the last statement keeps its change as it is.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
-	renamed, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		// A data-modifying WITH runs to the end whether or not the statement reads it.
-		changes := renamedChanges(db, appID, "requests", userID, replacement)
-		return db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
-			Where("customer_id = ?", appID).Where("user_id = ?", userID).Exec(ctx)
+	if replacement == userID {
+		// Nothing to rewrite, and every batch would match the rows it just wrote.
+		return 0, nil
+	}
+	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
+		var renamed int64
+		for {
+			// A data-modifying WITH runs to the end whether or not the statement reads it.
+			changes := renamedChanges(db, appID, "requests", userID, replacement)
+			batch := db.NewSelect().Model((*Request)(nil)).Column("id").
+				Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch)
+			result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
+				Where("id IN (?)", batch).Exec(ctx)
+			if err != nil {
+				return renamed, err
+			}
+			n, err := result.RowsAffected()
+			renamed += n
+			if err != nil || n < int64(writeBatch) {
+				return renamed, err
+			}
+		}
 	})
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+	}
+	var renamed int64
+	for _, count := range counts {
+		renamed += count
 	}
 	return renamed, nil
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -169,6 +170,9 @@ type stubSTT struct {
 	holdClose <-chan struct{}
 	// closes counts the times it was closed.
 	closes atomic.Int64
+	// panics, if set, is the value that a goroutine from Start panics with. It is like a bug
+	// in the read loop of a provider.
+	panics any
 }
 
 func newStubSTT() *stubSTT { return &stubSTT{emitter: stt.NewEmitter(64)} }
@@ -186,7 +190,15 @@ func (s *stubSTT) keyterms() []string {
 	return append([]string(nil), s.terms...)
 }
 
-func (s *stubSTT) Start(context.Context) error { return nil }
+func (s *stubSTT) Start(ctx context.Context) error {
+	s.mu.Lock()
+	panics := s.panics
+	s.mu.Unlock()
+	if panics != nil {
+		goroutine.Go(ctx, func() { panic(panics) })
+	}
+	return nil
+}
 
 func (s *stubSTT) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	s.mu.Lock()
@@ -304,6 +316,10 @@ type stubLLM struct {
 
 	// capabilities are what the model says it takes: text alone unless a test says more.
 	capabilities llm.Capabilities
+
+	// panics, if set, is the value that Create panics with. It is like a bug in a model
+	// adapter.
+	panics any
 }
 
 func newStubLLM() *stubLLM { return &stubLLM{scripts: map[string]*llmtest.Script{}} }
@@ -319,9 +335,12 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	sender, _ := routing.CallerFrom(ctx)
 	s.senders = append(s.senders, sender)
 	s.scheduled = append(s.scheduled, routing.ScheduledTurn(ctx))
-	hold, completion, refuses, breaks, screen, verdict := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict
+	hold, completion, refuses, breaks, screen, verdict, panics := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict, s.panics
 	s.mu.Unlock()
 
+	if panics != nil {
+		panic(panics)
+	}
 	if refuses != nil {
 		return nil, refuses
 	}
@@ -379,7 +398,7 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	// what lets a reply be caught mid-sentence.
 	if len(reply) == 0 && len(calls) == 0 {
 		if verdict != nil {
-			return script.Stream().Screen(verdict), nil
+			return script.Stream().Screen(ctx, verdict), nil
 		}
 		return screened(script.Stream(), screen, harness.WithoutNotes(params.Input)), nil
 	}
@@ -407,7 +426,7 @@ func screened(stream *llm.Stream, screen func([]llm.Message) error, input []llm.
 	}
 	verdict := make(chan error, 1)
 	verdict <- screen(input)
-	return stream.Screen(verdict)
+	return stream.Screen(context.Background(), verdict)
 }
 
 func (s *stubLLM) compose(params llm.ResponseParams) (*llm.Stream, error) {
@@ -987,6 +1006,9 @@ type AgentSuite struct {
 	// earsPause has the stub transcriber stand in for chorus-asr's, which an acting agent
 	// has ask about its callers' pauses (pausingSTT).
 	earsPause bool
+	// earsSettlePanics, if set, has the stub transcriber panic when it is told to settle its
+	// words, once the channel is closed (panicsOnSettleSTT).
+	earsSettlePanics chan struct{}
 
 	agent  *Agent
 	events *collector
@@ -1031,6 +1053,7 @@ func (s *AgentSuite) SetupTest() {
 	s.speculates = false
 	s.unified = false
 	s.floor, s.floorMode, s.earsPause = nil, "", false
+	s.earsSettlePanics = nil
 	s.performing = ""
 	s.voiceName = ""
 	s.replacement = nil
@@ -1209,6 +1232,9 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		}
 		if s.earsPause {
 			return pausingSTT{s.ears}, nil
+		}
+		if s.earsSettlePanics != nil {
+			return panicsOnSettleSTT{stubSTT: s.ears, release: s.earsSettlePanics}, nil
 		}
 		return s.ears, nil
 	}, routing.OverrideRegion)
@@ -1413,6 +1439,9 @@ func (s *AgentSuite) synthesises(turnID string) {
 func (s *AgentSuite) heardSomeOf(turnID string) {
 	s.synthesises(turnID)
 	s.eventually(func() bool { return len(s.edge.heard()) > 0 }, "none of the reply went out")
+	// On the fake clock no time passes by itself, so words the caller begins next could begin
+	// at the instant the reply went out, which is not after it (answerHeardBefore).
+	time.Sleep(time.Millisecond)
 }
 
 // replyWentOut waits until the reply the agent is saying has begun to go out. Words said
@@ -1440,6 +1469,20 @@ func (s *AgentSuite) actsOnChorusASR() {
 type pausingSTT struct{ *stubSTT }
 
 func (pausingSTT) AskOnPauses(audiofloor.Asker) {}
+
+// panicsOnSettleSTT is a stub transcriber that can be told to settle its words. When it is
+// told, it waits until release is closed and then panics, like a provider with a bug in it.
+// The wait lets a test send all its audio first: the call ends at the panic, and the edge
+// takes no more audio after that.
+type panicsOnSettleSTT struct {
+	*stubSTT
+	release <-chan struct{}
+}
+
+func (s panicsOnSettleSTT) Finalize() error {
+	<-s.release
+	panic("a bug in settling the words")
+}
 
 func (s *AgentSuite) says(participant stt.Participant, text string) {
 	s.saysAfter(participant, text, 0)

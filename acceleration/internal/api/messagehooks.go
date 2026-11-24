@@ -348,7 +348,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 				if answer, settled := s.answerOnce(ctx, origin, event); !answer {
 					return settled
 				}
-				owed := s.owing.owe(found.ID())
+				owed := s.owing.owe(found.Key())
 				origin.answer(func() {
 					defer owed()
 					s.followUpMessage(context.WithoutCancel(ctx), origin, found, event)

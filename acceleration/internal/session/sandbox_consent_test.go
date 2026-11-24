@@ -325,10 +325,10 @@ func (s *SandboxGrantsSuite) held(d *dispatcher) {
 	s.manager.mu.Lock()
 	defer s.manager.mu.Unlock()
 	if s.handedBack == nil {
-		s.handedBack, s.manager.sessions = &lockedBuffer{}, map[string]*Session{}
+		s.handedBack, s.manager.sessions = &lockedBuffer{}, map[Key]*Session{}
 		s.manager.logger = slog.New(slog.NewTextHandler(s.handedBack, nil))
 	}
-	s.manager.sessions[d.spec.ID] = &Session{id: d.spec.ID, spec: d.spec, connectors: d}
+	s.manager.sessions[Key{d.spec.CustomerID, d.spec.ID}] = &Session{id: d.spec.ID, spec: d.spec, connectors: d}
 }
 
 // carriedOn is how many times the session was told to carry on after a login.

@@ -122,8 +122,10 @@ jobs:
         env:
           GOEXPERIMENT: simd
 
+      # -race also checks unsafe pointer arithmetic (checkptr). The SIMD code of gopus fails that
+      # check, so it is off for gopus only.
       - name: Test the backend
-        run: go test ./...
+        run: go test -race -gcflags='github.com/thesyncim/gopus/...=-d=checkptr=0' ./...
         working-directory: acceleration
         env:
           GOEXPERIMENT: simd

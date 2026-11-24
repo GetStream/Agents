@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -781,7 +782,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			if err == nil {
 				a.askedApproval(requested.Call.ID)
 				if bye := a.goodbyeOf(requested.Call.ID, false); bye != nil {
-					go a.hangUpAfter(bye)
+					goroutine.Go(a.ctx, func() { a.hangUpAfter(bye) })
 				}
 			} else {
 				a.goodbyeOf(requested.Call.ID, true)
@@ -801,11 +802,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			a.goodbyeOf(requested.Call.ID, true)
 		}
 		if left {
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after transferring", "error", err)
 				}
-			}()
+			})
 		}
 		return
 	}
@@ -826,11 +827,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	}
 	// Closing waits for the goroutine this is running on, so the agent cannot end its own
 	// call from inside the loop handling the request to end it.
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		if err := a.Close(); err != nil {
 			a.logger.Error("could not leave after transferring", "error", err)
 		}
-	}()
+	})
 }
 
 // loggedTool is what "a tool call came back" says beside the agent logger's customer, session and
