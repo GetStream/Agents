@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
 	"net/url"
 	"slices"
 	"strconv"
@@ -74,6 +75,7 @@ type Directory struct {
 	workers     string
 	hosted      string
 	shards      string
+	inShard     string
 	handouts    string
 	logger      *slog.Logger
 	cancel      context.CancelFunc
@@ -139,6 +141,7 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 		workers:     prefix + ":workers:",
 		hosted:      prefix + ":hosted:",
 		shards:      prefix + ":shard:",
+		inShard:     prefix + ":inshard:",
 		handouts:    prefix + ":handout:",
 		logger:      logger,
 		cancel:      cancel,
@@ -155,6 +158,21 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 // Address is where this node's peers reach it.
 func (d *Directory) Address() string { return d.address }
 
+// Shard is the shard this node is in, empty for a deployment of one.
+func (d *Directory) Shard() string { return d.shard }
+
+// NodeInShard is where a node of shard can be reached, picked at random among those saying
+// they are in it, and empty when none is.
+func (d *Directory) NodeInShard(ctx context.Context, shard string) (string, error) {
+	now := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	addresses, err := d.redis.Do(ctx, d.redis.B().Zrange().Key(d.inShard+shard).
+		Min("("+now).Max("+inf").Byscore().Build()).AsStrSlice()
+	if err != nil || len(addresses) == 0 {
+		return "", err
+	}
+	return addresses[rand.IntN(len(addresses))], nil
+}
+
 // InAnotherShard reports whether the node at an address is in a shard other than this one's.
 // A node that has not said is taken to be in this one, which is every node of a deployment of
 // one shard.
@@ -168,21 +186,31 @@ func (d *Directory) InAnotherShard(ctx context.Context, address string) (bool, e
 
 // sayShard says which shard this node is in, for holdFor.
 func (d *Directory) sayShard(ctx context.Context) {
-	commands := d.shardCommands()
-	if len(commands) == 0 {
-		return
-	}
-	if err := d.redis.Do(ctx, commands[0]).Error(); err != nil {
-		d.logger.Warn("could not say which shard this node is in", "shard", d.shard, "error", err)
+	for _, result := range d.redis.DoMulti(ctx, d.shardCommands()...) {
+		if err := result.Error(); err != nil {
+			d.logger.Warn("could not say which shard this node is in", "shard", d.shard, "error", err)
+			return
+		}
 	}
 }
 
-// shardCommands say which shard this node is in, none for a node that has not been told.
+// shardCommands say which shard this node is in, by its address and among the shard's nodes,
+// none for a node that has not been told. The shard's nodes are a sorted set scored by when
+// each one's claim lapses, as a customer's workers are (advertiseCommands).
 func (d *Directory) shardCommands() []rueidis.Completed {
 	if d.shard == "" {
 		return nil
 	}
-	return []rueidis.Completed{d.redis.B().Set().Key(d.shards + d.address).Value(d.shard).Ex(holdFor).Build()}
+	key := d.inShard + d.shard
+	now := time.Now()
+	return []rueidis.Completed{
+		d.redis.B().Set().Key(d.shards + d.address).Value(d.shard).Ex(holdFor).Build(),
+		d.redis.B().Zadd().Key(key).ScoreMember().
+			ScoreMember(float64(now.Add(holdFor).UnixMilli()), d.address).Build(),
+		d.redis.B().Zremrangebyscore().Key(key).
+			Min("-inf").Max(strconv.FormatInt(now.UnixMilli(), 10)).Build(),
+		d.redis.B().Pexpire().Key(key).Milliseconds(holdFor.Milliseconds()).Build(),
+	}
 }
 
 // Hold says this node is running a customer's session in a Stream app, and goes on saying so

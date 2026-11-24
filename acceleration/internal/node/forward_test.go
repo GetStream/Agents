@@ -26,6 +26,10 @@ type ForwardSuite struct {
 	// those of them it was told came from a peer.
 	answered  atomic.Int32
 	forwarded atomic.Int32
+	// handed counts those of them handed to the node's shard (HandedToShard), and marked those
+	// still carrying the header that says so.
+	handed atomic.Int32
+	marked atomic.Int32
 }
 
 func TestForwardSuite(t *testing.T) {
@@ -38,6 +42,8 @@ func (s *ForwardSuite) SetupTest() {
 	s.ctx = ctx
 	s.answered.Store(0)
 	s.forwarded.Store(0)
+	s.handed.Store(0)
+	s.marked.Store(0)
 }
 
 // node serves a node that accepts the given credentials, and returns where it listens.
@@ -46,6 +52,12 @@ func (s *ForwardSuite) node(accepted ...[]byte) string {
 		s.answered.Add(1)
 		if Forwarded(r.Context()) {
 			s.forwarded.Add(1)
+		}
+		if HandedToShard(r.Context()) {
+			s.handed.Add(1)
+		}
+		if r.Header.Get(shardHeader) != "" {
+			s.marked.Add(1)
 		}
 		w.WriteHeader(http.StatusTeapot)
 	})
@@ -82,6 +94,36 @@ func (s *ForwardSuite) TestAPeerPresentingTheCredentialIsAnswered() {
 	s.Require().NoError(err)
 	s.Equal(int32(http.StatusTeapot), answer.GetStatus())
 	s.Equal(int32(1), s.forwarded.Load(), "the handler was not told the request came from a peer")
+}
+
+// A peer handing a request to the node's shard says so, and the node does not pass the mark on
+// with whatever it carries the request on to.
+func (s *ForwardSuite) TestARequestHandedToTheShardArrivesMarkedAndCarriesNoMarkOn() {
+	address := s.node([]byte("current"))
+	request, err := http.NewRequest(http.MethodPost, "/v1/chat/hooks/stream", nil)
+	s.Require().NoError(err)
+
+	answer, err := NewForwarder(nil, []byte("current")).Ask(ToShard(s.ctx, "europe-west4"), address, request, nil)
+
+	s.Require().NoError(err)
+	s.Equal(int32(http.StatusTeapot), answer.GetStatus())
+	s.Equal(int32(1), s.handed.Load(), "the node was not told the request was handed to its shard")
+	s.Zero(s.marked.Load(), "the mark stayed on the request, to be carried on with it")
+}
+
+// Anybody can send a header, so a request that arrived with the mark is carried on unmarked:
+// only the peer handing it to a shard marks it.
+func (s *ForwardSuite) TestAShardMarkOnTheRequestItselfIsNotCarriedOn() {
+	address := s.node([]byte("current"))
+	request, err := http.NewRequest(http.MethodPost, "/v1/chat/hooks/stream", nil)
+	s.Require().NoError(err)
+	request.Header.Set(shardHeader, "europe-west4")
+
+	_, err = NewForwarder(nil, []byte("current")).Ask(s.ctx, address, request, nil)
+
+	s.Require().NoError(err)
+	s.Equal(int32(1), s.forwarded.Load())
+	s.Zero(s.handed.Load(), "a mark the request arrived with was taken for a peer's")
 }
 
 func (s *ForwardSuite) TestANodeHoldingTwoKeysAnswersAPeerPresentingEither() {
