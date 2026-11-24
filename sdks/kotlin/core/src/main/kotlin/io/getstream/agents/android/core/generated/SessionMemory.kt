@@ -36,19 +36,19 @@ import kotlinx.serialization.encoding.Encoder
 /**
  * Who the session's memories are about. Without a user id nothing is recalled or stored, which is the case for a call with nobody identified on it.
  *
- * @param appId Separates two deployments sharing one memory account.
- * @param filter The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it.
+ * @param appId Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows recall but keeps nothing from the user.
+ * @param filter The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a user must not reach across groups, such as workspaces, need a user id per group, named by the backend.
  * @param userId Who the memories belong to. Empty means the customer. An end user's device may only name its own user id, and an anonymous caller none; a backend may name any of its users.
  */
 @Serializable
 
 internal data class SessionMemory (
 
-    /* Separates two deployments sharing one memory account. */
+    /* Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows recall but keeps nothing from the user. */
     @SerialName(value = "app_id")
     val appId: kotlin.String? = null,
 
-    /* The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. */
+    /* The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a user must not reach across groups, such as workspaces, need a user id per group, named by the backend. */
     @SerialName(value = "filter")
     val filter: kotlin.collections.Map<kotlin.String, kotlin.String>? = null,
 
