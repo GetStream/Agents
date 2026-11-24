@@ -14379,7 +14379,7 @@ type ClientInterface interface {
 
 	// DeleteKnowledgeDocument Take a document out of a knowledge base
 	//
-	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, or as pending while a newer upload of it waits to be read, so it can be deleted again.
+	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with DELETE /v1/agents/knowledge/documents/{id} (the `DeleteKnowledgeDocument` operationId).
@@ -18868,7 +18868,7 @@ func (c *Client) ListKnowledgeDocuments(ctx context.Context, params *ListKnowled
 
 // DeleteKnowledgeDocument Take a document out of a knowledge base
 //
-// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, or as pending while a newer upload of it waits to be read, so it can be deleted again.
+// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Corresponds with DELETE /v1/agents/knowledge/documents/{id} (the `DeleteKnowledgeDocument` operationId).
@@ -37702,7 +37702,7 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteKnowledgeDocumentWithResponse Take a document out of a knowledge base
 	//
-	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, or as pending while a newer upload of it waits to be read, so it can be deleted again.
+	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -69701,7 +69701,7 @@ func (c *ClientWithResponses) ListKnowledgeDocumentsWithResponse(ctx context.Con
 
 // DeleteKnowledgeDocumentWithResponse Take a document out of a knowledge base
 //
-// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, or as pending while a newer upload of it waits to be read, so it can be deleted again.
+// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Returns a wrapper object for the known response body format(s).

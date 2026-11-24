@@ -457,16 +457,23 @@ const removeAttempts = 5
 // still holds it, and otherwise the passages are deleted again.
 func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) (err error) {
 	owned := s.knowledgeFor(ctx, document.CustomerID, "")
+	rewritten := false
 	defer func() {
 		if err == nil {
 			return
 		}
-		// A document read again meanwhile may have lost passages to the removal, so it is
-		// marked too, for a caller that hung up as well. A file still waiting to be read is
-		// left to its read, which writes every passage.
+		// The document is marked failed for a caller that hung up as well. On the first
+		// attempt a file uploaded meanwhile is left to its read. A later attempt may have
+		// deleted what a read not yet finished wrote, so its file is let go of too.
 		held, cancel := detachedWrite(ctx)
 		defer cancel()
-		if markErr := s.store.KnowledgeDocuments.FailRemoval(held, document.CustomerID, document.ID); markErr != nil {
+		var markErr error
+		if rewritten {
+			_, _, markErr = s.store.KnowledgeDocuments.Take(held, document.CustomerID, document.ID)
+		} else {
+			markErr = s.store.KnowledgeDocuments.FailRemoval(held, document.CustomerID, document.ID)
+		}
+		if markErr != nil && !errors.Is(markErr, store.ErrNoKnowledgeDocument) {
 			s.logger.Warn("could not mark a knowledge document whose removal failed", "id", document.ID, "error", markErr)
 		}
 	}()
@@ -486,6 +493,7 @@ func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.Kno
 		if err != nil || removed {
 			return err
 		}
+		rewritten = true
 	}
 	return conflict("the document is being written while it is removed: delete it again")
 }
@@ -614,7 +622,7 @@ func (s *Server) registerKnowledge(api huma.API) {
 		Summary:     "Take a document out of a knowledge base",
 		Description: "The passages it was cut into are removed too, so the agent stops answering out of it. " +
 			"A document that keeps being written while it is removed is refused with a 409 and listed as " +
-			"failed, or as pending while a newer upload of it waits to be read, so it can be deleted again.\n" +
+			"failed, so it can be deleted again.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		DefaultStatus: http.StatusNoContent,

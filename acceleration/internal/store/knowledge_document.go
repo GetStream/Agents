@@ -271,8 +271,9 @@ const removalUnfinished = "Its removal did not finish. Delete it again."
 
 // Take begins the removal of a document, and returns the key the removal holds it under and
 // how many passages to remove. The row lets go of its file, as it does for a newer upload, so
-// a read of it finds it was overtaken. The row says failed until it is removed, so a removal that stops part
-// way leaves a document that is listed, not shown as found, and can be removed again.
+// a read of it finds it was overtaken. The row says failed until it is removed, so a removal
+// that stops part way leaves a document that is listed, not shown as found, and can be removed
+// again.
 func (r *KnowledgeDocuments) Take(ctx context.Context, customerID, id string) (key string, passages int, err error) {
 	if customerID == "" || id == "" {
 		return "", 0, stack.Wrap(errors.New("store: a customer and a knowledge document id are required"))

@@ -228,6 +228,13 @@ func (s *StoreSuite) TestOnlyTheDocumentWhoseRemovalFailedSaysSo() {
 	mine, other := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "hours.md")
 	before, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
 	s.Require().NoError(err)
+	waiting := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "manual.pdf", ObjectKey: "acme-app/one/manual.pdf"}
+	s.Require().NoError(s.store.KnowledgeDocuments.Pend(s.ctx, &waiting))
+	s.Require().NoError(s.store.KnowledgeDocuments.FailRemoval(s.ctx, "acme-app", waiting.ID))
+	pending, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", waiting.ID)
+	s.Require().NoError(err)
+	s.Equal(KnowledgeDocumentPending, pending.State, "its file still waits to be read")
+	s.Empty(pending.Error)
 
 	s.Require().NoError(s.store.KnowledgeDocuments.FailRemoval(s.ctx, "other-app", mine.ID))
 	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)

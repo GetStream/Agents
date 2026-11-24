@@ -399,6 +399,85 @@ func (s *KnowledgeFilesSuite) TestARemovalIsNotHeldUpByAnotherThatBegins() {
 	s.Empty(s.listed())
 }
 
+// holdTail uploads a shorter version of source and returns once its read wrote and is held in
+// deleting what the version before left past its end.
+func (s *KnowledgeFilesSuite) holdTail(source string) (finish func()) {
+	deleting, released := make(chan struct{}), make(chan struct{})
+	finish = sync.OnceFunc(func() { close(released) })
+	s.T().Cleanup(finish)
+	s.knowledge.onceBeforeDelete(func() error {
+		close(deleting)
+		<-released
+		return nil
+	})
+	status, _, _ := s.upload(source, []byte(sections(3)), "")
+	s.Equal(http.StatusAccepted, status)
+	select {
+	case <-deleting:
+	case <-time.After(30 * time.Second):
+		s.Fail("the read never deleted its tail")
+	}
+	return finish
+}
+
+// The last attempt deletes what a read wrote that is not finished, so the read must not say
+// the document is found.
+func (s *KnowledgeFilesSuite) TestARemovalThatEndsInAConflictIsFailedOnceTheReadItMetEnds() {
+	_, sent, _ := s.upload("met.md", []byte(sections(8)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	deletes, finish := 0, func() {}
+	var again func() error
+	again = func() error {
+		if deletes++; deletes == 5 {
+			finish = s.holdTail("met.md")
+			return nil
+		}
+		_, _, _ = s.upload("met.md", []byte(sections(8)), "")
+		s.settled(sent.Id)
+		s.knowledge.onceBeforeDelete(again)
+		return nil
+	}
+	s.knowledge.onceBeforeDelete(again)
+
+	s.Require().Equal(http.StatusConflict, s.remove(sent.Id))
+	finish()
+	s.everyFileRead()
+
+	s.Equal(5, deletes)
+	s.Zero(s.passagesOf("met.md"), "the last attempt deleted what the read wrote")
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Empty(s.listed())
+}
+
+func (s *KnowledgeFilesSuite) TestARemovalThatFailsOnALaterAttemptIsFailedOnceTheReadItMetEnds() {
+	_, sent, _ := s.upload("later.md", []byte(sections(8)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	finish := func() {}
+	s.knowledge.onceBeforeDelete(func() error {
+		_, _, _ = s.upload("later.md", []byte(sections(8)), "")
+		s.settled(sent.Id)
+		s.knowledge.onceBeforeDelete(func() error {
+			finish = s.holdTail("later.md")
+			return errors.New("down")
+		})
+		return nil
+	})
+
+	s.Require().Equal(http.StatusInternalServerError, s.remove(sent.Id))
+	finish()
+	s.everyFileRead()
+
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Zero(s.passagesOf("later.md"))
+	s.Empty(s.listed())
+}
+
 // A source written over and over keeps its removal from finishing: it ends, and says so.
 func (s *KnowledgeFilesSuite) TestARemovalOfADocumentWrittenAgainAndAgainIsAConflict() {
 	_, sent, _ := s.upload("busy.md", []byte(sections(3)), "")
