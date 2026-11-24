@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,6 +63,10 @@ func (s *AppsSuite) SetupSuite() {
 	opened, err := store.Open(testenv.Database(dsn, "phone_apps"))
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
+	// A number an earlier run left held would refuse the same number now: the database is the
+	// suite's own and is kept between runs.
+	_, err = opened.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET released_at = now() WHERE released_at IS NULL")
+	s.Require().NoError(err)
 	s.store = opened
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
 }
@@ -94,9 +99,24 @@ func (s *AppsSuite) serviceAt(publicURL string) *Service {
 	return service
 }
 
-// aNumber is a number nobody in the suite's database holds yet: a well-formed Austin number,
-// since a number in no country is not sold.
-func aNumber() string { return fmt.Sprintf("+1512%d%06d", 2+rand.Int64N(8), rand.Int64N(1_000_000)) }
+// austinNumbers is how many Austin numbers there are: +1 512, then seven digits whose first is
+// 2 to 9. The North American Numbering Plan's exchange code is NXX, N being 2 to 9, and
+// Country (region.Of) finds no country for a number whose exchange starts with 0 or 1.
+const austinNumbers = 8_000_000
+
+// numbersFrom and numbersGiven make aNumber's numbers: the next one each time, from a random
+// start so that runs on a kept database start in different places.
+var (
+	numbersFrom  = rand.Int64N(austinNumbers)
+	numbersGiven atomic.Int64
+)
+
+// aNumber is a number no other call in this process gave out: a well-formed Austin number,
+// since a number in no country is not sold. A number drawn at random could be one the suite
+// already holds, and a held number is unique (phone_numbers_held_idx).
+func aNumber() string {
+	return fmt.Sprintf("+1512%07d", 2_000_000+(numbersFrom+numbersGiven.Add(1))%austinNumbers)
+}
 
 func (s *AppsSuite) config() Config {
 	config, err := DefaultConfig()
@@ -2638,7 +2658,7 @@ func (s *AppsSuite) TestReleasingANumberLinedSinceItWasReadTakesItOffItsTrunk() 
 	lined, err := s.lineFor(s.customer, s.e164)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.service.unline(s.ctx, stale, "released a number", true))
+	s.Require().NoError(s.service.unline(s.ctx, stale, "released a number", time.Now().UTC()))
 
 	s.Equal([]string{second}, s.own.TrunkNumbers(lined.TrunkID))
 	s.Equal([]string{other.RouteID}, s.own.Rules())
@@ -2853,4 +2873,14 @@ func (s *AppsSuite) TestACallFromANumberLinedInAnotherAppMovesItsLine() {
 	s.Require().Len(trunks, 1)
 	s.Equal([]string{s.e164}, s.own.TrunkNumbers(trunks[0]))
 	s.Equal(int64(4242), s.number().StreamAppPK)
+}
+
+func (s *AppsSuite) TestNoNumberIsGivenOutTwice() {
+	given := make(map[string]bool)
+	for range 20_000 {
+		number := aNumber()
+		s.Require().Regexp(`^\+1512[2-9]\d{6}$`, number)
+		s.Require().False(given[number], "%s was given out twice", number)
+		given[number] = true
+	}
 }

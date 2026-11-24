@@ -69,7 +69,7 @@ func (r *ConnectorConfigTokens) WithProviderAppLock(ctx context.Context, custome
 	if err != nil {
 		return stack.Wrap(err)
 	}
-	defer releaseCredentialLock(conn, providerAppLockNamespace, key)
+	defer releaseCredentialLock(ctx, conn, providerAppLockNamespace, key)
 	return fn()
 }
 

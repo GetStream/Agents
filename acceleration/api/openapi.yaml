@@ -877,6 +877,10 @@ components:
         ui_instructions:
           description: What teaches the agent's model to answer with UI. An empty string removes them.
           type: string
+        updated_at:
+          description: 'The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.'
+          format: date-time
+          type: string
         video:
           $ref: '#/components/schemas/SessionVideo'
         visible_tools:
@@ -17197,7 +17201,7 @@ paths:
       description: |-
         For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
         Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-        A guest already claimed is refused rather than moved again.
+        A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
       operationId: claimGuestUser
       requestBody:
         content:
@@ -22281,7 +22285,7 @@ paths:
         One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
         Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
         A router with shards cannot be the source of a move and answers 400 `not_configured`.
-        An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+        An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
         Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
       operationId: exportData
       responses:
@@ -22321,7 +22325,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: 'This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or a write that was open when the export started is still open after 30 seconds: try again.'
+          description: 'This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or the export ran out of time before its first row; or a write that was open when the export started is still open after 30 seconds: try again.'
       summary: Everything this app has, as newline-delimited JSON
   /v1/data/import:
     post:

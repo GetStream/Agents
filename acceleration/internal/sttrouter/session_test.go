@@ -352,7 +352,7 @@ func (s *SessionSuite) TestAudioStopsReachingTheProviderBeforeTheCallerHearsOfAF
 	provider := &countingSTT{emitter: stt.NewEmitter(128)}
 	recorder := routing.NewRecorder(routing.STT, nil, nil, nil, slog.Default())
 	defer recorder.Close()
-	session := newSession(provider, routing.ProviderConfig{Provider: "counting", Model: "live"},
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "counting", Model: "live"},
 		routing.Owner{CustomerID: s.customerID}, recorder, nil, nil)
 	defer session.Close()
 	// Revisions nobody reads fill the session's buffer, so the fatal error is held until the
@@ -382,7 +382,7 @@ func (s *SessionSuite) TestAWriteUnderWayWhenTheProviderFailsIsDropped() {
 		writing: make(chan struct{}), release: make(chan struct{})}
 	recorder := routing.NewRecorder(routing.STT, nil, nil, nil, slog.Default())
 	defer recorder.Close()
-	session := newSession(provider, routing.ProviderConfig{Provider: "stalled", Model: "live"},
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "stalled", Model: "live"},
 		routing.Owner{CustomerID: s.customerID}, recorder, nil, nil)
 	defer session.Close()
 	written := make(chan error, 1)
@@ -405,7 +405,7 @@ func (s *SessionSuite) TestAWriteUnderWayWhenTheNextModelTakesOverIsDropped() {
 	reopen := func([]string) (stt.STT, routing.ProviderConfig, error) {
 		return next, routing.ProviderConfig{Provider: "next", Model: "live"}, nil
 	}
-	session := newSession(provider, routing.ProviderConfig{Provider: "stalled", Model: "live"},
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "stalled", Model: "live"},
 		routing.Owner{CustomerID: s.customerID}, recorder, reopen, nil)
 	defer session.Close()
 	written := make(chan error, 1)
@@ -538,7 +538,7 @@ func (s *SessionSuite) TestAWriteThatFailsWhileTheNextModelStartsDoesNotWaitForI
 		<-started
 		return &quietSTT{emitter: stt.NewEmitter(64)}, routing.ProviderConfig{Provider: "next", Model: "live"}, nil
 	}
-	session := newSession(provider, routing.ProviderConfig{Provider: "stalled", Model: "live"},
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "stalled", Model: "live"},
 		routing.Owner{CustomerID: s.customerID}, recorder, reopen, nil)
 	defer session.Close()
 	written := make(chan error, 1)
@@ -569,7 +569,7 @@ func (s *SessionSuite) TestAWriteThatFailsAsTheVendorRefusesNeverWaitsForTheNext
 			<-release
 			return &quietSTT{emitter: stt.NewEmitter(64)}, routing.ProviderConfig{Provider: "next", Model: "live"}, nil
 		}
-		session := newSession(provider, routing.ProviderConfig{Provider: "closed", Model: "live"},
+		session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "closed", Model: "live"},
 			routing.Owner{CustomerID: s.customerID}, recorder, reopen, nil)
 
 		// The dial is released only after the write returns, so a write waiting for it never does.
@@ -593,7 +593,7 @@ func (s *SessionSuite) TestACallerThatHangsUpWhileTheNextModelDialsEndsTheDial()
 		<-ctx.Done()
 		return nil, routing.ProviderConfig{}, ctx.Err()
 	}
-	session := newSession(provider, routing.ProviderConfig{Provider: "closed", Model: "live"},
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "closed", Model: "live"},
 		routing.Owner{CustomerID: s.customerID}, recorder, reopen, cancel)
 	s.Require().NoError(s.write(session))
 	<-dialling
@@ -897,7 +897,7 @@ func (s *SessionSuite) handingOver(provider stt.STT, next ...stt.STT) (*Session,
 		}
 		return next[len(refused)-1], routing.ProviderConfig{Provider: fmt.Sprintf("next-%d", len(refused)), Model: "live"}, nil
 	}
-	session := newSession(provider, routing.ProviderConfig{Provider: provider.Provider(), Model: "live"},
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: provider.Provider(), Model: "live"},
 		routing.Owner{CustomerID: s.customerID}, recorder, reopen, nil)
 	s.T().Cleanup(func() { _ = session.Close() })
 	return session, recorder

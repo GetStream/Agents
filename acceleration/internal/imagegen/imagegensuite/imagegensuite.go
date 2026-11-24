@@ -62,7 +62,7 @@ func (s *Suite) SetupSuite() {
 // Drawn is the apple, drawn on the first call and kept for the rest.
 func (s *Suite) Drawn() imagegen.Result {
 	if s.drawn == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+		ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 		defer cancel()
 		drawn, err := s.Provider.Generate(ctx, apple)
 		s.Require().NoError(err)

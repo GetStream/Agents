@@ -103,7 +103,7 @@ func (s *ReserveSuite) credit(micros int64) {
 	if micros > 0 {
 		s.service.Credit(s.T(), s.org, micros)
 	}
-	s.enforcer.Join(s.app, s.org, usage.DefaultTier)
+	s.enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 	// An account never read admits; once read, holding all of its credit leaves none.
 	probe := uuid.Must(uuid.NewV7())
 	s.Eventually(func() bool {

@@ -171,6 +171,9 @@ const (
 	// runs first, and the HTTP drain gets the rest of shutdownGrace, so both fit inside the
 	// orchestrator's termination grace period.
 	phoneHangupGrace = 5 * time.Second
+	// legFlushTimeout bounds the last write of the call legs the leg sweep still holds, once
+	// the HTTP and session drains are over: one insert a leg, of at most a few, normally.
+	legFlushTimeout = 5 * time.Second
 	// usageDrainTimeout is how long the usage writer has to write what is queued once
 	// everything that records has stopped: it starts after the HTTP drain, any session drain
 	// and sessions.Shutdown, and counts none of them. What is still queued after it is lost,
@@ -1197,6 +1200,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
+		// a session still kept get their last write, and before the usage writer closes.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), legFlushTimeout)
+			defer cancel()
+			telephony.StopLegSweep(ctx)
+		}()
 		go checkCallHook(ctx, settings, logger)
 		startPhoneSweeper(ctx, telephony, logger)
 	}

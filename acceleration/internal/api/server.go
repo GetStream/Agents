@@ -1386,7 +1386,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
 			r = r.WithContext(ctx)
-			s.policies.Join(principal.AppID, principal.OrganizationID, principal.OrganizationTier)
+			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)

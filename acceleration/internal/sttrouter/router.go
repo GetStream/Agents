@@ -143,7 +143,7 @@ func (r *Router) Start(ctx context.Context, request Request) (_ *Session, err er
 	// The session takes its lease's first minute as it opens, after the provider has
 	// answered, so the trace shows what the hold costs.
 	_, leased := tracer.Start(ctx, "stt.lease")
-	session := newSession(provider, config, core.Owner(), r.Recorder(), reopen, cancel)
+	session := newSession(ctx, provider, config, core.Owner(), r.Recorder(), reopen, cancel)
 	leased.End()
 	return session, nil
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -54,6 +55,7 @@ type AgentConfigPatch struct {
 	EndOfTurn          any                      `json:"end_of_turn,omitempty" hidden:"true"` // refused: floor_control's max_wait_ms replaced it
 	Tags               *map[string]string       `json:"tags,omitempty"`
 	Video              *SessionVideo            `json:"video,omitempty"`
+	UpdatedAt          *time.Time               `json:"updated_at,omitempty" doc:"The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored."`
 }
 
 func (*AgentConfigPatch) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -134,6 +136,11 @@ func (s *Server) registerConfigPatch(api huma.API) {
 
 // patchAgentConfig writes what a caller changed onto a stored config.
 func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfigRequest) (*agentConfigResponse, error) {
+	return onTheConfigAsItIs(func() (*agentConfigResponse, error) { return s.tryPatchAgentConfig(ctx, request) })
+}
+
+// tryPatchAgentConfig is one try of patchAgentConfig, on the config as it reads it.
+func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentConfigRequest) (*agentConfigResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -309,7 +316,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 
-	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+	// Only over original, which may have come from the cache: every field this patch does not
+	// send is what another save since then wrote.
+	if err := s.store.AgentConfigs.Save(ctx, &config, original.UpdatedAt, value(patch.UpdatedAt)); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)

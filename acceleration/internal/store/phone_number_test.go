@@ -231,7 +231,9 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 	s.Equal(3, s.countQueries(func() {
 		s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15125550198"))
 	}), "InsertOnSIPTrunk reads the trunk and the number before it inserts")
-	s.Equal(1, s.countQueries(func() {
+	// A write to a number is a transaction, BEGIN to COMMIT, that waits on the row as long as a
+	// trunk group may hold it.
+	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125550199", NumberAttachment{TrunkID: "trunk-1", CallType: "default"}))
 	}), "Attach")
 	s.Equal(1, s.countQueries(func() {
@@ -243,7 +245,7 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 		_, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15125550100")
 		s.Require().NoError(err)
 	}), "GetByE164")
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.PhoneNumbers.SetAgent(s.ctx, "acme", "+15125550199", config))
 	}), "SetAgent")
 	s.Equal(1, s.countQueries(func() {
@@ -251,7 +253,7 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(numbers, 6)
 	}), "AnsweredBy")
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.PhoneNumbers.ClearAgent(s.ctx, "acme", "+15125550199"))
 	}), "ClearAgent")
 	s.Equal(1, s.countQueries(func() {
@@ -259,7 +261,7 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(held, 7)
 	}), "HeldSince")
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125550199", s.base.Add(time.Hour)))
 	}), "Release")
 }

@@ -146,7 +146,9 @@ func (t dataTable) rollup() bool {
 // deployment's key. And voice_samples and voice_bindings: a sample's audio is in this
 // deployment's bucket and a binding's clone in this deployment's account at the provider, so
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
-// with its name and description, to be given a recording and prepared again.
+// with its name and description, to be given a recording and prepared again. And
+// phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
+// which only this deployment's sweep can settle.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -319,9 +321,10 @@ func (s *Store) StartDataCapture(ctx context.Context, customerID string, retenti
 		return errors.New("store: a customer id is required")
 	}
 	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		// A lock_timeout of 0 waits for ever.
+		// A lock_timeout of 0 waits for ever. The wait stays under the statement limit, which
+		// would otherwise end it first and answer a statement timeout instead of ErrWritesOpen.
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)",
-			fmt.Sprintf("%dms", max(within.Milliseconds(), 1))); err != nil {
+			fmt.Sprintf("%dms", max(min(within, captureLockWait).Milliseconds(), 1))); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -347,6 +350,10 @@ ON CONFLICT (customer_id) DO UPDATE SET expires_at = EXCLUDED.expires_at,
 	}
 	return nil
 }
+
+// captureLockWait is the longest StartDataCapture waits on a write open before it, a second
+// under the statement limit.
+const captureLockWait = statementTimeout - time.Second
 
 // captureLapseMargin is how close to expiring a capture may be and still count as lapsed when
 // it is renewed. It is well above a renewal's usual length (milliseconds) and far below any
@@ -407,6 +414,9 @@ WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 	return nil
 }
 
+// exportLimit is how long an export's statements may run and its transactions sit idle.
+const exportLimit = time.Hour
+
 // ExportCustomer writes every row belonging to a customer and returns the cursor their
 // changes carry on from.
 //
@@ -427,6 +437,10 @@ WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 // an object bucket rather than in Postgres. The rows naming them come across, and copying
 // the bucket is a copy between two object stores that neither deployment should be in the
 // middle of.
+//
+// Its transactions run past the serving limits, to exportLimit: a table of a large customer
+// streams for longer than a statement may take, and each transaction sits idle while the
+// others, or a slow reader of the rows, are served.
 func (s *Store) ExportCustomer(ctx context.Context, customerID string, write func(table string, row json.RawMessage) error) (int64, error) {
 	if customerID == "" {
 		return 0, errors.New("store: a customer id is required")
@@ -443,6 +457,9 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 		return 0, fmt.Errorf("store: export: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // read-only, and the error on the way out says nothing
+	if err := boundTransaction(ctx, tx, exportLimit, lockTimeout, exportLimit); err != nil {
+		return 0, fmt.Errorf("store: export: %w", err)
+	}
 
 	// Never below where the recording last started again: Changes refuses a cursor from before
 	// it. A transaction holding a number at or below it had written its row before that start,
@@ -477,6 +494,9 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 			return 0, fmt.Errorf("store: export: shard: %w", err)
 		}
 		defer shardTx.Rollback() //nolint:errcheck // read-only, and the error on the way out says nothing
+		if err := boundTransaction(ctx, shardTx, exportLimit, lockTimeout, exportLimit); err != nil {
+			return 0, fmt.Errorf("store: export: shard: %w", err)
+		}
 		shards = append(shards, shardTx)
 	}
 	for _, table := range dataTables {
@@ -673,9 +693,6 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
 	for {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("store: export %s: %w", table.name, err)
-		}
 		fetched, err := s.exportBatch(ctx, tx, table.name, write)
 		if err != nil {
 			return err
@@ -2086,12 +2103,20 @@ func (s *Store) PruneDataChanges(ctx context.Context, retention time.Duration) (
 	// prunes, and of two prunes at once the one that dropped the lower numbers can commit last, so
 	// pruned_through only goes up. A WITH statement that changes rows runs once and to the end
 	// whether or not the query reads it (https://www.postgresql.org/docs/current/queries-with.html).
+	//
+	// The lowest numbers go first, writeBatch of them per statement, so a backlog is pruned in
+	// statements that each finish inside the statement limit, and pruned_through still says
+	// how far the pruning got.
 	var removed int64
-	err = s.global.QueryRowContext(ctx, `
+	for {
+		var batch int64
+		err = s.global.QueryRowContext(ctx, `
 WITH pruned AS (
-  DELETE FROM data_changes
-  WHERE at < now() - make_interval(secs => ?)
-    AND seq <= LEAST(?, (SELECT MIN(seq) - 1 FROM data_changes WHERE at >= now() - make_interval(secs => ?)))
+  DELETE FROM data_changes WHERE seq IN (
+    SELECT seq FROM data_changes
+    WHERE at < now() - make_interval(secs => ?)
+      AND seq <= LEAST(?, (SELECT MIN(seq) - 1 FROM data_changes WHERE at >= now() - make_interval(secs => ?)))
+    ORDER BY seq LIMIT ?)
   RETURNING customer_id, seq
 ), noted AS (
   UPDATE data_change_capture AS c SET pruned_through = p.seq
@@ -2099,11 +2124,15 @@ WITH pruned AS (
   WHERE c.customer_id = p.customer_id AND c.pruned_through < p.seq
 )
 SELECT count(*) FROM pruned`,
-		retention.Seconds(), mark, retention.Seconds()).Scan(&removed)
-	if err != nil {
-		return 0, fmt.Errorf("store: prune data changes: %w", err)
+			retention.Seconds(), mark, retention.Seconds(), writeBatch).Scan(&batch)
+		if err != nil {
+			return removed, fmt.Errorf("store: prune data changes: %w", err)
+		}
+		removed += batch
+		if batch < int64(writeBatch) {
+			return removed, nil
+		}
 	}
-	return removed, nil
 }
 
 // watchDataChanges attaches the recording trigger to every table an export carries, in one

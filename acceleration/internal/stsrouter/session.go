@@ -1,6 +1,7 @@
 package stsrouter
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -113,6 +115,7 @@ type reply struct {
 }
 
 func newSession(
+	ctx context.Context,
 	provider sts.STS,
 	config routing.ProviderConfig,
 	owner routing.Owner,
@@ -135,7 +138,7 @@ func newSession(
 		openedAt: time.Now(),
 	}
 	session.lease = routing.StartLeaseEvery(recorder, config, owner, "sts", session.id, leaseMinute, leaseRenew, 3*leaseRenew)
-	go session.forward()
+	goroutine.Go(ctx, session.forward)
 	return session
 }
 
