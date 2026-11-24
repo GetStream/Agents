@@ -424,7 +424,7 @@ func (s *AdmissionSuite) TestTwoRoutersStopAnLLMSessionTogether() {
 	// One response of the counted model costs 1,000 micros.
 	s.usage.Credit(s.T(), s.organization(), 1_000_000)
 	other := s.otherRouter()
-	other.Join(s.customerID(), s.organization(), usage.DefaultTier)
+	other.Join(s.T().Context(), s.customerID(), s.organization(), usage.DefaultTier)
 	answering := s.serverClient.opens("/v1/llm/stream")
 	s.Require().NoError(answering.WriteJSON(frame{"type": "start", "target": "counted/counted-model"}))
 	s.Equal("started", s.await(answering, "started")["type"])
@@ -901,7 +901,7 @@ func (s *AdmissionSuite) TestAMoneyRefusalIsTheCodeNotTheText() {
 	_, ok = moneyError(nil)
 	s.False(ok)
 	var answer APIError
-	s.Require().True(errors.As(refusedRequest(errors.New("routing: unknown target")), &answer))
+	s.Require().True(errors.As(refusedRequest(routing.Refused(errors.New("routing: unknown target"))), &answer))
 	s.True(strings.HasPrefix(answer.Code, "invalid_request"))
 }
 

@@ -426,6 +426,26 @@ func (s *TwilioSuite) TestANumberThisAccountDoesNotOwnCannotBeReleased() {
 	s.ErrorContains(err, "not one of this account's numbers")
 }
 
+func (s *TwilioSuite) TestANumberThisAccountHoldsIsFoundByItsNumber() {
+	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}]}`)
+
+	sid, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+
+	s.Require().NoError(err)
+	s.True(held)
+	s.Equal("PN9", sid)
+	s.Equal("+15125551234", s.seen.query.Get("PhoneNumber"))
+}
+
+func (s *TwilioSuite) TestANumberThisAccountDoesNotListIsNotHeld() {
+	s.answer(`{"incoming_phone_numbers":[]}`)
+
+	_, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+
+	s.Require().NoError(err)
+	s.False(held)
+}
+
 func (s *TwilioSuite) TestConfiguringInboundPointsTheNumberAtTheBridge() {
 	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}],
 		"sid":"PN9","phone_number":"+15125551234"}`)

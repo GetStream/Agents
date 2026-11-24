@@ -354,3 +354,16 @@ func TestAHookThatCannotBePointedIsAnsweredWithTryAgain(t *testing.T) {
 	require.NotContains(t, response.Body.String(), "cmd/phone")
 	require.Contains(t, logged.String(), "level=ERROR")
 }
+
+func TestAnUnverifiedOrganizationIsToldToVerify(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	handler, _ := served(t, func() error { return phoneFailure(logger, stack.Wrap(phone.ErrVerificationRequired)) })
+
+	response := postSync(handler, `{"name":"jean"}`)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	answer := answered(t, response.Body.Bytes())
+	require.Equal(t, "verification_required", answer.Code)
+	require.Equal(t, "Verify your organization in the Stream dashboard to buy phone numbers. "+
+		"If you just did, try again in a minute.", answer.Message)
+}

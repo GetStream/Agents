@@ -5,10 +5,13 @@ package routing
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -314,7 +317,13 @@ func (s *CallSuite) TestSettlingWithoutAUsageIDIsRefusedLoudly() {
 	s.Empty(s.rows(meter), "work that could be billed twice is not billed at all")
 	s.Equal(before+1, alerts.Total(usageLost.WithLabelValues(lostInvalid)), "it is a lost row, which the lost alert reads")
 	s.Contains(logs.String(), `level=ERROR msg="usage row lost" reason=invalid`)
-	s.Contains(logs.String(), `\"InputTokens\":1000`, "logged in full, with what it used")
+	match := regexp.MustCompile(`msg="usage row lost".* row_hex=([0-9a-f]+)`).FindStringSubmatch(logs.String())
+	s.Require().NotNil(match)
+	raw, err := hex.DecodeString(match[1])
+	s.Require().NoError(err)
+	var lost store.Request
+	s.Require().NoError(json.Unmarshal(raw, &lost))
+	s.EqualValues(1000, lost.InputTokens, "logged in full, with what it used")
 }
 
 func (s *CallSuite) TestAMeterNamesTheRowsAttributes() {

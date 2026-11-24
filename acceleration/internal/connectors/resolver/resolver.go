@@ -62,6 +62,11 @@ const (
 	saveFirstPause = 100 * time.Millisecond
 )
 
+// unsavedMost bounds the renewals a router holds in memory once their saves all failed (held),
+// one a connection, each saved on its connection's next Resolve here. One past it is lost, and
+// so is every one held when the process stops: its connection then needs a reconnect.
+const unsavedMost = 1000
+
 // What LastError says after each outcome. core.CredentialState.LastError is shown to whoever
 // has to reconnect, so each says what to do. The wording follows the prototype's
 // (ResolveCredentials in internal/connectors/runtime.go:98-115 at cf62af0d), without the word
@@ -135,6 +140,9 @@ type Resolver struct {
 
 	mu    sync.Mutex
 	cache map[core.ConnectionRef]entry
+	// unsaved are the renewals whose saves all failed with an error a retry may fix, for
+	// the connection's next Resolve to save (saveUnsaved).
+	unsaved map[core.ConnectionRef]unsavedRenewal
 	// swept is when expired entries were last dropped, so connections nobody resolves any
 	// more do not keep theirs.
 	swept time.Time
@@ -149,6 +157,12 @@ type entry struct {
 	fetched    time.Time
 	// renewed says the Retrieve that fetched it renewed the stored credentials.
 	renewed bool
+}
+
+// unsavedRenewal is a renewal saveAgain could not save: the state its checkpoint committed and
+// the one it left.
+type unsavedRenewal struct {
+	atCheckpoint, final core.CredentialState
 }
 
 // New is a Resolver over cfg.
@@ -166,7 +180,7 @@ func New(cfg Config) (*Resolver, error) {
 		logger = slog.Default()
 	}
 	return &Resolver{store: cfg.Store, credentials: cfg.Credentials, schemes: cfg.Schemes, now: now,
-		logger: logger, cache: map[core.ConnectionRef]entry{}}, nil
+		logger: logger, cache: map[core.ConnectionRef]entry{}, unsaved: map[core.ConnectionRef]unsavedRenewal{}}, nil
 }
 
 // Resolve returns an access credential for ref.
@@ -183,6 +197,11 @@ func (r *Resolver) Resolve(ctx context.Context, ref core.ConnectionRef, req core
 	if err != nil {
 		r.drop(ref)
 		return core.AccessCredential{}, err
+	}
+	if connection.Status == store.ConnectionNeedsReauthorization {
+		if err := r.saveUnsaved(ctx, ref, connection); err != nil {
+			return core.AccessCredential{}, err
+		}
 	}
 	// A refused credential is never served again from the cache (core.CredentialRequest.Refused).
 	if connection.Status == store.ConnectionConnected && req.Refused == nil {
@@ -465,25 +484,77 @@ func (r *Resolver) saveAgain(ctx context.Context, ref core.ConnectionRef, atChec
 	for attempts < saveAttempts && retryable(err) && wait(ctx, pause) {
 		attempts, pause = attempts+1, 2*pause
 		var committed *core.CredentialState
-		err = r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
-			committed = state
-			if !changed(final, *state) {
-				return false, nil
-			}
-			if changed(atCheckpoint, *state) {
-				return false, stack.Wrap(errMovedSinceCheckpoint)
-			}
-			state.Credentials, state.ExpiresAt = final.Credentials, final.ExpiresAt
-			state.Status, state.LastError = final.Status, final.LastError
-			return true, nil
-		})
-		if err == nil {
+		if committed, err = r.saveFinal(ctx, ref, atCheckpoint, final); err == nil {
 			return committed, nil
 		}
+	}
+	if retryable(err) && r.hold(ref, unsavedRenewal{atCheckpoint: atCheckpoint, final: final}) {
+		r.logger.Error("could not save a connector credential refresh; this router saves it on the connection's next use, or the connection needs a reconnect",
+			"connection", ref.ConnectionID, "attempts", attempts, "error", err)
+		return nil, err
 	}
 	r.logger.Error("could not save a connector credential refresh; the connection needs a reconnect",
 		"connection", ref.ConnectionID, "attempts", attempts, "error", err)
 	return nil, err
+}
+
+// saveFinal saves final, in an Update of its own, while the connection is still as the
+// checkpoint left it (atCheckpoint). A save that landed with its answer lost is found done.
+func (r *Resolver) saveFinal(ctx context.Context, ref core.ConnectionRef, atCheckpoint, final core.CredentialState) (*core.CredentialState, error) {
+	var committed *core.CredentialState
+	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+		committed = state
+		if !changed(final, *state) {
+			return false, nil
+		}
+		if changed(atCheckpoint, *state) {
+			return false, stack.Wrap(errMovedSinceCheckpoint)
+		}
+		state.Credentials, state.ExpiresAt = final.Credentials, final.ExpiresAt
+		state.Status, state.LastError = final.Status, final.LastError
+		return true, nil
+	})
+	return committed, err
+}
+
+// saveUnsaved saves the renewal held for ref, if there is one, before connection, which still
+// says needs_reauthorization, is resolved: the renewed credentials the provider may have rotated
+// to are only here. It is forgotten once saved, or once the connection moved since its
+// checkpoint, a reconnect or a revocation coming first; a save that fails in a way a retry may
+// fix keeps it, and fails the call.
+func (r *Resolver) saveUnsaved(ctx context.Context, ref core.ConnectionRef, connection store.ConnectorConnection) error {
+	r.mu.Lock()
+	held, found := r.unsaved[ref]
+	r.mu.Unlock()
+	if !found {
+		return nil
+	}
+	committed, err := r.saveFinal(ctx, ref, held.atCheckpoint, held.final)
+	if err != nil && retryable(err) {
+		return stack.Wrap(err)
+	}
+	r.mu.Lock()
+	delete(r.unsaved, ref)
+	r.mu.Unlock()
+	if err == nil {
+		r.audit(ctx, ref, &connection, store.AuditGrantRefreshed, "", committed.Revision, core.CredentialChange{
+			Previous: core.FingerprintsOf(r.schemes, held.atCheckpoint.Credentials),
+			Current:  core.FingerprintsOf(r.schemes, committed.Credentials),
+		})
+	}
+	return nil
+}
+
+// hold keeps a renewal whose saves failed for the connection's next Resolve, and reports false
+// when unsavedMost are held already.
+func (r *Resolver) hold(ref core.ConnectionRef, renewal unsavedRenewal) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, found := r.unsaved[ref]; !found && len(r.unsaved) >= unsavedMost {
+		return false
+	}
+	r.unsaved[ref] = renewal
+	return true
 }
 
 // retryable says whether saving the same state again may pass: not when the connection moved

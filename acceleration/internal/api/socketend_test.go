@@ -112,7 +112,7 @@ func (s *SocketEndSuite) TestARelayedFrameTheCallerCannotBeSentIsClientGone() {
 	socket.frames <- json.RawMessage(`{"type":"said"}`)
 	server := &Server{logger: slog.New(slog.DiscardHandler)}
 
-	ended := server.writeRelayedEvents(s.brokenSocket(), nil, socket, "a-watcher", "a-session", wanted{}, make(chan error),
+	ended := server.writeRelayedEvents(s.T().Context(), s.brokenSocket(), nil, socket, "a-watcher", "a-session", wanted{}, make(chan error),
 		endingOf(resuming{}, func() bool { return false }))
 
 	s.Equal(socketEnd{cause: clientGone}, ended)

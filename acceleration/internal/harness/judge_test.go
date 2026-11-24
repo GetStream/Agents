@@ -96,7 +96,7 @@ func (s *JudgeSuite) answer(yes map[string]float64, missing ...string) {
 
 func (s *JudgeSuite) ruling(turn FlowTurn) Decided {
 	s.T().Helper()
-	s.Require().NoError(s.flow.Decide(turn))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), turn))
 	var got Decided
 	s.Require().Eventually(func() bool {
 		s.mu.Lock()

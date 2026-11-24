@@ -124,7 +124,7 @@ func (s *Store) importPin(ctx context.Context, customerID, table string, row jso
 func readPin(row json.RawMessage) (map[string]json.RawMessage, *int64, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, nil, fmt.Errorf("store: read a row's pin: %w", err)
+		return nil, nil, invalidImport(fmt.Errorf("store: read a row's pin: %w", err))
 	}
 	raw, ok := fields[pinColumn]
 	if !ok || string(raw) == "null" {
@@ -132,7 +132,7 @@ func readPin(row json.RawMessage) (map[string]json.RawMessage, *int64, error) {
 	}
 	var pin int64
 	if err := json.Unmarshal(raw, &pin); err != nil {
-		return nil, nil, fmt.Errorf("store: read a row's pin: %w", err)
+		return nil, nil, invalidImport(fmt.Errorf("store: read a row's pin: %w", err))
 	}
 	return fields, &pin, nil
 }

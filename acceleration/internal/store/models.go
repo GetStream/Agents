@@ -485,6 +485,9 @@ type User struct {
 	// person's conversations onto another's account.
 	ClaimedBy string     `bun:"claimed_by,nullzero"`
 	ClaimedAt *time.Time `bun:"claimed_at"`
+	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (FinishGuestClaim), nil
+	// while a claim that set ClaimedBy has not got that far.
+	ClaimFinishedAt *time.Time `bun:"claim_finished_at"`
 	// RefreshSecretHash is the SHA-256 of the refresh secret this guest was last handed
 	// (GuestSecretHash), nil for one handed none. Never sent anywhere: it is the credential
 	// that lets a guest whose token expired come back as themselves.

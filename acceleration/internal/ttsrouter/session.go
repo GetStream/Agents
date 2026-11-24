@@ -1,12 +1,14 @@
 package ttsrouter
 
 import (
+	"context"
 	"log/slog"
 	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -17,6 +19,8 @@ import (
 // Session is a live voice attached to one customer. It forwards the provider's events
 // untouched and records a stat row per completed synthesis on the way past.
 type Session struct {
+	// call is the context of the call. The goroutines of the session start under it.
+	call     context.Context
 	provider tts.TTS
 	// config is the routing identity of the provider. Stats and health are keyed by it,
 	// so a provider registered under a different name still aggregates coherently.
@@ -88,6 +92,7 @@ type utterance struct {
 }
 
 func newSession(
+	ctx context.Context,
 	provider tts.TTS,
 	config routing.ProviderConfig,
 	owner routing.Owner,
@@ -97,9 +102,10 @@ func newSession(
 	// A voice that takes each sentence as its own request works on them side by side, and
 	// heard as it arrives their audio is spliced together.
 	if !provider.Streaming() {
-		provider = tts.InOrder(provider)
+		provider = tts.InOrder(ctx, provider)
 	}
 	session := &Session{
+		call:      ctx,
 		provider:  provider,
 		config:    config,
 		owner:     owner,
@@ -112,7 +118,7 @@ func newSession(
 		sentences: map[string][]*pending{},
 		finished:  map[string]struct{}{},
 	}
-	go session.forward()
+	goroutine.Go(ctx, session.forward)
 	return session
 }
 
@@ -267,7 +273,7 @@ func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stopped)
 		err = s.provider.Close()
-		go func() {
+		goroutine.Go(s.call, func() {
 			<-s.forwarded
 			s.mu.Lock()
 			sentences := s.sentences
@@ -278,7 +284,7 @@ func (s *Session) Close() error {
 					s.recorder.Release(unsettled.reserved)
 				}
 			}
-		}()
+		})
 	})
 	return err
 }

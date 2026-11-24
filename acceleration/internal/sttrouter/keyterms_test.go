@@ -1,6 +1,7 @@
 package sttrouter
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,7 +12,7 @@ import (
 
 func TestTheSessionRetunesWithoutHandingOutTheVendor(t *testing.T) {
 	provider := &retuningSTT{quietSTT: quietSTT{emitter: stt.NewEmitter(64)}}
-	session := newSession(provider, routing.ProviderConfig{Provider: "deepgram", Model: "flux-general-en"}, routing.Owner{}, nil, nil, nil)
+	session := newSession(context.Background(), provider, routing.ProviderConfig{Provider: "deepgram", Model: "flux-general-en"}, routing.Owner{}, nil, nil, nil)
 	defer session.Close()
 
 	require.NoError(t, session.SetKeyterms([]string{"Chen"}))
@@ -20,7 +21,7 @@ func TestTheSessionRetunesWithoutHandingOutTheVendor(t *testing.T) {
 }
 
 func TestASessionWhoseVendorCannotRetuneIgnoresTheTerms(t *testing.T) {
-	session := newSession(&quietSTT{emitter: stt.NewEmitter(64)}, routing.ProviderConfig{Provider: "deepgram", Model: "flux-general-en"}, routing.Owner{}, nil, nil, nil)
+	session := newSession(context.Background(), &quietSTT{emitter: stt.NewEmitter(64)}, routing.ProviderConfig{Provider: "deepgram", Model: "flux-general-en"}, routing.Owner{}, nil, nil, nil)
 	defer session.Close()
 
 	require.NoError(t, session.SetKeyterms([]string{"Chen"}))

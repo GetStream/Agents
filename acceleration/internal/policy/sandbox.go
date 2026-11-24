@@ -318,13 +318,13 @@ func (s *sandboxSlots) Take(ctx context.Context, running bool) (func(), error) {
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go s.renew(id, stop, done)
+	go s.renew(context.WithoutCancel(ctx), id, stop, done)
 	var released sync.Once
 	return func() {
 		released.Do(func() {
 			close(stop)
 			<-done
-			if _, _, err := s.call(context.Background(), id, "release"); err != nil {
+			if _, _, err := s.call(context.WithoutCancel(ctx), id, "release"); err != nil {
 				e.logger.Warn("could not give back a sandbox's slot, which lapses on its own",
 					append(who(s.organization), "lease", s.lease, "error", err)...)
 			}
@@ -333,7 +333,7 @@ func (s *sandboxSlots) Take(ctx context.Context, running bool) (func(), error) {
 }
 
 // renew keeps the slot held until stop is closed.
-func (s *sandboxSlots) renew(id string, stop <-chan struct{}, done chan<- struct{}) {
+func (s *sandboxSlots) renew(ctx context.Context, id string, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	ticker := time.NewTicker(s.lease / 3)
 	defer ticker.Stop()
@@ -342,7 +342,7 @@ func (s *sandboxSlots) renew(id string, stop <-chan struct{}, done chan<- struct
 		case <-stop:
 			return
 		case <-ticker.C:
-			if _, _, err := s.call(context.Background(), id, "renew"); err != nil &&
+			if _, _, err := s.call(ctx, id, "renew"); err != nil &&
 				s.enforcer.money.refusals.Due(s.organization+"\x00sandbox_renew", logEvery) {
 				s.enforcer.logger.Warn("could not renew a running sandbox's slot; it is tried again",
 					append(who(s.organization), "error", err)...)

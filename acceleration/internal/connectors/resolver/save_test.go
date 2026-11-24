@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
@@ -134,6 +135,33 @@ func (s *ResolverSuite) TestARefreshWhoseSavesAllFailKeepsTheCheckpointAndIsLogg
 	s.Contains(line, "attempts=3")
 	access, refresh := s.f.tokens(ref)
 	s.noTokenLogged(access, refresh)
+}
+
+// A refresh whose saves all failed keeps what it renewed on the router that renewed it, which
+// saves it on the connection's next use once the database takes it again: the provider may
+// have rotated the refresh token, and the person does not have to reconnect.
+func (s *ResolverSuite) TestARefreshWhoseSavesAllFailedIsSavedOnTheNextUse() {
+	ref := s.f.connected()
+	s.f.due()
+	var failing atomic.Bool
+	failing.Store(true)
+	router := s.f.routerSaving(s.f.srv.Client(), &failingSaves{fail: func(int) (error, bool) {
+		if failing.Load() {
+			return dropped, false
+		}
+		return nil, false
+	}})
+	_, err := router.Resolve(s.f.ctx, ref, core.CredentialRequest{})
+	s.Require().ErrorIs(err, driver.ErrBadConn)
+	s.Require().Equal(store.ConnectionNeedsReauthorization, s.f.stored(ref).Status)
+	failing.Store(false)
+
+	credential, err := router.Resolve(s.f.ctx, ref, core.CredentialRequest{})
+
+	s.Require().NoError(err)
+	s.True(s.f.works(credential))
+	s.Equal(store.ConnectionConnected, s.f.stored(ref).Status)
+	s.Empty(s.f.stored(ref).LastError)
 }
 
 func (s *ResolverSuite) TestASaveIsRetriedOnlyAfterAFailureARetryCanFix() {
