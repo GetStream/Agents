@@ -149,7 +149,9 @@ const (
 	// A hosted router keeps its keys wrapped, so this is refused beside a KMS setting.
 	devKEKEnvVar = "ROUTER_DEV_KEK"
 	// setAKeyring is what a refusal for a missing keyring tells the operator to set.
-	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI, or " + authKEKEnvVar + "_V1" +
+	// A compose user meets it first, so it says what the key is and where compose reads it.
+	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI (once, to any random string such as " +
+		"`openssl rand -hex 32`, kept for good; compose reads it from .env), or " + authKEKEnvVar + "_V1" +
 		authKEKWrappedSuffix + " with auth.kms_key (ROUTER_AUTH_KMS_KEY) on a hosted router"
 	shutdownGrace     = 10 * time.Second
 	readHeaderTimeout = 10 * time.Second
