@@ -13,7 +13,7 @@ import (
 )
 
 // ChannelThread links one external thread, such as a Slack thread, to the thread channel the
-// channel bridge writes it into (20261007003100_channel_threads.sql).
+// channel bridge writes it into.
 type ChannelThread struct {
 	bun.BaseModel `bun:"table:channel_threads,alias:ct"`
 
@@ -134,9 +134,8 @@ func (r *ChannelThreads) SetChatPerson(ctx context.Context, channelID, person st
 }
 
 // SetStarter records starter as the person who started a thread channel's chat, by the contact
-// map address the episode their message opens has
-// (20261217090000_agent_config_episode_cards_record.sql). One already recorded is left as it
-// is, so the first admitted message's author stays the chat's starter.
+// map address the episode their message opens has. One already recorded is left as it is, so
+// the first admitted message's author stays the chat's starter.
 func (r *ChannelThreads) SetStarter(ctx context.Context, channelID, starter string) error {
 	if channelID == "" || starter == "" {
 		return stack.Wrap(errors.New("store: a channel id and a starter are required"))

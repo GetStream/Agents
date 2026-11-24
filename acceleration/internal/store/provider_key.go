@@ -14,8 +14,7 @@ import (
 )
 
 // ProviderKey is a key a customer keeps with the router for their own account at a vendor, in
-// one region (20261202130000_provider_keys.sql). Work routed on it is billed to them by the
-// vendor, and by the router as BYOK.
+// one region. Work routed on it is billed to them by the vendor, and by the router as BYOK.
 type ProviderKey struct {
 	bun.BaseModel `bun:"table:provider_keys,alias:pk"`
 

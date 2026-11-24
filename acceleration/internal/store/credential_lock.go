@@ -16,11 +16,11 @@ import (
 // two-integer key spaces apart ("note that these two key spaces do not overlap",
 // https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS),
 // and the other advisory locks in this repository take one bigint
-// (hashtextextended(..., 731) in logs.go and the agent_logs migrations,
-// hashtextextended(..., definitionLockSeed) in connectors.go), so no key here can be one of
+// (hashtextextended(..., 731) in agent_log.go and the agent_logs migrations,
+// hashtextextended(..., definitionLockSeed) in connector_definition.go), so no key here can be one of
 // theirs. 839 is this lock's issue, AI-839, as 833 is definitionLockSeed's; the value only
 // has to differ from the other two-integer locks: providerAppLockNamespace's 872
-// (config_tokens.go), and the change feed's, whose first key is a change number's high half
+// (connector_config_token.go), and the change feed's, whose first key is a change number's high half
 // (record_data_change), 0 and up, and reaches 839 only past 839 << 32 changes.
 const credentialLockNamespace int32 = 839
 
@@ -45,7 +45,7 @@ const (
 // withCredentialLock runs fn on one pool connection that holds the session-level advisory lock on
 // the connection's credential state, and gives the lock and the connection back when fn returns.
 //
-// Session-level, not pg_advisory_xact_lock as connectors.go uses: checkpoint commits while
+// Session-level, not pg_advisory_xact_lock as connector_definition.go uses: checkpoint commits while
 // the lock must stay held, and a transaction-level lock goes with the commit. "Once acquired
 // at session level, an advisory lock is held until explicitly released or the session ends",
 // and session-level requests "do not honor transaction semantics"

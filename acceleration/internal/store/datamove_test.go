@@ -295,8 +295,6 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
-	claimed, err := s.source.Guest(s.ctx, "acme", "guest-1")
-	s.Require().NoError(err)
 
 	s.move("acme", "moved")
 
@@ -305,8 +303,6 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	guest, err := s.destination.Guest(s.ctx, "moved", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("alice", guest.ClaimedBy)
-	s.Require().NotNil(guest.ClaimedAt)
-	s.True(claimed.ClaimedAt.Equal(*guest.ClaimedAt))
 	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
 	s.ErrorIs(err, ErrGuestClaimed)
 }

@@ -38,7 +38,7 @@ const (
 )
 
 // ConnectorInvocation is one connector tool call a session's dispatcher ran. It holds no
-// argument and no result (20261007170000_connector_invocations_and_audit.sql).
+// argument and no result.
 type ConnectorInvocation struct {
 	bun.BaseModel `bun:"table:connector_invocations,alias:ci"`
 
@@ -58,7 +58,7 @@ type ConnectorInvocation struct {
 	// ErrorType is one of the Invocation* values, empty for a call that answered.
 	ErrorType string `bun:"error_type,notnull"`
 	// ProviderStatus is the provider's HTTP status for the call's last answered request, nil
-	// when none was answered (20261031130000_connector_invocation_failures.sql).
+	// when none was answered.
 	ProviderStatus *int `bun:"provider_status"`
 	// ErrorMessage is why the call failed, as its log line says it, redacted and at most 1 KiB
 	// (session.dispatcher.record); empty for a call that answered.

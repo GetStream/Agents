@@ -73,7 +73,6 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 	s.Equal(OwnerApp, found.OwnerType)
 	s.Empty(found.OwnerID)
 	s.Equal("test_key", found.AuthScheme)
-	s.Empty(found.TLSScheme)
 	s.Equal(map[string]string{"region": "eu"}, found.Inputs)
 	s.Equal(map[string]string{}, found.Metadata)
 	s.Equal("Support workspace", found.Label)
@@ -86,24 +85,6 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 	s.Nil(found.DeletedAt)
 }
 
-func (s *StoreSuite) TestATLSSchemeIsStoredBesideTheAuthScheme() {
-	created := s.connection("acme-app", func(connection *ConnectorConnection) { connection.TLSScheme = "test_mtls" })
-
-	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", created.ID)
-	s.Require().NoError(err)
-	s.Equal("test_mtls", found.TLSScheme)
-
-	var stored *string
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT tls_scheme FROM connector_connections WHERE id = ?", created.ID).Scan(&stored))
-	s.Require().NotNil(stored)
-
-	plain := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT tls_scheme FROM connector_connections WHERE id = ?", plain.ID).Scan(&stored))
-	s.Nil(stored, "no TLS scheme is NULL, not an empty name")
-}
-
 func (s *StoreSuite) TestARegisteredAuthSchemeItsConnectorDoesNotListIsRefused() {
 	s.seed(acmeManifest)
 	connection := appConnection()
@@ -113,17 +94,6 @@ func (s *StoreSuite) TestARegisteredAuthSchemeItsConnectorDoesNotListIsRefused()
 
 	s.ErrorIs(err, ErrSchemeNotAllowed)
 	s.ErrorContains(err, `acme revision 1 does not list auth scheme "test_unlisted"`)
-}
-
-func (s *StoreSuite) TestARegisteredTLSSchemeItsConnectorDoesNotListIsRefused() {
-	s.seed(acmeManifest)
-	connection := appConnection()
-	connection.TLSScheme = "test_unlisted"
-
-	err := s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection)
-
-	s.ErrorIs(err, ErrSchemeNotAllowed)
-	s.ErrorContains(err, `acme revision 1 does not list tls scheme "test_unlisted"`)
 }
 
 func (s *StoreSuite) TestTheDatabaseRefusesAnAppOwnedConnectionNamingAUser() {
@@ -346,7 +316,7 @@ func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt(
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the table lock")
 	s.bind("acme-app", fixedBinding(connection.ID))
@@ -399,7 +369,7 @@ func (s *StoreSuite) TestABindThatCommitsWhileTheDeleteWaitsForTheRowStopsIt() {
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the row")
 	s.bind("acme-app", fixedBinding(connection.ID))
@@ -789,7 +759,7 @@ func (s *StoreSuite) TestARevocationThatCommitsWhileTheUnitIsSetWins() {
 	setter := s.router()
 	set := make(chan error, 1)
 	go func() { set <- setter.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1") }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the set waits for the row")
 	s.Require().NoError(held.Commit())

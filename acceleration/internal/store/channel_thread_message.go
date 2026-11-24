@@ -16,8 +16,7 @@ import (
 // choice rather than a measurement. Other providers' retry spans are unverified.
 const channelMessageKeep = 24 * time.Hour
 
-// What a claimed message of a thread channel is, each with its own ids
-// (20261007003100_channel_threads.sql).
+// What a claimed message of a thread channel is, each with its own ids.
 const (
 	// ClaimInbound is a provider's message the channel bridge took, by the provider's id.
 	ClaimInbound = "inbound"

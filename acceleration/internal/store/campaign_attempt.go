@@ -32,7 +32,6 @@ type CampaignAttempt struct {
 	// happening, and for a dial that placed none.
 	CallOutcome string `bun:"call_outcome,nullzero"`
 	Outcome     string `bun:"outcome,notnull"`
-	Converted   bool   `bun:"converted,notnull"`
 	// ClassifyState is empty, pending, done or abandoned: whether an answered call's outcome
 	// is still to be read from its transcript. Abandoned is one whose contact settled before
 	// it was read.
@@ -265,12 +264,11 @@ func (r *CampaignAttempts) PutOff(ctx context.Context, owner, attemptID string, 
 
 // Classified records an answered dial's outcome. A dial deleted with its campaign, or no longer
 // pending because another runner read it or its contact settled, is nothing to record.
-func (r *CampaignAttempts) Classified(ctx context.Context, attemptID, outcome string, converted bool) error {
+func (r *CampaignAttempts) Classified(ctx context.Context, attemptID, outcome string, _ bool) error {
 	_, err := r.store.global.NewUpdate().Model((*CampaignAttempt)(nil)).
 		Set("classify_state = ?", classifyDone).
 		Set("classify_after = NULL").
 		Set("outcome = ?", outcome).
-		Set("converted = ?", converted).
 		Where("id = ?", attemptID).
 		Where("classify_state = ?", classifyPending).
 		Exec(ctx)

@@ -67,7 +67,7 @@ const (
 	// unavailableConnection: no live connection by that id that the binding may use. One code
 	// for a missing connection and for another person's, so it says nothing of whose an id is.
 	// A custom connector deleted while the session opens gets it too: a forced delete deletes
-	// its connections with it (store.DeleteConnectorDefinition).
+	// its connections with it (store.ConnectorDefinitions.Delete).
 	unavailableConnection = "connection_unavailable"
 	// unavailableProvider: the connection is to another connector than the binding names.
 	unavailableProvider = "provider_mismatch"

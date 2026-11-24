@@ -1225,7 +1225,7 @@ func (m *Manager) supersede(spec Spec) {
 	}
 }
 
-// RetireWithin bounds how long a retiring session (Session.Retire) may take to write the
+// RetireWithin bounds how long a retiring session (Manager.Retire) may take to write the
 // replies it owes before it is closed all the same: as long as a written message's answer may
 // take (api.askTimeout).
 const RetireWithin = 2 * time.Minute
