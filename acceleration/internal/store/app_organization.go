@@ -153,10 +153,25 @@ func (r *AppOrganizations) registered(ctx context.Context, appIDs []string) (map
 	return owners, nil
 }
 
-// Apps is every app of an organization: those requests last named it for, those
-// registered under it that no request named another for, and the app whose id is the
+// Apps is every app of an organization: its Members, and the app whose id is the
 // organization's, for an app that is its own.
 func (r *AppOrganizations) Apps(ctx context.Context, organizationID string) ([]string, error) {
+	members, err := r.Members(ctx, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	apps := []string{organizationID}
+	for _, app := range members {
+		if app != organizationID {
+			apps = append(apps, app)
+		}
+	}
+	return apps, nil
+}
+
+// Members is every app of an organization, in order: those requests last named it for, and
+// those registered under it that no request named another for.
+func (r *AppOrganizations) Members(ctx context.Context, organizationID string) ([]string, error) {
 	// One statement, so an app a request records under the organization meanwhile is in one
 	// half or the other.
 	namedOther := r.store.global.NewSelect().Model((*AppOrganization)(nil)).
@@ -172,13 +187,7 @@ func (r *AppOrganizations) Apps(ctx context.Context, organizationID string) ([]s
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: organization apps: %w", err))
 	}
-	apps := []string{organizationID}
-	for _, app := range members {
-		if app != organizationID {
-			apps = append(apps, app)
-		}
-	}
-	return apps, nil
+	return members, nil
 }
 
 // ActivityApps is Apps for a read of what an organization did: the

@@ -65,10 +65,14 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
-	// retries holds a slot for each deletion forgetLater is trying again. stop ends them
+	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
+	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
+	// ask Postgres at once. stop ends them
 	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
 	// retry starts once Close is waiting.
 	retries  chan struct{}
+	lost     chan struct{}
+	polls    chan struct{}
 	closing  context.Context
 	stop     context.CancelFunc
 	retrying sync.WaitGroup
@@ -92,7 +96,8 @@ const writeTimeout = 10 * time.Second
 // keys is read once write has run, and names nothing when write found no row.
 //
 // A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
-// on each of the next few attempts (forgetLater), which Close lets run.
+// on each of the next few attempts, which Close lets run, and once more when Postgres says the
+// transaction has ended, which Close does not wait for (forgetLater).
 func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
 	_, err := s.detachedWriteTold(ctx, write, keys)
 	return err
@@ -104,9 +109,18 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
 	var committing bool
+	var xid sql.NullInt64
 	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
+		}
+		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
+		// lost has landed. Without a cache there is nothing to drop again, and a write that
+		// changed nothing has no id, so nothing to wait for either.
+		if s.cache != nil {
+			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
+				return err
+			}
 		}
 		committing = true
 		return nil
@@ -114,8 +128,8 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	names := keys()
 	told = s.forget(ctx, names...)
 	var answered pgdriver.Error
-	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
-		s.forgetLater(names, err, true)
+	if err != nil && committing && !errors.As(err, &answered) && xid.Valid && len(names) > 0 {
+		s.forgetLater(names, err, xid.Int64)
 	}
 	return told, err
 }
@@ -226,7 +240,7 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 }
 
 // Close releases the connection pools, once the deletions forgetLater holds have run, or
-// forgetGrace has passed.
+// forgetGrace has passed and the rest have stopped.
 func (s *Store) Close() error {
 	s.retryMu.Lock()
 	s.closed = true

@@ -203,7 +203,7 @@ func (s *QuotaSuite) TestAUsersOwnSessionIsCountedOnTheirDayWhoeverSendsItsTurns
 	// Unchanged by who sends a turn: a backend answering for the user in the user's own
 	// session spends the user's day, as it always has.
 	request := textSession(nil)
-	request.Llm = pointerTo("counted/counted-model")
+	request.ConfigId = pointerTo(s.config("counted/counted-model"))
 	opened := s.client.createSession(request)
 
 	status, failure := s.backend.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
