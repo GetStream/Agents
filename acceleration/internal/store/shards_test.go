@@ -196,6 +196,56 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardKeepsWhatItsRowHe
 	s.True(*found.Remembers, "deleting it still forgets what it taught the memory store")
 }
 
+// A router of the release before carries a session on in another shard into a row that says no
+// project tag: the row it left still does, whoever carried it on. One it opened itself says none.
+func (s *ShardedStoreSuite) TestASessionTheReleaseBeforeCarriedOnElsewhereKeepsItsProjectTag() {
+	opened := s.base.Add(time.Hour)
+	for id, tag := range map[string]string{"backends": "alpha", "devices": ""} {
+		row := func() *AgentSession {
+			return &AgentSession{ID: id, CustomerID: "app", UserID: "user", Project: "alpha", CreatedAt: s.base, OpenedAt: s.base}
+		}
+		left := row()
+		left.ProjectTag = &tag
+		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, left))
+		// The other kind of caller carries it on: its kind alone would say the opposite.
+		carried := row()
+		carried.OpenedAt, carried.CallerKind = opened, map[string]string{"backends": "authenticated", "devices": "server"}[id]
+		s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+		s.Require().NoError(s.other.Sessions.Supersede(s.ctx, "app", id, opened))
+
+		for _, store := range []*Store{s.store, s.other} {
+			found, err := store.Sessions.Get(s.ctx, "app", id)
+			s.Require().NoError(err)
+			s.Equal(tag, found.TaggedProject(), id)
+		}
+	}
+}
+
+func (s *ShardedStoreSuite) TestAnotherSessionsProjectTagIsNotASessionsOwn() {
+	for _, theirs := range []AgentSession{{ID: "one", CustomerID: "globex"}, {ID: "two", CustomerID: "app"}} {
+		theirs.Project, theirs.ProjectTag, theirs.CreatedAt = "alpha", new("alpha"), s.base
+		s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &theirs))
+	}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha",
+		CallerKind: "guest", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}))
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+
+	s.Require().NoError(err)
+	s.Empty(found.TaggedProject())
+}
+
+// Not known while the shard that says is down: the session is found all the same.
+func (s *ShardedStoreSuite) TestASessionsProjectTagInAShardThatIsDownFailsNoRead() {
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "here", CustomerID: "app", Project: "alpha",
+		CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}))
+
+	found, err := s.withAShardDown(s.shardDSN, s.other.shardDSN).Sessions.Get(s.ctx, "app", "here")
+
+	s.Require().NoError(err)
+	s.Equal("alpha", found.TaggedProject())
+}
+
 func (s *ShardedStoreSuite) TestASupersedeTriedAgainAfterAShardFailedTakesWhatTheEarlierRowSaid() {
 	s.opened("chat", "app", s.base, func(session *AgentSession) { session.Remembers = new(true) })
 	_, err := s.store.Sessions.Pin(s.ctx, "app", "chat", true, s.base)

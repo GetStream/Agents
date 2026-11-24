@@ -699,9 +699,7 @@ func sessionRow(created *Session) store.AgentSession {
 	row.CallerKind = string(spec.CallerKind)
 	row.APIKey, row.UsageCategories = spec.Attribution.APIKey, spec.Attribution.UsageCategories
 	row.Team = usage.Team(spec.Attribution.UsageCategories)
-	// A fork whose device named its own project keeps its parent's tag while it runs, and has none
-	// once it is carried on from this row.
-	row.ProjectServerSide = new(spec.Project != "" && spec.Project == spec.ProjectTag)
+	row.ProjectTag = new(spec.ProjectTag)
 	// What opens the session's memory (Manager.Create), so a delete knows whether there is
 	// anything in the memory store to forget.
 	row.Remembers = new(spec.Memory.UserID != "")

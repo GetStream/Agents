@@ -106,10 +106,11 @@ type AgentSession struct {
 	Description string `bun:"description,notnull"`
 	// Project is what the conversation belongs to.
 	Project string `bun:"project,notnull"`
-	// ProjectServerSide is whether a server-side caller named Project, which is then a cost tag
-	// too (ProjectIsTag). Written as the session opens and never changed. Nil, as on a row made
-	// before it was kept, is not known.
-	ProjectServerSide *bool `bun:"project_server_side"`
+	// ProjectTag is the project the session's usage is tagged with, the last one a server-side
+	// caller named, which a device's fork may have named another Project over. Empty for none.
+	// Written as the session opens and never changed. Nil, as on a row made before it was kept,
+	// is not known (TaggedProject).
+	ProjectTag *string `bun:"project_tag"`
 	// Custom is the caller's own, handed back untouched and never read by the router.
 	Custom          map[string]any  `bun:"custom,type:jsonb,nullzero"`
 	ModelOverwrites ModelOverwrites `bun:"model_overwrites,type:jsonb,nullzero"`
@@ -181,15 +182,17 @@ func (s *AgentSession) Validate() error {
 		done()
 }
 
-// ProjectIsTag reports whether the session's usage is tagged with its project: only one a
-// server-side caller named is. For a row from before that was kept, the kind of caller that
-// opened the session says, except for a fork: its project may be its parent's, which anybody
-// may have named.
-func (s *AgentSession) ProjectIsTag() bool {
-	if s.ProjectServerSide != nil {
-		return *s.ProjectServerSide
+// TaggedProject is the project the session's usage is tagged with, empty for none. For a row
+// from before it was kept it is the session's project if a server-side caller opened it, except
+// for a fork: its project may be its parent's, which anybody may have named.
+func (s *AgentSession) TaggedProject() string {
+	switch {
+	case s.ProjectTag != nil:
+		return *s.ProjectTag
+	case s.ForkedFrom == "" && s.CallerKind == string(auth.KindServer):
+		return s.Project
 	}
-	return s.ForkedFrom == "" && s.CallerKind == string(auth.KindServer)
+	return ""
 }
 
 // ErrNoSession is a session that is not there: never saved, or deleted since.
@@ -662,12 +665,34 @@ func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession
 		return sessions, err
 	})
 	if len(sessions) > 0 {
+		r.keepProjectTag(ctx, &sessions[0])
 		return sessions[0], nil
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return AgentSession{}, unknownStoredSession(id)
 	}
 	return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
+}
+
+// keepProjectTag gives a row a router of the release before wrote, carrying the session on from
+// another shard, the project tag an earlier run's row there has. A row opened here once, or one
+// that says its tag, is read no further, and a shard that is down leaves it not known.
+func (r *Sessions) keepProjectTag(ctx context.Context, session *AgentSession) {
+	if session.ProjectTag != nil || session.Project == "" || len(r.store.peers) == 0 || !session.OpenedAt.After(session.CreatedAt) {
+		return
+	}
+	tag, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (*string, error) {
+		var tag *string
+		err := db.NewSelect().Model((*AgentSession)(nil)).Column("project_tag").
+			Where("id = ?", session.ID).
+			Where("customer_id = ?", session.CustomerID).
+			Where("project_tag IS NOT NULL").
+			Scan(ctx, &tag)
+		return tag, err
+	})
+	if err == nil {
+		session.ProjectTag = tag
+	}
 }
 
 // ConversationPin is the Stream app a customer's conversation was kept in, read off the

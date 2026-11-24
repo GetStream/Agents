@@ -41,8 +41,8 @@ class ForkSessionRequest:
                 a caller able to rewrite those could make a session impersonate a different agent. A backend sets one session's
                 instructions with the instructions of CreateSessionRequest instead, which a device may not send.
             project_id (str | Unset): What the fork belongs to. Omitted, the parent's project and its cost tag are kept.
-                Sent server-side it is also the "project" cost tag, as on createSession, unless a running parent's tags already
-                name one. A device's groups the fork and changes no cost tag.
+                Sent server-side it is also the "project" cost tag, as on createSession. A device's groups the fork, which keeps
+                its parent's cost tag.
             response_id (str | Unset): Carry the parent's history only up to the end of this response, so the fork continues
                 from that point rather than from where the parent is now. The history is read from what the parent recorded,
                 which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with

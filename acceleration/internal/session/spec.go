@@ -183,9 +183,11 @@ type Spec struct {
 	Description string
 	// Project is what the conversation belongs to, which any caller names (NameProject).
 	Project string
-	// ProjectTag is the project a server-side caller named, also merged into Tags, so spend
+	// ProjectTag is the project a server-side caller named last, also merged into Tags, so spend
 	// breaks down by project without the app labelling it twice. A device names no cost label.
 	ProjectTag string
+	// tagged is whether Tags holds ProjectTag because it was merged in, not spelled out.
+	tagged bool
 	// Custom is whatever the caller wants to remember about the session, handed back
 	// untouched and never read here. A field this package interpreted would be a field it
 	// could break.
@@ -528,10 +530,10 @@ func (s *Spec) Normalize() error {
 	// the tags rather than the caller having to say it twice. An explicit tag wins: somebody who
 	// spelled out project in tags meant that. The tags are copied: a fork's are its running
 	// parent's map.
-	if s.ProjectTag != "" {
+	if _, named := s.Tags[projectTag]; s.ProjectTag != "" && !named {
 		tags := routing.Tags{projectTag: s.ProjectTag}
 		maps.Copy(tags, s.Tags)
-		s.Tags = tags
+		s.Tags, s.tagged = tags, true
 	}
 
 	s.CallID = joinedCallID(s.CallID)
@@ -620,8 +622,9 @@ func (s *Spec) Normalize() error {
 	if err := s.Tags.Validate(); err != nil {
 		return routing.Refused(err)
 	}
-	// A device's project is no tag and is as short as one: the session's row is indexed by it.
-	if _, named := s.Tags[projectTag]; !named {
+	// A project that is not the tag is as short as one: the session's row is indexed by it. One
+	// carried on already has its row.
+	if s.Reopened.IsZero() {
 		if err := (routing.Tags{projectTag: s.Project}).Validate(); err != nil {
 			return routing.Refused(err)
 		}
@@ -731,17 +734,20 @@ func (s *Spec) NameProject(project *string, kind auth.Kind) {
 		return
 	}
 	s.Project = *project
-	if kind == auth.KindServer {
-		s.ProjectTag = *project
+	if kind != auth.KindServer {
+		return
+	}
+	s.ProjectTag = *project
+	if s.tagged {
+		// A fork's, merged into the tags of its running parent.
+		s.Tags = maps.Clone(s.Tags)
+		delete(s.Tags, projectTag)
 	}
 }
 
 // KeepProject sets the project as a session's row keeps it.
 func (s *Spec) KeepProject(row store.AgentSession) {
-	s.Project = row.Project
-	if row.ProjectIsTag() {
-		s.ProjectTag = row.Project
-	}
+	s.Project, s.ProjectTag = row.Project, row.TaggedProject()
 }
 
 // Written is the spec once voice is stopped: on no call, and on one model, as Normalize

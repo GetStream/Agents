@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 
@@ -450,17 +451,20 @@ func (s *SpecSuite) TestADevicesProjectIsNoCostLabel() {
 	}
 }
 
-func (s *SpecSuite) TestAProjectIsAsShortAsATagUnlessAnExplicitTagStandsForIt() {
+func (s *SpecSuite) TestAProjectIsAsShortAsATag() {
 	long := strings.Repeat("h", 300)
-	device, backend, tagged := s.spec(nil), s.spec(nil), s.spec(nil)
+	device, backend, tagged, reopened := s.spec(nil), s.spec(nil), s.spec(nil), s.spec(nil)
 	device.NameProject(&long, auth.KindAuthenticated)
 	backend.NameProject(&long, auth.KindServer)
 	tagged.NameProject(&long, auth.KindAuthenticated)
 	tagged.Tags = routing.Tags{"project": "spelled-out"}
+	reopened.Project, reopened.Reopened = long, time.Now()
+	reopened.CallID, reopened.Text, reopened.PersistConversation, reopened.ConversationID = "", true, true, "agent:c-1"
 
 	s.ErrorIs(device.Normalize(), routing.ErrRequest)
 	s.ErrorIs(backend.Normalize(), routing.ErrRequest)
-	s.NoError(tagged.Normalize())
+	s.ErrorIs(tagged.Normalize(), routing.ErrRequest)
+	s.NoError(reopened.Normalize(), "its row is there already")
 }
 
 func (s *SpecSuite) TestAnExplicitProjectTagWins() {

@@ -124,7 +124,7 @@ func (s *ProjectTagSuite) TestADevicesForkKeepsItsBackendsTag() {
 
 			s.Equal("alpha", value(forked.ProjectId))
 			s.Equal([]string{"alpha"}, s.answered(owner, forked.Id))
-			s.Equal([]string{"alpha"}, s.reopened(owner, forked.Id), "its own row says the backend named it")
+			s.Equal([]string{"alpha"}, s.reopened(owner, forked.Id), "its own row says the tag")
 		})
 	}
 }
@@ -140,7 +140,72 @@ func (s *ProjectTagSuite) TestADevicesForkNamingAProjectKeepsItsBackendsTag() {
 
 			s.Equal("beta", value(forked.ProjectId))
 			s.Equal([]string{"alpha"}, s.answered(owner, forked.Id))
-			s.Equal([]string{""}, s.reopened(owner, forked.Id), "its row keeps only the project the device named")
+			s.Equal([]string{"alpha"}, s.reopened(owner, forked.Id))
+			s.Equal([]string{"alpha"}, s.reopenedElsewhere(owner, forked.Id))
+			again := s.fork(owner, forked.Id, ForkSessionRequest{ProjectId: pointerTo("")})
+			s.Equal([]string{"alpha"}, s.reopened(owner, again.Id), "nor does a device's fork naming none drop it")
+		})
+	}
+}
+
+// Every fork: who opened the parent, who forks it, the project named, if any, and the tag.
+func (s *ProjectTagSuite) TestAForkIsTaggedWithTheProjectABackendNamedLast() {
+	for state, end := range s.parents() {
+		for _, tried := range []struct{ opener, forker, project, want string }{
+			{"backend", "backend", "-", "alpha"}, {"backend", "backend", "beta", "beta"}, {"backend", "backend", "", ""},
+			{"backend", "device", "-", "alpha"}, {"backend", "device", "beta", "alpha"}, {"backend", "device", "", "alpha"},
+			{"device", "backend", "-", ""}, {"device", "backend", "beta", "beta"}, {"device", "backend", "", ""},
+			{"device", "device", "-", ""}, {"device", "device", "beta", ""}, {"device", "device", "", ""},
+		} {
+			s.Run(strings.Join([]string{state, tried.opener, tried.forker, tried.project}, " "), func() {
+				owner := s.data.createUser()
+				as := map[string]*testClient{"device": owner, "backend": s.serverClient.actingFor(owner)}
+				parent := s.open(as[tried.opener], "alpha")
+				end(parent.Id)
+				var request ForkSessionRequest
+				if tried.project != "-" {
+					request.ProjectId = &tried.project
+				}
+
+				forked := s.fork(as[tried.forker], parent.Id, request)
+
+				s.Equal([]string{tried.want}, s.answered(as[tried.forker], forked.Id))
+				s.Equal([]string{tried.want}, s.reopened(owner, forked.Id))
+				s.Equal([]string{tried.want}, s.reopenedElsewhere(owner, forked.Id))
+			})
+		}
+	}
+}
+
+// A backend naming a project on a fork of its running session leaves the session its own tag,
+// and an agent's project tag stands over both.
+func (s *ProjectTagSuite) TestABackendsForkNamingAProjectLeavesItsParentsTags() {
+	running := s.open(s.serverClient, "alpha")
+	config := s.taggedConfig(map[string]string{"project": "support"})
+	request := textSession(nil)
+	request.ConfigId, request.ProjectId = &config, pointerTo("alpha")
+	supported := s.serverClient.createSession(request)
+
+	renamed := s.fork(s.serverClient, running.Id, ForkSessionRequest{ProjectId: pointerTo("beta")})
+	ofSupported := s.fork(s.serverClient, supported.Id, ForkSessionRequest{ProjectId: pointerTo("beta")})
+
+	s.Equal([]string{"beta"}, s.answered(s.serverClient, renamed.Id))
+	s.Equal([]string{"alpha"}, s.answered(s.serverClient, running.Id))
+	s.Equal([]string{"support"}, s.answered(s.serverClient, ofSupported.Id))
+}
+
+func (s *ProjectTagSuite) TestALongProjectOnAForkIsRefused() {
+	for name, end := range s.parents() {
+		s.Run(name, func() {
+			owner := s.data.createUser()
+			parent := s.open(s.serverClient.actingFor(owner), "alpha")
+			end(parent.Id)
+
+			status, message := owner.failure(http.MethodPost, "/v1/agents/sessions/"+parent.Id+"/fork",
+				ForkSessionRequest{ProjectId: pointerTo(strings.Repeat("a", 8000)), Messages: pointerTo(false)})
+
+			s.Equal(http.StatusBadRequest, status)
+			s.Contains(message, `"project" is longer than`)
 		})
 	}
 }
@@ -198,6 +263,7 @@ func (s *ProjectTagSuite) TestAForkOntoAnotherAgentKeepsWhoNamedTheProject() {
 	ofNamed := s.fork(owner, named.Id, ForkSessionRequest{ConfigId: &config})
 	ofDevices := s.fork(backend, devices.Id, ForkSessionRequest{ConfigId: &config})
 
+	s.Equal("alpha", value(ofNamed.ProjectId))
 	s.Equal([]string{"alpha"}, s.answered(owner, ofNamed.Id))
 	s.Equal([]string{""}, s.answered(backend, ofDevices.Id))
 }
@@ -224,20 +290,20 @@ func (s *ProjectTagSuite) TestACarriedOnSessionIsTaggedAsItWasOpened() {
 	}
 }
 
-func (s *ProjectTagSuite) TestARowSaysWhoNamedItsProject() {
+func (s *ProjectTagSuite) TestARowSaysItsProjectTag() {
 	for want, opened := range map[string]Session{
-		"true:alpha": s.open(s.serverClient, "alpha"), "false:alpha": s.open(s.client, "alpha"),
-		"false:": s.serverClient.createSession(textSession(nil)),
+		"alpha:alpha": s.open(s.serverClient, "alpha"), ":alpha": s.open(s.client, "alpha"),
+		":": s.serverClient.createSession(textSession(nil)),
 	} {
 		s.Require().Eventually(func() bool { return s.stored(opened.Id) }, settleFor, 20*time.Millisecond)
 		var got string
 		s.Require().NoError(s.store.ShardDB().QueryRowContext(context.Background(),
-			"SELECT project_server_side::text || ':' || project FROM agent_sessions WHERE id = ?", opened.Id).Scan(&got))
+			"SELECT project_tag || ':' || project FROM agent_sessions WHERE id = ?", opened.Id).Scan(&got))
 		s.Equal(want, got)
 	}
 }
 
-// A row from before who named the project was kept: the kind of caller that opened it says.
+// A row from before the project tag was kept: the kind of caller that opened it says.
 func (s *ProjectTagSuite) TestARowFromBeforeIsTaggedByWhoOpenedIt() {
 	owner := s.data.createUser()
 	backend := s.serverClient.actingFor(owner)
@@ -381,11 +447,11 @@ func (s *ProjectTagSuite) stored(id string) bool {
 	return err == nil
 }
 
-// fromBefore makes a session's row one written before it kept who named its project.
+// fromBefore makes a session's row one written before it kept its project tag.
 func (s *ProjectTagSuite) fromBefore(id string) {
 	s.stop(id)
 	_, err := s.store.ShardDB().ExecContext(context.Background(),
-		"UPDATE agent_sessions SET project_server_side = NULL WHERE id = ?", id)
+		"UPDATE agent_sessions SET project_tag = NULL WHERE id = ?", id)
 	s.Require().NoError(err)
 }
 

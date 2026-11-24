@@ -2646,48 +2646,47 @@ func (s *DataMoveSuite) TestAnImportedRowCannotChooseItsStreamApp() {
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(unpinned), "an unpinned row was in somebody's deployment app, not this customer's")
 }
 
-// Who named a session's project moves with it, there and back, as a row and as a change. A row
-// of a source from before it was kept arrives not knowing.
-func (s *DataMoveSuite) TestWhoNamedASessionsProjectMovesWithIt() {
-	yes, no := true, false
-	for id, named := range map[string]*bool{"backends": &yes, "devices": &no, "before": nil} {
+// A session's project tag moves with it, there and back, as a row and as a change. A row of a
+// source from before it was kept arrives not knowing.
+func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
+	for id, tag := range map[string]*string{"backends": new("alpha"), "devices": new(""), "before": nil} {
 		s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
-			ID: id, CustomerID: "acme", ProjectServerSide: named, AgentID: "agent", UserID: "user",
+			ID: id, CustomerID: "acme", Project: "alpha", ProjectTag: tag, AgentID: "agent", UserID: "user",
 		}))
 	}
 
 	s.capture("acme")
 	cursor := s.move("acme", "acme")
-	s.assertProjectsNamedBy(s.destination)
+	s.assertProjectTags(s.destination)
 	_, err := s.source.shard.NewUpdate().Model((*AgentSession)(nil)).
 		Set("title = 'renamed'").Where("customer_id = 'acme'").Exec(s.ctx)
 	s.Require().NoError(err)
 	s.replay(s.destination, "acme", "acme", cursor)
-	s.assertProjectsNamedBy(s.destination)
+	s.assertProjectTags(s.destination)
 	for _, row := range s.exportFrom(s.destination, "acme").of("agent_sessions") {
 		encoded, err := json.Marshal(row)
 		s.Require().NoError(err)
 		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
 	}
-	s.assertProjectsNamedBy(s.source)
+	s.assertProjectTags(s.source)
 
 	older := s.export("acme").of("agent_sessions")[0]
-	delete(older, "project_server_side")
+	delete(older, "project_tag")
 	older["id"], older["caller_kind"] = "older", "server"
 	encoded, err := json.Marshal(older)
 	s.Require().NoError(err)
 	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
 	arrived, err := s.destination.Sessions.Get(s.ctx, "acme", "older")
 	s.Require().NoError(err)
-	s.Nil(arrived.ProjectServerSide)
-	s.True(arrived.ProjectIsTag())
+	s.Nil(arrived.ProjectTag)
+	s.Equal("alpha", arrived.TaggedProject())
 }
 
-func (s *DataMoveSuite) assertProjectsNamedBy(store *Store) {
-	for id, want := range map[string]string{"backends": "true", "devices": "false", "before": "null"} {
+func (s *DataMoveSuite) assertProjectTags(store *Store) {
+	for id, want := range map[string]string{"backends": `"alpha"`, "devices": `""`, "before": "null"} {
 		row, err := store.Sessions.Get(s.ctx, "acme", id)
 		s.Require().NoError(err)
-		got, err := json.Marshal(row.ProjectServerSide)
+		got, err := json.Marshal(row.ProjectTag)
 		s.Require().NoError(err)
 		s.Equal(want, string(got), id)
 	}

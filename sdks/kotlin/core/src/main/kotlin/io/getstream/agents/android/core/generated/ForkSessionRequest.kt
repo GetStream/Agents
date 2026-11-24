@@ -44,7 +44,7 @@ import kotlinx.serialization.encoding.Encoder
  * @param incognito Hold the fork off the record. The parent still exists; this conversation onwards is simply not kept.
  * @param messages Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants.
  * @param modelOverwrites 
- * @param projectId What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the \"project\" cost tag, as on createSession, unless a running parent's tags already name one. A device's groups the fork and changes no cost tag.
+ * @param projectId What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the \"project\" cost tag, as on createSession. A device's groups the fork, which keeps its parent's cost tag.
  * @param responseId Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false.
  * @param title 
  * @param toolTimeoutMs How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession.
@@ -76,7 +76,7 @@ internal data class ForkSessionRequest (
     @SerialName(value = "model_overwrites")
     val modelOverwrites: ModelOverwrites? = null,
 
-    /* What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the \"project\" cost tag, as on createSession, unless a running parent's tags already name one. A device's groups the fork and changes no cost tag. */
+    /* What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the \"project\" cost tag, as on createSession. A device's groups the fork, which keeps its parent's cost tag. */
     @SerialName(value = "project_id")
     val projectId: kotlin.String? = null,
 

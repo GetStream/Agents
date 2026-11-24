@@ -7949,7 +7949,7 @@ namespace GetStream.VisionAgents.Models
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
         /// <summary>
-        /// What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the "project" cost tag, as on createSession, unless a running parent's tags already name one. A device's groups the fork and changes no cost tag.
+        /// What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the "project" cost tag, as on createSession. A device's groups the fork, which keeps its parent's cost tag.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;

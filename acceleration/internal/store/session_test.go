@@ -500,26 +500,25 @@ func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.Empty(found.EndReason, "a reopened session shows why its last run ended")
 }
 
-// Who named a session's project is written as it opens. A router of the release before, which
-// carries it on during a deploy or after a rollback, names no column for it, and a later write of
-// this release's does not change it.
-func (s *StoreSuite) TestACarriedOnSessionKeepsWhoNamedItsProject() {
-	for id, named := range map[string]bool{"backends": true, "devices": false} {
-		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectServerSide = &named })
+// The project a session is tagged with is written as it opens. A router of the release before,
+// which carries it on during a deploy or after a rollback, names no column for it, and a later
+// write of this release's does not change it.
+func (s *StoreSuite) TestACarriedOnSessionKeepsItsProjectTag() {
+	for id, tag := range map[string]string{"backends": "alpha", "devices": ""} {
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = &tag })
 
 		s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: id, CustomerID: "app"}))
-		other := !named
-		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectServerSide = &other })
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
 
 		found, err := s.store.Sessions.Get(s.ctx, "app", id)
 		s.Require().NoError(err)
-		s.Require().NotNil(found.ProjectServerSide)
-		s.Equal(named, *found.ProjectServerSide)
+		s.Require().NotNil(found.ProjectTag)
+		s.Equal(tag, *found.ProjectTag)
 	}
 }
 
-// A router of the release before opens a session without saying who named its project, so the
-// kind of caller that opened it says, unless it is a fork.
+// A router of the release before opens a session without saying its project tag, so the kind of
+// caller that opened it says, unless it is a fork.
 func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {
 	for id, opened := range map[string]AgentSession{
 		"backend": {CallerKind: "server"}, "user": {CallerKind: "authenticated"}, "guest": {CallerKind: "guest"},
@@ -530,8 +529,8 @@ func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt()
 
 		found, err := s.store.Sessions.Get(s.ctx, "app", id)
 		s.Require().NoError(err)
-		s.Nil(found.ProjectServerSide)
-		s.Equal(id == "backend", found.ProjectIsTag(), id)
+		s.Nil(found.ProjectTag)
+		s.Equal(map[string]string{"backend": "alpha"}[id], found.TaggedProject(), id)
 	}
 }
 
