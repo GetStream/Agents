@@ -217,7 +217,7 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseEverySaveFailsI
 	took := time.Since(started)
 	s.GreaterOrEqual(took, 3*configTokenSaveFirstPause, "the saves wait 100 ms and then 200 ms between them")
 	// The seam fails each save at once, so the call takes the two pauses (300 ms) and a little
-	// more. 2 s is six times that, for a CI runner under load, and still under what an added
+	// more. 2 s is more than six times that, for a CI runner under load, and still under what an added
 	// 1 s wait after each of the three saves would take (3.3 s), or after the two retries (2.3 s).
 	s.Less(took, 2*time.Second, "the saves wait for nothing beside the two pauses")
 	s.Equal(http.StatusInternalServerError, status)
