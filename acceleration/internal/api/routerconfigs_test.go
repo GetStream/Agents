@@ -182,16 +182,19 @@ func (s *RouterConfigsSuite) TestASyncedRouterConfigShowsItsHashOnEveryRead() {
 
 func (s *RouterConfigsSuite) TestSyncingTheSameFileAgainWritesNothing() {
 	created := s.createConfig(s.syncedClinic("hash-one"))
+	// The create answers with the Go clock (ns on Linux); Postgres keeps µs. Compare with the stored row.
+	stored := s.readConfig(created.Id)
 
 	replaced := s.replaceConfig(created.Id, s.syncedClinic("hash-one"))
 
 	s.Equal("hash-one", replaced.SyncHash)
-	s.True(created.UpdatedAt.Equal(replaced.UpdatedAt), "answered with the config as it was")
-	s.True(created.UpdatedAt.Equal(s.readConfig(created.Id).UpdatedAt), "and nothing was written")
+	s.True(stored.UpdatedAt.Equal(replaced.UpdatedAt), "answered with the config as it was")
+	s.True(stored.UpdatedAt.Equal(s.readConfig(created.Id).UpdatedAt), "and nothing was written")
 }
 
 func (s *RouterConfigsSuite) TestTheSameHashWithOtherContentIsStillWritten() {
 	created := s.createConfig(s.syncedClinic("hash-one"))
+	stored := s.readConfig(created.Id)
 	changed := s.syncedClinic("hash-one")
 	changed["stt"] = map[string]any{"target": "llm-flow"}
 
@@ -199,7 +202,7 @@ func (s *RouterConfigsSuite) TestTheSameHashWithOtherContentIsStillWritten() {
 
 	read := s.readConfig(created.Id)
 	s.Equal("llm-flow", value(read.Stt.Target), "a body the hash does not describe is not dropped")
-	s.True(read.UpdatedAt.After(created.UpdatedAt))
+	s.True(read.UpdatedAt.After(stored.UpdatedAt))
 	s.Empty(read.SyncHash, "nor kept under a hash that names another file")
 }
 
