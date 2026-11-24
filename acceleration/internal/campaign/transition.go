@@ -88,6 +88,8 @@ func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, conta
 		return enrolledAt(hours, zone, at, settle), false
 	case NotPlaced:
 		if dialed.Reason == reasonPlacingFailed {
+			// Not capped as DialFailed is: the database not answering is nothing of the
+			// contact's, and using its attempt over an outage would leave it rung fewer times.
 			return enrolledAt(hours, zone, now.Add(placingRetry), settle), false
 		}
 		settle.Stage = store.Enrolled
