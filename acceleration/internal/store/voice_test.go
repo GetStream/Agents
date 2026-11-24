@@ -92,6 +92,29 @@ func (s *StoreSuite) TestARenamedVoiceIsNoLongerFoundUnderItsOldName() {
 	s.ErrorIs(s.store.Voices.Delete(s.ctx, "globex", voice.ID), ErrNoVoice)
 }
 
+func (s *StoreSuite) TestARenameDoesNotWaitForABindingBeingAddedToTheVoice() {
+	voice := Voice{CustomerID: "acme", Name: "founder"}
+	s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice))
+	binding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), voice.ID)
+	s.Require().NoError(err)
+
+	renamed := make(chan error, 1)
+	go func() {
+		voice.Name = "narrator"
+		renamed <- s.store.Voices.Update(s.ctx, &voice)
+	}()
+
+	select {
+	case err := <-renamed:
+		s.NoError(err)
+	case <-time.After(time.Second):
+		s.Fail("the rename waited for the binding's transaction")
+	}
+}
+
 func (s *StoreSuite) TestVoiceQueryBudgets() {
 	for range 20 {
 		s.Require().NoError(s.store.Voices.Insert(s.ctx, &Voice{CustomerID: "acme", Name: "v" + newID()}))

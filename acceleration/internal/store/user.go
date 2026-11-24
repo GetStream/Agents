@@ -144,9 +144,16 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 	}
 
 	if redis != nil {
+		// Writing the key ends this process's tracking of it, so a later deletion would not drop
+		// the entry held below. Redis sends this process the invalidation of its own copy after
+		// the SET's reply, so once the EXISTS after it is answered that has been applied (as in
+		// Store.forget), and the read through the cache that follows tracks the key again.
 		set := redis.B().Set().Key(name).Value(sighting).Ex(userTTL).Build()
 		write, cancel := context.WithTimeout(ctx, cacheWait)
-		err := redis.Do(write, set).Error()
+		err := redis.DoMulti(write, set, redis.B().Exists().Key(name).Build())[0].Error()
+		if err == nil {
+			err = redis.DoCache(write, redis.B().Get().Key(name).Cache(), userTTL).Error()
+		}
 		cancel()
 		if err != nil {
 			slog.Default().Error("could not cache a user in redis",

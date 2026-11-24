@@ -1007,9 +1007,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// A row renamed, or a skill moved to another config, is cached under what it was too. What it
 	// was is read in the statement that writes it, locked, so the one forgotten is the one a
 	// concurrent write did not already replace. It is read in the FROM, so before the row is written.
+	// The lock is the one the upsert takes, which a child row being inserted does not wait on.
 	if cachedByID(table) {
 		locked, through = fmt.Sprintf("WITH was AS (SELECT (SELECT to_jsonb(h) FROM %s AS h"+
-			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR UPDATE) AS prior) ", spec.name), "was, "
+			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR NO KEY UPDATE) AS prior) ", spec.name), "was, "
 		args = append([]any{string(row), customerID}, args...)
 		returning = " RETURNING (SELECT prior FROM was), " + cachedRow(table, spec.name)
 	}

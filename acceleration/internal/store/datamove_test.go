@@ -2277,6 +2277,72 @@ func (s *DataMoveSuite) TestAnImportForgetsTheNameARenameWhileItWaitedGaveTheVoi
 	s.ErrorIs(err, ErrNoVoice)
 }
 
+// A binding being added to a voice locks the voice only against a change of its key, which an
+// import does not make, so the import does not wait for the binding's transaction to end.
+func (s *DataMoveSuite) TestAnImportOfAVoiceDoesNotWaitForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "voices", row))
+
+	s.Less(time.Since(began), time.Second)
+}
+
+// An import naming a voice another customer holds here is refused without waiting on that
+// customer's row, which a binding being added to it holds.
+func (s *DataMoveSuite) TestAnImportOfAnotherCustomersVoiceIsRefusedWithoutWaitingForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	err = s.destination.ImportRow(s.ctx, "somebody-else", "voices", row)
+
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.Less(time.Since(began), time.Second)
+}
+
+// A delete whose key its column cannot take is refused as an invalid import.
+func (s *DataMoveSuite) TestADeleteWhoseKeyItsColumnCannotTakeIsRefused() {
+	for _, key := range []string{
+		`{"modality": "llm", "customer_id": "acme", "provider": "openai", "model": "gpt-4o", "bucket": "yesterday at noon"}`,
+		`"llm"`,
+	} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "stats_hourly", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
+// A day and a number are keys too.
+func (s *DataMoveSuite) TestARowKeyedByADayAndANumberIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO turn_latency_hourly (customer_id, agent_id, bucket, leg, bin, count)
+		VALUES ('acme', 'agent', '2026-01-01 05:00:00+00', 'stt', 3, 2)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM turn_latency_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"))
+}
+
 // waitingOnALock waits for a statement holding text to wait on a lock.
 func (s *DataMoveSuite) waitingOnALock(db *bun.DB, text string) {
 	s.Require().Eventually(func() bool {
@@ -2371,6 +2437,29 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 
 	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
 	s.Equal(1, s.usersHeld(destination, app, "alice"))
+}
+
+// A replica that wrote the user itself, rather than read them from Redis, forgets them too.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByTheReplicaThatWroteThem() {
+	destination, other := s.cachedDestination(), s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = ? AND id = 'alice'", app)
+	s.Require().NoError(err)
+	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+	s.Require().Equal(1, s.usersHeld(destination, app, "alice"))
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+	s.Require().Zero(s.usersHeld(destination, app, "alice"))
+
+	s.Eventually(func() bool {
+		s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+		return s.usersHeld(destination, app, "alice") == 1
+	}, settleFor, 10*time.Millisecond, "the replica that wrote alice is still answering from a stale cache")
 }
 
 // A user recorded here from their own token, then imported as the guest the source still had them

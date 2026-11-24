@@ -304,6 +304,22 @@ func (s *StoreSuite) TestForgettingAUserOnOneReplicaForgetsThemOnTheOther() {
 	}, settleFor, 10*time.Millisecond, "the other replica is still answering from a stale cache")
 }
 
+func (s *StoreSuite) TestForgettingAUserOnOneReplicaForgetsThemOnTheReplicaThatWroteThem() {
+	app, other := s.freshApp(), s.replicaUsers()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
+
+	s.eraseUser(app, "guest-1")
+	other.Forget(s.ctx, app, "guest-1")
+
+	s.Require().Eventually(func() bool {
+		if err := s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest); err != nil {
+			return false
+		}
+		_, found := s.userRow(app, "guest-1")
+		return found
+	}, settleFor, 10*time.Millisecond, "the replica that wrote the user is still answering from a stale cache")
+}
+
 func (s *StoreSuite) TestAnAnonymousCallerNamingNoKindIsNotRecorded() {
 	app := s.freshApp()
 	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "whoever", ""))
