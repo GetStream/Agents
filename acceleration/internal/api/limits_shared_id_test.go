@@ -311,13 +311,11 @@ func (s *SelfHostedLimitsSuite) TestStaffManageTheLimitsOfASharedId() {
 
 // What cannot be looked up is the router's failure, and no limit is read or written on it.
 func (s *SelfHostedLimitsSuite) TestLimitsAreNotReadWhileAnOrganizationsAppsCannotBe() {
-	own, organization, id := s.sharedID()
+	own, organization, _ := s.sharedID()
 	s.limitAs(organization, teamLimit(4242))
+	s.failQueries("AS member")
 
-	for _, query := range []string{"AS member", "app_id IN ('" + id + "')"} {
-		s.failQueries(query)
-		s.Equal(http.StatusInternalServerError, own.do(http.MethodGet, "/v1/spend/limits", nil, nil), query)
-	}
+	s.Equal(http.StatusInternalServerError, own.do(http.MethodGet, "/v1/spend/limits", nil, nil))
 }
 
 func (s *SelfHostedLimitsSuite) TestALimitIsNotWrittenUnlessItsOrganizationIsRecorded() {

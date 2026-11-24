@@ -738,10 +738,11 @@ func (s *SelfHostedLimitsSuite) TestAnOrganizationsSpendLeavesOutAnAppWhoseIdIsI
 	s.Equal(int64(300_000), s.dailySpend(backend, "subject=organization"))
 }
 
-// The teams of an app in no organization are its own work's: an app seen under an organization
-// whose id is the app's is another customer's.
+// The teams of a request that names no organization are its app's work's alone, also when the
+// app is recorded in the organization of its own id with others.
 func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsTeamsAreItsOwnWorks() {
 	own, stranger := s.utils.uuid(), s.utils.uuid()
+	s.seen(own, own)
 	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: stranger, OrganizationID: own}))
 	s.spent(own, 300_000, "team:finance")
 	s.spent(stranger, 700_000, "team:stranger")

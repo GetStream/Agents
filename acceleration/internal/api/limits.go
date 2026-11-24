@@ -571,24 +571,16 @@ func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, er
 }
 
 // sharedID reports whether an app a request names no organization for has the id of an
-// organization it is not in: one another app was last seen under, or is registered under. It
-// reads Postgres, so an organization counts as soon as an app of it is recorded.
+// organization it is not in: one with Members, the app not among them. It reads Postgres, so an
+// organization counts as soon as an app of it is recorded.
 func (s *Server) sharedID(ctx context.Context, app string) (bool, error) {
-	apps, err := s.store.AppOrganizations.Apps(ctx, app)
-	if err != nil {
-		return false, err
-	}
-	// Apps always holds the id itself.
-	if len(apps) == 1 {
-		return false, nil
-	}
-	owners, err := s.store.AppOrganizations.OrganizationsOf(ctx, []string{app})
-	return owners[app] != app, err
+	members, err := s.store.AppOrganizations.Members(ctx, app)
+	return len(members) > 0 && !slices.Contains(members, app), err
 }
 
 // recordOrganization records the caller's app in its organization when it is recorded in
-// another or in none. Enforcer.Join does so in the background, after which a limit would be
-// kept before sharedID knows of its organization.
+// another or in none, so that sharedID knows the organization of a limit before the limit is
+// kept. Enforcer.Join records it in the background, and once per router.
 func (s *Server) recordOrganization(ctx context.Context) error {
 	app, _ := CustomerFrom(ctx)
 	organization := OrganizationFrom(ctx)
