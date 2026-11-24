@@ -365,3 +365,34 @@ func (s *ProxySuite) TestTheBudgetOfKeptBodiesIsGivenBack() {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestABodyACheckKeptIsSentAgainWithNoBudget: the GraphQL and LFS checks hold their body in memory already, so the
+// request has a GetBody from them, and a budget of one byte, which keeps no other body, does not stop the host's
+// GOAWAY from being answered with the request sent again. Without the checks' GetBody the sandbox gets the 502.
+func (s *ProxySuite) TestABodyACheckKeptIsSentAgainWithNoBudget() {
+	cases := map[string]struct {
+		target, contentType, body string
+		grant                     func()
+	}{
+		"graphql": {"https://api.github.test/graphql", "application/json", `{"query":"query { viewer { login } }"}`, func() { s.readGraphQL() }},
+		"lfs":     {lfsBatch, "application/vnd.git-lfs+json", lfsDownload, s.readLFS},
+	}
+	for name, c := range cases {
+		c.grant()
+		s.overHTTP2(func(options *egress.Options) { options.KeptBodies = 1 })
+		origin := s.goAwayOrigin()
+		// Trailing spaces, JSON's own, carry the body past one DATA frame: the origin's GOAWAY comes with the first.
+		body := c.body + strings.Repeat(" ", 32<<10)
+		request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, c.target, strings.NewReader(body))
+		s.Require().NoError(err, name)
+		request.Header.Set("Content-Type", c.contentType)
+		request.Header.Set("Authorization", "Bearer "+s.placeholder)
+
+		response, answer, err := s.send(s.sandbox(s.credential), request)
+
+		s.Require().NoError(err, name)
+		s.Equal(http.StatusOK, response.StatusCode, name)
+		s.Equal("processed", answer, name)
+		s.Equal([]string{digest([]byte(body))}, origin.processed(), name)
+	}
+}

@@ -79,6 +79,7 @@ func onlyOneQuery(r *http.Request) (map[string]json.RawMessage, error) {
 	// A body cut short is checked as far as it came, and the host gets those bytes.
 	body, _ := io.ReadAll(io.LimitReader(r.Body, maxQueryBody+1))
 	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	switch {
 	case len(body) > maxQueryBody:
 		return nil, errors.New("a jobs.query POST over the size the proxy reads")
