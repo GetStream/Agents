@@ -124,13 +124,13 @@ func startProbe(t *testing.T) *probe {
 	return p
 }
 
-// guardedUA is the UA and customer leg's client as Dial builds them, guarded by g.
-func guardedUA(t *testing.T, g guard) (*sipgo.UserAgent, *sipgo.Client) {
+// guardedUA is what Dial builds for the two legs to send on, the customer's guarded by g.
+func guardedUA(t *testing.T, g guard) (ua userAgents, customer, stream *sipgo.Client) {
 	t.Helper()
-	ua, client, _, _, err := newUA(g)
+	ua, customer, stream, _, err := newUA(g)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ua.Close() })
-	return ua, client
+	return ua, customer, stream
 }
 
 // DNS rebinding over TLS: the guard keeps the name for the certificate, so sipgo resolves it
@@ -138,7 +138,7 @@ func guardedUA(t *testing.T, g guard) (*sipgo.UserAgent, *sipgo.Client) {
 // system's, which sipgo uses, with loopback.
 func TestATLSRequestNeverConnectsToAPrivateAddressTheNameRebindsTo(t *testing.T) {
 	probe := startProbe(t)
-	_, client := guardedUA(t, guard{resolver: &answers{byHost: map[string][][]string{
+	_, client, _ := guardedUA(t, guard{resolver: &answers{byHost: map[string][][]string{
 		"localhost": {{"8.8.8.8"}},
 	}}}.withDefaults())
 
@@ -153,19 +153,48 @@ func TestATLSRequestNeverConnectsToAPrivateAddressTheNameRebindsTo(t *testing.T)
 // host, without the guard's requester. Here a request goes to the transport the same way.
 func TestATCPConnectionOpenedWithoutTheGuardsCheckCannotReachAPrivateAddress(t *testing.T) {
 	probe := startProbe(t)
-	ua, client := guardedUA(t, guard{}.withDefaults())
+	ua, client, _ := guardedUA(t, guard{}.withDefaults())
 	req := requestTo("127.0.0.1", probe.port, "TCP")
 	require.NoError(t, sipgo.ClientRequestAddVia(client, req))
 
-	err := ua.TransportLayer().WriteMsg(req)
+	err := ua.customer.TransportLayer().WriteMsg(req)
 
 	require.ErrorContains(t, err, "sipbridge: refusing to connect: 127.0.0.1 is not a public address")
 	require.Zero(t, probe.accepted.Load())
 }
 
+// sipgo reuses a connection by address alone. A customer request to the address of the
+// Stream leg's connection would go out on it, and over TLS past a certificate checked for
+// Stream's name, not the host the request was for.
+func TestACustomerRequestNeverGoesOutOnTheStreamLegsConnection(t *testing.T) {
+	peer := startPeer(t, peerOptions{})
+	_, customer, stream := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	options := func() *sip.Request {
+		req := sip.NewRequest(sip.OPTIONS, sip.Uri{User: "peer", Host: "127.0.0.1", Port: peer.port})
+		req.SetTransport("TCP")
+		return req
+	}
+	toStream, toCustomer := options(), options()
+
+	_, err := stream.Do(ctx, toStream)
+	require.NoError(t, err)
+	_, err = customer.Do(ctx, toCustomer)
+	require.NoError(t, err)
+
+	// The peer sees each request come from the local address of the connection it came on.
+	source := func(req *sip.Request) string {
+		got := peer.requests(sip.OPTIONS, req.CallID().Value())
+		require.Len(t, got, 1)
+		return got[0].Source()
+	}
+	require.NotEqual(t, source(toStream), source(toCustomer))
+}
+
 func TestATLSRequestConnectsToAnAddressTheGuardAllows(t *testing.T) {
 	probe := startProbe(t)
-	_, client := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
+	_, client, _ := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
 
 	// The probe speaks no TLS, so the handshake fails once the connection is open.
 	_, err := client.TransactionRequest(t.Context(), requestTo("127.0.0.1", probe.port, "TLS"))
@@ -266,7 +295,7 @@ func guardedLeg(t *testing.T, server *sipServer) *sipLeg {
 // guardedLegTo is guardedLeg to the trunk at addr.
 func guardedLegTo(t *testing.T, addr string) *sipLeg {
 	t.Helper()
-	_, client := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
+	_, client, _ := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
 
 	host, portText, _ := net.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portText)
