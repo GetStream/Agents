@@ -307,7 +307,7 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	s.Require().NotNil(guest.ClaimedAt)
 	s.True(claimed.ClaimedAt.Equal(*guest.ClaimedAt))
 	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
-	s.ErrorContains(err, "already claimed")
+	s.ErrorIs(err, ErrGuestClaimed)
 }
 
 func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGranted() {
@@ -2328,6 +2328,69 @@ func (s *DataMoveSuite) TestBackfillPinsTheDeploymentAppsRows() {
 	}
 	_, err = s.source.BackfillStreamPins(s.ctx, 0)
 	s.Error(err, "an unknown deployment app pins nothing")
+}
+
+func (s *DataMoveSuite) TestBackfillPinsARowAnotherWriterChangesMidway() {
+	locked, other := s.pinnedSession("acme", 0), s.pinnedSession("acme", 0)
+
+	s.backfillPast(locked, "title = 'renamed'")
+
+	s.Zero(s.unpinned(), "rows %s and %s", locked, other)
+}
+
+func (s *DataMoveSuite) TestBackfillPinsTheOnlyRowWhenAnotherWriterChangesIt() {
+	locked := s.pinnedSession("acme", 0)
+
+	s.backfillPast(locked, "title = 'renamed'")
+
+	s.Zero(s.unpinned(), "row %s", locked)
+}
+
+func (s *DataMoveSuite) TestBackfillLeavesARowAnotherWriterPinnedMidway() {
+	locked := s.pinnedSession("acme", 0)
+
+	s.backfillPast(locked, "stream_app_pk = 4242")
+
+	var pin int64
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT stream_app_pk FROM agent_sessions WHERE id = ?", locked).Scan(&pin))
+	s.Equal(int64(4242), pin, "the other writer's pin is kept")
+}
+
+// backfillPast backfills the source's pins while an update setting set on session id holds its
+// row, which commits once the backfill waits on it, as a session written to mid-backfill would.
+func (s *DataMoveSuite) backfillPast(id, set string) {
+	tx, err := s.source.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // a no-op once committed
+	_, err = tx.ExecContext(s.ctx, "UPDATE agent_sessions SET "+set+" WHERE id = ?", id)
+	s.Require().NoError(err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.source.BackfillStreamPins(s.ctx, 1)
+		done <- err
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting bool
+		err := s.source.GlobalDB().QueryRowContext(s.ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'UPDATE agent_sessions SET stream_app_pk%')`).Scan(&waiting)
+		return err == nil && waiting
+	}, 10*time.Second, 10*time.Millisecond, "the backfill never waited on the row")
+	s.Require().NoError(tx.Commit())
+	select {
+	case err := <-done:
+		s.Require().NoError(err)
+	case <-time.After(10 * time.Second):
+		s.FailNow("the backfill did not finish")
+	}
+}
+
+// unpinned is how many of the source's sessions have no pin.
+func (s *DataMoveSuite) unpinned() int {
+	var count int
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM agent_sessions WHERE stream_app_pk IS NULL").Scan(&count))
+	return count
 }
 
 func (s *DataMoveSuite) TestADeploymentThatCanNeverKnowItsAppParksAPinnedRow() {

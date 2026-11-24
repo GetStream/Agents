@@ -6216,7 +6216,7 @@ type CreateOptOutRequest struct {
 	// Channel The channel a recipient opted out of, or all of them.
 	Channel OptOutChannel `json:"channel"`
 
-	// Recipient The number, in E.164.
+	// Recipient The number in E.164, or an iMessage handle's email address, for channel imessage or all.
 	Recipient string `json:"recipient"`
 
 	// Source Omitted is api.
@@ -8045,7 +8045,7 @@ type OptOut struct {
 	CreatedAt time.Time     `json:"created_at"`
 	Id        string        `json:"id"`
 
-	// Recipient The number, in E.164.
+	// Recipient The number in E.164, or an iMessage handle's email address.
 	Recipient string `json:"recipient"`
 
 	// Source keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard.

@@ -1777,7 +1777,7 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 
 	session, err := a.startListener(target)
 	if err != nil {
-		return nil, fmt.Errorf("agent: start stt for %s: %w", participant.ID, err)
+		return nil, fmt.Errorf("agent: start stt: %w", err)
 	}
 	// A new transcriber numbers the participant's utterances from one again: a stop ruled
 	// in one of the last one's is spent, and is forgotten before this one can rule another.

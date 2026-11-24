@@ -245,6 +245,25 @@ func (s *StoreSuite) TestADuplicateOfNotContactedTakesOnlyContactsNeverDialed() 
 	s.Empty(s.contactsOf(nobody))
 }
 
+func (s *StoreSuite) TestADuplicateOfNotContactedKeepsAContactWhoseAttemptsPlacedNoCall() {
+	original := s.draftCampaign(newID(), "+15550001", "+15550002", "+15550003")
+	s.launch(original, s.base)
+	contacts := s.contactsOf(original)
+	for i, result := range []string{"deferred", "", "voicemail"} {
+		_, err := s.store.GlobalDB().NewInsert().Model(&CampaignAttempt{ID: newID(), CampaignID: original.ID, ContactID: contacts[i].ID,
+			StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: s.base, Result: result}).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(s.store.Campaigns.Stop(s.ctx, original.CustomerID, original.ID, s.base))
+
+	copied, err := s.store.Campaigns.Duplicate(s.ctx, original.CustomerID, original.ID, "not_contacted")
+	s.Require().NoError(err)
+
+	kept := s.contactsOf(copied)
+	s.Require().Len(kept, 1, "a deferred attempt rang nobody; a call and a voicemail did")
+	s.Equal(contacts[0].ToNumber, kept[0].ToNumber)
+}
+
 func (s *StoreSuite) TestTheSameNumberTwiceIsADuplicate() {
 	campaign := s.draftCampaign(newID(), "+15550001")
 

@@ -867,6 +867,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 `Folder.load`, and so `Agent.new(folder: "…")`, raise a `ConfigurationError` for a folder whose agent.yaml names `plugins:`, with an error that names the file and points to `connectors:`. An empty or null `plugins` still loads and sends nothing, as before. Folder sync no longer sends `plugins`, and the warning that plugins are deprecated is gone, as is the check that no name is under both `connectors` and `plugins`. Move each plugin to a `connectors:` entry (AI-2528).
 
+### `POST /v1/phone/opt-outs` refuses a recipient it could never match
+
+A `recipient` that is neither an E.164 number nor, for channel `imessage` or `all`, an iMessage handle's email address is now refused with a 400 `validation_failed` instead of being stored. Such opt-outs never took effect: an opt-out is matched against the number or handle as written, and numbers are always E.164. `15551110000` and `(555) 111-0000` are refused; send `+15551110000`.
+
 ## Bug Fixes
 
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
