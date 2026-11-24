@@ -558,6 +558,37 @@ func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
 	s.Zero(len(s.router.imports))
 }
 
+func (s *DataMoveSuite) TestAnImportRefusedAtALineLetsGoOfItsConnectionWhenTheBodyStalls() {
+	s.withImportLineWait(500 * time.Millisecond)
+	// A bad second line, then a stall in a body that says it is longer than what is sent, and
+	// small enough that net/http reads the rest of it before answering.
+	body, writer := io.Pipe()
+	defer writer.Close()
+	go func() { _, _ = writer.Write([]byte(emptyImport + "\nnot an export\n")) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The client's send waits on the body, which only closing it ends.
+	context.AfterFunc(ctx, func() { _ = writer.Close() })
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	request.ContentLength = 200
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	began := time.Now()
+
+	response, err := (&http.Client{Transport: transport}).Do(request)
+
+	s.Require().NoError(err, "the refused import was never answered")
+	defer response.Body.Close()
+	payload, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+	s.Equal(http.StatusBadRequest, response.StatusCode, string(payload))
+	s.Contains(string(payload), "this is not an export")
+	s.True(response.Close, "the connection is kept, with the rest of its body unread")
+	s.Less(time.Since(began), 5*time.Second, "answered only once the client gave up")
+}
+
 func (s *DataMoveSuite) TestAnImportWhoseLinesKeepArrivingOutlastsTheLineWait() {
 	s.withImportLineWait(time.Second)
 	body, writer := io.Pipe()

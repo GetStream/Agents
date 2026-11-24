@@ -242,7 +242,17 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(nil, maxImportLine)
 	controller := http.NewResponseController(w)
+	// An import that ends at a line, refused or failed, leaves the rest of the body to
+	// net/http, which reads up to 256 KiB of it before answering: that read waits for the
+	// client as long as a line would, not for ever.
+	atLine := false
+	defer func() {
+		if atLine {
+			_ = controller.SetReadDeadline(time.Now().Add(s.importLineWait))
+		}
+	}()
 	for {
+		atLine = false
 		if err := controller.SetReadDeadline(time.Now().Add(s.importLineWait)); err != nil {
 			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
 			return
@@ -256,6 +266,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
 			return
 		}
+		atLine = true
 		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
 			continue
 		}
