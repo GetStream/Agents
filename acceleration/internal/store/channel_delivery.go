@@ -51,10 +51,11 @@ func (r *ChannelDeliveries) ClaimStop(ctx context.Context, accountID, messageID,
 	})
 }
 
-// ClaimStart is ClaimStop of a START, lifting the recipient's opt-outs (OptOuts.RevokeAll).
+// ClaimStart is ClaimStop of a START, lifting the recipient's opt-outs (OptOuts.RevokeAll),
+// whether kept under recipient or under from as the sender wrote it.
 func (r *ChannelDeliveries) ClaimStart(ctx context.Context, accountID, messageID, from, customerID, recipient, channel string) (bool, error) {
 	return r.claimWith(ctx, accountID, messageID, from, func(ctx context.Context, tx bun.Tx) error {
-		return revokeAllOptOuts(ctx, tx, customerID, recipient, channel)
+		return revokeAllOptOuts(ctx, tx, customerID, channel, recipient, from)
 	})
 }
 

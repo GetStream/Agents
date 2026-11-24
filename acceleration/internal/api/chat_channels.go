@@ -6,7 +6,6 @@ import (
 	"errors"
 	"slices"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -178,8 +177,8 @@ func (s *Server) answerChatChannelTurn(ctx context.Context, origin hookOrigin, c
 	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	holder := uuid.NewString()
-	if err := takeTurn(ctx, func(ctx context.Context, until time.Time) (bool, error) {
-		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, LeaseUntil: until})
+	if err := takeTurn(ctx, func(ctx context.Context) (bool, error) {
+		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, Lease: threadTurnLease})
 	}); err != nil {
 		s.logger.Error("a message in a channel the Router answers in waited too long for the channel's turn", "channel", cid, "error", err)
 		return

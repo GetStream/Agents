@@ -2375,8 +2375,11 @@ router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read the
 **Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
 written. `router usage replay --from <log>` writes them from the log, once each. Each line
 holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
-text in the row is redacted and masked first. A user id that changes is left off, and the row
-bills to its app without that user. A line from before that holds the row as `row=` JSON the
+text in the row is redacted and masked first. A user id that changes is logged masked after
+`masked:`; replay gives the row back the user of its own app's session when that user masks
+alike, and otherwise the row bills to its app without a user. Replay before forgetting a user:
+the session still holds the id, so a replay after `forget-user` writes it back, and
+`forget-user` must then be run again for that user. A line from before that holds the row as `row=` JSON the
 redaction rewrote, and cannot be recovered: replay counts it as could not be read.
 
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
@@ -2392,13 +2395,19 @@ window the replacement already has taking the forgotten one's spend), and again 
 database their own policy and user-level limits, deleted, so the app's defaults apply, and the
 id on their resets, grants and campaigns. Usage and cost stay under the app. It writes one
 `end_user` audit row naming the replacement and the actor, never the id, and the service one
-`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Every
+`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Once the
+last step, the shared database's, has started, it completes even if the command is interrupted,
+and the command drops the user's cached policy from every router before it exits. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
 that one replacement, with the run's own audit row. Sessions, conversation history and
 `agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
 `keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
-that forgetting leaves alone.
+that forgetting leaves alone. It cannot reach logs, so the logger masks the ids it can tell
+apart: `phone:` and a number anywhere in a line, everything before an email's `@` under `user`,
+`user_id`, `participant`, `bound` and `id` (`logMasks`, `internal/store/logmask.go`), and in the
+logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
+another name among them, stays until log retention ends.
 
 The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,
@@ -2830,6 +2839,8 @@ and then saves the cursor.
 
 `POST /v1/data/import` refuses an export the same way: an app this deployment already holds gets a 409 before
 any of the export's rows is written, unless the request asks `?full=true`; a batch of changes is always applied. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+An app runs one import at a time on a router: a second one is answered 409 `import_running` until the first ends. A router runs
+at most four imports at once, and one more is answered 503. An import ends when a line has taken a minute to arrive.
 
 The default `--source-auth jwt` is for a source behind Stream's gateway, such as the hosted router.
 `--source-auth server` is for a source router reached directly.

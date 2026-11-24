@@ -71,6 +71,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 		return nil, err
 	}
 	if err != nil {
+		s.logUnkept(customerID, err)
 		// Everything that can go wrong here is the caller's spec, a provider that would not
 		// start, or a refusal about money, and each is worth reading rather than a 500 with
 		// the detail in a log the caller cannot see.
@@ -78,6 +79,27 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 	s.rememberTimezone(ctx, customerID, spec)
 	return &createSessionResponse{Body: sessionOf(ctx, created)}, nil
+}
+
+// logUnkept logs what Stream or the router said for a session refused because its Stream app is
+// missing or refuses its keys: Stream's own answer is the operator's to read, never the caller's.
+func (s *Server) logUnkept(customerID string, err error) {
+	if found, ok := errors.AsType[*session.UnkeptError](err); ok {
+		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
+			"customer", customerID, "error", err, "cause", found.Cause)
+	}
+}
+
+// unkeptAnswer is the answer for a session refused because the deployment's Stream app is
+// missing or refuses its keys: a setting of the deployment rather than anything in the
+// request, so not_configured, in words of our own. False for any other error.
+func unkeptAnswer(err error) (APIError, bool) {
+	for _, refusal := range []error{session.ErrNoStreamKeys, session.ErrStreamKeysRejected} {
+		if errors.Is(err, refusal) {
+			return notConfigured(strings.TrimPrefix(refusal.Error(), "session: ")), true
+		}
+	}
+	return APIError{}, false
 }
 
 // rememberTimezone stores the zone a session was opened in as its user's zone, so what a

@@ -53,6 +53,16 @@ const maxExports = 4
 // escaping.
 const maxImportLine = 64 << 20
 
+// maxImports bounds the imports running on one router at once. Each holds a buffer of up to
+// maxImportLine, grown by doubling, and the copy of a row that decoding its line makes: 128 MiB
+// or more an import at its largest line, so four hold over half a GiB.
+const maxImports = 4
+
+// importLineWait bounds the read of one line of an import, which holds one of maxImports and
+// its app's place until it ends, so a client that stops sending lets go of them after this. A
+// line of maxImportLine arrives within it at over a megabyte a second.
+const importLineWait = time.Minute
+
 // errExportRunning refuses a second export of an app while one is running on this router. Each
 // export holds a connection of this router's pool until its client has read it all.
 var errExportRunning = conflict("an export of this app is already running: wait for it to finish")
@@ -62,6 +72,13 @@ var errExportTooLong = unavailable("the export ran out of time before its first 
 
 // errExportsBusy refuses an export while maxExports are running on this router.
 var errExportsBusy = unavailable("this router is running as many exports as it takes at once: try again later")
+
+// errImportRunning refuses a second import of an app while one is running on this router.
+var errImportRunning = APIError{Type: ErrorTypeConflict, Code: codeImportRunning,
+	Message: "an import of this app is already running: wait for it to finish"}
+
+// errImportsBusy refuses an import while maxImports are running on this router.
+var errImportsBusy = unavailable("this router is running as many imports as it takes at once: try again later")
 
 // errWritesOpen is a capture start, or the export after it, that gave up on a write from before
 // the start (store.ErrWritesOpen).
@@ -197,6 +214,19 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if _, running := s.importing.LoadOrStore(customerID, struct{}{}); running {
+		writeError(w, errImportRunning)
+		return
+	}
+	defer s.importing.Delete(customerID)
+	select {
+	case s.imports <- struct{}{}:
+	default:
+		writeError(w, errImportsBusy)
+		return
+	}
+	defer func() { <-s.imports }()
+
 	// Asked at the first row rather than up front, so a batch of changes costs no lookup; once
 	// that row is written the app holds it, so the rows after it are not asked about.
 	checked := full
@@ -207,7 +237,15 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(nil, maxImportLine)
-	for scanner.Scan() {
+	controller := http.NewResponseController(w)
+	for {
+		if err := controller.SetReadDeadline(time.Now().Add(s.importLineWait)); err != nil {
+			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
+			return
+		}
+		if !scanner.Scan() {
+			break
+		}
 		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
 			continue
 		}
@@ -223,8 +261,10 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				writeImportFailure(w, r, err)
 				return
 			}
-			rows++
-			tables[line.Change.Table]++
+			if !line.Change.Skipped() {
+				rows++
+				tables[line.Change.Table]++
+			}
 		case line.Table != "":
 			if !checked {
 				table, err := s.store.HoldingTable(r.Context(), customerID)

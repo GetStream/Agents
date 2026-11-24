@@ -305,8 +305,7 @@ func (s *Service) runDue(ctx context.Context) time.Duration {
 		if free == 0 {
 			continue
 		}
-		now := time.Now()
-		claimed, err := s.store.ImageJobs.Claim(ctx, now, free, now.Add(s.lease), kind.decided)
+		claimed, err := s.store.ImageJobs.Claim(ctx, free, s.lease, kind.decided)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not take the image jobs due", "error", err)

@@ -3,6 +3,7 @@ package dlc
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -165,25 +166,68 @@ func (g *Gate) AllowTransfer(ctx context.Context, customerID, to string, into Ca
 	return g.allow(ctx, customerID, Voice, to, into)
 }
 
-func (g *Gate) allow(ctx context.Context, customerID, channel, to string, into Call) error {
-	admission, err := g.admit(ctx, customerID)
+// AllowCall is Allow for a call to to, with the room the call is placed in: the organization
+// its leg counts against and, while the calls at once are enforced, how many may be up. The
+// count Allow took can be stale by the time the call is placed, so placing it counts again as
+// one step with keeping its leg (store.CallLegs.PlaceWithin).
+func (g *Gate) AllowCall(ctx context.Context, customerID, to string) (CallRoom, error) {
+	admission, err := g.allowAdmitted(ctx, customerID, Voice, to, Call{})
 	if err != nil {
+		return CallRoom{}, err
+	}
+	room := CallRoom{OrganizationID: admission.OrganizationID, tier: tierNamed(admission.LimitsTier)}
+	if !g.limiting() || g.mode != config.LimitsEnforce || admission.Limits == nil || admission.OrganizationID == "" {
+		return room, nil
+	}
+	if limits, ok := admission.Limits.Channels[Voice]; ok && limits.Concurrent != nil {
+		room.AtOnce = &store.CallsAtOnce{Limit: *limits.Concurrent, Ringing: RingWindow}
+	}
+	return room, nil
+}
+
+// CallRoom is what AllowCall let a call be placed with.
+type CallRoom struct {
+	// OrganizationID is whose calls the call's leg counts among; empty for an app of none.
+	OrganizationID string
+	// AtOnce is how many of them may be up at once, nil when that is not enforced.
+	AtOnce *store.CallsAtOnce
+	tier   string
+}
+
+// Refusal is err, the failure of placing a call in the room, as the gate's refusal when it is
+// the organization's calls at once leaving no room for it.
+func (r CallRoom) Refusal(err error) error {
+	if r.AtOnce == nil || !errors.Is(err, store.ErrCallsAtOnce) {
 		return err
 	}
+	return tooManyAtOnce(r.tier, r.AtOnce.Limit)
+}
+
+func (g *Gate) allow(ctx context.Context, customerID, channel, to string, into Call) error {
+	_, err := g.allowAdmitted(ctx, customerID, channel, to, into)
+	return err
+}
+
+// allowAdmitted is allow, with the admission it was decided on.
+func (g *Gate) allowAdmitted(ctx context.Context, customerID, channel, to string, into Call) (routing.Admission, error) {
+	admission, err := g.admit(ctx, customerID)
+	if err != nil {
+		return admission, err
+	}
 	if g == nil || g.store == nil {
-		return nil
+		return admission, nil
 	}
 	optedOut, err := g.store.OptOuts.OptedOut(ctx, customerID, to, channel)
 	if err != nil {
-		return err
+		return admission, err
 	}
 	if optedOut {
-		return refused(codeOptedOut, stack.Wrap(fmt.Errorf("%w: %s opted out of %s", ErrRefused, to, channel)))
+		return admission, refused(codeOptedOut, stack.Wrap(fmt.Errorf("%w: %s opted out of %s", ErrRefused, to, channel)))
 	}
 	if err := g.inSandbox(ctx, customerID, channel, to); err != nil {
-		return err
+		return admission, err
 	}
-	return g.withinTier(ctx, admission, customerID, channel, to, into)
+	return admission, g.withinTier(ctx, admission, customerID, channel, to, into)
 }
 
 // inSandbox refuses what the sandbox does not allow an app none of whose use cases is approved.

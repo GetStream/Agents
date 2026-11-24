@@ -64,9 +64,10 @@ and cannot be changed.
 
 The REST create does not need `scheduling.enabled` (`internal/api/scheduled_tasks.go:752`).
 
-A follow-up needs a kept conversation. A router without Stream Chat credentials keeps none
-and logs `not keeping the conversation in Stream Chat` (`internal/session/manager.go:340`);
-its tasks cannot be delivered into a conversation.
+A follow-up needs a kept conversation, and a conversation is kept only in Stream Chat. A
+router without a usable Stream app refuses every session that is not incognito with 400
+`not_configured` (`session.ErrNoStreamKeys`, `ErrStreamKeysRejected` in
+`internal/session/stream_keys.go`), so it has no conversation to deliver a task into.
 
 ## Schedule one locally
 
@@ -182,7 +183,7 @@ Read the task, then its runs, then the logs, in that order.
 | Edit refused | update, pause or resume answers 409 `task_changed` | The task changed between the request's read and its save (another edit or pause, or a worker's claim, hold, finish or session write; a lease renewal is not a change): nothing was saved, so read it again and retry. The agent's `update_scheduled_task` is refused the same way |
 | The tools | the model never calls `schedule_task` | `scheduling.enabled` off, incognito, a guest or anonymous caller, or a `noauth` router |
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay |
-| Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it (`internal/api/session_delete.go:47`) |
+| Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it, with their runs, and redacts the changes recorded of them (`DeleteForSession`) |
 | User forgotten | task 404, its runs gone | `router usage forget-user` deleted every task of that user in the app, with its runs, and redacted the changes recorded of them (`ForgetUserTasks`) |
 
 Run `error` codes (`internal/scheduling/scheduler.go:105`):
@@ -210,8 +211,8 @@ Run `error` codes (`internal/scheduling/scheduler.go:105`):
 A failure is retried after 30 s, 2 min and 10 min (`deliveryRetries`) only when the failure
 is not final; with several channels, it is final only when every channel's failure is.
 
-Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all but the
-last; it also finds the job queue's `Failed to forward scheduled tasks`, which is noise):
+Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all of them;
+it also finds the job queue's `Failed to forward scheduled tasks`, which is noise):
 
 | Line | Level | Where |
 | --- | --- | --- |
@@ -239,7 +240,6 @@ last; it also finds the job queue's `Failed to forward scheduled tasks`, which i
 | `could not record a scheduled task run by hand` | error | `scheduled_tasks.go:578` |
 | `could not read when a scheduled task last ran` | error | `scheduled_tasks.go:637` |
 | `could not pause a deleted config's scheduled tasks` | error | `internal/api/configs.go:309` |
-| `not keeping the conversation in Stream Chat` | warn | `internal/session/manager.go:340` |
 
 Each line carries `task`, `run` and `customer` where it has them; the `error` field holds the
 whole story the run's code leaves out.

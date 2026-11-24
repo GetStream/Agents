@@ -265,7 +265,7 @@ func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID str
 	if existing.ClaimedBy == userID {
 		return nil
 	}
-	return stack.Wrap(fmt.Errorf("%w: %s was already claimed by %s", ErrGuestClaimed, guestID, existing.ClaimedBy))
+	return stack.Wrap(ErrGuestClaimed)
 }
 
 // FinishGuestClaim records that every step of userID's claim of a guest ran, so the same claim

@@ -390,6 +390,7 @@ type Server struct {
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
 	exportLineWait     time.Duration
+	importLineWait     time.Duration
 	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
@@ -398,6 +399,9 @@ type Server struct {
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
 	exports   chan struct{}
+	// importing and imports are the same for imports, of maxImports.
+	importing sync.Map
+	imports   chan struct{}
 	// healthLogs throttles the line a dependency that did not answer the health check logs:
 	// every probe asks.
 	healthLogs quota.Throttle
@@ -609,8 +613,10 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
 		exportLineWait:     exportLineWait,
+		importLineWait:     importLineWait,
 		exportWait:         exportWait,
 		exports:            make(chan struct{}, maxExports),
+		imports:            make(chan struct{}, maxImports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
@@ -1324,6 +1330,10 @@ var errServerSideOnly = APIError{
 		auth.AuthTypeServer + " and a token carrying server: true",
 }
 
+// statusClientClosed is what a request whose caller hung up before it was answered is counted
+// as, nginx's 499: no caller reads it.
+const statusClientClosed = 499
+
 // withCustomer lifts the authenticated principal into the request context so handlers can
 // read it without each one reaching into the raw request.
 //
@@ -1372,6 +1382,15 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
 			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A caller that hung up while its credential was checked is no failure of the router's,
+		// and nobody is left to answer. The status is for withMetrics, which counts and times it
+		// as a 4xx: callers giving up on a stalled key store still show there.
+		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+			s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+			w.WriteHeader(statusClientClosed)
 			return
 		}
 		// A credential that could not be checked (the key store down, a key that would not

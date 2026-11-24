@@ -522,6 +522,46 @@ func (s *StoreSuite) TestMigrateRebuildsTheContactIndexLeftInvalid() {
 	s.True(valid, "dropped and built again")
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('agent_logs_session_order')")
+	s.Require().NoError(err)
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('agent_logs_session_order')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+	var definition string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_get_indexdef(to_regclass('agent_logs_session_order'))").Scan(&definition))
+	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')")
+	s.Require().NoError(err)
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+}
+
 func (s *StoreSuite) TestMigrateRebuildsTheResponseParentIndexLeftInvalid() {
 	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
 	s.onShard("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('agent_responses_parent_idx')")

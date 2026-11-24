@@ -231,6 +231,10 @@ var usageIndexes = []struct{ set, name, create string }{
 	{"shard", "call_legs_token_hash_key", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_key ON call_legs (token_hash)"},
 	{"shard", "call_legs_token_hash_placed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_placed_idx ON call_legs (placed_at) " +
 		"WHERE token_hash IS NOT NULL"},
+	// A session's log lines, newest first.
+	{"global", "agent_logs_session_order", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_logs_session_order ON agent_logs (customer_id, session_id, id DESC)"},
+	// A campaign's attempts.
+	{"global", "campaign_attempts_campaign_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS campaign_attempts_campaign_idx ON campaign_attempts (campaign_id)"},
 	// The queued image jobs of each kind, in the order a claim takes them.
 	{"global", "image_jobs_undecided", "CREATE INDEX CONCURRENTLY IF NOT EXISTS image_jobs_undecided ON image_jobs (next_attempt_at, id) " +
 		"WHERE state = 'queued' AND message = ''"},

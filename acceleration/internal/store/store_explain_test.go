@@ -509,11 +509,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "ImageJobs.Claim", index: "image_jobs_undecided", inOrder: true, run: func(ctx context.Context, store *Store) error {
-			_, err := store.ImageJobs.Claim(ctx, s.base, 10, s.base, false)
+			_, err := store.ImageJobs.Claim(ctx, 10, 0, false)
 			return err
 		}},
 		{name: "ImageJobs.Claim decided", index: "image_jobs_decided", inOrder: true, run: func(ctx context.Context, store *Store) error {
-			_, err := store.ImageJobs.Claim(ctx, s.base, 10, s.base, true)
+			_, err := store.ImageJobs.Claim(ctx, 10, 0, true)
 			return err
 		}},
 		{name: "ImageJobs.NextDue", index: "image_jobs_undecided", run: func(ctx context.Context, store *Store) error {
@@ -625,7 +625,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{Severity: "error", After: 1000, Forward: true})
 			return err
 		}},
-		{name: "AgentLogs.Select of a session", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
+		{name: "AgentLogs.Select of a session", index: "agent_logs_session_order", run: func(ctx context.Context, store *Store) error {
 			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{SessionID: "seeded-session-7", UserID: "user-7",
 				Sources: []string{"agent"}, Search: "request"})
 			return err

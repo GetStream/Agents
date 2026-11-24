@@ -281,11 +281,6 @@ func (r *Policies) HasUsers(ctx context.Context, appID string) (bool, error) {
 	})
 }
 
-// forget drops what every replica had cached of a scope's document once it was written.
-func (r *Policies) forget(ctx context.Context, scope PolicyScope, id string) {
-	r.store.forget(ctx, r.keys(ctx, scope, id)...)
-}
-
 // keys are what every replica cached of a scope's document. An organization's is in the
 // AppPolicies of every app seen under it, listed after the write committed: an app seen under
 // it since drops its own (AppOrganizations.Upsert). A listing that fails is logged, as a
@@ -307,7 +302,7 @@ func (r *Policies) keys(ctx context.Context, scope PolicyScope, id string) []str
 }
 
 // policyKeys are the cached values a write of one scope's document changes, but for the
-// AppPolicies of an organization's apps (forget).
+// AppPolicies of an organization's apps (keys).
 func policyKeys(scope PolicyScope, id string) []string {
 	keys := []string{cacheKey("policy", string(scope), id)}
 	if scope == ScopeApp {
