@@ -63,6 +63,8 @@ type stubLLM struct {
 	// holdCreate, if set, is waited on after the request is recorded and before a stream
 	// is returned, so a test can Cancel while Create has not come back.
 	holdCreate <-chan struct{}
+	// closes counts the times the session over it was closed.
+	closes int
 
 	// scripts are the responses handed out, so a test can settle one and see which were
 	// abandoned. order remembers which came first.
@@ -149,6 +151,7 @@ func (s *stubLLM) settle(responseID, text string) {
 
 func (s *stubLLM) Close() error {
 	s.mu.Lock()
+	s.closes++
 	scripts := make([]*llmtest.Script, 0, len(s.scripts))
 	for _, script := range s.scripts {
 		scripts = append(scripts, script)
@@ -455,6 +458,21 @@ func (s *HarnessSuite) TestAModelIsRequired() {
 	_, err := New(Options{})
 
 	s.ErrorContains(err, "model session")
+}
+
+// A harness with no flow controller has nowhere to put one it is handed, so it closes it
+// rather than leaving it open for the rest of the call.
+func (s *HarnessSuite) TestAControllerHandedToAHarnessWithoutAFlowIsClosed() {
+	h, err := New(Options{Text: true, Model: s.session(newStubLLM())})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = h.Close() })
+	controller := newStubLLM()
+
+	h.SetModel(s.session(newStubLLM()), s.session(controller))
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	s.Equal(1, controller.closes, "the controller was left open")
 }
 
 func (s *HarnessSuite) TestASkillWithoutADescriptionIsRefused() {

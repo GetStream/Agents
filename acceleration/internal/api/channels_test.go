@@ -404,7 +404,7 @@ func (s *ChannelsSuite) TestAStopTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	body := s.delivery(writer, id, "Stop")
 	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
 	s.Equal(http.StatusInternalServerError, status, "a STOP not recorded is the provider's to deliver again")
-	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.Contains(string(answered), "something went wrong")
 	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -507,7 +507,7 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	body := s.delivery(writer, id, "START")
 	status, answered := s.post(line.WebhookUrl, s.signed(body), body)
 	s.Equal(http.StatusInternalServerError, status, "a START not recorded is the provider's to deliver again")
-	s.Contains(string(answered), "the message could not be recorded; deliver it again")
+	s.Contains(string(answered), "something went wrong")
 	s.NotContains(string(answered), "refused by the test", "the store's error stays in the log")
 	optedOut, err := s.store.OptOuts.OptedOut(ctx, s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -524,6 +524,43 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "help"))
 	s.Equal("Reply STOP to unsubscribe.", s.reply(writer, 3))
 	s.Len(s.meta.to(writer), 3, "the START is confirmed once, however often it is delivered")
+}
+
+// A HELP or an ordinary message the store could not claim fails its delivery with a 500 the
+// provider retries, saying nothing of the store, whose error goes to the log. A trigger
+// refuses the line's deliveries.
+func (s *ChannelsSuite) TestAMessageTheStoreCouldNotClaimIsA500WithoutTheStoresWords() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+		CREATE FUNCTION channels_suite_refuse_delivery() RETURNS trigger AS $$
+			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER channels_suite_refuse_delivery BEFORE INSERT ON channel_deliveries FOR EACH ROW
+			WHEN (NEW.account_id = '`+line.Id+`') EXECUTE FUNCTION channels_suite_refuse_delivery();
+		COMMIT`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+			DROP TRIGGER channels_suite_refuse_delivery ON channel_deliveries;
+			DROP FUNCTION channels_suite_refuse_delivery();
+			COMMIT`)
+		s.Require().NoError(err)
+	}()
+
+	for _, text := range []string{"HELP", "what time do you open?"} {
+		writer := s.writer()
+		body := s.delivery(writer, "msg-"+s.utils.uuid(), text)
+		status, answered := s.post(line.WebhookUrl, s.signed(body), body)
+		s.Equal(http.StatusInternalServerError, status, "%q not claimed is the provider's to deliver again", text)
+		s.Contains(string(answered), "something went wrong", text)
+		s.NotContains(string(answered), "refused by the test", text)
+		s.NotContains(string(answered), "claim channel message", text)
+		s.Empty(s.meta.to(writer), "%q not claimed is not answered", text)
+	}
+	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" customer=`+s.customerID())
+	s.Contains(s.logged.String(), "refused by the test", "what the store said is kept in the log")
 }
 
 // A delivery of a STOP racing a slow first one waits for the first to record the opt-out, and
@@ -570,7 +607,7 @@ func (s *ChannelsSuite) TestARedeliveryRacingAStopThatFailsRecordsIt() {
 
 	failed := <-first
 	s.Equal(http.StatusInternalServerError, failed.status)
-	s.Contains(string(failed.body), "the message could not be recorded; deliver it again")
+	s.Contains(string(failed.body), "something went wrong")
 	s.Equal(http.StatusAccepted, (<-second).status)
 	optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
 	s.Require().NoError(err)
@@ -680,6 +717,56 @@ func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	s.ErrorIs(err, store.ErrNoContact)
 }
 
+// A code texted to another agent's line of the app is answered as a code nobody was given, so a
+// guess cannot tell a live code from a dead one, and is not spent: the number still claims it on
+// the line of the agent it was minted for.
+func (s *ChannelsSuite) TestACodeTextedToAnotherAgentsLineStillClaimsTheNumberOnItsOwn() {
+	ownNumber, otherNumber := s.number(), s.number()
+	own, other := s.connect(ownNumber), s.connect(otherNumber)
+	config := s.agentOn(ownNumber, store.ChannelIdentityLink)
+	otherConfig := s.agentOn(otherNumber, store.ChannelIdentityLink)
+	owner := s.utils.uuid()
+	writer := s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: owner}, &minted))
+	s.Regexp(`^[0-9]{6}$`, minted.Code)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, writer, "msg-"+s.utils.uuid(), "no such code"))
+	unknown := s.reply(writer, 1)
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, writer, "msg-"+s.utils.uuid(), minted.Code))
+	s.Equal(unknown, s.reply(writer, 2))
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), otherConfig.Id, "whatsapp", "+"+writer)
+	s.Require().ErrorIs(err, store.ErrNoContact)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(own, writer, "msg-"+s.utils.uuid(), minted.Code))
+	s.Equal("This number is yours now. What can I do for you?", s.reply(writer, 3))
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
+	s.Require().NoError(err)
+	s.Equal(owner, held.UserID)
+}
+
+// A guess that hits another agent's live code counts as a wrong one, as any other guess does.
+func (s *ChannelsSuite) TestCodesOfAnotherAgentCountAsWrongCodes() {
+	ownNumber, otherNumber := s.number(), s.number()
+	s.connect(ownNumber)
+	other := s.connect(otherNumber)
+	config := s.agentOn(ownNumber, store.ChannelIdentityLink)
+	s.agentOn(otherNumber, store.ChannelIdentityLink)
+	guesser := s.writer()
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	for n := range 5 {
+		s.Require().Equal(http.StatusAccepted, s.deliver(other, guesser, "msg-"+s.utils.uuid(), minted.Code))
+		s.Contains(s.reply(guesser, n+1), "code")
+	}
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(other, guesser, "msg-"+s.utils.uuid(), "no such code"))
+
+	s.Contains(s.reply(guesser, 6), "Too many codes")
+}
+
 // A code is six digits, so a number that may text guesses without end finds one.
 func (s *ChannelsSuite) TestANumberThatTextsWrongCodesCannotClaimEvenTheRightOne() {
 	number := s.number()
@@ -727,6 +814,35 @@ func (s *ChannelsSuite) TestNumbersGuessingCodesOnOneLineTogetherCannotClaimOne(
 	s.ErrorIs(err, store.ErrNoContact)
 }
 
+// A code the router cannot write is its own failure: the caller is told so, not what the store said.
+func (s *ChannelsSuite) TestACodeThatCannotBeWrittenIsA500WithoutTheStoresWords() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+
+	s.failQueries(`INSERT INTO "channel_links"`)
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()})
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	s.Contains(string(payload), "something went wrong")
+	s.NotContains(string(payload), "channel link")
+	s.NotContains(string(payload), "store:")
+}
+
+// Two people linking on one agent before either texts get two codes.
+func (s *ChannelsSuite) TestTwoPeopleLinkingOnOneAgentGetTwoCodes() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	var first, second ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &first))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &second))
+	s.NotEqual(first.Code, second.Code)
+}
+
 func (s *ChannelsSuite) TestAnAgentIdentifyingBySomebodysNumberHasNothingToLink() {
 	number := s.number()
 	s.connect(number)
@@ -754,6 +870,38 @@ func (s *ChannelsSuite) TestAnIdentityThatIsNeitherPhoneNorLinkIsRefused() {
 	}, nil)
 
 	s.Equal(http.StatusBadRequest, status)
+}
+
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *ChannelsSuite) TestALineTheDatabaseCannotSaveIsAFailureWithNoDatabaseText() {
+	number := s.number()
+	s.failQueries(number)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/channels", ConnectChannelRequest{
+		Kind:      string(channels.WhatsApp),
+		Number:    number,
+		AccountId: pointerTo(strings.TrimPrefix(number, "+")),
+		Token:     pointerTo("meta-token"),
+		Signing:   pointerTo(appSecret),
+		Challenge: pointerTo(s.challenge()),
+	})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
+}
+
+func (s *ChannelsSuite) TestACodeTheDatabaseCannotSaveIsAFailureWithNoDatabaseText() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	owner := s.utils.uuid()
+	s.failQueries(owner)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: owner})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
 }
 
 // connect hands the router a WhatsApp line's credentials and returns where it will deliver.

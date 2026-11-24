@@ -110,14 +110,14 @@ type Mount struct {
 	// Env are env vars the sandbox is created with as they are, such as a placeholder the
 	// broker's egress knows.
 	Env map[string]string
-	// RunEnv are env vars every command and run of code in the sandbox gets, such as its proxy
-	// and the CA files it trusts. Set per run, they win over what the provider sets in the
-	// sandbox, which Env does not: Daytona's netleash replaces its proxy and CA env vars (live
-	// probe, 2026-10-21).
+	// RunEnv are env vars every command and run of code in the sandbox gets, such as the CA
+	// files it trusts. Set per run, they win over what the provider sets in the sandbox, which
+	// Env does not: Daytona's netleash replaces its proxy and CA env vars (live probe,
+	// 2026-10-21). A run of code also gets the env BeforeRun gives it, such as its proxy.
 	RunEnv map[string]string
 	// Proxy, when set, is the only address the sandbox may reach: an http or https proxy at an
-	// IPv4 address, with the sandbox's credential in the userinfo. RunEnv sends the sandbox's
-	// requests there, or to a tunnel in the sandbox to it.
+	// IPv4 address. Each run's env from BeforeRun sends its requests there, or to a tunnel in
+	// the sandbox to it, with that run's credential.
 	Proxy *url.URL
 	// Files are written into the sandbox, by absolute path, before code runs in it.
 	Files map[string][]byte
@@ -146,7 +146,13 @@ type CredentialBroker interface {
 	// just bound has, and withdraws one whose connection gives
 	// ErrNoCredential, so code never runs with a credential the router would no longer send
 	// itself. A credential that cannot be had just now is kept, and asked for again next run.
-	BeforeRun(ctx context.Context) error
+	// It returns the env vars the run of code gets on top of Mount.RunEnv, which hold what lets
+	// the run reach its grants for as long as it lasts, such as a proxy credential of its own.
+	BeforeRun(ctx context.Context) (map[string]string, error)
+	// AfterRun ends what BeforeRun gave the run once its call is over (code a cut call left may still run, without it), so nothing copied out
+	// of the run reaches the grants after it. A no-op after Close, and when BeforeRun gave
+	// nothing that ends.
+	AfterRun(ctx context.Context) error
 	// Close removes everything Prepare left with the provider. Safe to call twice, and
 	// Prepare may run again after it.
 	Close(ctx context.Context) error

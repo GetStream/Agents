@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -252,8 +253,9 @@ func (t *Transcriber) checksPause(participant stt.Participant, heard int64) bool
 		length = min(length, Window)
 	}
 	c.audio = t.heard.Last(length)
+	asker := t.asker
 	t.running.Add(1)
-	go t.check(t.asker, c)
+	goroutine.Go(t.call, func() { t.check(asker, c) })
 	return true
 }
 
@@ -280,10 +282,10 @@ func (t *Transcriber) standsOver(heard int64, cap time.Duration) bool {
 		}
 		t.mu.Unlock()
 		t.running.Add(1)
-		go func() {
+		goroutine.Go(t.call, func() {
 			defer t.running.Done()
 			t.finish(epoch)
-		}()
+		})
 		return true
 	case p.polled > 0 && t.quiet < p.polled+overPoll:
 		t.mu.Unlock()
@@ -455,7 +457,7 @@ func (t *Transcriber) checksOver(participant stt.Participant, heard int64) bool 
 	// The check writes the words so far, so no interim is due for a while.
 	t.spoken = 0
 	t.running.Add(1)
-	go t.checkOver(asker, c)
+	goroutine.Go(t.call, func() { t.checkOver(asker, c) })
 	return true
 }
 
@@ -765,7 +767,7 @@ func (t *Transcriber) check(asker Asker, c pauseCheck) {
 	if said != nil {
 		c.free = !turn.Speaking
 		t.running.Add(1)
-		go t.await(c, said)
+		goroutine.Go(t.call, func() { t.await(c, said) })
 	}
 	t.finish(c.epoch)
 }

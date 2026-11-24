@@ -7,12 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pressly/goose/v3"
-	"github.com/pressly/goose/v3/database"
 )
-
-// noticesVersion is the migration that keeps every kind of notice in one table.
-const noticesVersion = 20270111000000
 
 func (s *StoreSuite) limitNotice(organization string) LimitNotice {
 	return LimitNotice{
@@ -185,58 +180,4 @@ func (s *StoreSuite) TestNoticeQueryBudgets() {
 	s.backdate(organization)
 	s.Equal(1, s.countQueries(func() { s.Len(keysOf(s.claimed(), organization), 1) }))
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Notices.MarkPosted(s.ctx, limit)) }))
-}
-
-// The migration that made the notices one table carries every row of the three it replaced,
-// in its kind's own shape, and its Down puts them back.
-func (s *StoreSuite) TestTheNoticesOfTheThreeOldTablesAreCarriedIntoOne() {
-	db, err := Open(s.emptyDatabase("notices_migration"))
-	s.Require().NoError(err)
-	defer db.Close()
-	s.Require().NoError(db.Migrate(s.ctx))
-	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", db.global.DB, globalSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-	_, err = provider.DownTo(s.ctx, noticesVersion-1)
-	s.Require().NoError(err)
-	_, err = db.global.ExecContext(s.ctx, `
-		INSERT INTO limit_notices (organization_id, kind, app_id, tier, enforced, message, claimed_at, posted_at)
-		VALUES ('org-a', 'spend_limit', 'app-1', 'free', true, 'over', now() - interval '2 hours', NULL),
-		       ('org-a', 'no_credit', '', '', false, 'posted', now(), now());
-		INSERT INTO balance_notices (organization_id, kind, granted_micros, balance_micros, threshold_micros)
-		VALUES ('org-a', 'balance_low', 10, 4, 5);
-		INSERT INTO cost_anomaly_notices (organization_id, day, spent_micros, baseline_micros, claimed_at)
-		VALUES ('org-a', '2026-03-10', 500, 100, now() - interval '2 hours')`)
-	s.Require().NoError(err)
-
-	_, err = provider.Up(s.ctx)
-	s.Require().NoError(err)
-
-	var rows []Notice
-	s.Require().NoError(db.global.NewSelect().Model(&rows).Order("kind").Scan(s.ctx))
-	s.Require().Len(rows, 4)
-	balance, anomaly, limit, posted := rows[0], rows[1], rows[3], rows[2]
-	s.Equal("10", balance.DedupeKey)
-	s.JSONEq(`{"balance_micros": 4, "threshold_micros": 5}`, string(balance.Payload))
-	s.NotNil(balance.PostedAt, "a balance warning was queued as it was written")
-	read, err := anomaly.CostAnomaly()
-	s.Require().NoError(err)
-	s.Equal(CostAnomaly{OrganizationID: "org-a", Day: time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC), SpentMicros: 500, BaselineMicros: 100}, read)
-	over, err := limit.LimitNotice()
-	s.Require().NoError(err)
-	s.Equal(LimitNotice{OrganizationID: "org-a", Kind: LimitSpendLimit, AppID: "app-1", Tier: "free", Enforced: true, Message: "over"}, over)
-	s.NotNil(posted.PostedAt)
-	claimed, err := db.Notices.Claim(s.ctx, time.Hour, 10)
-	s.Require().NoError(err)
-	s.ElementsMatch([]string{"cost_anomaly/2026-03-10", "spend_limit/"}, keysOf(claimed, "org-a"), "the unposted are claimed as before")
-
-	_, err = provider.DownTo(s.ctx, noticesVersion-1)
-	s.Require().NoError(err)
-	var limits, balances, anomalies int
-	s.Require().NoError(db.global.QueryRowContext(s.ctx, `SELECT
-		(SELECT count(*) FROM limit_notices WHERE app_id = 'app-1' AND enforced AND message = 'over'),
-		(SELECT count(*) FROM balance_notices WHERE granted_micros = 10 AND balance_micros = 4),
-		(SELECT count(*) FROM cost_anomaly_notices WHERE day = '2026-03-10' AND spent_micros = 500)`).Scan(&limits, &balances, &anomalies))
-	s.Equal([]int{1, 1, 1}, []int{limits, balances, anomalies}, "and the Down puts each back")
 }

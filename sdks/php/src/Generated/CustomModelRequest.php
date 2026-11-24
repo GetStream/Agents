@@ -19,7 +19,7 @@ final readonly class CustomModelRequest
         public string $name,
         // Sent as a bearer token. Stored sealed and never returned. Left out of an update keeps the one stored; empty...
         public ?string $apiKey = null,
-        // Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+        // Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default r...
         public ?int $contextWindow = null,
         // Input kinds beyond text the model accepts, e.g. image.
         /** @var list<string>|null */

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/getsentry/sentry-go"
 )
@@ -99,6 +100,35 @@ var shapedCredentials = []shapedCredential{
 // escape) or a quote, so an encoded one also takes the encoded parameters after it.
 var queryCredential = regexp.MustCompile(`(?i)((?:[?&"]|&amp;|\\u0026|%(?:25)*3F|%(?:25)*26)(?:key|token)(?:=|\\u003d|%(?:25)*3D))[^&\s"\x27#\\]+`)
 
+// encodedCredential is a credential name and an encoded equals sign (%3D, or %253D twice
+// encoded) with the value after it, where no ? or & stands before the name: the text of an
+// encoded query cut at the parameter ("key%3D<hex>"), or a parameter after another separator
+// such as %22. The names are the ones credentialText takes, and as it takes them: api_key,
+// access_token, password, secret and the others wherever they stand, in any case and with or
+// without their separator (x_api_key, accessToken, clientSecret), and id_token after an
+// underscore or a boundary. Key and token, which end other names, take a boundary before them:
+// the start of the text, a character that is not a letter, digit or underscore, or an encoded
+// character, once or twice encoded (%22, %2522), so monkey%3D1, max_token%3D256 and
+// sort_key%3Ddate stay. The name and the boundary are kept. The value is read as
+// queryCredential reads it, whatever its length: a parameter named key is a key. A name with a
+// plain = is the rule of credentialText and queryCredential.
+var encodedCredential = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_]|%(?:25)*[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})(?:key|token|id[_-]?token)|_id[_-]?token|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|password|secret)(%(?:25)*3D)[^&\s"\x27#\\]+`)
+
+// vendorKeyMessage is a provider's refusal that names the key it was sent, with no = or : to
+// say so: "Invalid API key <32 hex>", "Incorrect API key provided: <key>", invalid_api_key, or
+// the same for an API token. The key is the 16 characters or more of the key alphabet, base64
+// (+ /, and = only as the padding at its end) and base64url (- _) included, after the phrase,
+// so a request id of 8 hex digits after "Invalid API key." stays, and so does a glued
+// name=value after it (model=..., request_id=...). A quote before the key, or a quote escaped as a JSON body has it
+// (\"), stays with the phrase. The phrase stays and the key is taken out, unless it is a word
+// (see redactVendorKeyMessage).
+var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})()`)
+
+// vendorKeyBefore is the same refusal with the key before the verdict: "The API key '<key>' is
+// invalid", with single quotes, double quotes (raw or JSON-escaped) or none. The key has the
+// same 16 character floor, and the phrase around it stays.
+var vendorKeyBefore = regexp.MustCompile(`(?i)\b(api[\s_-]?(?:key|token)\s+(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})((?:\\?["\x27])?\s+(?:is|was)\s+(?:invalid|incorrect)\b)`)
+
 // encodedAuthorization is an authorization or cookie header (proxy-authorization and
 // set-cookie end in those names) written into a URL: the name, an optional encoded quote
 // (%22, %27) and an encoded colon or equals sign (%3A, %3D), then the value to the end of its
@@ -115,14 +145,37 @@ var encodedBearer = regexp.MustCompile(`(?i)bearer(?:%(?:25)*20|\+)+[^\s"\x27&#\
 func SafeLogText(text string) string {
 	text = RedactLogText(text)
 	if len(text) > 8192 {
-		text = string([]rune(text)[:min(len([]rune(text)), 2048)]) + "… [truncated]"
+		text = string([]rune(text)[:min(len([]rune(text)), 2048)]) + truncatedMarker
 	}
 	return text
 }
 
+// truncatedMarker ends a text that was cut.
+const truncatedMarker = "… [truncated]"
+
+// maxTurnText is the most of one turn's text that is kept: what was asked, thought or answered.
+// The session socket takes a message of 5 MiB and the text is stored twice, on the response and
+// on its item, while a real turn is a few KiB: a ceiling far above that never cuts one.
+const maxTurnText = 256 << 10
+
+// turnText is what a conversation said as it is stored: RedactLogText, cut past maxTurnText at a
+// rune boundary with the marker SafeLogText adds.
+func turnText(text string) string {
+	text = RedactLogText(text)
+	if len(text) <= maxTurnText {
+		return text
+	}
+	cut := maxTurnText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + truncatedMarker
+}
+
 // RedactLogText is text with every credential shape taken out, at whatever length. A caller
 // that must send the whole text, such as a refusal naming what the caller sent, or a log line,
-// which has no cap (RedactLogAttr), uses this; everything stored uses SafeLogText.
+// which has no cap (RedactLogAttr), uses this. What a conversation said, read back to the model,
+// is stored with turnText; everything else stored uses SafeLogText.
 func RedactLogText(text string) string {
 	if !mayHoldCredential(text) {
 		return text
@@ -172,15 +225,17 @@ func holdsWord(text string, words []string) bool {
 	return false
 }
 
-// redactCredentials is RedactLogText with no check first.
+// redactCredentials is RedactLogText with no check first. The shaped rules run first, so a
+// rule after them that takes only a part of a shaped token, as vendorKeyMessage takes a JWT
+// up to its first dot, does not leave the rest of it in a shape no rule matches.
 func redactCredentials(text string) string {
-	if holdsLegacyWord(text) {
-		text = redactLegacyCredentials(text)
-	}
 	for _, shaped := range shapedCredentials {
 		if shaped.mayMatch(text) {
 			text = shaped.rule.ReplaceAllString(text, "${1}[redacted]")
 		}
+	}
+	if holdsLegacyWord(text) {
+		text = redactLegacyCredentials(text)
 	}
 	return text
 }
@@ -191,11 +246,29 @@ func redactLegacyCredentials(text string) string {
 	text = redactUnlessWord(credentialText, text)
 	text = urlCredential.ReplaceAllString(text, "${1}[redacted]@")
 	text = queryCredential.ReplaceAllString(text, "${1}[redacted]")
+	// The encoded key goes before the vendor phrase: the key class of the phrase stops at the %
+	// of %3D and would leave the value of an encoded key that follows it.
+	text = encodedCredential.ReplaceAllString(text, "${1}${2}[redacted]")
+	text = redactVendorKeyMessage(vendorKeyMessage, text)
+	text = redactVendorKeyMessage(vendorKeyBefore, text)
 	text = encodedAuthorization.ReplaceAllString(text, "[redacted]")
 	text = encodedBearer.ReplaceAllString(text, "[redacted]")
 	text = providerCredential.ReplaceAllString(text, "[redacted]")
 	text = jsonToken.ReplaceAllString(text, `${1}"[redacted]"`)
 	return text
+}
+
+// redactVendorKeyMessage takes the key out of each match of rule (vendorKeyMessage or
+// vendorKeyBefore: the phrase before it, the key, the phrase after it), but for a value that
+// is a word, as redactUnlessWord does, such as authentication_failed after "invalid_api_key".
+func redactVendorKeyMessage(rule *regexp.Regexp, text string) string {
+	return rule.ReplaceAllStringFunc(text, func(match string) string {
+		parts := rule.FindStringSubmatch(match)
+		if word.MatchString(parts[2]) {
+			return match
+		}
+		return parts[1] + "[redacted]" + parts[3]
+	})
 }
 
 func (s shapedCredential) mayMatch(text string) bool {

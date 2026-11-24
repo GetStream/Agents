@@ -2,6 +2,8 @@ module github.com/GetStream/Vision-Agents/sdks/go
 
 go 1.25.0
 
+retract v0.5.0 // stream.Version reports 0.3.0; use v0.5.1
+
 tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
 
 require (

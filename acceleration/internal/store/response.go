@@ -141,7 +141,9 @@ func (r *Responses) Insert(ctx context.Context, response *AgentResponse) error {
 	if response.QuestionResponseID == "" {
 		response.QuestionResponseID = response.ID
 	}
-	response.Said = SafeLogText(response.Said)
+	// What was asked is the conversation, read back to the model when it is carried on, so it
+	// is kept whole, up to maxTurnText.
+	response.Said = turnText(response.Said)
 
 	// The update sets nothing new: it tells a retry, which matches its own row, from an id
 	// another customer's row has, which matches none.

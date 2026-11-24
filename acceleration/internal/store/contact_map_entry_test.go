@@ -186,6 +186,49 @@ func (s *StoreSuite) TestWhoANumberIsCanBeRecordedAndItsConversationMovedOn() {
 	s.Equal("phone:"+address, held.UserID)
 }
 
+// Two routers answering a number's first messages at once each open a conversation: the one
+// recorded first is kept, and each is handed it.
+func (s *StoreSuite) TestTwoConcurrentFirstMessagesFromOneNumberEndInOneConversation() {
+	customerID, configID := newID(), newID()
+	address := "+1347" + newID()[:7]
+	kept := make([]string, 2)
+	var wg sync.WaitGroup
+	for i := range kept {
+		wg.Go(func() {
+			identity := ContactMapEntry{CustomerID: customerID, ConfigID: configID, Kind: "sms", Address: address, UserID: "phone:" + address}
+			s.NoError(s.store.ContactMapEntries.Upsert(s.ctx, &identity))
+			identity.ConversationID = "agent:omni-" + newID()
+			s.NoError(s.store.ContactMapEntries.Upsert(s.ctx, &identity))
+			kept[i] = identity.ConversationID
+		})
+	}
+	wg.Wait()
+
+	held, err := s.store.ContactMapEntries.GetByAddress(s.ctx, customerID, configID, "sms", address)
+	s.Require().NoError(err)
+	s.Equal(held.ConversationID, kept[0])
+	s.Equal(held.ConversationID, kept[1])
+}
+
+// A router that saw no row for a number writes one with no conversation: one another router
+// recorded meanwhile is not wiped, and is handed back.
+func (s *StoreSuite) TestAFirstSightingOfANumberKeepsTheConversationRecordedMeanwhile() {
+	customerID, configID := newID(), newID()
+	address := "+1347" + newID()[:7]
+	recorded := ContactMapEntry{CustomerID: customerID, ConfigID: configID, Kind: "sms", Address: address,
+		UserID: "phone:" + address, ConversationID: "agent:omni-first"}
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(s.ctx, &recorded))
+
+	late := ContactMapEntry{CustomerID: customerID, ConfigID: configID, Kind: "sms", Address: address, UserID: "phone:" + address}
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(s.ctx, &late))
+	s.Equal("agent:omni-first", late.ConversationID)
+	s.Equal(recorded.ID, late.ID)
+
+	held, err := s.store.ContactMapEntries.GetByAddress(s.ctx, customerID, configID, "sms", address)
+	s.Require().NoError(err)
+	s.Equal("agent:omni-first", held.ConversationID)
+}
+
 // The same person writing to two agents is two conversations.
 func (s *StoreSuite) TestANumberIsIdentifiedPerAgent() {
 	customerID, address := newID(), "+1347"+newID()[:7]

@@ -18,8 +18,12 @@ app/                 the phone half: chat, voice, and tools that run on the devi
 Start the router and its Postgres and Redis, from the repo root, with `ROUTER_AUTH_MODE=proxy`
 in the repo `.env` so it trusts the customer and user ids it is given. Not `noauth`, which takes
 every caller for the backend: the phone's user would never join its own chat channel.
+In proxy mode the router starts without `ROUTER_DEV_KEK`, but connectors, channels and SIP
+trunks need it, and the default `api_key` mode refuses to start without it. So make one if
+`.env` has none, and only once: running it again leaves the secrets already stored unreadable.
 
 ```bash
+grep -q '^ROUTER_DEV_KEK=.' .env || echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
 docker compose up --build
 ```
 
@@ -32,11 +36,9 @@ STREAM_ACCELERATION_CUSTOMER_ID=examples \
 go run ./configure
 ```
 
-A config belongs to one customer, and `compose.yaml` builds the dashboard with
-`NEXT_PUBLIC_CUSTOMER_ID: examples` — baked in at build time, since Next inlines a
-`NEXT_PUBLIC_` variable into the bundle. So store the agent under `examples` and it shows up
-on the dashboard; store it under anything else and the app will find it but
-[the agents page](http://localhost:3000/agents) will not. `Demo.customerID` in
+A config belongs to one customer. The Volt dashboard (see the `dashboard` skill) shows the
+configs of a numeric app id rather than `examples`, so store the agent under that id to see it
+there. `Demo.customerID` in
 `app/SwiftDemo/Demo.swift` has to match whatever you use here.
 
 ```

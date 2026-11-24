@@ -125,12 +125,13 @@ func DefaultRegistry() *Registry {
 			client = endpoint.Client
 		}
 		return Started(custom.New(custom.Options{
-			Name:       spec.Model,
-			Model:      endpoint.Model,
-			BaseURL:    endpoint.BaseURL,
-			APIKey:     endpoint.APIKey,
-			HTTPClient: client,
-			Logger:     spec.Logger,
+			Name:          spec.Model,
+			Model:         endpoint.Model,
+			BaseURL:       endpoint.BaseURL,
+			APIKey:        endpoint.APIKey,
+			ContextWindow: endpoint.ContextWindow,
+			HTTPClient:    client,
+			Logger:        spec.Logger,
 		}))
 	})
 

@@ -104,13 +104,16 @@ func (r *CustomModels) Insert(ctx context.Context, model *CustomModel) error {
 	model.CreatedAt = now
 	model.UpdatedAt = now
 
-	if _, err := r.store.global.NewInsert().Model(model).Exec(ctx); err != nil {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(model).Exec(ctx)
+		return err
+	}, func() []string { return []string{customModelKey(model.CustomerID, model.Name)} })
+	if err != nil {
 		if constraint(err) == "custom_models_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
 		return stack.Wrap(fmt.Errorf("store: create model: %w", err))
 	}
-	r.store.forget(ctx, customModelKey(model.CustomerID, model.Name))
 	return nil
 }
 
@@ -135,14 +138,25 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 		Where("customer_id = ?", model.CustomerID).
 		For("UPDATE")
 	var wasName string
-	err := r.store.global.NewUpdate().Model(model).
-		With("was", was).
-		TableExpr("was").
-		ExcludeColumn("id", "customer_id", "created_at").
-		Where("cm.id = ?", model.ID).
-		Where("cm.customer_id = ?", model.CustomerID).
-		Returning("was.name").
-		Scan(ctx, &wasName)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model(model).
+			With("was", was).
+			TableExpr("was").
+			ExcludeColumn("id", "customer_id", "created_at").
+			Where("cm.id = ?", model.ID).
+			Where("cm.customer_id = ?", model.CustomerID).
+			Returning("was.name").
+			Scan(ctx, &wasName)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if wasName == "" {
+			return nil
+		}
+		return []string{
+			customModelKey(model.CustomerID, model.Name),
+			customModelKey(model.CustomerID, wasName),
+		}
+	})
 	switch {
 	case constraint(err) == "custom_models_name_idx":
 		return stack.Wrap(ErrNameTaken)
@@ -151,7 +165,6 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 	case err != nil:
 		return stack.Wrap(fmt.Errorf("store: update model: %w", err))
 	}
-	r.store.forget(ctx, customModelKey(model.CustomerID, model.Name), customModelKey(model.CustomerID, wasName))
 	return nil
 }
 
@@ -162,18 +175,25 @@ func (r *CustomModels) Delete(ctx context.Context, customerID, id string) error 
 	}
 
 	var name string
-	err := r.store.global.NewDelete().Model((*CustomModel)(nil)).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Returning("name").
-		Scan(ctx, &name)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewDelete().Model((*CustomModel)(nil)).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Returning("name").
+			Scan(ctx, &name)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if name == "" {
+			return nil
+		}
+		return []string{customModelKey(customerID, name)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return stack.Wrap(fmt.Errorf("%w: %s", ErrNoCustomModel, id))
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete model: %w", err))
 	}
-	r.store.forget(ctx, customModelKey(customerID, name))
 	return nil
 }
 

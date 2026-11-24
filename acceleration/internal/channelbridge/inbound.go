@@ -125,8 +125,7 @@ func (b *Bridge) writeDue(ctx context.Context) (wait time.Duration, again bool) 
 		if free == 0 {
 			return 0, false
 		}
-		now := time.Now()
-		claimed, err := b.store.ChannelInbounds.Claim(ctx, now, free, now.Add(inboundLease))
+		claimed, err := b.store.ChannelInbounds.Claim(ctx, free, inboundLease)
 		if err != nil {
 			if ctx.Err() == nil {
 				b.logger.Error("could not take the inbound messages due", "error", err)

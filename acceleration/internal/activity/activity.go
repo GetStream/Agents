@@ -260,9 +260,9 @@ func (r *Recorder) run() {
 	}
 }
 
-// write writes what is held and reports whether it did. What a failed write held is kept for
-// the next one, as far as there is room: a database that did not answer this minute may next
-// minute.
+// write writes what is held and reports whether it holds nothing back for the next write. What
+// a failed write held is kept for the next one, as far as there is room: a database that did not
+// answer this minute may next minute. A write whose commit may have landed is dropped instead.
 func (r *Recorder) write() bool {
 	r.mu.Lock()
 	pending, dropped := r.pending, r.dropped
@@ -282,7 +282,15 @@ func (r *Recorder) write() bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	if err := r.db.Activities.Add(ctx, deltas); err != nil {
+	err := r.db.Activities.Add(ctx, deltas)
+	if errors.Is(err, store.ErrActivityUnsure) {
+		// Kept for the next write, rows the database did record would be counted twice: a count
+		// lost reads better than one doubled.
+		r.logger.Error("could not tell whether the activity record was written; dropped it", "rows", len(deltas), "error", err)
+		// Nothing is held for the next write, so a full record is written again at once.
+		return true
+	}
+	if err != nil {
 		r.logger.Error("could not write the activity record", "rows", len(deltas), "error", err)
 		r.mu.Lock()
 		defer r.mu.Unlock()

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"slices"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -166,7 +165,7 @@ func (s *Server) answerChatChannel(ctx context.Context, origin hookOrigin, event
 		return settled
 	}
 	cid := event.ChannelType + ":" + event.ChannelID
-	origin.answer(func() { s.answerChatChannelTurn(origin, config, cid, event) })
+	origin.answer(func() { s.answerChatChannelTurn(context.WithoutCancel(ctx), origin, config, cid, event) })
 	return true
 }
 
@@ -174,12 +173,12 @@ func (s *Server) answerChatChannel(ctx context.Context, origin hookOrigin, event
 // across every router, as a thread channel's: the turn's lease is a row in Postgres
 // (store.ChannelTurns.Take), and a message that arrives while another router answers waits
 // for it, so the session opened for it reads that router's reply from the channel.
-func (s *Server) answerChatChannelTurn(origin hookOrigin, config store.AgentConfig, cid string, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) answerChatChannelTurn(ctx context.Context, origin hookOrigin, config store.AgentConfig, cid string, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	holder := uuid.NewString()
-	if err := takeTurn(ctx, func(ctx context.Context, until time.Time) (bool, error) {
-		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, LeaseUntil: until})
+	if err := takeTurn(ctx, func(ctx context.Context) (bool, error) {
+		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, Lease: threadTurnLease})
 	}); err != nil {
 		s.logger.Error("a message in a channel the Router answers in waited too long for the channel's turn", "channel", cid, "error", err)
 		return
@@ -192,7 +191,7 @@ func (s *Server) answerChatChannelTurn(origin hookOrigin, config store.AgentConf
 			s.logger.Error("could not let go of a channel's turn; it runs out instead", "channel", cid, "error", err)
 		}
 	}()
-	s.answerHosted(origin, cid, config.CustomerID, event,
+	s.answerHosted(ctx, origin, cid, config.CustomerID, event,
 		func(turn context.Context) (*session.Session, error) {
 			return s.chatChannelSession(turn, origin, config, cid, event)
 		})

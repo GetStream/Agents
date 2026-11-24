@@ -7,10 +7,12 @@ from .account_status import AccountStatus
 from .activated_branch import ActivatedBranch
 from .activity_area import ActivityArea
 from .activity_bucket import ActivityBucket
+from .activity_day import ActivityDay
 from .activity_ending import ActivityEnding
 from .activity_granularity import ActivityGranularity
 from .activity_latency import ActivityLatency
 from .activity_meter import ActivityMeter
+from .activity_page import ActivityPage
 from .activity_session import ActivitySession
 from .activity_sessions import ActivitySessions
 from .activity_step import ActivityStep
@@ -219,6 +221,8 @@ from .contact_input import ContactInput
 from .contact_input_variables import ContactInputVariables
 from .contact_page import ContactPage
 from .contact_stage import ContactStage
+from .contact_update_request import ContactUpdateRequest
+from .contact_update_request_variables import ContactUpdateRequestVariables
 from .contact_variables import ContactVariables
 from .cost_source import CostSource
 from .create_opt_out_request import CreateOptOutRequest
@@ -385,6 +389,7 @@ from .opt_out import OptOut
 from .opt_out_channel import OptOutChannel
 from .opt_out_page import OptOutPage
 from .organization_activity import OrganizationActivity
+from .organization_progress import OrganizationProgress
 from .phone_capability import PhoneCapability
 from .phone_number import PhoneNumber
 from .phone_number_tags import PhoneNumberTags
@@ -678,10 +683,12 @@ __all__ = (
     "ActivatedBranch",
     "ActivityArea",
     "ActivityBucket",
+    "ActivityDay",
     "ActivityEnding",
     "ActivityGranularity",
     "ActivityLatency",
     "ActivityMeter",
+    "ActivityPage",
     "ActivitySession",
     "ActivitySessions",
     "ActivityStep",
@@ -886,6 +893,8 @@ __all__ = (
     "ContactInputVariables",
     "ContactPage",
     "ContactStage",
+    "ContactUpdateRequest",
+    "ContactUpdateRequestVariables",
     "ContactVariables",
     "CostSource",
     "CreateOptOutRequest",
@@ -1050,6 +1059,7 @@ __all__ = (
     "OptOutChannel",
     "OptOutPage",
     "OrganizationActivity",
+    "OrganizationProgress",
     "PhoneCapability",
     "PhoneNumber",
     "PhoneNumberTags",

@@ -1688,10 +1688,8 @@ Writes go to this shard's database. Reads of one call, session or recording look
 shard, and lists merge every shard's rows, so a session carried on in another region is
 still one session. Each database runs the migration set it holds: `migrations/global` on the
 global one and `migrations/shard` on each shard's, both on the one database of a single node
-(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A database migrated
-before the sets were split kept every table; once every router runs a release with two sets,
-`router schema drop-strays` drops the empty ones of the other set. A socket for a session held in
-another shard is proxied to the node holding it, since that shard's relay is not this
+(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A socket for a session
+held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
@@ -2170,6 +2168,7 @@ is every call on a deployment with no ops key. They are tagged `Staff` in the sp
 
 | Route | What it is for |
 | ----- | -------------- |
+| `GET /v1/ops/activity` | Every organization's activity by UTC day, by cursor, with how far each got |
 | `GET /v1/ops/orgs/{org_id}/activity` | Whether an organization tried Agents, how far it got and how much it used |
 | `GET`, `PUT`, `DELETE /v1/ops/customers/{customer_id}/telephony-suspension` | Stop an app using the phone, and lift it |
 | `GET /v1/ops/use-cases`, `GET /v1/ops/use-cases/{id}`, `POST /v1/ops/use-cases/{id}/review` | Review 10DLC use cases |
@@ -2181,7 +2180,20 @@ An organization's activity reads `customer_activity` for every app of the organi
 out):
 
 ```bash
-curl -H "X-Ops-Key: $ROUTER_AUTH_OPS_KEY" "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/orgs/$ORG_ID/activity?since=2026-11-01T00:00:00Z"
+```
+
+Every organization's activity is a list by cursor of `customer_activity`'s rows from `from` to
+`to`, UTC days, both included, at most 400 days apart (500 a page, `limit` up to 1000). Each page
+also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
+on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
+`app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+definitions of tried, API calls, production and churned:
+
+```bash
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
+printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
@@ -2234,9 +2246,10 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
-The router keeps activity for 400 days (`activityKeepDays` in `internal/store/activity_digest.go`).
+The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
 That is 13 months and a margin, so staff can compare a month with the same month a year before.
 GDPR asks that personal data is kept no longer than needed (Art. 5(1)(e)). The router that holds
 the cost anomaly lock deletes the older `customer_activity` and `activity_digests` rows once per
@@ -2359,10 +2372,22 @@ events `listUsage` answers, with its filters and cursor, without the organizatio
 `base_cost_micros`, `price_version` or `source`. The manage key opens none of them. The
 router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read them.
 
+**Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
+written. `router usage replay --from <log>` writes them from the log, once each. Each line
+holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
+text in the row is redacted and masked first. A user id that changes is logged masked after
+`masked:`; replay gives the row back the user of its own app's session when that user masks
+alike, and otherwise the row bills to its app without a user. Replay before forgetting a user:
+the session still holds the id, so a replay after `forget-user` writes it back, and
+`forget-user` must then be run again for that user. A line from before that holds the row as `row=` JSON the
+redaction rewrote, and cannot be recovered: replay counts it as could not be read.
+
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
 customer's users reaches the usage records. `router usage forget-user --app <app> --user <id>
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a
-hash of an email can be recomputed from it), in order: the requests of every shard; the usage
+hash of an email can be recomputed from it), in order, once their scheduled tasks are deleted
+with their runs, so none runs again, and the changes recorded of them made deletes: the
+requests of every shard; the usage
 service's events and the user's windows (`POST /v1/manage/users/forget`, one transaction, a
 window the replacement already has taking the forgotten one's spend), and again after
 `--settle` (2 minutes) for a batch a shipper read before the shards were rewritten; the user's
@@ -2370,12 +2395,19 @@ window the replacement already has taking the forgotten one's spend), and again 
 database their own policy and user-level limits, deleted, so the app's defaults apply, and the
 id on their resets, grants and campaigns. Usage and cost stay under the app. It writes one
 `end_user` audit row naming the replacement and the actor, never the id, and the service one
-`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Every
+`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Once the
+last step, the shared database's, has started, it completes even if the command is interrupted,
+and the command drops the user's cached policy from every router before it exits. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
-that one replacement, with the run's own audit row. It covers
-the usage records only: sessions, conversation history and `agent_logs` have their own
-retention, and work recorded for the id afterwards carries it again.
+that one replacement, with the run's own audit row. Sessions, conversation history and
+`agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
+`keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
+that forgetting leaves alone. It cannot reach logs, so the logger masks the ids it can tell
+apart: `phone:` and a number anywhere in a line, everything before an email's `@` under `user`,
+`user_id`, `participant`, `bound` and `id` (`logMasks`, `internal/store/logmask.go`), and in the
+logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
+another name among them, stays until log retention ends.
 
 The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,
@@ -2770,6 +2802,11 @@ including one that was in progress when the export started. A transaction still 
 export answer 503: run it again. A repeatable read or serializable transaction whose snapshot is older than the
 start of recording is refused with a serialization failure when it next writes, so its retry is recorded.
 
+An app runs one export at a time on a router: a second one is answered 409 until the first ends. A router runs
+at most four exports at once, and one more is answered 503. An export ends after an hour, or when one line has
+taken a minute to write; an export that ends early has no cursor line, so run it again. An import is one JSON
+object per line, as an export writes it, and a line over 64 MiB is answered 413.
+
 The source must be a router without shards. A shard's tables (calls, call bridges, recordings,
 sessions, responses, requests and their stats) record no changes, so a router with a shard database
 of its own, or with other shards' databases listed in `postgres.shards`, answers the export and the
@@ -2802,6 +2839,8 @@ and then saves the cursor.
 
 `POST /v1/data/import` refuses an export the same way: an app this deployment already holds gets a 409 before
 any of the export's rows is written, unless the request asks `?full=true`; a batch of changes is always applied. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+An app runs one import at a time on a router: a second one is answered 409 `import_running` until the first ends. A router runs
+at most four imports at once, and one more is answered 503. An import ends when a line has taken a minute to arrive.
 
 The default `--source-auth jwt` is for a source behind Stream's gateway, such as the hosted router.
 `--source-auth server` is for a source router reached directly.

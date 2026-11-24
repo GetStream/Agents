@@ -4,6 +4,7 @@ package store
 
 import (
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -214,4 +215,100 @@ func (s *StoreSuite) TestATestCopyIsNotAmongTheConfigsThatBindAConnection() {
 	s.Require().NoError(err)
 	s.Require().Len(configs, 1)
 	s.Equal(live, configs[0].ID)
+}
+
+// smsAgent is a config of customerID answering on the SMS number e164.
+func smsAgent(customerID, e164 string) *AgentConfig {
+	return &AgentConfig{
+		CustomerID: customerID, Name: "texted-" + newID(),
+		Channels: AgentAnswersIn{Lines: AgentChannels{SMS: &ChannelLine{Number: e164}, Identity: ChannelIdentityPhone}},
+	}
+}
+
+func (s *StoreSuite) TestASecondConfigNamingAnSMSNumberIsRefusedAndTheFirstStillSaves() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	first := smsAgent(customerID, e164)
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, first))
+
+	err := s.store.AgentConfigs.Insert(s.ctx, smsAgent(customerID, e164))
+	taken, ok := errors.AsType[*ChannelLineTakenError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal(first.ID, taken.OwnerID)
+	s.Equal("sms", taken.Kind)
+
+	first.Instructions = "Answer texts."
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, first), "the config on the line keeps it")
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, smsAgent(newID(), e164)), "another customer's number is theirs")
+}
+
+// Two configs that shared a line before the rule can each still be saved while they keep it.
+func (s *StoreSuite) TestAConfigThatSharedAnSMSNumberBeforeTheRuleStillSaves() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	first := smsAgent(customerID, e164)
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, first))
+	second := smsAgent(customerID, "+1555"+newID()[:7])
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, second))
+	// Put on the first's number as a router from before the rule could.
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").
+		Set("channels_lines = jsonb_build_object('sms', jsonb_build_object('number', ?::text))", e164).
+		Where("id = ?", second.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	second.Channels.Lines.SMS.Number = e164
+
+	second.Instructions = "Answer texts."
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, second))
+}
+
+// Two configs saved at once each pass the API's check before the write: one of them is the
+// line's agent, and the other is refused.
+func (s *StoreSuite) TestTwoConfigsSavedAtOnceNamingOneSMSNumberLeaveOneOnIt() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	saved := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range saved {
+		wg.Go(func() { saved[i] = s.store.AgentConfigs.Insert(s.ctx, smsAgent(customerID, e164)) })
+	}
+	wg.Wait()
+
+	refused := 0
+	for _, err := range saved {
+		if _, ok := errors.AsType[*ChannelLineTakenError](err); ok {
+			refused++
+		} else {
+			s.Require().NoError(err)
+		}
+	}
+	s.Equal(1, refused)
+	on, err := s.store.GlobalDB().NewSelect().Model((*AgentConfig)(nil)).
+		Where("customer_id = ?", customerID).Where("deleted_at IS NULL").Count(s.ctx)
+	s.Require().NoError(err)
+	s.Equal(1, on)
+}
+
+// A config naming a line waits for another save of the line to finish, and then sees it,
+// rather than both reading the line as free.
+func (s *StoreSuite) TestASaveNamingAnSMSNumberWaitsForAnotherSaveOfIt() {
+	customerID, e164 := newID(), "+1555"+newID()[:7]
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = tx.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))", customerID+"/sms/"+e164, channelLineLockSeed)
+	s.Require().NoError(err)
+	holder := smsAgent(customerID, e164)
+	holder.ID, holder.CreatedAt, holder.UpdatedAt = newID(), time.Now().UTC(), time.Now().UTC()
+	normalizeConfig(holder)
+	_, err = tx.NewInsert().Model(holder).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	saved := make(chan error, 1)
+	go func() { saved <- s.store.AgentConfigs.Insert(s.ctx, smsAgent(customerID, e164)) }()
+	select {
+	case err := <-saved:
+		s.Require().NoError(tx.Rollback())
+		s.FailNowf("the save did not wait for the line", "it returned %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	s.Require().NoError(tx.Commit())
+
+	_, taken := errors.AsType[*ChannelLineTakenError](<-saved)
+	s.True(taken, "the save that waited sees the config that held the line")
 }

@@ -17,6 +17,10 @@ import (
 var errUserPolicyQuotaOnly = invalidRequest("a user's policy holds a quota only: data_policy, prompt_injection, " +
 	"allowed_models, tags, require_own_stream_app and balance_warning_micros are set on the app or the organization")
 
+// customerPolicyPath is the route of a customer's policy, whose {id} of a user's policy is
+// <app>/<user id>.
+const customerPolicyPath = "/v1/manage/organizations/{organization_id}/policies/{scope}/{id}"
+
 // UserPolicy is one end user's own quota, what they are held to, and what they spent today.
 type UserPolicy struct {
 	UserId    string         `json:"user_id"`
@@ -190,7 +194,7 @@ func (s *Server) registerUserPolicies(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "getCustomerPolicy",
 		Method:      http.MethodGet,
-		Path:        "/v1/manage/organizations/{organization_id}/policies/{scope}/{id}",
+		Path:        customerPolicyPath,
 		Summary:     "Read a customer's policy",
 		Description: "An organization's, an app's or one end user's policy, as the customer's own read answers it." + staff,
 		Tags:        []string{staffTag},
@@ -201,7 +205,7 @@ func (s *Server) registerUserPolicies(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "updateCustomerPolicy",
 		Method:      http.MethodPut,
-		Path:        "/v1/manage/organizations/{organization_id}/policies/{scope}/{id}",
+		Path:        customerPolicyPath,
 		Summary:     "Replace a customer's policy",
 		Description: "Held to the customer's own rules: a user's policy holds a quota only, a budget is a 400 " +
 			"budget_moved (spend limits are /v1/manage/spend/limits), and an organization's " +

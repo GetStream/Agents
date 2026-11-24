@@ -34,9 +34,11 @@ const (
 
 // What kind of campaign it is.
 const (
-	// Standard is a campaign that rings the contacts it was given.
+	// Standard is a campaign that rings the contacts it was given before launch, and completes
+	// once it is done with them.
 	Standard = "standard"
-	// AutoEnroll is reserved: nothing creates one yet.
+	// AutoEnroll also takes contacts while it is scheduled, running or paused, and never
+	// completes on its own.
 	AutoEnroll = "auto_enroll"
 )
 
@@ -356,7 +358,8 @@ SELECT replace(gen_random_uuid()::text, '-', ''), ?, to_number, instructions, va
 FROM campaign_contacts cc
 WHERE campaign_id = ? AND reason IS DISTINCT FROM 'duplicate'`
 		if contacts == DuplicateNotContacted {
-			query += ` AND NOT EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id)`
+			// An attempt that was deferred or refused rang nobody.
+			query += ` AND NOT EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id AND ` + placedDial + `)`
 		}
 		if _, err := tx.ExecContext(ctx, query+" ORDER BY seq", copied.ID, source.ID); err != nil {
 			return fmt.Errorf("store: duplicate contacts: %w", err)
@@ -419,25 +422,8 @@ func (r *Campaigns) Launch(ctx context.Context, customerID, id string, launch La
 			return r.whyNotChanged(ctx, tx, customerID, id)
 		}
 
-		if _, err := tx.NewUpdate().Model((*Contact)(nil)).
-			Set("stage = ?", Rejected).
-			Set("reason = 'opted_out'").
-			Set("next_attempt_at = NULL").
-			Where("campaign_id = ?", id).
-			Where("stage = ?", Enrolled).
-			Where(`EXISTS (SELECT 1 FROM opt_outs oo WHERE oo.customer_id = ? AND oo.recipient = cc.to_number
-				AND oo.channel IN ('voice', ?) AND oo.revoked_at IS NULL)`, customerID, OptOutAll).
-			Exec(ctx); err != nil {
-			return fmt.Errorf("store: reject opted-out contacts: %w", err)
-		}
-		if _, err := tx.NewUpdate().Model((*Contact)(nil)).
-			Set("step_id = 'step_1'").
-			Set("attempt = 0").
-			Set("next_attempt_at = ?", launch.StartAt).
-			Where("campaign_id = ?", id).
-			Where("stage = ?", Enrolled).
-			Exec(ctx); err != nil {
-			return fmt.Errorf("store: enroll contacts: %w", err)
+		if err := enroll(ctx, tx, customerID, id, launch.StartAt, nil); err != nil {
+			return err
 		}
 		launched, err = campaignIn(ctx, tx, customerID, id)
 		return err
@@ -446,6 +432,15 @@ func (r *Campaigns) Launch(ctx context.Context, customerID, id string, launch La
 		return Campaign{}, stack.Wrap(err)
 	}
 	return launched, nil
+}
+
+// TakesContacts is a campaign people may be added to: a draft, or an auto-enroll campaign that
+// has not ended.
+func (c Campaign) TakesContacts() bool {
+	if c.State == Draft {
+		return true
+	}
+	return c.Type == AutoEnroll && slices.Contains([]string{Scheduled, Running, Paused}, c.State)
 }
 
 // Pause pauses a running or scheduled campaign. A reason names what refused its next call when the

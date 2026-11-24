@@ -81,6 +81,7 @@ TABLE agent_logs
     CREATE INDEX agent_logs_config_order ON public.agent_logs USING btree (customer_id, config_id, id DESC)
     CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
     CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
+    CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)
     CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
 
 TABLE api_keys
@@ -147,6 +148,7 @@ TABLE business_profiles
     authorized_contact_phone text NOT NULL DEFAULT ''::text
     authorized_contact_title text NOT NULL DEFAULT ''::text
     brand_name text NOT NULL DEFAULT ''::text
+    brand_requested_at timestamp with time zone
     brand_status text NOT NULL DEFAULT ''::text
     business_registration_country text NOT NULL DEFAULT ''::text
     business_verification_documents text[] NOT NULL DEFAULT '{}'::text[]
@@ -189,6 +191,7 @@ TABLE campaign_attempts
     CONSTRAINT campaign_attempts_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES campaign_contacts(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_pkey PRIMARY KEY (id)
+    CREATE INDEX campaign_attempts_campaign_idx ON public.campaign_attempts USING btree (campaign_id)
     CREATE INDEX campaign_attempts_classify_idx ON public.campaign_attempts USING btree (classify_after) WHERE (classify_state = 'pending'::text)
     CREATE INDEX campaign_attempts_contact_idx ON public.campaign_attempts USING btree (contact_id, started_at)
 
@@ -288,7 +291,7 @@ TABLE channel_links
     expires_at timestamp with time zone NOT NULL
     used_at timestamp with time zone
     user_id text NOT NULL
-    CONSTRAINT channel_links_pkey PRIMARY KEY (code)
+    CONSTRAINT channel_links_pkey PRIMARY KEY (customer_id, code)
 
 TABLE channel_thread_inbound
     attempts integer NOT NULL DEFAULT 0
@@ -738,6 +741,7 @@ TABLE dlc_review_logs
 TABLE dlc_use_cases
     age_gated boolean NOT NULL DEFAULT false
     approved_at timestamp with time zone
+    campaign_requested_at timestamp with time zone
     channels jsonb NOT NULL DEFAULT '{}'::jsonb
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
@@ -790,6 +794,7 @@ TABLE episodes
     CONSTRAINT episodes_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'ended'::text, 'summarized'::text, 'summary_failed'::text])))
     CREATE UNIQUE INDEX episodes_call_session ON public.episodes USING btree (session_id)
     CREATE INDEX episodes_contact ON public.episodes USING btree (contact_id, started_at DESC)
+    CREATE UNIQUE INDEX episodes_customer_call_session ON public.episodes USING btree (customer_id, session_id)
     CREATE INDEX episodes_lease ON public.episodes USING btree (lease_until) WHERE (lease_until IS NOT NULL)
     CREATE INDEX episodes_open_call ON public.episodes USING btree (call_id) WHERE ((status = 'in_progress'::text) AND (session_id IS NOT NULL))
     CREATE UNIQUE INDEX episodes_open_thread ON public.episodes USING btree (customer_id, thread_channel) WHERE ((status = 'in_progress'::text) AND (session_id IS NULL))
@@ -987,6 +992,22 @@ TABLE organizations
     name text NOT NULL
     CONSTRAINT organizations_pkey PRIMARY KEY (id)
 
+TABLE phone_number_orders
+    action text NOT NULL
+    attempts integer NOT NULL DEFAULT 0
+    country text NOT NULL DEFAULT ''::text
+    created_at timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    e164 text NOT NULL
+    id bigint NOT NULL DEFAULT nextval('phone_number_orders_id_seq'::regclass)
+    monthly_cost_micros bigint NOT NULL DEFAULT 0
+    next_attempt_at timestamp with time zone NOT NULL
+    tags jsonb NOT NULL DEFAULT '{}'::jsonb
+    vendor text NOT NULL
+    CONSTRAINT phone_number_orders_action_check CHECK ((action = ANY (ARRAY['buy'::text, 'release'::text])))
+    CONSTRAINT phone_number_orders_pkey PRIMARY KEY (id)
+    CREATE INDEX phone_number_orders_due_idx ON public.phone_number_orders USING btree (next_attempt_at, id)
+
 TABLE phone_numbers
     attached_at timestamp with time zone
     capabilities text[] NOT NULL DEFAULT '{}'::text[]
@@ -1121,6 +1142,7 @@ TABLE scheduled_task_runs
     started_at timestamp with time zone
     state text NOT NULL DEFAULT 'running'::text
     task_id text NOT NULL
+    texted text[] NOT NULL DEFAULT '{}'::text[]
     trigger text NOT NULL DEFAULT 'schedule'::text
     CONSTRAINT scheduled_task_runs_customer_id_task_id_fkey FOREIGN KEY (customer_id, task_id) REFERENCES scheduled_tasks(customer_id, id) ON DELETE CASCADE
     CONSTRAINT scheduled_task_runs_pkey PRIMARY KEY (id)
@@ -1346,6 +1368,7 @@ TABLE user_phones
     CREATE UNIQUE INDEX user_phones_phone ON public.user_phones USING btree (customer_id, stream_app_pk, phone)
 
 TABLE users
+    claim_finished_at timestamp with time zone
     claimed_at timestamp with time zone
     claimed_by text
     created_at timestamp with time zone NOT NULL DEFAULT now()
