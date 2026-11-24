@@ -318,7 +318,7 @@ func (a *Agent) approvedName(call llm.ToolCall) string {
 	return call.Name
 }
 
-// runningAs is the call a running call's id is held under: an approved call runs under the
+// runningAsLocked is the call a running call's id is held under: an approved call runs under the
 // confirmation that ran it, which is the call the model has open. The caller holds the lock.
 func (a *Agent) runningAsLocked(id string) string {
 	if run, ok := a.approvedRuns[id]; ok {

@@ -102,7 +102,7 @@ func (s *StoreSuite) TestForgettingAUserRenamesThemInTheChangesOfTheRequestsRewr
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
 	request := func(user string) *Request {
 		recorded := &Request{Modality: "stt", CustomerID: "app", UserID: user, Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, recorded))
+		s.Require().NoError(insertRequest(s.ctx, s.store, recorded))
 		return recorded
 	}
 	request("jlahey")
@@ -150,7 +150,7 @@ func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBe
 	}
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
 	gone := &Request{Modality: "stt", CustomerID: "app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, gone))
+	s.Require().NoError(insertRequest(s.ctx, s.store, gone))
 	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE usage_id = ?", gone.UsageID)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(s.payloadsNaming("app", "jlahey"), "the request's insert was recorded")

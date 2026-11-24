@@ -387,6 +387,51 @@ func (s *QuotaSuite) TestAUserWhoHasSpentTheirDayStillReadsTheirSession() {
 	s.Equal(http.StatusTooManyRequests, status, "a turn is still refused")
 }
 
+func (s *QuotaSuite) TestAUserWhoHasSpentTheirDayIsRefusedAVoiceSocket() {
+	s.spendTheDay()
+
+	status, refused := s.client.refusal("/v1/agents/socket")
+
+	s.Equal(http.StatusTooManyRequests, status)
+	s.Contains(refused, "the daily limit is spent")
+}
+
+func (s *QuotaSuite) TestAUserWithADayLeftStillOpensAVoiceSocket() {
+	s.client.opens("/v1/agents/socket")
+}
+
+func (s *QuotaSuite) TestASearchIsCountedOnTheUsersDay() {
+	status, failure := s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+	s.Require().Equal(http.StatusOK, status, failure)
+	s.awaitTheDaySpent()
+
+	status, _ = s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "and another"})
+	s.Equal(http.StatusTooManyRequests, status, "the user's next search is refused")
+}
+
+func (s *QuotaSuite) TestABackendsSearchForAUserIsCountedOnTheirAppsQuota() {
+	s.putQuota(1)
+	status, failure := s.backend.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+	s.Require().Equal(http.StatusOK, status, failure)
+	s.awaitTheDaySpent()
+
+	status, _ = s.backend.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "and another"})
+	s.Equal(http.StatusTooManyRequests, status, "the backend's next search for the user is refused")
+}
+
+func (s *QuotaSuite) TestADeviceMayNotChooseHowASearchIsRun() {
+	status, failure := s.client.failure(http.MethodPost, "/v1/search", SearchRequest{
+		Query: "how much does a call cost", Options: &SearchOptions{Results: pointerTo(50)},
+	})
+
+	s.Equal(http.StatusForbidden, status)
+	s.Contains(failure, "options are sent server-side")
+	status, failure = s.backend.failure(http.MethodPost, "/v1/search", SearchRequest{
+		Query: "how much does a call cost", Options: &SearchOptions{Results: pointerTo(2)},
+	})
+	s.Equal(http.StatusOK, status, "a backend still chooses: %s", failure)
+}
+
 // raw opens a session as client and answers the response, which must be a 201.
 func (s *QuotaSuite) raw(client *testClient) *http.Response {
 	response := client.raw(http.MethodPost, "/v1/agents/sessions", textSession(nil))

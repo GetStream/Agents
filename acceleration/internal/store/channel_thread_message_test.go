@@ -41,7 +41,7 @@ func (s *StoreSuite) TestAReleasedClaimCanBeTakenAgain() {
 	_, err = s.store.ChannelThreadMessages.Claim(s.ctx, "thread-one", ClaimReply, "reply-1")
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.ChannelThreadMessages.Release(s.ctx, "thread-one", ClaimReply, "reply-1"))
+	s.Require().NoError(s.store.ChannelThreadMessages.ReleaseReply(s.ctx, "thread-one", "reply-1"))
 
 	again, err := s.store.ChannelThreadMessages.Claim(s.ctx, "thread-one", ClaimReply, "reply-1")
 	s.Require().NoError(err)
@@ -74,6 +74,6 @@ func (s *StoreSuite) TestChannelThreadMessageQueryBudgets() {
 		s.True(claimed)
 	}), "Claim: drop the channel's old claims, claim")
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ChannelThreadMessages.Release(s.ctx, "thread-one", ClaimReply, "msg-one"))
-	}), "Release")
+		s.Require().NoError(s.store.ChannelThreadMessages.ReleaseReply(s.ctx, "thread-one", "msg-one"))
+	}), "ReleaseReply")
 }

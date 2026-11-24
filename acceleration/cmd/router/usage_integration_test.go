@@ -331,7 +331,7 @@ func (s *UsageCommandsSuite) states() map[uuid.UUID]shipState {
 
 // rowsOfEveryKind writes, started ten minutes ago, a row the usage service has, one it refused,
 // one written before the router shipped, and one a data move carried in, which arrives as the
-// import writes it (see TestAnImportedRequestKeepsItsUsageIDAndIsNeverShipped).
+// import writes it.
 func (s *UsageCommandsSuite) rowsOfEveryKind() (shipped, rejected, beforeShipping, imported uuid.UUID) {
 	shippedAt := time.Now().UTC().Add(-5 * time.Minute)
 	shipped = s.recorded(10*time.Minute, func(request *store.Request) { request.ShippedAt = &shippedAt })

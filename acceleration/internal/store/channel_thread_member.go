@@ -10,7 +10,7 @@ import (
 )
 
 // channelThreadMember is a person a thread channel's chat reaches, by the recipient their
-// opt-outs name (20261117110000_channel_thread_members.sql).
+// opt-outs name.
 type channelThreadMember struct {
 	bun.BaseModel `bun:"table:channel_thread_members,alias:ctm"`
 

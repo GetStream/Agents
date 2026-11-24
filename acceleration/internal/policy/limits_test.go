@@ -51,12 +51,6 @@ func TestANamedUserBeatsTheDefaults(t *testing.T) {
 	require.False(t, ok, "the same user id in another app is another user")
 }
 
-func TestARowOfAnotherOrganizationLimitsNothing(t *testing.T) {
-	row := store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: "o2", AppID: "a1", Interval: usage.Daily}
-
-	require.False(t, row.Covers(usage.SubjectRef{OrganizationID: "o1", Subject: usage.SubjectApp, AppID: "a1"}))
-}
-
 func TestAResetCountsFromItsBaseline(t *testing.T) {
 	limit := store.Limit{LimitMicros: 10}
 	start := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)

@@ -172,7 +172,7 @@ func (c *Cards) whose(ctx context.Context, reading Reading) (store.ContactMapEnt
 
 // alone reports whether every person's message the session reads in its thread channel is
 // by the one who started the thread. The channel bridge makes the channel as the author of
-// the thread's first message, the one the thread's episode is with (store.OpenEpisode). A
+// the thread's first message, the one the thread's episode is with (store.Episodes.Open). A
 // Slack thread somebody else replied in is not alone: Alice's cards are never read for Bob.
 func (c *Cards) alone(ctx context.Context, reading Reading) (bool, error) {
 	window, err := c.window(ctx, reading, reading.Thread)
@@ -373,7 +373,7 @@ func summaryOf(ctx context.Context, bound streamapp.Bound, card store.EpisodeCar
 
 // writtenAsCard reports whether a message is in an omni-channel, by the channel's own agent
 // user, as Write writes a card. Not only in the reader's omni-channel: once a link joins a
-// Stream user's and a number's rows (store.LinkUserPhone), the cards written before stay in the
+// Stream user's and a number's rows (store.UserPhones.Link), the cards written before stay in the
 // omni-channel their row pointed at then, and are still the person's.
 func writtenAsCard(message getstream.MessageWithChannelResponse) bool {
 	channelID, ok := strings.CutPrefix(message.Cid, chatlog.ChannelType+":")
@@ -384,7 +384,7 @@ func writtenAsCard(message getstream.MessageWithChannelResponse) bool {
 // episode: before Until and not before it started, for a session reading the card as for its
 // summary (Closer). A call channel can hold other callers' calls, and a thread channel holds
 // every episode of its thread, one after another: a number's SMS thread holds what it texted
-// before a link set those episodes aside (store.LinkUserPhone), so the card of its next
+// before a link set those episodes aside (store.UserPhones.Link), so the card of its next
 // episode, in progress, never hands them to the linked user.
 // A channel that is not the customer's has none, and so has a call card whose window holds a
 // person's line by anybody but the card's caller: two callers on one call id at once, or a

@@ -199,7 +199,7 @@ func (s *Server) registerLimitGrants(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.createGrant(ctx, organization, request.Body, audit)
+		return s.createGrant(ctx, organization, s.billedOrganization(ctx), request.Body, audit)
 	})
 	manageCreate := manage(create)
 	manageCreate.Responses = created
@@ -211,7 +211,7 @@ func (s *Server) registerLimitGrants(api huma.API) {
 		if organization == "" {
 			return nil, errManageOrganization
 		}
-		return s.createGrant(ctx, organization, request.Body.LimitGrantInput, s.manageAudit(ctx, organization))
+		return s.createGrant(ctx, organization, true, request.Body.LimitGrantInput, s.manageAudit(ctx, organization))
 	})
 
 	list := op("listLimitGrants", http.MethodGet, "/v1/spend/limits/grants", "List the organization's grants",
@@ -292,7 +292,7 @@ func grantOf(grant store.LimitGrant, now time.Time) LimitGrant {
 	return answer
 }
 
-func (s *Server) createGrant(ctx context.Context, organization string, sent LimitGrantInput, audit store.LimitAudit) (*createdGrantResponse, error) {
+func (s *Server) createGrant(ctx context.Context, organization string, billed bool, sent LimitGrantInput, audit store.LimitAudit) (*createdGrantResponse, error) {
 	ref, err := usageTarget(sent.LimitTarget, organization, "api_key")
 	if err != nil {
 		return nil, err
@@ -301,6 +301,9 @@ func (s *Server) createGrant(ctx context.Context, organization string, sent Limi
 	if sent.ExpiresAt != nil && (!sent.ExpiresAt.After(now) || sent.ExpiresAt.Sub(now) > longestGrant) {
 		return nil, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidExpiry,
 			Message: "expires_at is in the future and at most 366 days away"}
+	}
+	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
+		return nil, err
 	}
 	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {

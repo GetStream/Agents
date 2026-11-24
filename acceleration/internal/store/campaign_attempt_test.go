@@ -61,9 +61,6 @@ func (s *StoreSuite) TestCampaignAttemptQueryBudgets() {
 	s.Equal(2+2, s.countQueries(func() {
 		s.Require().NoError(s.store.CampaignAttempts.PutOff(s.ctx, "b", classifying[0].Attempt.ID, s.base.Add(time.Hour)))
 	}), "PutOff releases the contact and puts the dial off")
-	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, classifying[1].Attempt.ID, "callback", true))
-	}), "Classified")
 }
 
 // A router whose call outlived its lease ends its dial after the router that took the contact

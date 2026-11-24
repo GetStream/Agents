@@ -307,14 +307,13 @@ func (s *StoreSuite) TestAnAnsweredDialWaitsToBeClassifiedAndIsClaimedOnce() {
 	s.Equal(AwaitingOutcome, won[0].Contact.Stage)
 	s.Equal(campaign.ID, won[0].Campaign.ID)
 
-	s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, attempt.ID, "success", true))
 	s.ErrorIs(s.store.CampaignContacts.Settle(s.ctx, loser, claimed.Contact.ID, Settle{Stage: ContactCompleted}), ErrNotLeaseHolder)
-	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, winner, claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, winner, Classification{AttemptID: attempt.ID, Outcome: "success"},
+		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
 	latest, _, err = s.store.CampaignAttempts.Latest(s.ctx, claimed.Contact.ID)
 	s.Require().NoError(err)
 	s.Equal("done", latest.ClassifyState)
 	s.Equal("success", latest.Outcome)
-	s.True(latest.Converted)
 	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
 	later, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", classifyAfter.Add(time.Hour), time.Minute, 10)
 	s.Require().NoError(err)
@@ -344,7 +343,6 @@ func (s *StoreSuite) TestTheLatestDialIsTheSecondOfADoubleDial() {
 
 func (s *StoreSuite) TestEndingADialOfADeletedCampaignIsNothing() {
 	s.NoError(s.store.CampaignAttempts.End(s.ctx, "app", "deleted-attempt", "", "completed", "call-1", "", s.base, nil))
-	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, "deleted-attempt", "success", true))
 }
 
 func (s *StoreSuite) TestACampaignCompletesWhenNobodyIsLeft() {
@@ -453,8 +451,8 @@ func (s *StoreSuite) TestOnlyTheLatestAnsweredDialOfAContactIsClassified() {
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Equal(latest.ID, claimed[0].Attempt.ID)
-	s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, latest.ID, "success", true))
-	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success"}))
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: latest.ID, Outcome: "success"},
+		contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success"}))
 	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
 	s.Require().NoError(err)
 	for _, attempt := range attempts {
@@ -503,6 +501,7 @@ func (s *StoreSuite) TestAContactStoppedMidCallThatFailsKeepsWhyItFailed() {
 	s.Equal("opted_out", settled.Reason)
 }
 
+// The contact settles each time, so only the dial's own state keeps a late answer off it.
 func (s *StoreSuite) TestALateClassificationChangesNothing() {
 	campaign := s.runningCampaign(5, "+15550001")
 	contact := s.claimDue("a", s.base, 10)[0].Contact
@@ -511,11 +510,16 @@ func (s *StoreSuite) TestALateClassificationChangesNothing() {
 	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1}))
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base.Add(time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, latest.ID, "success", true))
-	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1}))
+	again := s.base.Add(time.Hour)
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: latest.ID, Outcome: "no_response"},
+		contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &again}))
 
-	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, latest.ID, "other", false), "a done dial")
-	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, older.ID, "other", false), "an abandoned dial")
+	for _, late := range []CampaignAttempt{latest, older} {
+		s.Require().Len(s.claimDue("a", again, 10), 1)
+		again = again.Add(time.Hour)
+		s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: late.ID, Outcome: "other"},
+			contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &again}))
+	}
 
 	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
 	s.Require().NoError(err)
@@ -523,9 +527,8 @@ func (s *StoreSuite) TestALateClassificationChangesNothing() {
 	for _, attempt := range attempts {
 		byID[attempt.ID] = attempt
 	}
-	s.Equal("success", byID[latest.ID].Outcome)
-	s.True(byID[latest.ID].Converted)
-	s.Equal("abandoned", byID[older.ID].ClassifyState)
+	s.Equal("no_response", byID[latest.ID].Outcome, "a done dial")
+	s.Equal("abandoned", byID[older.ID].ClassifyState, "an abandoned dial")
 	s.Empty(byID[older.ID].Outcome)
 }
 
@@ -574,7 +577,7 @@ func (s *StoreSuite) TestAClassificationWhoseContactCannotSettleStaysPending() {
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base, time.Minute, 10)
 	s.Require().NoError(err)
 
-	err = s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success", Converted: true},
+	err = s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success"},
 		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true})
 
 	s.ErrorIs(err, ErrNotLeaseHolder)
@@ -593,7 +596,7 @@ func (s *StoreSuite) TestAClassificationAndItsContactSettleTogether() {
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base, time.Minute, 10)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success", Converted: true},
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success"},
 		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
 
 	latest, _, err := s.store.CampaignAttempts.Latest(s.ctx, claimed.Contact.ID)

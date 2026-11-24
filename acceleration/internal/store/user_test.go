@@ -75,7 +75,7 @@ func (s *StoreSuite) eraseUser(customerID, userID string) {
 
 // userEmail is the address a user's row holds.
 func (s *StoreSuite) userEmail(customerID, userID string) string {
-	email, err := s.store.UserEmail(s.ctx, customerID, userID)
+	email, err := s.store.Users.GetEmail(s.ctx, customerID, userID)
 	s.Require().NoError(err)
 	return email
 }
@@ -263,7 +263,7 @@ func (s *StoreSuite) TestASightingNamingNoUserIsNotRecorded() {
 func (s *StoreSuite) TestAGuestTheRouterMintedStaysAGuestOnTheirOwnToken() {
 	// The token minted for them names no role, so it reads as a full user's.
 	app := s.freshApp()
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: app}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: app}))
 
 	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindAuthenticated))
 
@@ -275,7 +275,7 @@ func (s *StoreSuite) TestAClaimedGuestStaysAGuestOnAFullToken() {
 	// The claim stands: a retried claim reads the guest row.
 	app := s.freshApp()
 	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "guest-1", UserKindGuest))
-	_, err := s.store.ClaimGuest(s.ctx, app, "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, app, "guest-1", "jlahey")
 	s.Require().NoError(err)
 	s.store.Users.Forget(s.ctx, app, "guest-1")
 
@@ -342,7 +342,7 @@ func (s *StoreSuite) TestADeploymentWithNoRedisStillWritesItsUsersDown() {
 func (s *StoreSuite) TestAnEmailIsWrittenAgainOnceItsTTLEnds() {
 	users, app := s.usersWithoutRedis(500*time.Millisecond), s.freshApp()
 	s.Require().NoError(users.Email(s.ctx, app, "jlahey", "jim@fake.example"))
-	s.Require().NoError(s.store.SetUserEmail(s.ctx, app, "jlahey", "behind@fake.example"))
+	s.Require().NoError(s.store.Users.SetEmail(s.ctx, app, "jlahey", "behind@fake.example"))
 
 	s.Require().NoError(users.Email(s.ctx, app, "jlahey", "jim@fake.example"))
 	s.Equal("behind@fake.example", s.userEmail(app, "jlahey"), "an address just written costs no write")
