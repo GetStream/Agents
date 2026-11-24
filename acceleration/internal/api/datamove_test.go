@@ -518,7 +518,7 @@ func (s *DataMoveSuite) TestAnImportRefusedAtTheRoutersCapLeavesItsAppFree() {
 }
 
 func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
-	s.withImportLineWait(500 * time.Millisecond)
+	s.withImportLineWait(2 * time.Second)
 	// A line, then a stall: the wait is for each line, not only the first. The body says it is
 	// longer than what is sent, and small enough that net/http reads the rest of it before
 	// answering, so the answer needs the stalled read to stay bounded.
@@ -535,10 +535,12 @@ func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
 	request.ContentLength = 100
 	transport := &http.Transport{}
 	defer transport.CloseIdleConnections()
+	began := time.Now()
 
 	response, err := (&http.Client{Transport: transport}).Do(request)
 
 	s.Require().NoError(err, "the stalled import was never answered")
+	s.Less(time.Since(began), 3*time.Second, "answered after one wait for the line, not two")
 	defer response.Body.Close()
 	payload, err := io.ReadAll(response.Body)
 	s.Require().NoError(err)
