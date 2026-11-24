@@ -1,6 +1,8 @@
 package phone
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -76,4 +78,21 @@ func (s *ServiceSuite) TestEveryVendorOfTheServiceHasItsCallSeriesAtZeroFromTheS
 	for _, vendor := range vendors {
 		s.True(has[vendor], vendor)
 	}
+}
+
+func (s *ServiceSuite) TestAPlacingTheDatabaseFailedIsAPlacingFailure() {
+	err := notPlaced(context.Background(), errors.New("lock timeout"))
+
+	s.ErrorIs(err, ErrNotPlaced)
+	s.ErrorIs(err, ErrPlacingFailed)
+}
+
+func (s *ServiceSuite) TestAPlacingCutOffByItsContextIsNoPlacingFailure() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := notPlaced(ctx, ctx.Err())
+
+	s.ErrorIs(err, ErrNotPlaced)
+	s.NotErrorIs(err, ErrPlacingFailed, "a shutdown rings the contact again at once")
 }

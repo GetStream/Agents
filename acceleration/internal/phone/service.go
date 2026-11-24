@@ -1306,8 +1306,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		return Placed{}, room.Refusal(err)
 	}
 	if err != nil {
-		// Nothing was asked of the vendor, so nobody was rung.
-		return Placed{}, stack.Wrap(fmt.Errorf("%w: %w: %w", ErrNotPlaced, ErrPlacingFailed, err))
+		return Placed{}, notPlaced(ctx, err)
 	}
 	// Until the dial, whose failures forget it themselves, a call that goes no further is
 	// forgotten here: it never rang.
@@ -1726,6 +1725,16 @@ func callBridgeAAD(customerID, token string) []byte {
 // ErrNotPlaced is a call the vendor was never asked to dial, its context ended or its placing
 // failed (ErrPlacingFailed): nobody was rung.
 var ErrNotPlaced = errors.New("phone: the call was not placed")
+
+// notPlaced is err, the failure of placing a call, as ErrNotPlaced: nothing was asked of the
+// vendor, so nobody was rung. It is ErrPlacingFailed too unless ctx ended, as a shutdown ends
+// it, which is no failure of the database's to wait out.
+func notPlaced(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return stack.Wrap(fmt.Errorf("%w: %w", ErrNotPlaced, err))
+	}
+	return stack.Wrap(fmt.Errorf("%w: %w: %w", ErrNotPlaced, ErrPlacingFailed, err))
+}
 
 // ErrPlacingFailed is a call whose placing failed other than by its organization's calls at
 // once, the count or its lock not answering in time: it is ErrNotPlaced too, and worth trying
