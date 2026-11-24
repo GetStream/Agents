@@ -145,8 +145,9 @@ func (e *Exchange) Redact(text string) string {
 }
 
 // RedactCredential is text, such as a 2xx answer a tool source returns for the call, with
-// each string of the credential the last request was sent with taken out, as Redact takes them
-// out, but its path and query kept: an answer names the resource it is about. Text is
+// each secret value of the credential the last request was sent with taken out, as Redact takes
+// them out, but its path and query kept, and a name the secret holds, such as api_key's header
+// name (SecretValuer): an answer names the resource it is about, and may name the header. Text is
 // unchanged when no request left. Example: an API answering 200 with "your key is <the key>"
 // says "your key is [redacted]".
 func (e *Exchange) RedactCredential(text string) string {

@@ -3,7 +3,10 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +103,44 @@ func (s *AcceptanceSuite) TestA200EchoingTheKeyIsRedacted() {
 
 	s.Require().NoError(err)
 	s.Equal(`{"error":"key [redacted] and  may not read this"}`, llm.TextOf(result.Parts))
+}
+
+// R1.1 of AI-3675: a 2xx takes out api_key's key but keeps its header's name, which an API's
+// answer may say, as its docs do; an error still takes out both, as Redact did before.
+func (s *AcceptanceSuite) TestA2xxKeepsTheKeysHeaderName() {
+	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/denied" {
+			w.WriteHeader(http.StatusForbidden)
+		}
+		_, _ = io.WriteString(w, `{"docs":"send `+fakeprovider.APIKeyHeader+`","seen":"`+r.Header.Get(fakeprovider.APIKeyHeader)+`"}`)
+	}))
+	defer api.Close()
+	transports, err := core.NewTransports(core.TransportsConfig{Resolver: keyResolver{key: "k3675-secret"},
+		Timeout: requestTimeout, NewClient: loopback(api.Client())})
+	s.Require().NoError(err)
+
+	for path, want := range map[string]string{
+		"/ok":     `{"docs":"send X-Api-Key","seen":"[redacted]"}`,
+		"/denied": `The API answered 403 Forbidden: {"docs":"send [redacted]","seen":"[redacted]"}`,
+	} {
+		tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: path}
+		binding := s.binding(tool)
+		binding.Manifest.Endpoints[Kind] = api.URL + fakeprovider.PathAPI
+		binding.HTTP = transports.Client(core.ConnectionRef{CustomerID: "app", ConnectionID: "crm-1"}, apikey.New())
+		set, err := s.source.Open(s.ctx, binding, s.grants(binding, "get"))
+		s.Require().NoError(err)
+
+		result, err := set.Call(s.ctx, llm.ToolCall{Name: "crm__get", Arguments: `{}`})
+
+		text := llm.TextOf(result.Parts)
+		var reported *core.ToolError
+		if errors.As(err, &reported) {
+			text = reported.Message
+		} else {
+			s.Require().NoError(err, path)
+		}
+		s.Equal(want, text, path)
+	}
 }
 
 // The log line of a call (core.LoggedMessage, with the call's Exchange.Redact, as the session's

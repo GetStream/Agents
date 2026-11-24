@@ -145,6 +145,15 @@ func secretStrings(credential AccessCredential) []string {
 	return appendStrings(nil, secret)
 }
 
+// secretValues is each secret value of the credential scheme issued: its SecretValues when it
+// is a SecretValuer, else every string of the secret (secretStrings).
+func secretValues(scheme Scheme, credential AccessCredential) []string {
+	if valuer, ok := scheme.(SecretValuer); ok {
+		return valuer.SecretValues(credential)
+	}
+	return secretStrings(credential)
+}
+
 // redactionFrom is the redaction of each of found longer than a byte, each as it is,
 // URL-escaped and JSON-escaped: a token request's form body is urlencoded (url.Values.Encode,
 // QueryEscape), and its basic auth carries the client secret QueryEscaped (RFC 6749 section

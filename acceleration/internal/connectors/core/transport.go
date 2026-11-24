@@ -216,7 +216,7 @@ func (c *credentialed) RoundTrip(request *http.Request) (*http.Response, error) 
 		var redact, secret redaction
 		if exchange != nil {
 			redact = redactionOf(request, credential)
-			secret = redactionFrom(secretStrings(credential))
+			secret = redactionFrom(secretValues(c.scheme, credential))
 		}
 		exchange.sending(request.URL.Host, redact, secret)
 		response, err := c.scheme.Wrap(c.base, credential).RoundTrip(request)
