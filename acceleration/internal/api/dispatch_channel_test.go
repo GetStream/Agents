@@ -101,7 +101,7 @@ func (s *MessageHooksSuite) TestAnotherPersonsMessageIsAnsweredByTheWorkersSessi
 func (s *MessageHooksSuite) TestOnlyTheBackendOfTheChannelsCustomerOpensItsChannel() {
 	handed := s.handedOut()
 	owner := s.app
-	asked := CreateSessionRequest{AgentId: &handed.AgentID, Llm: pointerTo("en-low-latency")}
+	asked := CreateSessionRequest{AgentId: &handed.AgentID}
 
 	for name, opener := range map[string]*testClient{
 		"end user":                  s.client,
