@@ -40,7 +40,7 @@ const MessageBytes = 1 << 10
 // mcp/streamable.go:2174 and :2560), and a connector's endpoints are all https
 // (internal/connectors/core/AGENTS.md, «Untrusted values cannot steer a request»). It is
 // then passed through redact, when it is not nil: the call's Exchange.Redact, which takes
-// out the last request's path and query and the strings of its credential, since the MCP
+// out every request's path and query and the strings of its credential, since the MCP
 // client puts a JSON-RPC error's message, and a tool its isError text, in the error, and a
 // provider may echo either there (AI-1244). It is then cut to MessageBytes at a UTF-8
 // boundary. The session's dispatcher logs it for a session's tool call, and hands it to the

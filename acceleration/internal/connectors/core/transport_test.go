@@ -153,9 +153,9 @@ func (s *TransportsSuite) TestAnExchangeRecordsTheResolversRefusalAndNothingSent
 	s.ErrorIs(exchange.CredentialError(), errNotConnected)
 }
 
-// TestAnExchangeRedactsTheLastRequestsPathAndCredential: what Redact takes out of a text, such
+// TestAnExchangeRedactsEveryRequestsPathAndCredential: what Redact takes out of a text, such
 // as the MCP client's error for a JSON-RPC error that echoes them (AI-1244).
-func (s *TransportsSuite) TestAnExchangeRedactsTheLastRequestsPathAndCredential() {
+func (s *TransportsSuite) TestAnExchangeRedactsEveryRequestsPathAndCredential() {
 	ctx, exchange := core.WithExchange(context.Background())
 
 	_, err := s.postWith(ctx, s.client(), s.provider.URL+"/mcp")
