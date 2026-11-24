@@ -100,6 +100,12 @@ func (s *Source) Open(_ context.Context, b core.ResolvedBinding, grants []core.T
 	if err != nil {
 		return nil, err
 	}
+	// Validation refused such a source when it was stored; it is refused again here, the last
+	// step before a request, so one that skipped it never names a method override or writes
+	// while saying it reads.
+	if err := core.CheckHTTPSource(*rule); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("http: connector %q: %w", b.Manifest.ConnectorID, err))
+	}
 	granted := make(map[string]string, len(grants))
 	for _, grant := range grants {
 		granted[grant.Name] = grant.SchemaDigest
@@ -148,13 +154,44 @@ func ToolSchemaDigest(tool core.HTTPTool) (string, error) {
 }
 
 // callClient is the connection's client for an opened Toolset: the same client, with a timeout
-// no shorter than callTimeout, so it never cuts a call before the caller's deadline.
+// no shorter than callTimeout, so it never cuts a call before the caller's deadline, and which
+// follows a redirect only for a GET or a HEAD (redirectMethods), within the client's own policy.
 func (s *Source) callClient(client *http.Client) *http.Client {
 	copied := *client
 	if copied.Timeout < s.callTimeout {
 		copied.Timeout = s.callTimeout
 	}
+	policy := client.CheckRedirect
+	copied.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if !slices.Contains(redirectMethods, via[0].Method) {
+			return http.ErrUseLastResponse
+		}
+		if policy == nil {
+			return defaultRedirects(via)
+		}
+		return policy(request, via)
+	}
 	return &copied
+}
+
+// redirectMethods are the methods whose call follows a redirect: the reads. Any other method
+// gets the redirect as its answer, which the model reads as a tool error naming its status. A
+// write's method and path are what the manifest fixes and its owner approved, and net/http sends
+// a POST, a PUT or a PATCH body again on a 307 or a 308 (AI-3674 R1.6), so following one would run
+// the write, and maybe write twice, at a path the manifest does not name. The egress client
+// (core.Transports) already follows only within the origin and keeps the method.
+var redirectMethods = []string{http.MethodGet, http.MethodHead}
+
+// maxRedirects is net/http's own limit, which a client with no CheckRedirect has
+// (defaultCheckRedirect, net/http/client.go: "stopped after 10 redirects").
+const maxRedirects = 10
+
+// defaultRedirects is net/http's redirect policy, for a client that sets none.
+func defaultRedirects(via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("http: stopped after %d redirects", maxRedirects)
+	}
+	return nil
 }
 
 // httpSource is the manifest's http source and the URL of its endpoint.

@@ -71,6 +71,16 @@ func WithExchange(ctx context.Context) (context.Context, *Exchange) {
 	return context.WithValue(ctx, exchangeKey{}, e), e
 }
 
+// Observed is ctx and the Exchange it carries, or ctx carrying a new one when it carries none
+// (WithExchange), for a tool source that redacts what it returns for a call (Exchange.Redact)
+// whoever called it.
+func Observed(ctx context.Context) (context.Context, *Exchange) {
+	if e := exchangeOf(ctx); e != nil {
+		return ctx, e
+	}
+	return WithExchange(ctx)
+}
+
 // exchangeOf is the Exchange ctx carries, nil when it carries none.
 func exchangeOf(ctx context.Context) *Exchange {
 	e, _ := ctx.Value(exchangeKey{}).(*Exchange)

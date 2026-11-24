@@ -1,12 +1,15 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // SourceKindHTTP is the sources[].kind of the http source: the tools are the ones the manifest
@@ -99,6 +102,21 @@ var (
 	// these characters is RFC 3986 unreserved, so a name also goes into a query as it is.
 	httpParameterName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 )
+
+// CheckHTTPSource is every rule of Manifest.Validate an http source breaks, or nil: the same
+// rules (checkHTTPSource), for the http tool source to hold a manifest it opens to again, so a
+// stored one that skipped validation cannot offer a tool that names a method override or writes
+// while saying it reads (AI-3675).
+func CheckHTTPSource(source SourceRule) error {
+	var errs []error
+	checkHTTPSource(func(field, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("%s: %s", field, fmt.Sprintf(format, args...)))
+	}, "sources[http]", source)
+	if len(errs) > 0 {
+		return stack.Wrap(errors.Join(errs...))
+	}
+	return nil
+}
 
 // checkHTTPSource refuses an http source whose tools a session could not offer or that could
 // write while saying they read. field names the source.
