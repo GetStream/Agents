@@ -618,11 +618,16 @@ func (s *ReplicateRepeatSuite) TestARowThatBelongsToOneLeftOutIsLoggedInTheCopyA
 	s.exec(s.source, contact, "copied", "campaign-1", e164(1))
 	s.exec(s.source, contact, "kept", "campaign-2", e164(2))
 	s.skip = []string{`campaigns:{"id":"campaign-1"}`}
+	// The app's own opt-out, recorded here too: the one here is kept, and nothing is left out.
+	for _, in := range []*store.Store{s.source, s.target} {
+		s.Require().NoError(in.OptOuts.Insert(s.ctx, &store.OptOut{CustomerID: "acme", Recipient: e164(9), Channel: "sms", Source: "keyword"}))
+	}
 	const leftOut = `left out a row whose parent row is not this app's here" row="campaign_contacts:{\"id\":\"`
 
 	s.Require().NoError(s.once("acme", false))
 
 	s.Equal(1, strings.Count(s.logs.String(), leftOut))
+	s.NotContains(s.logs.String(), "opt_outs:")
 	s.Contains(s.logs.String(), leftOut+`copied\"}"`)
 	s.exec(s.source, contact, "changed", "campaign-1", e164(3))
 
