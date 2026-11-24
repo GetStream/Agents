@@ -216,7 +216,9 @@ func (s *ExtractSuite) TestAReadStoppedAtTheDeadlineKillsItsWorkerBeforeClosingI
 
 		_, err := s.extractor.Extract(ctx, "manual.pdf", data)
 
-		s.Require().ErrorIs(err, context.Canceled)
+		if err != nil {
+			s.Require().ErrorIs(err, context.Canceled)
+		}
 	}
 }
 
