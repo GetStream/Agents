@@ -23,7 +23,9 @@ const (
 	Refused       Result = "refused"
 	Deferred      Result = "deferred"
 	Paused        Result = "paused"
-	// NotPlaced is a dial cut off by a shutdown before the vendor took it: nobody was rung.
+	// NotPlaced is a dial the vendor never took: nobody was rung. A shutdown cut it off, and
+	// it is rung again at once; or its placing failed (reasonPlacingFailed), and it is rung
+	// again after placingRetry. Neither uses the attempt.
 	NotPlaced Result = "not_placed"
 	// DialFailed is a dial that failed before the vendor was asked, for a reason that may pass:
 	// nobody was rung, and the contact is tried again shortly without using the attempt, up to
@@ -38,6 +40,10 @@ const (
 	reasonUnknownResult = "unknown_result"
 	codeConcurrent      = "concurrent"
 	concurrentRetry     = 5 * time.Minute
+	reasonPlacingFailed = "placing_failed"
+	// placingRetry is how long a dial whose placing failed waits: a shard or the shared database
+	// not answering, which ringing again at once would only press on, against the API's calls.
+	placingRetry = time.Minute
 )
 
 // Dialed is how one dial ended: a Result for one that placed no call or reached a machine,
@@ -80,7 +86,15 @@ func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, conta
 			at = time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, zone)
 		}
 		return enrolledAt(hours, zone, at, settle), false
-	case Paused, NotPlaced:
+	case NotPlaced:
+		if dialed.Reason == reasonPlacingFailed {
+			// Not capped as DialFailed is: the database not answering is nothing of the
+			// contact's, and using its attempt over an outage would leave it rung fewer times.
+			return enrolledAt(hours, zone, now.Add(placingRetry), settle), false
+		}
+		settle.Stage = store.Enrolled
+		settle.NextAttemptAt = &now
+	case Paused:
 		settle.Stage = store.Enrolled
 		settle.NextAttemptAt = &now
 	case Refused:
@@ -145,6 +159,9 @@ func afterOutcome(step Step, contact store.Contact, outcomeID string) store.Sett
 
 // resultOf maps the error of a dial. It looks through wrapping.
 func resultOf(err error) Dialed {
+	if errors.Is(err, phone.ErrPlacingFailed) {
+		return Dialed{Result: NotPlaced, Reason: reasonPlacingFailed}
+	}
 	if errors.Is(err, phone.ErrNotPlaced) {
 		return Dialed{Result: NotPlaced}
 	}
