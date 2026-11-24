@@ -149,7 +149,7 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 		text = body
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		message := fmt.Sprintf("The API answered %s", response.Status)
+		message := "The API answered " + status(response)
 		if len(body) > 0 {
 			message += ": " + text
 		}
@@ -160,11 +160,18 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 	// An empty answer, such as a 204's or any HEAD's, is its status, so the model can tell a
 	// call that was done from one that said nothing.
 	if len(body) == 0 {
-		return core.Result{Parts: llm.TextParts(fmt.Sprintf("The API answered %s.", response.Status))}, nil
+		return core.Result{Parts: llm.TextParts("The API answered " + status(response) + ".")}, nil
 	}
 	// An API may echo the credential in an answer too, which the model reads as one: it is
 	// taken out, but the path and query, which an answer names its resource by, are kept.
 	return core.Result{Parts: llm.TextParts(core.CutResult(exchange.RedactCredential(text)))}, nil
+}
+
+// status is the answer's code and net/http's text for it, such as "204 No Content": never the
+// reason phrase the API sent, which is its own text and may echo the request's credential
+// (AI-3675 S1.1). A code net/http has no text for is the code alone.
+func status(response *http.Response) string {
+	return strings.TrimSpace(fmt.Sprintf("%d %s", response.StatusCode, http.StatusText(response.StatusCode)))
 }
 
 // errOtherResource is a path value that would make the path name another resource (builtPath).

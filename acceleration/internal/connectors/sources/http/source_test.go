@@ -431,6 +431,8 @@ func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 		"/missing":          "The API answered 404 Not Found: no such item",
 		"/multiple-choices": "The API answered 300 Multiple Choices",
 		"/refused":          "The API answered 401 Unauthorized: bad token",
+		"/reason-own":       "The API answered 403 Forbidden",
+		"/reason-unknown":   "The API answered 499",
 	} {
 		tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: path}
 
@@ -451,6 +453,8 @@ func (s *SourceSuite) TestAnEmpty2xxIsItsStatus() {
 	for want, tool := range map[string]core.HTTPTool{
 		"The API answered 204 No Content.": {Name: "remove", Description: "Calls the API.", Method: http.MethodDelete, Path: "/no-content"},
 		"The API answered 200 OK.":         {Name: "check", Description: "Calls the API.", Method: http.MethodHead, Path: "/items"},
+		// S1.1 of AI-3675: the API's own reason phrase, here echoing the token, is not read.
+		"The API answered 202 Accepted.": {Name: "seen", Description: "Calls the API.", Method: http.MethodGet, Path: "/reason-echo"},
 	} {
 		result, err := s.call(s.binding(tool), tool.Name, `{}`)
 
@@ -859,6 +863,12 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 			r.Header.Get("Authorization")+strings.Repeat("y", 2*len(core.TruncatedMarker)))
 	case "/no-content":
 		w.WriteHeader(http.StatusNoContent)
+	case "/reason-echo":
+		answerWithReason(w, "202 seen "+r.Header.Get("Authorization"))
+	case "/reason-own":
+		answerWithReason(w, "403 Go away")
+	case "/reason-unknown":
+		answerWithReason(w, "499 Client Closed Request")
 	case "/missing":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "no such item")
@@ -886,6 +896,19 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		_, _ = io.WriteString(w, "ok")
 	}
+}
+
+// answerWithReason answers with an empty body and the status line "HTTP/1.1 <status>", status
+// being a code and a reason phrase of the server's own, which net/http's ResponseWriter never
+// writes.
+func answerWithReason(w http.ResponseWriter, status string) {
+	conn, buffered, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = io.WriteString(buffered, "HTTP/1.1 "+status+"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	_ = buffered.Flush()
 }
 
 // binding reaches the provider's /api under the alias crm, through core.Transports with the
