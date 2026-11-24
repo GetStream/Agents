@@ -1,7 +1,7 @@
 # internal/phone/outcome
 
 How each phone call ended. The `Keeper` keeps one row per call the router placed
-(`phone_calls`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
+(`call_legs`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
 and the phone's join and leave into its stored outcome: `completed`, `busy`, `no_answer`,
 `failed`, `canceled` or `unknown`. The API and billing read those values: add to them, never
 change one.
