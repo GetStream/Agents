@@ -80,7 +80,6 @@ func (s *HTTPSourceSuite) TestAValidHTTPSourceIsAccepted() {
 		"a boolean":                           withTool(func(t *HTTPTool) { t.Parameters["days"] = HTTPParameter{Type: "boolean"} }),
 		"a name of 63 with capitals and -":    withTool(func(t *HTTPTool) { t.Name = "Get-" + strings.Repeat("x", 59) }),
 		"a description of 1000 bytes":         withTool(func(t *HTTPTool) { t.Description = strings.Repeat("d", 1000) }),
-		"no description":                      withTool(func(t *HTTPTool) { t.Description = "" }),
 		"a path of 2048 bytes":                withTool(func(t *HTTPTool) { t.Path = "/{city}/" + strings.Repeat("p", 2040) }),
 		"the root path":                       withTool(func(t *HTTPTool) { t.Path, t.Parameters = "/", nil }),
 		"a {name} inside a segment":           withTool(func(t *HTTPTool) { t.Path = "/files/{city}.json" }),
@@ -166,8 +165,9 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"needs_scopes on a source with no tool":         {noTool(func(r *SourceRule) { r.Tools = []ToolRule{{Name: "x", NeedsScopes: []string{"read"}}} }), `sources[0].tools: is not set on an http source`},
 		"read_only_tools on a source with no tool":      {noTool(func(r *SourceRule) { r.ReadOnlyTools = []string{"x"} }), `sources[0].read_only_tools: is not set on an http source`},
 		"an override header on a source with no tool":   {noTool(func(r *SourceRule) { r.Headers = map[string]string{"X-HTTP-Method": "PUT"} }), `names a method override`},
-		"a description over 1000":                       {withTool(func(t *HTTPTool) { t.Description = strings.Repeat("d", 1001) }), `http_tools[0].description: is over 1000 bytes`},
-		"129 tools":                                     {httpManifest(tools(129)...), `sources[0].http_tools: has 129 tools, over 128`},
+		"no description":          {withTool(func(t *HTTPTool) { t.Description = "" }), `http_tools[0].description: is empty`},
+		"a description over 1000": {withTool(func(t *HTTPTool) { t.Description = strings.Repeat("d", 1001) }), `http_tools[0].description: is over 1000 bytes`},
+		"129 tools":               {httpManifest(tools(129)...), `sources[0].http_tools: has 129 tools, over 128`},
 		"http_tools on an mcp source": {Manifest{ID: "example", Revision: 1, Name: "Example", Schemes: []string{"bearer"},
 			Endpoints: map[string]string{SourceKindMCP: "https://api.example.com/mcp"},
 			Sources:   []SourceRule{{Kind: SourceKindMCP, Endpoint: SourceKindMCP, HTTPTools: []HTTPTool{forecast()}}}},
@@ -193,11 +193,11 @@ func (s *HTTPSourceSuite) TestEveryToolIsChecked() {
 
 func (s *HTTPSourceSuite) TestAnHTTPSourceParsesFromYAML() {
 	parsed, err := ParseManifest(minimal("endpoints:\n  http: https://api.example.com/v1\nsources:\n  - kind: http\n    endpoint: http\n" +
-		"    http_tools:\n      - name: get_forecast\n        method: GET\n        path: /forecast/{city}\n        read_only: true\n" +
+		"    http_tools:\n      - name: get_forecast\n        description: The forecast for a city.\n        method: GET\n        path: /forecast/{city}\n        read_only: true\n" +
 		"        parameters:\n          city: {type: string, required: true}\n"))
 	s.Require().NoError(err)
 
-	s.Equal([]HTTPTool{{Name: "get_forecast", Method: "GET", Path: "/forecast/{city}", ReadOnly: true,
+	s.Equal([]HTTPTool{{Name: "get_forecast", Description: "The forecast for a city.", Method: "GET", Path: "/forecast/{city}", ReadOnly: true,
 		Parameters: map[string]HTTPParameter{"city": {Type: "string", Required: true}}}}, HTTPSource(parsed.Sources).HTTPTools)
 }
 

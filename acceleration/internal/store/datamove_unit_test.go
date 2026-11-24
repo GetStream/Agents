@@ -22,7 +22,7 @@ func TestImportableDefinitionSuite(t *testing.T) {
 func (s *ImportableDefinitionSuite) TestAnHTTPConnectorIsRefusedAndAnMCPOneKept() {
 	http := `{"id": "custom_crm", "revision": 1, "name": "CRM", "endpoints": {"http": "https://api.crm.example"},
 		"schemes": ["bearer"], "sources": [{"kind": "http", "endpoint": "http",
-		"http_tools": [{"name": "delete_item", "method": "DELETE", "path": "/items/{id}",
+		"http_tools": [{"name": "delete_item", "description": "Deletes an item.", "method": "DELETE", "path": "/items/{id}",
 		"parameters": {"id": {"type": "string", "required": true}}}]}]}`
 	mcp := `{"id": "custom_crm", "revision": 1, "name": "CRM", "endpoints": {"mcp": "https://mcp.crm.example/mcp"},
 		"schemes": ["bearer"], "sources": [{"kind": "mcp", "endpoint": "mcp"}]}`

@@ -49,6 +49,13 @@ func (s *LoggedDescriptionSuite) TestAJSONEscapedEchoOfASecretIsRedacted() {
 	s.Equal("go [redacted], php [redacted], plain [redacted], plain php [redacted]", core.LoggedDescription(text, secret))
 }
 
+// TestASecretHoldingAnotherIsTakenOutWhole (AI-3675 S1.2): api_key's key may hold its header
+// name, and taking the name out first would leave the rest of the key.
+func (s *LoggedDescriptionSuite) TestASecretHoldingAnotherIsTakenOutWhole() {
+	s.Equal("seen [redacted], header [redacted]",
+		core.LoggedDescription("seen X-Key-9f8e7d6c5b, header X-Key", "X-Key", "X-Key-9f8e7d6c5b"))
+}
+
 // TestASecretOfOneByteIsLeftAlone: a byte alone names nothing, and taking it out would take
 // out every such byte, as the Exchange's redaction leaves it.
 func (s *LoggedDescriptionSuite) TestASecretOfOneByteIsLeftAlone() {
@@ -100,6 +107,13 @@ func (s *LoggedMessageSuite) TestAnUnreachedErrorAddsWhatFailed() {
 	err := stack.Wrap(&core.UnreachedError{Message: "http: crm__lookup: the API could not be reached", Err: sending})
 
 	s.Equal(`http: crm__lookup: the API could not be reached: Get "https://crm.example": EOF`, core.LoggedMessage(err, nil))
+}
+
+// R2.1 of AI-3674: an UnreachedError with no cause is its Message alone on the line.
+func (s *LoggedMessageSuite) TestAnUnreachedErrorWithNoCauseIsItsMessage() {
+	err := stack.Wrap(&core.UnreachedError{Message: "http: crm__lookup: the API could not be reached"})
+
+	s.Equal("http: crm__lookup: the API could not be reached", core.LoggedMessage(err, nil))
 }
 
 func (s *LoggedMessageSuite) TestNoErrorIsNoMessage() {

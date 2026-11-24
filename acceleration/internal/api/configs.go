@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
@@ -1130,11 +1131,37 @@ func bindingSendsOut(binding store.ConnectorBinding, manifest core.Manifest) ([]
 		return unheld, len(unheld) > 0
 	}
 	for _, tool := range binding.Tools {
-		if manifest.SendsOutTool(tool.Name) && !binding.RequiresApproval(tool.Name) {
+		if grantSendsOut(manifest, tool) && !binding.RequiresApproval(tool.Name) {
 			unheld = append(unheld, tool.Name)
 		}
 	}
 	return unheld, len(unheld) > 0
+}
+
+// grantSendsOut reports whether the tool that grant names may send data out of the conversation
+// (core.Manifest.SendsOutTool), with an http tool judged as the grant pins it: a session opens
+// one only at the digest its grant pins (httpsource.Source.Open), and the digest covers its
+// method, path and read_only (httpsource.ToolSchemaDigest). So an http tool that only reads at
+// the latest revision still sends out when the grant pins no digest, which a session pins on
+// first use at the revision its connection is on, or another revision's, such as a POST that
+// revision 2 turned into a read-only GET while a connection stays on revision 1 (AI-3675). An
+// mcp tool is judged at the latest revision alone, as its read_only_tools say what the server's
+// tool does, whatever revision lists it.
+func grantSendsOut(manifest core.Manifest, grant store.ToolGrant) bool {
+	if source := core.HTTPSource(manifest.Sources); source != nil {
+		for _, tool := range source.HTTPTools {
+			if tool.Name != grant.Name {
+				continue
+			}
+			// The digest is JSON of strings and maps, which always encodes: an error is no
+			// digest, which pins nothing.
+			digest, err := httpsource.ToolSchemaDigest(tool)
+			if err != nil || digest != grant.SchemaDigest {
+				return true
+			}
+		}
+	}
+	return manifest.SendsOutTool(grant.Name)
 }
 
 // holdsPattern reports whether the binding's require_approval holds every tool a tool pattern

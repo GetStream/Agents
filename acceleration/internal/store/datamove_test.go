@@ -2420,7 +2420,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 // read-only GET tool on an API taking a key.
 const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://api.weather.example/v1"},
 	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
-	"method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
+	"description": "The forecast for a city.", "method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
 
 // TestAnImportedHTTPDefinitionIsRefused: a definition the API would store for an http connector
 // is refused, and writes nothing, until AI-3676 lifts it (importableDefinition).

@@ -1,12 +1,15 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // SourceKindHTTP is the sources[].kind of the http source: the tools are the ones the manifest
@@ -100,6 +103,21 @@ var (
 	httpParameterName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 )
 
+// CheckHTTPSource is every rule of Manifest.Validate an http source breaks, or nil: the same
+// rules (checkHTTPSource), for the http tool source to hold a manifest it opens to again, so a
+// stored one that skipped validation cannot offer a tool that names a method override or writes
+// while saying it reads (AI-3675).
+func CheckHTTPSource(source SourceRule) error {
+	var errs []error
+	checkHTTPSource(func(field, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("%s: %s", field, fmt.Sprintf(format, args...)))
+	}, "sources[http]", source)
+	if len(errs) > 0 {
+		return stack.Wrap(errors.Join(errs...))
+	}
+	return nil
+}
+
 // checkHTTPSource refuses an http source whose tools a session could not offer or that could
 // write while saying they read. field names the source.
 func checkHTTPSource(fail func(field, format string, args ...any), field string, source SourceRule) {
@@ -130,6 +148,11 @@ func checkHTTPSource(fail func(field, format string, args ...any), field string,
 			fail(field+".name", "%q is named twice", tool.Name)
 		}
 		named[tool.Name] = true
+		// Why: a session refuses a tool with no description (harness.Tools.Validate), since the
+		// model would never know when to use it; refused here, the sync says so, not a session.
+		if tool.Description == "" {
+			fail(field+".description", "is empty: the model reads it to know when to use the tool")
+		}
 		if len(tool.Description) > maxHTTPToolDescription {
 			fail(field+".description", "is over %d bytes", maxHTTPToolDescription)
 		}
