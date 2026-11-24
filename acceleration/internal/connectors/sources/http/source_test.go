@@ -272,30 +272,44 @@ func (s *SourceSuite) TestOpenRefusesASourceThatBreaksARuleOfValidation() {
 }
 
 // R1.6 of AI-3674: a write's redirect is its answer, so a 307 or a 308 never sends its body
-// again, nor a DELETE to another path; a GET or a HEAD follows one within the origin.
+// again, nor a DELETE to another path; a GET or a HEAD follows one within the origin. R1.2 of
+// AI-3675: a write answered 301, 302 or 303 may have run, so the model reads that as a result.
 func (s *SourceSuite) TestOnlyAReadFollowsARedirect() {
 	for _, test := range []struct {
 		method, path string
-		// err is the tool error the model reads, "" when the redirect is followed.
-		err string
+		// err is the tool error the model reads, and answer the result, both "" when the
+		// redirect is followed.
+		err, answer string
 	}{
-		{http.MethodPost, "/moved-307", "The API answered 307 Temporary Redirect"},
-		{http.MethodPost, "/moved-308", "The API answered 308 Permanent Redirect"},
-		{http.MethodPut, "/moved-307", "The API answered 307 Temporary Redirect"},
-		{http.MethodPatch, "/moved-308", "The API answered 308 Permanent Redirect"},
-		{http.MethodDelete, "/moved-307", "The API answered 307 Temporary Redirect"},
-		{http.MethodPost, "/moved-303", "The API answered 303 See Other"},
-		{http.MethodGet, "/moved-307", ""},
-		{http.MethodGet, "/moved-301", ""},
-		{http.MethodHead, "/moved-308", ""},
+		{http.MethodPost, "/moved-307", "The API answered 307 Temporary Redirect", ""},
+		{http.MethodPost, "/moved-308", "The API answered 308 Permanent Redirect", ""},
+		{http.MethodPut, "/moved-307", "The API answered 307 Temporary Redirect", ""},
+		{http.MethodPatch, "/moved-308", "The API answered 308 Permanent Redirect", ""},
+		{http.MethodDelete, "/moved-307", "The API answered 307 Temporary Redirect", ""},
+		{http.MethodPost, "/moved-303", "", "The API answered 303 See Other; the request may have run."},
+		{http.MethodPut, "/moved-301", "", "The API answered 301 Moved Permanently; the request may have run."},
+		{http.MethodPatch, "/moved-302", "", "The API answered 302 Found; the request may have run."},
+		{http.MethodDelete, "/moved-303", "", "The API answered 303 See Other; the request may have run."},
+		{http.MethodGet, "/moved-307", "", ""},
+		{http.MethodGet, "/moved-301", "", ""},
+		{http.MethodGet, "/moved-302", "", ""},
+		{http.MethodGet, "/moved-303", "", ""},
+		{http.MethodHead, "/moved-308", "", ""},
+		{http.MethodHead, "/moved-303", "", ""},
 	} {
 		s.provider.reset()
 		tool := core.HTTPTool{Name: "act", Description: "Calls the API.", Method: test.method, Path: test.path,
 			Parameters: map[string]core.HTTPParameter{"q": {Type: "string"}}}
 
-		_, err := s.call(s.binding(tool), "act", `{"q":"x"}`)
+		result, err := s.call(s.binding(tool), "act", `{"q":"x"}`)
 
 		received := s.provider.requests()
+		if test.answer != "" {
+			s.Require().NoError(err, test.method+" "+test.path)
+			s.Equal(test.answer, llm.TextOf(result.Parts), test.method+" "+test.path)
+			s.Len(received, 1, test.method+" "+test.path+": the target got nothing")
+			continue
+		}
 		if test.err == "" {
 			s.Require().NoError(err, test.method+" "+test.path)
 			s.Require().Len(received, 2, test.method+" "+test.path)
@@ -842,7 +856,7 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/bad-byte-at-the-cap":
 		_, _ = io.WriteString(w, strings.Repeat("a", 4<<20-1))
 		_, _ = w.Write([]byte{0xff})
-	case "/moved-301", "/moved-303", "/moved-307", "/moved-308":
+	case "/moved-301", "/moved-302", "/moved-303", "/moved-307", "/moved-308":
 		code, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/moved-"))
 		http.Redirect(w, r, "/api/target", code)
 	case "/target":

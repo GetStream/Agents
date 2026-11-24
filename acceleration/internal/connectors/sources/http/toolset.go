@@ -148,6 +148,13 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 	if utf8.ValidString(body) {
 		text = body
 	}
+	// A write answered 301, 302 or 303 may have run: a 303 points at its outcome, and a 301 or a
+	// 302 may be followed as a GET (RFC 9110 sections 15.4.2 to 15.4.4); only a 307 or a 308 asks
+	// for the same request again. So the model reads it as a result, not as an error it might
+	// answer by calling the write again (AI-3675 R1.2). A read follows it (callClient).
+	if slices.Contains(ranRedirects, response.StatusCode) && !slices.Contains(redirectMethods, offered.tool.Method) {
+		return core.Result{Parts: llm.TextParts("The API answered " + status(response) + "; the request may have run.")}, nil
+	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		message := "The API answered " + status(response)
 		if len(body) > 0 {
@@ -173,6 +180,9 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 func status(response *http.Response) string {
 	return strings.TrimSpace(fmt.Sprintf("%d %s", response.StatusCode, http.StatusText(response.StatusCode)))
 }
+
+// ranRedirects are the redirects a write may have run before (Call).
+var ranRedirects = []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther}
 
 // errOtherResource is a path value that would make the path name another resource (builtPath).
 var errOtherResource = errors.New("a path value names another resource")

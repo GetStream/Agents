@@ -175,7 +175,8 @@ func (s *Source) callClient(client *http.Client) *http.Client {
 }
 
 // redirectMethods are the methods whose call follows a redirect: the reads. Any other method
-// gets the redirect as its answer, which the model reads as a tool error naming its status. A
+// gets the redirect as its answer, which the model reads as a tool error naming its status, or,
+// for a 301, a 302 or a 303, as a result saying the request may have run (Toolset.Call). A
 // write's method and path are what the manifest fixes and its owner approved, and net/http sends
 // a POST, a PUT or a PATCH body again on a 307 or a 308 (AI-3674 R1.6), so following one would run
 // the write, and maybe write twice, at a path the manifest does not name. The egress client
