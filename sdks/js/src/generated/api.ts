@@ -2140,7 +2140,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Continue a conversation as a new one
-         * @description Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+         * @description Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
          *     The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
          */
         readonly post: operations["forkSession"];
@@ -7615,6 +7615,7 @@ export type components = {
              * @default true
              */
             readonly messages?: boolean;
+            /** @description Server-side only: a device sending it is refused with a 403. */
             readonly model_overwrites?: components["schemas"]["ModelOverwrites"];
             readonly project_id?: string;
             /** @description Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false. */

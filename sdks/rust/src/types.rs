@@ -6264,6 +6264,7 @@ pub struct ForkSessionRequest {
     ///Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub messages: ::std::option::Option<bool>,
+    ///Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub model_overwrites: ::std::option::Option<ModelOverwrites>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]

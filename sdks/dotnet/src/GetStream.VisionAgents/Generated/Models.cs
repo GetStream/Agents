@@ -7954,6 +7954,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("messages")]
         public bool? Messages { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 

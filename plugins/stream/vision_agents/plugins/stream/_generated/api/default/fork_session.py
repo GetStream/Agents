@@ -106,7 +106,8 @@ def sync_detailed(
      Opens a session from another's spec, carrying its history across by default, and records where it
     came from. The usual reason is to ask the same question of a different model without losing the
     original answer, which is why anything in the request is written over what the parent was opened
-    with.
+    with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403,
+    and its fork runs on the models the parent has.
     The parent is untouched and keeps running if it was running. Forking an incognito session is refused
     rather than answered with an empty conversation: there is nothing recorded to fork from, and
     pretending otherwise would hand back a session that quietly lost everything the caller thought they
@@ -150,7 +151,8 @@ def sync(
      Opens a session from another's spec, carrying its history across by default, and records where it
     came from. The usual reason is to ask the same question of a different model without losing the
     original answer, which is why anything in the request is written over what the parent was opened
-    with.
+    with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403,
+    and its fork runs on the models the parent has.
     The parent is untouched and keeps running if it was running. Forking an incognito session is refused
     rather than answered with an empty conversation: there is nothing recorded to fork from, and
     pretending otherwise would hand back a session that quietly lost everything the caller thought they
@@ -189,7 +191,8 @@ async def asyncio_detailed(
      Opens a session from another's spec, carrying its history across by default, and records where it
     came from. The usual reason is to ask the same question of a different model without losing the
     original answer, which is why anything in the request is written over what the parent was opened
-    with.
+    with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403,
+    and its fork runs on the models the parent has.
     The parent is untouched and keeps running if it was running. Forking an incognito session is refused
     rather than answered with an empty conversation: there is nothing recorded to fork from, and
     pretending otherwise would hand back a session that quietly lost everything the caller thought they
@@ -231,7 +234,8 @@ async def asyncio(
      Opens a session from another's spec, carrying its history across by default, and records where it
     came from. The usual reason is to ask the same question of a different model without losing the
     original answer, which is why anything in the request is written over what the parent was opened
-    with.
+    with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403,
+    and its fork runs on the models the parent has.
     The parent is untouched and keeps running if it was running. Forking an incognito session is refused
     rather than answered with an empty conversation: there is nothing recorded to fork from, and
     pretending otherwise would hand back a session that quietly lost everything the caller thought they
