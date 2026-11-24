@@ -133,9 +133,9 @@ func (s *ScheduledTasksSuite) outcomeOf(done <-chan callOutcome) callOutcome {
 
 // shortCalls has calls ring for ring and last for limit.
 func (s *ScheduledTasksSuite) shortCalls(ring, limit time.Duration) {
-	window, longest := scheduledPhoneWindow, scheduledCallLimit
-	scheduledPhoneWindow, scheduledCallLimit = ring, limit
-	s.T().Cleanup(func() { scheduledPhoneWindow, scheduledCallLimit = window, longest })
+	window, longest := s.router.phoneWindow, s.router.callLimit
+	s.router.phoneWindow, s.router.callLimit = ring, limit
+	s.T().Cleanup(func() { s.router.phoneWindow, s.router.callLimit = window, longest })
 }
 
 // shortOfTime has calls ring for half of deliveryWait and last for all of it,
@@ -181,7 +181,7 @@ func (s *ScheduledTasksSuite) TestACallATaskPlacedIsGivenTheTaskAsItsFirstTurnAn
 	s.NotContains(model.instructions(), "<scheduled_task", "the task is no part of what the agent is told it is")
 	s.NotContains(model.instructions(), "Remind them to stretch.")
 	s.Contains(model.instructions(), "You have called this number", "the agent knows it placed the call")
-	s.GreaterOrEqual(time.Since(started), scheduledCallLimit, "the call was held until its limit")
+	s.GreaterOrEqual(time.Since(started), s.router.callLimit, "the call was held until its limit")
 	_, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
 	s.False(live, "the agent hung up at the call's limit")
 }
@@ -334,9 +334,7 @@ func (s *ScheduledTasksSuite) settledRun(task store.ScheduledTask) store.Schedul
 // retryLate has a failed occurrence wait ten minutes before it is tried
 // again, so one that finishes at once was not retried.
 func (s *ScheduledTasksSuite) retryLate() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{10 * time.Minute}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAfter(10 * time.Minute)
 }
 
 func (s *ScheduledTasksSuite) TestAPhoneTaskMoreThanAQuarterHourLateIsMissedWithoutACall() {
@@ -543,7 +541,7 @@ func (s *ScheduledTasksSuite) TestACallTheOccurrenceHasTimeToRingAndHoldIsTried(
 	s.shortCalls(2*time.Second, 10*time.Second)
 	task := s.phoneTask(s.data.createUser(), []string{"phone"}, time.Now())
 
-	run, err := s.deliverWithin(task, scheduledPhoneWindow+scheduledCallLimit+deliveryWait)
+	run, err := s.deliverWithin(task, s.router.phoneWindow+s.router.callLimit+deliveryWait)
 
 	failure := s.failure(err)
 	s.Equal(scheduling.ReasonFailed, failure.Reason, "the call was tried, and none can be placed here")
