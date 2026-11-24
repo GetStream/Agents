@@ -2673,7 +2673,9 @@ them without buying anything here. `POST /v1/phone/trunks` stores the trunk (hos
 transport, username, codecs, and whether it accepts an INVITE without SDP); the password is
 sealed under the deployment's key encryption key and never returned, and without such a key
 the trunk paths answer 400 `not_configured`. `POST /v1/phone/trunks/{id}/numbers` records a number on it with
-vendor `sip_trunk`. A call from that number is then placed by the router itself: it opens one
+vendor `sip_trunk`. A number another app holds here, bought or on its own trunk, is refused with
+409, and a call from a trunk number another app has since bought is refused with 400: Stream lists
+a number on one trunk per app, so the line made for one app's calls would take the other's. A call from that number is then placed by the router itself: it opens one
 SIP dialog to the customer's trunk and one to the Stream trunk made for the call, and copies
 SDP between them, so the audio goes from the carrier to Stream directly. `POST
 /v1/phone/calls` answers `queued` at once, as with every vendor. A wrong password, host or
@@ -2944,7 +2946,8 @@ the bucket is the operator's.
 
 Only a phone number on the app's own SIP trunk (vendor `sip_trunk`) moves, in E.164 form
 (`+15551234567`), and it arrives detached: its trunk, route, call and 10DLC use case stay
-behind, so it is attached again where it arrives. A number bought at a vendor does not move,
+behind, so it is attached again where it arrives. One that another app holds where it moves to is
+refused, unless the moving app holds it there too. A number bought at a vendor does not move,
 held or given back; its bills move with the requests. The app keeps it by buying or porting
 it where it moves to.
 
