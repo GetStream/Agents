@@ -105,7 +105,10 @@ Create does not need `scheduling.enabled`: that flag only offers the tools
 A move is refused with `interval_too_short` when it lands under 15 minutes from now
 (`scheduling.MinMove`, `scheduling.go:52`). One move is allowed: to or past the current run,
 when that run is still ahead. With no run pending, or with the current run already due,
-every move must be 15 minutes out (`scheduling.CheckMove`, `scheduling.go:59`).
+every move must be 15 minutes out (`scheduling.CheckMove`, `scheduling.go:59`). A schedule
+written to a failed task is held to the same check, since its resume takes the next run from
+that schedule. The agent's `schedule_task` sets a first run 15 minutes out at the soonest
+(`scheduling.CheckFirst`); a backend's create over REST has no floor.
 
 A task's `last_run_at` is when a run last finished, in UTC (`max(finished_at)`,
 `internal/store/scheduled_tasks.go:845`). A run's `scheduled_for` is when the occurrence was
@@ -115,7 +118,10 @@ and `last_run_at` Tue 10:00.
 
 Scheduled turns are customer spend: they never consume the end user's daily caps. That is
 the follow-up turn and the replies that finish it. What the user types after it is theirs
-again.
+again. So a scheduled turn cannot set a run going: `schedule_task`, and the `reschedule`,
+`snooze` and `resume` of `update_scheduled_task`, answer it `scheduled_turn`. Otherwise a
+task could make the next one, and they would run on, uncounted, with nobody asking again.
+It may still list, pause, skip and cancel.
 
 Delivery goes where the task says, in order (`deliver_to`, default the conversation alone).
 The agent's reply is written once in its conversation, under the run's command id. A text

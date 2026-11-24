@@ -474,7 +474,8 @@ func (s *Server) rescheduleTask(task *store.ScheduledTask, written ScheduledTask
 	if err != nil {
 		return scheduleFailure(err)
 	}
-	if task.State == store.ScheduledTaskActive || task.State == store.ScheduledTaskPaused {
+	running := task.State == store.ScheduledTaskActive || task.State == store.ScheduledTaskPaused
+	if running || task.State == store.ScheduledTaskFailed {
 		// A new start that has passed moves to the next occurrence, its COUNT
 		// counted from there, as a create does. The stored start sent back
 		// (an edit of the repeat or until alone) keeps counting from it. A
@@ -483,14 +484,20 @@ func (s *Server) rescheduleTask(task *store.ScheduledTask, written ScheduledTask
 		if parsed.MovesStartFrom(task.StartLocal) {
 			next, ok = parsed.FromNow(now)
 		}
-		if !ok {
+		if !ok && running {
 			return scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 				Message: "that schedule has no occurrence left; its last one has passed"})
 		}
-		if err := scheduling.CheckMove(next, current, now); err != nil {
-			return scheduleFailure(err)
+		// A failed task takes its next run from this schedule when it is resumed, which
+		// checks nothing, so a schedule written to it is held to the floor here.
+		if ok {
+			if err := scheduling.CheckMove(next, current, now); err != nil {
+				return scheduleFailure(err)
+			}
 		}
-		task.NextRunAt = &next
+		if running {
+			task.NextRunAt = &next
+		}
 	}
 	task.StartLocal, task.Timezone, task.RRule = parsed.StartLocal, parsed.Timezone, parsed.Repeat
 	task.UntilDate = nil

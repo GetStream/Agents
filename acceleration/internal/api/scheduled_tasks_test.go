@@ -1004,21 +1004,129 @@ func (s *ScheduledTasksSuite) TestADueTaskFollowsUpInTheConversationItWasSchedul
 
 // The worker sleeps up to a lease (a minute) when nothing is due sooner; a
 // task the agent makes or changes wakes it, so one due in seconds is
-// delivered in seconds, well inside that minute.
-func (s *ScheduledTasksSuite) TestATaskTheAgentMakesDueInSecondsIsDeliveredWithoutWaitingForTheWorker() {
+// delivered in seconds, well inside that minute. The agent cannot make one due
+// in seconds itself (TestTheAgentCannotScheduleATaskSoonerThanAQuarterHour),
+// so the one due is written straight to the store, which wakes nothing.
+func (s *ScheduledTasksSuite) TestATaskTheAgentMakesWakesTheWorkerForOneDueInSeconds() {
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
 	s.runWorker()
+	waiting := s.createTask(user, utcTaskRequest(config))
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
-		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","in":"PT3S","timezone":"UTC"}`})
+		Arguments: `{"title":"Water","instructions":"Remind them to drink water.","in":"PT2H","timezone":"UTC"}`})
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
-	s.say(user, opened.Id, "remind me to stretch in three seconds")
-	s.ranResult(watching)
+	soon := time.Now().UTC().Add(5 * time.Second).Truncate(time.Second)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+		Set("start_local = ?", soon).Set("next_run_at = ?", soon).
+		Where("customer_id = ?", s.customerID()).Where("id = ?", waiting.Id).
+		Exec(context.Background())
+	s.Require().NoError(err)
 
-	tasks := s.tasksOf(user)
-	s.Require().Len(tasks, 1)
-	s.deliveredWithin(tasks[0], 20*time.Second)
+	s.say(user, opened.Id, "remind me to drink water in two hours")
+	s.Contains(s.ranResult(watching), `"title":"Water"`)
+
+	s.deliveredWithin(store.ScheduledTask{ID: waiting.Id}, 20*time.Second)
+}
+
+// A first run under a quarter hour away is refused, as a move to one is: without the
+// floor, a task made a second ahead, again and again, buys a turn a second.
+func (s *ScheduledTasksSuite) TestTheAgentCannotScheduleATaskSoonerThanAQuarterHour() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","in":"PT5M","timezone":"UTC"}`})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+
+	s.say(user, opened.Id, "remind me to stretch in five minutes")
+
+	s.Contains(s.ranResult(watching), `"error":"interval_too_short"`)
+	s.Empty(s.tasksOf(user))
+}
+
+// dueInItsConversation is a task the backend made in a conversation the user has open,
+// with the worker running, for a test to plan what the task's turn does and then
+// makeDue it.
+func (s *ScheduledTasksSuite) dueInItsConversation() (*testClient, Session, store.ScheduledTask) {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, nil)
+	s.runWorker()
+	return user, opened, s.tasksOf(user)[0]
+}
+
+// A turn a scheduled task fires is never on the user's day: a task that could make another
+// would run on uncounted with nobody asking again, a second apart for as long as it liked.
+func (s *ScheduledTasksSuite) TestATasksTurnCannotScheduleATask() {
+	user, _, task := s.dueInItsConversation()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Again","instructions":"Do this again.","in":"PT20M","timezone":"UTC"}`})
+
+	s.makeDue(task)
+
+	s.delivered(task)
+	s.toldTheModel(`"error":"scheduled_turn"`)
+	s.Len(s.tasksOf(user), 1, "the task's turn made no task")
+}
+
+// What a task's turn may not do to a task is set a run going: a move, or a resume.
+func (s *ScheduledTasksSuite) TestATasksTurnCannotRescheduleSnoozeOrResumeATask() {
+	user, _, task := s.dueInItsConversation()
+	other := s.createTask(user, utcTaskRequest(task.ConfigID))
+	paused := s.createTask(user, utcTaskRequest(task.ConfigID))
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+paused.Id+"/pause", nil, nil))
+	before := s.taskReloaded(store.ScheduledTask{ID: other.Id})
+	s.schedulingScript.plan(
+		llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+			Arguments: `{"id":"` + other.Id + `","action":"reschedule","in":"PT20M"}`},
+		llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+			Arguments: `{"id":"` + other.Id + `","action":"snooze","in":"PT30M"}`},
+		llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+			Arguments: `{"id":"` + paused.Id + `","action":"resume"}`})
+
+	s.makeDue(task)
+
+	s.delivered(task)
+	s.toldTheModel(`"error":"scheduled_turn"`)
+	after := s.taskReloaded(store.ScheduledTask{ID: other.Id})
+	s.Require().NotNil(after.NextRunAt)
+	s.True(before.NextRunAt.Equal(*after.NextRunAt), "moved from %s to %s", before.NextRunAt, after.NextRunAt)
+	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(store.ScheduledTask{ID: paused.Id}).State)
+}
+
+// A pause sets no run going, so a task's turn may still pause a task, as one whose
+// instructions say to stop once the user is done would.
+func (s *ScheduledTasksSuite) TestATasksTurnMayPauseATask() {
+	user, _, task := s.dueInItsConversation()
+	other := s.createTask(user, utcTaskRequest(task.ConfigID))
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + other.Id + `","action":"pause"}`})
+
+	s.makeDue(task)
+
+	s.delivered(task)
+	s.Eventually(func() bool {
+		return s.taskReloaded(store.ScheduledTask{ID: other.Id}).State == store.ScheduledTaskPaused
+	}, settleFor, 50*time.Millisecond, "the task's turn did not pause the other task")
+}
+
+// The refusal is the task's turn's alone: what the user says next in the same
+// conversation is theirs, and may schedule.
+func (s *ScheduledTasksSuite) TestTheUsersTurnAfterATasksTurnMaySchedule() {
+	user, opened, task := s.dueInItsConversation()
+	watching := s.watch(user, opened.Id)
+	s.makeDue(task)
+	s.delivered(task)
+	s.await(watching, "responded")
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Water","instructions":"Remind them to drink water.","in":"PT2H","timezone":"UTC"}`})
+
+	s.say(user, opened.Id, "and remind me to drink water in two hours")
+
+	s.Contains(s.ranResult(watching), `"title":"Water"`)
+	s.Len(s.tasksOf(user), 2)
 }
 
 func (s *ScheduledTasksSuite) TestATaskTheAgentResumesDueInSecondsIsDeliveredWithoutWaitingForTheWorker() {
@@ -2070,13 +2178,15 @@ func (s *ScheduledTasksSuite) TestARepeatWrittenFromAPastDateStartsAtItsNextOccu
 	nextOf(updated, fmt.Sprintf("%02d:00", second))
 }
 
-// threeDaysAgo is midnight UTC three days back: a daily COUNT=3 from it has
-// let all three occurrences pass. It returns that start and the next three
-// midnights, the occurrences a create from it is to run.
+// threeDaysAgo is three days back, in UTC, at the minute an hour from now
+// reads: a daily COUNT=3 from it has let all three occurrences pass. It returns
+// that start and the next three times that minute comes, the occurrences a
+// create from it is to run. The first is an hour away, so the agent's floor on
+// a first run never refuses it, whatever time the test runs at.
 func threeDaysAgo() (string, []time.Time) {
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	return today.AddDate(0, 0, -3).Format("2006-01-02T15:04"),
-		[]time.Time{today.AddDate(0, 0, 1), today.AddDate(0, 0, 2), today.AddDate(0, 0, 3)}
+	next := time.Now().UTC().Add(time.Hour).Truncate(time.Minute)
+	return next.AddDate(0, 0, -3).Format("2006-01-02T15:04"),
+		[]time.Time{next, next.AddDate(0, 0, 1), next.AddDate(0, 0, 2)}
 }
 
 func (s *ScheduledTasksSuite) TestARepeatCreatedWithItsStartPassedRunsItsWholeCountFromNow() {
@@ -2796,6 +2906,25 @@ func (s *ScheduledTasksSuite) TestAFailedOneShotIsRefusedOnResumeUntilItIsResche
 	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, path+"/resume", nil, &resumed))
 	s.Equal(store.ScheduledTaskActive, resumed.State)
 	s.NotNil(resumed.NextRunAt)
+}
+
+// A resume takes a failed task's next run from its schedule as written, so the schedule is
+// held to the floor when it is written: else a device would re-arm a failed one-shot a
+// second ahead, again and again, a turn a second on nobody's day.
+func (s *ScheduledTasksSuite) TestAFailedTaskCannotBeRescheduledSoonerThanAQuarterHour() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, utcTaskRequest(config))
+	path := "/v1/agents/scheduled-tasks/" + created.Id
+	s.ranOut(created.Id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 1)
+
+	status, answered := s.taskFailure(user, http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo("PT1S")}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code)
+	s.refusedAsInThePast(user, created.Id)
+	s.Equal(store.ScheduledTaskFailed, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }
 
 func (s *ScheduledTasksSuite) TestATaskWithNoOccurrenceLeftIsRefusedBeforeItsLimitOrItsConfigIsAsked() {

@@ -253,9 +253,24 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   (unit).
 - **No zone is a refusal, not a guess.** `TestResolveZoneWithoutAnyZoneAsks` (unit),
   `TestScheduledTasksSuite/TestATaskIsRefusedInWordsWhenNoZoneIsKnown`.
-- **A run moved earlier lands 15 min from now at the soonest** (`MinMove`).
+- **A run moved earlier lands 15 min from now at the soonest** (`MinMove`), and so does the
+  first run of a task the agent makes (`CheckFirst`) and a schedule written to a failed task,
+  whose resume takes its next run from it unchecked. A backend's REST create has no floor.
   `TestAMoveLandsNoSoonerThanMinMoveUnlessItKeepsTheCurrentRun` (unit),
-  `TestScheduledTasksSuite/TestANextSoonerThanAQuarterHourIsRefused`.
+  `TestAFirstRunLandsNoSoonerThanMinMove` (unit),
+  `TestScheduledTasksSuite/TestANextSoonerThanAQuarterHourIsRefused`,
+  `TestScheduledTasksSuite/TestTheAgentCannotScheduleATaskSoonerThanAQuarterHour`,
+  `TestScheduledTasksSuite/TestAFailedTaskCannotBeRescheduledSoonerThanAQuarterHour`.
+- **A scheduled turn sets no run going.** It is never on the user's day, so a task that made
+  the next one would run on uncounted. A tool call the agent asks for in it carries
+  `agent.WithScheduledCall` (set in `Agent.prepareTool` from `toolScheduled`), and
+  `schedule_task` and the `reschedule`, `snooze` and `resume` of `update_scheduled_task` answer
+  it `scheduled_turn`; list, pause, skip and cancel still run. The user's next turn is theirs.
+  `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATask`,
+  `TestScheduledTasksSuite/TestATasksTurnCannotRescheduleSnoozeOrResumeATask`,
+  `TestScheduledTasksSuite/TestATasksTurnMayPauseATask`,
+  `TestScheduledTasksSuite/TestTheUsersTurnAfterATasksTurnMaySchedule`,
+  `TestTelnyxChannelSuite/TestATasksTurnOnAThreadCannotScheduleATask`.
 - **The tools go only to verified users with scheduling on, outside incognito.**
   `TestScheduledTasksSuite/TestGuestsAndAnonymousCallersAreNotOfferedTheTools`,
   `TestScheduledTasksSuite/TestAnIncognitoSessionIsNotOfferedTheTools`,
@@ -309,7 +324,6 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestTelnyxChannelSuite/TestAThreadTaskInItsQuietHoursIsHeld`,
   `TestTelnyxChannelSuite/TestAThreadTasksDeliverToCannotChange`,
   `TestTelnyxChannelSuite/TestAThreadTaskSaysItIsDeliveredOnTheThreadsChannel`,
-  `TestTelnyxChannelSuite/TestATaskScheduledInATasksTurnIsDeliveredOnTheThreadToo`,
   `TestWhatsAppChannelSuite/TestAWhatsAppThreadTaskSaysItIsDeliveredOnWhatsApp`,
   `TestTelnyxChannelSuite/TestAPersonWhoOptedOutIsNotTextedAndTheTaskIsNotRetried`,
   `TestTelnyxChannelSuite/TestATaskOnARemovedLineFailsFinally`,
