@@ -3445,7 +3445,7 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
-        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("paused_reason")]
         public string? PausedReason { get; set; } = default!;
@@ -3550,7 +3550,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Minutes after the previous attempt started, pushed into the calling hours.
+        /// Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("delay_minutes")]
         public long DelayMinutes { get; set; } = default!;
@@ -6167,7 +6167,7 @@ namespace GetStream.VisionAgents.Models
         public string? Outcome { get; set; } = default!;
 
         /// <summary>
-        /// Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
+        /// Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("result")]
         public string Result { get; set; } = default!;
@@ -15185,11 +15185,17 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("cost_micros_total")]
         public long CostMicrosTotal { get; set; } = default!;
 
+        /// <summary>
+        /// True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("other")]
+        public bool? Other { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("request_count")]
         public long RequestCount { get; set; } = default!;
 
         /// <summary>
-        /// The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+        /// The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("value")]
         public string Value { get; set; } = default!;

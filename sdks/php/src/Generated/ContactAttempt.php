@@ -15,7 +15,7 @@ final readonly class ContactAttempt
         public int $attempt,
         // 1, or 2 for the second call of a double dial.
         public int $dial,
-        // Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped be...
+        // Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped befo...
         public string $result,
         public \DateTimeImmutable $startedAt,
         public ?string $callId = null,

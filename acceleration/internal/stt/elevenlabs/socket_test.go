@@ -286,22 +286,23 @@ func (s *ElevenlabsSocketSuite) TestClosingIsNotSatisfiedByASegmentFromEarlierIn
 	s.speak(provider, []int16{1, 2, 3})
 	s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(
 		`{"message_type":"committed_transcript","text":"Hello."}`)))
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(
+		`{"message_type":"partial_transcript","text":"and"}`)))
 
-	// Give the segment time to land before closing, so the wait below is for one that
-	// comes after the audio stopped rather than for that one.
+	// The segment's transcript is sent before the boundary that tells Close it has settled,
+	// so closing on that transcript alone can leave the boundary still on its way, and Close
+	// would take it for the tail. The partial is the next frame: hearing it means the reader
+	// is done with the segment, and the wait below is for one that comes after the audio
+	// stopped rather than for that one.
 	deadline := time.After(5 * time.Second)
-	for {
-		heard := false
+	for heard := false; !heard; {
 		select {
 		case event := <-provider.Events():
-			if transcript, ok := event.(stt.Transcript); ok && transcript.Final() {
+			if transcript, ok := event.(stt.Transcript); ok && !transcript.Final() {
 				heard = true
 			}
 		case <-deadline:
-			s.FailNow("the first segment never arrived")
-		}
-		if heard {
-			break
+			s.FailNow("the next segment never began")
 		}
 	}
 

@@ -4383,7 +4383,7 @@ export type paths = {
          * What the calling customer spent, grouped
          * @description Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
          *     scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-         *     Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+         *     Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
          *     Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
          */
         readonly get: operations["getSpend"];
@@ -5869,7 +5869,7 @@ export type components = {
             /** Format: date-time */
             readonly launched_at?: string;
             readonly name: string;
-            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
+            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
             readonly paused_reason?: string;
             readonly sequence: components["schemas"]["CampaignSequence"];
             /**
@@ -5925,7 +5925,7 @@ export type components = {
         readonly CampaignAttempt: {
             /**
              * Format: int64
-             * @description Minutes after the previous attempt started, pushed into the calling hours.
+             * @description Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
              */
             readonly delay_minutes: number;
         };
@@ -6891,7 +6891,7 @@ export type components = {
             readonly ended_at?: string;
             /** @description The outcome an answered call was read as: no_response when nobody but the agent spoke. */
             readonly outcome?: string;
-            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
+            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
             readonly result: string;
             /** Format: date-time */
             readonly started_at: string;
@@ -10467,10 +10467,12 @@ export type components = {
              * @description Millionths of a dollar, priced from the configured rates.
              */
             readonly cost_micros_total: number;
+            /** @description True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other. */
+            readonly other?: boolean;
             /** Format: int64 */
             readonly request_count: number;
             /**
-             * @description The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+             * @description The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
              * @example support
              */
             readonly value: string;

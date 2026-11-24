@@ -582,6 +582,27 @@ func (s *ServerSuite) TestSpendByUserAcrossTheOrganization() {
 		spentBy(s.spend("group_by=who%3Aorigin&granularity=daily&scope=organization")))
 }
 
+func (s *ServerSuite) TestALabelValuedOtherIsKeptApartFromTheRest() {
+	for value, cost := range map[string]int64{"other": 5_000, "a": 3_000, "b": 1_000, "c": 500} {
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+			Modality: "llm", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, APIKey: "key",
+			Provider: "stub", Model: "stub-llm", StartedAt: s.base.Add(5 * time.Minute), CostMicros: cost,
+			Billable: true, Success: true, Tags: map[string]string{"project": value},
+		}))
+	}
+
+	type row struct {
+		value string
+		other bool
+	}
+	spent := map[row]int64{}
+	for _, bucket := range s.spend("group_by=project&granularity=daily&limit=2") {
+		spent[row{bucket.Value, bucket.Other}] += bucket.CostMicrosTotal
+	}
+
+	s.Equal(map[row]int64{{"other", false}: 5_000, {"a", false}: 3_000, {"other", true}: 1_500}, spent)
+}
+
 // who:origin groups by the key or origin that started the work (AI-2811).
 func (s *ServerSuite) TestSpendByOrigin() {
 	organization := s.app.organization.ID

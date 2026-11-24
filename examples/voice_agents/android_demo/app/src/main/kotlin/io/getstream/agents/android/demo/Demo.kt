@@ -35,9 +35,8 @@ object Demo {
     val backendUrl: String = BuildConfig.BACKEND_URL
 
     /**
-     * Whichever customer id you started the router with. `compose.yaml` builds the dashboard
-     * with `examples`, and a config belongs to one customer, so anything else here works but
-     * will not appear on the dashboard.
+     * Whichever customer id you stored the agent under: a config belongs to one customer.
+     * The Volt dashboard shows a numeric app id's configs, not those under `examples`.
      */
     const val CUSTOMER_ID: String = "examples"
 
