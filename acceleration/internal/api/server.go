@@ -1367,13 +1367,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		principal, err := s.authenticator.Authenticate(ctx, r)
 		span.End()
 		if errors.Is(err, auth.ErrLevelRefused) {
-			s.logger.Debug("refused a level of user this app turns away",
-				"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
-			// The caller proved which app it is of, so its lines name the app, though it is
-			// no customer here: nothing it asked for is counted under the app.
-			r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
-			s.refuseLogged(w, r, forbidden("this app does not accept "+
-				"requests from this level of user"))
+			s.refuseLevel(w, r, principal)
 			return
 		}
 		// The categories are what the request's usage is counted under, so a request naming
@@ -1403,6 +1397,13 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			return
 		}
 		if err == nil && principal.AppID != "" {
+			guest := s.guest(r.Context(), principal)
+			// The authenticator asked whether the app admits a KindGuest. One this router minted
+			// it took for an account, so that is asked here.
+			if guest && principal.Kind != auth.KindGuest && !s.guestAdmitted(r.Context(), principal.AppID) {
+				s.refuseLevel(w, r, principal)
+				return
+			}
 			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
 			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)
 			ctx = context.WithValue(ctx, serverSideContextKey{}, principal.ServerSide)
@@ -1414,6 +1415,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				IP:         s.callerIP(r, principal.UserID),
 				ServerSide: principal.ServerSide,
 				Verified:   principal.UserID != "" && principal.Kind.Verified(),
+				Guest:      guest,
 			})
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
@@ -1425,6 +1427,58 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// refuseLevel answers a caller whose level the app turns away.
+func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	s.logger.Debug("refused a level of user this app turns away",
+		"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
+	// The caller proved which app it is of, so its lines name the app, though it is
+	// no customer here: nothing it asked for is counted under the app.
+	r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
+	s.refuseLogged(w, r, forbidden("this app does not accept "+
+		"requests from this level of user"))
+}
+
+// guest reports whether the caller is a guest: by kind, or one this router minted, whose token
+// reads as an account's. A backend naming a guest is a backend.
+func (s *Server) guest(ctx context.Context, principal auth.Principal) bool {
+	if principal.ServerSide {
+		return false
+	}
+	return s.guestUser(ctx, principal.AppID, principal.UserID, principal.Kind)
+}
+
+// guestUser is guest for a user an end user's credential of that kind named. Only an id the
+// router could have minted is looked up. One whose row cannot be read is taken for a guest, so
+// that a database that is down does not make an account of one; nothing but what a guest is not
+// given is lost to a user of the app's own whose id starts the same way.
+func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) bool {
+	if kind != auth.KindAuthenticated {
+		return kind == auth.KindGuest
+	}
+	if s.store == nil || !strings.HasPrefix(userID, guestPrefix) {
+		return false
+	}
+	minted, err := s.store.Users.Minted(ctx, customerID, userID)
+	if err != nil {
+		s.logger.Error("could not read whether a user is a guest, taking them for one",
+			"customer", customerID, "user", userID, "error", err)
+		return true
+	}
+	return minted
+}
+
+// guestAdmitted reports whether the app takes guests. Settings that cannot be read admit, as an
+// app with none does: an outage must not turn the guests of every app away.
+func (s *Server) guestAdmitted(ctx context.Context, customerID string) bool {
+	settings, err := s.store.Apps.GetSettings(ctx, customerID)
+	if err != nil {
+		s.logger.Error("could not read whether an app admits guests, admitting one",
+			"customer", customerID, "error", err)
+		return true
+	}
+	return settings.GuestAllowed()
 }
 
 // attributionOf is who a request's usage is recorded as asked for by. The user is recorded as

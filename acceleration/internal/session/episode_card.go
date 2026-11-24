@@ -175,12 +175,12 @@ func (c *callCards) read(ctx context.Context, spec Spec, stream streamapp.Bound)
 
 // deviceCaller reports whether the session was opened by the person's own device: an end user
 // whose token was signed for them (auth.KindAuthenticated: by the app's secret in api_key
-// mode, by Stream behind the gateway). Not a guest, whose account is a temporary one the app
-// does not know, nor an anonymous caller, who may go by any name, nor a backend, the app's
+// mode, by Stream behind the gateway). Not a guest (routing.Caller.Guest), whose account is a
+// temporary one the app does not know, nor an anonymous caller, who may go by any name, nor a backend, the app's
 // worker or a scheduled task acting for a user (routing.Caller.ServerSide), which no device of
 // the person's opened.
 func deviceCaller(spec Spec) bool {
-	return spec.CallerKind == auth.KindAuthenticated && spec.Caller.UserID != "" && !spec.Caller.ServerSide
+	return spec.CallerKind == auth.KindAuthenticated && spec.Caller.UserID != "" && !spec.Caller.ServerSide && !spec.Caller.Guest
 }
 
 // checksTokens reports whether Stream says the app the session acts in checks the tokens it is

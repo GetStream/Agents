@@ -164,10 +164,13 @@ const (
 	KindServer Kind = "server"
 	// KindAuthenticated is an end user whose token was verified.
 	KindAuthenticated Kind = "authenticated"
-	// KindGuest is an end user whose token was verified and who Stream issued as a guest:
-	// a real user with a temporary account rather than one the customer knows. It is
-	// treated exactly as KindAuthenticated is, and kept apart from it only so a caller
-	// can be told which it was.
+	// KindGuest is an end user whose verified token says the role guest: a real user with a
+	// temporary account rather than one the customer knows. The app signs such a token itself;
+	// one Stream issues, or this router mints (POST /v1/agents/guests), says no role, so its
+	// holder is KindAuthenticated, and a guest the router minted is known by its row
+	// (routing.Caller.Guest). What is theirs is kept apart from a KindAuthenticated user's of
+	// the same id, an app may turn them away (Levels), and neither scheduling nor the
+	// connectors a user owns are offered to them.
 	KindGuest Kind = "guest"
 	// KindAnonymous is an end user who presented no token. Whatever name such a caller
 	// goes by is a claim nobody checked, which is why the kind travels with it.
@@ -526,10 +529,8 @@ func userClaim(claims jwt.MapClaims) string {
 	return strings.TrimSpace(named)
 }
 
-// guestToken reads whether the user this token names is one Stream issued as a guest. It
-// is the role claim a guest token carries. A guest is a verified user with a temporary
-// account and reaches exactly what a permanent one does; the kind is kept apart so a
-// caller can be told which it was talking to, and so an app can decline to take them.
+// guestToken reads whether a token says the role guest. The app that signs it says so: neither
+// Stream's own tokens nor the ones this router mints carry a role claim (KindGuest).
 func guestToken(claims jwt.MapClaims) bool {
 	role, _ := claims["role"].(string)
 	return strings.EqualFold(strings.TrimSpace(role), string(KindGuest))

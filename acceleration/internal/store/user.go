@@ -3,13 +3,18 @@ package store
 import (
 	"container/list"
 	"context"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidisaside"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // userTTL is how long a user's key lives in Redis. It is a backstop rather than a policy:
@@ -56,10 +61,15 @@ const seenCapacity = 10_000
 // The email a backend says its user signs in with is said on every request too, and is
 // held in an LRU of its own, by user and address, for emailTTL: a changed address is written
 // at once.
+//
+// Whether the router minted a user as a guest is read on each of their requests (Minted), and
+// held apart from all of that: a user is seen whether or not they were minted.
 type Users struct {
 	store  *Store
 	seen   *seen
 	emails *seen
+	// minted is what Minted read, in a router with no Redis to hold it.
+	minted *seen
 
 	// emailTTL is emailTTL; a test shortens it.
 	emailTTL time.Duration
@@ -69,7 +79,7 @@ type Users struct {
 }
 
 func newUsers(s *Store) *Users {
-	return &Users{store: s, seen: newSeen(seenCapacity), emails: newSeen(seenCapacity), emailTTL: emailTTL}
+	return &Users{store: s, seen: newSeen(seenCapacity), emails: newSeen(seenCapacity), minted: newSeen(seenCapacity), emailTTL: emailTTL}
 }
 
 // Seen records that an app acted for a user, as the kind their own token proved them to
@@ -223,6 +233,62 @@ func (r *Users) emailLock(customerID, userID string) *sync.Mutex {
 	return &r.emailLocks[hash.Sum32()%emailStripes]
 }
 
+// Minted reports whether a user is a guest this router handed out (InsertGuest), through the
+// cache. A claimed guest still is one, and no row is none.
+//
+// The answer is held in Redis and in the copy each router tracks of it, or in an LRU of this
+// router's with no Redis, where nothing tells it of another router's write. One that could
+// become yes (InsertGuest, a moved row) is kept for missTTL, and a failed read is not kept.
+func (r *Users) Minted(ctx context.Context, customerID, userID string) (bool, error) {
+	if customerID == "" || userID == "" {
+		return false, nil
+	}
+	if r.store.cache != nil {
+		return cached(ctx, r.store, mintedKey(customerID, userID), func(ctx context.Context) (bool, error) {
+			minted, err := r.readMinted(ctx, customerID, userID)
+			if err == nil && !minted {
+				rueidisaside.OverrideCacheTTL(ctx, missTTL)
+			}
+			return minted, err
+		})
+	}
+	for _, minted := range []bool{true, false} {
+		if r.minted.Holds(customerID, userID, strconv.FormatBool(minted), time.Now()) {
+			return minted, nil
+		}
+	}
+	minted, err := r.readMinted(ctx, customerID, userID)
+	if err != nil {
+		return false, err
+	}
+	r.minted.Keep(customerID, userID, strconv.FormatBool(minted), time.Now().Add(missTTL))
+	return minted, nil
+}
+
+func (r *Users) readMinted(ctx context.Context, customerID, userID string) (bool, error) {
+	minted, err := r.store.global.NewSelect().Model((*User)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", userID).
+		Where("kind = ?", UserKindGuest).
+		Where("minted").
+		Exists(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: minted guest: %w", err))
+	}
+	return minted, nil
+}
+
+// mintedKey names the cached answer of Minted.
+func mintedKey(customerID, userID string) string {
+	return cacheKey("minted-guest", customerID, userID)
+}
+
+// forgetMinted drops what Minted holds for a user, here and in every router on this Redis.
+func (r *Users) forgetMinted(ctx context.Context, customerID, userID string) {
+	r.minted.Remove(customerID, userID)
+	r.store.forget(ctx, mintedKey(customerID, userID))
+}
+
 // Forget drops a user from the caches, for one whose row has changed under them. Deleting
 // the key is what tells the other replicas and, once Redis sends it, this process's own
 // copy too; this process's entry goes directly as well, so it does not wait for that.
@@ -244,6 +310,7 @@ func (r *Users) forgetKeys(names []string) {
 	for _, name := range names {
 		if customerID, userID, named := splitUserKey(name); named {
 			r.seen.Remove(customerID, userID)
+			r.minted.Remove(customerID, userID)
 		}
 	}
 }

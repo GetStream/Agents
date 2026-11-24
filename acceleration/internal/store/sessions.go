@@ -108,7 +108,11 @@ func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string
 func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
-	return r.Insert(ctx, guest)
+	if err := r.Insert(ctx, guest); err != nil {
+		return err
+	}
+	r.forgetMinted(ctx, guest.CustomerID, guest.ID)
+	return nil
 }
 
 // GetGuest returns one guest of a customer's. A user of some other kind is not one: an
