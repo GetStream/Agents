@@ -328,6 +328,14 @@ func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
 	// matches the clock digits of the line's turn id and time.
 	s.NotContains(fmt.Sprint(back), "•••99")
 	s.NotContains(fmt.Sprint(back), "555 010")
+	// Digits only, so the number is caught in any punctuation: "5550100199", "555-010-0199".
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, fmt.Sprint(back))
+	s.NotContains(digits, "5550100199")
 }
 
 // interruptsATool has the caller interrupt while a tool runs, the tool asking policy of the
