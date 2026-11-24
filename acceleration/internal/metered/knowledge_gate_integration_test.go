@@ -206,6 +206,10 @@ func (s *KnowledgeGateSuite) TestAnUnpricedLookupIsServedToAnOwnerWhoMayPay() {
 	s.NoError(s.search())
 	s.NoError(s.fetch(1))
 	s.EqualValues(2, s.asked.Load())
+
+	s.own(0)
+	s.ErrorIs(s.search(), policy.ErrNoCredits)
+	s.ErrorIs(s.fetch(1), policy.ErrNoCredits)
 }
 
 func (s *KnowledgeGateSuite) TestALookupThatCostsNothingNeedsNoCredit() {
@@ -230,6 +234,7 @@ func (s *KnowledgeGateSuite) TestABaseInTheCustomersOwnAccountIsReadWithNoCredit
 
 	s.suspend()
 	s.ErrorIs(s.search(), policy.ErrSuspended)
+	s.ErrorIs(s.fetch(1), policy.ErrSuspended)
 }
 
 func (s *KnowledgeGateSuite) TestARouterThatHasReadNothingRefusesASuspendedOrganization() {
