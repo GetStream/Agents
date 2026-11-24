@@ -169,3 +169,10 @@ func (s *StoreSuite) TestImageJobQueryBudgets() {
 		s.Equal(int64(1), pruned)
 	}), "Prune")
 }
+
+// PostedImageJobsAreDeletedAfterADayAndFailedOnesAfter30Days, with a backlog of more than one statement's worth.
+func (s *StoreSuite) TestABacklogOfFinishedImageJobsIsPrunedWhole() {
+	s.inSmallBatches()
+	deletes := s.statementsLike("DELETE FROM image_jobs", s.TestPostedImageJobsAreDeletedAfterADayAndFailedOnesAfter30Days)
+	s.Equal(3, deletes, "a row per statement, then the one that finds none")
+}

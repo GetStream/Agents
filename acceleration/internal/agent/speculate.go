@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -203,7 +204,7 @@ func (a *Agent) speculate(current *harness.Harness, ready candidate, speaking, a
 	for _, dropped := range stale {
 		dropped.drop()
 	}
-	go a.runSpeculation(spec)
+	goroutine.Go(a.ctx, func() { a.runSpeculation(spec) })
 	return unified
 }
 

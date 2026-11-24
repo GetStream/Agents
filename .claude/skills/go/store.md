@@ -70,6 +70,11 @@ A state change that is more than a column write gets a domain verb on the same r
   It takes the store's `rueidis.Client`.
 - Any method touching more than one key sends one round trip: `DoMulti`, a `MULTI`, or a Lua
   script. A loop issuing one command per item is a bug.
+- Each Redis command of a cached read (`cachedFor`) waits `cacheWait` (250ms) for its answer,
+  and so does any command on the shared client sent with no deadline, rueidisaside's own
+  among them (`cacheReadBound`); then the row is read
+  from Postgres. A Redis that is down slows a request and does not stop it. The load itself
+  runs on the caller's context, and the readers of a cold key on one router share it.
 - Every key has a TTL or a named owner that deletes it. Name keys `<family>:{<customer>}:...`
   so a customer's keys share a cluster slot when a script needs several.
 - Rate limiters, admission counters and pub/sub stay in their own packages (`policy`,
@@ -93,6 +98,13 @@ A state change that is more than a column write gets a domain verb on the same r
   `nextDue` says when to look again, and every write after the claim goes through `heldBy`,
   so a claim whose lease ran out cannot overwrite the next one. `image_jobs.go` is the
   example. Do not write the claim by hand.
+- Every serving connection runs with `statement_timeout` 8s, `lock_timeout` 3s,
+  `idle_in_transaction_session_timeout` 30s and `timezone` UTC (`sessionDefaults` in
+  `store.go`); a parameter the DSN names wins. Work that legitimately takes longer raises the
+  limits for its own transaction with `boundTransaction` (the export, the grant reconcile,
+  a trunk group), or a `SET LOCAL` of its own (`VendorCostGaps`). A prune or rename over
+  many rows goes `writeBatch` rows per statement (`deleteInBatches`), and a rollup a bucket at
+  a time: the driver gives up after 10 s, so no statement may outgrow that.
 
 ## Naming
 

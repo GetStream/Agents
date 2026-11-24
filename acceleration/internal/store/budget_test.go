@@ -68,6 +68,40 @@ func (s *StoreSuite) countEveryQuery() {
 	}
 }
 
+// statementsOf counts the statements starting with prefix sent while it is active.
+type statementsOf struct {
+	prefix string
+	active atomic.Bool
+	sent   atomic.Int64
+}
+
+func (c *statementsOf) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (c *statementsOf) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if c.active.Load() && strings.HasPrefix(event.Query, c.prefix) {
+		c.sent.Add(1)
+	}
+}
+
+// statementsLike is how many statements starting with prefix run sends, on every database the
+// store holds: how many batches a batched write took.
+func (s *StoreSuite) statementsLike(prefix string, run func()) int {
+	counter := &statementsOf{prefix: prefix}
+	databases := append([]*bun.DB{s.store.global}, s.store.peers...)
+	if s.store.Sharded() {
+		databases = append(databases, s.store.shard)
+	}
+	for _, db := range databases {
+		db.AddQueryHook(counter)
+	}
+	counter.active.Store(true)
+	run()
+	counter.active.Store(false)
+	return int(counter.sent.Load())
+}
+
 // roundTrips counts what the store sends Redis: a command, or a pipeline of them, is one.
 type roundTrips struct{ sent atomic.Int64 }
 

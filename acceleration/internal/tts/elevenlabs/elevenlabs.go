@@ -27,6 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -262,6 +263,9 @@ func (a *dialAttempt) finish(keep bool) bool {
 
 // TTS is a streaming ElevenLabs text-to-speech session.
 type TTS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a reconnect.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -408,6 +412,7 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("elevenlabs: already started"))
 	}
 	t.started = true
+	t.call = ctx
 	t.session, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	session := t.session
 	t.mu.Unlock()
@@ -797,7 +802,7 @@ func (t *TTS) connect(ctx context.Context) (*socket, *http.Response, error) {
 	t.mu.Unlock()
 
 	t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
-	go t.readLoop(sock)
+	goroutine.Go(t.call, func() { t.readLoop(sock) })
 	return sock, response, nil
 }
 

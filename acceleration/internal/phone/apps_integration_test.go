@@ -2658,7 +2658,7 @@ func (s *AppsSuite) TestReleasingANumberLinedSinceItWasReadTakesItOffItsTrunk() 
 	lined, err := s.lineFor(s.customer, s.e164)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.service.unline(s.ctx, stale, "released a number", true))
+	s.Require().NoError(s.service.unline(s.ctx, stale, "released a number", time.Now().UTC()))
 
 	s.Equal([]string{second}, s.own.TrunkNumbers(lined.TrunkID))
 	s.Equal([]string{other.RouteID}, s.own.Rules())
