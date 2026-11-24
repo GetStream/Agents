@@ -7458,7 +7458,7 @@ namespace GetStream.VisionAgents.Models
         public double? MinConfidence { get; set; } = default!;
 
         /// <summary>
-        /// Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+        /// Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it, and one naming a provider that is not a candidate is refused.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("overwrites")]
         public System.Collections.Generic.Dictionary<string, object>? Overwrites { get; set; } = default!;

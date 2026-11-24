@@ -21,9 +21,9 @@ sent, so a caller never needs the image size to draw it.
 
 ## The vendors, and what each calls the same thing
 
-| Option | Moondream | Roboflow model | Roboflow Workflow | Ultralytics YOLO |
+| Option | Moondream | Roboflow model | Roboflow faces Workflow | Ultralytics YOLO |
 | --- | --- | --- | --- | --- |
-| endpoint | `POST api.moondream.ai/v1/detect` | `POST serverless.roboflow.com/{project}/{version}` | `POST serverless.roboflow.com/workflows/run` or `/infer/workflows/{ws}/{id}` | `POST platform.ultralytics.com/api/models/{owner}/{project}/{model}/predict` |
+| endpoint | `POST api.moondream.ai/v1/detect` | `POST serverless.roboflow.com/{project}/{version}` | `POST serverless.roboflow.com/workflows/run`, the built-in `specification` in the body | `POST platform.ultralytics.com/api/models/{owner}/{project}/{model}/predict` |
 | auth | `X-Moondream-Auth` | `api_key` query | `api_key` body | `Authorization: Bearer`, optional for public models |
 | image | `image_url` data URI | base64 body, form encoded | `inputs.image {type: base64}` | multipart `file` |
 | `classes` | `object`, free text, one call per class | filter after the fact | filter after the fact | filter after the fact |
@@ -51,7 +51,7 @@ The terms a detection model declares in `supports:`:
 | --- | --- | --- |
 | `open_vocabulary` | `classes` may be any words, not only trained labels | Moondream |
 | `confidence` | `min_confidence` is honoured | Roboflow, Ultralytics |
-| `embeddings` | each box carries a vector | `roboflow/faces`, `roboflow/workflow` |
+| `embeddings` | each box carries a vector | `roboflow/faces` |
 
 A request that asks for one is only routed to a model that declared it, and a term nothing can
 serve is a 400 naming it. A fixed-class model asked for "package" would return an empty list
@@ -59,14 +59,15 @@ that looks like "there is no package", which is the exact failure terms exist to
 
 ## Overwrites
 
-`options.overwrites` carries what the vocabulary has no word for, keyed by provider:
+`options.overwrites` carries what the vocabulary has no word for, keyed by provider. No
+detection provider takes one today, and each refuses one it is sent.
 
-```json
-{"overwrites": {"roboflow": {"workspace": "acme", "workflow_id": "doorbell"}}}
-```
-
-- `roboflow/workflow` needs `workspace` and `workflow_id` (a saved Workflow), or `specification`
-  (an inline one). It must output `predictions`, and may output `embeddings`, one per box.
+- There is no Workflow of the caller's own. Roboflow runs a Workflow on the account of the key
+  it is sent with, which is the deployment's, and a Workflow can run any block Roboflow has:
+  vision language models billed by the second, uploads into the account's datasets, webhooks.
+  `roboflow/workflow`, which took a `specification` or a `workspace` and `workflow_id`, is
+  retired for `roboflow/faces`. One comes back only on the customer's own Roboflow key, which
+  detection does not take yet.
 - There is no overwrite for an address. Ultralytics' shared API is limited to 20 requests a
   minute, and a deployment that needs more names a dedicated endpoint in `ULTRALYTICS_ENDPOINT`.
   That is the operator's to set, because whatever address it names is sent the key and the

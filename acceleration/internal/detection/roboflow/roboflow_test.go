@@ -152,10 +152,8 @@ func (s *RoboflowSuite) TestAWorkflowIsBilledAnImageForEveryModelCallRoboflowLis
 	s.answering(workflowTwoFaces)
 	s.processing = `[{"m": "coco/3", "t": 0.012}, {"m": "face-detection-mik1i/18", "t": 0.017}, ` +
 		`{"m": "clip/embed_image", "t": 0.007}, {"m": "clip/embed_image", "t": 0.005}]`
-	request := frame()
-	request.Overwrite = json.RawMessage(`{"workspace": "acme", "workflow_id": "doorbell"}`)
 
-	found, err := s.provider(ModelWorkflow).Detect(context.Background(), request)
+	found, err := s.provider(ModelFaces).Detect(context.Background(), frame())
 
 	s.Require().NoError(err)
 	s.Equal(4, found.Billed, "two detectors over the image, and CLIP once for each face's crop")
@@ -190,19 +188,27 @@ func (s *RoboflowSuite) TestARateLimitedKeyHandsTheWorkflowToTheNextKey() {
 	s.Equal([]any{first, second}, keys)
 }
 
-func (s *RoboflowSuite) TestASavedWorkflowIsCalledByItsWorkspaceAndId() {
-	s.answering(workflowTwoFaces)
-	request := frame()
-	request.Overwrite = json.RawMessage(`{"workspace": "acme", "workflow_id": "doorbell"}`)
+func (s *RoboflowSuite) TestAWorkflowOfTheCallersOwnIsNoModel() {
+	_, err := New(Options{APIKey: "rf-key", Model: "workflow"})
 
-	_, err := s.provider(ModelWorkflow).Detect(context.Background(), request)
-
-	s.Require().NoError(err)
-	s.Equal("/infer/workflows/acme/doorbell", s.seen()[0].path)
+	s.ErrorContains(err, "project/version")
 }
 
-func (s *RoboflowSuite) TestAWorkflowNamingNoWorkflowIsRefusedWithoutACall() {
-	_, err := s.provider(ModelWorkflow).Detect(context.Background(), frame())
+func (s *RoboflowSuite) TestTheFaceWorkflowRunsNoSpecificationTheCallerSent() {
+	request := frame()
+	request.Overwrite = json.RawMessage(`{"specification": {"version": "1.0", "steps": [{"type": "roboflow_core/webhook_sink@v1"}]}}`)
+
+	_, err := s.provider(ModelFaces).Detect(context.Background(), request)
+
+	s.Equal(detection.UnsupportedOption, detection.CodeOf(err))
+	s.Empty(s.seen())
+}
+
+func (s *RoboflowSuite) TestAHostedModelCallsNoWorkflowTheCallerNamed() {
+	request := frame()
+	request.Overwrite = json.RawMessage(`{"workspace": "..", "workflow_id": ".."}`)
+
+	_, err := s.provider("coco/3").Detect(context.Background(), request)
 
 	s.Equal(detection.UnsupportedOption, detection.CodeOf(err))
 	s.Empty(s.seen())
