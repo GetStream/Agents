@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -222,6 +223,8 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseEverySaveFailsI
 	s.Contains(line, s.customerID())
 	s.Contains(line, "slack_bot")
 	s.Contains(line, "attempts=3")
+	s.Equal([]string{"time", "level", "msg", "customer", "connector", "attempts", "error"}, logAttributes(line),
+		"no field beside these, so none can hold the sealed pair or a token")
 	// The router's logger masks a Slack token as [redacted], so a token the line held would show as that.
 	s.NotContains(line, "[redacted]", "neither the configuration token nor its refresh token is logged")
 	s.False(strings.Contains(s.logged.String(), "xoxe"), "nor in the clear")
@@ -420,6 +423,18 @@ func (s *ConnectorProviderAppsSuite) create(name string) ConnectorProviderApp {
 	s.Require().NoError(json.Unmarshal(payload, &created))
 	return created
 }
+
+// logAttributes is the keys of a text log line, in order; a quoted value is skipped whole, so
+// a key= inside a message is not one.
+func logAttributes(line string) []string {
+	var keys []string
+	for _, found := range logAttribute.FindAllStringSubmatch(line, -1) {
+		keys = append(keys, found[1])
+	}
+	return keys
+}
+
+var logAttribute = regexp.MustCompile(`(?:^| )([A-Za-z_][\w.]*)=("(?:[^"\\]|\\.)*"|\S*)`)
 
 // linesWith is the lines the router logged that hold text.
 func (s *ConnectorProviderAppsSuite) linesWith(text string) []string {
