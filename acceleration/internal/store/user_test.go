@@ -442,6 +442,35 @@ func (s *StoreSuite) TestAUserIsHeldByTheReplicaThatWroteThemHoweverLateItsOwnIn
 	s.Equal("authenticated", held)
 }
 
+// An account's sighting replaces a guest's and not the other way round, so two callers naming one
+// user as each stop costing anything once the account is written.
+func (s *StoreSuite) TestOneUserSeenAsAGuestAndAsAnAccountStopsCostingAnything() {
+	app, other := s.freshApp(), s.replicaUsers()
+	s.Require().NoError(other.Seen(s.ctx, app, "u", UserKindGuest))
+	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "u", UserKindGuest))
+	s.Require().NoError(other.Seen(s.ctx, app, "u", UserKindAuthenticated))
+	// What the account's write dropped here is read again, once.
+	s.Require().Eventually(func() bool {
+		s.Require().NoError(s.store.Users.Seen(s.ctx, app, "u", UserKindAuthenticated))
+		held, _ := s.store.Users.seen.Value(app, "u")
+		return held == UserKindAuthenticated
+	}, settleFor, 10*time.Millisecond)
+
+	var trips int
+	queries := s.countQueries(func() {
+		trips = s.countRedis(func() {
+			for range 20 {
+				s.Require().NoError(s.store.Users.Seen(s.ctx, app, "u", UserKindGuest))
+				s.Require().NoError(s.store.Users.Seen(s.ctx, app, "u", UserKindAuthenticated))
+				s.Require().NoError(other.Seen(s.ctx, app, "u", UserKindGuest))
+			}
+		})
+	})
+
+	s.Zero(queries)
+	s.Zero(trips)
+}
+
 func (s *StoreSuite) TestAUserWrittenWhileRedisHangsIsHeld() {
 	hung, line := s.storeOnRedisLine()
 	line.freeze()
