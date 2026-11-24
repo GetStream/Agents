@@ -189,14 +189,19 @@ func (r *EventDeliveries) Finish(ctx context.Context, destinationID, id string) 
 	return stack.Wrap(err)
 }
 
-// Release gives back a claim that made no attempt: the attempt its claim counted is taken back,
-// and the delivery is due again after, on Postgres's clock, for a router that can send it.
-func (r *EventDeliveries) Release(ctx context.Context, destinationID, id string, after time.Duration) error {
+// Release gives back the claim of delivery that made no attempt: the attempt its claim counted
+// is taken back, and the delivery is due again after, on Postgres's clock, for a router that can
+// send it. It changes the row only while that claim still holds it, by the attempts and the
+// lease the claim wrote: a release whose lease ran out, and whose row another router claimed
+// since, would otherwise undo the newer claim.
+func (r *EventDeliveries) Release(ctx context.Context, delivery ClaimedEventDelivery, after time.Duration) error {
 	_, err := r.store.global.NewUpdate().Model((*EventDelivery)(nil)).
 		Set("attempts = greatest(attempts - 1, 0)").
 		Set("next_attempt_at = now() + make_interval(secs => ?)", after.Seconds()).
-		Where("destination_id = ?", destinationID).
-		Where("id = ?", id).
+		Where("destination_id = ?", delivery.DestinationID).
+		Where("id = ?", delivery.ID).
+		Where("attempts = ?", delivery.Attempts).
+		Where("next_attempt_at = ?", delivery.NextAttemptAt).
 		Exec(ctx)
 	return stack.Wrap(err)
 }

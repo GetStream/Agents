@@ -243,12 +243,36 @@ func (s *StoreSuite) TestAClaimCountsItsAttemptAndAReleaseTakesItBack() {
 	s.Require().Len(second, 1)
 	s.Equal([]int{1, 2}, []int{first[0].Attempts, second[0].Attempts})
 
-	s.Require().NoError(s.store.EventDeliveries.Release(s.ctx, "every", "msg_one", 0))
+	s.Require().NoError(s.store.EventDeliveries.Release(s.ctx, second[0], 0))
 
-	again, err := s.store.EventDeliveries.Claim(s.ctx, time.Now(), 10, 10, nil, time.Now().Add(time.Hour))
+	// A minute on, past the release's now() on Postgres's clock, which may run ahead of this
+	// process's.
+	later := time.Now().Add(time.Minute)
+	again, err := s.store.EventDeliveries.Claim(s.ctx, later, 10, 10, nil, later.Add(time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(again, 1, "due again after the release's wait, though the last claim's lease runs an hour")
 	s.Equal(2, again[0].Attempts, "the released claim is not counted")
+}
+
+// A release names the claim it gives back: one whose lease ran out, and whose row another
+// router claimed since, leaves the newer claim alone.
+func (s *StoreSuite) TestAReleaseOfAClaimTakenOverChangesNothing() {
+	s.eventDestination("acme-app", "slack_bot", "every", ForwardAll)
+	_, err := s.store.EventDeliveries.Queue(s.ctx, "acme-app", "slack_bot", []string{ForwardAll}, EventDelivery{ID: "msg_one", Body: []byte("{}"), NextAttemptAt: s.base})
+	s.Require().NoError(err)
+	stale, err := s.store.EventDeliveries.Claim(s.ctx, s.base, 10, 10, nil, s.base)
+	s.Require().NoError(err)
+	s.Require().Len(stale, 1)
+	current, err := s.store.EventDeliveries.Claim(s.ctx, s.base, 10, 10, nil, s.base.Add(time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(current, 1)
+
+	s.Require().NoError(s.store.EventDeliveries.Release(s.ctx, stale[0], 0))
+
+	var held EventDelivery
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&held).Where("id = ?", "msg_one").Scan(s.ctx))
+	s.Equal(2, held.Attempts, "the current claim's count")
+	s.True(held.NextAttemptAt.Equal(s.base.Add(time.Hour)), "the current claim's lease: %s", held.NextAttemptAt)
 }
 
 func (s *StoreSuite) TestDeletingADestinationDropsItsPendingDeliveries() {
@@ -341,4 +365,7 @@ func (s *StoreSuite) TestEventDeliveryQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.EventDeliveries.Finish(s.ctx, claimed[1].DestinationID, claimed[1].ID))
 	}), "Finish")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.EventDeliveries.Release(s.ctx, claimed[2], time.Minute))
+	}), "Release")
 }

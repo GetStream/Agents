@@ -134,7 +134,13 @@ func (s *ForwarderSuite) TestAForwardWhoseSecretThisRouterCannotOpenIsLeftToOneT
 		Retries: []time.Duration{time.Millisecond, time.Millisecond}, Poll: 10 * time.Millisecond})
 	s.Require().NoError(err)
 	customer := s.destinationOf(holder, target.URL)
-	s.forwarder(target.Client())
+	// Its releases are due a 200 ms lease later, and its retries are long, so it leaves the
+	// forward for the holder well before it would give it up.
+	keyOne, err := New(Options{Store: s.store, Secrets: s.sealer, HTTP: target.Client(),
+		Retries: []time.Duration{time.Minute}, Poll: 10 * time.Millisecond, Lease: 200 * time.Millisecond})
+	s.Require().NoError(err)
+	keyOne.Start()
+	s.T().Cleanup(keyOne.Close)
 
 	s.Require().NoError(holder.Forward(s.ctx, Event{CustomerID: customer, ConnectorID: "slack_bot", Body: []byte(`{"sealed":2}`)}))
 
@@ -144,6 +150,47 @@ func (s *ForwarderSuite) TestAForwardWhoseSecretThisRouterCannotOpenIsLeftToOneT
 	s.T().Cleanup(holder.Close)
 	s.Require().Eventually(func() bool { return s.pending(customer) == 0 }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(int32(1), hits.Load())
+}
+
+// A forward sealed under a key version no router holds is released a lease at a time, not
+// claimed again every poll, and given up once it has waited out its retries, rather than
+// cycled for ever.
+func (s *ForwarderSuite) TestAForwardNoRouterCanSignIsGivenUpAndNotClaimedEveryPoll() {
+	var hits atomic.Int32
+	target := s.destination(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) })
+	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "test key one", 2: "test key two"})
+	s.Require().NoError(err)
+	sealer, err := New(Options{Store: s.store, Secrets: rotated, HTTP: target.Client()})
+	s.Require().NoError(err)
+	customer := s.destinationOf(sealer, target.URL)
+	own, err := store.Open(s.dsn)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
+	releases := &releaseCount{}
+	own.GlobalDB().AddQueryHook(releases)
+	keyOne, err := New(Options{Store: own, Secrets: s.sealer, HTTP: target.Client(),
+		Retries: []time.Duration{time.Millisecond}, Poll: 10 * time.Millisecond, Lease: 500 * time.Millisecond})
+	s.Require().NoError(err)
+	keyOne.Start()
+	s.T().Cleanup(keyOne.Close)
+
+	s.Require().NoError(sealer.Forward(s.ctx, Event{CustomerID: customer, ConnectorID: "slack_bot", Body: []byte(`{"sealed":2}`)}))
+
+	s.Require().Eventually(func() bool { return s.pending(customer) == 0 }, 5*time.Second, 10*time.Millisecond)
+	s.Zero(hits.Load())
+	s.GreaterOrEqual(releases.Load(), int32(1), "left for another router before it was given up")
+	s.LessOrEqual(releases.Load(), int32(2), "released a lease at a time, over about a second, not every 10 ms poll")
+}
+
+// releaseCount counts the releases a store sent Postgres.
+type releaseCount struct{ atomic.Int32 }
+
+func (*releaseCount) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+
+func (r *releaseCount) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, "greatest(attempts - 1") {
+		r.Add(1)
+	}
 }
 
 // The spec: «3xx: Failure. Following redirects causes unnecessary load on both the sender and

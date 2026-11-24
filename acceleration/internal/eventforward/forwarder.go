@@ -157,9 +157,12 @@ type Forwarder struct {
 	// sending is how many sends to each destination are running, by destination id.
 	mu      sync.Mutex
 	sending map[string]int
-	ctx     context.Context
-	cancel  context.CancelFunc
-	working sync.WaitGroup
+	// unopenedAt is when this router last logged that it cannot open a destination's signing
+	// secret, by destination id (unopened).
+	unopenedAt map[string]time.Time
+	ctx        context.Context
+	cancel     context.CancelFunc
+	working    sync.WaitGroup
 }
 
 // Event is one verified provider delivery of one customer's provider app.
@@ -224,20 +227,21 @@ func New(options Options) (*Forwarder, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Forwarder{
-		store:     options.Store,
-		secrets:   options.Secrets,
-		http:      &unredirected,
-		publicURL: publicURL,
-		retries:   retries,
-		poll:      poll,
-		lease:     leaseFor,
-		activity:  options.Activity,
-		logger:    logger,
-		kick:      make(chan struct{}, 1),
-		slots:     make(chan struct{}, inFlight),
-		sending:   map[string]int{},
-		ctx:       ctx,
-		cancel:    cancel,
+		store:      options.Store,
+		secrets:    options.Secrets,
+		http:       &unredirected,
+		publicURL:  publicURL,
+		retries:    retries,
+		poll:       poll,
+		lease:      leaseFor,
+		activity:   options.Activity,
+		logger:     logger,
+		kick:       make(chan struct{}, 1),
+		slots:      make(chan struct{}, inFlight),
+		sending:    map[string]int{},
+		unopenedAt: map[string]time.Time{},
+		ctx:        ctx,
+		cancel:     cancel,
 	}, nil
 }
 
@@ -525,13 +529,18 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	// The claim counted this attempt.
 	attempts := delivery.Attempts
 	switch {
+	case errors.Is(err, auth.ErrKeyVersionUnavailable) && time.Since(delivery.CreatedAt) > f.unsignedWait():
+		// No router opened it for longer than its retries would have run: none holds the key.
+		log.Warn("gave up an event forward no router could sign", "error", err)
+		f.count(delivery, codeNotSent)
+		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	case errors.Is(err, auth.ErrKeyVersionUnavailable):
 		// Another router may hold the key version the secret was sealed with: this one sent
 		// nothing, so the delivery goes back to the queue with no attempt counted. It is due
-		// again a poll later, not at once, or this router, woken by its own finished send,
-		// would take it straight back each time and starve the router that can send it.
-		log.Error("this router cannot open an event destination's signing secret; the forward is left to another", "error", err)
-		err = f.store.EventDeliveries.Release(writing, delivery.DestinationID, delivery.ID, f.poll)
+		// again a lease later, as if its claim had run out, not at once: this router, woken by
+		// its own finished send, would take the destination's backlog straight back every poll.
+		f.unopened(log, delivery.DestinationID, err)
+		err = f.store.EventDeliveries.Release(writing, delivery, f.lease)
 	case err == nil:
 		f.count(delivery, "")
 		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
@@ -546,6 +555,32 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	if err != nil {
 		log.Error("could not record an event forward's attempt", "error", err)
 	}
+}
+
+// unsignedWait is how long a forward no router can sign is left for one that can: its whole
+// retry schedule, and a lease for the release that ends it.
+func (f *Forwarder) unsignedWait() time.Duration {
+	wait := f.lease
+	for _, retry := range f.retries {
+		wait += retry
+	}
+	return wait
+}
+
+// unopened logs that this router cannot open a destination's signing secret, once a lease for
+// each destination: a destination's whole backlog fails alike, and one line says it.
+func (f *Forwarder) unopened(log *slog.Logger, destinationID string, err error) {
+	f.mu.Lock()
+	last, seen := f.unopenedAt[destinationID]
+	due := !seen || time.Since(last) >= f.lease
+	if due {
+		f.unopenedAt[destinationID] = time.Now()
+	}
+	f.mu.Unlock()
+	if !due {
+		return
+	}
+	log.Error("this router cannot open an event destination's signing secret; its forwards are left to another", "error", err)
 }
 
 // giveUpUnsent drops a delivery claimed more times than it may be tried: each claim before
