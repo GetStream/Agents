@@ -2318,7 +2318,7 @@ func queueRedis(redis config.Redis, shared rueidis.Client) asynq.RedisConnOpt {
 }
 
 // newKnowledge is the knowledge base every lookup and write goes through, a backend in each
-// region the settings map, recorded by recorder, each write admitted by gate, and the place
+// region the settings map, recorded by recorder, each read and write admitted by gate, and the place
 // each base is kept recorded in pgStore: its region, and the customer's own account there when
 // keys holds their turbopuffer key for it as the base is first written. Nil without a
 // turbopuffer key of the deployment's.

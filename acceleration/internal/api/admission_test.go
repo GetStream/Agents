@@ -823,6 +823,30 @@ func (s *AdmissionSuite) TestAKnowledgeIngestWithNoCreditIsAPaymentRequiredAndWr
 	s.Empty(s.documents(namespace))
 }
 
+func (s *AdmissionSuite) TestAKnowledgeDocumentsPassagesNeedCredit() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	namespace := "namespace-" + s.utils.uuid()
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/knowledge",
+		s.knowledgeRequest(namespace, "refunds.md"), nil))
+	listed := s.documents(namespace)
+	s.Require().Len(listed, 1)
+	passages := "/v1/agents/knowledge/documents/" + listed[0].Id + "/passages"
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, passages, nil, nil))
+	s.usage.Credit(s.T(), s.organization(), -10_000_000)
+
+	status, failure := s.refused(http.MethodGet, passages, nil)
+
+	s.Equal(http.StatusPaymentRequired, status)
+	s.Equal(codeInsufficientCredits, failure.Code)
+
+	s.usage.Suspend(s.T(), s.organization(), "review "+s.utils.uuid())
+	s.Eventually(func() bool {
+		status, failure = s.refused(http.MethodGet, passages, nil)
+		return status == http.StatusForbidden
+	}, 10*time.Second, 50*time.Millisecond)
+	s.Equal(codeAccountSuspended, failure.Code)
+}
+
 func (s *AdmissionSuite) TestAKnowledgeIngestForASuspendedAccountIsForbidden() {
 	s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
