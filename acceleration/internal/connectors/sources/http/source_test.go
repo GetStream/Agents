@@ -290,6 +290,7 @@ func (s *SourceSuite) TestOnlyAReadFollowsARedirect() {
 		{http.MethodPut, "/moved-301", "", "The API answered 301 Moved Permanently; the request may have run."},
 		{http.MethodPatch, "/moved-302", "", "The API answered 302 Found; the request may have run."},
 		{http.MethodDelete, "/moved-303", "", "The API answered 303 See Other; the request may have run."},
+		{http.MethodPost, "/moved-reason", "", "The API answered 303 See Other; the request may have run."},
 		{http.MethodGet, "/moved-307", "", ""},
 		{http.MethodGet, "/moved-301", "", ""},
 		{http.MethodGet, "/moved-302", "", ""},
@@ -861,6 +862,8 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/moved-301", "/moved-302", "/moved-303", "/moved-307", "/moved-308":
 		code, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/moved-"))
 		http.Redirect(w, r, "/api/target", code)
+	case "/moved-reason":
+		answerWithReason(w, "303 seen "+r.Header.Get("Authorization"))
 	case "/moved-nowhere":
 		w.WriteHeader(http.StatusFound)
 	case "/target":
