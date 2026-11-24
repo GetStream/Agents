@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
@@ -107,7 +108,11 @@ type SandboxesOptions struct {
 	// one for their region has their sandboxes made there. Nil makes every one in the
 	// deployment's.
 	Keys routing.CustomerKeys
-	// Every is how long a slice of a sandbox's time runs. Zero is routing.SliceEvery.
+	// Gate admits each sandbox as a model call is admitted, before it is made or started again
+	// and while it runs. Nil admits every sandbox.
+	Gate routing.Gate
+	// Every is how long a slice of a sandbox's time runs, and how often a running sandbox is
+	// admitted again. Zero is routing.SliceEvery.
 	Every  time.Duration
 	Logger *slog.Logger
 }
@@ -153,6 +158,12 @@ type SandboxSpec struct {
 // An owner who keeps a Daytona key for the work's region has the sandbox made in their own
 // organization on it, on the same target, labelled LabelAccount, its secrets kept there too, and
 // its time priced at the BYOK entry.
+//
+// The sandbox is admitted through Gate before it is made or started again, and while it runs,
+// as a model call is: an owner whose organization is suspended is refused, and so is one whose
+// work may spend no money (Admission.Spend), unless the sandbox is in their own organization,
+// which Daytona bills them for. A running sandbox refused is stopped, unless its money only
+// could not be checked.
 func (s *Sandboxes) Open(ctx context.Context, owner routing.Owner, spec SandboxSpec) (sandbox.Sandbox, error) {
 	switch {
 	case owner.CustomerID == "":
@@ -183,9 +194,29 @@ func (s *Sandboxes) Open(ctx context.Context, owner routing.Owner, spec SandboxS
 	return daytona.New(daytona.Options{
 		APIKey: apiKey, APIURL: s.options.APIURL, Target: target, Config: spec.Config, Grants: spec.Grants, Broker: broker,
 		Labels: labels, Lifecycle: s.options.Lifecycle, Logger: s.options.Logger, Slots: spec.Slots,
+		Admit: s.admit(owner, byok), AdmitEvery: s.options.Every,
 		Meter: &sandboxMeter{recorder: s.options.Recorder, owner: owner, every: s.options.Every, deployment: s.options.Deployment,
 			region: region, byok: byok},
 	})
+}
+
+// admit is how owner's sandbox is admitted (Open), byok one in their own Daytona organization;
+// nil with no Gate. Money that could not be checked passes again on its own (policy.Transient),
+// so a sandbox already running is not stopped for it.
+func (s *Sandboxes) admit(owner routing.Owner, byok bool) func(context.Context, bool) error {
+	if s.options.Gate == nil {
+		return nil
+	}
+	return func(ctx context.Context, running bool) error {
+		admission, err := s.options.Gate.Admit(ctx, owner)
+		if err == nil && !byok {
+			err = stack.Wrap(admission.Spend)
+		}
+		if running && policy.Transient(err) {
+			return nil
+		}
+		return err
+	}
 }
 
 // Serves reports whether sandboxes are made in region: the default one always, any other on

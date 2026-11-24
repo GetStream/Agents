@@ -79,12 +79,13 @@ func sandboxRouter(settings config.Config) string {
 
 // newSandboxes makes the sessions' sandboxes, labelled with the deployment and shard, each on
 // the Daytona target of the region its session's work is done in, in the owner's own
-// organization when keys holds their Daytona key for that region, and billed through the
-// process's writer.
+// organization when keys holds their Daytona key for that region, admitted by gate, and billed
+// through the process's writer.
 func newSandboxes(settings config.Config, writer *routing.Writer, prices pricing.Pricer,
-	keys routing.CustomerKeys, logger *slog.Logger) *metered.Sandboxes {
+	keys routing.CustomerKeys, gate routing.Gate, logger *slog.Logger) *metered.Sandboxes {
 	return metered.NewSandboxes(metered.SandboxesOptions{
 		Recorder:    routing.NewRecorderOn(routing.Sandbox, writer, prices, logger),
+		Gate:        gate,
 		Deployment:  settings.CodeSandbox.Deployment,
 		Environment: sandboxEnvironment(),
 		Router:      sandboxRouter(settings),

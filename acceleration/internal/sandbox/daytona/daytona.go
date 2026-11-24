@@ -73,6 +73,10 @@ const buildTimeout = 20 * time.Minute
 // pythonVersion is the slim Python image a setup without an image of its own starts from.
 const pythonVersion = "3.13"
 
+// defaultAdmitEvery is how often a running sandbox is admitted again, so one its owner may no
+// longer pay for runs about a minute more.
+const defaultAdmitEvery = time.Minute
+
 type Options struct {
 	APIKey, APIURL string
 	// Target is the Daytona region the sandbox is made in, such as eu. Empty is DAYTONA_TARGET,
@@ -103,6 +107,13 @@ type Options struct {
 	// Slots bound how many sandboxes run at once: one is taken before the sandbox is made or
 	// started again, and given back once it stops or is gone. Nil bounds nothing.
 	Slots sandbox.Slots
+	// Admit refuses a sandbox its owner may not pay for. It is asked before each piece of work
+	// in the sandbox, which its refusal refuses before anything is made or started again, and
+	// every AdmitEvery while the sandbox runs; running says it runs already, and a refusal of
+	// one that does stops it, as one stopped for idling. Nil admits every sandbox.
+	Admit func(ctx context.Context, running bool) error
+	// AdmitEvery is how often a running sandbox is admitted again. Zero is a minute.
+	AdmitEvery time.Duration
 }
 
 // Reserved is what a sandbox holds, which Daytona bills by the second: its vCPUs, memory and
@@ -175,6 +186,9 @@ type Sandbox struct {
 	meter     Meter
 	slots     sandbox.Slots
 	logger    *slog.Logger
+	// admit and admitEvery are Options.Admit and Options.AdmitEvery.
+	admit      func(ctx context.Context, running bool) error
+	admitEvery time.Duration
 	// slot gives back the slot the sandbox holds while it runs, nil while it holds none. It is
 	// held under the gate.
 	slot func()
@@ -222,6 +236,9 @@ func New(o Options) (*Sandbox, error) {
 	if o.Meter == nil {
 		o.Meter = unmetered{}
 	}
+	if o.AdmitEvery <= 0 {
+		o.AdmitEvery = defaultAdmitEvery
+	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
@@ -233,7 +250,7 @@ func New(o Options) (*Sandbox, error) {
 	return &Sandbox{client: c, gate: make(chan struct{}, 1), timeout: o.Timeout, runTimeout: o.RunTimeout, config: o.Config,
 		check: min(o.Timeout, defaultTimeout), state: stateTimeout,
 		grants: o.Grants, broker: o.Broker, labels: maps.Clone(o.Labels), lifecycle: o.Lifecycle, meter: o.Meter,
-		slots: o.Slots, logger: o.Logger, grace: stopGrace}, nil
+		slots: o.Slots, logger: o.Logger, admit: o.Admit, admitEvery: o.AdmitEvery, grace: stopGrace}, nil
 }
 func Configured() bool { return os.Getenv(apiKeyEnvVar) != "" }
 
@@ -443,10 +460,13 @@ func (s *Sandbox) vanished(ctx context.Context, err error) bool {
 
 // started creates the sandbox the first time it is needed, starts it again once Daytona has
 // stopped it, makes a new one once Daytona has deleted it, and waits for it to be running.
-// The caller holds the gate.
+// Each of those bills, so none is done for an owner Admit refuses. The caller holds the gate.
 func (s *Sandbox) started(ctx context.Context) error {
 	if s.closed.Load() {
 		return errors.New("daytona: sandbox is closed")
+	}
+	if err := s.admitted(ctx); err != nil {
+		return err
 	}
 	if s.box != nil && s.lapsed() {
 		// A sandbox Daytona may have stopped has lost what its setup started.
@@ -575,6 +595,38 @@ func (s *Sandbox) lapsed() bool {
 	return !s.stoppedAt.IsZero() || s.gone || time.Since(s.used) >= s.lifecycle.IdleStop
 }
 
+// admitted is Admit's refusal of the sandbox's owner, and stops the sandbox if it runs: it
+// would bill on until it idled. The caller holds the gate.
+func (s *Sandbox) admitted(ctx context.Context) error {
+	if s.admit == nil {
+		return nil
+	}
+	running := s.box != nil && !s.lapsed()
+	err := s.admit(ctx, running)
+	if err != nil && running {
+		s.halt(ctx, err)
+	}
+	return err
+}
+
+// halt stops a running sandbox its owner may not pay for, as Daytona stops one for idling: its
+// disk alone bills from now, and the next work Admit lets through starts it again. One Daytona
+// would not stop is stopped at the next admission. The caller holds the gate.
+func (s *Sandbox) halt(ctx context.Context, refusal error) {
+	stop, end := context.WithTimeout(context.WithoutCancel(ctx), s.check)
+	defer end()
+	if err := s.box.Stop(stop); err != nil {
+		s.logger.Warn("could not stop a sandbox its owner may not pay for; it is stopped at its next admission",
+			"sandbox", s.box.ID, "refusal", refusal, "error", err)
+		return
+	}
+	s.logger.Info("stopped a sandbox its owner may not pay for", "sandbox", s.box.ID, "refusal", refusal)
+	// As at an idle stop, the slot is given back before the stop is reported.
+	s.stoppedAt, s.confirmed = time.Now(), true
+	s.letGo()
+	s.meter.Stopped()
+}
+
 // revive reads the state of a sandbox that may have lapsed, starts it again if Daytona stopped
 // it, waits for one Daytona is bringing up, and forgets it if Daytona deleted it, so that
 // started makes another. Only a started sandbox is running: one in any other state, such as
@@ -678,9 +730,9 @@ func (s *Sandbox) lost() {
 	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
 }
 
-// arm sets the timer for the sandbox's next point in its lifecycle: where Daytona stops it for
-// idling, where its stopped state is read to see that it did, and where Daytona deletes it.
-// The caller holds the gate.
+// arm sets the timer for the sandbox's next point in its lifecycle: where it is admitted again
+// while it runs, where Daytona stops it for idling, where its stopped state is read to see that
+// it did, and where Daytona deletes it. The caller holds the gate.
 func (s *Sandbox) arm() {
 	s.epoch++
 	if s.timer != nil {
@@ -694,6 +746,9 @@ func (s *Sandbox) arm() {
 	switch {
 	case s.stoppedAt.IsZero():
 		at = s.used.Add(s.lifecycle.IdleStop)
+		if admitted := time.Now().Add(s.admitEvery); s.admit != nil && admitted.Before(at) {
+			at = admitted
+		}
 	case !s.confirmed:
 		at = s.stoppedAt.Add(s.grace)
 		if deletes && s.lifecycle.StoppedDelete < s.grace {
@@ -729,6 +784,11 @@ func (s *Sandbox) lapse(epoch int) {
 	switch {
 	case s.stoppedAt.IsZero():
 		if now.Sub(s.used) < s.lifecycle.IdleStop {
+			// A refusal stops the sandbox, and there is nobody to tell it to. One whose session
+			// closed is deleted once it idles instead, which a stop would put off.
+			if !s.closed.Load() {
+				_ = s.admitted(context.Background())
+			}
 			return
 		}
 		if s.closed.Load() && s.retryDelete() {
