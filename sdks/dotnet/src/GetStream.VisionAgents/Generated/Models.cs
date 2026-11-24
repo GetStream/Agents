@@ -6700,7 +6700,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<HistoryMessage>? History { get; set; } = default!;
 
         /// <summary>
-        /// The id to hold the session by, so a caller can know it before the session exists. It may be any string of up to 64 letters, digits, - and _, such as your own record's id, that nobody has used for a session before. A UUID is held lowercase. Omitted, the router generates a UUIDv7.
+        /// The id to hold the session by, so a caller can know it before the session exists. It may be any string of up to 64 letters, digits, - and _, such as your own record's id, that no session of yours holds. Ids are your own: another customer's session of the id is no clash, unless it acts in the same Stream app as yours, where both sessions' call and channel would be agent:&lt;id&gt;, and then the id is refused with a 409. A UUID is held lowercase. Omitted, the router generates a UUIDv7.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("id")]
         public string? Id { get; set; } = default!;
