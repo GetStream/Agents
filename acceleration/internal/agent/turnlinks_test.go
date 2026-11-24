@@ -323,7 +323,10 @@ func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
 	s.Equal("error", back["error_code"])
 	s.NotContains(back, "error")
 	s.NotContains(fmt.Sprint(back), "example.com")
-	s.NotContains(fmt.Sprint(back), "555")
+	s.NotContains(fmt.Sprint(back), "no order for")
+	// The log masks the number to +1•••99. Its digits never show, and searching for them only
+	// matches the clock digits of the line's turn id and time.
+	s.NotContains(fmt.Sprint(back), "•••99")
 }
 
 // interruptsATool has the caller interrupt while a tool runs, the tool asking policy of the
