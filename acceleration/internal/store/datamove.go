@@ -31,8 +31,9 @@ var ErrChangesExpired = errors.New("store: the changes since that cursor are no 
 var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
 // ErrInvalidImport is an export that cannot be written as it is: a table no export carries, a
-// row that does not read, or a row the database refuses for what it holds. Its message names
-// the table and nothing of the database. A database that failed is never one.
+// row that does not read, a row the database refuses for what it holds, or a row whose key
+// another customer holds here (ErrAnotherCustomersRow). Its message names the table, and for that
+// last one the row's own key, but nothing of the database. A database that failed is never one.
 var ErrInvalidImport = errors.New("store: the export cannot be imported")
 
 // invalidImport marks err as ErrInvalidImport without changing its message.
@@ -819,7 +820,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	case "campaigns":
 		row, err = pauseImported(row, []string{Running, Scheduled}, Paused, false)
 	case "campaign_contacts":
-		row, err = requeueImportedContact(row, time.Now())
+		row, err = requeueImportedContact(row)
 	case "campaign_attempts":
 		row, err = endImportedAttempt(row, time.Now())
 	case "simulation_runs":
@@ -996,9 +997,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// A row renamed, or a skill moved to another config, is cached under what it was too. What it
 	// was is read in the statement that writes it, locked, so the one forgotten is the one a
 	// concurrent write did not already replace. It is read in the FROM, so before the row is written.
+	// The lock is the one the upsert takes, which a child row being inserted does not wait on.
 	if cachedByID(table) {
 		locked, through = fmt.Sprintf("WITH was AS (SELECT (SELECT to_jsonb(h) FROM %s AS h"+
-			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR UPDATE) AS prior) ", spec.name), "was, "
+			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR NO KEY UPDATE) AS prior) ", spec.name), "was, "
 		args = append([]any{string(row), customerID}, args...)
 		returning = " RETURNING (SELECT prior FROM was), " + cachedRow(table, spec.name)
 	}
@@ -1049,7 +1051,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	if taken {
-		return fmt.Errorf("store: import %s: %w", table, ErrAnotherCustomersRow)
+		key, err := rowKey(table, shape.keys, row)
+		if err != nil {
+			return err
+		}
+		return invalidImport(fmt.Errorf("store: import %s: %w", key, ErrAnotherCustomersRow))
 	}
 	return nil
 }
@@ -1084,8 +1090,27 @@ func importCached(ctx context.Context, db bun.IDB, customerID, table, query stri
 	return written, nil
 }
 
-// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
+// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here,
+// as an ErrInvalidImport that names the row as rowKey does.
 var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
+
+// rowKey names an imported row by its table and the values of its primary key, as
+// agent_configs:{"id":"config-1"}.
+func rowKey(table string, keys []string, row json.RawMessage) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return "", invalidImport(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	key := make(map[string]json.RawMessage, len(keys))
+	for _, column := range keys {
+		key[column] = fields[column]
+	}
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		return "", stack.Wrap(err)
+	}
+	return table + ":" + string(encoded), nil
+}
 
 // cachedByID is whether a moved table's rows are cached by their id and something else they
 // hold, which a write can change.
@@ -1396,9 +1421,11 @@ func normalizeImportedOptOut(row json.RawMessage) (json.RawMessage, error) {
 // requeueImportedContact gives up the source's lease on a contact it was ringing, since the
 // runner that held it is in the deployment it came from. One in a call keeps its stage with a
 // lease already run out, so once the move is cut over a runner here settles it from its dial,
-// as it would one whose runner died: its next attempt waits its delay. One awaiting its
-// answered call's outcome keeps waiting, and has the transcript read here.
-func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage, error) {
+// as it would one whose runner died: its next attempt waits its delay. That lease ends at the
+// Unix epoch. Postgres's clock is always after that time, also when the clock of the importing
+// router is ahead. One awaiting its answered call's outcome keeps waiting, and has the
+// transcript read here.
+func requeueImportedContact(row json.RawMessage) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
 		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
@@ -1406,10 +1433,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 	until := json.RawMessage("null")
 	switch string(fields["stage"]) {
 	case `"` + InProgress + `"`:
-		var err error
-		if until, err = json.Marshal(now); err != nil {
-			return nil, fmt.Errorf("store: write an imported row: %w", err)
-		}
+		until = json.RawMessage(`"1970-01-01T00:00:00Z"`)
 	case `"` + AwaitingOutcome + `"`:
 	default:
 		return row, nil
