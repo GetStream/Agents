@@ -285,6 +285,10 @@ func (s *StoreSuite) TestACampaignHoldsAtMostAHundredThousandContacts() {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL session_replication_role = replica"); err != nil {
 			return err
 		}
+		// Setup, not the store's own work: it may run past the serving statement limit.
+		if _, err := tx.ExecContext(ctx, "SET LOCAL statement_timeout = 0"); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO campaign_contacts (id, campaign_id, to_number)
 			SELECT 'c' || n, ?, '+1' || n FROM generate_series(1, 99999) AS n`, campaign.ID)
 		return err

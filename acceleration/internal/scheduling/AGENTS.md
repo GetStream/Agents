@@ -144,6 +144,9 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   config, so creates and resumes at once stop at `max_tasks_per_user`.
   `TestStoreSuite/TestCreatesAtOnceStopAtTheActiveLimit`,
   `TestStoreSuite/TestResumesAtOnceStopAtTheConfigsActiveLimit`,
+  `TestStoreSuite/TestACreateAndAResumeAtOnceStopAtTheActiveLimit` (a create and a resume share
+  the one lock), `TestStoreSuite/TestAFailedTaskResumedAtTheLimitIsRefused` (a failed task resumed
+  is counted too, not only a paused one),
   `TestScheduledTasksSuite/TestResumesAtOnceStopAtTheActiveLimit`.
 - **A pause or edit writes a running run `missed`, held or in flight (S4).** An edited active
   one-shot comes due again as it now reads, unless its run placed a call: then it is completed.
