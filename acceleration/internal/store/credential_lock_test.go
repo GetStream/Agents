@@ -662,6 +662,44 @@ func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheUnlockStatementPani
 	s.assertThePanickedConnectionIsGone(router)
 }
 
+// panicsOnDeadline is a context whose Deadline panics once armed. pgdriver reads it
+// (Conn.deadline) inside database/sql's query, after the Conn's close lock is taken, so the
+// panic is the one discardOnPanic closes on a goroutine of its own.
+type panicsOnDeadline struct {
+	context.Context
+	armed *atomic.Bool
+}
+
+func (c panicsOnDeadline) Deadline() (time.Time, bool) {
+	if c.armed.Load() {
+		panic("context deadline")
+	}
+	return c.Context.Deadline()
+}
+
+func (s *StoreSuite) TestADriverPanicInTheLockStatementReachesTheCallerWhoseSlotIsGivenBack() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+	// An idle lock pool connection first, so the panic comes in the lock statement.
+	s.Require().NoError(router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	armed := new(atomic.Bool)
+	armed.Store(true)
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_ = router.ConnectorConnections.WithLocked(panicsOnDeadline{s.ctx, armed}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+	}()
+	select {
+	case p := <-panicked:
+		s.Equal("context deadline", p, "the driver's panic reaches the caller")
+	case <-time.After(5 * time.Second):
+		s.FailNow("a panic inside database/sql's query leaves the caller blocked closing its connection")
+	}
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic inside the driver gives the slot back")
+}
+
 // assertThePanickedConnectionIsGone checks that the lock pool connection a lock or unlock
 // statement panicked on is closed, so no session is left holding the credential lock, which
 // would keep the connection locked for every router, and the lock pool has its connection back.
