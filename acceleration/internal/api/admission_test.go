@@ -65,6 +65,11 @@ func (s *AdmissionSuite) SetupSuite() {
 	s.telnyxPublicKey, s.telnyxConnectionID = public, "1234567890"
 	s.logged = &lockedLog{}
 	s.logs = s.logged
+	// A voice the deployment runs itself, reached by name only, so a voiced session on a free
+	// model has its flow controller as the only thing it opens that costs money.
+	s.ttsConfig = routableConfig()
+	s.ttsConfig.Providers = append(s.ttsConfig.Providers,
+		routing.ProviderConfig{Provider: "plain", Model: "local-voice", Languages: []string{"la"}, Local: true})
 	s.RouterSuite.SetupSuite()
 	s.line = telnyxRinger{suite: &s.RouterSuite, private: private}
 	// A run cut short leaves its campaigns ringing, and this run's dialer would ring them.
@@ -184,12 +189,23 @@ func (s *AdmissionSuite) TestAFreeModelAnswersWithNoCredit() {
 	s.answersOnTheFreeModel()
 }
 
-func (s *AdmissionSuite) TestAnAgentWhoseFlowControllerCostsMoneyIsRefused() {
+func (s *AdmissionSuite) TestAVoicedAgentWhoseFlowControllerCostsMoneyIsRefused() {
 	status, failure := s.refused(http.MethodPost, "/v1/agents/sessions",
-		CreateSessionRequest{ConfigId: pointerTo(s.config("echo/local-model"))})
+		CreateSessionRequest{ConfigId: pointerTo(s.config("echo/local-model")), Tts: pointerTo("plain/local-voice"), StartVoice: pointerTo(true)})
 
 	s.Equal(http.StatusPaymentRequired, status, "every model a session opens is admitted, and its flow controller is priced")
 	s.Equal(codeInsufficientCredits, failure.Code)
+}
+
+// A conversation held in writing opens no flow controller, so on a model that costs nothing it
+// spends nothing and is admitted with no credit.
+func (s *AdmissionSuite) TestAWrittenSessionOnAFreeModelOpensWithNoCredit() {
+	// Warm the organization's money first, as refused does: a router that has read nothing
+	// yet admits anything, which would let this pass without the session being free.
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
+
+	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("echo/local-model")), Incognito: pointerTo(true)})
+	s.T().Cleanup(func() { s.serverClient.stopSession(opened.Id) })
 }
 
 func (s *AdmissionSuite) TestASuspendedAccountIsForbidden() {
@@ -408,7 +424,7 @@ func (s *AdmissionSuite) TestTwoRoutersStopAnLLMSessionTogether() {
 	// One response of the counted model costs 1,000 micros.
 	s.usage.Credit(s.T(), s.organization(), 1_000_000)
 	other := s.otherRouter()
-	other.Join(s.customerID(), s.organization(), usage.DefaultTier)
+	other.Join(s.T().Context(), s.customerID(), s.organization(), usage.DefaultTier)
 	answering := s.serverClient.opens("/v1/llm/stream")
 	s.Require().NoError(answering.WriteJSON(frame{"type": "start", "target": "counted/counted-model"}))
 	s.Equal("started", s.await(answering, "started")["type"])
@@ -885,7 +901,7 @@ func (s *AdmissionSuite) TestAMoneyRefusalIsTheCodeNotTheText() {
 	_, ok = moneyError(nil)
 	s.False(ok)
 	var answer APIError
-	s.Require().True(errors.As(refusedRequest(errors.New("routing: unknown target")), &answer))
+	s.Require().True(errors.As(refusedRequest(routing.Refused(errors.New("routing: unknown target"))), &answer))
 	s.True(strings.HasPrefix(answer.Code, "invalid_request"))
 }
 

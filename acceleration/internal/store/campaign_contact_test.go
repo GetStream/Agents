@@ -719,3 +719,223 @@ func (s *StoreSuite) TestASettleUnderALeaseTakenOverSinceSettlesNothing() {
 	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", second.ID, Settle{Stage: ContactCompleted, Attempt: 1, LeaseUntil: second.LeaseUntil}))
 	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
 }
+
+// autoEnrollCampaign is a draft auto-enroll campaign for a fresh customer, launched to start at
+// startAt.
+func (s *StoreSuite) autoEnrollCampaign(startAt time.Time) Campaign {
+	campaign := Campaign{CustomerID: newID(), Name: "Inbound leads", ConfigID: "config-1", FromNumber: "+15550100", Type: AutoEnroll}
+	s.Require().NoError(s.store.Campaigns.Insert(s.ctx, &campaign))
+	return s.launch(campaign, startAt)
+}
+
+func (s *StoreSuite) addOne(campaign Campaign, number string) (Contact, error) {
+	added, _, err := s.store.CampaignContacts.InsertMany(s.ctx, campaign.ID, []Contact{{CampaignID: campaign.ID, ToNumber: number}})
+	if err != nil {
+		return Contact{}, err
+	}
+	s.Require().Len(added, 1)
+	return s.contactByNumber(campaign, number), nil
+}
+
+// replaceWith is a change that makes the contact what changes holds.
+func replaceWith(changes Contact) func(Contact) (Contact, error) {
+	return func(Contact) (Contact, error) { return changes, nil }
+}
+
+func (s *StoreSuite) claimedNumbers(now time.Time) []string {
+	var numbers []string
+	for _, claimed := range s.claimDue("a", now, 10) {
+		numbers = append(numbers, claimed.Contact.ToNumber)
+	}
+	return numbers
+}
+
+func (s *StoreSuite) TestARunningAutoEnrollCampaignRingsAContactAddedToItFromTheFirstStep() {
+	campaign := s.autoEnrollCampaign(s.base)
+	before := time.Now().UTC()
+
+	added, err := s.addOne(campaign, "+15550001")
+
+	s.Require().NoError(err)
+	s.Equal(Enrolled, added.Stage)
+	s.Equal("step_1", added.StepID)
+	s.Equal(0, added.Attempt)
+	s.Require().NotNil(added.NextAttemptAt, "a contact with no next attempt is never rung")
+	s.False(added.NextAttemptAt.Before(before.Truncate(time.Microsecond)), "due now, not at the start long past")
+	s.Equal([]string{"+15550001"}, s.claimedNumbers(time.Now().Add(time.Minute)))
+}
+
+func (s *StoreSuite) TestAContactAddedToAPausedAutoEnrollCampaignWaitsForTheResume() {
+	campaign := s.autoEnrollCampaign(s.base)
+	s.Require().NoError(s.store.Campaigns.Pause(s.ctx, campaign.CustomerID, campaign.ID, ""))
+
+	_, err := s.addOne(campaign, "+15550001")
+
+	s.Require().NoError(err)
+	s.Empty(s.claimedNumbers(time.Now().Add(time.Minute)))
+	s.Require().NoError(s.store.Campaigns.Resume(s.ctx, campaign.CustomerID, campaign.ID))
+	s.Equal([]string{"+15550001"}, s.claimedNumbers(time.Now().Add(time.Minute)))
+}
+
+func (s *StoreSuite) TestAContactAddedBeforeAScheduledStartIsDueAtTheStart() {
+	start := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	campaign := s.autoEnrollCampaign(start)
+	s.Require().Equal(Scheduled, campaign.State)
+
+	added, err := s.addOne(campaign, "+15550001")
+
+	s.Require().NoError(err)
+	s.Require().NotNil(added.NextAttemptAt)
+	s.Equal(start, added.NextAttemptAt.UTC())
+}
+
+func (s *StoreSuite) TestAnOptedOutContactAddedAfterLaunchIsRejectedWithoutACall() {
+	campaign := s.autoEnrollCampaign(s.base)
+	s.Require().NoError(s.store.OptOuts.Insert(s.ctx, &OptOut{CustomerID: campaign.CustomerID, Recipient: "+15550001", Channel: "voice", Source: "test"}))
+
+	added, err := s.addOne(campaign, "+15550001")
+
+	s.Require().NoError(err)
+	s.Equal(Rejected, added.Stage)
+	s.Equal("opted_out", added.Reason)
+	s.Nil(added.NextAttemptAt)
+	s.Empty(s.claimedNumbers(time.Now().Add(time.Minute)))
+}
+
+func (s *StoreSuite) TestAStoppedAutoEnrollCampaignTakesNoMoreContacts() {
+	campaign := s.autoEnrollCampaign(s.base)
+	s.Require().NoError(s.store.Campaigns.Stop(s.ctx, campaign.CustomerID, campaign.ID, s.base))
+
+	_, err := s.addOne(campaign, "+15550001")
+
+	s.ErrorIs(err, ErrCampaignLocked)
+	s.Empty(s.contactsOf(campaign))
+}
+
+func (s *StoreSuite) TestADraftsContactCanBeChanged() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	contact := s.contactByNumber(campaign, "+15550001")
+
+	changed, err := s.store.CampaignContacts.Update(s.ctx, campaign.ID, contact.ID, replaceWith(Contact{
+		ToNumber: "+15550009", Variables: map[string]string{"first_name": "Anna"}, TimeZone: "Europe/Amsterdam", Instructions: "Speak Dutch",
+	}))
+
+	s.Require().NoError(err)
+	s.Equal(contact.ID, changed.ID)
+	s.Equal(contact.Seq, changed.Seq, "a change keeps the contact's place in the queue")
+	stored := s.contactsOf(campaign)
+	s.Require().Len(stored, 1)
+	s.Equal("+15550009", stored[0].ToNumber)
+	s.Equal(map[string]string{"first_name": "Anna"}, stored[0].Variables)
+	s.Equal("Europe/Amsterdam", stored[0].TimeZone)
+	s.Equal("Speak Dutch", stored[0].Instructions)
+}
+
+func (s *StoreSuite) TestAnAddLeavesAContactMidSequenceAlone() {
+	campaign := s.autoEnrollCampaign(s.base)
+	first, err := s.addOne(campaign, "+15550001")
+	s.Require().NoError(err)
+	later := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*Contact)(nil)).
+		Set("attempt = 2").Set("step_id = 'step_2'").Set("next_attempt_at = ?", later).
+		Where("id = ?", first.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	_, err = s.addOne(campaign, "+15550002")
+
+	s.Require().NoError(err)
+	kept := s.contactByNumber(campaign, "+15550001")
+	s.Equal(2, kept.Attempt)
+	s.Equal("step_2", kept.StepID)
+	s.Require().NotNil(kept.NextAttemptAt)
+	s.Equal(later, kept.NextAttemptAt.UTC())
+}
+
+func (s *StoreSuite) TestADraftsContactHasNoNextAttempt() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	s.Nil(s.contactByNumber(campaign, "+15550001").NextAttemptAt)
+}
+
+func (s *StoreSuite) TestOverlappingChangesToOneContactBothPersist() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	contact := s.contactByNumber(campaign, "+15550001")
+	firstRead := make(chan struct{})
+	release := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		_, err := s.store.CampaignContacts.Update(s.ctx, campaign.ID, contact.ID, func(found Contact) (Contact, error) {
+			close(firstRead)
+			<-release
+			found.TimeZone = "Europe/Amsterdam"
+			return found, nil
+		})
+		s.NoError(err)
+	}()
+	<-firstRead
+	go func() {
+		defer wait.Done()
+		_, err := s.store.CampaignContacts.Update(s.ctx, campaign.ID, contact.ID, func(found Contact) (Contact, error) {
+			found.Variables = map[string]string{"first_name": "Anna"}
+			return found, nil
+		})
+		s.NoError(err)
+	}()
+	// The first change writes only once the second is queued on its lock, so they overlap.
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the second change never waited on the first's lock")
+	close(release)
+	wait.Wait()
+
+	stored := s.contactsOf(campaign)
+	s.Require().Len(stored, 1)
+	s.Equal("Europe/Amsterdam", stored[0].TimeZone)
+	s.Equal(map[string]string{"first_name": "Anna"}, stored[0].Variables)
+}
+
+func (s *StoreSuite) TestAContactCannotTakeANumberAnotherContactHolds() {
+	campaign := s.draftCampaign(newID(), "+15550001", "+15550002")
+	contact := s.contactByNumber(campaign, "+15550001")
+
+	_, err := s.store.CampaignContacts.Update(s.ctx, campaign.ID, contact.ID, replaceWith(Contact{ToNumber: "+15550002"}))
+
+	s.ErrorIs(err, ErrDuplicateContact)
+	s.Equal("+15550001", s.contactByNumber(campaign, "+15550001").ToNumber)
+}
+
+func (s *StoreSuite) TestOneContactCanBeRemovedFromADraft() {
+	campaign := s.draftCampaign(newID(), "+15550001", "+15550002")
+
+	s.Require().NoError(s.store.CampaignContacts.Delete(s.ctx, campaign.ID, s.contactByNumber(campaign, "+15550001").ID))
+
+	remaining := s.contactsOf(campaign)
+	s.Require().Len(remaining, 1)
+	s.Equal("+15550002", remaining[0].ToNumber)
+}
+
+func (s *StoreSuite) TestALaunchedCampaignsContactsCannotBeChangedOrRemoved() {
+	campaign := s.autoEnrollCampaign(s.base)
+	contact, err := s.addOne(campaign, "+15550001")
+	s.Require().NoError(err)
+
+	_, err = s.store.CampaignContacts.Update(s.ctx, campaign.ID, contact.ID, replaceWith(Contact{ToNumber: "+15550002"}))
+	s.ErrorIs(err, ErrCampaignLocked)
+	s.ErrorIs(s.store.CampaignContacts.Delete(s.ctx, campaign.ID, contact.ID), ErrCampaignLocked)
+	s.Equal([]string{"+15550001"}, []string{s.contactsOf(campaign)[0].ToNumber})
+}
+
+func (s *StoreSuite) TestChangingOrRemovingAContactOfAnotherCampaignFindsNone() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	other := s.draftCampaign(newID(), "+15550001")
+	contact := s.contactByNumber(other, "+15550001")
+
+	_, err := s.store.CampaignContacts.Update(s.ctx, campaign.ID, contact.ID, replaceWith(Contact{ToNumber: "+15550002"}))
+	s.ErrorIs(err, ErrNoCampaignContact)
+	s.ErrorIs(s.store.CampaignContacts.Delete(s.ctx, campaign.ID, contact.ID), ErrNoCampaignContact)
+	s.Equal("+15550001", s.contactByNumber(other, "+15550001").ToNumber)
+}

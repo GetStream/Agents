@@ -2,6 +2,7 @@ package sttrouter
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -34,7 +35,7 @@ func (s *STTRouterSuite) timedSession(provider stt.STT, config routing.ProviderC
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	owner := routing.Owner{CustomerID: "acme", AgentID: "concierge", CallID: logs.call}
-	session := newSession(provider, config, owner, recorder, reopen, nil)
+	session := newSession(context.Background(), provider, config, owner, recorder, reopen, nil)
 	s.T().Cleanup(func() {
 		_ = session.Close()
 		slog.SetDefault(previous)

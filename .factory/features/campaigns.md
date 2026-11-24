@@ -27,6 +27,19 @@ Once launched, only the name, the from number and the concurrency can change. Th
 hours are what the customer consented to ring people with. Only a `draft`, `stopped` or
 `completed` campaign can be deleted; its calls stay.
 
+A campaign's `type` is fixed when it is made. A `standard` campaign rings the contacts it was
+given before launch, needs at least one to launch, and completes once it is done with them. An
+`auto_enroll` campaign may launch with nobody on it and takes contacts while it is `scheduled`,
+`running` or `paused`; it never completes on its own and runs until it is stopped. A contact added
+after launch is enrolled in the same transaction, under the campaign row lock, as launch enrolls
+them: an opted-out number is rejected without a call, and the rest start on the first step at the
+later of now and `start_at`. Contacts already in the sequence are left alone.
+
+A draft's contacts can be changed or removed one at a time. A change keeps what it leaves out, is
+read and written under the draft's lock, goes through the same number checks as an add, and
+answers 409 `contact_duplicate` for a number another contact holds. Once launched, a contact is
+stopped rather than changed or removed.
+
 A contact is `enrolled` (waiting for `next_attempt_at`), `in_progress` (claimed, a call
 happening), `awaiting_outcome` (answered, transcript not read yet), `completed`, `failed`,
 `rejected` or `stopped`. The API shows `awaiting_outcome` as `in_progress`. Contacts who opted out
@@ -144,9 +157,11 @@ POST   /v1/agents/campaigns/{id}/stop                        end for good
 POST   /v1/agents/campaigns/{id}/duplicate                   a draft with the same settings
 GET    /v1/agents/campaigns/{id}/analytics                   dialed, connected, converted, per day
 GET    /v1/agents/campaigns/{id}/contacts                    contacts, by stage or number
-POST   /v1/agents/campaigns/{id}/contacts                    add up to 1,000 to a draft
+POST   /v1/agents/campaigns/{id}/contacts                    add up to 1,000 to a draft, or a launched auto_enroll campaign
 DELETE /v1/agents/campaigns/{id}/contacts                    remove every contact of a draft
 GET    /v1/agents/campaigns/{id}/contacts/{contact_id}       one contact, every dial made to them
+PATCH  /v1/agents/campaigns/{id}/contacts/{contact_id}       change one contact of a draft
+DELETE /v1/agents/campaigns/{id}/contacts/{contact_id}       remove one contact of a draft
 POST   /v1/agents/campaigns/{id}/contacts/{contact_id}/stop  ring this one no more
 ```
 
@@ -156,7 +171,8 @@ holds at most 100,000 contacts.
 ## Not done
 
 - **One step only.** A route to another step is refused.
-- **`auto_enroll` is reserved.** Nothing creates one, so contacts are only added to a draft.
+- **An `auto_enroll` campaign counts every contact it ever took toward the 100,000 cap.** Nothing
+  is removed after launch, so a long-running one can fill up.
 - **Machine detection at two vendors.** Elsewhere no message is left. The transcript still
   tells a recording from a person, so the attempt counts as not answered.
 - **A leg still ringing when its session fails is not hung up at the vendor.** Only the Stream

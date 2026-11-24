@@ -73,7 +73,7 @@ func (s *MeteringSuite) TestACallAnsweredWithNoAgentInItIsEndedAfterTheWait() {
 	s.checked("INFO", noAgent)
 	s.Eventually(func() bool { return s.endedAtStream(placed.CallType, placed.CallID) }, 5*time.Second, 10*time.Millisecond)
 	s.Contains(s.logs.String(), "session_id="+placed.CallID)
-	s.Contains(s.logs.String(), "vendor_call_id=telnyx-call")
+	s.Contains(s.logs.String(), "vendor_call_id="+s.vendor.called)
 	s.Contains(s.logs.String(), "waited=10s")
 }
 

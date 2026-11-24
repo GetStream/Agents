@@ -34,6 +34,16 @@ const keyCacheTTL = time.Minute
 // otherwise be kept for cacheTTL.
 const missTTL = time.Minute
 
+// forgetAttempts is how many times a deletion Redis did not take is tried again, the first
+// forgetBackoff after it and each one twice as long after the last. forgetSlots bounds how
+// many are being retried at once, so a Redis that is down costs a few goroutines and not one
+// per write.
+const (
+	forgetAttempts = 3
+	forgetBackoff  = 100 * time.Millisecond
+	forgetSlots    = 64
+)
+
 // Redis says where a Redis server is. An empty Address is none.
 type Redis struct {
 	// Address is a host:port, for example localhost:6379.
@@ -165,10 +175,10 @@ type found[T any] struct {
 // forget drops cached rows from Redis, which drops them from every replica's local cache
 // too, in one round trip.
 //
-// A deletion that does not land is logged rather than returned: the write it followed has
-// already happened, and refusing it afterwards would tell the caller their change was
-// rejected when it was not. The TTL is what covers the difference. It reports whether the
-// deletion landed, false without Redis, for a caller that tells a person so.
+// A deletion that does not land is tried again in the background rather than returned: the
+// write it followed has already happened, and refusing it afterwards would tell the caller
+// their change was rejected when it was not. It reports whether the deletion landed now, false
+// without Redis, for a caller that tells a person so.
 //
 // The deletion goes out even when the request has been cancelled since the write: rueidis
 // returns the context's error before it sends anything, so neither the DEL nor the EXISTS
@@ -195,12 +205,67 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 		commands = append(commands, client.B().Del().Key(name).Build(), client.B().Exists().Key(name).Build())
 	}
 	replies := client.DoMulti(ctx, commands...)
-	landed := true
+	var missed []string
+	var failed error
 	for i, name := range names {
 		if err := replies[2*i].Error(); err != nil && !errors.Is(err, rueidis.Nil) {
-			slog.Default().Error("could not drop a cached row", "key", name, "error", err)
-			landed = false
+			missed, failed = append(missed, name), err
 		}
 	}
-	return landed
+	if len(missed) > 0 {
+		s.forgetLater(missed, failed)
+	}
+	return len(missed) == 0
+}
+
+// forgetLater tries again, a few times and in the background, a deletion Redis did not take.
+// The usual cause is a connection Redis dropped, which the client dials again at once. A
+// deletion still not taken after that, or one with no slot left to retry in, is what the TTL
+// covers.
+func (s *Store) forgetLater(names []string, err error) {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	if s.closed {
+		slog.Default().Error("could not drop cached rows, and the store is closing", "keys", names, "error", err)
+		return
+	}
+	select {
+	case s.retries <- struct{}{}:
+	default:
+		slog.Default().Error("could not drop cached rows, and no retry is free", "keys", names, "error", err)
+		return
+	}
+	s.retrying.Add(1)
+	go func() {
+		defer s.retrying.Done()
+		defer func() { <-s.retries }()
+		client := s.cache.Client()
+		wait := forgetBackoff
+		for range forgetAttempts {
+			timer := time.NewTimer(wait)
+			select {
+			case <-s.closing.Done():
+				timer.Stop()
+				slog.Default().Error("could not drop cached rows before the store closed", "keys", names, "error", err)
+				return
+			case <-timer.C:
+			}
+			// One DEL per key, as forget sends them, since a cluster refuses one across slots.
+			commands := make(rueidis.Commands, 0, len(names))
+			for _, name := range names {
+				commands = append(commands, client.B().Del().Key(name).Build())
+			}
+			var missed []string
+			for i, reply := range client.DoMulti(s.closing, commands...) {
+				if failed := reply.Error(); failed != nil && !errors.Is(failed, rueidis.Nil) {
+					missed, err = append(missed, names[i]), failed
+				}
+			}
+			if names = missed; len(names) == 0 {
+				return
+			}
+			wait *= 2
+		}
+		slog.Default().Error("gave up dropping cached rows", "keys", names, "attempts", forgetAttempts, "error", err)
+	}()
 }

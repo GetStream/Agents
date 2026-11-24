@@ -60,7 +60,7 @@ func (r *ActivityDigests) MarkPosted(ctx context.Context, day time.Time) error {
 	return nil
 }
 
-// Prune deletes the activity digests of the UTC days more than activityKeepDays before now's,
+// Prune deletes the activity digests of the UTC days more than ActivityKeepDays before now's,
 // as Activities.Prune does the activity, and returns how many it deleted.
 func (r *ActivityDigests) Prune(ctx context.Context, now time.Time) (int, error) {
 	return pruneDays(ctx, r.store.global, "activity_digests", now)

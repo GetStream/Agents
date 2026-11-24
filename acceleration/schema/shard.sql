@@ -76,8 +76,6 @@ TABLE agent_sessions
     agent_id text NOT NULL DEFAULT ''::text
     agent_name text NOT NULL DEFAULT ''::text
     api_key text NOT NULL DEFAULT ''::text
-    call_id text
-    call_type text
     caller_kind text NOT NULL DEFAULT ''::text
     caller_tools jsonb
     closed_at timestamp with time zone
@@ -96,6 +94,7 @@ TABLE agent_sessions
     modality text NOT NULL DEFAULT 'voice'::text
     model_overwrites jsonb NOT NULL DEFAULT '{}'::jsonb
     no_ui boolean
+    opened_at timestamp with time zone
     pinned_at timestamp with time zone
     project text NOT NULL DEFAULT ''::text
     remembers boolean
@@ -105,6 +104,7 @@ TABLE agent_sessions
     searchable tsvector DEFAULT (((setweight(to_tsvector('english'::regconfig, COALESCE(title, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(description, ''::text)), 'B'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(project, ''::text)), 'C'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(agent_name, ''::text)), 'D'::"char"))
     state text NOT NULL
     stream_app_pk bigint
+    superseded_at timestamp with time zone
     team text NOT NULL DEFAULT ''::text
     title text NOT NULL DEFAULT ''::text
     tool_timeout_ms integer
@@ -199,6 +199,7 @@ TABLE call_legs
     CREATE UNIQUE INDEX call_legs_token_hash_key ON public.call_legs USING btree (token_hash)
     CREATE INDEX call_legs_token_hash_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
+    CREATE UNIQUE INDEX call_legs_transfer_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), vendor_call_id) WHERE ((placed_at IS NULL) AND (vendor_call_id IS NOT NULL))
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 
@@ -237,7 +238,6 @@ TABLE calls
     call_id text NOT NULL
     call_type text NOT NULL DEFAULT ''::text
     campaign_id text
-    config_id text
     contact_id text
     conversation_id text
     customer_id text NOT NULL
@@ -260,7 +260,6 @@ TABLE calls
     tags jsonb NOT NULL DEFAULT '{}'::jsonb
     to_number text
     tts text NOT NULL DEFAULT ''::text
-    user_id text NOT NULL DEFAULT ''::text
     voice text NOT NULL DEFAULT ''::text
     CONSTRAINT calls_pkey PRIMARY KEY (id)
     CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL

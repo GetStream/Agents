@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -191,11 +192,11 @@ func (t *TTS) Synthesize(request tts.Request) error {
 	t.mu.Unlock()
 
 	t.running.Add(1)
-	go func() {
+	goroutine.Go(ctx, func() {
 		defer t.running.Done()
 		defer cancel()
 		t.synthesize(ctx, synthesis, text, request)
-	}()
+	})
 	return nil
 }
 

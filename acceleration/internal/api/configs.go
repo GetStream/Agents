@@ -236,6 +236,11 @@ func (s *Server) getAgentConfig(ctx context.Context, request *getAgentConfigRequ
 
 // updateAgentConfig replaces a config with what it now is.
 func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConfigRequest) (*updateAgentConfigResponse, error) {
+	return onTheConfigAsItIs(func() (*updateAgentConfigResponse, error) { return s.tryUpdateAgentConfig(ctx, request) })
+}
+
+// tryUpdateAgentConfig is one try of updateAgentConfig, on the config as it reads it.
+func (s *Server) tryUpdateAgentConfig(ctx context.Context, request *updateAgentConfigRequest) (*updateAgentConfigResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -377,7 +382,9 @@ func (s *Server) updateAgentConfig(ctx context.Context, request *updateAgentConf
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+	// Only over existing, which may have come from the cache: the fields kept from it above are
+	// what another save since then wrote.
+	if err := s.store.AgentConfigs.Save(ctx, &config, existing.UpdatedAt, time.Time{}); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)
@@ -604,6 +611,35 @@ var (
 	}
 )
 
+// errAgentConfigChanged is a patch made from a copy of the config older than the config: it
+// sent updated_at, and the config was saved after it.
+var errAgentConfigChanged = conflict("the agent config was saved after updated_at: read it again and make the change on that")
+
+// errAgentConfigBusy is a save of an agent config that other saves replaced the config under on
+// every try: sent again, it is made on the config as it then is.
+var errAgentConfigBusy = conflict("the agent config was saved by others while this save was made: send it again")
+
+// configSaveTries is how many times a save of an agent config is made in all while other saves
+// keep replacing the config it was made from. A try is lost only to a save that landed while it
+// ran, so this many saves of one config at once all land.
+const configSaveTries = 5
+
+// onTheConfigAsItIs runs save, which reads an agent config, makes a change to it, checks the
+// result and stores it, again when another save replaced the config in between
+// (store.ErrStaleAgentConfig). The change is then made and checked again on the config as it
+// now is, rather than written over a config nobody checked it against.
+func onTheConfigAsItIs[T any](save func() (T, error)) (T, error) {
+	for try := 1; ; try++ {
+		saved, err := save()
+		if !errors.Is(err, store.ErrStaleAgentConfig) {
+			return saved, err
+		}
+		if try == configSaveTries {
+			return saved, errAgentConfigBusy
+		}
+	}
+}
+
 // errAgentRoleTaken is a save that would give a second live agent config of the customer a
 // role another one holds. The one there is, agent_moderator, is what the chat worker finds the
 // app's moderator by, so two would leave it guessing.
@@ -649,7 +685,8 @@ func channelConnectionTaken(taken *store.ChannelConnectionTakenError) APIError {
 // choosing another name. A record, a connection or a custom connector that is not there, such
 // as one deleted after the request was checked, is the invalid request it has always been
 // answered with. A channel connection another live agent config binds is a 409 naming that
-// config. Anything else is the database failing rather than the
+// config, and an agent config saved after the copy a patch was made from is a 409 too.
+// Anything else is the database failing rather than the
 // caller, so err goes back as it is, to be answered as a 500 and recorded with its stack.
 func storeFailure(err error, taken APIError) error {
 	if owned, ok := errors.AsType[*store.ChannelConnectionTakenError](err); ok {
@@ -660,6 +697,8 @@ func storeFailure(err error, taken APIError) error {
 		return taken
 	case errors.Is(err, store.ErrRoleTaken):
 		return errAgentRoleTaken
+	case errors.Is(err, store.ErrAgentConfigChanged):
+		return errAgentConfigChanged
 	case errors.Is(err, store.ErrNoAgentConfig), errors.Is(err, store.ErrNoSkill),
 		errors.Is(err, store.ErrNoRouterConfig), errors.Is(err, store.ErrNoVoice),
 		errors.Is(err, store.ErrNoConnectorConnection), errors.Is(err, store.ErrNoConnectorDefinition):

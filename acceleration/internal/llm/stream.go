@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -75,6 +77,11 @@ type StreamOptions struct {
 	ResponseID string
 	Provider   string
 	Model      string
+	// StartedAt is when the request was sent, which time to first token and the duration are
+	// measured from. It defaults to when the stream was made, for a provider whose stream
+	// exists before anything is waited on; one that returns its stream only once the response
+	// headers are in sets it, since a server can hold those back until its first token.
+	StartedAt time.Time
 }
 
 // NewStream returns the stream a provider produces by advancing the given puller.
@@ -83,11 +90,15 @@ func NewStream(options StreamOptions, puller Puller) *Stream {
 		options.ResponseID = fmt.Sprintf("resp-%d", time.Now().UnixNano())
 	}
 
+	if options.StartedAt.IsZero() {
+		options.StartedAt = time.Now()
+	}
+
 	stream := &Stream{puller: puller}
 	stream.writer = &ResponseWriter{
 		stream:    stream,
 		options:   options,
-		startedAt: time.Now(),
+		startedAt: options.StartedAt,
 		status:    StatusCompleted,
 		calls:     map[int64]*partialCall{},
 	}
@@ -99,6 +110,10 @@ func NewStream(options StreamOptions, puller Puller) *Stream {
 	})
 	return stream
 }
+
+// StartedAt is when the response's clock started (StreamOptions.StartedAt), zero for a
+// replayed one.
+func (s *Stream) StartedAt() time.Time { return s.writer.startedAt }
 
 // Replay returns a Stream over events that have already happened, for a caller standing in
 // for a provider.
@@ -307,22 +322,23 @@ func (s *Stream) Close() error {
 }
 
 // Screen has a judgement of what the response was asked run beside it. The verdict channel
-// yields exactly once: nil to let the response stand, or the reason to refuse it.
+// yields exactly once: nil to let the response stand, or the reason to refuse it. ctx is the
+// context of the call that the response is for.
 //
 // The deltas are not held, so the screen costs a caller no time to first token. What is held
 // is the ResponseCompleted, until the verdict arrives, because that is where the tool calls a
 // caller acts on are settled. A refusal that arrives while the model is still answering
 // closes the upstream at once, and either way the response settles as failed with the
 // refusal as its error. It is for a stream a provider produced, not one from Replay.
-func (s *Stream) Screen(verdict <-chan error) *Stream {
+func (s *Stream) Screen(ctx context.Context, verdict <-chan error) *Stream {
 	s.screened = make(chan struct{})
-	go func() {
+	goroutine.Go(ctx, func() {
 		defer close(s.screened)
 		if err := <-verdict; err != nil {
 			s.Close()
 			s.refused.Store(&err)
 		}
-	}()
+	})
 	return s
 }
 

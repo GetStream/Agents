@@ -270,6 +270,19 @@ func (s *SocketSessionSuite) TestARefusalNamingWhatTheCallerSentNeverCarriesAKey
 	}
 }
 
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *SocketSessionSuite) TestAStartTheDatabaseCannotCheckIsRefusedWithNoDatabaseText() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+	connection := s.serverClient.opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "session": map[string]any{"id": id}}))
+
+	refused := s.readFrame(connection)
+
+	s.Equal("error", refused["type"])
+	s.Equal(internalError().Message, refused["error"])
+}
+
 // A socket session carries its own audio, so voice started on it names no Stream call either.
 func (s *SocketSessionSuite) TestVoiceOnASocketSessionTakesNoCall() {
 	_, answered := s.starts("hi")

@@ -555,7 +555,7 @@ func (s *ScheduledTasksSuite) TestARunByHandTooLateToRingIsMissed() {
 	task := s.phoneTask(s.data.createUser(), []string{"phone"}, time.Now())
 	run := s.runOf(task, time.Now().Add(-16*time.Minute), "")
 
-	s.router.deliverManualRun(task, run)
+	s.router.deliverManualRun(s.T().Context(), task, run)
 
 	stored := s.runsOf(task)[0]
 	s.Equal(store.ScheduledTaskRunMissed, stored.State)

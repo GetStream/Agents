@@ -108,7 +108,7 @@ func (s *Suite) TestAToolResultIsAnsweredRatherThanRefused() {
 // TestClosingStopsTheAnswerMidStream is barge-in: the caller talks over the model, and
 // the model stops rather than finishing a reply nobody is listening to.
 func (s *Suite) TestClosingStopsTheAnswerMidStream() {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 	defer cancel()
 
 	stream, err := s.LLM.Create(ctx, counting)

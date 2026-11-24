@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/thesyncim/gopus"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -134,6 +135,9 @@ type Transcriber struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, so a panic in one of them stops that call.
+	call context.Context
 
 	// What ProcessAudio keeps, on the session's own goroutine: the frame being filled, the
 	// detector that scores each, and the stream of them.
@@ -247,7 +251,8 @@ func NewTranscriber(client *Client, model string, languages []string, logger *sl
 }
 
 // Start opens the session. It asks the server nothing.
-func (t *Transcriber) Start(context.Context) error {
+func (t *Transcriber) Start(ctx context.Context) error {
+	t.call = ctx
 	var err error
 	if t.heard, err = t.client.NewStream(maxUtterance); err != nil {
 		return err
@@ -255,8 +260,8 @@ func (t *Transcriber) Start(context.Context) error {
 	if t.detector, err = gopus.NewSpeechDetector(SampleRate); err != nil {
 		return stack.Wrap(err)
 	}
-	t.ctx, t.cancel = context.WithCancel(context.Background())
-	go t.transcribe()
+	t.ctx, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
+	goroutine.Go(t.call, t.transcribe)
 	t.emitter.Send(stt.Connected{Provider: ProviderName, Model: t.model, At: time.Now()})
 	return nil
 }
