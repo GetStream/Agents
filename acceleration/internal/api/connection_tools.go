@@ -758,7 +758,8 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 		return nil, err
 	}
 	// The latest revision, not the one the connection pins: it is what a config save checks a
-	// binding beside a sensitive connector against (SensitiveBindingsComplaint).
+	// binding beside a sensitive connector against (SensitiveBindingsComplaint), with each
+	// tool's digest as a grant made from this list pins it (grantSendsOut).
 	// A connector the app can no longer see has no definition: a save skips such a binding, so
 	// no tool of it is a read (read_only false) and the tools are still listed.
 	definition, err := s.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
@@ -770,7 +771,8 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 	for _, tool := range connection.CachedTools {
 		tools = append(tools, ConnectionTool{Name: tool.Name, Description: tool.Description,
 			InputSchema: maps.Clone(tool.InputSchema), SchemaDigest: tool.SchemaDigest,
-			NeedsScopes: slices.Clone(tool.NeedsScopes), ReadOnly: known && !definition.Manifest.SendsOutTool(tool.Name)})
+			NeedsScopes: slices.Clone(tool.NeedsScopes),
+			ReadOnly:    known && !grantSendsOut(definition.Manifest, store.ToolGrant{Name: tool.Name, SchemaDigest: tool.SchemaDigest})})
 	}
 	return &connectionToolsResponse{Body: ConnectionTools{ConnectionID: connection.ID, Tools: tools,
 		Digest: connection.ToolsDigest, CheckedAt: connection.ToolsCheckedAt}}, nil

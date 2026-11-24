@@ -365,6 +365,7 @@ func (s *SourceSuite) TestAToolErrorEchoingTheCredentialIsRedacted() {
 		s.Require().ErrorAs(err, &reported, path)
 		s.NotContains(reported.Message, "tok", path)
 		s.NotContains(core.LoggedMessage(err, exchange.Redact), "tok", path)
+		s.Equal(http.StatusForbidden, exchange.Status(), "the caller's Exchange saw the answer: %s", path)
 		if want != "" {
 			s.Equal(want, reported.Message, path)
 			continue
