@@ -12,7 +12,7 @@ import (
 
 // movingTables are the tables on their way from the shared database to the shards'. Both
 // migration sets create them until the shared set drops its copy.
-var movingTables = []string{"agent_logs"}
+var movingTables = []string{"agent_logs", "connector_invocations"}
 
 // A table is created by one set alone, so a deployment of shards knows where each one is. One
 // moving to the shards is created by both until the shared set drops it, and is read from both.

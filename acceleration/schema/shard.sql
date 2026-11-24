@@ -294,6 +294,26 @@ TABLE calls
     CREATE INDEX calls_session_started_idx ON public.calls USING btree (session_id, started_at DESC) WHERE (session_id IS NOT NULL)
     CREATE INDEX calls_tags_idx ON public.calls USING gin (tags)
 
+TABLE connector_invocations
+    arguments jsonb
+    binding text NOT NULL
+    config_id text NOT NULL
+    connection_id text NOT NULL
+    connector_id text NOT NULL
+    customer_id text NOT NULL
+    error_message text NOT NULL DEFAULT ''::text
+    error_type text NOT NULL DEFAULT ''::text
+    id text NOT NULL
+    latency_ms integer NOT NULL
+    provider_status integer
+    session_id text NOT NULL DEFAULT ''::text
+    started_at timestamp with time zone NOT NULL
+    tool text NOT NULL
+    CONSTRAINT connector_invocations_error_type_check CHECK ((error_type = ANY (ARRAY[''::text, 'customer_auth'::text, 'external_server'::text, 'client_timeout'::text, 'outcome_unknown'::text, 'denied'::text])))
+    CONSTRAINT connector_invocations_latency_ms_check CHECK ((latency_ms >= 0))
+    CONSTRAINT connector_invocations_pkey PRIMARY KEY (id)
+    CREATE INDEX connector_invocations_connection_idx ON public.connector_invocations USING btree (customer_id, connection_id, started_at DESC, id DESC)
+
 TABLE conversation_documents
     conversation_id text NOT NULL DEFAULT ''::text
     created_at timestamp with time zone NOT NULL DEFAULT now()
