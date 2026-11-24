@@ -2431,7 +2431,8 @@ func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveCh
 // revision 2's digest: the connection's x, at revision 1's digest, lists as not read_only, a
 // config granting it at that digest or by name is refused beside nessy, and one granting it at
 // revision 2's digest, which that connection never opens, is accepted. A connection validated at
-// revision 2 lists x as read_only.
+// revision 2 lists x as read_only. Each revision also has y, a read-only GET whose digest is
+// neither grant's.
 func (s *ConfigsSuite) TestAnHTTPToolReadsOnlyAtTheDigestItsGrantPins() {
 	s.useInternalApp()
 	ctx := context.Background()
@@ -2447,7 +2448,8 @@ func (s *ConfigsSuite) TestAnHTTPToolReadsOnlyAtTheDigestItsGrantPins() {
 		manifest.ID = id
 		manifest.Endpoints = maps.Clone(manifest.Endpoints)
 		manifest.Endpoints[core.SourceKindHTTP] = "https://8.8.8.8/api"
-		manifest.Sources = []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{tool}}}
+		manifest.Sources = []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{
+			{Name: "y", Method: http.MethodGet, Path: "/y", ReadOnly: true}, tool}}}
 		definition, err := s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 		s.Require().NoError(err)
 		connection := &store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: id,

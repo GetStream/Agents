@@ -1148,19 +1148,20 @@ func bindingSendsOut(binding store.ConnectorBinding, manifest core.Manifest) ([]
 // mcp tool is judged at the latest revision alone, as its read_only_tools say what the server's
 // tool does, whatever revision lists it.
 func grantSendsOut(manifest core.Manifest, grant store.ToolGrant) bool {
-	if manifest.SendsOutTool(grant.Name) {
-		return true
+	if source := core.HTTPSource(manifest.Sources); source != nil {
+		for _, tool := range source.HTTPTools {
+			if tool.Name != grant.Name {
+				continue
+			}
+			// The digest is JSON of strings and maps, which always encodes: an error is no
+			// digest, which pins nothing.
+			digest, err := httpsource.ToolSchemaDigest(tool)
+			if err != nil || digest != grant.SchemaDigest {
+				return true
+			}
+		}
 	}
-	source := core.HTTPSource(manifest.Sources)
-	if source == nil {
-		return false
-	}
-	index := slices.IndexFunc(source.HTTPTools, func(tool core.HTTPTool) bool { return tool.Name == grant.Name })
-	if index < 0 {
-		return false
-	}
-	digest, err := httpsource.ToolSchemaDigest(source.HTTPTools[index])
-	return err != nil || digest != grant.SchemaDigest
+	return manifest.SendsOutTool(grant.Name)
 }
 
 // holdsPattern reports whether the binding's require_approval holds every tool a tool pattern

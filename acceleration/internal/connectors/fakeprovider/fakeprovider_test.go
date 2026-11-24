@@ -1198,12 +1198,16 @@ func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswer
 	status, body = send(http.MethodGet, "/bytes/2?then=3", srv.APIKey)
 	s.Equal(http.StatusOK, status)
 	s.Equal("aa\xff\xff\xff", body)
+	for _, size := range []string{"/bytes/x", "/bytes/-1", "/bytes/1?then=x", "/bytes/1?then=-1"} {
+		status, _ = send(http.MethodGet, size, srv.APIKey)
+		s.Equal(http.StatusBadRequest, status, size)
+	}
 	status, body = send(http.MethodPost, "/echo-credential", srv.APIKey)
 	s.Equal(http.StatusForbidden, status)
 	s.Contains(body, srv.APIKey)
 
 	requests := srv.APIRequests()
-	s.Require().Len(requests, 5, "the refused one too")
+	s.Require().Len(requests, 9, "the refused ones too")
 	s.Equal(http.MethodDelete, requests[1].Method)
 	s.Equal("/rest/items/..%2Fadmin?q=1", requests[1].URI)
 	s.Equal("sent", requests[1].Body)
