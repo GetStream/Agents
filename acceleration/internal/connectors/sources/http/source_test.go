@@ -74,7 +74,7 @@ func (s *SourceSuite) SetupTest() {
 // parameters in the query, each as the model wrote it; one left out is not sent. The manifest's
 // headers and the connection's credential are on it.
 func (s *SourceSuite) TestAGETSendsItsPathParameterInThePathAndTheOthersInTheQuery() {
-	tool := core.HTTPTool{Name: "get_forecast", Method: http.MethodGet, Path: "/v1/forecast/{city}", ReadOnly: true,
+	tool := core.HTTPTool{Name: "get_forecast", Description: "Calls the API.", Method: http.MethodGet, Path: "/v1/forecast/{city}", ReadOnly: true,
 		Parameters: map[string]core.HTTPParameter{
 			"city": {Type: "string", Required: true}, "latitude": {Type: "number", Required: true},
 			"current": {Type: "string"}, "days": {Type: "integer"}, "past": {Type: "boolean"}, "hourly": {Type: "boolean"},
@@ -99,7 +99,7 @@ func (s *SourceSuite) TestAGETSendsItsPathParameterInThePathAndTheOthersInTheQue
 // AC of AI-3674 and AC-8 of AI-3669: a POST sends its other parameters as a JSON object, numbers
 // as the model wrote them, so 2^53+1 is not rounded through a float.
 func (s *SourceSuite) TestAPOSTSendsItsOtherParametersAsAJSONBody() {
-	tool := core.HTTPTool{Name: "echo", Method: http.MethodPost, Path: "/items/{id}",
+	tool := core.HTTPTool{Name: "echo", Description: "Calls the API.", Method: http.MethodPost, Path: "/items/{id}",
 		Parameters: map[string]core.HTTPParameter{
 			"id": {Type: "string", Required: true}, "message": {Type: "string", Required: true},
 			"count": {Type: "integer"}, "urgent": {Type: "boolean"},
@@ -134,7 +134,7 @@ func (s *SourceSuite) TestEachMethodSendsItsParametersWhereTheRuleSays() {
 		{http.MethodPost, `{"id":"7"}`, url.Values{}, `{}`},
 	} {
 		s.provider.reset()
-		tool := core.HTTPTool{Name: "act", Method: test.method, Path: "/items/{id}",
+		tool := core.HTTPTool{Name: "act", Description: "Calls the API.", Method: test.method, Path: "/items/{id}",
 			Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}, "q": {Type: "string"}}}
 
 		_, err := s.call(s.binding(tool), "act", test.arguments)
@@ -152,7 +152,7 @@ func (s *SourceSuite) TestEachMethodSendsItsParametersWhereTheRuleSays() {
 // whatever it is named and whatever the method, with one sentence; the declared ones alone are
 // sent.
 func (s *SourceSuite) TestAnArgumentTheToolDoesNotDeclareIsRefusedBeforeSending() {
-	post := core.HTTPTool{Name: contracttest.ToolEcho, Method: http.MethodPost, Path: "/echo",
+	post := core.HTTPTool{Name: contracttest.ToolEcho, Description: "Calls the API.", Method: http.MethodPost, Path: "/echo",
 		Parameters: map[string]core.HTTPParameter{"text": {Type: "string", Required: true}}}
 	for _, tool := range []core.HTTPTool{echoTool(), post} {
 		for _, arguments := range []string{
@@ -188,13 +188,13 @@ func (s *SourceSuite) TestAnArgumentTheToolDoesNotDeclareIsRefusedBeforeSending(
 // of AI-3669 says ../admin does, and a value escaped already keeps its %, so neither is a dot
 // segment.
 func (s *SourceSuite) TestAPathValueThatNamesAnotherResourceIsRefusedBeforeSending() {
-	one := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{id}",
+	one := core.HTTPTool{Name: "remove", Description: "Calls the API.", Method: http.MethodDelete, Path: "/items/{id}",
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}}}
-	inner := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{id}/notes",
+	inner := core.HTTPTool{Name: "remove", Description: "Calls the API.", Method: http.MethodDelete, Path: "/items/{id}/notes",
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}}}
-	pair := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{a}{b}",
+	pair := core.HTTPTool{Name: "remove", Description: "Calls the API.", Method: http.MethodDelete, Path: "/items/{a}{b}",
 		Parameters: map[string]core.HTTPParameter{"a": {Type: "string", Required: true}, "b": {Type: "string", Required: true}}}
-	number := core.HTTPTool{Name: "remove", Method: http.MethodDelete, Path: "/items/{id}",
+	number := core.HTTPTool{Name: "remove", Description: "Calls the API.", Method: http.MethodDelete, Path: "/items/{id}",
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "integer", Required: true}}}
 
 	for _, test := range []struct {
@@ -290,7 +290,7 @@ func (s *SourceSuite) TestOnlyAReadFollowsARedirect() {
 		{http.MethodHead, "/moved-308", ""},
 	} {
 		s.provider.reset()
-		tool := core.HTTPTool{Name: "act", Method: test.method, Path: test.path,
+		tool := core.HTTPTool{Name: "act", Description: "Calls the API.", Method: test.method, Path: test.path,
 			Parameters: map[string]core.HTTPParameter{"q": {Type: "string"}}}
 
 		_, err := s.call(s.binding(tool), "act", `{"q":"x"}`)
@@ -337,7 +337,7 @@ func (s *SourceSuite) TestARedirectToAnotherOriginNeverCarriesTheCredential() {
 
 // A client with no redirect policy of its own stops a read's redirects where net/http does.
 func (s *SourceSuite) TestAClientWithNoRedirectPolicyStopsAfterTenRedirects() {
-	binding := s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/loop"})
+	binding := s.binding(core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/loop"})
 	binding.HTTP.CheckRedirect = nil
 
 	_, err := s.call(binding, "get", `{}`)
@@ -354,7 +354,7 @@ func (s *SourceSuite) TestAToolErrorEchoingTheCredentialIsRedacted() {
 		"/echo-credential": `The API answered 403 Forbidden: {"error":"key Bearer [redacted] may not read this"}`,
 		"/echo-at-the-cut": "",
 	} {
-		tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: path}
+		tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: path}
 		set, err := s.source.Open(s.ctx, s.binding(tool), s.grants(s.binding(tool), "get"))
 		s.Require().NoError(err)
 		ctx, exchange := core.WithExchange(s.ctx)
@@ -377,7 +377,7 @@ func (s *SourceSuite) TestAToolErrorEchoingTheCredentialIsRedacted() {
 // An API that echoes the request's credential in a 2xx does not put it in the conversation
 // either, with or without an Exchange of the caller's; the path and query it names are kept.
 func (s *SourceSuite) TestA2xxEchoingTheCredentialIsRedactedAndKeepsItsPath() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential-ok/{id}", ReadOnly: true,
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/echo-credential-ok/{id}", ReadOnly: true,
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}, "q": {Type: "string"}}}
 	for name, ctx := range map[string]context.Context{"the caller's Exchange": func() context.Context {
 		ctx, _ := core.WithExchange(s.ctx)
@@ -395,7 +395,7 @@ func (s *SourceSuite) TestA2xxEchoingTheCredentialIsRedactedAndKeepsItsPath() {
 
 // A call without an Exchange of its caller's is redacted all the same, with one of its own.
 func (s *SourceSuite) TestAToolErrorIsRedactedWithNoExchangeOfTheCallers() {
-	_, err := s.call(s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential"}), "get", `{}`)
+	_, err := s.call(s.binding(core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/echo-credential"}), "get", `{}`)
 
 	var reported *core.ToolError
 	s.Require().ErrorAs(err, &reported)
@@ -403,7 +403,7 @@ func (s *SourceSuite) TestAToolErrorIsRedactedWithNoExchangeOfTheCallers() {
 }
 
 func (s *SourceSuite) TestNoArgumentsAtAllAreAnEmptyObject() {
-	tool := core.HTTPTool{Name: "list", Method: http.MethodGet, Path: "/items"}
+	tool := core.HTTPTool{Name: "list", Description: "Calls the API.", Method: http.MethodGet, Path: "/items"}
 
 	result, err := s.call(s.binding(tool), "list", "  ")
 
@@ -432,7 +432,7 @@ func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 		"/multiple-choices": "The API answered 300 Multiple Choices",
 		"/refused":          "The API answered 401 Unauthorized: bad token",
 	} {
-		tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: path}
+		tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: path}
 
 		_, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -440,7 +440,7 @@ func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 		s.Require().ErrorAs(err, &reported, path)
 		s.Equal(want, reported.Message, path)
 	}
-	result, err := s.call(s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/last-2xx"}), "get", `{}`)
+	result, err := s.call(s.binding(core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/last-2xx"}), "get", `{}`)
 	s.Require().NoError(err, "299 is the last 2xx")
 	s.Equal("ok", llm.TextOf(result.Parts))
 }
@@ -449,8 +449,8 @@ func (s *SourceSuite) TestAnAnswerThatIsNotA2xxIsAToolErrorNamingItsStatus() {
 // the model can tell done from nothing.
 func (s *SourceSuite) TestAnEmpty2xxIsItsStatus() {
 	for want, tool := range map[string]core.HTTPTool{
-		"The API answered 204 No Content.": {Name: "remove", Method: http.MethodDelete, Path: "/no-content"},
-		"The API answered 200 OK.":         {Name: "check", Method: http.MethodHead, Path: "/items"},
+		"The API answered 204 No Content.": {Name: "remove", Description: "Calls the API.", Method: http.MethodDelete, Path: "/no-content"},
+		"The API answered 200 OK.":         {Name: "check", Description: "Calls the API.", Method: http.MethodHead, Path: "/items"},
 	} {
 		result, err := s.call(s.binding(tool), tool.Name, `{}`)
 
@@ -460,7 +460,7 @@ func (s *SourceSuite) TestAnEmpty2xxIsItsStatus() {
 }
 
 func (s *SourceSuite) TestAToolErrorOverTheCapIsCutWithTheMarker() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/error-large"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/error-large"}
 
 	_, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -471,7 +471,7 @@ func (s *SourceSuite) TestAToolErrorOverTheCapIsCutWithTheMarker() {
 }
 
 func (s *SourceSuite) TestABodyThatIsNotTextReadsAsNotText() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/binary"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/binary"}
 
 	result, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -482,7 +482,7 @@ func (s *SourceSuite) TestABodyThatIsNotTextReadsAsNotText() {
 // The provider answers 4 MiB of text and then a byte that is not UTF-8: read past the cap, the
 // body would be no text at all.
 func (s *SourceSuite) TestABodyIsReadOnlyUpToTheCap() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/huge"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/huge"}
 
 	result, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -494,7 +494,7 @@ func (s *SourceSuite) TestABodyIsReadOnlyUpToTheCap() {
 
 // R1.2: valid text whose cut at the cap falls inside a rune is still text, cut before that rune.
 func (s *SourceSuite) TestTextTheCapCutsInsideARuneIsStillText() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/huge-runes"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/huge-runes"}
 
 	result, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -507,7 +507,7 @@ func (s *SourceSuite) TestTextTheCapCutsInsideARuneIsStillText() {
 // R1.3: the last byte under the 4 MiB cap is read: a body whose last byte there is not UTF-8 is
 // not text, under a cap even one byte lower too.
 func (s *SourceSuite) TestTheLastByteUnderTheCapIsRead() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/bad-byte-at-the-cap"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/bad-byte-at-the-cap"}
 
 	result, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -517,7 +517,7 @@ func (s *SourceSuite) TestTheLastByteUnderTheCapIsRead() {
 
 // R1.3: a 4xx or a 5xx whose body is not text names its status and says so, never the bytes.
 func (s *SourceSuite) TestAToolErrorWithABodyThatIsNotTextSaysItIsNotText() {
-	_, err := s.call(s.binding(core.HTTPTool{Name: "broken", Method: http.MethodGet, Path: "/broken"}), "broken", `{}`)
+	_, err := s.call(s.binding(core.HTTPTool{Name: "broken", Description: "Calls the API.", Method: http.MethodGet, Path: "/broken"}), "broken", `{}`)
 
 	var reported *core.ToolError
 	s.Require().ErrorAs(err, &reported)
@@ -528,8 +528,8 @@ func (s *SourceSuite) TestAToolErrorWithABodyThatIsNotTextSaysItIsNotText() {
 // made for one revision's x never opens the other's, so a connection still pinned to revision 1
 // never runs the POST under a grant made for the read-only GET, nor the reverse.
 func (s *SourceSuite) TestAGrantForAnotherRevisionOfAToolIsNeverOpened() {
-	post := core.HTTPTool{Name: "x", Method: http.MethodPost, Path: "/x"}
-	get := core.HTTPTool{Name: "x", Method: http.MethodGet, Path: "/x", ReadOnly: true}
+	post := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodPost, Path: "/x"}
+	get := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodGet, Path: "/x", ReadOnly: true}
 	revision1, revision2 := s.binding(post), s.binding(get)
 	granted1, granted2 := s.grants(revision1, "x"), s.grants(revision2, "x")
 
@@ -598,7 +598,7 @@ func (s *SourceSuite) TestTheInputSchemaIsTheDeclaredParameters() {
 		Path: "/v1/forecast/{city}", Parameters: map[string]core.HTTPParameter{
 			"days": {Type: "integer", Description: "How many days."}, "city": {Type: "string", Required: true},
 			"at": {Type: "number", Required: true}}}
-	list := core.HTTPTool{Name: "list", Method: http.MethodGet, Path: "/items",
+	list := core.HTTPTool{Name: "list", Description: "Calls the API.", Method: http.MethodGet, Path: "/items",
 		Parameters: map[string]core.HTTPParameter{"q": {Type: "string"}}}
 	binding := s.binding(forecast, list)
 
@@ -659,7 +659,7 @@ func (s *SourceSuite) TestAManifestWithNoHTTPSourceOrNoEndpointIsRefused() {
 // The connection's client cuts a request at its own timeout, which validate's requests keep; an
 // opened toolset's copy waits at least callTimeout, so the caller's deadline ends a call first.
 func (s *SourceSuite) TestAnOpenedToolsetWaitsPastTheConnectionsClientTimeout() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/slow"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/slow"}
 	binding := s.provider.binding(s.T(), shortTimeout, tool)
 
 	result, err := s.call(binding, "get", `{}`)
@@ -684,7 +684,7 @@ func (s *SourceSuite) TestAClientWaitingLongerThanCallTimeoutKeepsItsTimeout() {
 }
 
 func (s *SourceSuite) TestABodyCutShortIsAnErrorNotAnAnswer() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/cut"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/cut"}
 
 	_, err := s.call(s.binding(tool), "get", `{}`)
 
@@ -699,7 +699,7 @@ func (s *SourceSuite) TestABodyCutShortIsAnErrorNotAnAnswer() {
 // one sentence, with no URL, no argument and nothing of the policy or the resolver; the log line
 // keeps why (core.LoggedMessage).
 func (s *SourceSuite) TestACallThatReachesNoAPIReadsOneSentence() {
-	lookup := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/people/{id}",
+	lookup := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/people/{id}",
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}, "email": {Type: "string"}}}
 	transports, err := core.NewTransports(core.TransportsConfig{Resolver: tokenResolver{}, Timeout: requestTimeout})
 	s.Require().NoError(err)
@@ -720,7 +720,7 @@ func (s *SourceSuite) TestACallThatReachesNoAPIReadsOneSentence() {
 const unreachedSentence = "http: crm__get: the API could not be reached, or its answer did not arrive whole"
 
 func (s *SourceSuite) TestTheBindingsTimeoutBoundsACall() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/slow"}
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/slow"}
 	binding := s.binding(tool)
 	binding.Binding.Timeout = shortTimeout
 

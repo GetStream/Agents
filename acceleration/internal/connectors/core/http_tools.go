@@ -148,6 +148,11 @@ func checkHTTPSource(fail func(field, format string, args ...any), field string,
 			fail(field+".name", "%q is named twice", tool.Name)
 		}
 		named[tool.Name] = true
+		// Why: a session refuses a tool with no description (harness.Tools.Validate), since the
+		// model would never know when to use it; refused here, the sync says so, not a session.
+		if tool.Description == "" {
+			fail(field+".description", "is empty: the model reads it to know when to use the tool")
+		}
 		if len(tool.Description) > maxHTTPToolDescription {
 			fail(field+".description", "is over %d bytes", maxHTTPToolDescription)
 		}

@@ -39,7 +39,7 @@ func (s *AcceptanceSuite) SetupTest() {
 // is refused before sending, and the provider records no request; with valid arguments it records
 // exactly one GET with no override header, the path value ../admin escaped as one segment.
 func (s *AcceptanceSuite) TestAnOverrideIsRefusedBeforeSendingAndAValidCallIsOneGET() {
-	tool := core.HTTPTool{Name: "get_item", Method: http.MethodGet, Path: "/items/{id}", ReadOnly: true,
+	tool := core.HTTPTool{Name: "get_item", Description: "Calls the API.", Method: http.MethodGet, Path: "/items/{id}", ReadOnly: true,
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}}}
 
 	_, err := s.call(tool, `{"id":"1","_method":"DELETE","X-HTTP-Method-Override":"DELETE"}`)
@@ -65,7 +65,7 @@ func (s *AcceptanceSuite) TestAnOverrideIsRefusedBeforeSendingAndAValidCallIsOne
 // 5 MiB one only the first 4 MiB is read: past them the fake's bytes are not UTF-8, which would
 // read as nonText.
 func (s *AcceptanceSuite) TestAnAnswerIsReadUpTo4MiBAndReadAsAtMost32KiB() {
-	tool := core.HTTPTool{Name: "get_bytes", Method: http.MethodGet, Path: "/bytes/{size}", ReadOnly: true,
+	tool := core.HTTPTool{Name: "get_bytes", Description: "Calls the API.", Method: http.MethodGet, Path: "/bytes/{size}", ReadOnly: true,
 		Parameters: map[string]core.HTTPParameter{"size": {Type: "integer", Required: true}, "then": {Type: "integer"}}}
 
 	for _, arguments := range []string{`{"size":102400}`, `{"size":4194304,"then":1048576}`} {
@@ -82,7 +82,7 @@ func (s *AcceptanceSuite) TestAnAnswerIsReadUpTo4MiBAndReadAsAtMost32KiB() {
 // S1.2 of AI-3674: an API answering 403 with the api_key and the Authorization it got does not
 // put the key in the conversation.
 func (s *AcceptanceSuite) TestA403EchoingTheKeyIsRedacted() {
-	_, err := s.call(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential"}, `{}`)
+	_, err := s.call(core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/echo-credential"}, `{}`)
 
 	var reported *core.ToolError
 	s.Require().ErrorAs(err, &reported)
@@ -93,7 +93,7 @@ func (s *AcceptanceSuite) TestA403EchoingTheKeyIsRedacted() {
 // An API answering 200 with the api_key it got does not put the key in the conversation either;
 // the rest of the answer stays as it came.
 func (s *AcceptanceSuite) TestA200EchoingTheKeyIsRedacted() {
-	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential", ReadOnly: true,
+	tool := core.HTTPTool{Name: "get", Description: "Calls the API.", Method: http.MethodGet, Path: "/echo-credential", ReadOnly: true,
 		Parameters: map[string]core.HTTPParameter{"status": {Type: "string"}}}
 
 	result, err := s.call(tool, `{"status":"200"}`)
@@ -106,14 +106,14 @@ func (s *AcceptanceSuite) TestA200EchoingTheKeyIsRedacted() {
 // dispatcher writes it) holds no argument value and no credential: the URL the client's error
 // names is cut to its scheme and host, and the tool error is redacted.
 func (s *AcceptanceSuite) TestALogLineHoldsNoArgumentAndNoCredential() {
-	lookup := core.HTTPTool{Name: "lookup", Method: http.MethodGet, Path: "/people/{id}",
+	lookup := core.HTTPTool{Name: "lookup", Description: "Calls the API.", Method: http.MethodGet, Path: "/people/{id}",
 		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}, "email": {Type: "string"}}}
 	transports, err := core.NewTransports(core.TransportsConfig{Resolver: keyResolver{key: s.provider.APIKey}, Timeout: requestTimeout})
 	s.Require().NoError(err)
 	unreached := s.binding(lookup)
 	unreached.Manifest.Endpoints[Kind] = "https://127.0.0.1:8443/rest"
 	unreached.HTTP = transports.Client(core.ConnectionRef{CustomerID: "app", ConnectionID: "crm-1"}, apikey.New())
-	echoed := s.binding(core.HTTPTool{Name: "lookup", Method: http.MethodGet, Path: "/echo-credential",
+	echoed := s.binding(core.HTTPTool{Name: "lookup", Description: "Calls the API.", Method: http.MethodGet, Path: "/echo-credential",
 		Parameters: map[string]core.HTTPParameter{"email": {Type: "string"}}})
 
 	for name, binding := range map[string]core.ResolvedBinding{"egress refuses the host": unreached, "the API echoes the key": echoed} {

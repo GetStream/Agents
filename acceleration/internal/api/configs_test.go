@@ -2437,8 +2437,8 @@ func (s *ConfigsSuite) TestAnHTTPToolReadsOnlyAtTheDigestItsGrantPins() {
 	s.useInternalApp()
 	ctx := context.Background()
 	id := "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	post := core.HTTPTool{Name: "x", Method: http.MethodPost, Path: "/x"}
-	get := core.HTTPTool{Name: "x", Method: http.MethodGet, Path: "/x", ReadOnly: true}
+	post := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodPost, Path: "/x"}
+	get := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodGet, Path: "/x", ReadOnly: true}
 	// linear.yaml's manifest with an http source in place of its mcp one: the suite registers
 	// oauth2_code alone, which a custom http connector cannot have (core.CustomManifest).
 	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
@@ -2449,7 +2449,7 @@ func (s *ConfigsSuite) TestAnHTTPToolReadsOnlyAtTheDigestItsGrantPins() {
 		manifest.Endpoints = maps.Clone(manifest.Endpoints)
 		manifest.Endpoints[core.SourceKindHTTP] = "https://8.8.8.8/api"
 		manifest.Sources = []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{
-			{Name: "y", Method: http.MethodGet, Path: "/y", ReadOnly: true}, tool}}}
+			{Name: "y", Description: "Calls the API.", Method: http.MethodGet, Path: "/y", ReadOnly: true}, tool}}}
 		definition, err := s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 		s.Require().NoError(err)
 		connection := &store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: id,
