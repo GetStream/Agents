@@ -210,7 +210,7 @@ const (
 // ConnectorDefinitionLimit is the page size a definition list uses for the limit asked for.
 // Select returns one row more than this.
 func ConnectorDefinitionLimit(asked int) int {
-	return clampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
+	return ClampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
 }
 
 // ConnectorDefinitionFilter narrows a definition list and says where its page starts.

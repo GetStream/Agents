@@ -69,7 +69,7 @@ const (
 // CustomModelLimit is the page size a model list uses for the limit asked for. Select returns
 // one row more than this, the same as the session queries.
 func CustomModelLimit(asked int) int {
-	return clampLimit(asked, defaultCustomModelLimit, maxCustomModelLimit)
+	return ClampLimit(asked, defaultCustomModelLimit, maxCustomModelLimit)
 }
 
 // CustomModelPosition is where a page of models ends.

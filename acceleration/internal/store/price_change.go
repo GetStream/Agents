@@ -368,7 +368,7 @@ const (
 // PriceChangeLimit is the page size a list of price changes uses for the limit asked for.
 // PriceChanges.Select returns one row more than this.
 func PriceChangeLimit(asked int) int {
-	return clampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
+	return ClampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
 }
 
 // PriceChangePosition is the last change of a page.

@@ -58,7 +58,7 @@ const (
 // ProviderKeyLimit is the page size a provider key list uses for the limit asked for.
 // Select returns one row more than this.
 func ProviderKeyLimit(asked int) int {
-	return clampLimit(asked, defaultProviderKeyLimit, maxProviderKeyLimit)
+	return ClampLimit(asked, defaultProviderKeyLimit, maxProviderKeyLimit)
 }
 
 // ProviderKeyPosition is where a page of a customer's provider keys ends: the provider and the

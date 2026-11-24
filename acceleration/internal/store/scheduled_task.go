@@ -150,7 +150,7 @@ const (
 
 // ScheduledTaskLimit is the page size a task or run list uses.
 func ScheduledTaskLimit(asked int) int {
-	return clampLimit(asked, defaultScheduledTaskLimit, maxScheduledTaskLimit)
+	return ClampLimit(asked, defaultScheduledTaskLimit, maxScheduledTaskLimit)
 }
 
 // ScheduledTaskScope narrows a list to one user's tasks as one kind of caller

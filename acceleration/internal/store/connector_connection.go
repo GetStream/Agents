@@ -157,7 +157,7 @@ type ConnectionPosition struct {
 // Select returns one row more than this, so a caller can tell the page
 // is not the last without counting.
 func ConnectionLimit(asked int) int {
-	return clampLimit(asked, defaultConnectionLimit, maxConnectionLimit)
+	return ClampLimit(asked, defaultConnectionLimit, maxConnectionLimit)
 }
 
 // ConnectorConnections are the accounts customers connected at connectors, in the shared

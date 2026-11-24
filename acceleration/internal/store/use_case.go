@@ -143,7 +143,7 @@ const (
 
 // DLCLimit is the page size the use case, review and opt-out lists use for the limit asked
 // for. They return one row more than this, so a caller can tell the page is not the last.
-func DLCLimit(asked int) int { return clampLimit(asked, defaultDLCLimit, maxDLCLimit) }
+func DLCLimit(asked int) int { return ClampLimit(asked, defaultDLCLimit, maxDLCLimit) }
 
 // Select pages through an app's use cases, newest first.
 func (r *UseCases) Select(ctx context.Context, customerID string, limit int, after *CreatedPosition) ([]UseCase, error) {

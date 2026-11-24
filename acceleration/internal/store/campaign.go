@@ -193,7 +193,7 @@ func (r *Campaigns) Select(ctx context.Context, customerID string, filter Campai
 	if filter.After != nil {
 		query = query.Where("(created_at, id) < (?, ?)", filter.After.At, filter.After.ID)
 	}
-	err := query.Order("created_at DESC", "id DESC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx)
+	err := query.Order("created_at DESC", "id DESC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query campaigns: %w", err))
 	}

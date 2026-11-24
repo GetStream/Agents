@@ -163,7 +163,7 @@ type AuditEntryFilter struct {
 // AuditEntryLimit is the page size an audit query uses for the limit asked for.
 // AuditEntries.Select returns one row more than this.
 func AuditEntryLimit(asked int) int {
-	return clampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
+	return ClampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
 }
 
 // Validate refuses an entry the log would not hold: an audited resource and action, a resource,

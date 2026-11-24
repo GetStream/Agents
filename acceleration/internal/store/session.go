@@ -260,9 +260,10 @@ const (
 //
 // The queries return one row more than this, so a caller can tell the page is not the last
 // without counting.
-func SessionLimit(asked int) int { return clampLimit(asked, defaultSessionLimit, maxSessionLimit) }
+func SessionLimit(asked int) int { return ClampLimit(asked, defaultSessionLimit, maxSessionLimit) }
 
-func clampLimit(asked, fallback, most int) int {
+// ClampLimit is the page size for the limit asked for: fallback when none was, at most most.
+func ClampLimit(asked, fallback, most int) int {
 	if asked <= 0 {
 		return fallback
 	}
