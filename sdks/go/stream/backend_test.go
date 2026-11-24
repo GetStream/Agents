@@ -114,9 +114,27 @@ func TestARegionIsTheHostedRouterThere(t *testing.T) {
 	}
 }
 
-func TestTheHostedRouterOutOfTheBoxIsUSEast4(t *testing.T) {
-	if DefaultURL != "https://accelerate-us-east4.gcp.stream-io-api.com" {
+func TestTheHostedRouterOutOfTheBoxIsTheNearestRegion(t *testing.T) {
+	if DefaultURL != "https://accelerate-auto.gcp.stream-io-api.com" {
 		t.Errorf("the default is %s", DefaultURL)
+	}
+}
+
+func TestTheNearestHostedRouterIsAuthenticated(t *testing.T) {
+	t.Setenv(RegionEnv, "")
+	t.Setenv(CustomerEnv, "acme")
+	t.Setenv(APIKeyEnv, "ntv9")
+	t.Setenv(APISecretEnv, "shh")
+
+	for _, url := range []string{"", "https://accelerate-auto.gcp.stream-io-api.com/"} {
+		t.Setenv(URLEnv, url)
+		resolved, err := Backend{}.Resolve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved.URL != DefaultURL || !resolved.Authenticate {
+			t.Errorf("%q resolved to %s, authenticating %v", url, resolved.URL, resolved.Authenticate)
+		}
 	}
 }
 
