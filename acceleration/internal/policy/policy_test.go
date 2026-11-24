@@ -141,7 +141,11 @@ func (s *PolicySuite) spend(appID string, costMicros int64) {
 func (s *PolicySuite) spendAs(request store.Request) {
 	request.Modality, request.Provider, request.Model = "llm", "openai", "gpt-5.6-luna"
 	request.StartedAt, request.Success, request.Billable = time.Now().UTC(), true, true
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
+	if request.UsageID == uuid.Nil {
+		request.UsageID = uuid.Must(uuid.NewV7())
+	}
+	_, err := s.store.Requests.InsertMany(s.ctx, []store.Request{request})
+	s.Require().NoError(err)
 }
 
 func (s *PolicySuite) save(scope store.PolicyScope, id string, document store.PolicyDocument) {

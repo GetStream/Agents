@@ -657,7 +657,7 @@ func (m *money) release(key string, acct *account, now time.Time) {
 				acct.letGoGrants(held)
 			case held.countedAt.IsZero() && !held.writtenAt.IsZero() && now.Sub(held.writtenAt) > uncountable:
 				// The reconcile misses a row written past its overlap after it started, and
-				// AddGrantUses refuses one naming a grant long ended: neither ever counts.
+				// store.LimitGrantUses.InsertMany refuses one naming a grant long ended: neither ever counts.
 				stranded += held.micros
 				strandedGrants = append(strandedGrants, held.grants...)
 				acct.letGoGrants(held)

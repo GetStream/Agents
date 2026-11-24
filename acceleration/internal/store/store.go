@@ -280,7 +280,7 @@ func (s *Store) CustomerActivity(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown activity granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	unit := granularity.truncateUnit()
@@ -459,7 +459,7 @@ func carriedIn(id string) string {
 // and is one session while both are open.
 func (s *Store) CustomerConcurrencyPeak(ctx context.Context, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	if customerID == "" {
-		return ConcurrencyPeak{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConcurrencyPeak{}, stack.Wrap(errCustomerRequired)
 	}
 
 	const spans = `
@@ -564,7 +564,7 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 // response when it comes back while the turn is open, and as a turn of its own after.
 func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID string, from, to time.Time) (ToolUsage, []ToolUsage, error) {
 	if customerID == "" {
-		return ToolUsage{}, nil, stack.Wrap(errors.New("store: customer id is required"))
+		return ToolUsage{}, nil, stack.Wrap(errCustomerRequired)
 	}
 
 	type usageRow struct {
@@ -899,7 +899,7 @@ GROUP BY x.session_id, x.turn_id`,
 // A configID keeps to the sessions of that agent config, and empty is every one.
 func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, from, to time.Time) (SessionTurns, error) {
 	if customerID == "" {
-		return SessionTurns{}, stack.Wrap(errors.New("store: customer id is required"))
+		return SessionTurns{}, stack.Wrap(errCustomerRequired)
 	}
 	type shardTurns struct {
 		SessionTurns
@@ -967,8 +967,10 @@ func lockUntilCommit(ctx context.Context, tx bun.IDB, key string, seed int64) er
 	return err
 }
 
-// databaseNow is the database's clock, which routers whose clocks disagree still share.
-func databaseNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+// transactionStart is when db's transaction started, by the database's clock, which routers
+// whose clocks disagree still share. It is not when it is asked: every call in one transaction
+// gets the same answer, and outside a transaction it is when the statement started.
+func transactionStart(ctx context.Context, db bun.IDB) (time.Time, error) {
 	var now time.Time
 	err := db.QueryRowContext(ctx, "SELECT now()").Scan(&now)
 	return now, err

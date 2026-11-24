@@ -107,6 +107,23 @@ func (s *StoreSuite) TestAppOrganizationQueryBudgets() {
 	}), "an app never seen under one is looked up where it was registered")
 }
 
+func (s *StoreSuite) TestManyAppsOrganizationsAreReadInTwoStatements() {
+	registered, moved := s.app(), s.app()
+	seen := "app-" + uuid.NewString()
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: seen, OrganizationID: "org-1"}))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: moved.ID, OrganizationID: "org-other"}))
+
+	var owners map[string]string
+	s.Equal(2, s.countQueries(func() {
+		var err error
+		owners, err = s.store.AppOrganizations.OrganizationsOf(s.ctx, []string{registered.ID, moved.ID, seen, "app-never"})
+		s.Require().NoError(err)
+	}), "the apps seen, then where the others are registered")
+
+	s.Equal(map[string]string{registered.ID: registered.OrganizationID, moved.ID: "org-other", seen: "org-1"}, owners,
+		"the organization last seen wins over the one registered, and an app neither names is left out")
+}
+
 func (s *StoreSuite) TestAnOrganizationsAppsAreReadInOneStatement() {
 	app := s.app()
 	s.Equal(1, s.countQueries(func() {

@@ -311,7 +311,7 @@ func (s *CloserSuite) TestAFailedSummaryLeavesSummaryFailedAndTheThreadIntact() 
 func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked() {
 	s.chat.KnownAuthors()
 	user := "anya-" + uuid.NewString()
-	// A Stream user of the deployment's own app, as a link names one (store.LinkUserPhone).
+	// A Stream user of the deployment's own app, as a link names one (store.UserPhones.Link).
 	chatting, err := s.cards.Open(s.ctx, Episode{
 		CustomerID: s.customerID, AgentConfigID: s.config.ID, AgentName: s.config.Name,
 		Person: Person{Kind: store.ContactStreamUser, Address: store.StreamUserAddress(0, user)},

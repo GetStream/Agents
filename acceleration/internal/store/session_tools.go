@@ -61,9 +61,7 @@ func (r *SessionTools) Upsert(ctx context.Context, customerID, sessionID string,
 	if customerID == "" {
 		return stack.Wrap(errors.New("store: a customer is required"))
 	}
-	if tools == nil {
-		tools = []ToolDefinition{}
-	}
+	tools = orEmpty(tools)
 	row := &agentSessionTools{SessionID: sessionID, CustomerID: customerID, Tools: tools, UpdatedAt: time.Now().UTC()}
 	if err := row.Validate(); err != nil {
 		return stack.Wrap(err)

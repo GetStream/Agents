@@ -188,6 +188,12 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
+	// The parent's tools go to the fork only for the kind of caller that declared them, as
+	// they do for a conversation carried on (rowTools): a backend's tool on its end user's
+	// fork would be the device's to answer (Session.seatRuns).
+	if spec.CallerKind != KindFrom(ctx) {
+		spec.Tools = nil
+	}
 	spec.CallerKind = KindFrom(ctx)
 	if body.Messages == nil || *body.Messages {
 		spec.Documents = s.forkedDocuments(ctx, parent, value(body.ResponseId), spec.Caller.UserID)
@@ -676,6 +682,13 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		}
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
+		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
+		// caller takes the ones its row keeps for that kind.
+		if spec.CallerKind != KindFrom(ctx) {
+			if failure = s.toolsFromRow(ctx, &spec); failure != nil {
+				return nil, nil, failure
+			}
+		}
 	case errors.Is(failure, errUnknownSession):
 		if spec, failure = s.reopenedFromRow(ctx, id); failure != nil {
 			return nil, nil, failure
@@ -710,6 +723,39 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 	}
 	events, detach := reopened.Watch()
 	return reopened, func() { go holdUntilAnswered(reopened, events, detach) }, nil
+}
+
+// toolsFromRow gives spec, ended here and last carried on by another kind of caller, the tools
+// and timeout its row keeps. The row keeps them for the kind of caller that opened it
+// (Sessions.Upsert), so a device carrying on its backend's conversation leaves the backend
+// its tools. With no row it has no tools.
+func (s *Server) toolsFromRow(ctx context.Context, spec *session.Spec) error {
+	spec.Tools = nil
+	if s.store == nil {
+		return nil
+	}
+	// As for reopenedFromRow: a failed flush reads the row as it is.
+	_ = s.sessions.FlushRecords(ctx)
+	row, err := s.store.Sessions.Get(ctx, spec.CustomerID, spec.ID)
+	if errors.Is(err, store.ErrNoSession) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rowTools(ctx, spec, row)
+	return nil
+}
+
+// rowTools gives spec the caller's tools and how long they are waited for, as row keeps them.
+// The tools go only to the kind of caller that declared them: a backend's tool carried on by
+// its end user's device would be the device's to answer (Session.seatRuns).
+func rowTools(ctx context.Context, spec *session.Spec, row store.AgentSession) {
+	spec.ToolTimeoutMs = row.ToolTimeoutMs
+	spec.Tools = nil
+	if row.CallerKind == string(KindFrom(ctx)) {
+		spec.Tools = session.DeclaredTools(row.CallerTools)
+	}
 }
 
 // reopenRaceWait bounds how long a request that lost a reopen waits for the winner to be held.
@@ -775,12 +821,7 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.ForkedFrom = row.ForkedFrom
 	// The caller's tools and how long they are waited for go on with the chat, as they do
 	// for one carried on in the process that held it (Spec.Written).
-	spec.ToolTimeoutMs = row.ToolTimeoutMs
-	// Tools only for the kind of caller that declared them: a backend's tool carried on by its
-	// end user's device would be the device's to answer (Session.seatRuns).
-	if row.CallerKind == string(KindFrom(ctx)) {
-		spec.Tools = session.DeclaredTools(row.CallerTools)
-	}
+	rowTools(ctx, &spec, *row)
 	// The caller's connections go on with the chat; the session checks each against the
 	// config as it is now and the caller asking, as it did when the chat opened.
 	spec.ConnectorSelections = selectionsOf(*row)

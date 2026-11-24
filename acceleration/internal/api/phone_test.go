@@ -1300,7 +1300,10 @@ func (s *PhoneSuite) TestReleasingANumberRemovesItsAgent() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/phone/numbers/"+number+"/agent",
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(ctx, s.customerID(), number, time.Time{}))
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "bics"}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(number, time.Time{})
+	}))
 
 	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, s.customerID(), config)
 	s.Require().NoError(err)

@@ -33,7 +33,7 @@ func (c AgentConfig) TestCopy() bool {
 const notTestCopy = "coalesce(tags->>'" + DraftOfTag + "', '') = ''"
 
 // channelOwnerLockSeed is the second argument to hashtextextended for the lock a channel
-// connection's owner is decided under. Any value other than the 731 RecordAgentLog uses and
+// connection's owner is decided under. Any value other than the 731 AgentLogs.Insert uses and
 // definitionLockSeed (833) would do; 1049 is this rule's issue, AI-1049.
 const channelOwnerLockSeed = 1049
 

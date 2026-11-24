@@ -130,18 +130,21 @@ GROUP BY 1, 2`
 
 // Subject sums the billable cost of a subject's rows since a moment, across every
 // shard, for a deployment with no usage service to count it. A subject of the whole
-// organization (the organization, a category) counts every app seen under it, and the app
-// whose id the organization's is, for an app that is its own organization.
-func (r *Spend) Subject(ctx context.Context, ref usage.SubjectRef, since time.Time) (int64, error) {
+// organization (the organization, a category) counts every app seen under it when billed, or,
+// for an app in no organization, whose id ref.OrganizationID is, that app alone. Neither
+// counts an app of another customer's whose id is the same: an app whose id is a billed
+// organization's, or one seen under an organization whose id is an unbilled app's.
+func (r *Spend) Subject(ctx context.Context, ref usage.SubjectRef, since time.Time, billed bool) (int64, error) {
 	apps := []string{ref.AppID}
 	if ref.Subject == usage.SubjectOrganization || ref.Subject == usage.SubjectCategory {
 		apps = []string{ref.OrganizationID}
-		var members []string
-		if err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
-			Where("organization_id = ?", ref.OrganizationID).Scan(ctx, &members); err != nil {
-			return 0, stack.Wrap(fmt.Errorf("store: subject spend since: %w", err))
+		if billed {
+			apps = nil
+			if err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
+				Where("organization_id = ?", ref.OrganizationID).Scan(ctx, &apps); err != nil {
+				return 0, stack.Wrap(fmt.Errorf("store: subject spend since: %w", err))
+			}
 		}
-		apps = append(apps, members...)
 	}
 	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
 		var spent int64

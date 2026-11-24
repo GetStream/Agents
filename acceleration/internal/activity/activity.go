@@ -1,5 +1,5 @@
 // Package activity counts the requests each app makes, by area of the API and by client, and
-// writes the sums to customer_activity (store.RecordActivity).
+// writes the sums to customer_activity (store.Activities.Add).
 //
 // Every authenticated request is one, and so is a hook checked as an app's (NoteCustomer), and
 // the work the router does for an app on its own: a forward to its endpoint, a scheduled task's

@@ -57,10 +57,9 @@ type Contact struct {
 	Outcome    string     `bun:"outcome,notnull"`
 	Converted  bool       `bun:"converted,notnull"`
 	// CallID is the calls row of the last dial.
-	CallID       string    `bun:"call_id,nullzero"`
-	VendorCallID string    `bun:"vendor_call_id,nullzero"`
-	Reason       string    `bun:"reason,nullzero"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
+	CallID    string    `bun:"call_id,nullzero"`
+	Reason    string    `bun:"reason,nullzero"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
 }
 
 // Validate refuses a contact nobody could be rung at.
@@ -110,9 +109,7 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 		contacts[index].CampaignID = campaignID
 		contacts[index].Stage = Enrolled
 		contacts[index].CreatedAt = now
-		if contacts[index].Variables == nil {
-			contacts[index].Variables = map[string]string{}
-		}
+		contacts[index].Variables = orEmptyMap(contacts[index].Variables)
 		if err := contacts[index].Validate(); err != nil {
 			return nil, nil, stack.Wrap(err)
 		}
@@ -275,9 +272,7 @@ func (r *CampaignContacts) Update(ctx context.Context, campaignID, contactID str
 		if changes.ToNumber == "" {
 			return errors.New("store: a contact needs a number to ring")
 		}
-		if changes.Variables == nil {
-			changes.Variables = map[string]string{}
-		}
+		changes.Variables = orEmptyMap(changes.Variables)
 		err = tx.NewUpdate().Model(&changed).
 			Set("to_number = ?", changes.ToNumber).
 			Set("variables = ?", changes.Variables).
@@ -355,7 +350,7 @@ func (r *CampaignContacts) Select(ctx context.Context, campaignID string, filter
 	if filter.After != nil {
 		query = query.Where("seq > ?", *filter.After)
 	}
-	if err := query.Order("seq ASC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
+	if err := query.Order("seq ASC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query contacts: %w", err))
 	}
 	return contacts, nil
@@ -549,8 +544,8 @@ type Settle struct {
 	Outcome       string
 	Converted     bool
 	Reason        string
-	// CallID and VendorCallID are the last dial's; empty keeps the ones already stored.
-	CallID, VendorCallID string
+	// CallID is the last dial's; empty keeps the one already stored.
+	CallID string
 	// LeaseUntil is the lease the owner's claim returned, which every claim and take-over sets
 	// anew. Set, the contact settles only under that same lease: an owner is one process, and a
 	// call that outlives its lease may find the contact taken over, settled and claimed again
@@ -604,7 +599,6 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("outcome = ?", settle.Outcome).
 			Set("converted = ?", settle.Converted).
 			Set("call_id = COALESCE(?, cc.call_id)", nullable(settle.CallID)).
-			Set("vendor_call_id = COALESCE(?, cc.vendor_call_id)", nullable(settle.VendorCallID)).
 			Set("leased_by = ''").
 			Set("lease_until = NULL").
 			Where("cp.id = cc.campaign_id").
@@ -655,7 +649,6 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 type Classification struct {
 	AttemptID string
 	Outcome   string
-	Converted bool
 }
 
 // ClassifyAndSettle records what an answered dial's transcript said and settles its contact, both
@@ -670,7 +663,6 @@ func (r *CampaignContacts) ClassifyAndSettle(ctx context.Context, owner string, 
 			Set("classify_after = NULL").
 			Set("classify_state = ?", classifyDone).
 			Set("outcome = ?", classification.Outcome).
-			Set("converted = ?", classification.Converted).
 			Where("id = ?", classification.AttemptID).
 			Where("classify_state = ?", classifyPending).
 			Exec(ctx)

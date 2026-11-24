@@ -132,9 +132,6 @@ func (s *Store) sharedRedis() rueidis.Client {
 	return s.cache.Client()
 }
 
-// redisFamilies are the prefixes of every key the store keeps in Redis.
-var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
-
 // cacheKey names one cached row. Every key is prefixed, so what the store cached can be told
 // from what the rest of the router keeps.
 func cacheKey(parts ...string) string { return "appcfg:" + strings.Join(parts, ":") }

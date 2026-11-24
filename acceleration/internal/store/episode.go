@@ -12,22 +12,21 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// What an episode came in on, the source field of its card (20261007042100_episodes.sql).
+// What an episode came in on, the source field of its card.
 const (
 	EpisodeCall     = "call"
 	EpisodeSlack    = "slack"
 	EpisodeIMessage = "imessage"
 	EpisodeSMS      = "sms"
 	EpisodeWhatsApp = "whatsapp"
-	// EpisodeChat is a run of messages in one agent channel of the app chat
-	// (20261212090000_chat_episodes.sql).
+	// EpisodeChat is a run of messages in one agent channel of the app chat.
 	EpisodeChat = "chat"
 )
 
 // episodeInProgress is an episode not closed yet, the status its card is written with.
 const episodeInProgress = "in_progress"
 
-// The statuses that close an episode (20261007042100_episodes.sql; T55, omnichannel.Closer):
+// The statuses that close an episode (T55, omnichannel.Closer):
 // ended once it is closed, then summarized or summary_failed once its summary is written or
 // could not be.
 const (
@@ -35,12 +34,12 @@ const (
 	EpisodeSummaryFailed = "summary_failed"
 )
 
-// EpisodeSummarized is an episode whose card holds its summary (20261007042100_episodes.sql;
-// T55 sets it). A card in any other status is read by the last lines of its thread channel.
+// EpisodeSummarized is an episode whose card holds its summary (T55 sets it). A card in any
+// other status is read by the last lines of its thread channel.
 const EpisodeSummarized = "summarized"
 
 // Episode is one call, or one run of messages on one external thread, and its card in the
-// person's omni-channel (20261007042100_episodes.sql).
+// person's omni-channel.
 type Episode struct {
 	bun.BaseModel `bun:"table:episodes,alias:ep"`
 
@@ -246,7 +245,7 @@ func (r *Episodes) CloseIdle(ctx context.Context, idleSince, now time.Time, limi
 // leases each to the router that ended it. The
 // status is checked on the row the update locks, so the event delivered twice, to two
 // routers, ends each episode once. session_id IS NOT NULL is every call episode
-// (20261007042100_episodes.sql), named so episodes_open_call finds them.
+// (episodes_check), named so episodes_open_call finds them.
 const endCallEpisodesQuery = `
 WITH closed AS (
     UPDATE episodes
@@ -258,7 +257,7 @@ WITH closed AS (
 // EndCall ends, at now, the episodes in progress of the call callID in the app scope names,
 // each leased to holder for its summary until leaseUntil. A call id is unique
 // only within its app, so the scope is the app the call event came from, as
-// ReleaseCallResourcesInApp takes it. None is no error: a call under an agent config without
+// CallResources.Release takes it. None is no error: a call under an agent config without
 // episode cards has none.
 func (r *Episodes) EndCall(ctx context.Context, scope AppScope, callID string, now, leaseUntil time.Time, holder string) ([]ClosedEpisode, error) {
 	closed := []ClosedEpisode{}

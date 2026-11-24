@@ -375,7 +375,7 @@ func (s *StoreSuite) TestASummaryFinishesOnlyAnEndedEpisode() {
 	s.Equal(episodeInProgress, s.episodeStatus(episode.ID))
 }
 
-// anyToSweep is AnyEpisodeToSweep's answer.
+// anyToSweep is Episodes.AnyToSweep's answer.
 func (s *StoreSuite) anyToSweep() bool {
 	due, err := s.store.Episodes.AnyToSweep(s.ctx)
 	s.Require().NoError(err)

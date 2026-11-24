@@ -157,16 +157,14 @@ func (s *StoreSuite) TestUpdatingAConfigReplacesItsBindings() {
 	s.Equal(replacement.ID, read.Connectors[0].Connection.ConnectionID)
 }
 
-// The containment query in ConnectorConnectionReferenced reads the JSON this model writes,
+// The containment query in boundByConfig reads the JSON this model writes,
 // so a change to its tags shows here rather than as a connection deleted out from under an
 // agent.
 func (s *StoreSuite) TestAFixedBindingAConfigStoresReferencesItsConnection() {
 	connection := s.connection("acme-app", nil)
 	s.boundConfig("acme-app", fixed(connection.ID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.True(referenced)
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID), ErrConnectorConnectionBound)
 }
 
 // secondNode is another router's store on the same database and Redis, for what one node

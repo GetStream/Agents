@@ -130,7 +130,7 @@ func (s *ResumeSuite) TestResumeKeepsTheStreamTargetParameters() {
 }
 
 func (s *ResumeSuite) TestResumeAnswersAChallengeWithTheTrunkCredentials() {
-	s.setup(peerOptions{}, peerOptions{challengeOnce: true})
+	s.setup(peerOptions{}, peerOptions{challenges: 1})
 
 	s.resume()
 

@@ -150,7 +150,7 @@ const (
 
 // ScheduledTaskLimit is the page size a task or run list uses.
 func ScheduledTaskLimit(asked int) int {
-	return clampLimit(asked, defaultScheduledTaskLimit, maxScheduledTaskLimit)
+	return ClampLimit(asked, defaultScheduledTaskLimit, maxScheduledTaskLimit)
 }
 
 // ScheduledTaskScope narrows a list to one user's tasks as one kind of caller
@@ -284,7 +284,7 @@ func lockTaskLimits(ctx context.Context, tx bun.Tx, customerID string, holders [
 // plain UPDATE of deleted_at, whose FOR NO KEY UPDATE conflicts only with
 // FOR SHARE and stronger (table 13.3,
 // https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
-// A config is only ever soft-deleted (DeleteAgentConfig), so an id with no row
+// A config is only ever soft-deleted (AgentConfigs.Delete), so an id with no row
 // is not a delete and is left to the caller, which resolved it.
 func refuseDeletedConfig(ctx context.Context, tx bun.Tx, customerID, configID string) (AgentScheduling, error) {
 	var configs []AgentConfig
@@ -357,7 +357,7 @@ func (r *ScheduledTasks) Get(ctx context.Context, customerID, id string) (Schedu
 // ScheduledTaskLimit(filter.Limit).
 func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter ScheduledTaskFilter) ([]ScheduledTask, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var tasks []ScheduledTask
 	query := r.store.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID)
@@ -491,7 +491,7 @@ func (r *ScheduledTasks) update(ctx context.Context, task *ScheduledTask, missed
 					task.State, task.NextRunAt = ScheduledTaskCompleted, nil
 					break
 				}
-				again, err := databaseNow(ctx, tx)
+				again, err := transactionStart(ctx, tx)
 				if err != nil {
 					return fmt.Errorf("store: save scheduled task: %w", err)
 				}
@@ -642,7 +642,7 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 	}
 	claimed := []ClaimedScheduledTask{}
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		now, err := databaseNow(ctx, tx)
+		now, err := transactionStart(ctx, tx)
 		if err != nil {
 			return fmt.Errorf("store: claim scheduled tasks: %w", err)
 		}
