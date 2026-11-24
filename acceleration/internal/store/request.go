@@ -46,7 +46,7 @@ type Request struct {
 	UserID           string   `bun:"user_id,notnull"`
 	UsageCategories  []string `bun:"usage_categories,array,nullzero"`
 	// LimitGrants are the grants the work was admitted on past a spent limit, which its
-	// billable cost is drawn from (20261112121000_requests_limit_grants.sql).
+	// billable cost is drawn from.
 	LimitGrants []int64 `bun:"limit_grants,array,nullzero"`
 	// AgentID is the agent the work was done for. Empty outside a conversation.
 	AgentID string `bun:"agent_id,nullzero"`
@@ -182,8 +182,8 @@ func measured(prefix string) string {
 	return "COALESCE(" + prefix + "error_code, '') NOT IN ('" + ErrorCancelled + "', '" + ErrorRefused + "')"
 }
 
-// requestsPrimaryKey is named for the table's first name: 20260815090000_multi_modality.sql
-// renamed the table and not its key.
+// requestsPrimaryKey is named for the table's first name: the table was renamed and its key
+// was not.
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a
@@ -302,7 +302,7 @@ func (r *Requests) Insert(ctx context.Context, request *Request) error {
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
 // A row InsertMany wrote has its ID set, and one with an agent a provider_request agent log
 // row. With one database each row it wrote counts toward the grants it names, and is logged,
-// in the same transaction (AddGrantUses); with shards the grants are the caller's to count,
+// in the same transaction (addGrantUses); with shards the grants are the caller's to count,
 // apart, and the log rows are written to the shared database after the commit.
 func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
 	for i := range requests {

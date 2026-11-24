@@ -50,7 +50,7 @@ var errOutOfTime = errors.New("the occurrence ran out of time")
 // or claimed elsewhere, so another router's claims are not chased in a loop.
 const poll = time.Second
 
-// deliveryWindow is how late each kind of occurrence may be: a task that runs
+// How late each kind of occurrence may be: a task that runs
 // once is still worth delivering a day late, told that it is late; a repeating
 // one is only run at its latest due occurrence, the older ones written missed.
 const (

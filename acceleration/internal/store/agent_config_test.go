@@ -157,7 +157,7 @@ func (s *StoreSuite) TestUpdatingAConfigReplacesItsBindings() {
 	s.Equal(replacement.ID, read.Connectors[0].Connection.ConnectionID)
 }
 
-// The containment query in ConnectorConnectionReferenced reads the JSON this model writes,
+// The containment query in ConnectorConnections.Referenced reads the JSON this model writes,
 // so a change to its tags shows here rather than as a connection deleted out from under an
 // agent.
 func (s *StoreSuite) TestAFixedBindingAConfigStoresReferencesItsConnection() {

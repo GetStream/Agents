@@ -29,7 +29,7 @@ Use these names, with the customer first after `ctx` for every tenant-scoped mod
 | `Delete(ctx, customerID, id)` | Removes one row; `ErrNoX` when absent. |
 
 A state change that is more than a column write gets a domain verb on the same repository:
-`Calls.Finish`, `CampaignContacts.Lease`, `Episodes.Close`. Batch versions take a slice
+`Calls.Finish`, `CampaignContacts.Claim`, `Episodes.CloseIdle`. Batch versions take a slice
 (`InsertMany`, `GetMany`) and run one statement, never a loop of single ones.
 
 ## Validation
@@ -98,7 +98,7 @@ A state change that is more than a column write gets a domain verb on the same r
 - A table of work routers claim (inbound messages, deliveries, jobs) is a `queue`
   (`queue.go`): `claim` leases due rows with `FOR UPDATE SKIP LOCKED` in one query,
   `nextDue` says when to look again, and every write after the claim goes through `heldBy`,
-  so a claim whose lease ran out cannot overwrite the next one. `image_jobs.go` is the
+  so a claim whose lease ran out cannot overwrite the next one. `image_job.go` is the
   example. Do not write the claim by hand.
 - Every serving connection runs with `statement_timeout` 8s, `lock_timeout` 3s,
   `idle_in_transaction_session_timeout` 30s and `timezone` UTC (`sessionDefaults` in

@@ -420,7 +420,7 @@ func (r *Runner) mayRing(ctx context.Context, campaign store.Campaign, contact s
 	if err != nil {
 		return store.Campaign{}, false, err
 	}
-	// StopContact marks a contact in a call with the reason it would end with.
+	// store.CampaignContacts.Stop marks a contact in a call with the reason it would end with.
 	marked, _, err := r.store.CampaignContacts.Get(ctx, campaign.ID, contact.ID)
 	if err != nil {
 		return store.Campaign{}, false, err

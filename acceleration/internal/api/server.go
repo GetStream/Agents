@@ -1293,9 +1293,8 @@ func (n operationName) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
 // withServerSide refuses the generated operations only a backend may reach.
 //
 // It sits after withCustomer, because refusing a caller for what it is means having worked
-// out what it is first. The four sockets are left out of the embedded spec by being left
-// out of generation, so socketRoutes puts them back rather than leaving them to be open by
-// omission.
+// out what it is first. The routes served by hand are in the spec too (documentHandWritten),
+// so none is open by omission.
 //
 // A caller that authenticated and asked for one of these gets a 403 rather than a 401: it
 // has already proved who it is, so there is nothing to be learned from a specific answer
