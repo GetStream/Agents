@@ -159,7 +159,9 @@ func documentHandWritten(api huma.API) {
 			"uncertain writes. Ordinary status watchers should leave this disabled. Persistent text " +
 			"command recovery is unchanged.\n" +
 			"The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, " +
-			"`interrupt` (optionally naming a `request_id`) or `close` to act on the session. A " +
+			"`interrupt` (optionally naming a `request_id`) or `close` to act on the session. `say` " +
+			"is server-side only, as saySession is: from an end user's device it is answered with " +
+			"an `error` (`context` `command`), nothing is said and the socket stays open. A " +
 			"session's instructions are its agent config's, so there is no command to change them. " +
 			"A `tool_call` is the only frame that must be answered: everything else is a " +
 			"report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` " +
