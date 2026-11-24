@@ -178,6 +178,19 @@ func (s *DirectorySuite) TestAConversationHeldUnderItsCidAloneIsFound() {
 	s.Equal("node-a:1", s.answeringIn(s.directoryAt("node-c:1"), "acme", "messaging:general"))
 }
 
+// A claim on an agent lapses once its node has not renewed it for holdFor, though other
+// customers' renewals keep the agent's entry alive.
+func (s *DirectorySuite) TestAClaimOnAnAgentLapsesOnceItIsNotRenewed() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
+
+	entry, err := s.client.Do(s.ctx, s.client.B().Hget().Key(s.prefix+":writing-as:support").Field("acme").Build()).ToString()
+	s.Require().NoError(err)
+	_, live := liveClaim(entry, time.Now().UnixMilli())
+	s.True(live, "a claim just made")
+	_, live = liveClaim(entry, time.Now().Add(holdFor).UnixMilli())
+	s.False(live, "a claim nobody renewed for holdFor")
+}
+
 // A router of the release before reads a session's agent and conversation by their ids alone.
 func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsAgentAndConversationAlone() {
 	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "messaging:general")
