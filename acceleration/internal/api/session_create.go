@@ -157,9 +157,8 @@ var errAnonymousMemory = forbidden("memory needs a signed-in user: an anonymous 
 	"nobody checked, so the memories kept under it could be anyone's")
 
 // errAnonymousConversation refuses conversation_id to a caller whose user id nobody checked.
-var errAnonymousConversation = forbidden("conversation_id needs a signed-in user: a conversation is kept " +
-	"for a user id, and an anonymous caller's is a claim nobody checked. Carry a conversation on by its " +
-	"session id instead")
+var errAnonymousConversation = forbidden("conversation_id needs a verified caller: an anonymous caller " +
+	"carries its conversation on by its session id")
 
 // refuseSessionRequest reports the failure a new session's request is refused with before
 // anything is made for it. createSession and the session socket both call it, so a request one
@@ -285,7 +284,7 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	if request.Team != nil && !ServerSideFrom(ctx) {
 		return errDeviceTeam, true
 	}
-	if request.LegacyConversationId != nil && !KindFrom(ctx).Verified() {
+	if value(request.LegacyConversationId) != "" && !KindFrom(ctx).Verified() {
 		return errAnonymousConversation, true
 	}
 	if request.Memory != nil && value(request.Memory.UserId) != "" && !ServerSideFrom(ctx) {

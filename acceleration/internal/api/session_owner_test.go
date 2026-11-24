@@ -122,8 +122,7 @@ func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenReachesNothin
 }
 
 func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenOpensNoneOfTheirConversations() {
-	// A conversation's owner is kept as a name alone, so naming its channel with the owner's
-	// name in a header would carry on their conversation and read it back.
+	// Naming a conversation's channel takes a verified caller, whatever name the caller goes by.
 	alice := s.data.createUser()
 	opened := alice.createSession(textSession(nil))
 	alice.stopSession(opened.Id)
@@ -132,11 +131,38 @@ func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenOpensNoneOfTh
 
 	status, body := s.data.claiming(alice.userID).call(http.MethodPost, "/v1/agents/sessions", resume)
 
-	s.Require().Equal(http.StatusForbidden, status, "%s", body)
-	var refused ErrorResponse
-	s.Require().NoError(json.Unmarshal(body, &refused))
-	s.Equal("forbidden", refused.Error.Code)
-	s.Contains(refused.Error.Message, "conversation_id")
+	s.assertConversationRefused(status, body)
+}
+
+func (s *SessionOwnershipSuite) TestANamelessCallerOpensNoConversationOfTheBackends() {
+	// A conversation a backend opened for no user is the backend's to carry on.
+	opened := s.serverClient.createSession(textSession(nil))
+	s.serverClient.stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	status, body := s.data.claiming("").call(http.MethodPost, "/v1/agents/sessions", resume)
+
+	s.assertConversationRefused(status, body)
+}
+
+func (s *SessionOwnershipSuite) TestAnAnonymousCallerNamesNoChannelOfAnyType() {
+	resume := textSession(nil)
+	resume.LegacyConversationId = pointerTo("messaging:" + s.utils.uuid())
+
+	status, body := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/sessions", resume)
+
+	s.assertConversationRefused(status, body)
+}
+
+func (s *SessionOwnershipSuite) TestAnAnonymousCallerSendingAnEmptyConversationIdOpensANewConversation() {
+	request := textSession(nil)
+	request.LegacyConversationId = pointerTo("")
+
+	opened := s.data.createAnonymous().createSession(request)
+
+	s.Equal("agent:"+opened.Id, value(opened.ConversationId))
 }
 
 func (s *SessionOwnershipSuite) TestAGuestCarriesOnItsOwnConversationByItsChannel() {
@@ -369,6 +395,15 @@ func (s *SessionOwnershipSuite) TestASessionWithNoTokenAtAllIsRefusedBeforeItIsO
 	status, _ := s.unauthenticatedClient.call(http.MethodPost, "/v1/agents/sessions/query", nil)
 
 	s.Equal(http.StatusUnauthorized, status)
+}
+
+// assertConversationRefused checks a create was refused for the conversation it named.
+func (s *SessionOwnershipSuite) assertConversationRefused(status int, body []byte) {
+	s.Require().Equal(http.StatusForbidden, status, "%s", body)
+	var refused ErrorResponse
+	s.Require().NoError(json.Unmarshal(body, &refused))
+	s.Equal("forbidden", refused.Error.Code)
+	s.Contains(refused.Error.Message, "conversation_id")
 }
 
 // onACall is a session with an agent in a call, which records no conversation of its own.
