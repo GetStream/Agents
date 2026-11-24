@@ -393,6 +393,24 @@ func (s *ReplicateRepeatSuite) TestARunThatBringsNoChangesStillSavesWhenItReadTh
 	s.WithinDuration(time.Now(), s.saved().ReadAt, time.Minute, "the read kept the source recording, so the next run is not refused")
 }
 
+// The source leaves an organization's policy under the app's id out of the changes, and the
+// cursor it answers past it is where the next run starts.
+func (s *ReplicateRepeatSuite) TestARunWhosePageCarriesNoChangeStillMovesItsCursor() {
+	s.recorded(1)
+	s.Require().NoError(s.once("acme", false))
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, updated_at) VALUES ('organization', 'acme', now())")
+	s.Require().NoError(err)
+	var last int64
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT max(seq) FROM data_changes WHERE customer_id = 'acme'").Scan(&last))
+
+	s.Require().NoError(s.once("acme", false))
+
+	s.Require().NotNil(s.saved().Cursor)
+	s.Equal(last, *s.saved().Cursor)
+}
+
 func (s *ReplicateRepeatSuite) TestAnOrganizationsPolicyUnderTheAppsIDIsNotTheAppsData() {
 	// The export carries only app policies, so an organization's under the same id is not a copy.
 	_, err := s.target.GlobalDB().ExecContext(s.ctx,

@@ -152,7 +152,7 @@ func (s *PolicySuite) dropHolds(client rueidis.Client, organization string) int 
 func (s *PolicySuite) sharer(redis rueidis.Client, change ...func(*Settings)) *reading {
 	enforcer := s.billed(append([]func(*Settings){sharing(redis)}, change...)...)
 	s.T().Cleanup(func() { s.dropHolds(s.direct(), s.org) })
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	return enforcer
 }
@@ -411,7 +411,7 @@ func (s *PolicySuite) TestRedisDownAdmitsFromMemoryThenRefuses() {
 func (s *PolicySuite) TestWithoutRedisHoldsStayLocalAndNeverRefuse() {
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	enforcer := s.billed(func(settings *Settings) { settings.FlushMaxLag = 50 * time.Millisecond })
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.Require().NoError(enforcer.Reserve(s.owner(), newID(), 400_000, time.Minute))

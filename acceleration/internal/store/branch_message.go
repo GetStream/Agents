@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,14 +61,30 @@ func (r *BranchMessages) UpsertMany(ctx context.Context, messages []AgentBranchM
 			messages[i].Message = map[string]any{}
 		}
 	}
-	_, err := r.store.shard.NewInsert().Model(&messages).
-		On("CONFLICT (session_id, original_message_id) DO UPDATE").
-		Set("response_id = EXCLUDED.response_id").
-		Set("switch_id = EXCLUDED.switch_id").
-		Set("chat_created_at = EXCLUDED.chat_created_at").
-		Set("author_id = EXCLUDED.author_id").
-		Set("message = EXCLUDED.message").
-		Where("abm.customer_id = EXCLUDED.customer_id").
+	// No conflict target is named: every unique index arbitrates the insert, so it depends on
+	// none of them. The copies kept already are replaced below, the customer's own only.
+	var inserted []string
+	err := r.store.shard.NewInsert().Model(&messages).On("CONFLICT DO NOTHING").
+		Returning("original_message_id").Scan(ctx, &inserted)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save branch messages: %w", err))
+	}
+	kept := slices.DeleteFunc(slices.Clone(messages), func(m AgentBranchMessage) bool {
+		return slices.Contains(inserted, m.OriginalMessageID)
+	})
+	if len(kept) == 0 {
+		return nil
+	}
+	_, err = r.store.shard.NewUpdate().With("saved", r.store.shard.NewValues(&kept)).
+		Model((*AgentBranchMessage)(nil)).TableExpr("saved").
+		Set("response_id = saved.response_id").
+		Set("switch_id = saved.switch_id").
+		Set("chat_created_at = saved.chat_created_at").
+		Set("author_id = saved.author_id").
+		Set("message = saved.message").
+		Where("abm.customer_id = saved.customer_id").
+		Where("abm.session_id = saved.session_id").
+		Where("abm.original_message_id = saved.original_message_id").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save branch messages: %w", err))

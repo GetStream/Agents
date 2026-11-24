@@ -31,6 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -341,6 +342,9 @@ type resumptionUpdate struct {
 
 // STS is a Gemini Live conversation.
 type STS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a resume.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -463,6 +467,7 @@ func (s *STS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("gemini: already started"))
 	}
 	s.started = true
+	s.call = ctx
 	s.mu.Unlock()
 
 	conn, err := s.connect(ctx, "")
@@ -474,7 +479,7 @@ func (s *STS) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop(conn)
+	goroutine.Go(ctx, func() { s.readLoop(conn) })
 	return nil
 }
 
@@ -879,7 +884,7 @@ func (s *STS) resume(handle string) bool {
 		s.mu.Unlock()
 
 		s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-		go s.readLoop(conn)
+		goroutine.Go(s.call, func() { s.readLoop(conn) })
 		return true
 	}
 

@@ -89,11 +89,12 @@ func (s *ClassifySuite) TestATargetPicksTheClassifier() {
 	s.False(ruled, "the default classifier was not asked")
 }
 
+// A judgement the vendor did not give is the vendor's failure, not the caller's.
 func (s *ClassifySuite) TestAFailedJudgementIsAnErrorRatherThanAnEmptyAnswer() {
 	status, failure := s.refused(s.allThree("unanswerable"))
 
-	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "was not answered")
+	s.Equal(http.StatusInternalServerError, status)
+	s.Equal(internalError().Message, failure)
 }
 
 func (s *ClassifySuite) TestAClassifierAskedTooOftenSaysToComeBack() {

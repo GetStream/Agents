@@ -228,6 +228,37 @@ func (s *StoreSuite) TestAWriteThatWaitsOutThePriceListsLockIsBusy() {
 	s.ErrorIs(err, ErrPriceListBusy)
 }
 
+func (s *StoreSuite) TestACancelThatWaitedPastTheChangesTimeIsRefused() {
+	s.seeded(priced("a", 1))
+	// The change's time is read off the database's clock, which Cancel checks it against; read
+	// is the router's clock at that moment, to wait from.
+	const lead = 1500 * time.Millisecond
+	var soon time.Time
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT clock_timestamp() + ?::interval", lead.String()).Scan(&soon))
+	read := time.Now()
+	write := apiChange("soon", "key-soon", priced("a", 0.5))
+	write.EffectiveAt = &soon
+	change, _, _, err := s.store.PriceChanges.Insert(s.ctx, write, accept)
+	s.Require().NoError(err)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer held.Rollback() //nolint:errcheck // the lock goes with the transaction
+	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
+	s.Require().NoError(err)
+
+	cancelled := make(chan error, 1)
+	go func() {
+		_, _, _, err := s.store.PriceChanges.Cancel(s.ctx, change.Name, "Late.", "staff:ada", "Ada")
+		cancelled <- err
+	}()
+	// The cancel's transaction starts before the change's time and waits for the lock past it.
+	time.Sleep(time.Until(read.Add(lead + 300*time.Millisecond)))
+	s.Require().Empty(cancelled, "the cancel is still waiting for the lock")
+	s.Require().NoError(held.Rollback())
+
+	s.ErrorIs(<-cancelled, ErrPriceChangeInForce)
+}
+
 func (s *StoreSuite) TestThePriceSourceAnswersTheListInForceAndTheNextChange() {
 	seed := s.seeded(priced("a", 1))
 	tomorrow := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Microsecond)

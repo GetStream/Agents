@@ -557,6 +557,7 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerSendsTheSandboxThroughTheProxy() 
 	s.Require().NoError(err)
 	s.T().Cleanup(redis.Close)
 	api := s.daytonaAPI()
+	api.redis = redis
 	s.manager.options.SandboxBroker, s.manager.options.SandboxSecretPrefix = egress.BrokerName, ""
 	s.manager.options.SandboxProxy = egress.BrokerOptions{Store: egress.NewStore(redis), URL: "http://203.0.113.7:8091",
 		CACert: []byte(proxyCA)}
@@ -581,10 +582,11 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerSendsTheSandboxThroughTheProxy() 
 	proxy, err := url.Parse(api.ran["envs"].(map[string]any)["HTTPS_PROXY"].(string))
 	s.Require().NoError(err)
 	s.Equal("203.0.113.7:8091", proxy.Host)
-	credential, _ := proxy.User.Password()
-	sum := sha256.Sum256([]byte(credential))
-	raw, err := redis.Do(s.ctx, redis.B().Get().Key("sandbox:egress:"+hex.EncodeToString(sum[:])).Build()).AsBytes()
-	s.Require().NoError(err)
+	raw := api.record
+	s.Require().NotNil(raw, "during the run")
+	api.mu.Lock()
+	s.Nil(api.reached(s.ctx), "once the run has ended")
+	api.mu.Unlock()
 	var record egress.Record
 	s.Require().NoError(json.Unmarshal(raw, &record))
 	s.Equal(spec.ID, record.Session)
@@ -651,6 +653,10 @@ type daytonaAPI struct {
 	secrets map[string]string
 	// created is the last request for a sandbox, and ran for a run of code.
 	created, ran map[string]any
+	// redis, when set, is the proxy's store, and record the egress record the last run's proxy
+	// credential reached while the run was in flight, as code in it reads through the proxy.
+	redis  rueidis.Client
+	record []byte
 }
 
 func (s *SandboxGrantsSuite) daytonaAPI() *daytonaAPI {
@@ -696,10 +702,31 @@ func (a *daytonaAPI) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(r.URL.Path, "/process/code-run"):
 		_ = json.NewDecoder(r.Body).Decode(&a.ran)
+		if a.redis != nil {
+			a.record = a.reached(r.Context())
+		}
 		_, _ = w.Write([]byte(`{"result":"","exitCode":0}`))
 	default:
 		_, _ = w.Write([]byte(`{"result":"","exitCode":0}`))
 	}
+}
+
+// reached is the egress record the proxy credential of the last run's env reaches now, nil when
+// there is none. The caller holds mu.
+func (a *daytonaAPI) reached(ctx context.Context) []byte {
+	envs, _ := a.ran["envs"].(map[string]any)
+	value, _ := envs["HTTPS_PROXY"].(string)
+	proxy, err := url.Parse(value)
+	if err != nil || proxy.User == nil {
+		return nil
+	}
+	credential, _ := proxy.User.Password()
+	sum := sha256.Sum256([]byte(credential))
+	raw, err := a.redis.Do(ctx, a.redis.B().Get().Key("sandbox:egress:"+hex.EncodeToString(sum[:])).Build()).AsBytes()
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // offered says whether Daytona still holds a secret for the env var the sandbox reads.
@@ -1420,6 +1447,7 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerBindsALateGrantOnceTheLoginFinish
 	s.Require().NoError(err)
 	s.T().Cleanup(redis.Close)
 	api := s.daytonaAPI()
+	api.redis = redis
 	s.manager.options.SandboxBroker, s.manager.options.SandboxSecretPrefix = egress.BrokerName, ""
 	s.manager.options.SandboxProxy = egress.BrokerOptions{Store: egress.NewStore(redis), URL: "http://203.0.113.7:8091",
 		CACert: []byte(proxyCA)}
@@ -1432,14 +1460,8 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerBindsALateGrantOnceTheLoginFinish
 	record := func() egress.Record {
 		result, err = box.Run(s.ctx, "print(1)", nil)
 		s.Require().NoError(err)
-		proxy, err := url.Parse(api.ran["envs"].(map[string]any)["HTTPS_PROXY"].(string))
-		s.Require().NoError(err)
-		credential, _ := proxy.User.Password()
-		sum := sha256.Sum256([]byte(credential))
-		raw, err := redis.Do(s.ctx, redis.B().Get().Key("sandbox:egress:"+hex.EncodeToString(sum[:])).Build()).AsBytes()
-		s.Require().NoError(err)
 		var record egress.Record
-		s.Require().NoError(json.Unmarshal(raw, &record))
+		s.Require().NoError(json.Unmarshal(api.record, &record), "the record during the run")
 		s.Require().Len(record.Grants, 1)
 		return record
 	}

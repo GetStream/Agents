@@ -266,6 +266,12 @@ module GetStream
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
+        "deleteCampaignContact" => {
+          method: :delete, path: "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+          path_params: %w[id contact_id].freeze, query: [].freeze,
+          body: nil, body_required: false,
+          socket: false, client_accessible: false
+        }.freeze,
         "deleteCampaignContacts" => {
           method: :delete, path: "/v1/agents/campaigns/{id}/contacts",
           path_params: %w[id].freeze, query: [].freeze,
@@ -888,6 +894,12 @@ module GetStream
           method: :post, path: "/v1/agents/channels/links",
           path_params: [].freeze, query: [].freeze,
           body: "LinkChannelRequest", body_required: false,
+          socket: false, client_accessible: false
+        }.freeze,
+        "listActivity" => {
+          method: :get, path: "/v1/ops/activity",
+          path_params: [].freeze, query: %w[from to org_id app_id limit cursor].freeze,
+          body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
         "listAgentConfigs" => {
@@ -1706,6 +1718,12 @@ module GetStream
           body: "CampaignRequest", body_required: true,
           socket: false, client_accessible: false
         }.freeze,
+        "updateCampaignContact" => {
+          method: :patch, path: "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+          path_params: %w[id contact_id].freeze, query: [].freeze,
+          body: "ContactUpdateRequest", body_required: true,
+          socket: false, client_accessible: false
+        }.freeze,
         "updateCustomModel" => {
           method: :put, path: "/v1/agents/models/{id}",
           path_params: %w[id].freeze, query: [].freeze,
@@ -1833,6 +1851,10 @@ module GetStream
           properties: %w[active_users bucket calls messages phone_minutes sessions voice_minutes].freeze,
           required: %w[active_users bucket calls messages phone_minutes sessions voice_minutes].freeze, open: false
         }.freeze,
+        "ActivityDay" => {
+          properties: %w[app_id area client day first_at last_at last_refusal_code organization_id refused requests].freeze,
+          required: %w[organization_id app_id day area client first_at last_at requests refused last_refusal_code].freeze, open: false
+        }.freeze,
         "ActivityEnding" => {
           properties: %w[end_reason sessions].freeze,
           required: %w[sessions].freeze, open: false
@@ -1844,6 +1866,10 @@ module GetStream
         "ActivityMeter" => {
           properties: %w[audio_ms characters cost_micros duration_ms input_tokens meter output_tokens requests].freeze,
           required: %w[meter requests input_tokens output_tokens audio_ms characters duration_ms cost_micros].freeze, open: false
+        }.freeze,
+        "ActivityPage" => {
+          properties: %w[has_more items next_cursor organizations].freeze,
+          required: %w[items organizations has_more].freeze, open: false
         }.freeze,
         "ActivitySession" => {
           properties: %w[agent_name app_id closed_at created_at end_reason id modality].freeze,
@@ -1894,7 +1920,7 @@ module GetStream
           required: %w[created_at id mode name region updated_at].freeze, open: false
         }.freeze,
         "AgentConfigPatch" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: [].freeze, open: false
         }.freeze,
         "AgentConfigRequest" => {
@@ -2365,6 +2391,10 @@ module GetStream
           properties: %w[has_more items next_cursor].freeze,
           required: %w[items has_more].freeze, open: false
         }.freeze,
+        "ContactUpdateRequest" => {
+          properties: %w[instructions time_zone to_number variables].freeze,
+          required: [].freeze, open: false
+        }.freeze,
         "CostSource" => {
           properties: %w[cost_micros source].freeze,
           required: %w[source cost_micros].freeze, open: false
@@ -2732,6 +2762,10 @@ module GetStream
         "OrganizationActivity" => {
           properties: %w[areas first_seen furthest_step last_seen latency meters organization_id sessions shards since steps].freeze,
           required: %w[organization_id since furthest_step steps areas meters shards sessions latency].freeze, open: false
+        }.freeze,
+        "OrganizationProgress" => {
+          properties: %w[furthest_step organization_id steps].freeze,
+          required: %w[organization_id furthest_step steps].freeze, open: false
         }.freeze,
         "PhoneNumber" => {
           properties: %w[agent_config_id capabilities country e164 monthly_cost_micros purchased_at released_at sip_trunk_id stream_trunk_id tags vendor].freeze,
@@ -3134,7 +3168,7 @@ module GetStream
           required: %w[text].freeze, open: false
         }.freeze,
         "SpendBucket" => {
-          properties: %w[bucket cost_micros_total request_count value].freeze,
+          properties: %w[bucket cost_micros_total other request_count value].freeze,
           required: %w[bucket cost_micros_total request_count value].freeze, open: false
         }.freeze,
         "SpendHardLimit" => {

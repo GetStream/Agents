@@ -201,8 +201,8 @@ func (r *CallLegs) Open(ctx context.Context, leg *CallLeg) (bool, error) {
 // takeParticipant gives a leg that just opened the join of its phone kept from before it
 // (CallParticipants.Record): by the leg's remote number, then, for an outbound leg, the number it
 // was placed from, then its participant session, then, for a leg that knows none of them, the
-// call's first phone to join. The leg starts when that phone joined, or when the leg opened if
-// that is later, and ends when the phone left if its leave was kept too.
+// call's first phone to join. A leg not started yet starts when that phone joined, or when the
+// leg opened if that is later, and the leg ends when the phone left if its leave was kept too.
 func (r *CallLegs) takeParticipant(ctx context.Context, leg *CallLeg) error {
 	var matches []func(*bun.SelectQuery) *bun.SelectQuery
 	byNumber := func(number string) func(*bun.SelectQuery) *bun.SelectQuery {
@@ -292,13 +292,14 @@ func (r *CallLegs) takeFrom(ctx context.Context, db bun.IDB, leg *CallLeg, match
 }
 
 // joinTaken starts a leg, which legs holds, from the kept join of its phone, no earlier than the
-// leg opened, and ends it if the phone's leave was kept too. A leg given another phone
-// meanwhile keeps it, and its start (errLegGone), and so does a phone given another leg
-// (errPhoneHasLeg).
+// leg opened, and ends it if the phone's leave was kept too. A leg opened started, as a call that
+// arrived is, keeps its start, as it does when the join is delivered after it (Connect). A leg
+// given another phone meanwhile keeps it, and its start (errLegGone), and so does a phone given
+// another leg (errPhoneHasLeg).
 func joinTaken(ctx context.Context, legs bun.IDB, leg CallLeg, taken CallParticipant) (CallLeg, error) {
 	update := legs.NewUpdate().Model((*CallLeg)(nil)).
 		Set("participant_session = ?", taken.ParticipantSession).
-		Set("started_at = GREATEST(?::timestamptz, dialed_at)", *taken.JoinedAt)
+		Set("started_at = COALESCE(started_at, GREATEST(?::timestamptz, dialed_at))", *taken.JoinedAt)
 	if taken.LeftAt != nil {
 		update = update.Set("ended_at = GREATEST(?::timestamptz, ?::timestamptz, dialed_at)", *taken.LeftAt, *taken.JoinedAt).
 			Set("end_reason = ?", LegLeft)

@@ -403,7 +403,7 @@ describe("a team on the client", () => {
     const api = new Client({ url: router.url, customerId: "local" });
 
     assert.deepEqual(await api.backend.headers(), {
-      "X-Stream-Client": "sdk",
+      "X-Stream-Client": `stream-agents-js-v${VERSION}-node`,
       "User-Agent": `stream-agents-js/${VERSION}`,
       "X-Customer-Id": "local",
     });

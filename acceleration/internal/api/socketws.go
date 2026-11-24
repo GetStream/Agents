@@ -188,18 +188,21 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		refuseWith(refusedByRouter, answer)
 		return
 	}
-	if errors.Is(err, session.ErrAppSettingsUnreadable) {
-		s.logger.Error("could not open a socket session", "error", err)
-		refuseWith(serverFailed, internalError())
-		return
-	}
 	// Noted with the codes POST /v1/agents/sessions answers the same failures with.
 	if errors.Is(err, session.ErrSessionExists) {
 		refuse(refusal, conflict("").Code, store.RedactLogText(err.Error()))
 		return
 	}
 	if err != nil {
-		refuse(refusal, invalidRequest("").Code, store.RedactLogText(err.Error()))
+		answer, answered := errors.AsType[APIError](refusedRequest(err))
+		// A failure that is not the caller's mistake can name where the database is. The device
+		// gets no text of it.
+		if !answered {
+			s.logger.Error("could not open a socket session", "error", err)
+			refuseWith(serverFailed, internalError())
+			return
+		}
+		refuse(refusal, answer.Code, store.RedactLogText(answer.Message))
 		return
 	}
 	s.rememberTimezone(ctx, customerID, spec)

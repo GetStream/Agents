@@ -13,8 +13,6 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
 	"github.com/uptrace/bun"
-
-	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 )
 
 func (s *ShardedStoreSuite) TestTheSchemaFilesAreCurrent() {
@@ -34,39 +32,6 @@ func (s *ShardedStoreSuite) TestEachDatabaseHoldsOnlyItsOwnSet() {
 	s.Require().NoError(s.store.global.QueryRowContext(s.ctx, "SELECT to_regclass('requests') IS NOT NULL").Scan(&requests))
 	s.False(configs, "a shard keeps no agent configs")
 	s.False(requests, "the shared database keeps no requests")
-}
-
-// A shard that ran the single history kept every table. The empty ones of the shared set are
-// dropped; one holding rows is left for a person.
-func (s *ShardedStoreSuite) TestAShardDropsTheEmptyTablesOfTheSharedSet() {
-	global, shard := s.emptyDatabase("strays_global"), s.emptyDatabase("strays_shard")
-	everything, err := Open(shard)
-	s.Require().NoError(err)
-	s.Require().NoError(everything.Migrate(s.ctx))
-	_, err = everything.global.ExecContext(s.ctx, "INSERT INTO skills (id, customer_id, name, description, instructions) VALUES ('kept', 'app', 'kept', '', '')")
-	s.Require().NoError(err)
-	s.Require().NoError(everything.Close())
-
-	split, err := OpenShards(Options{DSN: global, ShardDSN: shard})
-	s.Require().NoError(err)
-	defer split.Close()
-	s.Require().NoError(split.Migrate(s.ctx))
-	var before bool
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT to_regclass('agent_configs') IS NOT NULL").Scan(&before))
-	s.True(before, "migrating drops nothing a router of the previous release may still read")
-
-	dropped, left, err := split.DropStrays(s.ctx)
-	s.Require().NoError(err)
-	s.Contains(dropped, "agent_configs")
-	s.Equal([]string{"skills"}, left)
-
-	var configs, skills, requests bool
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx,
-		"SELECT to_regclass('agent_configs') IS NOT NULL, to_regclass('skills') IS NOT NULL, to_regclass('requests') IS NOT NULL").
-		Scan(&configs, &skills, &requests))
-	s.False(configs, "an empty table of the shared set is dropped")
-	s.True(skills, "a table of the shared set holding rows is kept")
-	s.True(requests, "the shard's own tables stay")
 }
 
 // record_data_change locks the one data_change_starts row on a repeatable read write, on either
@@ -90,50 +55,75 @@ func (s *ShardedStoreSuite) TestARepeatableReadWriteOnANewDatabaseIsRecorded() {
 	s.NoError(err, "a repeatable read write on a new shard")
 }
 
-// legacy turns the suite's database back into one that ran the single history up to version:
-// the baseline's schema, recorded in the single history's table.
-func (s *StoreSuite) legacy(dsn string, version int64) *Store {
-	legacy, err := Open(dsn)
+// ranHistory is a database of the suite's own that recorded, besides each set's initial
+// migration, the version given of the history squashed into it.
+func (s *StoreSuite) ranHistory(name string, global, shard int64) *Store {
+	db, err := Open(s.emptyDatabase(name))
 	s.Require().NoError(err)
-	s.upTo(legacy, globalSet, baseline)
-	s.upTo(legacy, shardSet, baseline)
-	_, err = legacy.global.ExecContext(s.ctx, `DROP TABLE goose_global_version, goose_shard_version;
-		CREATE TABLE goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp DEFAULT now());
-		INSERT INTO goose_db_version (version_id, is_applied) VALUES (0, true), (?, true)`, version)
-	s.Require().NoError(err)
-	return legacy
-}
-
-func (s *StoreSuite) TestADatabaseThatRanTheSingleHistoryIsAdopted() {
-	legacy := s.legacy(s.emptyDatabase("adopted"), legacyHead)
-	defer legacy.Close()
-
-	s.Require().NoError(legacy.Migrate(s.ctx))
-
-	for _, table := range []string{"goose_global_version", "goose_shard_version"} {
-		var applied bool
-		s.Require().NoError(legacy.global.QueryRowContext(s.ctx,
-			"SELECT EXISTS (SELECT 1 FROM "+table+" WHERE version_id = ? AND is_applied)", baseline).Scan(&applied))
-		s.True(applied, table)
+	s.Require().NoError(db.Migrate(s.ctx))
+	for _, ran := range []struct {
+		set     migrationSet
+		version int64
+	}{{globalSet, global}, {shardSet, shard}} {
+		_, err := db.global.ExecContext(s.ctx, "INSERT INTO ? (version_id, is_applied) VALUES (?, true)", bun.Ident(ran.set.table), ran.version)
+		s.Require().NoError(err)
 	}
+	return db
 }
 
-func (s *StoreSuite) TestADatabaseShortOfTheSingleHistorysLastMigrationIsRefused() {
-	legacy := s.legacy(s.emptyDatabase("behind"), legacyHead-1)
-	defer legacy.Close()
+// Every database deployed before the squash ran the whole history, so it holds the initial
+// migration's schema and starts as it is.
+func (s *StoreSuite) TestADatabaseThatRanTheSquashedHistoryStartsAsItIs() {
+	db := s.ranHistory("squashed", globalSet.squashed, shardSet.squashed)
+	defer db.Close()
 
-	s.ErrorContains(legacy.Migrate(s.ctx), "has not applied migration 20270103090000")
+	s.Require().NoError(db.Migrate(s.ctx))
 }
 
-// A database that ran a migration past the single history's last holds a schema the baseline
-// does not describe, so it is not adopted as though it were the baseline's.
-func (s *StoreSuite) TestADatabaseThatRanAMigrationNoSetHasIsRefused() {
-	legacy := s.legacy(s.emptyDatabase("unknown"), legacyHead)
-	defer legacy.Close()
-	_, err := legacy.global.ExecContext(s.ctx, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (20270105090000, true)")
+func (s *StoreSuite) TestADatabaseThatRanPartOfTheSquashedHistoryIsRefused() {
+	db := s.ranHistory("behind", globalSet.squashed-1, shardSet.squashed)
+	defer db.Close()
+
+	s.ErrorContains(db.Migrate(s.ctx), "has not applied migration 20270124093000")
+}
+
+func (s *StoreSuite) TestADatabaseFromBeforeTheSplitIsRefused() {
+	db, err := Open(s.emptyDatabase("unsplit"))
+	s.Require().NoError(err)
+	defer db.Close()
+	_, err = db.global.ExecContext(s.ctx, "CREATE TABLE agent_configs (id text PRIMARY KEY)")
 	s.Require().NoError(err)
 
-	s.ErrorContains(legacy.Migrate(s.ctx), "applied migrations 20270105090000")
+	s.ErrorContains(db.Migrate(s.ctx), "ran the migrations from before they were split")
+}
+
+// A version counts by its latest row, so one recorded and then rolled back is not applied: a
+// database holding such a version with no file is no history the squash left out.
+func (s *StoreSuite) TestARolledBackVersionWithNoFileIsNotRefused() {
+	db, err := Open(s.emptyDatabase("rolled_back"))
+	s.Require().NoError(err)
+	defer db.Close()
+	s.Require().NoError(db.Migrate(s.ctx))
+	_, err = db.global.ExecContext(s.ctx, "INSERT INTO goose_global_version (version_id, is_applied) VALUES (20270105090000, true), (20270105090000, false)")
+	s.Require().NoError(err)
+
+	s.Require().NoError(db.Migrate(s.ctx))
+}
+
+// A database a later release migrated holds versions this one has no file for, after the
+// squashed history and before any of it is recorded once the cleanup has run: rolling back to
+// this release starts on it.
+func (s *StoreSuite) TestADatabaseALaterReleaseMigratedStartsAfterTheCleanup() {
+	db, err := Open(s.emptyDatabase("later_release"))
+	s.Require().NoError(err)
+	defer db.Close()
+	s.Require().NoError(db.Migrate(s.ctx))
+	for _, set := range []migrationSet{globalSet, shardSet} {
+		_, err = db.global.ExecContext(s.ctx, "INSERT INTO ? (version_id, is_applied) VALUES (29991231000000, true)", bun.Ident(set.table))
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(db.Migrate(s.ctx))
 }
 
 // shardTo opens an empty database of the suite's own with the shared set applied and the shard
@@ -144,87 +134,6 @@ func (s *StoreSuite) shardTo(name string, version int64) *Store {
 	s.upTo(opened, globalSet, math.MaxInt64)
 	s.upTo(opened, shardSet, version)
 	return opened
-}
-
-// The backfill runs in batches outside a transaction, so one stopped part way keeps the batches
-// before it, and the next start gives every session its one call.
-func (s *StoreSuite) TestEverySessionKeepsItsCallThroughTheBatchedBackfill() {
-	split := s.shardTo("sessions_calls", 20270127000000-1)
-	defer split.Close()
-	_, err := split.global.ExecContext(s.ctx, `
-INSERT INTO agent_sessions (id, customer_id, agent_id, call_id, call_type, state)
-VALUES ('voice', 'app', 'agent', 'stream-call', 'default', 'open'), ('written', 'app', 'agent', 'later-call', 'default', 'open');
-INSERT INTO agent_sessions (id, customer_id, agent_id, state)
-SELECT 'text-' || lpad(n::text, 4, '0'), 'app', 'agent', 'open' FROM generate_series(1, 2500) AS n;
-INSERT INTO calls (id, customer_id, call_id, agent_id) VALUES ('written', 'app', '', 'agent'), ('text-1500', 'app', '', 'agent')`)
-	s.Require().NoError(err)
-
-	// A query holding a call of the second batch stops the backfill at its lock timeout.
-	held, err := split.shard.BeginTx(s.ctx, nil)
-	s.Require().NoError(err)
-	defer held.Rollback() //nolint:errcheck // a no-op once rolled back
-	_, err = held.ExecContext(s.ctx, "SELECT 1 FROM calls WHERE id = 'text-1500' FOR UPDATE")
-	s.Require().NoError(err)
-	s.Require().ErrorContains(split.Migrate(s.ctx), "lock timeout")
-	var committed int
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM calls WHERE session_id = id").Scan(&committed))
-	s.Equal(1000, committed, "the first batch is kept")
-	// A call already given its session is not written again by the next start.
-	_, err = split.shard.ExecContext(s.ctx, "UPDATE calls SET call_type = 'kept' WHERE id = 'text-0001'")
-	s.Require().NoError(err)
-	s.Require().NoError(held.Rollback())
-
-	s.Require().NoError(split.Migrate(s.ctx))
-
-	var kept string
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT call_type FROM calls WHERE id = 'text-0001'").Scan(&kept))
-	s.Equal("kept", kept)
-	var calls, sessions int
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM calls WHERE session_id = id").Scan(&calls))
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM agent_sessions").Scan(&sessions))
-	s.Equal(2502, sessions)
-	s.Equal(sessions, calls, "every session, past the first batch included, has its call")
-	var voice, written string
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT call_id || '/' || call_type FROM calls WHERE id = 'voice'").Scan(&voice))
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT call_id FROM calls WHERE id = 'written'").Scan(&written))
-	s.Equal("stream-call/default", voice)
-	s.Equal("later-call", written, "a call row written before gains its session's Stream call")
-	var validated bool
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT convalidated FROM pg_constraint WHERE conname = 'calls_session_id_fkey'").Scan(&validated))
-	s.True(validated, "the session key is checked on every row")
-
-	// A database that ran these as one migration, or stopped part way, runs them again.
-	_, err = split.shard.ExecContext(s.ctx, "DELETE FROM goose_shard_version WHERE version_id >= 20270127000000")
-	s.Require().NoError(err)
-	s.Require().NoError(split.Migrate(s.ctx))
-}
-
-// The calls move only adds to the schema, so a router of the release before the split still
-// writes and reads a session's call the way it did (its SessionVoiced and StartCall, as SQL).
-func (s *StoreSuite) TestTheReleaseBeforeStillWritesAndReadsASessionsCall() {
-	for _, query := range []struct {
-		sql  string
-		args []any
-	}{
-		{`INSERT INTO agent_sessions (id, customer_id, config_id, agent_id, call_id, call_type, state, modality, created_at, updated_at)
-			VALUES ('old', 'acme', 'config', 'agent', NULL, NULL, 'open', 'text', now(), now())`, nil},
-		{`UPDATE agent_sessions SET call_id = ?, call_type = ?, modality = CASE WHEN modality = 'text' THEN 'voice' ELSE modality END
-			WHERE id = ?`, []any{"stream-call", "default", "old"}},
-		{`INSERT INTO calls (id, customer_id, call_id, agent_id, config_id, user_id, direction, started_at)
-			VALUES ('old', 'acme', 'stream-call', 'agent', 'config', 'user', 'inbound', now())
-			ON CONFLICT (id) DO UPDATE SET ended_at = NULL`, nil},
-	} {
-		result, err := s.store.shard.ExecContext(s.ctx, query.sql, query.args...)
-		s.Require().NoError(err, query.sql)
-		affected, err := result.RowsAffected()
-		s.Require().NoError(err)
-		s.Equal(int64(1), affected, query.sql)
-	}
-
-	var callID, callType, configID, userID string
-	s.Require().NoError(s.store.shard.QueryRowContext(s.ctx, "SELECT call_id, call_type FROM agent_sessions WHERE id = 'old'").Scan(&callID, &callType))
-	s.Require().NoError(s.store.shard.QueryRowContext(s.ctx, "SELECT config_id, user_id FROM calls WHERE id = 'old'").Scan(&configID, &userID))
-	s.Equal([]string{"stream-call", "default", "config", "user"}, []string{callID, callType, configID, userID})
 }
 
 // An index built concurrently waits for every write open on its table, which may be longer than
@@ -241,25 +150,6 @@ func (s *StoreSuite) TestAMigrationThatWaitsPastTheReadTimeoutFinishes() {
 	defer ended.Stop()
 
 	s.NoError(split.Migrate(s.ctx))
-}
-
-// The session key is added unchecked, so adding it reads no row of calls under its lock.
-func (s *StoreSuite) TestTheSessionKeyIsAddedUnchecked() {
-	split := s.shardTo("key_unchecked", 20270127000000-1)
-	defer split.Close()
-	var validated bool
-	s.Require().NoError(split.shard.QueryRowContext(s.ctx, "SELECT convalidated FROM pg_constraint WHERE conname = 'calls_session_id_fkey'").Scan(&validated))
-	s.False(validated)
-}
-
-// A version the single history did not have, but which was rolled back, left nothing behind.
-func (s *StoreSuite) TestADatabaseThatRolledBackAMigrationNoSetHasIsAdopted() {
-	legacy := s.legacy(s.emptyDatabase("rolled_back"), legacyHead)
-	defer legacy.Close()
-	_, err := legacy.global.ExecContext(s.ctx, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (20270105090000, true), (20270105090000, false)")
-	s.Require().NoError(err)
-
-	s.Require().NoError(legacy.Migrate(s.ctx))
 }
 
 // A database that ran 20270117000400 while its function still refused writes through old
@@ -289,47 +179,6 @@ BEGIN RAISE EXCEPTION 'record_data_change: % was attached without its secret col
 	}
 	s.Equal(body(fresh.global), body(opened.global), "the shared database ends with the function a new one has")
 	s.Equal(body(fresh.shard), body(opened.shard), "the shard ends with the function a new one has")
-}
-
-// placedCalls opens a shard of the suite's own just before placed calls moved onto their legs,
-// holding the one outbound leg given and two placed calls that both match it.
-func (s *StoreSuite) placedCalls(name, legVendorCallID string, first, second string) *Store {
-	merged := s.shardTo(name, 20270116000001-1)
-	dialed := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
-	_, err := merged.global.ExecContext(s.ctx, `
-INSERT INTO call_legs (customer_id, call_type, call_id, vendor, vendor_call_id, direction, local_number, remote_number, dialed_at)
-VALUES ('app', 'default', 'call', 'telnyx', NULLIF(?, ''), 'outbound', '+1000', '+2000', ?);
-INSERT INTO phone_calls (id, token, customer_id, call_type, call_id, vendor, local_number, remote_number, reports, vendor_call_id, placed_at)
-VALUES `+first+`, `+second, legVendorCallID, dialed)
-	s.Require().NoError(err)
-	// Only through the merge: a later migration moves the token into token_hash.
-	s.upTo(merged, shardSet, 20270116000001)
-	return merged
-}
-
-// tokenOnTheLeg is the token of the placed call the one dialled leg was given.
-func (s *StoreSuite) tokenOnTheLeg(merged *Store) string {
-	var token string
-	s.Require().NoError(merged.shard.QueryRowContext(s.ctx, "SELECT token FROM call_legs WHERE dialed_at = '2026-03-01 10:00:00+00'").Scan(&token))
-	return token
-}
-
-func (s *StoreSuite) TestALegTwoPlacedCallsMatchGoesToTheOneWithItsVendorCallID() {
-	merged := s.placedCalls("merge_vendor", "v1",
-		"(1, 'with-id', 'app', 'default', 'call', 'telnyx', '+1000', '+2000', false, 'v1', '2026-03-01 09:59:00+00')",
-		"(2, 'newer', 'app', 'default', 'call', 'telnyx', '+1000', '+2000', false, NULL, '2026-03-01 09:59:59+00')")
-	defer merged.Close()
-
-	s.Equal("with-id", s.tokenOnTheLeg(merged))
-}
-
-func (s *StoreSuite) TestALegTwoPlacedCallsMatchGoesToTheOneNearestInTime() {
-	merged := s.placedCalls("merge_nearest", "",
-		"(1, 'nearest', 'app', 'default', 'call', 'telnyx', '+1000', '+2000', false, NULL, '2026-03-01 09:59:59+00')",
-		"(2, 'farther', 'app', 'default', 'call', 'telnyx', '+1000', '+2000', false, NULL, '2026-03-01 09:59:00+00')")
-	defer merged.Close()
-
-	s.Equal("nearest", s.tokenOnTheLeg(merged))
 }
 
 // A trigger attached by the release before passes no secret columns, and stays in place from
@@ -386,43 +235,6 @@ AFTER INSERT OR UPDATE OR DELETE ON provider_keys FOR EACH ROW EXECUTE FUNCTION 
 	s.NotContains(string(byTable["provider_keys"][0].Payload), "api_key_sealed")
 }
 
-// The Down of each migration before the connector tables were folded undoes its Up, so the
-// set can be stepped back over them and run forward again.
-func (s *StoreSuite) TestTheFirstSharedMigrationsStepBackAndForward() {
-	stepped := s.migratedTo("stepped", 20270112000300)
-	defer stepped.Close()
-	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", stepped.global.DB, globalSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-
-	_, err = provider.DownTo(s.ctx, 20270111000000)
-	s.Require().NoError(err)
-	var plugins, held bool
-	s.Require().NoError(stepped.global.QueryRowContext(s.ctx, `SELECT to_regclass('agent_plugin_connections') IS NOT NULL,
-		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'simulation_runs' AND column_name = 'held_until')`).Scan(&plugins, &held))
-	s.True(plugins, "the plugin tables are back")
-	s.True(held, "the run's lease has its old name")
-	var sandbox, index bool
-	s.Require().NoError(stepped.global.QueryRowContext(s.ctx, `SELECT
-		EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'agent_configs' AND column_name = 'sandbox'),
-		to_regclass('knowledge_urls_due_idx') IS NOT NULL`).Scan(&sandbox, &index))
-	s.True(sandbox, "agent_configs has its old column names")
-	s.False(index, "the due index is gone")
-
-	_, err = provider.UpTo(s.ctx, 20270112000300)
-	s.Require().NoError(err)
-}
-
-// migratedTo opens an empty database of the suite's own with the shared set applied up to
-// version, so a test can write the rows a later migration rewrites.
-func (s *StoreSuite) migratedTo(name string, version int64) *Store {
-	opened, err := Open(s.emptyDatabase(name))
-	s.Require().NoError(err)
-	s.upTo(opened, globalSet, version)
-	return opened
-}
-
 // upTo applies set's migrations to the store's one database up to version.
 func (s *StoreSuite) upTo(opened *Store, set migrationSet, version int64) {
 	s.upToOn(opened.global, set, version)
@@ -436,61 +248,4 @@ func (s *StoreSuite) upToOn(db *bun.DB, set migrationSet, version int64) {
 	s.Require().NoError(err)
 	_, err = provider.UpTo(s.ctx, version)
 	s.Require().NoError(err)
-}
-
-func (s *StoreSuite) TestFoldingTheConnectorSideTablesKeepsTheirRows() {
-	folded := s.migratedTo("folded", 20270113000000-1)
-	defer folded.Close()
-	checked := time.Date(2026, 3, 1, 10, 0, 0, 123456000, time.UTC)
-	expires := checked.Add(time.Hour)
-	_, err := folded.global.ExecContext(s.ctx, `
-INSERT INTO connector_connections (id, customer_id, connector_id, definition_revision, owner_type, auth_scheme, status)
-VALUES ('with', 'app', 'acme', 1, 'app', 'test_key', 'connected'), ('without', 'app', 'acme', 1, 'app', 'test_key', 'pending');
-INSERT INTO connector_connection_clients (connection_id, registration, client_id, updated_at) VALUES ('with', 'dcr', 'issued', ?);
-INSERT INTO connector_connection_validations (connection_id, revision, status, code, error, checked_at)
-VALUES ('with', 3, 'failed', '503', 'Service Unavailable', ?);
-INSERT INTO connector_audit (id, customer_id, connection_id, connector_id, owner_type, action, created_at)
-VALUES ('granted', 'app', 'with', 'acme', 'app', 'grant_created', ?), ('called', 'app', 'with', 'acme', 'app', 'proxy_call', ?);
-INSERT INTO connector_audit_credentials (audit_id, access_fingerprint, refresh_fingerprint, previous_refresh_fingerprint, rotated, access_expires_at)
-VALUES ('granted', 'a1', 'r2', 'r1', true, ?);
-INSERT INTO connector_invocations (id, customer_id, connection_id, connector_id, config_id, binding, tool, started_at, latency_ms)
-VALUES ('shaped', 'app', 'with', 'acme', 'config', 'acme', 'search', ?, 5), ('unshaped', 'app', 'with', 'acme', 'config', 'acme', 'search', ?, 5);
-INSERT INTO connector_invocation_arguments (invocation_id, shape) VALUES ('shaped', '[{"name": "q", "type": "string", "length": 4}]');
-`, checked, checked, checked, checked.Add(-time.Second), expires, checked, checked.Add(-time.Second))
-	s.Require().NoError(err)
-
-	s.Require().NoError(folded.Migrate(s.ctx))
-
-	with, err := folded.ConnectorConnections.Get(s.ctx, "app", "with")
-	s.Require().NoError(err)
-	s.Equal(ConnectorConnectionClient{Registration: core.ClientDCR, ClientID: "issued", UpdatedAt: checked}, with.Client)
-	s.Equal(ConnectorConnectionValidation{Revision: 3, Status: "failed", Code: "503", Error: "Service Unavailable", CheckedAt: checked}, with.Validation)
-	without, err := folded.ConnectorConnections.Get(s.ctx, "app", "without")
-	s.Require().NoError(err)
-	s.Zero(without.Client)
-	s.Zero(without.Validation)
-
-	events, err := folded.ConnectorAuditEvents.Select(s.ctx, "app", AuditFilter{ConnectionID: "with"})
-	s.Require().NoError(err)
-	s.Require().Len(events, 2)
-	s.Equal(&ConnectorAuditCredential{AccessFingerprint: "a1", RefreshFingerprint: "r2", PreviousRefreshFingerprint: "r1",
-		Rotated: true, AccessExpiresAt: expires}, normalized(events[0].Credential))
-	s.Nil(events[1].Credential, "a row without a credential has none")
-
-	invocations, err := folded.ConnectorInvocations.Select(s.ctx, "app", InvocationFilter{ConnectionID: "with"})
-	s.Require().NoError(err)
-	s.Require().Len(invocations, 2)
-	length := 4
-	s.Equal([]ArgumentShape{{Name: "q", Type: "string", Length: &length}}, invocations[0].Arguments)
-	s.Nil(invocations[1].Arguments, "a call whose arguments were not an object has no shape")
-}
-
-// normalized is credential with its times in UTC, as they were written.
-func normalized(credential *ConnectorAuditCredential) *ConnectorAuditCredential {
-	if credential == nil {
-		return nil
-	}
-	out := *credential
-	out.AccessExpiresAt, out.RefreshExpiresAt = out.AccessExpiresAt.UTC(), out.RefreshExpiresAt.UTC()
-	return &out
 }

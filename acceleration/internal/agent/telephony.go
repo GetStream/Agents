@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -588,10 +589,7 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	cancels := telephonyTool(requested.Call.Name) || requested.Call.Name == toolEndCall ||
 		a.options.ToolPolicy != nil && a.options.ToolPolicy(a.approvedName(requested.Call)).Cancels
 	a.mu.Lock()
-	parent := a.ctx
-	if parent == nil {
-		parent = context.Background()
-	}
+	parent := a.ctxLocked()
 	if requester := a.requesterLocked(); requester != (Requester{}) {
 		parent = WithRequester(parent, requester)
 	}
@@ -675,7 +673,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	// ran is whether the tool was called: the router refuses some calls itself, before it.
 	// asked is whether it was answered with its approval question instead.
-	var ran, asked bool
+	var ran, asked, confirmed bool
 	// What the caller said and the tools returned is checked against the whole call, not the
 	// history the model reads: compaction summarises that, and a value it summarised away
 	// was still said or returned.
@@ -686,7 +684,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		err = refusal
 	} else if requested.Call.Name == confirmTool && a.offersConfirm() {
 		ran = true
-		parts, err = a.confirm(ctx, requested.Call)
+		parts, confirmed, err = a.confirm(ctx, requested.Call)
 	} else if earlier, repeated := answeredSinceCaller(harness.WithoutNotes(a.History()), requested.Call, a.connected()); repeated {
 		parts = llm.TextParts(alreadyCalled + earlier)
 	} else if refused, again := refusedBefore(harness.WithoutNotes(a.History()), requested.Call); again {
@@ -749,9 +747,18 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	took := time.Since(began)
 	toolCallSeconds.WithLabelValues(outcome).Observe(took.Seconds())
-	a.logger.Info("a tool call came back", append(a.loggedTool(*report, err), "tool", requested.Call.Name,
-		"tool_call", requested.Call.ID, "turn", requested.TurnID, "duration_ms", took.Milliseconds(),
-		"outcome", outcome)...)
+	var approval []any
+	if asked {
+		// Answered with its question, the call is not run here: the confirmation runs it.
+		approval = []any{"approval", "asked"}
+	}
+	// The confirmation's line is about the answer; the approved run's own line carries the
+	// connector and the error, so a count by either does not count a run twice.
+	fields := a.loggedTool(*report, err)
+	if confirmed {
+		fields = a.loggedAnswer(err)
+	}
+	a.logToolBack(requested.Call, fields, took, outcome, approval...)
 
 	a.emitter.Send(ToolRan{
 		ID:        requested.Call.ID,
@@ -775,7 +782,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			if err == nil {
 				a.askedApproval(requested.Call.ID)
 				if bye := a.goodbyeOf(requested.Call.ID, false); bye != nil {
-					go a.hangUpAfter(bye)
+					goroutine.Go(a.ctx, func() { a.hangUpAfter(bye) })
 				}
 			} else {
 				a.goodbyeOf(requested.Call.ID, true)
@@ -795,11 +802,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			a.goodbyeOf(requested.Call.ID, true)
 		}
 		if left {
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after transferring", "error", err)
 				}
-			}()
+			})
 		}
 		return
 	}
@@ -820,11 +827,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	}
 	// Closing waits for the goroutine this is running on, so the agent cannot end its own
 	// call from inside the loop handling the request to end it.
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		if err := a.Close(); err != nil {
 			a.logger.Error("could not leave after transferring", "error", err)
 		}
-	}()
+	})
 }
 
 // loggedTool is what "a tool call came back" says beside the agent logger's customer, session and
@@ -858,6 +865,20 @@ func (a *Agent) loggedTool(report ToolReport, err error) []any {
 		fields = append(fields, "error", store.SafeLogText(message))
 	}
 	return fields
+}
+
+// loggedAnswer is loggedTool for a confirmation: who, and whether the answer failed; no
+// connector, error_code or error, which belong to the line of the run it approved.
+func (a *Agent) loggedAnswer(err error) []any {
+	return []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID, "success", err == nil}
+}
+
+// logToolBack writes "a tool call came back" for call, which ran in its TurnID for took and
+// ended as outcome, with more fields after the identity and result fields every such line has.
+func (a *Agent) logToolBack(call llm.ToolCall, identity []any, took time.Duration, outcome string, more ...any) {
+	fields := append(identity, "tool", call.Name, "tool_call", call.ID, "turn", call.TurnID,
+		"duration_ms", took.Milliseconds(), "outcome", outcome)
+	a.logger.Info("a tool call came back", append(fields, more...)...)
 }
 
 // toolOutcome names how a tool call ended: cancelled, failed, refused by the router before
@@ -908,7 +929,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 		return nil, false, err
 	}
 	if a.native() && (call.Name == delegateSkill || call.Name == cancelSkill) {
-		return a.nativeDelegate(call)
+		return a.nativeDelegate(ctx, call)
 	}
 
 	if telephonyTool(call.Name) {

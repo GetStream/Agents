@@ -5,6 +5,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -613,4 +617,125 @@ func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	case <-time.After(30 * time.Second):
 		s.FailNow("the waiting router never migrated once the lock was free")
 	}
+}
+
+// shortLimit is the statement and idle limit of a limitedStore's connections.
+const shortLimit = 300 * time.Millisecond
+
+// limitedDSN is dsn with a statement and idle limit of shortLimit on every connection, as a
+// DSN may set them, so a test can show what outlasts the serving limits without waiting for
+// them.
+func (s *StoreSuite) limitedDSN(dsn string) string {
+	parsed, err := url.Parse(dsn)
+	s.Require().NoError(err)
+	query := parsed.Query()
+	limit := fmt.Sprintf("%dms", shortLimit.Milliseconds())
+	query.Set("statement_timeout", limit)
+	query.Set("idle_in_transaction_session_timeout", limit)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+// limitedStore is another router's store on the suite's databases, every connection of it
+// held to shortLimit.
+func (s *StoreSuite) limitedStore() *Store {
+	store, err := OpenShards(Options{DSN: s.limitedDSN(s.dsn), ShardDSN: s.limitedDSN(s.shardDSN)})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(store.Close()) })
+	return store
+}
+
+// postgresCode is the SQLSTATE Postgres answered err with, empty for an error of another kind.
+func postgresCode(err error) string {
+	var refused pgdriver.Error
+	if errors.As(err, &refused) {
+		return refused.Field('C')
+	}
+	return ""
+}
+
+func (s *StoreSuite) TestAStatementPastTheLimitIsEndedOnTheServer() {
+	started := time.Now()
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "SELECT pg_sleep(20)")
+	took := time.Since(started)
+
+	s.Equal("57014", postgresCode(err), "the server cancelled it, not the driver: %v", err)
+	s.InDelta(8, took.Seconds(), 1)
+	var running int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = current_database() AND state = 'active' AND query LIKE '%pg_sleep(20)%' AND pid <> pg_backend_pid()`).Scan(&running))
+	s.Zero(running, "nothing is left running on the server")
+}
+
+func (s *StoreSuite) TestAWaitOnAnotherSessionsLockIsEnded() {
+	config := s.boundConfig("app")
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holder.Rollback() //nolint:errcheck // only ever holds the lock
+	_, err = holder.ExecContext(s.ctx, "SELECT 1 FROM agent_configs WHERE id = ? FOR UPDATE", config.ID)
+	s.Require().NoError(err)
+
+	started := time.Now()
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET name = name WHERE id = ?", config.ID)
+
+	s.Equal("55P03", postgresCode(err), "the wait was ended as a lock timeout: %v", err)
+	s.InDelta(3, time.Since(started).Seconds(), 1)
+}
+
+func (s *StoreSuite) TestAServingConnectionBoundsAnIdleTransaction() {
+	var limit string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SHOW idle_in_transaction_session_timeout").Scan(&limit))
+	s.Equal("30s", limit)
+}
+
+func (s *StoreSuite) TestDaysAreCutInUTCWhateverTheDatabaseSays() {
+	var database string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "ALTER DATABASE ? SET timezone = 'Pacific/Kiritimati'", bun.Ident(database))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "ALTER DATABASE ? RESET timezone", bun.Ident(database))
+		s.NoError(err)
+	})
+	fresh, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	defer fresh.Close()
+	// One in the morning in UTC is the afternoon of the same day at UTC+14, whose day began
+	// the evening before in UTC.
+	morning := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	s.opened("one", "acme", morning, nil)
+
+	buckets, err := fresh.CustomerActivity(s.ctx, "acme", ActivityDaily, morning.Add(-48*time.Hour), morning.Add(48*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.Equal(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), buckets[0].Bucket.UTC())
+}
+
+func (s *StoreSuite) TestALimitTheDSNSetsIsKeptOverTheDefault() {
+	limited := s.limitedStore()
+	tx, err := limited.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // ended by the server
+	_, err = tx.ExecContext(s.ctx, "SELECT 1")
+	s.Require().NoError(err)
+
+	time.Sleep(3 * shortLimit)
+	_, err = tx.ExecContext(s.ctx, "SELECT 1")
+
+	s.Error(err, "the transaction was ended at the DSN's idle limit, not the default's")
+	_ = tx.Rollback()
+	for range 3 {
+		_, err := limited.GlobalDB().ExecContext(s.ctx, "SELECT 1")
+		s.Require().NoError(err, "the pool hands out no connection the server ended")
+	}
+}
+
+// inSmallBatches makes every batched prune and rename take one row per statement for the
+// test, so a backlog of a few rows is more than one statement's worth.
+func (s *StoreSuite) inSmallBatches() {
+	kept := writeBatch
+	writeBatch = 1
+	s.T().Cleanup(func() { writeBatch = kept })
 }

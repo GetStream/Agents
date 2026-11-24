@@ -127,7 +127,7 @@ func (e *Enforcer) Book(ctx context.Context, owner routing.Owner, micros int64) 
 		return e.bookingRefused(organization, reason, refusal, nil)
 	}
 
-	b := &booking{enforcer: e, organization: organization, id: id}
+	b := &booking{ctx: context.WithoutCancel(ctx), enforcer: e, organization: organization, id: id}
 	if !e.money.off() && micros > 0 {
 		if err := e.Reserve(owner, id, micros, BookingTTL); err != nil {
 			b.Release()
@@ -189,6 +189,9 @@ func hardLimitRoom(standing usage.Standing, now time.Time) int64 {
 
 // booking is credit Book set aside.
 type booking struct {
+	// ctx is the context of the request that booked it, without its cancellation: the
+	// purchase settles after that request is gone.
+	ctx          context.Context
 	enforcer     *Enforcer
 	organization string
 	id           uuid.UUID
@@ -212,7 +215,7 @@ func (b *booking) finish(verb string) {
 	if b.reserved {
 		e.Release(b.id)
 	}
-	if err := e.bookings(b.organization).finish(context.Background(), b.id, verb); err != nil {
+	if err := e.bookings(b.organization).finish(b.ctx, b.id, verb); err != nil {
 		e.logger.Warn("could not settle a booking, which expires on its own",
 			append(who(b.organization), "verb", verb, "expires_in", BookingTTL, "error", err)...)
 	}

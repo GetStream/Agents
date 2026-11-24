@@ -3,11 +3,14 @@ package store
 import (
 	"cmp"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 	"github.com/uptrace/bun/schema"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -91,20 +94,44 @@ func (r *Activities) Add(ctx context.Context, deltas []ActivityDelta) error {
 			cmp.Compare(a.client, b.client), cmp.Compare(a.day, b.day))
 	})
 
-	// One transaction, so a failed write wrote nothing and the caller can keep the deltas
-	// for its next try without counting any of them twice.
+	// One transaction, so a write that failed before its commit wrote nothing and the caller can
+	// keep the deltas for its next try without counting any of them twice. One whose commit was
+	// sent and got no answer may have been written, a reply lost on the way back: that is
+	// ErrActivityUnsure (commitUnsure).
+	committing := false
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for start := 0; start < len(order); start += activityBatch {
 			if err := writeActivity(ctx, tx, folded, order[start:min(start+activityBatch, len(order))]); err != nil {
 				return err
 			}
 		}
+		committing = true
 		return nil
 	})
+	if committing && commitUnsure(err) {
+		return stack.Wrap(fmt.Errorf("store: record activity: %w: %w", ErrActivityUnsure, err))
+	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record activity: %w", err))
 	}
 	return nil
+}
+
+// ErrActivityUnsure is a write of activity whose commit was sent and got no answer, which may
+// have been written all the same: written again, its counts would be counted twice.
+var ErrActivityUnsure = errors.New("store: the activity may have been recorded")
+
+// commitUnsure reports whether err, a commit's failure, leaves it unknown whether the commit
+// landed. database/sql answers a context that ended before the commit with ErrTxDone or the
+// context's error and sends nothing, and pgdriver sends COMMIT on a context of its own, so
+// neither comes from a COMMIT on the wire; an error the server answered is a commit it refused.
+// Anything else, such as a connection cut after COMMIT was sent, may have landed.
+func commitUnsure(err error) bool {
+	if err == nil || errors.Is(err, sql.ErrTxDone) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var refused pgdriver.Error
+	return !errors.As(err, &refused)
 }
 
 // activityUpsert is one customer_activity row as writeActivity upserts it.
@@ -290,6 +317,123 @@ func (r *Activities) Day(ctx context.Context, day time.Time) ([]OrganizationDayA
 	return areas, nil
 }
 
+// ActivityRow is one customer_activity row: what one app of an organization did in one area
+// from one client on one UTC day.
+type ActivityRow struct {
+	OrganizationID string    `bun:"organization_id"`
+	AppID          string    `bun:"app_id"`
+	Day            time.Time `bun:"day"`
+	ActivityArea
+}
+
+// ActivityPosition is where a page of List ended: its last row's whole sort key, which ends
+// with the row's primary key, so no two rows share one.
+type ActivityPosition struct {
+	OrganizationID string `json:"o"`
+	Day            string `json:"d"`
+	AppID          string `json:"a"`
+	Area           string `json:"r"`
+	Client         string `json:"c"`
+}
+
+// ActivityFilter is which rows List reads: those of the UTC days from From to To, both
+// included, and when set, only those naming OrganizationID or of AppID.
+type ActivityFilter struct {
+	From, To       time.Time
+	OrganizationID string
+	AppID          string
+}
+
+// List is up to limit rows filter keeps, after the position after when it is not nil, by
+// organization, day, app, area and client. Rows that name no organization are left out, as in
+// Day. An organization's rows are read by its (organization_id, day) index, an app's by the
+// primary key.
+func (r *Activities) List(ctx context.Context, filter ActivityFilter, after *ActivityPosition, limit int) ([]ActivityRow, error) {
+	query := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("organization_id, app_id, day, area, client, first_at, last_at, requests, refused").
+		ColumnExpr("COALESCE(last_refusal_code, '') AS last_refusal_code").
+		Where("day BETWEEN ?::date AND ?::date", filter.From.UTC().Format(time.DateOnly), filter.To.UTC().Format(time.DateOnly)).
+		Where("organization_id <> ''")
+	if filter.OrganizationID != "" {
+		query = query.Where("organization_id = ?", filter.OrganizationID)
+	}
+	if filter.AppID != "" {
+		query = query.Where("app_id = ?", filter.AppID)
+	}
+	if after != nil {
+		query = query.Where("(organization_id, day, app_id, area, client) > (?, ?::date, ?, ?, ?)",
+			after.OrganizationID, after.Day, after.AppID, after.Area, after.Client)
+	}
+	var rows []ActivityRow
+	err := query.Order("organization_id", "day", "app_id", "area", "client").Limit(limit).Scan(ctx, &rows)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: list activity: %w", err))
+	}
+	return rows, nil
+}
+
+// OrganizationArea is what one organization's apps did in one area of the API, every client
+// summed: the requests and refusals of the days read, and the first UTC day ever with a
+// request answered, nil when none was.
+type OrganizationArea struct {
+	OrganizationID string     `bun:"organization_id"`
+	Area           string     `bun:"area"`
+	Requests       int64      `bun:"requests"`
+	Refused        int64      `bun:"refused"`
+	FirstAnswered  *time.Time `bun:"first_answered"`
+}
+
+// OrganizationAreas is, for each of organizations and each area its apps ever made a request
+// in, what Areas and FirstAnswered read for an app list: the counts of the UTC days from from
+// to to, both included, and the first day answered over every day recorded. By organization,
+// then area.
+func (r *Activities) OrganizationAreas(ctx context.Context, organizations []string, from, to time.Time) ([]OrganizationArea, error) {
+	inRange := bun.SafeQuery("day BETWEEN ?::date AND ?::date", from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly))
+	var areas []OrganizationArea
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("organization_id, area").
+		ColumnExpr("COALESCE(SUM(requests) FILTER (WHERE ?), 0) AS requests", inRange).
+		ColumnExpr("COALESCE(SUM(refused) FILTER (WHERE ?), 0) AS refused", inRange).
+		ColumnExpr("MIN(day) FILTER (WHERE requests > refused) AS first_answered").
+		Where("organization_id IN (?)", bun.In(organizations)).
+		Group("organization_id", "area").
+		Order("organization_id", "area").
+		Scan(ctx, &areas)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organization activity areas: %w", err))
+	}
+	return areas, nil
+}
+
+// OrganizationDays is, for each of organizations, how many UTC days from from to to, both
+// included, its apps had a request answered, not refused, in any of areas, as Days counts them
+// for an app list. An organization with none is absent.
+func (r *Activities) OrganizationDays(ctx context.Context, organizations []string, from, to time.Time, areas []string) (map[string]int, error) {
+	var counted []struct {
+		OrganizationID string `bun:"organization_id"`
+		Days           int    `bun:"days"`
+	}
+	err := r.store.global.NewSelect().
+		TableExpr("customer_activity").
+		ColumnExpr("organization_id, COUNT(DISTINCT day) AS days").
+		Where("organization_id IN (?)", bun.In(organizations)).
+		Where("day BETWEEN ?::date AND ?::date", from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly)).
+		Where("area IN (?)", bun.In(areas)).
+		Where("requests > refused").
+		Group("organization_id").
+		Scan(ctx, &counted)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organization activity days: %w", err))
+	}
+	days := make(map[string]int, len(counted))
+	for _, row := range counted {
+		days[row.OrganizationID] = row.Days
+	}
+	return days, nil
+}
+
 // FirstAnswer is an organization whose apps had a request of an area answered for the first
 // time on a day.
 type FirstAnswer struct {
@@ -342,26 +486,25 @@ func (r *Activities) ActiveOrganizations(ctx context.Context, day time.Time) (in
 	return active, nil
 }
 
-// activityKeepDays is how many UTC days back from today customer_activity and activity_digests
+// ActivityKeepDays is how many UTC days back from today customer_activity and activity_digests
 // keep rows for: 13 months and a margin, so staff can compare a month with the same month a year
 // before. Rows are kept no longer than that need, as GDPR's storage limitation principle asks
 // (Art. 5(1)(e), https://eur-lex.europa.eu/eli/reg/2016/679/oj).
-const activityKeepDays = 400
+const ActivityKeepDays = 400
 
-// Prune deletes the activity rows of the UTC days more than activityKeepDays before now's, and
+// Prune deletes the activity rows of the UTC days more than ActivityKeepDays before now's, and
 // returns how many it deleted.
 func (r *Activities) Prune(ctx context.Context, now time.Time) (int, error) {
 	return pruneDays(ctx, r.store.global, "customer_activity", now)
 }
 
-// pruneDays deletes the rows of table whose day is more than activityKeepDays before now's UTC
+// pruneDays deletes the rows of table whose day is more than ActivityKeepDays before now's UTC
 // day, and returns how many it deleted.
 func pruneDays(ctx context.Context, db bun.IDB, table string, now time.Time) (int, error) {
-	before := now.UTC().AddDate(0, 0, -activityKeepDays).Format(time.DateOnly)
-	result, err := db.NewDelete().TableExpr(table).Where("day < ?::date", before).Exec(ctx)
+	before := now.UTC().AddDate(0, 0, -ActivityKeepDays).Format(time.DateOnly)
+	deleted, err := deleteInBatches(ctx, db, table, "day < ?::date", before)
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune %s: %w", table, err))
+		return int(deleted), stack.Wrap(fmt.Errorf("store: prune %s: %w", table, err))
 	}
-	deleted, _ := result.RowsAffected()
 	return int(deleted), nil
 }

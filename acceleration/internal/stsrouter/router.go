@@ -170,7 +170,7 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSession(provider, config, core.Owner(), r.Recorder(), r.backend), nil
+	return newSession(ctx, provider, config, core.Owner(), r.Recorder(), r.backend), nil
 }
 
 // declared reports the first thing a config promises of a model that the code behind it

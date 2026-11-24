@@ -40,10 +40,13 @@ type BusinessProfile struct {
 	VerificationDocuments []string      `bun:"business_verification_documents,array"`
 	// VendorBrandID is the brand the vendor registered the app as, and BrandStatus the
 	// vendor's own word for where it stands. Empty until a use case was sent.
-	VendorBrandID string    `bun:"vendor_brand_id,notnull"`
-	BrandStatus   string    `bun:"brand_status,notnull"`
-	CreatedAt     time.Time `bun:"created_at,notnull"`
-	UpdatedAt     time.Time `bun:"updated_at,notnull"`
+	VendorBrandID string `bun:"vendor_brand_id,notnull"`
+	BrandStatus   string `bun:"brand_status,notnull"`
+	// BrandRequestedAt is when the vendor was asked to register the brand (RequestBrand). Set
+	// with no VendorBrandID, the vendor's answer was lost.
+	BrandRequestedAt *time.Time `bun:"brand_requested_at"`
+	CreatedAt        time.Time  `bun:"created_at,notnull"`
+	UpdatedAt        time.Time  `bun:"updated_at,notnull"`
 }
 
 // PostalAddress is where a business is registered.
@@ -81,6 +84,23 @@ func (r *BusinessProfiles) Get(ctx context.Context, customerID string) (Business
 	}
 	if err != nil {
 		return BusinessProfile{}, stack.Wrap(fmt.Errorf("store: business profile: %w", err))
+	}
+	return profile, nil
+}
+
+// GetByBrand returns the profile a vendor registered as brandID. A vendor reports on a brand
+// rarely and an app holds one profile, so the read has no index of its own.
+func (r *BusinessProfiles) GetByBrand(ctx context.Context, brandID string) (BusinessProfile, error) {
+	if brandID == "" {
+		return BusinessProfile{}, stack.Wrap(ErrNoBusinessProfile)
+	}
+	var profile BusinessProfile
+	err := r.store.global.NewSelect().Model(&profile).Where("vendor_brand_id = ?", brandID).Limit(1).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BusinessProfile{}, stack.Wrap(ErrNoBusinessProfile)
+	}
+	if err != nil {
+		return BusinessProfile{}, stack.Wrap(fmt.Errorf("store: business profile by brand: %w", err))
 	}
 	return profile, nil
 }
@@ -137,6 +157,39 @@ func (r *BusinessProfiles) SetBrand(ctx context.Context, customerID, brandID, st
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: set brand: %w", err))
+	}
+	return nil
+}
+
+// RequestBrand records that the vendor is about to be asked to register the app's brand. It
+// reports false, and records nothing, for an app with a brand, or one the vendor was asked for
+// already: that registration may be running, or its answer was lost, and asking again could
+// register and bill a second brand.
+func (r *BusinessProfiles) RequestBrand(ctx context.Context, customerID string, at time.Time) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*BusinessProfile)(nil)).
+		Set("brand_requested_at = ?", at.UTC()).
+		Where("customer_id = ?", customerID).
+		Where("vendor_brand_id = ''").
+		Where("brand_requested_at IS NULL").
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: request brand: %w", err))
+	}
+	requested, _ := result.RowsAffected()
+	return requested == 1, nil
+}
+
+// ForgetBrandRequest forgets the brand request made at at, which the vendor did not carry out,
+// so the brand may be asked for again. A request made since is another's, and is kept.
+func (r *BusinessProfiles) ForgetBrandRequest(ctx context.Context, customerID string, at time.Time) error {
+	_, err := r.store.global.NewUpdate().Model((*BusinessProfile)(nil)).
+		Set("brand_requested_at = NULL").
+		Where("customer_id = ?", customerID).
+		Where("vendor_brand_id = ''").
+		Where("brand_requested_at = ?", at.UTC()).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: forget brand request: %w", err))
 	}
 	return nil
 }
