@@ -200,19 +200,34 @@ func (m *money) sharing(h *hold, now time.Time) bool {
 	return m.sharedUntil(h).After(now) || len(h.grants) > 0 && m.grantSharedUntil(h).After(now)
 }
 
-// HoldKey is the key of a subject's shared holds.
-func HoldKey(ref usage.SubjectRef) string {
-	return ref.Key(holdPrefix)
+// appHoldPrefix starts those of an app in no organization, whose organization id is the app's.
+const appHoldPrefix = holdPrefix + ":app"
+
+// holdPrefixOf starts the keys of an account's shared holds.
+func holdPrefixOf(account string) string {
+	if billed(account) {
+		return holdPrefix
+	}
+	return appHoldPrefix
 }
 
-// holdKey is the key of a subject's shared holds, from the key of its counters.
-func holdKey(counter string) string {
-	return holdPrefix + strings.TrimPrefix(counter, usage.CounterPrefix)
+// HoldKey is the key of a subject's shared holds, for an organization's work, or with billed
+// false for the work of an app in none.
+func HoldKey(ref usage.SubjectRef, billed bool) string {
+	if billed {
+		return ref.Key(holdPrefix)
+	}
+	return ref.Key(appHoldPrefix)
 }
 
-// grantKey is the key of a grant's shared holds, in its organization's slot.
-func grantKey(organization string, grant int64) string {
-	return holdPrefix + ":{" + organization + "}:grant:" + strconv.FormatInt(grant, 10)
+// holdKey is the key of an account's subject's shared holds, from the key of its counters.
+func holdKey(account, counter string) string {
+	return holdPrefixOf(account) + strings.TrimPrefix(counter, usage.CounterPrefix)
+}
+
+// grantKey is the key of a grant's shared holds, in its account's slot.
+func grantKey(account string, grant int64) string {
+	return holdPrefixOf(account) + ":{" + limitsOrganization(account) + "}:grant:" + strconv.FormatInt(grant, 10)
 }
 
 // shareOf is what the shared Redis should hold of one hold, by key: nothing for one that is gone
@@ -225,14 +240,13 @@ func (m *money) shareOf(key string, h *hold, now time.Time) map[string]string {
 	if until := m.sharedUntil(h); until.After(now) {
 		value := shareValue(h.micros, until, now)
 		for _, subject := range h.subjects {
-			out[holdKey(subject)] = value
+			out[holdKey(key, subject)] = value
 		}
 	}
 	if until := m.grantSharedUntil(h); len(h.grants) > 0 && until.After(now) {
 		value := shareValue(h.micros, until, now)
-		organization := limitsOrganization(key)
 		for _, id := range h.grants {
-			out[grantKey(organization, id)] = value
+			out[grantKey(key, id)] = value
 		}
 	}
 	return out
@@ -384,7 +398,7 @@ func (m *money) planFlush(now time.Time) (map[string]*keyPlan, map[uuid.UUID]flu
 			// A key of the hold's own account answers for it; one left from another it moved
 			// from answers for nobody.
 			slot := remoteSlot{}
-			if strings.HasPrefix(key, holdPrefix+":{"+limitsOrganization(d.key)+"}:") {
+			if strings.HasPrefix(key, holdPrefixOf(d.key)+":{"+limitsOrganization(d.key)+"}:") {
 				slot = slotOf(d.key, key)
 			}
 			plan := planFor(key, slot)
@@ -400,18 +414,17 @@ func (m *money) planFlush(now time.Time) (map[string]*keyPlan, map[uuid.UUID]flu
 			if now.Sub(acct.used) > m.settings.Idle {
 				continue
 			}
-			organization := limitsOrganization(key)
-			org := usage.SubjectRef{OrganizationID: organization, Subject: usage.SubjectOrganization}.Key(usage.CounterPrefix)
-			planFor(holdKey(org), remoteSlot{account: key, counter: org})
+			org := usage.SubjectRef{OrganizationID: limitsOrganization(key), Subject: usage.SubjectOrganization}.Key(usage.CounterPrefix)
+			planFor(holdKey(key, org), remoteSlot{account: key, counter: org})
 			if acct.limited {
 				for counter, subject := range acct.subjects {
 					if now.Sub(subject.used) <= m.settings.Idle {
-						planFor(holdKey(counter), remoteSlot{account: key, counter: counter})
+						planFor(holdKey(key, counter), remoteSlot{account: key, counter: counter})
 					}
 				}
 			}
 			for _, grant := range acct.grants {
-				planFor(grantKey(organization, grant.grant.ID), remoteSlot{account: key, grant: grant.grant.ID})
+				planFor(grantKey(key, grant.grant.ID), remoteSlot{account: key, grant: grant.grant.ID})
 			}
 		}
 	}
@@ -424,7 +437,7 @@ func slotOf(account, key string) remoteSlot {
 		id, _ := strconv.ParseInt(grant, 10, 64)
 		return remoteSlot{account: account, grant: id}
 	}
-	return remoteSlot{account: account, counter: usage.CounterPrefix + strings.TrimPrefix(key, holdPrefix)}
+	return remoteSlot{account: account, counter: usage.CounterPrefix + strings.TrimPrefix(key, holdPrefixOf(account))}
 }
 
 // landFlush keeps, under m.mu, what the other routers hold under each key answered, and marks

@@ -87,7 +87,7 @@ func (s *StoreSuite) member(app, organization string) {
 }
 
 func (s *StoreSuite) TestARowWithoutItsOrganizationCountsTowardItsAppsGrants() {
-	own := s.grant(LimitGrant{OrganizationID: "app-alone", AmountMicros: 10_000})
+	own := s.grant(LimitGrant{OrganizationID: "app-alone", Billed: new(false), AmountMicros: 10_000})
 	theirs := s.grant(LimitGrant{AmountMicros: 10_000})
 	s.member("app-1", "org-1")
 	s.member("org-1", "org-2")
@@ -261,7 +261,7 @@ func (s *ShardedStoreSuite) TestAReconcileCountsARowOnlyTowardItsOwnOrganization
 }
 
 func (s *ShardedStoreSuite) TestAReconcileCountsARowWithoutItsOrganizationTowardItsAppsGrants() {
-	own := s.grant(LimitGrant{OrganizationID: "app-alone", AmountMicros: 10_000})
+	own := s.grant(LimitGrant{OrganizationID: "app-alone", Billed: new(false), AmountMicros: 10_000})
 	theirs := s.grant(LimitGrant{AmountMicros: 10_000})
 	s.member("app-1", "org-1")
 	for _, row := range []Request{s.unresolved("app-alone", 100, own.ID), s.unresolved("app-1", 20, theirs.ID), s.unresolved("app-2", 3_000, own.ID)} {

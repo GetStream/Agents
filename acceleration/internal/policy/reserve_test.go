@@ -643,7 +643,7 @@ func (s *PolicySuite) TestAFlushOfMoreKeysThanAChunkLandsWhole() {
 	lengths := make(rueidis.Commands, 0, users)
 	for i := range users {
 		user := usage.SubjectRef{OrganizationID: s.org, Subject: usage.SubjectUser, AppID: s.app, UserID: "user-" + strconv.Itoa(i)}
-		lengths = append(lengths, direct.B().Hlen().Key(holdKey(user.Key(usage.CounterPrefix))).Build())
+		lengths = append(lengths, direct.B().Hlen().Key(holdKey(s.org, user.Key(usage.CounterPrefix))).Build())
 	}
 	took := 0
 	for _, length := range direct.DoMulti(s.ctx, lengths...) {

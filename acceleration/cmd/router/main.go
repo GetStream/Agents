@@ -1382,6 +1382,11 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if pgStore != nil {
 		go pruneDataChanges(ctx, pgStore, settings.DataMove.Retention, logger)
 	}
+	// A limit a release from before limits said whose they are wrote is shown to no customer until
+	// it is known whose it is.
+	if pgStore != nil {
+		go attributeLimits(ctx, pgStore, logger)
+	}
 	// A scheduled task's finished runs, and the tasks that completed or failed, are kept for
 	// store.ScheduledTasksKept.
 	if pgStore != nil {
@@ -1991,6 +1996,25 @@ func pruneDataChanges(ctx context.Context, pgStore *store.Store, retention time.
 			logger.Error("could not prune the uses of ended grants", "error", err)
 		} else if removed > 0 {
 			logger.Debug("pruned the uses of ended grants", "rows", removed)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// attributeLimits attributes the limits, resets and grants not known to be anyone's, now and
+// every minute until the process stops, since the release before writes them while it runs.
+func attributeLimits(ctx context.Context, pgStore *store.Store, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		if attributed, err := pgStore.AttributeLimits(ctx); err != nil {
+			logger.Error("could not attribute limits to their owners", "error", err)
+		} else if attributed > 0 {
+			logger.Info("attributed limits to their owners", "rows", attributed)
 		}
 		select {
 		case <-ctx.Done():

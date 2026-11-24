@@ -691,8 +691,11 @@ func (f forgetting) commands(client rueidis.Client, exists bool, organizations .
 	slices.Sort(every)
 	for _, organization := range slices.Compact(every) {
 		user := usageservice.SubjectRef{OrganizationID: organization, Subject: usageservice.SubjectUser, AppID: f.app, UserID: f.user}
-		keys = append(keys, user.Key(usageservice.CounterPrefix), policy.HoldKey(user))
+		keys = append(keys, user.Key(usageservice.CounterPrefix), policy.HoldKey(user, true))
 	}
+	// The app's own, for work it did in no organization.
+	own := usageservice.SubjectRef{OrganizationID: f.app, Subject: usageservice.SubjectUser, AppID: f.app, UserID: f.user}
+	keys = append(keys, policy.HoldKey(own, false))
 	commands := make([]rueidis.Completed, 0, len(keys))
 	for _, key := range keys {
 		if exists {

@@ -161,15 +161,32 @@ func TestAKeyPlannedFirstForADropStillKeepsItsAnswer(t *testing.T) {
 	org := usage.SubjectRef{OrganizationID: heldOrg, Subject: usage.SubjectOrganization}.Key(usage.CounterPrefix)
 	// A hold gone from another account, last shared under this organization's key.
 	gone := uuid.Must(uuid.NewV7())
-	m.shared = map[uuid.UUID][]string{gone: {holdKey(org)}}
+	m.shared = map[uuid.UUID][]string{gone: {holdKey(heldOrg, org)}}
 	m.dirty = map[uuid.UUID]dirtyHold{gone: {key: "another-org", since: time.Now(), version: 1}}
 
 	plans, _ := m.planFlush(time.Now())
 
-	plan := plans[holdKey(org)]
+	plan := plans[holdKey(heldOrg, org)]
 	require.NotNil(t, plan)
 	require.Equal(t, remoteSlot{account: heldOrg, counter: org}, plan.slot, "the refresh of the key fills in whose answer it is")
 	require.Equal(t, []string{gone.String(), ""}, plan.args, "and the drop is still sent")
+}
+
+// A hold let go of by an app in no organization still answers for the app's account.
+func TestAnAppsDroppedHoldAnswersForItsOwnAccount(t *testing.T) {
+	e, _ := holding(t)
+	m := &e.money
+	alone := appAccount("app-1")
+	org := usage.SubjectRef{OrganizationID: "app-1", Subject: usage.SubjectOrganization}.Key(usage.CounterPrefix)
+	gone := uuid.Must(uuid.NewV7())
+	m.shared = map[uuid.UUID][]string{gone: {"hold:app:{app-1}:organization"}}
+	m.dirty = map[uuid.UUID]dirtyHold{gone: {key: alone, since: time.Now(), version: 1}}
+
+	plans, _ := m.planFlush(time.Now())
+
+	plan := plans["hold:app:{app-1}:organization"]
+	require.NotNil(t, plan)
+	require.Equal(t, remoteSlot{account: alone, counter: org}, plan.slot)
 }
 
 func TestAnIdleAccountGivesItsFoldedIDsBackToTheProcess(t *testing.T) {

@@ -202,10 +202,10 @@ func (s *StoreSuite) TestAnOrganizationHasAtMostSoManyLiveGrants() {
 func (s *StoreSuite) TestGrantsAreListedNewestFirst() {
 	a, b, c := s.grant(LimitGrant{}), s.grant(LimitGrant{}), s.grant(LimitGrant{})
 
-	page, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{OrganizationID: "org-1", Limit: 2})
+	page, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{Owner: "org-1", Limit: 2})
 	s.Require().NoError(err)
 	s.Equal([]int64{c.ID, b.ID, a.ID}, idsOf(page), "two and one more")
-	next, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{OrganizationID: "org-1", Before: b.ID, Limit: 2})
+	next, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{Owner: "org-1", Before: b.ID, Limit: 2})
 	s.Require().NoError(err)
 	s.Equal([]int64{a.ID}, idsOf(next))
 }
@@ -227,7 +227,7 @@ func (s *StoreSuite) TestAUsedUpGrantIsNotLiveAndLeavesRoomForAnother() {
 	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &extra, LimitAudit{CustomerID: "app-1", Source: AuditSourceAPI}),
 		"nor counted toward the cap")
 	yes := true
-	listed, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{OrganizationID: "org-used", Used: &yes, Limit: 50})
+	listed, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{Owner: "org-used", Used: &yes, Limit: 50})
 	s.Require().NoError(err)
 	s.Equal([]int64{used.ID}, idsOf(listed))
 }
@@ -255,7 +255,7 @@ func (s *StoreSuite) TestLimitGrantQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{OrganizationID: organization, Limit: 10})
+		_, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{Owner: organization, Limit: 10})
 		s.Require().NoError(err)
 	}))
 	s.Equal(5, s.countQueries(func() {

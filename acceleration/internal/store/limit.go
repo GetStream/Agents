@@ -49,20 +49,23 @@ func LimitLevels(subject usage.Subject) []LimitLevel {
 type Limit struct {
 	bun.BaseModel `bun:"table:limits,alias:lim"`
 
-	ID             int64          `bun:"id,pk,autoincrement"`
-	Subject        usage.Subject  `bun:"subject,notnull"`
-	Level          LimitLevel     `bun:"level,notnull"`
-	OrganizationID string         `bun:"organization_id,notnull"`
-	AppID          string         `bun:"app_id,notnull"`
-	APIKey         string         `bun:"api_key,notnull"`
-	UserID         string         `bun:"user_id,notnull"`
-	Category       string         `bun:"category,notnull"`
-	Interval       usage.Interval `bun:"interval,notnull"`
-	LimitMicros    int64          `bun:"limit_micros,notnull"`
-	Note           string         `bun:"note,notnull"`
-	UpdatedBy      string         `bun:"updated_by,notnull"`
-	CreatedAt      time.Time      `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt      time.Time      `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	ID             int64         `bun:"id,pk,autoincrement"`
+	Subject        usage.Subject `bun:"subject,notnull"`
+	Level          LimitLevel    `bun:"level,notnull"`
+	OrganizationID string        `bun:"organization_id,notnull"`
+	// Billed is whether OrganizationID is an organization's id, or an app's in none. Nil is a row
+	// from before it was kept (AttributeLimits).
+	Billed      *bool          `bun:"billed"`
+	AppID       string         `bun:"app_id,notnull"`
+	APIKey      string         `bun:"api_key,notnull"`
+	UserID      string         `bun:"user_id,notnull"`
+	Category    string         `bun:"category,notnull"`
+	Interval    usage.Interval `bun:"interval,notnull"`
+	LimitMicros int64          `bun:"limit_micros,notnull"`
+	Note        string         `bun:"note,notnull"`
+	UpdatedBy   string         `bun:"updated_by,notnull"`
+	CreatedAt   time.Time      `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt   time.Time      `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 }
 
 // Validate refuses a limit its table's checks would: a subject limited at a level it has
@@ -84,10 +87,11 @@ func (l *Limit) Validate() error {
 		done()
 }
 
-// ErrNoLimit is a limit that is not there, or is another organization's.
+// ErrNoLimit is a limit that is not there, or is another owner's.
 var ErrNoLimit = errors.New("store: no such limit")
 
 // ErrLimitExists is a limit written for a subject, level and interval that already have one.
+// ID is 0 for one not known to be the same owner's.
 type ErrLimitExists struct{ ID int64 }
 
 func (e *ErrLimitExists) Error() string {
@@ -150,16 +154,18 @@ func fieldChanges(before, after map[string]any) []AuditChange {
 	return changes
 }
 
-// LimitFilter picks one organization's limits. Each empty field is every row.
+// LimitFilter picks one owner's limits. Each empty field is every row.
 type LimitFilter struct {
-	OrganizationID string
-	Subject        usage.Subject
-	Level          LimitLevel
-	AppID          string
-	APIKey         string
-	UserID         string
-	Category       string
-	Interval       usage.Interval
+	Owner string
+	// Unattributed also keeps the rows of the owner's id not known to be anyone's.
+	Unattributed bool
+	Subject      usage.Subject
+	Level        LimitLevel
+	AppID        string
+	APIKey       string
+	UserID       string
+	Category     string
+	Interval     usage.Interval
 	// CategoryPrefix keeps only the rows whose category starts with it, and
 	// NotCategoryPrefix only the ones whose category does not.
 	CategoryPrefix    string
@@ -192,7 +198,8 @@ type Limits struct {
 	store *Store
 }
 
-// SelectOf is every limit of the organizations.
+// SelectOf is every limit whose organization id is one of organizationIDs, whoever it belongs to
+// (OwnedBy, HeldTo).
 func (r *Limits) SelectOf(ctx context.Context, organizationIDs []string) ([]Limit, error) {
 	limits := []Limit{}
 	if len(organizationIDs) == 0 {
@@ -204,16 +211,16 @@ func (r *Limits) SelectOf(ctx context.Context, organizationIDs []string) ([]Limi
 	return limits, nil
 }
 
-// Get is one limit by id, of the organization, or of any when organizationID is empty.
-func (r *Limits) Get(ctx context.Context, organizationID string, id int64) (Limit, error) {
-	return limitOf(ctx, r.store.global, organizationID, id, false)
+// Get is one limit by id, of the owner, or of any when owner is empty.
+func (r *Limits) Get(ctx context.Context, owner string, id int64) (Limit, error) {
+	return limitOf(ctx, r.store.global, owner, id, false)
 }
 
-func limitOf(ctx context.Context, db bun.IDB, organizationID string, id int64, lock bool) (Limit, error) {
+func limitOf(ctx context.Context, db bun.IDB, owner string, id int64, lock bool) (Limit, error) {
 	var limit Limit
 	query := db.NewSelect().Model(&limit).Where("id = ?", id)
-	if organizationID != "" {
-		query = query.Where("organization_id = ?", organizationID)
+	if owner != "" {
+		query = whereOwner(query, owner, false)
 	}
 	if lock {
 		query = query.For("UPDATE")
@@ -234,6 +241,7 @@ func (r *Limits) Insert(ctx context.Context, limit *Limit, audit LimitAudit) err
 	if err := limit.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
+	limit.Billed = organizationOwned(limit.Billed)
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.NewInsert().Model(limit).Returning("*").Exec(ctx); err != nil {
 			return err
@@ -243,13 +251,16 @@ func (r *Limits) Insert(ctx context.Context, limit *Limit, audit LimitAudit) err
 	})
 	if isViolation(err, uniqueViolation) {
 		var existing Limit
-		found := r.store.global.NewSelect().Model(&existing).
-			Where("organization_id = ?", limit.OrganizationID).Where("subject = ?", limit.Subject).
+		found := whereOwner(r.store.global.NewSelect().Model(&existing), LimitOwner(limit.OrganizationID, *limit.Billed), true).
+			Where("subject = ?", limit.Subject).
 			Where("level = ?", limit.Level).Where("interval = ?", limit.Interval).
 			Where("app_id = ?", limit.AppID).Where("api_key = ?", limit.APIKey).
 			Where("user_id = ?", limit.UserID).Where("category = ?", limit.Category).Scan(ctx)
 		if found != nil {
 			return stack.Wrap(fmt.Errorf("store: create limit: %w", found))
+		}
+		if existing.Billed == nil {
+			return &ErrLimitExists{}
 		}
 		return &ErrLimitExists{ID: existing.ID}
 	}
@@ -259,12 +270,12 @@ func (r *Limits) Insert(ctx context.Context, limit *Limit, audit LimitAudit) err
 	return nil
 }
 
-// Update changes a limit of the organization, or of any when organizationID is empty, and
-// records what moved. A change that moves nothing writes nothing.
-func (r *Limits) Update(ctx context.Context, organizationID string, id int64, change LimitChange, audit LimitAudit) (Limit, error) {
+// Update changes a limit of the owner, or of any when owner is empty, and records
+// what moved. A change that moves nothing writes nothing.
+func (r *Limits) Update(ctx context.Context, owner string, id int64, change LimitChange, audit LimitAudit) (Limit, error) {
 	var updated Limit
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		before, err := limitOf(ctx, tx, organizationID, id, true)
+		before, err := limitOf(ctx, tx, owner, id, true)
 		if err != nil {
 			return err
 		}
@@ -295,11 +306,10 @@ func (r *Limits) Update(ctx context.Context, organizationID string, id int64, ch
 	return updated, nil
 }
 
-// Delete removes a limit of the organization, or of any when organizationID is empty, and
-// records it.
-func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, audit LimitAudit) error {
+// Delete removes a limit of the owner, or of any when owner is empty, and records it.
+func (r *Limits) Delete(ctx context.Context, owner string, id int64, audit LimitAudit) error {
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		before, err := limitOf(ctx, tx, organizationID, id, true)
+		before, err := limitOf(ctx, tx, owner, id, true)
 		if err != nil {
 			return err
 		}
@@ -321,11 +331,11 @@ func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, au
 // Select lists an organization's limits by id, after filter.After, LimitPage(filter.Limit) and
 // one more.
 func (r *Limits) Select(ctx context.Context, filter LimitFilter) ([]Limit, error) {
-	if filter.OrganizationID == "" {
-		return nil, stack.Wrap(errors.New("store: listing limits needs an organization"))
+	if filter.Owner == "" {
+		return nil, stack.Wrap(errors.New("store: listing limits needs an owner"))
 	}
 	limits := []Limit{}
-	query := r.store.global.NewSelect().Model(&limits).Where("organization_id = ?", filter.OrganizationID)
+	query := whereOwner(r.store.global.NewSelect().Model(&limits), filter.Owner, filter.Unattributed)
 	for column, value := range map[string]string{
 		"subject": string(filter.Subject), "level": string(filter.Level), "app_id": filter.AppID, "api_key": filter.APIKey,
 		"user_id": filter.UserID, "category": filter.Category, "interval": string(filter.Interval),

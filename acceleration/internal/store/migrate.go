@@ -252,6 +252,17 @@ var usageIndexes = []struct{ set, name, create string }{
 	// An app's end user's call legs, which forgetting them rewrites.
 	{"shard", "call_legs_user_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_user_idx ON call_legs (customer_id, user_id) " +
 		"WHERE user_id <> ''"},
+	// An organization's, and an app in none's, one limit of a subject, level and interval. A row not
+	// known to be either's takes the place of both.
+	{"global", "limits_one_per_level_organization", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS limits_one_per_level_organization ON limits " +
+		"(organization_id, subject, level, \"interval\", app_id, api_key, user_id, category) WHERE billed IS NOT FALSE"},
+	{"global", "limits_one_per_level_app", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS limits_one_per_level_app ON limits " +
+		"(organization_id, subject, level, \"interval\", app_id, api_key, user_id, category) WHERE billed IS NOT TRUE"},
+	// The limits of an organization id.
+	{"global", "limits_organization_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS limits_organization_idx ON limits (organization_id, id)"},
+	// Who wrote a limit, a reset or a grant.
+	{"global", "audit_log_limit_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_limit_idx ON audit_log (resource_id) " +
+		"WHERE resource_type = 'limit'"},
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},

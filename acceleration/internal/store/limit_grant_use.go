@@ -125,7 +125,8 @@ func addGrantUses(ctx context.Context, tx bun.Tx, uses []GrantUse) (int, error) 
 	// organization the app was last seen under, or for an app in none the app itself. Either
 	// one serves, since a row is written without its organization when the app could not be
 	// looked up, and the app's membership is recorded in the background after its first grant
-	// may be drawn. A grant scoped to an app is that app's alone.
+	// may be drawn. A grant not known to be either's is matched as both. A grant scoped to an app is
+	// that app's alone.
 	var counts struct {
 		Added   int `bun:"added"`
 		Refused int `bun:"refused"`
@@ -135,7 +136,8 @@ WITH sent AS (
     SELECT * FROM unnest(?::bigint[], ?::text[], ?::text[], ?::uuid[], ?::bigint[]) AS s (grant_id, customer_id, organization_id, usage_id, micros)
 ), granted AS (
     SELECT s.grant_id, s.usage_id, s.micros,
-        g.organization_id IN (s.organization_id, coalesce(ao.organization_id, s.customer_id)) AND g.app_id IN ('', s.customer_id) AS owned
+        ((g.billed IS NOT FALSE AND g.organization_id IN (s.organization_id, ao.organization_id))
+            OR (g.billed IS NOT TRUE AND ao.organization_id IS NULL AND g.organization_id = s.customer_id)) IS TRUE AND g.app_id IN ('', s.customer_id) AS owned
     FROM sent s
     LEFT JOIN app_organizations ao ON ao.app_id = s.customer_id
     JOIN limit_grants g ON g.id = s.grant_id
