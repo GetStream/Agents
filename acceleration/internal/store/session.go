@@ -280,6 +280,7 @@ type Sessions struct {
 // running is findable and one the process died during is not simply lost. Saving the same
 // session twice updates the row: a retried write must not become a second conversation. It
 // also opens a text session that ended again, which is how one is carried on under its id.
+// Saving one under an id another customer's row has is ErrIDTaken, and leaves that row alone.
 //
 // Incognito sessions never get here. The manager does not call this for one, which is what
 // the flag means -- not a row that is hidden, but no row at all.
@@ -306,41 +307,79 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		session.ConnectorSelections = []SessionConnectorSelection{}
 	}
 
-	_, err := r.store.shard.NewInsert().Model(session).
-		On("CONFLICT (id) DO UPDATE").
-		Set("title = EXCLUDED.title").
-		Set("description = EXCLUDED.description").
-		Set("custom = EXCLUDED.custom").
-		Set("conversation_id = EXCLUDED.conversation_id").
-		Set("state = EXCLUDED.state").
-		Set("closed_at = NULL").
-		Set("end_reason = ''").
-		Set("updated_at = EXCLUDED.updated_at").
-		Set("opened_at = EXCLUDED.opened_at").
-		// Superseded by a run opened after this write's, the row stays superseded: the write is
-		// a late one, of a run that ended.
-		Set("superseded_at = CASE WHEN ?TableAlias.superseded_at > EXCLUDED.opened_at THEN ?TableAlias.superseded_at END").
-		// A reopened session's tool settings are kept for the kind of caller that opened it (the
-		// row's caller_kind, which a reopen does not change): an end user's device carrying on
-		// its backend's conversation neither clears the backend's tools nor sets its timeout.
-		Set("tool_timeout_ms = CASE WHEN ?TableAlias.caller_kind = EXCLUDED.caller_kind " +
-			"THEN EXCLUDED.tool_timeout_ms ELSE ?TableAlias.tool_timeout_ms END").
-		Set("caller_tools = CASE WHEN ?TableAlias.caller_kind = EXCLUDED.caller_kind " +
-			"THEN EXCLUDED.caller_tools ELSE ?TableAlias.caller_tools END").
-		// A session reopened from its row is opened without the memory it had, and what it
-		// remembered before is still in the store, so once true it stays true. Not known
-		// stays not known: NULL OR false is NULL.
-		Set("remembers = ?TableAlias.remembers OR EXCLUDED.remembers").
-		// A write of a run opened before the one the row holds is late, from a router that held
-		// the session earlier, and changes nothing: the close that router queued next would
-		// otherwise close the run opened since. A write with no time is a router's from before
-		// opened_at was kept.
-		Where("EXCLUDED.opened_at IS NULL OR ?TableAlias.opened_at IS NULL OR ?TableAlias.opened_at <= EXCLUDED.opened_at").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+	// No conflict target is named: every unique index arbitrates the insert, so it neither fails
+	// on one it did not name nor depends on which of them the table has. A row there already is
+	// then updated only if it is the customer's own. Twice at most: a row deleted between the
+	// insert and the update is inserted again.
+	for range 2 {
+		result, err := r.store.shard.NewInsert().Model(session).On("CONFLICT DO NOTHING").Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		written, err := result.RowsAffected()
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		if written == 1 {
+			return nil
+		}
+		result, err = r.store.shard.NewUpdate().With("saved", r.store.shard.NewValues(session)).
+			Model((*AgentSession)(nil)).TableExpr("saved").
+			Set("title = saved.title").
+			Set("description = saved.description").
+			Set("custom = saved.custom").
+			Set("conversation_id = saved.conversation_id").
+			Set("state = saved.state").
+			Set("closed_at = NULL").
+			Set("end_reason = ''").
+			Set("updated_at = saved.updated_at").
+			Set("opened_at = saved.opened_at").
+			// Superseded by a run opened after this write's, the row stays superseded: the write is
+			// a late one, of a run that ended.
+			Set("superseded_at = CASE WHEN ?TableAlias.superseded_at > saved.opened_at THEN ?TableAlias.superseded_at END").
+			// A reopened session's tool settings are kept for the kind of caller that opened it (the
+			// row's caller_kind, which a reopen does not change): an end user's device carrying on
+			// its backend's conversation neither clears the backend's tools nor sets its timeout.
+			Set("tool_timeout_ms = CASE WHEN ?TableAlias.caller_kind = saved.caller_kind " +
+				"THEN saved.tool_timeout_ms ELSE ?TableAlias.tool_timeout_ms END").
+			Set("caller_tools = CASE WHEN ?TableAlias.caller_kind = saved.caller_kind " +
+				"THEN saved.caller_tools ELSE ?TableAlias.caller_tools END").
+			// A session reopened from its row is opened without the memory it had, and what it
+			// remembered before is still in the store, so once true it stays true. Not known
+			// stays not known: NULL OR false is NULL.
+			Set("remembers = ?TableAlias.remembers OR saved.remembers").
+			Where("?TableAlias.customer_id = saved.customer_id").
+			Where("?TableAlias.id = saved.id").
+			// A write of a run opened before the one the row holds is late, from a router that held
+			// the session earlier, and changes nothing: the close that router queued next would
+			// otherwise close the run opened since. A write with no time is a router's from before
+			// opened_at was kept.
+			Where("saved.opened_at IS NULL OR ?TableAlias.opened_at IS NULL OR ?TableAlias.opened_at <= saved.opened_at").
+			Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		written, err = result.RowsAffected()
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		if written == 1 {
+			return nil
+		}
+		// Nothing written: the row is another customer's, or this customer's own of a run
+		// opened since, which a late write leaves as it is.
+		own, err := r.store.shard.NewSelect().Model((*AgentSession)(nil)).
+			Where("id = ?", session.ID).
+			Where("customer_id = ?", session.CustomerID).
+			Exists(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: save session: %w", err))
+		}
+		if own {
+			return nil
+		}
 	}
-	return nil
+	return stack.Wrap(fmt.Errorf("%w: session %s", ErrIDTaken, session.ID))
 }
 
 // Supersede makes the row Upsert just wrote in this shard, of a session carried on there that
@@ -983,49 +1022,72 @@ func (e SessionEnd) Ended() bool {
 	return e.ClosedAt != nil || !e.Known && !e.Running
 }
 
-// Ends is what this shard knows of whether each of ids is over, a session with no row
+// SessionKey is a session by its customer and id. The id is one the customer chose, so it
+// names a session only within that customer.
+type SessionKey struct {
+	CustomerID string
+	ID         string
+}
+
+// Ends is what this shard knows of whether each of keys is over, a session with no row
 // counting as running while it has recorded runtime since since.
-func (r *Sessions) Ends(ctx context.Context, ids []string, since time.Time) (map[string]SessionEnd, error) {
-	ends := map[string]SessionEnd{}
-	if len(ids) == 0 {
+func (r *Sessions) Ends(ctx context.Context, keys []SessionKey, since time.Time) (map[SessionKey]SessionEnd, error) {
+	ends := map[SessionKey]SessionEnd{}
+	if len(keys) == 0 {
 		return ends, nil
 	}
 	var sessions []struct {
-		ID       string     `bun:"id"`
-		ClosedAt *time.Time `bun:"closed_at"`
+		CustomerID string     `bun:"customer_id"`
+		ID         string     `bun:"id"`
+		ClosedAt   *time.Time `bun:"closed_at"`
 	}
-	if err := r.store.shard.NewSelect().TableExpr("agent_sessions").Column("id", "closed_at").
-		Where("id IN (?)", bun.In(ids)).Scan(ctx, &sessions); err != nil {
+	customers, ids := sessionKeyColumns(keys)
+	if err := r.store.shard.NewSelect().TableExpr("agent_sessions").Column("customer_id", "id", "closed_at").
+		Where("(customer_id, id) IN (SELECT * FROM unnest(?::text[], ?::text[]))", customers, ids).
+		Scan(ctx, &sessions); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: session ends: %w", err))
 	}
 	for _, session := range sessions {
-		ends[session.ID] = SessionEnd{Known: true, ClosedAt: session.ClosedAt}
+		ends[SessionKey{session.CustomerID, session.ID}] = SessionEnd{Known: true, ClosedAt: session.ClosedAt}
 	}
-	var unknown []string
-	for _, id := range ids {
-		if _, known := ends[id]; !known {
-			unknown = append(unknown, id)
+	var unknown []SessionKey
+	for _, key := range keys {
+		if _, known := ends[key]; !known {
+			unknown = append(unknown, key)
 		}
 	}
 	if len(unknown) == 0 {
 		return ends, nil
 	}
-	var running []string
-	err := r.store.shard.NewSelect().TableExpr("requests").ColumnExpr("DISTINCT session_id").
+	var running []struct {
+		CustomerID string `bun:"customer_id"`
+		SessionID  string `bun:"session_id"`
+	}
+	customers, ids = sessionKeyColumns(unknown)
+	err := r.store.shard.NewSelect().TableExpr("requests").ColumnExpr("DISTINCT customer_id, session_id").
 		Where("modality = ?", RuntimeModality).
-		Where("session_id IN (?)", bun.In(unknown)).
+		Where("(customer_id, session_id) IN (SELECT * FROM unnest(?::text[], ?::text[]))", customers, ids).
 		Where("started_at >= ?", since).
 		Scan(ctx, &running)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: session ends: %w", err))
 	}
-	for _, id := range unknown {
-		ends[id] = SessionEnd{}
+	for _, key := range unknown {
+		ends[key] = SessionEnd{}
 	}
-	for _, id := range running {
-		ends[id] = SessionEnd{Running: true}
+	for _, key := range running {
+		ends[SessionKey{key.CustomerID, key.SessionID}] = SessionEnd{Running: true}
 	}
 	return ends, nil
+}
+
+// sessionKeyColumns is keys as the two arrays an unnest pairs back up.
+func sessionKeyColumns(keys []SessionKey) (customers, ids any) {
+	customerIDs, sessionIDs := make([]string, len(keys)), make([]string, len(keys))
+	for i, key := range keys {
+		customerIDs[i], sessionIDs[i] = key.CustomerID, key.ID
+	}
+	return pgdialect.Array(customerIDs), pgdialect.Array(sessionIDs)
 }
 
 // jsonbOf renders a map for a jsonb comparison. A map that will not encode is sent as an

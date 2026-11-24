@@ -1020,9 +1020,11 @@ func (s *Server) callApp(ctx context.Context, customerID, callType, callID strin
 // agent's call a call routed under it would join. Session ids are unique across customers.
 // One nobody holds yet is not: a caller may name the session it is about to start.
 func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id string) (bool, error) {
-	if s.sessions != nil && s.sessions.Running(id) {
-		_, own := s.sessions.Get(id, session.Owner{CustomerID: customerID, Kind: auth.KindServer})
-		return !own, nil
+	if s.sessions != nil && s.sessions.Running(customerID, id) {
+		return false, nil
+	}
+	if s.sessions != nil && s.sessions.HeldByAnother(customerID, id) {
+		return true, nil
 	}
 	if s.store == nil {
 		return false, nil

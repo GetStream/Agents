@@ -96,7 +96,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestStoreSuite/TestAnOccurrenceWhoseWorkersKeepDyingIsFailedAtTheAttemptCap`,
   `TestStoreSuite/TestTheAttemptCapRecordsWhatThePlacedCallLeft`,
   `TestSchedulerSuite/TestACappedOccurrence*` (two tests).
-- **A failed finish is written again** (`FinishRetries`: 1 s, 2 s, 4 s): a run left running is
+- **A failed finish is written again** (`finishRetries`: 1 s, 2 s, 4 s): a run left running is
   taken over once stale and delivered again.
   `TestScheduledTasksSuite/TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce`.
 - **A run's words are texted once per channel.** The delivery takes (run, channel) on the run
@@ -175,7 +175,9 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduledTasksSuite/TestATaskWithNoOccurrenceLeftIsRefusedBeforeItsLimitOrItsConfigIsAsked`,
   `TestScheduledTasksSuite/TestTheAgentCannotResumeAFailedOneShotPastItsTime`.
 - **A call rings once, on an SMS number, never more than 15 min late, and only with ring and
-  call limit left in the occurrence (S5).** Too late is `missed` without a call; nobody
+  call limit left in the occurrence (S5).** A placed call is rung once, whatever refuses it: a
+  refusal while the money could not be checked, of its session or its answered turn, fails the
+  run final under the money code (`callEnded`, AI-3597). Too late is `missed` without a call; nobody
   answering is `not_answered`, final, kept on the run for a worker that takes it over and for
   a retry, whatever would stop that retry's call. A call placed whose end the run does not
   record (delivered, or cut off with the worker) is `already_called`, and no channel after
@@ -198,7 +200,9 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestStoreSuite/TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingItOver`,
   `TestScheduledTasksSuite/TestARetryShortOfTimeAfterAnUnansweredCallIsNotAnswered`,
   `TestScheduledTasksSuite/TestARetryAQuarterHourLateAfterAnUnansweredCallIsNotAnswered`,
-  `TestScheduledTasksSuite/TestARetryWhileTheUserIsOnACallAfterAnUnansweredCallIsNotAnswered`.
+  `TestScheduledTasksSuite/TestARetryWhileTheUserIsOnACallAfterAnUnansweredCallIsNotAnswered`,
+  `TestTelnyxUnpaidSuite/TestACallWhoseSessionCannotOpenWhileMoneyCannotBeCheckedFailsFinal`,
+  `TestTelnyxUnpaidSuite/TestACallWhoseTurnIsRefusedWhileMoneyCannotBeCheckedFailsFinalAfterOneRing`.
 - **A reply that was cancelled or interrupted runs again once; a finished one is read back
   (AI-1558).** `replyCommand` reads the follow-up's state in the conversation (rebuilt from
   Stream after a restart), not the run's `attempts`, which also count attempts that never

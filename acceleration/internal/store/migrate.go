@@ -245,6 +245,9 @@ var usageIndexes = []struct{ set, name, create string }{
 		"WHERE campaign_id IS NOT NULL"},
 	// A response's alternatives, the responses sharing its parent.
 	{"shard", "agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
+	// A customer's session's call episode.
+	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
+		"ON episodes (customer_id, session_id)"},
 }
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed

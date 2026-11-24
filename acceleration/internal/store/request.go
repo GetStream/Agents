@@ -485,7 +485,7 @@ FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
     AS r (customer_id, agent_id, call_id, started_at, ordinal)
 CROSS JOIN LATERAL (
     SELECT COALESCE(s.config_id, '') AS config_id, COALESCE(calls.session_id, '') AS session_id
-    FROM calls LEFT JOIN agent_sessions AS s ON s.id = calls.session_id
+    FROM calls LEFT JOIN agent_sessions AS s ON s.customer_id = calls.customer_id AND s.id = calls.session_id
     WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
         AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
     ORDER BY calls.started_at DESC

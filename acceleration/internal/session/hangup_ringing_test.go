@@ -291,7 +291,7 @@ func (s *RingingSuite) TestASessionTurnedAwayForAnIdAlreadyHeldLeavesTheCallRing
 	s.Require().ErrorIs(<-refused, ErrSessionExists)
 	s.settled()
 
-	s.True(s.manager.Running(held.ID()), "the session holding the id was ended")
+	s.True(s.manager.Running(held.Spec().CustomerID, held.ID()), "the session holding the id was ended")
 	s.False(s.hungUp(), "the session turned away hung up the call another one holds")
 	s.Empty(s.outcome(held))
 }

@@ -165,6 +165,9 @@ type SweepSuite struct {
 	// prefix is the test's secret prefix, and keys its Redis keys, each named for this PR.
 	prefix string
 	keys   []string
+	// customer is whose sessions the test's secrets are for. It holds an _, as a session id and
+	// a binding may.
+	customer string
 }
 
 func TestSweepSuite(t *testing.T) {
@@ -196,6 +199,7 @@ func (s *SweepSuite) SetupTest() {
 		Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
 	s.keys = []string{"sandbox:secret-sweep:" + s.prefix}
+	s.customer = "app_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
 }
 
 func (s *SweepSuite) TearDownTest() {
@@ -204,10 +208,18 @@ func (s *SweepSuite) TearDownTest() {
 	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Del().Key(s.keys...).Build()).Error())
 }
 
-// live has the directory say session runs on this router.
+// live has the directory say the customer's session runs on this router.
 func (s *SweepSuite) live(session string) {
-	s.directory.Hold(s.ctx, session, "", "")
-	s.keys = append(s.keys, "w15sweep:"+s.prefix+":session:"+session)
+	s.directory.Hold(s.ctx, s.customer, session, "", "")
+	s.keys = append(s.keys, "w15sweep:"+s.prefix+":session:"+session, "w15sweep:"+s.prefix+":session:"+s.customer+":"+session)
+}
+
+// liveUnder has a router say a customer's session runs on it under the customer's key alone,
+// as one that no longer writes the key of the id does.
+func (s *SweepSuite) liveUnder(customer, session string) {
+	key := "w15sweep:" + s.prefix + ":session:" + customer + ":" + session
+	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Set().Key(key).Value("10.0.0.2:1").Build()).Error())
+	s.keys = append(s.keys, key)
 }
 
 // unreadable has the directory fail to say whether session is live: its claim's key holds a
@@ -231,13 +243,42 @@ func (s *SweepSuite) sweeperEvery(directory *node.Directory, every time.Duration
 	return sweeper
 }
 
-// named is this test's secret for session and binding.
+// named is this test's secret for the customer's session and binding.
 func (s *SweepSuite) named(session, binding string) string {
+	return "va_" + s.prefix + "_" + session + "_" + s.customer + "_" + binding + "_0a1b2c3d"
+}
+
+// namedBefore is the secret a router of the release before named for session and binding, with
+// no customer in it.
+func (s *SweepSuite) namedBefore(session, binding string) string {
 	return "va_" + s.prefix + "_" + session + "_" + binding + "_0a1b2c3d"
 }
 
 func (s *SweepSuite) TestAnEndedSessionsSecretIsDeletedAndALiveOnesKept() {
 	s.live("session-live")
+	s.org.add(s.named("session-live", "github"), 2*time.Hour)
+	s.org.add(s.named("session-ended", "github"), 2*time.Hour)
+
+	s.Require().NoError(s.sweeper(s.directory).Sweep(s.ctx))
+
+	s.Equal([]string{s.named("session-live", "github")}, s.org.names())
+}
+
+// A router of the release before names no customer in its secrets, and holds its sessions under
+// their ids.
+func (s *SweepSuite) TestASecretNamingNoCustomerIsKeptWhileItsSessionIsLive() {
+	s.live("session-live")
+	s.org.add(s.namedBefore("session-live", "github"), 2*time.Hour)
+	s.org.add(s.namedBefore("session-ended", "github"), 2*time.Hour)
+
+	s.Require().NoError(s.sweeper(s.directory).Sweep(s.ctx))
+
+	s.Equal([]string{s.namedBefore("session-live", "github")}, s.org.names())
+}
+
+// A router that holds its sessions under their customer alone still has its secrets kept.
+func (s *SweepSuite) TestASessionHeldUnderItsCustomerAloneKeepsItsSecret() {
+	s.liveUnder(s.customer, "session-live")
 	s.org.add(s.named("session-live", "github"), 2*time.Hour)
 	s.org.add(s.named("session-ended", "github"), 2*time.Hour)
 

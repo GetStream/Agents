@@ -112,15 +112,17 @@ func (b *stalled) Prepare(context.Context, []sandbox.Grant) (sandbox.Mount, erro
 	return sandbox.Mount{}, nil
 }
 
-func (b *stalled) BeforeRun(ctx context.Context) error {
+func (b *stalled) BeforeRun(ctx context.Context) (map[string]string, error) {
 	b.entered <- struct{}{}
 	select {
 	case <-b.let:
-		return nil
+		return nil, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 }
+
+func (b *stalled) AfterRun(context.Context) error { return nil }
 
 func (b *stalled) Close(context.Context) error { return nil }
 
