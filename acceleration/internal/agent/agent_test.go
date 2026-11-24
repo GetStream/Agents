@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -572,6 +573,9 @@ type stubTTS struct {
 	said       []tts.Request
 	interrupts int
 	active     map[string]struct{}
+	// finished is every synthesis Synthesize reported complete, which a voice that is lost
+	// does not report again.
+	finished map[string]struct{}
 	// reconnecting holds interruption open while the test delivers work that would
 	// normally arrive during the provider's replacement connection.
 	interruptStarted chan struct{}
@@ -598,7 +602,10 @@ type stubTTS struct {
 }
 
 func newStubTTS(streaming bool) *stubTTS {
-	return &stubTTS{emitter: tts.NewEmitter(64), streaming: streaming, active: map[string]struct{}{}}
+	return &stubTTS{
+		emitter: tts.NewEmitter(64), streaming: streaming,
+		active: map[string]struct{}{}, finished: map[string]struct{}{},
+	}
 }
 
 func (s *stubTTS) Start(ctx context.Context) error {
@@ -654,6 +661,9 @@ func (s *stubTTS) Synthesize(request tts.Request) error {
 		})
 	}
 	if request.Final {
+		s.mu.Lock()
+		s.finished[request.ID] = struct{}{}
+		s.mu.Unlock()
 		s.emitter.Send(tts.SynthesisComplete{
 			SynthesisID:       request.ID,
 			Characters:        int64(utf8.RuneCountInString(request.Text)),
@@ -746,6 +756,20 @@ func (s *stubTTS) spoken() []tts.Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]tts.Request(nil), s.said...)
+}
+
+// unfinished is every synthesis the stub was sent and Synthesize has not reported complete,
+// in the order it was first sent.
+func (s *stubTTS) unfinished() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []string
+	for _, request := range s.said {
+		if _, done := s.finished[request.ID]; !done && !slices.Contains(ids, request.ID) {
+			ids = append(ids, request.ID)
+		}
+	}
+	return ids
 }
 
 func (s *stubTTS) interrupted() int {
@@ -6682,18 +6706,16 @@ func (s *AgentSuite) writtenToSilentVoice() string {
 }
 
 // refusesVoice loses the voice the way a provider refusing the agent's voice does: an error
-// that loses it, then each synthesis it had been sent reported cut.
+// that loses it, then each synthesis it had been sent and had not finished reported cut. A
+// provider settles only what it still has open (the ElevenLabs and Inworld adapters'
+// settleOutstanding): a synthesis it finished is not reported again.
 func (s *AgentSuite) refusesVoice() {
 	s.voice.emitter.Send(tts.Error{
 		Provider: "stub", Model: "stub-tts", Fatal: true,
 		Err: errors.New("free users cannot use library voices via the API"),
 	})
-	var ids []string
-	for _, request := range s.voice.spoken() {
-		if !slices.Contains(ids, request.ID) {
-			ids = append(ids, request.ID)
-			s.voice.emitter.Send(tts.SynthesisComplete{SynthesisID: request.ID, Interrupted: true})
-		}
+	for _, id := range s.voice.unfinished() {
+		s.voice.emitter.Send(tts.SynthesisComplete{SynthesisID: id, Interrupted: true})
 	}
 }
 
@@ -6980,6 +7002,51 @@ func (s *AgentSuite) answerToSilentVoice() {
 		return countOf[Responded](s.reported()) == 2 && !s.agent.generating
 	}, "the answer was never written")
 	s.Require().False(s.agent.harness.Pending())
+}
+
+func (s *AgentSuite) TestTwoTurnsAtOneInstantAreNamedApart() {
+	s.onFakeClock(func() {
+		// The fake clock stands still while the agent works, as a clock counting in
+		// microseconds does for two turns close together. Named alike, an answer the subagent
+		// sent back at once was taken for the reply the caller had heard, and never owed again.
+		first, second := turnStamp(), turnStamp()
+		s.NotEqual(first, second)
+		stamp, err := strconv.ParseInt(second, 10, 64)
+		s.Require().NoError(err)
+		s.GreaterOrEqual(stamp, time.Now().UnixNano(), "a stamp is never behind the clock")
+
+		// Turns are named from several goroutines at once: the voice's, the ears' and the
+		// subagent's.
+		stamps := make(chan string, 8*200)
+		var named sync.WaitGroup
+		for range 8 {
+			named.Go(func() {
+				for range 200 {
+					stamps <- turnStamp()
+				}
+			})
+		}
+		named.Wait()
+		close(stamps)
+		seen := map[string]bool{}
+		for stamp := range stamps {
+			s.False(seen[stamp], "two turns named at once got one name")
+			seen[stamp] = true
+		}
+
+		// A line said as it is is a turn too.
+		s.joinText()
+		s.Require().NoError(s.agent.Say(s.ctx, "Welcome."))
+		s.Require().NoError(s.agent.Say(s.ctx, "Welcome back."))
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 2 }, "the lines were never said")
+		var said []string
+		for _, event := range s.reported() {
+			if line, ok := event.(Responded); ok {
+				said = append(said, line.TurnID)
+			}
+		}
+		s.NotEqual(said[0], said[1], "two lines said at one instant were named alike")
+	})
 }
 
 func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {
