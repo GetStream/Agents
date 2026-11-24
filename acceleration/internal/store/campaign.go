@@ -136,9 +136,7 @@ func (r *Campaigns) Insert(ctx context.Context, campaign *Campaign) error {
 
 	campaign.ID = newID()
 	campaign.CreatedAt = time.Now().UTC()
-	if campaign.Tags == nil {
-		campaign.Tags = map[string]string{}
-	}
+	campaign.Tags = orEmptyMap(campaign.Tags)
 
 	if _, err := r.store.global.NewInsert().Model(campaign).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create campaign: %w", err))
@@ -182,7 +180,7 @@ type CampaignFilter struct {
 // Select returns a customer's campaigns, newest first.
 func (r *Campaigns) Select(ctx context.Context, customerID string, filter CampaignFilter) ([]Campaign, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var campaigns []Campaign
@@ -193,7 +191,7 @@ func (r *Campaigns) Select(ctx context.Context, customerID string, filter Campai
 	if filter.After != nil {
 		query = query.Where("(created_at, id) < (?, ?)", filter.After.At, filter.After.ID)
 	}
-	err := query.Order("created_at DESC", "id DESC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx)
+	err := query.Order("created_at DESC", "id DESC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query campaigns: %w", err))
 	}
@@ -393,10 +391,7 @@ func (r *Campaigns) Launch(ctx context.Context, customerID, id string, launch La
 		state = Scheduled
 	}
 	// The column holds an empty list, never NULL, for a request that named no categories.
-	categories := launch.UsageCategories
-	if categories == nil {
-		categories = []string{}
-	}
+	categories := orEmpty(launch.UsageCategories)
 
 	var launched Campaign
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {

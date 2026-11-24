@@ -143,7 +143,7 @@ const (
 
 // DLCLimit is the page size the use case, review and opt-out lists use for the limit asked
 // for. They return one row more than this, so a caller can tell the page is not the last.
-func DLCLimit(asked int) int { return clampLimit(asked, defaultDLCLimit, maxDLCLimit) }
+func DLCLimit(asked int) int { return ClampLimit(asked, defaultDLCLimit, maxDLCLimit) }
 
 // Select pages through an app's use cases, newest first.
 func (r *UseCases) Select(ctx context.Context, customerID string, limit int, after *CreatedPosition) ([]UseCase, error) {
@@ -284,9 +284,7 @@ func (r *UseCases) Insert(ctx context.Context, useCase *UseCase, numbers ...stri
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	useCase.ID = newID()
 	useCase.CreatedAt, useCase.UpdatedAt = now, now
-	if useCase.MessageSamples == nil {
-		useCase.MessageSamples = []string{}
-	}
+	useCase.MessageSamples = orEmpty(useCase.MessageSamples)
 	asked := useCase.IsDefault
 	var err error
 	// Twice at most: two creates at once for an app with no use case both find none, and the
@@ -329,9 +327,7 @@ func (r *UseCases) Update(ctx context.Context, useCase *UseCase) error {
 		return stack.Wrap(err)
 	}
 	useCase.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if useCase.MessageSamples == nil {
-		useCase.MessageSamples = []string{}
-	}
+	useCase.MessageSamples = orEmpty(useCase.MessageSamples)
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if useCase.IsDefault {
 			if err := clearDefaultUseCase(ctx, tx, useCase.CustomerID, useCase.ID); err != nil {

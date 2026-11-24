@@ -404,7 +404,7 @@ func (s *GuestsSuite) TestTheSameClaimArrivingTwiceIsNotAConflict() {
 func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhenSentAgain() {
 	guest, account := s.recordGuest(), s.data.createUser()
 	talked := s.talked(guest)
-	_, err := s.store.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
+	_, err := s.store.Users.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), account.userID)
 
@@ -686,7 +686,7 @@ func (s *GuestsSuite) mint(as *testClient, request GuestUserRequest) GuestUser {
 
 // storedGuest is the guest's row as the store holds it.
 func (s *GuestsSuite) storedGuest(id string) store.User {
-	held, err := s.store.Guest(context.Background(), s.customerID(), id)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	return held
 }
@@ -716,7 +716,7 @@ func (s *GuestsSuite) assertStreamProfile(id, name string, custom map[string]any
 // over HTTP would reach Stream for the token.
 func (s *GuestsSuite) recordGuest() string {
 	id := guestPrefix + s.utils.uuid()
-	s.Require().NoError(s.store.RecordGuest(context.Background(), &store.User{
+	s.Require().NoError(s.store.Users.InsertGuest(context.Background(), &store.User{
 		ID: id, CustomerID: s.customerID(), Name: "Guest",
 	}))
 	return id
@@ -728,7 +728,7 @@ func (s *RouterSuite) guestSeenInAToken() string {
 	id := "visitor-" + s.utils.uuid()
 	s.signedIn(jwt.MapClaims{"user_id": id, "role": "guest"}, auth.AuthTypeJWT, guest, id).
 		do(http.MethodGet, "/v1/agents/calls", nil, nil)
-	seen, err := s.store.Guest(context.Background(), s.customerID(), id)
+	seen, err := s.store.Users.GetGuest(context.Background(), s.customerID(), id)
 	s.Require().NoError(err, "the call is what records the guest")
 	s.Require().False(seen.Minted)
 	return id

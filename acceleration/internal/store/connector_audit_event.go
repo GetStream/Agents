@@ -132,7 +132,7 @@ type AuditPosition struct {
 // AuditLimit is the page size an audit list uses for the limit asked for.
 // Select returns one row more than this.
 func AuditLimit(asked int) int {
-	return clampLimit(asked, defaultAuditLimit, maxAuditLimit)
+	return ClampLimit(asked, defaultAuditLimit, maxAuditLimit)
 }
 
 // ConnectorAuditEvents are the connector audit log.

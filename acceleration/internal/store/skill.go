@@ -79,9 +79,7 @@ func (r *Skills) Insert(ctx context.Context, skill *Skill) error {
 	skill.CreatedAt = now
 	skill.UpdatedAt = now
 	skill.DeletedAt = nil
-	if skill.Files == nil {
-		skill.Files = map[string]string{}
-	}
+	skill.Files = orEmptyMap(skill.Files)
 
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewInsert().Model(skill).Exec(ctx)
@@ -107,9 +105,7 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 	}
 
 	skill.UpdatedAt = time.Now().UTC()
-	if skill.Files == nil {
-		skill.Files = map[string]string{}
-	}
+	skill.Files = orEmptyMap(skill.Files)
 	// The config the row was in is read in the same statement, locked, so the one forgotten is
 	// the one a concurrent move did not already replace.
 	was := r.store.global.NewSelect().Model((*Skill)(nil)).Column("config_id").
@@ -204,7 +200,7 @@ func (r *Skills) Get(ctx context.Context, customerID, id string) (Skill, error) 
 // Select returns the skills a customer holds, newest first.
 func (r *Skills) Select(ctx context.Context, customerID string, filter SkillFilter) ([]Skill, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var skills []Skill
@@ -229,7 +225,7 @@ func (r *Skills) Select(ctx context.Context, customerID string, filter SkillFilt
 // naming a built-in asks on every conversation.
 func (r *Skills) GetByNames(ctx context.Context, customerID, configID string, names []string) ([]Skill, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	// Skills belong to a config, so a session that was not created from one reaches
 	// nothing here and takes the built-in set.

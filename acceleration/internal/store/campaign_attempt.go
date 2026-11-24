@@ -262,22 +262,6 @@ func (r *CampaignAttempts) PutOff(ctx context.Context, owner, attemptID string, 
 	return nil
 }
 
-// Classified records an answered dial's outcome. A dial deleted with its campaign, or no longer
-// pending because another runner read it or its contact settled, is nothing to record.
-func (r *CampaignAttempts) Classified(ctx context.Context, attemptID, outcome string, _ bool) error {
-	_, err := r.store.global.NewUpdate().Model((*CampaignAttempt)(nil)).
-		Set("classify_state = ?", classifyDone).
-		Set("classify_after = NULL").
-		Set("outcome = ?", outcome).
-		Where("id = ?", attemptID).
-		Where("classify_state = ?", classifyPending).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: classified: %w", err))
-	}
-	return nil
-}
-
 // Made counts, per contact, the attempts with at least one dial that placed a call. A
 // contact with none is left out.
 func (r *CampaignAttempts) Made(ctx context.Context, contactIDs []string) (map[string]int, error) {

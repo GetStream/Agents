@@ -163,7 +163,7 @@ type AuditEntryFilter struct {
 // AuditEntryLimit is the page size an audit query uses for the limit asked for.
 // AuditEntries.Select returns one row more than this.
 func AuditEntryLimit(asked int) int {
-	return clampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
+	return ClampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
 }
 
 // Validate refuses an entry the log would not hold: an audited resource and action, a resource,
@@ -213,9 +213,7 @@ func recordAuditEntries(ctx context.Context, db bun.IDB, entries []AuditEntry) e
 		if err := entry.Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		if entry.Changes == nil {
-			entry.Changes = []AuditChange{}
-		}
+		entry.Changes = orEmpty(entry.Changes)
 		entry.ID = newID()
 		if !slices.Contains(auditSources, entry.Source) {
 			entry.Source = AuditSourceAPI

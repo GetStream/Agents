@@ -65,23 +65,6 @@ type Limit struct {
 	UpdatedAt      time.Time      `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 }
 
-// Covers reports whether the row limits the subject: the same subject and organization, and
-// every id the row's level names equal to the subject's.
-func (l Limit) Covers(ref usage.SubjectRef) bool {
-	if l.Subject != ref.Subject || l.OrganizationID != ref.OrganizationID || l.Category != ref.Category {
-		return false
-	}
-	switch l.Level {
-	case LevelApp:
-		return l.AppID == ref.AppID
-	case LevelAPIKey:
-		return l.AppID == ref.AppID && l.APIKey == ref.APIKey
-	case LevelUser:
-		return l.AppID == ref.AppID && l.UserID == ref.UserID
-	}
-	return true
-}
-
 // Validate refuses a limit its table's checks would: a subject limited at a level it has
 // none of, an id its level does not name or one it names left out, an interval spend is not
 // kept in, or a negative amount.
@@ -193,7 +176,7 @@ const (
 )
 
 // LimitPage is the page size Limits.Select uses for the size asked for. It returns one row more.
-func LimitPage(asked int) int { return clampLimit(asked, defaultLimitPage, maxLimitPage) }
+func LimitPage(asked int) int { return ClampLimit(asked, defaultLimitPage, maxLimitPage) }
 
 // LimitChange is what an update of a limit changes: its amount and its note, nil leaving each
 // as it is. What a row limits never changes.
@@ -313,15 +296,13 @@ func (r *Limits) Update(ctx context.Context, organizationID string, id int64, ch
 }
 
 // Delete removes a limit of the organization, or of any when organizationID is empty, and
-// records it, returning what it was.
-func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, audit LimitAudit) (Limit, error) {
-	var deleted Limit
+// records it.
+func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, audit LimitAudit) error {
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		before, err := limitOf(ctx, tx, organizationID, id, true)
 		if err != nil {
 			return err
 		}
-		deleted = before
 		if _, err := tx.NewDelete().Model(&before).WherePK().Exec(ctx); err != nil {
 			return err
 		}
@@ -329,12 +310,12 @@ func (r *Limits) Delete(ctx context.Context, organizationID string, id int64, au
 			fieldChanges(limitFields(&before), nil)))
 	})
 	if errors.Is(err, ErrNoLimit) {
-		return Limit{}, ErrNoLimit
+		return ErrNoLimit
 	}
 	if err != nil {
-		return Limit{}, stack.Wrap(fmt.Errorf("store: delete limit: %w", err))
+		return stack.Wrap(fmt.Errorf("store: delete limit: %w", err))
 	}
-	return deleted, nil
+	return nil
 }
 
 // Select lists an organization's limits by id, after filter.After, LimitPage(filter.Limit) and
