@@ -30,7 +30,7 @@ type queue struct {
 	key string
 }
 
-// claimSettle bounds a claim that runs on after its caller stopped (claim).
+// claimSettle bounds how long a claim runs on, and its unclaim, once its caller stopped (claim).
 const claimSettle = 5 * time.Second
 
 // claim leases up to limit rows due now for lease and returns them with columns. Both are
@@ -44,6 +44,11 @@ func claim[T any](ctx context.Context, db bun.IDB, q queue, lease time.Duration,
 	if limit < 1 {
 		return claimed, nil
 	}
+	// A caller already stopped claims nothing: leasing rows only to give them back would spend
+	// one of their attempts on every router that stops.
+	if err := ctx.Err(); err != nil {
+		return nil, stack.Wrap(err)
+	}
 	due := db.NewSelect().Model((*T)(nil)).
 		Column(q.alias+"."+q.key).
 		Where("?.next_attempt_at <= now()", bun.Ident(q.alias))
@@ -56,9 +61,11 @@ func claim[T any](ctx context.Context, db bun.IDB, q queue, lease time.Duration,
 	// Why: a router stopping cancels ctx while the claim is in flight. Cancelled between its
 	// commit and the read of its rows, the claim would lease rows no one works on until the lease
 	// ran out. It runs to the end on a context of its own, and gives back what it took when its
-	// caller has gone.
-	running, done := context.WithTimeout(context.WithoutCancel(ctx), claimSettle)
-	defer done()
+	// caller has gone. That context ends claimSettle after ctx does, not before: a bound from the
+	// start could land after the commit and lease rows to nobody the same way.
+	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopRunning()
+	defer context.AfterFunc(ctx, func() { time.AfterFunc(claimSettle, stopRunning) })()
 	err := db.NewUpdate().With("due", due).Model((*T)(nil)).
 		TableExpr("due").
 		Set("next_attempt_at = now() + make_interval(secs => ?)", lease.Seconds()).
@@ -70,7 +77,9 @@ func claim[T any](ctx context.Context, db bun.IDB, q queue, lease time.Duration,
 		return nil, stack.Wrap(fmt.Errorf("store: claim %s: %w", q.name, err))
 	}
 	if ctx.Err() != nil {
-		if err := unclaim(running, db, q, claimed); err != nil {
+		giving, done := context.WithTimeout(context.WithoutCancel(ctx), claimSettle)
+		defer done()
+		if err := unclaim(giving, db, q, claimed); err != nil {
 			return nil, stack.Wrap(errors.Join(ctx.Err(), err))
 		}
 		return nil, stack.Wrap(ctx.Err())

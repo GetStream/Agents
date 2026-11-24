@@ -49,3 +49,17 @@ func (s *StoreSuite) TestAClaimCancelledAfterItWasSentLeavesNoRowLeased() {
 	again := s.claimedChat("msg-one")
 	s.Equal(2, again.Attempts, "the cancelled claim's attempt stays counted, so no claim before it writes the row again")
 }
+
+// A caller that stopped before its claim takes nothing and spends no attempt: a router that
+// stops does not use up a retry of every row due.
+func (s *StoreSuite) TestAClaimWhoseCallerHadStoppedTakesNothing() {
+	s.queuedChat("msg-one")
+	ctx, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	claimed, err := s.store.ChatInbounds.Claim(ctx, 10, chatLease)
+
+	s.Require().ErrorIs(err, context.Canceled)
+	s.Empty(claimed)
+	s.Equal(1, s.claimedChat("msg-one").Attempts, "the first claim that took it")
+}
