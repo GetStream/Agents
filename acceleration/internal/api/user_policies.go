@@ -233,7 +233,6 @@ func (s *Server) userPolicyCaller(ctx context.Context) (string, error) {
 	return customerID, nil
 }
 
-// checkUserID holds a user id to Stream Chat's rule, as a spend limit's is.
 // reservedUserIDPrefix starts the user ids Stream keeps for itself, such as anonymous users'.
 const reservedUserIDPrefix = "!"
 
@@ -249,6 +248,7 @@ func refuseReservedUserID(field, userID string) (APIError, bool) {
 	return APIError{}, false
 }
 
+// checkUserID holds a user id to Stream Chat's rule, as a spend limit's is.
 func checkUserID(userID string) error {
 	if !limitUserID.MatchString(userID) || usage.IDProblem(userID) != "" {
 		return invalidRequest("user_id is 1 to 255 characters of A-Z, a-z, 0-9, @, _, ., - and space, as Stream Chat's user ids are")

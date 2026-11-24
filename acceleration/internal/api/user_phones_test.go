@@ -242,6 +242,13 @@ func (s *UserPhonesSuite) TestANumberIsNotLinkedToAReservedUserID() {
 	s.Empty(s.links())
 }
 
+// Unlinking is never refused, so a number kept under a reserved id before can still be let go.
+func (s *UserPhonesSuite) TestAReservedUserIDCanStillBeUnlinked() {
+	status, payload := s.serverClient.call(http.MethodPut, "/v1/agents/users/!anon", `{"phone": null}`)
+
+	s.Equal(http.StatusOK, status, string(payload))
+}
+
 // Catches a null that is refused or keeps the link, and a number still held after it.
 func (s *UserPhonesSuite) TestNullUnlinksAndFreesTheNumber() {
 	s.Require().Equal(http.StatusOK, s.put(s.user, `{"phone": "`+s.person+`"}`, nil))

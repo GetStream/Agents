@@ -162,9 +162,6 @@ func (s *Server) putUser(ctx context.Context, request *putUserRequest) (*putUser
 	if !ok {
 		return nil, errMissingCustomer
 	}
-	if failure, refused := refuseReservedUserID("user_id", request.UserID); refused {
-		return nil, failure
-	}
 	if s.store == nil {
 		return nil, errNoUserLinks
 	}
@@ -178,6 +175,10 @@ func (s *Server) putUser(ctx context.Context, request *putUserRequest) (*putUser
 	}
 	if request.Body.Phone == nil {
 		return &putUserResponse{Body: AgentUser{UserID: request.UserID}}, s.store.UserPhones.Unlink(ctx, customerID, app, request.UserID)
+	}
+	// Unlinking stays open above, so a number kept under such an id before can still be let go.
+	if failure, refused := refuseReservedUserID("user_id", request.UserID); refused {
+		return nil, failure
 	}
 	person, err := omnichannel.Phone(*request.Body.Phone)
 	if err != nil {
