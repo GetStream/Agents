@@ -390,6 +390,7 @@ type Server struct {
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
 	exportLineWait     time.Duration
+	importLineWait     time.Duration
 	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
@@ -612,6 +613,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
 		exportLineWait:     exportLineWait,
+		importLineWait:     importLineWait,
 		exportWait:         exportWait,
 		exports:            make(chan struct{}, maxExports),
 		imports:            make(chan struct{}, maxImports),

@@ -461,10 +461,64 @@ func (s *DataMoveSuite) lineOf(fields map[string]any) string {
 func (s *DataMoveSuite) TestASecondImportOfAnAppIsRefusedWhileOneIsRunning() {
 	s.heldImport()
 
-	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/data/import", emptyImport)
 
 	s.Require().Equal(http.StatusConflict, status)
-	s.Contains(failure, "an import of this app is already running")
+	var failure ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &failure))
+	s.Equal("import_running", failure.Error.Code, "told apart from an app that already holds data here")
+	s.Contains(failure.Error.Message, "an import of this app is already running")
+}
+
+func (s *DataMoveSuite) TestABadFullIsRefusedWhileAnImportOfTheAppRuns() {
+	s.heldImport()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=maybe", emptyImport)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "full is true or false")
+}
+
+func (s *DataMoveSuite) TestAnImportRefusedAtTheRoutersCapLeavesItsAppFree() {
+	var hangUps []context.CancelFunc
+	for range maxImports {
+		s.useApp(s.data.createApp())
+		hangUps = append(hangUps, s.heldImport())
+	}
+	s.useApp(s.data.createApp())
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+	s.Require().Equal(http.StatusServiceUnavailable, status)
+
+	hangUps[0]()
+
+	s.Eventually(func() bool {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+		return status == http.StatusOK
+	}, letGoWithin, 10*time.Millisecond, "the app refused at the cap still counts as importing")
+}
+
+func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
+	s.withImportLineWait(500 * time.Millisecond)
+	s.heldImport()
+
+	s.Eventually(func() bool {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+		return status == http.StatusOK
+	}, letGoWithin, 10*time.Millisecond, "the import whose body stalled still holds its places")
+	s.Zero(len(s.router.imports))
+}
+
+func (s *DataMoveSuite) TestAnImportIsServedWhileItsAppsExportRuns() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	s.Require().Equal(http.StatusOK, s.stalledExport().StatusCode)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusOK, status, failure)
+	status, failure = s.serverClient.failure(http.MethodGet, "/v1/data/export", nil)
+	s.Equal(http.StatusConflict, status, "the export still holds its app's place")
+	s.Contains(failure, "an export of this app is already running")
 }
 
 func (s *DataMoveSuite) TestAnImportOverTheRoutersCapIsRefused() {
@@ -523,6 +577,13 @@ func (s *DataMoveSuite) TestAnImportIsServedWhileTheRoutersExportsRun() {
 	s.Equal(http.StatusOK, status, failure)
 }
 
+// withImportLineWait bounds how long this test's imports wait for a line.
+func (s *DataMoveSuite) withImportLineWait(wait time.Duration) {
+	s.Equal(importLineWait, s.router.importLineWait, "the default bound")
+	s.router.importLineWait = wait
+	s.T().Cleanup(func() { s.router.importLineWait = importLineWait })
+}
+
 // emptyImport is an import with no rows, which is written at once.
 const emptyImport = `{"cursor":1}`
 
@@ -547,7 +608,7 @@ func (s *DataMoveSuite) heldImport() context.CancelFunc {
 			_ = response.Body.Close()
 		}
 	}()
-	s.Eventually(func() bool { return len(s.router.imports) == held+1 }, settleFor, 10*time.Millisecond,
+	s.Require().Eventually(func() bool { return len(s.router.imports) == held+1 }, settleFor, 10*time.Millisecond,
 		"the import never started")
 	return hangUp
 }
