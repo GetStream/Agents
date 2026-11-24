@@ -630,6 +630,7 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("classify_state = ?", classifyAbandoned).
 			Set("classify_after = NULL").
 			Where("contact_id = ?", contactID).
+			Where(ofItsContactsCampaign).
 			Where("classify_state = ?", classifyPending).
 			Exec(ctx); err != nil {
 			return fmt.Errorf("store: abandon pending classifications: %w", err)

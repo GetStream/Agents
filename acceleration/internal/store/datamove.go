@@ -1033,6 +1033,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if returning == "" {
 		result, err := db.ExecContext(ctx, query, args...)
 		if err != nil {
+			if isViolation(err, foreignKeyViolation) {
+				// A foreign key that holds the customer: the row it names is missing, or another's.
+				named, keyErr := rowKey(table, shape.keys, row)
+				if keyErr != nil {
+					return keyErr
+				}
+				return stack.Wrap(invalidImport(marked{fmt.Errorf("store: import %s: %w", named, ErrNamesNoRow), err}))
+			}
 			if refused := refusedRow(table, err); refused != nil {
 				return refused
 			}

@@ -484,6 +484,24 @@ var bareColumns = map[string][]string{
 	"policies":            {"document"},
 }
 
+// bareTexts are the text columns of moved tables that hold an id under another name, by how they are read:
+// forked_from is only answered back, claimed_by is looked up among the customer's users, a
+// channel_thread of another customer's is refused by the delivery, and spend by api_key is read with the app.
+var bareTexts = []string{"api_key", "channel_thread", "claimed_by", "forked_from"}
+
+// words are the text columns of moved tables that hold no row's id.
+var words = strings.Fields(`
+	agent_name area assertion auth_scheme call_outcome call_type callback caller_kind caller_stt caller_target caller_tts
+	caller_voice category channel classify_state client client_registration content_type country created_by declared_title
+	default_country delivered_to description direction e164 email end_reason ended error error_code error_message event_type
+	from_number greeting greeting_mode guardrail harness host image instructions judge_target kind label last_error
+	last_refusal_code leased_by leg llm markdown message modality mode model name namespace knowledge_namespace object_key
+	organization_tier outcome owner_type paused_reason price_version project prompt provider purpose reason recipient region
+	result return_url review_instructions review_notes role rrule said sandbox_provider scenario scope search severity sha256
+	ship_error sku source stage state status stream_call_type sts stt subagent summary sync_hash tag_key tag_value team text
+	time_zone timezone title tls_scheme to_number tool_name tools_digest transport trigger tts type ui_instructions url username
+	validation_code validation_error validation_status vendor verdict video_source voice`)
+
 // forcedColumns are written by the import itself or left to this deployment, whatever was sent
 // (identity, vouched).
 var forcedColumns = map[string][]string{
@@ -524,9 +542,9 @@ FROM pg_constraint c WHERE c.conrelid = ?::regclass AND c.contype = 'f'`, table.
 		var columns []string
 		s.Require().NoError(s.destination.sideOf(table).NewRaw(`
 SELECT attname::text FROM pg_attribute WHERE attrelid = ?::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''
-	AND (attname ~ '(_ids?|_pk)$' OR atttypid::regtype::text ~ '^(jsonb?|.*\[\])$')`, table.name).Scan(s.ctx, &columns))
+	AND (attname ~ '(_ids?|_pk)$' OR atttypid::regtype::text ~ '^(text|uuid|jsonb?|.*\[\])$')`, table.name).Scan(s.ctx, &columns))
 		for _, column := range columns {
-			known := column == table.customer || column == "customer_id" || slices.Contains(held, column) ||
+			known := column == "id" || slices.Contains(bareTexts, column) || slices.Contains(words, column) || column == table.customer || column == "customer_id" || slices.Contains(held, column) ||
 				slices.Contains(bareColumns[table.name], column) || slices.Contains(forcedColumns[table.name], column) ||
 				slices.Contains(table.vouched, column)
 			s.True(known, "%s.%s may name a row of another table: see bareColumns", table.name, column)
@@ -534,32 +552,94 @@ SELECT attname::text FROM pg_attribute WHERE attrelid = ?::regclass AND attnum >
 	}
 }
 
-// What a bare id names is looked up with the customer, so one of another customer's is not found.
+// A moved row arrives whatever its bare ids name, and what each names is looked up with the
+// customer, so one of another customer's is not found by them, and theirs does not find the row.
 func (s *DataMoveSuite) TestABareIdOfAnotherCustomersRowIsNotFound() {
-	session, campaign, _, simulation := s.holding(s.destination, "resident")
+	session, campaign, contact, simulation := s.holding(s.destination, "resident")
 	config := s.seedAgentConfig(s.destination, "resident", "theirs")
 	voice := s.seedVoice(s.destination, "resident", "theirs")
 	connection := s.seedConnectorConnection(s.destination, "resident")
-	s.Require().NoError(s.destination.Responses.Insert(s.ctx, &AgentResponse{ID: newID(), SessionID: session, CustomerID: "resident"}))
+	turn := newID()
+	s.execute(s.destination.shard, "INSERT INTO agent_responses (id, session_id, customer_id, created_at) VALUES (?, ?, 'resident', '2026-01-01')", turn, session)
+	db := s.source.GlobalDB()
+	s.execute(db, "INSERT INTO agent_configs (id, customer_id, name, voice, connectors) VALUES ('own', 'acme', 'own', ?, jsonb_build_array("+
+		"jsonb_build_object('name', 'a', 'connector_id', 'custom_acme', 'connection', jsonb_build_object('type', 'fixed', 'connection_id', ?::text))))", voice, connection)
+	s.execute(db, "INSERT INTO skills (id, customer_id, config_id, name, description, instructions) VALUES ('sk', 'acme', ?, 'look', '', '')", config)
+	s.execute(db, "INSERT INTO agent_sessions (id, customer_id, state, config_id, forked_from) VALUES ('se', 'acme', '', ?, ?)", config, session)
+	s.execute(db, "INSERT INTO agent_responses (id, session_id, customer_id, parent_response_id, question_response_id) VALUES ('r', 'se', 'acme', ?, ?)", turn, turn)
+	s.execute(db, "INSERT INTO conversation_documents (id, customer_id, owner_user_id, session_id, response_id, name, markdown, sha256)"+
+		" VALUES ('d', 'acme', 'sam', ?, ?, 'a', 'b', 'c')", session, turn)
+	s.execute(db, "INSERT INTO calls (id, customer_id, agent_id, call_id, campaign_id, contact_id) VALUES ('c', 'acme', 'a', 'c', ?, ?)", campaign, contact)
+	s.execute(db, "INSERT INTO agent_logs (customer_id, source, severity, event_type, message, config_id, session_id, occurred_at)"+
+		" VALUES ('acme', 'agent', 'info', 'turn', 'm', ?, ?, now())", config, session)
+	s.execute(db, "INSERT INTO scheduled_tasks (id, customer_id, config_id, user_id, title, instructions, start_local, timezone, state, session_id, origin_session_id)"+
+		" VALUES ('t', 'acme', ?, 'sam', 'a', 'b', '2026-12-01', 'UTC', 'paused', ?, ?)", config, session, session)
 
-	_, err := s.destination.AgentConfigs.Get(s.ctx, "acme", config)
-	s.ErrorIs(err, ErrNoAgentConfig)
-	_, err = s.destination.Voices.Get(s.ctx, "acme", voice)
-	s.ErrorIs(err, ErrNoVoice)
-	_, err = s.destination.ConnectorConnections.Get(s.ctx, "acme", connection)
-	s.ErrorIs(err, ErrNoConnectorConnection)
-	_, err = s.destination.Campaigns.Get(s.ctx, "acme", campaign)
-	s.Error(err)
-	_, err = s.destination.Simulations.Get(s.ctx, "acme", simulation)
-	s.Error(err)
-	_, err = s.destination.Sessions.Get(s.ctx, "acme", session)
-	s.Error(err)
-	turns, err := s.destination.Responses.Select(s.ctx, "acme", session, ResponseFilter{})
+	s.move("acme", "acme")
+
+	here := s.destination
+	moved, err := here.AgentConfigs.Get(s.ctx, "acme", "own")
 	s.Require().NoError(err)
-	s.Empty(turns)
-	s.Require().NoError(s.destination.Sessions.Delete(s.ctx, "acme", session))
-	_, err = s.destination.Sessions.Get(s.ctx, "resident", session)
-	s.NoError(err, "nor deleted")
+	s.Equal(connection, moved.Connectors[0].Connection.ConnectionID)
+	_, err = here.Voices.Get(s.ctx, "acme", moved.Voice)
+	s.ErrorIs(err, ErrNoVoice)
+	_, err = here.ConnectorConnections.Get(s.ctx, "acme", connection)
+	s.ErrorIs(err, ErrNoConnectorConnection)
+	uses, err := here.ConnectorConnections.Uses(s.ctx, "resident", []string{connection})
+	s.Require().NoError(err)
+	s.Empty(uses)
+	row, err := here.Sessions.Get(s.ctx, "acme", "se")
+	s.Require().NoError(err)
+	s.Equal(session, row.ForkedFrom)
+	_, err = here.Sessions.Get(s.ctx, "acme", row.ForkedFrom)
+	s.Error(err)
+	_, err = here.AgentConfigs.Get(s.ctx, "acme", row.ConfigID)
+	s.ErrorIs(err, ErrNoAgentConfig)
+	answer, err := here.Responses.Get(s.ctx, "acme", "se", "r")
+	s.Require().NoError(err)
+	s.Equal(turn, answer.ParentResponseID)
+	_, err = here.Responses.Get(s.ctx, "acme", "se", answer.ParentResponseID)
+	s.ErrorIs(err, ErrUnknownResponse)
+	siblings, err := here.Responses.Siblings(s.ctx, "acme", "se", "r", SiblingsOfReply)
+	s.Require().NoError(err)
+	s.Len(siblings, 1)
+	_, err = here.Campaigns.Get(s.ctx, "acme", campaign)
+	s.Error(err)
+	_, err = here.Simulations.Get(s.ctx, "acme", simulation)
+	s.Error(err)
+
+	skills, err := here.Skills.Select(s.ctx, "resident", SkillFilter{ConfigID: config})
+	s.Require().NoError(err)
+	s.Empty(skills)
+	calls, err := here.Calls.Select(s.ctx, "resident", CallFilter{CampaignID: campaign})
+	s.Require().NoError(err)
+	s.Empty(calls)
+	logs, err := here.AgentLogs.Select(s.ctx, "resident", AgentLogFilter{SessionID: session, ConfigID: config})
+	s.Require().NoError(err)
+	s.Empty(logs)
+	documents, err := here.ConversationDocuments.Select(s.ctx, "resident", DocumentScope{SessionID: session, Owner: "sam"})
+	s.Require().NoError(err)
+	s.Empty(documents)
+	tasks, err := here.ScheduledTasks.Select(s.ctx, "resident", ScheduledTaskFilter{SessionID: session})
+	s.Require().NoError(err)
+	s.Empty(tasks)
+
+	s.Require().NoError(here.ScheduledTasks.DeleteForSession(s.ctx, "resident", session))
+	s.Require().NoError(here.Sessions.Delete(s.ctx, "resident", session))
+	left := s.exportFrom(here, "acme")
+	s.Len(left.of("scheduled_tasks"), 1)
+	s.Len(left.of("conversation_documents"), 1)
+	s.Len(left.of("agent_logs"), 1)
+}
+
+// A foreign key that holds the customer refuses a row the same way, named by its key.
+func (s *DataMoveSuite) TestARunOfATaskNotHereIsRefusedByItsKey() {
+	err := s.destination.ImportRow(s.ctx, "acme", "scheduled_task_runs", json.RawMessage(`{"id": "run", "task_id": "not-here", "state": "delivered",
+		"trigger": "schedule", "attempts": 0, "prompt": "", "delivered_to": "", "session_id": "", "texted": [],
+		"scheduled_for": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z"}`))
+
+	s.ErrorIs(err, ErrInvalidImport)
+	s.EqualError(err, `store: import scheduled_task_runs:{"id":"run"}: a row names a row that neither the export nor this app holds`)
 }
 
 func (s *DataMoveSuite) TestAnImportOfARowThatNamesAnotherIsTwoQueries() {

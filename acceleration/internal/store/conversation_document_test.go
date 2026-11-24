@@ -83,6 +83,20 @@ func (s *StoreSuite) TestADocumentSentWithARewoundTurnIsNotRead() {
 	s.Equal([]string{"kept"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
 }
 
+func (s *StoreSuite) TestARewindToAnotherCustomersTurnRewindsNothing() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "their-turn", SessionID: "theirs", CustomerID: "somebody-else",
+		CreatedAt: s.base.Add(-time.Hour)}))
+
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "their-turn", s.base.Add(time.Hour)))
+
+	first, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	s.Nil(first.RewoundAt)
+}
+
 func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 	s.opened("one", "app", s.base, nil)
 	s.responded("one", "first", "read this", s.base)

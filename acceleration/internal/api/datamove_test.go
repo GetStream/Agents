@@ -411,6 +411,15 @@ func (s *DataMoveSuite) TestAnImportedRowThatNamesARowTheAppDoesNotHoldIsRefused
 	}
 }
 
+func (s *DataMoveSuite) TestAnImportedRunOfATaskTheAppDoesNotHoldIsRefusedTheSame() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{{Table: "scheduled_task_runs",
+		Row: json.RawMessage(`{"id": "run", "task_id": "not-here", "state": "delivered", "trigger": "schedule", "attempts": 0, "prompt": "",
+			"delivered_to": "", "session_id": "", "texted": [], "scheduled_for": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z"}`)}}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(`store: import scheduled_task_runs:{"id":"run"}: this row cannot be written here`, failure)
+}
+
 // A change to a policy of another scope is skipped, so the answer counts no row for it.
 func (s *DataMoveSuite) TestAChangeToAnotherScopesPolicyIsNotCountedAsWritten() {
 	key := `{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) + `}`
