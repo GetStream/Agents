@@ -92,7 +92,8 @@ const writeTimeout = 10 * time.Second
 // keys is read once write has run, and names nothing when write found no row.
 //
 // A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
-// on each of the next few attempts (forgetLater), which Close lets run.
+// on each of the next few attempts, and once more when Postgres says the transaction has
+// ended (forgetLater), which Close lets run.
 func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
 	_, err := s.detachedWriteTold(ctx, write, keys)
 	return err
@@ -104,9 +105,17 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
 	var committing bool
+	var xid int64
 	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
+		}
+		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
+		// lost has landed. Without a cache there is nothing to drop again.
+		if s.cache != nil {
+			if err := tx.NewSelect().ColumnExpr("txid_current()").Scan(ctx, &xid); err != nil {
+				return err
+			}
 		}
 		committing = true
 		return nil
@@ -115,7 +124,7 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	told = s.forget(ctx, names...)
 	var answered pgdriver.Error
 	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
-		s.forgetLater(names, err, true)
+		s.forgetLater(names, err, xid)
 	}
 	return told, err
 }
@@ -226,7 +235,7 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 }
 
 // Close releases the connection pools, once the deletions forgetLater holds have run, or
-// forgetGrace has passed.
+// forgetGrace has passed and the rest have stopped.
 func (s *Store) Close() error {
 	s.retryMu.Lock()
 	s.closed = true

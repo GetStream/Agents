@@ -98,7 +98,7 @@ func (s *StoreSuite) TestVoiceQueryBudgets() {
 	}
 	voice := Voice{CustomerID: "acme", Name: "founder"}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.Voices.Select(s.ctx, "acme")
 		s.Require().NoError(err)
@@ -109,7 +109,7 @@ func (s *StoreSuite) TestVoiceQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	voice.Description = "the one from the ad"
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.Voices.Update(s.ctx, &voice)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.Voices.Update(s.ctx, &voice)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	for _, provider := range []string{"elevenlabs", "cartesia"} {
 		binding := VoiceBinding{VoiceID: voice.ID, Provider: provider, ExternalID: "x", State: VoiceReady}
 		s.Require().NoError(s.store.VoiceBindings.Upsert(s.ctx, &binding))
@@ -125,11 +125,11 @@ func (s *StoreSuite) TestVoiceQueryBudgets() {
 				s.Require().NoError(err)
 			}))
 		}))
-		s.Equal(3, s.countQueries(func() {
+		s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 			s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.Voices.Delete(s.ctx, "acme", voice.ID)) }),
 				"forgetting the voice, its name and every provider's binding is one round trip")
-		}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+		}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 		return
 	}
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.Voices.Delete(s.ctx, "acme", voice.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.Voices.Delete(s.ctx, "acme", voice.ID)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }

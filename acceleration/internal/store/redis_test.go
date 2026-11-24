@@ -508,6 +508,124 @@ func (s *StoreSuite) TestADeleteWhoseCommitLandsAfterItGaveUpIsForgottenAgain() 
 	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped again")
 }
 
+func (s *StoreSuite) TestADeleteWhoseCommitLandsAfterTheLastRetryIsForgottenOnceItLands() {
+	proxy, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+	config := s.routerConfig("acme-app", "fast")
+
+	s.Require().Error(slow.RouterConfigs.Delete(s.ctx, "acme-app", config.ID), "the COMMIT is held past the read timeout")
+	// Past the third deletion that follows, 100, 300 and 700 ms on, reading the config into the
+	// cache all the while.
+	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); {
+		_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+		s.Require().NoError(err, "the config is still there while the COMMIT is held")
+	}
+	proxy.let()
+	s.Require().Eventually(func() bool {
+		deleted, err := s.store.global.NewSelect().Model((*RouterConfig)(nil)).
+			Where("id = ? AND deleted_at IS NOT NULL", config.ID).Exists(s.ctx)
+		s.Require().NoError(err)
+		return deleted
+	}, 5*time.Second, 10*time.Millisecond, "the held COMMIT lands")
+
+	s.Eventually(func() bool {
+		_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+		return errors.Is(err, ErrNoRouterConfig)
+	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped once it lands")
+}
+
+func (s *StoreSuite) TestADeletionRedisRefusedIsTriedAgainAfterTheFirstRetry() {
+	proxy := s.redisProxy()
+	behind, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(behind.Close()) })
+	redis := s.store.sharedRedis()
+	key := cacheKey("probe", newID())
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+
+	proxy.setDown(true)
+	s.Require().False(behind.forget(s.ctx, key), "Redis is down")
+	// Down past the first retry, 100 ms on, and up before the second, at 300 ms.
+	time.Sleep(200 * time.Millisecond)
+	proxy.setDown(false)
+
+	s.Eventually(func() bool {
+		exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		return exists == 0
+	}, 2*time.Second, 10*time.Millisecond, "a later retry drops the key")
+}
+
+func (s *StoreSuite) TestCloseLetsAPendingRetryRun() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	redis := s.store.sharedRedis()
+	key := cacheKey("probe", newID())
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+
+	closing.forgetLater([]string{key}, errors.New("refused"), 0)
+	s.Require().NoError(closing.Close())
+
+	exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Zero(exists, "the retry ran before the store closed")
+}
+
+func (s *StoreSuite) TestCloseStopsWaitingOnACommitThatHasNotEndedAndOutlivesNoRetry() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	open, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = open.Rollback() })
+	var xid int64
+	s.Require().NoError(open.NewSelect().ColumnExpr("txid_current()").Scan(s.ctx, &xid))
+
+	closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	closed := make(chan error, 1)
+	go func() { closed <- closing.Close() }()
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(3 * time.Second):
+		s.FailNow("Close waits on a commit that has not ended")
+	}
+
+	s.Zero(len(closing.retries), "no retry outlives Close")
+}
+
+func (s *StoreSuite) TestRetriesAskedForWhileTheStoreClosesEndWithIt() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+
+	var asking sync.WaitGroup
+	for range 8 {
+		asking.Go(func() {
+			for range 50 {
+				closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("refused"), 0)
+			}
+		})
+	}
+	s.Require().NoError(closing.Close())
+	for range 100 {
+		closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("refused"), 0)
+		s.Require().Zero(len(closing.retries), "a retry asked for after Close starts")
+	}
+	asking.Wait()
+
+	s.Zero(len(closing.retries), "no retry outlives Close")
+}
+
 func (s *StoreSuite) TestForgetsBehindADownRedisAreBoundedAndEndWithTheStore() {
 	proxy := s.redisProxy()
 	before := runtime.NumGoroutine()

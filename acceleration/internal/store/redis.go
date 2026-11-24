@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,7 +50,8 @@ const missTTL = time.Minute
 // many are being retried at once, so a Redis that is down costs a few goroutines and not one
 // per write. forgetGrace is how long Close lets them run before it stops them: past the last
 // attempt of one that began as Close did, when Redis answers it promptly. One that waits on a
-// slow Redis can still be cut short at its third attempt.
+// slow Redis can still be cut short at its third attempt, and one waiting for a lost commit to
+// end (settled) is cut short at once.
 const (
 	forgetAttempts = 3
 	forgetBackoff  = 100 * time.Millisecond
@@ -298,7 +300,7 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 		}
 	}
 	if len(missed) > 0 {
-		s.forgetLater(missed, failed, false)
+		s.forgetLater(missed, failed, 0)
 	}
 	return len(missed) == 0
 }
@@ -306,19 +308,34 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 // forgetLater tries again, a few times and in the background, a deletion Redis did not take.
 // The usual cause is a connection Redis dropped, which the client dials again at once. A
 // deletion still not taken after that, or one with no slot left to retry in, is what the TTL
-// covers. With every set, each attempt deletes all of names whatever the last one answered:
-// the keys of a COMMIT whose answer was lost, which may land at any time during them.
-func (s *Store) forgetLater(names []string, err error, every bool) {
+// covers.
+//
+// A commit other than 0 is the id of a transaction whose COMMIT answer was lost, err that
+// loss, and names its keys. The COMMIT may land at any time, so each attempt deletes all of
+// names whatever the last one answered, and they are deleted once more after Postgres says the
+// transaction has ended (settled).
+//
+// The lines it logs count the keys rather than name them: a user's policy key holds the
+// user's id, often an email.
+func (s *Store) forgetLater(names []string, err error, commit int64) {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
 	if s.closed {
-		slog.Default().Error("could not drop cached rows, and the store is closing", "keys", names, "error", err)
+		if commit != 0 {
+			slog.Default().Error("lost a commit's answer as the store closed, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
+		} else {
+			slog.Default().Error("could not drop cached rows, and the store is closing", "keys", len(names), "error", err)
+		}
 		return
 	}
 	select {
 	case s.retries <- struct{}{}:
 	default:
-		slog.Default().Error("could not drop cached rows, and no retry is free", "keys", names, "error", err)
+		if commit != 0 {
+			slog.Default().Error("lost a commit's answer with no retry free to wait for it, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
+		} else {
+			slog.Default().Error("could not drop cached rows, and no retry is free", "keys", len(names), "error", err)
+		}
 		return
 	}
 	s.retrying.Add(1)
@@ -326,6 +343,22 @@ func (s *Store) forgetLater(names []string, err error, every bool) {
 		defer s.retrying.Done()
 		defer func() { <-s.retries }()
 		client := s.cache.Client()
+		// del deletes names, one DEL per key as forget sends them, since a cluster refuses one
+		// across slots, and returns those Redis did not take.
+		del := func(names []string) (missed []string) {
+			commands := make(rueidis.Commands, 0, len(names))
+			for _, name := range names {
+				commands = append(commands, client.B().Del().Key(name).Build())
+			}
+			attempt, cancel := context.WithTimeout(s.closing, forgetWait)
+			defer cancel()
+			for i, reply := range client.DoMulti(attempt, commands...) {
+				if failed := reply.Error(); failed != nil && !errors.Is(failed, rueidis.Nil) {
+					missed, err = append(missed, names[i]), failed
+				}
+			}
+			return missed
+		}
 		wait := forgetBackoff
 		var missed []string
 		for range forgetAttempts {
@@ -333,32 +366,64 @@ func (s *Store) forgetLater(names []string, err error, every bool) {
 			select {
 			case <-s.closing.Done():
 				timer.Stop()
-				slog.Default().Error("could not drop cached rows before the store closed", "keys", names, "error", err)
+				if commit != 0 {
+					slog.Default().Error("the store closed before a commit whose answer was lost had ended, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
+				} else {
+					slog.Default().Error("could not drop cached rows before the store closed", "keys", len(names), "error", err)
+				}
 				return
 			case <-timer.C:
 			}
-			// One DEL per key, as forget sends them, since a cluster refuses one across slots.
-			commands := make(rueidis.Commands, 0, len(names))
-			for _, name := range names {
-				commands = append(commands, client.B().Del().Key(name).Build())
-			}
-			missed = nil
-			attempt, cancel := context.WithTimeout(s.closing, forgetWait)
-			for i, reply := range client.DoMulti(attempt, commands...) {
-				if failed := reply.Error(); failed != nil && !errors.Is(failed, rueidis.Nil) {
-					missed, err = append(missed, names[i]), failed
-				}
-			}
-			cancel()
-			if !every {
+			missed = del(names)
+			if commit == 0 {
 				if names = missed; len(names) == 0 {
 					return
 				}
 			}
 			wait *= 2
 		}
+		if commit != 0 {
+			if !s.settled(commit) {
+				slog.Default().Error("a commit whose answer was lost had not ended when the store stopped waiting, so the rows it changed can stay cached until they expire", "keys", len(names))
+				if s.closing.Err() != nil {
+					return
+				}
+			}
+			missed = del(names)
+		}
 		if len(missed) > 0 {
-			slog.Default().Error("gave up dropping cached rows", "keys", missed, "attempts", forgetAttempts, "error", err)
+			slog.Default().Error("gave up dropping cached rows", "keys", len(missed), "attempts", forgetAttempts, "error", err)
 		}
 	}()
+}
+
+// commitWait bounds how long a lost COMMIT answer is waited on. A transaction whose COMMIT
+// never reached the server is rolled back once it has been idle for
+// idleInTransactionTimeout, which began before the answer was lost.
+const commitWait = idleInTransactionTimeout
+
+// settled waits until Postgres says transaction xid is no longer in progress, committed or
+// rolled back, and reports whether it said so before commitWait passed or the store closed.
+// txid_status counts a transaction that has committed but still waits on a synchronous
+// replica as in progress, since its rows are not yet visible to other sessions.
+func (s *Store) settled(xid int64) bool {
+	ctx, cancel := context.WithTimeout(s.closing, commitWait)
+	defer cancel()
+	wait := forgetBackoff
+	for {
+		// NULL is a transaction old enough to have left the commit log: long ended.
+		var status sql.NullString
+		err := s.global.NewSelect().ColumnExpr("txid_status(?)", xid).Scan(ctx, &status)
+		if err == nil && status.String != "in progress" {
+			return true
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		wait = min(2*wait, time.Second)
+	}
 }
