@@ -50,8 +50,8 @@ const seenCapacity = 10_000
 //
 // A deployment with no Redis keeps the LRU and writes to Postgres on a miss, and so does
 // one whose Redis is unreachable. Nothing here fails a request because a cache is missing,
-// and nothing here fails a request at all: recording who called is not what the caller
-// asked for.
+// and recording who called fails no request at all: it is not what the caller asked for.
+// A guest's row, secret and claim are here too, and those do answer with their errors.
 //
 // The email a backend says its user signs in with is said on every request too, and is
 // held in an LRU of its own, by user and address, for emailTTL: a changed address is written

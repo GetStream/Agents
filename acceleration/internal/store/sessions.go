@@ -12,7 +12,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// Insert stores an end user this app was seen acting for.
+// Insert stores an end user this app was seen acting for. A row already there is left as it
+// is, and the caller is not told.
 func (r *Users) Insert(ctx context.Context, user *User) error {
 	if user.ID == "" {
 		return stack.Wrap(errors.New("store: a user id is required"))
@@ -102,7 +103,8 @@ func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string
 	return user.Email, nil
 }
 
-// InsertGuest stores a guest this app handed out, so it can later be claimed.
+// InsertGuest stores a guest this app handed out, so it can later be claimed. As with Insert,
+// a row already there is left as it is.
 func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
