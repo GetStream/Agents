@@ -221,8 +221,7 @@ func readBoundedInside(root, rel string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("agents: reading %s: %w", joined, err)
 	}
-	relCheck, err := filepath.Rel(rootReal, targetReal)
-	if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+	if leaves(rootReal, targetReal) {
 		return nil, "", fmt.Errorf("agents: ui path %q leaves the agent directory", rel)
 	}
 	info, err := os.Stat(targetReal)
