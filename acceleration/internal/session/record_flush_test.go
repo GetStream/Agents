@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
@@ -743,6 +744,75 @@ func (s *RecordFlushSuite) TestEndsAFullQueueDropsAreCounted() {
 		"a session end the full queue dropped is not counted")
 	s.InDelta(callsLost+1, testutil.ToFloat64(recordsLost.WithLabelValues(lostCallEnd)), 0,
 		"a call end the full queue dropped is not counted")
+}
+
+func (s *RecordFlushSuite) TestEveryWriteAFullQueueDropsIsCounted() {
+	release := s.holdWriter()
+	defer release()
+	for range recordQueueSize {
+		s.records.Voiced(s.customer, rand.Text())
+	}
+	dropped := s.droppedTotal()
+
+	opened := s.row()
+	s.records.Opened(opened, nil, nil)
+	s.records.Responding(store.AgentResponse{ID: rand.Text(), SessionID: opened.ID, CustomerID: s.customer})
+	s.records.Item(store.AgentResponseItem{ResponseID: rand.Text(), SessionID: opened.ID,
+		Kind: store.ItemSaid, Text: "Where is my order?", At: time.Now().UTC()})
+	s.records.Closed(s.customer, opened.ID, opened.OpenedAt, time.Now().UTC(), TimeoutHangup)
+
+	s.Equal(int64(4), s.records.Dropped(), "the queue was not full")
+	s.InDelta(dropped+4, s.droppedTotal(), 0, "a write the full queue dropped is not counted")
+}
+
+// droppedTotal reads the counter of writes a full queue dropped, as a scrape does, 0 before
+// it exists.
+func (s *RecordFlushSuite) droppedTotal() float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() == "router_session_records_dropped_total" {
+			return family.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+func (s *RecordFlushSuite) TestTheItemsOfATurnWhoseRowIsMissingDoNotFailEveryLaterBatch() {
+	logged := &syncBuffer{}
+	records := s.recorderLogging(s.store, logged)
+	session := s.row()
+	records.Opened(session, nil, nil)
+	stored := store.AgentResponse{ID: rand.Text(), SessionID: session.ID, CustomerID: s.customer, Said: "Where is my order?"}
+	records.Responding(stored)
+	missing := rand.Text()
+	lost := testutil.ToFloat64(recordsLost.WithLabelValues(lostItems))
+
+	// A batch per Flush, each holding an item of the stored turn and one of the turn whose row
+	// was never written.
+	batch := func(ordinal int, said string) {
+		records.Item(store.AgentResponseItem{ResponseID: stored.ID, Ordinal: ordinal, SessionID: session.ID,
+			Kind: store.ItemSaid, Text: said, At: time.Now().UTC()})
+		records.Item(store.AgentResponseItem{ResponseID: missing, Ordinal: ordinal, SessionID: session.ID,
+			Kind: store.ItemSaid, Text: said, At: time.Now().UTC()})
+		s.Require().NoError(records.Flush(s.bounded()))
+	}
+	batch(0, "It ships today.")
+	batch(1, "It arrives on Friday.")
+
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, session.ID, store.ItemFilter{ResponseID: stored.ID, Limit: 10})
+	s.Require().NoError(err)
+	s.Len(items, 2, "an item of the stored turn was dropped")
+	s.Equal(1, strings.Count(logged.String(), "its response was never recorded"),
+		"a later batch failed again on the turn already found missing")
+	s.InDelta(lost+2, testutil.ToFloat64(recordsLost.WithLabelValues(lostItems)), 0,
+		"each item of the missing turn is not counted, one by one")
+
+	// Once the turn ended its id is tried again, as any other turn's is.
+	records.Responded(s.customer, missing, store.ResponseCompleted, "", time.Now().UTC())
+	batch(2, "Anything else?")
+	s.Equal(2, strings.Count(logged.String(), "its response was never recorded"),
+		"the turn found missing is still kept after it ended")
 }
 
 // cutRows stores a running text session offered no tools yet, a turn of it and a call of it.
