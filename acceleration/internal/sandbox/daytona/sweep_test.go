@@ -467,7 +467,8 @@ func (s *SweepSuite) TestTheNextTickSweepsAfterAListError() {
 
 	go s.sweeper(s.directory).Run(ctx)
 
-	s.Eventually(func() bool { return len(s.org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
+	org := s.org
+	s.Eventually(func() bool { return len(org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(2, s.org.called("GET /api/secret/paginated"))
 }
 
@@ -479,7 +480,8 @@ func (s *SweepSuite) TestRunSweepsAtOnceAndThenHourly() {
 
 	go s.sweeperEvery(s.directory, 0).Run(ctx)
 
-	s.Eventually(func() bool { return len(s.org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
+	org := s.org
+	s.Eventually(func() bool { return len(org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
 	time.Sleep(300 * time.Millisecond)
 	s.Equal(1, s.org.called("GET /api/secret/paginated"))
 }
