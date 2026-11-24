@@ -92,6 +92,83 @@ func (s *StoreSuite) TestARenamedVoiceIsNoLongerFoundUnderItsOldName() {
 	s.ErrorIs(s.store.Voices.Delete(s.ctx, "globex", voice.ID), ErrNoVoice)
 }
 
+func (s *StoreSuite) TestARenameDoesNotWaitForABindingBeingAddedToTheVoice() {
+	voice := Voice{CustomerID: "acme", Name: "founder"}
+	s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice))
+	binding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), voice.ID)
+	s.Require().NoError(err)
+
+	renamed := make(chan error, 1)
+	go func() {
+		voice.Name = "narrator"
+		renamed <- s.store.Voices.Update(s.ctx, &voice)
+	}()
+
+	select {
+	case err := <-renamed:
+		s.NoError(err)
+	case <-time.After(time.Second):
+		s.Fail("the rename waited for the binding's transaction")
+	}
+}
+
+func (s *StoreSuite) TestARenameForgetsTheNameARenameWhileItWaitedGaveTheVoice() {
+	voice := Voice{CustomerID: "acme", Name: "founder"}
+	s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice))
+	renaming, holding := s.begin(), s.begin()
+	_, err := renaming.ExecContext(s.ctx, "UPDATE voices SET name = 'announcer' WHERE id = ?", voice.ID)
+	s.Require().NoError(err)
+	held := make(chan error, 1)
+	go func() {
+		_, err := holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", voice.ID)
+		held <- err
+	}()
+	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 }, 2*time.Second, 10*time.Millisecond)
+	renamed := make(chan error, 1)
+	go func() {
+		narrator := voice
+		narrator.Name = "narrator"
+		renamed <- s.store.Voices.Update(s.ctx, &narrator)
+	}()
+	s.Require().Eventually(func() bool { return s.waitingForALock() == 2 }, 2*time.Second, 10*time.Millisecond)
+
+	s.Require().NoError(renaming.Commit())
+	s.Require().NoError(<-held)
+	_, err = s.store.Voices.GetByName(s.ctx, "acme", "announcer")
+	s.Require().NoError(err)
+	s.Require().NoError(holding.Commit())
+	s.Require().NoError(<-renamed)
+
+	_, err = s.store.Voices.GetByName(s.ctx, "acme", "announcer")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+func (s *StoreSuite) TestRenamesOfOneVoiceAtOnceAllLand() {
+	voice := Voice{CustomerID: "acme", Name: "founder"}
+	s.Require().NoError(s.store.Voices.Insert(s.ctx, &voice))
+	holding := s.begin()
+	_, err := holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", voice.ID)
+	s.Require().NoError(err)
+
+	renamed := make(chan error, 4)
+	for range 4 {
+		go func() {
+			other := voice
+			other.Name = newID()
+			renamed <- s.store.Voices.Update(s.ctx, &other)
+		}()
+	}
+	s.Require().Eventually(func() bool { return s.waitingForALock() == 4 }, 2*time.Second, 10*time.Millisecond)
+	s.Require().NoError(holding.Commit())
+
+	for range 4 {
+		s.NoError(<-renamed)
+	}
+}
+
 func (s *StoreSuite) TestVoiceQueryBudgets() {
 	for range 20 {
 		s.Require().NoError(s.store.Voices.Insert(s.ctx, &Voice{CustomerID: "acme", Name: "v" + newID()}))

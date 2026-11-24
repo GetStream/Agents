@@ -1252,6 +1252,9 @@ type redisLine struct {
 	cut, freeze func()
 	// slow holds back every answer from Redis by a while, as a Redis that is slow but up does.
 	slow func(time.Duration)
+	// slowInvalidations holds back an invalidation and what follows it by a while, and not the
+	// answer before it.
+	slowInvalidations func(time.Duration)
 }
 
 // storeOnRedisLine is another router's store on the suite's databases, whose Redis is reached
@@ -1272,7 +1275,7 @@ func (s *StoreSuite) storeOnRedisLineHooked(hook func(redisLine) rueidishook.Hoo
 	var clients, servers []net.Conn
 	closed := false
 	// delay holds back each answer from Redis by this many nanoseconds.
-	var delay atomic.Int64
+	var delay, invalidationDelay atomic.Int64
 	go func() {
 		for {
 			client, err := listener.Accept()
@@ -1298,7 +1301,16 @@ func (s *StoreSuite) storeOnRedisLineHooked(hook func(redisLine) rueidishook.Hoo
 					n, err := server.Read(buffer)
 					if n > 0 {
 						time.Sleep(time.Duration(delay.Load()))
-						if _, err := client.Write(buffer[:n]); err != nil {
+						answer := buffer[:n]
+						// A RESP3 push of two, named invalidate.
+						if at := bytes.Index(answer, []byte(">2\r\n$10\r\ninvalidate")); at >= 0 && invalidationDelay.Load() > 0 {
+							if _, err := client.Write(answer[:at]); err != nil {
+								return
+							}
+							answer = answer[at:]
+							time.Sleep(time.Duration(invalidationDelay.Load()))
+						}
+						if _, err := client.Write(answer); err != nil {
 							return
 						}
 					}
@@ -1327,7 +1339,10 @@ func (s *StoreSuite) storeOnRedisLineHooked(hook func(redisLine) rueidishook.Hoo
 		}
 	})
 
-	line := redisLine{cut: cut, freeze: freeze, slow: func(by time.Duration) { delay.Store(int64(by)) }}
+	line := redisLine{cut: cut, freeze: freeze,
+		slow:              func(by time.Duration) { delay.Store(int64(by)) },
+		slowInvalidations: func(by time.Duration) { invalidationDelay.Store(int64(by)) },
+	}
 	options := Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: listener.Addr().String()}}
 	if hook != nil {
 		options.redisHook = hook(line)
