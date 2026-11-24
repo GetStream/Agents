@@ -267,10 +267,14 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `schedule_task` and the `reschedule`, `snooze` and `resume` of `update_scheduled_task` answer
   it `scheduled_turn`; list, pause, skip and cancel still run. The user's next turn is theirs.
   `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATask`,
+  `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATaskInALaterRound`,
   `TestScheduledTasksSuite/TestATasksTurnCannotRescheduleSnoozeOrResumeATask`,
   `TestScheduledTasksSuite/TestATasksTurnMayPauseATask`,
   `TestScheduledTasksSuite/TestTheUsersTurnAfterATasksTurnMaySchedule`,
-  `TestTelnyxChannelSuite/TestATasksTurnOnAThreadCannotScheduleATask`.
+  `TestTelnyxChannelSuite/TestATasksTurnOnAThreadCannotScheduleATask`,
+  `TestAgentSuite/TestAToolAskedInAScheduledNativeTurnRunsAsTheTasksCall`,
+  `TestAgentSuite/TestAToolTheTasksNativeReplyAsksForAfterTheCallerCutsInIsStillTheTasksCall`,
+  `TestAgentSuite/TestAToolAskedInTheCallersOwnNativeReplyIsNotTheTasksCall` (`internal/agent`).
 - **The tools go only to verified users with scheduling on, outside incognito.**
   `TestScheduledTasksSuite/TestGuestsAndAnonymousCallersAreNotOfferedTheTools`,
   `TestScheduledTasksSuite/TestAnIncognitoSessionIsNotOfferedTheTools`,

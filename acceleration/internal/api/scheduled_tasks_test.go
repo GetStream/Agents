@@ -1071,6 +1071,20 @@ func (s *ScheduledTasksSuite) TestATasksTurnCannotScheduleATask() {
 	s.Len(s.tasksOf(user), 1, "the task's turn made no task")
 }
 
+// The reply a tool's answer starts is still the task's turn.
+func (s *ScheduledTasksSuite) TestATasksTurnCannotScheduleATaskInALaterRound() {
+	user, _, task := s.dueInItsConversation()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "list_scheduled_tasks", Arguments: `{}`})
+	s.schedulingScript.planRound(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Again","instructions":"Do this again.","in":"PT20M","timezone":"UTC"}`})
+
+	s.makeDue(task)
+
+	s.delivered(task)
+	s.toldTheModel(`"error":"scheduled_turn"`)
+	s.Len(s.tasksOf(user), 1, "the task's turn made no task")
+}
+
 // What a task's turn may not do to a task is set a run going: a move, or a resume.
 func (s *ScheduledTasksSuite) TestATasksTurnCannotRescheduleSnoozeOrResumeATask() {
 	user, _, task := s.dueInItsConversation()

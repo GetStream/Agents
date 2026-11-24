@@ -180,7 +180,7 @@ func (s *TelnyxChannelSuite) TestATaskMadeInAnSMSThreadIsTextedBackOnTheThread()
 	texted := s.took(sent + 1)[sent]
 	s.Equal(telnyxMessage{from: s.line, to: person, text: "Done."}, texted.withoutAuthorization())
 	s.Equal(1, s.scheduledTurns())
-	s.Contains(s.scheduledTurnTools(), "schedule_task", "the turn answers the person, who may schedule again")
+	s.Contains(s.scheduledTurnTools(), "schedule_task", "the turn answers the person, with their tools")
 	s.Equal(replies+1, s.repliesIn(channel), "the reply is kept in the thread")
 	s.Eventually(func() bool { return !s.threadOpen(channel) }, settleFor, 10*time.Millisecond, "the session was left open")
 }
