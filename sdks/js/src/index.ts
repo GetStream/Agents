@@ -121,8 +121,10 @@ export {
 export {
   ConfigurationError,
   HostingRefusedError,
+  NoCallError,
   RouterError,
   SocketClosedError,
+  UnnamedTurnError,
   type RouterErrorType,
 } from "./errors.js";
 

@@ -104,6 +104,19 @@ describe("loadFolder", () => {
     });
   });
 
+  it("reads a greeting as its text alone, and one that names no mode as a variation", async () => {
+    const read = async (declaration: string) =>
+      (await loadFolder(await agentDir({ "agent.yaml": `name: jean\n${declaration}` }))).settings?.greeting;
+
+    assert.deepEqual(await read("greeting: Hello, how can I help?\n"), {
+      text: "Hello, how can I help?",
+      mode: "variation",
+    });
+    assert.deepEqual(await read('greeting: "Hi: welcome"\n'), { text: "Hi: welcome", mode: "variation" });
+    assert.deepEqual(await read("greeting:\n  text: Hello\n"), { text: "Hello", mode: "variation" });
+    assert.deepEqual(await read("greeting:\n  text: Hello\n  mode: exact\n"), { text: "Hello", mode: "exact" });
+  });
+
   it("reads the region the agent's work is done in, and none when agent.yaml names none", async () => {
     const placed = await loadFolder(await agentDir({ "agent.yaml": "name: jean\nregion: eu\n" }));
     const unplaced = await loadFolder(await agentDir({ "agent.yaml": "name: jean\n" }));
@@ -122,8 +135,9 @@ describe("loadFolder", () => {
     for (const declaration of [
       "lmm: openai/gpt-5.6\n",
       "speed: 0.9\n",
-      "greeting: Hello\n",
       "greeting:\n  mode: exact\n",
+      "greeting:\n  text: Hello\n  tone: warm\n",
+      "greeting: [Hello, Hi]\n",
       "keyterms: Vision Agents\n",
       "llm:\n  - one\n  - two\n",
       "video:\n  max_frames: 9\n",
