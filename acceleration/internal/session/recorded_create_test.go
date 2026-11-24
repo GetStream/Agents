@@ -15,6 +15,7 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -226,6 +227,7 @@ func (s *RecordedCreateSuite) TestASessionWhoseIDAnotherCustomerTookOnceItWasHel
 	spec := s.spec(Spec{ID: "shared-" + uuid.NewString(), Greeting: "Hi, I'm listening."})
 	spec.CustomerID = other
 
+	lost := testutil.ToFloat64(recordsLost.WithLabelValues(lostItems))
 	created, err := late.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	s.opened(spec.ID)
@@ -240,6 +242,11 @@ func (s *RecordedCreateSuite) TestASessionWhoseIDAnotherCustomerTookOnceItWasHel
 	s.Require().NotEmpty(created.conversation(), "the greeting is what a review would read")
 	late.reviews.running.Wait()
 	s.NotContains(s.logged.String(), "review the call", "a session with no row of its own is reviewed")
+	s.Equal(EndClosed, created.EndedFor(), "the refused session ends as closed")
+	s.Equal(1, strings.Count(s.logged.String(), `level=WARN msg="ending a session whose id another customer's session has"`),
+		"the refusal is logged once, at WARN")
+	s.NotContains(s.logged.String(), "could not record the session starting", "and not as a write that failed")
+	s.Equal(lost, testutil.ToFloat64(recordsLost.WithLabelValues(lostItems)), "the refused session's items are not counted as lost")
 }
 
 // A carry-on skips the check that the id is free, so its row can be refused as a new
