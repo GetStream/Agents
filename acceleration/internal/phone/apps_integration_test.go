@@ -1196,7 +1196,7 @@ func (s *AppsSuite) TestAnAttachedNumbersCallersEachLandInACallOfTheirOwn() {
 }
 
 func (s *AppsSuite) TestAPlacedCallLandsInTheCallOfTheSessionItWasPlacedFor() {
-	id := "0b9f2a52-5c1e-4d7a-9a3e-0f6b8f1c2d3e"
+	id := uuid.NewString()
 
 	placed, err := s.service.Call(s.ctx, CallRequest{
 		Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15550001111", SessionID: id,
