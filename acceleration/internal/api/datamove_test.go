@@ -259,7 +259,7 @@ func (s *DataMoveSuite) TestAnImportedAgentNamedLikeOneHereIsRefusedWithoutTheIn
 	s.NotContains(failure, "agent_configs_name_idx")
 }
 
-// A row whose key another app holds here is the export's to correct, and the answer names it.
+// A row whose key another app holds here is refused by name, and the answer says nothing of who holds it.
 func (s *DataMoveSuite) TestAnImportedRowWhoseKeyAnotherAppHoldsIsRefusedNamingIt() {
 	theirs := s.data.createAgentConfig()
 	var exported dataLine
@@ -271,11 +271,15 @@ func (s *DataMoveSuite) TestAnImportedRowWhoseKeyAnotherAppHoldsIsRefusedNamingI
 	s.Require().NotEmpty(exported.Table)
 	s.useApp(s.data.createApp())
 
-	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{exported}))
+	change := dataLine{Change: &store.DataChange{Table: "agent_configs", Op: store.ChangeUpdate,
+		Key: json.RawMessage(`{"id":"` + theirs.Id + `"}`), Payload: exported.Row}}
 
-	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, `agent_configs:{"id":"`+theirs.Id+`"}`)
-	s.Contains(failure, "belongs to another customer here")
+	for _, line := range []dataLine{exported, change} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{line}))
+
+		s.Equal(http.StatusBadRequest, status)
+		s.Equal(`store: import agent_configs:{"id":"`+theirs.Id+`"}: this row cannot be written here`, failure)
+	}
 }
 
 // importedConnector is an export's line of a custom definition id whose manifest has fields,

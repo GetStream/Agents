@@ -2913,8 +2913,9 @@ change batch is found by the `usage_id` made from the one the change names, and 
 a request this deployment recorded itself.
 
 A row refused because another tenant here holds its key stops the move, and the error names the
-row by table and primary key, as `agent_configs:{"id":"config-1"}`; `POST /v1/data/import` answers
-400. Name that row to whoever holds it.
+row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
+`POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
+to the operator of this deployment.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.

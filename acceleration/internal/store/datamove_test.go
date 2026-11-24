@@ -687,7 +687,7 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 
 	s.ErrorIs(err, ErrAnotherCustomersRow)
 	s.ErrorIs(err, ErrInvalidImport, "the export's to correct, not the router's failure")
-	s.ErrorContains(err, `agent_configs:{"id":"`+id+`"}`)
+	s.EqualError(err, `store: import agent_configs:{"id":"`+id+`"}: a row with this key belongs to another customer here`)
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT name, customer_id FROM agent_configs WHERE id = ?", id).Scan(&name, &owner))
