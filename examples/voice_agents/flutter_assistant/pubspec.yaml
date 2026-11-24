@@ -33,9 +33,24 @@ dependencies:
   shared_preferences: ^2.5.3
   # Stream Chat's AI components: the conversation, its steps, the composer and the voice glow.
   # Built on Stream's design system.
-  stream_chat_flutter_ai: ^0.2.0
-  # The A2UI renderer for the UI the agent writes in its replies.
-  stream_chat_flutter_ai_a2ui: ^0.2.0
+  # TODO: switch to ^0.3.0 once released
+  stream_chat_flutter_ai:
+    git:
+      url: https://github.com/GetStream/stream-chat-flutter-ai.git
+      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
+      path: packages/stream_chat_flutter_ai
+  # The A2UI and OpenUI renderers for the UI the agent writes in its replies.
+  # TODO: switch to ^0.3.0 once released
+  stream_chat_flutter_ai_a2ui:
+    git:
+      url: https://github.com/GetStream/stream-chat-flutter-ai.git
+      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
+      path: packages/stream_chat_flutter_ai_a2ui
+  stream_chat_flutter_ai_openui:
+    git:
+      url: https://github.com/GetStream/stream-chat-flutter-ai.git
+      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
+      path: packages/stream_chat_flutter_ai_openui
   # Stream's design system, which the AI components are built on: its widgets for the app's own
   # screens (app bar, buttons, sheets). The version stream_chat_flutter_ai uses.
   stream_core_flutter: ^0.5.3
@@ -45,6 +60,15 @@ dependencies:
   # The SDK as it is in this checkout.
   stream_agents:
     path: ../../../sdks/dart/stream_agents
+
+dependency_overrides:
+  # The renderers ask for stream_chat_flutter_ai from pub.dev, where this commit is not.
+  # TODO: drop once 0.3.0 is released
+  stream_chat_flutter_ai:
+    git:
+      url: https://github.com/GetStream/stream-chat-flutter-ai.git
+      ref: e47ea46a5c5617e15a2cd8a19351404bdd32829b
+      path: packages/stream_chat_flutter_ai
 
 dev_dependencies:
   flutter_test:

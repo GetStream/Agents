@@ -61,9 +61,11 @@ router needs `XAI_API_KEY`. A call needs `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` an
 `INWORLD_API_KEY`. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
 `PERPLEXITY_API_KEY`.
 
-The AI components and the A2UI renderer are `stream_chat_flutter_ai` and
-`stream_chat_flutter_ai_a2ui` 0.2.0 from pub.dev. The OpenUI renderer is the app's own
-(`lib/openui_renderer.dart`) until Stream's is published.
+The AI components and the A2UI and OpenUI renderers are `stream_chat_flutter_ai`,
+`stream_chat_flutter_ai_a2ui` and `stream_chat_flutter_ai_openui`, taken from
+[stream-chat-flutter-ai](https://github.com/GetStream/stream-chat-flutter-ai) by git at a pinned
+commit until 0.3.0 is on pub.dev. The renderers ask for `stream_chat_flutter_ai` from pub.dev,
+so `pubspec.yaml` overrides it with the same commit.
 
 ## Gmail and Linear
 
@@ -224,8 +226,8 @@ also the app's own. Tapping a free table asks to reserve it.
   reduce-motion setting.
 - **Settings › Brand** chooses the accent and corners the UI wears: Stream Default, Ember
   Hospitality or Nordic Mobility (`brand_theme.dart`), kept between launches. Cards already on
-  screen take it on at once: the A2UI and OpenUI renderers and the app's widgets read it from
-  the widget tree. The agent writes the same UI whichever is chosen.
+  screen take it on at once: the brand is an `A2UITheme` and an `OpenUITheme` over the
+  conversation, which the renderers read from the widget tree, as the app's widgets do. The agent writes the same UI whichever is chosen.
 
 ## What is not here yet
 

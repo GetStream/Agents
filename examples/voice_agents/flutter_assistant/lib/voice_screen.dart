@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
 import 'package:stream_chat_flutter_ai_a2ui/stream_chat_flutter_ai_a2ui.dart';
+import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 import 'package:stream_core_flutter/core.dart';
 import 'package:stream_video_flutter/stream_video_flutter.dart' as video;
 import 'package:stream_agents/stream_agents.dart';
@@ -13,7 +14,6 @@ import 'agent_chat.dart';
 import 'assistant.dart';
 import 'brand_theme.dart';
 import 'captions.dart';
-import 'openui_renderer.dart';
 import 'permissions.dart';
 import 'smooth_size.dart';
 import 'trip_components.dart';
@@ -89,8 +89,8 @@ class _VoiceScreenState extends State<VoiceScreen> with WidgetsBindingObserver {
   late final AIUIHost _voiceUI = AIUIHost(
     components: TripComponents.all,
     renderers: [
-      OpenUIRenderer(onError: (error, _) => debugPrint('Voice OpenUI: $error')),
       A2UIRenderer(onError: (error, _) => debugPrint('Voice A2UI: $error')),
+      OpenUIRenderer(onError: (error, _) => debugPrint('Voice OpenUI: $error')),
     ],
     send: (action) => widget.session.responses.create(action.label, uiAction: action.toJson()),
   );
