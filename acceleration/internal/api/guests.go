@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -34,6 +37,23 @@ const guestPrefix = "guest-"
 // does not admit guests, so naming it here is what makes that switch mean anything.
 const guestRole = "guest"
 
+// guestsPerAddress is how many new guests one address may mint in one app in guestWindow.
+//
+// A device keeps the guest it was minted and comes back as them with its refresh_secret, so a
+// person mints a guest once per browser, not once per visit. Every new guest is a user written
+// to the app's Stream app and a row here, so a page that mints one on every load, or many
+// devices behind one address, should be told to wait rather than add users without end. Sixty
+// an hour is set well above one office or household behind one address, and is a choice,
+// not a measurement. The app's backend is not counted: it can make users in its Stream app
+// without the router anyway, as the daily quota trusts it with its spend.
+const guestsPerAddress = 60
+
+// guestWindow is the window guestsPerAddress counts in.
+const guestWindow = time.Hour
+
+// newGuestsPrefix starts the key an address's new guests in one app are counted under.
+const newGuestsPrefix = "guests:new:"
+
 // createGuestUser mints a guest so somebody can talk to an agent before they sign up, or
 // gives a guest coming back a fresh token.
 //
@@ -48,6 +68,12 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
+	}
+	// A suspended organization may do no work at all, and a guest is only minted to do some.
+	// Its money is not asked: a guest costs nothing, and an organization out of credit still
+	// runs the models that cost nothing.
+	if _, err := s.policies.Admit(ctx, routing.Owner{CustomerID: customerID, Attribution: routing.AttributionFrom(ctx)}); err != nil {
+		return nil, err
 	}
 	bound, mintable, err := s.streamFor(ctx, customerID)
 	if elsewhere(err) {
@@ -89,6 +115,15 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 
 // newGuest mints a guest nobody has been before, and a refresh secret to come back with.
 func (s *Server) newGuest(ctx context.Context, customerID string, bound streamapp.Bound, body GuestUserRequest) (*createGuestUserResponse, error) {
+	// Counted before Stream is asked, so a refused guest writes nothing anywhere. A caller
+	// with no address counts against nobody, as in the daily quota.
+	if caller := CallerFrom(ctx); !caller.ServerSide && caller.IP != "" {
+		key := newGuestsPrefix + url.QueryEscape(customerID) + ":" + caller.IP
+		if _, over := s.newGuests.Admit(ctx, "", key, guestsPerAddress, guestWindow); over > 0 {
+			return nil, rateLimited(fmt.Sprintf("this address has minted %d guests of this app this hour: try again in %ds",
+				guestsPerAddress, max(int(over.Seconds()), 1)))
+		}
+	}
 	userID := guestPrefix + store.NewID()
 	name := value(body.Name)
 	if name == "" {
@@ -440,12 +475,14 @@ func (s *Server) registerGuests(api huma.API) {
 			"Open to a page on purpose. A guest that a backend had to mint is a guest every " +
 			"anonymous visitor costs a round trip through the customer's own servers, which is " +
 			"exactly the integration this is meant to remove. An app that has turned guests off " +
-			"refuses it.",
+			"refuses it, and so does a suspended organization. One address may mint 60 new guests " +
+			"of an app an hour; the app's backend is not counted.",
 		Extensions:    map[string]any{clientAccessibleExtension: true},
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The guest and a token for them"},
-			"403": errorResponse("This app does not admit guests"),
+			"403": errorResponse("This app does not admit guests, or its organization is suspended"),
+			"429": errorResponse("This address has minted as many guests of this app as it may this hour"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.createGuestUser)

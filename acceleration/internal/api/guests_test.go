@@ -660,6 +660,61 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 	s.Contains(s.chat.Members(channel), account, "a channel with no stamp is the app's to join")
 }
 
+func (s *GuestsSuite) TestAnAddressIsRefusedItsSixtyFirstNewGuestOfAnAppInAnHour() {
+	s.mintSixtyGuests()
+	written := s.profileWrites()
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusTooManyRequests, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal(ErrorTypeRateLimited, answered.Error.Type)
+	s.Contains(answered.Error.Message, "60 guests of this app this hour")
+	s.Equal(written, s.profileWrites(), "a refused guest is never written to Stream")
+}
+
+func (s *GuestsSuite) TestTheBackendStillMintsGuestsOnceAnAddressHasMintedItsHour() {
+	s.mintSixtyGuests()
+
+	minted := s.mint(s.serverClient, GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+func (s *GuestsSuite) TestAGuestComingBackWithTheirSecretIsNotCountedAsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	for range 59 {
+		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+
+	again := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
+
+	s.Equal(first.Id, again.Id)
+}
+
+func (s *GuestsSuite) TestAnAddressThatMintedItsHourInOneAppStillMintsGuestsOfAnother() {
+	s.mintSixtyGuests()
+	s.useApp(s.data.createApp())
+
+	minted := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+// mintSixtyGuests mints as many new guests of the suite's app as one address may in an hour,
+// each by a caller of its own. Every test's address is the same, so they are minted within
+// one hour of the clock, where the count is kept: a count that started again at the hour
+// would let the next guest through.
+func (s *GuestsSuite) mintSixtyGuests() {
+	if left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)); left < time.Minute {
+		time.Sleep(left)
+	}
+	for range 60 {
+		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+}
+
 // mint asks for a guest as the caller and expects one.
 func (s *GuestsSuite) mint(as *testClient, request GuestUserRequest) GuestUser {
 	var minted GuestUser

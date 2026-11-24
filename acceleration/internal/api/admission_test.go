@@ -225,6 +225,28 @@ func (s *AdmissionSuite) TestASuspendedAccountIsForbidden() {
 	}, 10*time.Second, 50*time.Millisecond, "restored, it is admitted again")
 }
 
+func (s *AdmissionSuite) TestASuspendedOrganizationMintsNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusForbidden, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal("account_suspended", answered.Error.Code)
+}
+
+func (s *AdmissionSuite) TestAnOrganizationWithNoCreditStillMintsAGuest() {
+	// A guest costs nothing, and the models that cost nothing still answer them.
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/echo-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusCreated, status, string(payload))
+}
+
 func (s *AdmissionSuite) TestASpentLimitIsAPaymentRequiredNotAServerError() {
 	s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	s.limitApp(usage.Daily, 10_000)
