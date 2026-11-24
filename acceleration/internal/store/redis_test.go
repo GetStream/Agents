@@ -589,6 +589,53 @@ func (s *StoreSuite) TestEveryCachedWriteARequestGaveUpOnLeavesNoStaleCopy() {
 			_, err = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", was)
 			s.ErrorIs(err, ErrNoAgentConfig)
 		},
+		"AppOrganizations.Upsert": func() {
+			app := "app-" + newID()
+			s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-before"}))
+			err := s.readWhileWriting(s.lockingWhere("app_organizations", "app_id = ?", app), func(ctx context.Context) error {
+				return s.store.AppOrganizations.Upsert(ctx, &AppOrganization{AppID: app, OrganizationID: "org-after"})
+			}, func() {
+				seen, err := s.store.AppOrganizations.Get(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().Equal("org-before", seen.OrganizationID, "the app has not moved yet")
+				policies, err := s.store.Policies.OfApp(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().Equal("org-before", policies.OrganizationID, "the app's policies are not moved yet")
+			}, bun.Tx.Commit)
+			s.Require().NoError(err)
+			seen, err := s.store.AppOrganizations.Get(s.ctx, app)
+			s.Require().NoError(err)
+			s.Equal("org-after", seen.OrganizationID)
+			policies, err := s.store.Policies.OfApp(s.ctx, app)
+			s.Require().NoError(err)
+			s.Equal("org-after", policies.OrganizationID, "the app's policies are read under the new organization")
+		},
+		"ForgetUserSettings": func() {
+			app := "app-" + newID()
+			user := UserScopeID(app, "jlahey")
+			yes := true
+			s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeUser, ScopeID: user, Document: PolicyDocument{PromptInjection: &yes}}))
+			err := s.readWhileWriting(s.lockingWhere("policies", "scope = ? AND scope_id = ?", ScopeUser, user), func(ctx context.Context) error {
+				_, err := s.store.ForgetUserSettings(ctx, app, "jlahey", "forgotten", &AuditEntry{
+					CustomerID: app, ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+				})
+				return err
+			}, func() {
+				document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+				s.Require().NoError(err)
+				s.Require().NotNil(document.PromptInjection, "the user's policy is not deleted yet")
+				has, err := s.store.Policies.HasUsers(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().True(has, "the app still has a user with a policy")
+			}, bun.Tx.Commit)
+			s.Require().NoError(err)
+			document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+			s.Require().NoError(err)
+			s.Nil(document.PromptInjection)
+			has, err := s.store.Policies.HasUsers(s.ctx, app)
+			s.Require().NoError(err)
+			s.False(has, "the app has no user with a policy any more")
+		},
 		"Skills.Insert": func() {
 			config := s.boundConfig("acme-app")
 			other := Skill{ID: newID(), CustomerID: "acme-app", ConfigID: config.ID, Name: "refund", Files: map[string]string{}, CreatedAt: now, UpdatedAt: now}

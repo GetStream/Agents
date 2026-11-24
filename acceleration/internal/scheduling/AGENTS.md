@@ -141,13 +141,19 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestStoreSuite/TestASaveOfACopyReadBefore*` (six tests), `TestStoreSuite/TestAClosingRefusedAsChangedRecordsNoRun`.
 - **The active limit is counted under a lock.** A create, and a save that makes a task active
   again, count the user's active tasks on the config under an advisory lock on customer, user and
-  config, so creates and resumes at once stop at `max_tasks_per_user`.
+  config, so creates and resumes at once stop at `max_tasks_per_user`. A move's cut-over
+  (`ResumeMovedRows`) counts under the same locks, taken after the task rows as a save takes them,
+  500 users on a config to a transaction, each wait bounded by the serving `lock_timeout` (3s).
   `TestStoreSuite/TestCreatesAtOnceStopAtTheActiveLimit`,
   `TestStoreSuite/TestResumesAtOnceStopAtTheConfigsActiveLimit`,
   `TestStoreSuite/TestACreateAndAResumeAtOnceStopAtTheActiveLimit` (a create and a resume share
   the one lock), `TestStoreSuite/TestAFailedTaskResumedAtTheLimitIsRefused` (a failed task resumed
   is counted too, not only a paused one),
-  `TestScheduledTasksSuite/TestResumesAtOnceStopAtTheActiveLimit`.
+  `TestScheduledTasksSuite/TestResumesAtOnceStopAtTheActiveLimit`,
+  `TestDataMoveSuite/TestTheCutOverCountsTheRoomACreateInProgressTakes`,
+  `TestDataMoveSuite/TestTheCutOverWaitsForAResumeOfAMovedTaskAndCountsItOnce`,
+  `TestDataMoveSuite/TestTheCutOverLeavesATaskPausedByTheUserWhileItWaited`,
+  `TestDataMoveSuite/TestTheCutOverAndResumesAtOnceKeepTheLimit`.
 - **A pause or edit writes a running run `missed`, held or in flight (S4).** An edited active
   one-shot comes due again as it now reads, unless its run placed a call: then it is completed.
   Only an edit that leaves a one-shot active while it is delivered keeps its claim and run.

@@ -76,10 +76,12 @@ type recordWrite struct {
 	// customerID is whose session the write is to: an id alone may be another customer's.
 	customerID string
 	// session is a session that opened or was renamed, nil otherwise, and tools what its
-	// model is offered. carriedOn says it was carried on from a row it had.
+	// model is offered. carriedOn says it was carried on from a row it had. refused is called
+	// if the store refuses its row because another customer's session has its id.
 	session   *store.AgentSession
 	tools     []store.ToolDefinition
 	carriedOn bool
+	refused   func()
 	// offered is the session whose model is now offered tools.
 	offered string
 	// closed is the session that ended, opened when the router closing it opened it, closedAt
@@ -148,8 +150,11 @@ type recorder interface {
 // session open and close.
 type sessionRecords interface {
 	recorder
-	Opened(row store.AgentSession, tools []store.ToolDefinition)
-	CarriedOn(row store.AgentSession, tools []store.ToolDefinition)
+	// Opened says a session started. refused is called, on the writer, if its id turns out to
+	// be another customer's session's.
+	Opened(row store.AgentSession, tools []store.ToolDefinition, refused func())
+	// CarriedOn says a session was carried on from a row it had; refused is as for Opened.
+	CarriedOn(row store.AgentSession, tools []store.ToolDefinition, refused func())
 	Closed(customerID, id string, opened, at time.Time, reason EndReason)
 	Close()
 }
@@ -186,6 +191,10 @@ type sessionRecorder struct {
 	// next that succeeds. Meanwhile each write is tried once: a database that stays down
 	// would otherwise hold every queued write, and Close behind them, for a whole budget each.
 	failing bool
+	// taken are the sessions, by customer and id, whose row the store refused because the id
+	// is another customer's: their turns and calls are not written under it. Kept by the
+	// writer alone, and each until the session closes.
+	taken map[[2]string]struct{}
 }
 
 func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecorder {
@@ -196,20 +205,21 @@ func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecor
 		flushes: make(chan chan (<-chan struct{})),
 		done:    make(chan struct{}),
 		refused: map[string]struct{}{},
+		taken:   map[[2]string]struct{}{},
 	}
 	go r.run()
 	return r
 }
 
 // Opened queues the row for a session that has just started.
-func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefinition) {
-	r.queueWrite(recordWrite{session: &row, tools: tools})
+func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefinition, refused func()) {
+	r.queueWrite(recordWrite{session: &row, tools: tools, refused: refused})
 }
 
 // CarriedOn queues the row of a session carried on from a row it had, maybe in another shard,
 // which it supersedes once written.
-func (r *sessionRecorder) CarriedOn(row store.AgentSession, tools []store.ToolDefinition) {
-	r.queueWrite(recordWrite{session: &row, tools: tools, carriedOn: true})
+func (r *sessionRecorder) CarriedOn(row store.AgentSession, tools []store.ToolDefinition, refused func()) {
+	r.queueWrite(recordWrite{session: &row, tools: tools, carriedOn: true, refused: refused})
 }
 
 // Offered queues what a session's model is now offered.
@@ -440,10 +450,24 @@ func (w *flushWaiters) release(taken int) {
 func (r *sessionRecorder) write(write recordWrite) {
 	switch {
 	case write.session != nil:
-		if err := r.attempt(func(ctx context.Context) error { return r.store.Sessions.Upsert(ctx, write.session) }); err != nil {
+		key := [2]string{write.session.CustomerID, write.session.ID}
+		err := r.attempt(func(ctx context.Context) error { return r.store.Sessions.Upsert(ctx, write.session) })
+		if errors.Is(err, store.ErrIDTaken) {
+			r.taken[key] = struct{}{}
+			if write.refused != nil {
+				write.refused()
+			}
+			// Expected when two routers open one id at once, and handled where refused ends
+			// the session, which says so: no ERROR with a stack here.
+			return
+		}
+		if err != nil {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
+		// The id is the customer's now, whether or not the close of a refused session before
+		// it reached the writer: a full queue drops a close.
+		delete(r.taken, key)
 		if write.carriedOn {
 			if err := r.attempt(func(ctx context.Context) error {
 				return r.store.Sessions.Supersede(ctx, write.session.CustomerID, write.session.ID, write.session.OpenedAt)
@@ -463,6 +487,7 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.closed != "":
+		delete(r.taken, [2]string{write.customerID, write.closed})
 		if err := r.attempt(func(ctx context.Context) error {
 			return r.store.Sessions.Close(ctx, write.customerID, write.closed, write.opened, write.closedAt, write.endReason)
 		}); err != nil {
@@ -471,6 +496,10 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session ending", "session", write.closed, "error", err)
 		}
 	case write.response != nil:
+		if _, taken := r.taken[[2]string{write.response.CustomerID, write.response.SessionID}]; taken {
+			r.refused[write.response.ID] = struct{}{}
+			return
+		}
 		err := r.attempt(func(ctx context.Context) error { return r.store.Responses.Insert(ctx, write.response) })
 		if errors.Is(err, store.ErrIDTaken) {
 			r.refused[write.response.ID] = struct{}{}
@@ -524,6 +553,9 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session's voice", "session", write.voiced, "error", err)
 		}
 	case write.callStarted != nil:
+		if _, taken := r.taken[[2]string{write.callStarted.CustomerID, write.callStarted.SessionID}]; taken {
+			return
+		}
 		if err := r.attempt(func(ctx context.Context) error { return r.store.Calls.Start(ctx, write.callStarted) }); err != nil {
 			r.logger.Error("could not record the call starting", "error", err)
 		}

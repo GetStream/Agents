@@ -54,6 +54,8 @@ type Store struct {
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
+	// shardsDown is when each shard that did not answer was last logged (settledWithout).
+	shardsDown shardWarnings
 	// globalIsShard says the shared database is also some shard's own, so its calls are not
 	// strays to drop.
 	globalIsShard bool
@@ -90,7 +92,7 @@ const writeTimeout = 10 * time.Second
 // keys is read once write has run, and names nothing when write found no row.
 //
 // A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
-// shortly after it (forgetLater).
+// on each of the next few attempts (forgetLater), which Close lets run.
 func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
 	_, err := s.detachedWriteTold(ctx, write, keys)
 	return err
@@ -113,7 +115,7 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	told = s.forget(ctx, names...)
 	var answered pgdriver.Error
 	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
-		s.forgetLater(names, err)
+		s.forgetLater(names, err, true)
 	}
 	return told, err
 }
@@ -223,11 +225,21 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 	return database, server.String, nil
 }
 
-// Close releases the connection pools.
+// Close releases the connection pools, once the deletions forgetLater holds have run, or
+// forgetGrace has passed.
 func (s *Store) Close() error {
 	s.retryMu.Lock()
 	s.closed = true
 	s.retryMu.Unlock()
+	retried := make(chan struct{})
+	go func() {
+		s.retrying.Wait()
+		close(retried)
+	}()
+	select {
+	case <-retried:
+	case <-time.After(forgetGrace):
+	}
 	s.stop()
 	s.retrying.Wait()
 	s.closeRedis()

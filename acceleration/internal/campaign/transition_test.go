@@ -14,6 +14,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 type TransitionSuite struct {
@@ -219,11 +220,63 @@ func (s *TransitionSuite) TestARefusalOfMoneyPausesAndKeepsTheAttempt() {
 	}
 }
 
+// A Stream app disconnected or moved away from refuses every call after this one, so the
+// campaign pauses with the attempt kept, rather than failing or retrying each contact.
+func (s *TransitionSuite) TestADisconnectedOrMovedStreamAppPausesTheCampaign() {
+	for err, code := range map[error]string{
+		streamapp.ErrStreamAppDisconnected: "stream_app_disconnected",
+		streamapp.ErrStreamAppMoved:        "stream_app_moved",
+	} {
+		dialed := resultOf(stack.Wrap(err))
+		s.Equal(Paused, dialed.Result)
+		s.Equal(code, dialed.Reason)
+	}
+}
+
 func (s *TransitionSuite) TestAWrappedErrorIsRecognisedAsItsKind() {
 	wrapped := fmt.Errorf("dial: %w", stack.Wrap(dlc.NewRefusal("country")))
 	s.Equal(Refused, resultOf(wrapped).Result)
 	s.Equal("country", resultOf(wrapped).Reason)
 	s.Equal(InvalidNumber, resultOf(fmt.Errorf("x: %w", stack.Wrap(phone.Dialable("+19005550123")))).Result)
+}
+
+// A dial that failed before anything rang is tried again five minutes later without using the
+// attempt, rather than taken as a call that may have rung.
+func (s *TransitionSuite) TestADialThatFailedBeforeAnythingRangIsTriedAgainWithoutUsingTheAttempt() {
+	now := s.at(2, 10, 0)
+	dialed := resultOf(fmt.Errorf("%w: %w", phone.ErrNotDialed, errors.New("store: the connection was reset")))
+	s.Equal(DialFailed, dialed.Result)
+	s.Equal(codeDialFailed, dialed.Reason)
+
+	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(2), 1, dialed, now, now)
+
+	s.False(again)
+	s.Equal(store.Enrolled, settle.Stage)
+	s.Equal(2, settle.Attempt)
+	s.True(now.Add(5 * time.Minute).Equal(*settle.NextAttemptAt))
+}
+
+// A refusal is what it is, whether or not it came before the vendor was asked.
+func (s *TransitionSuite) TestARefusalBeforeAnythingRangIsStillARefusal() {
+	dialed := resultOf(fmt.Errorf("%w: %w", phone.ErrNotDialed, dlc.NewRefusal("sandbox_recipient")))
+	s.Equal(Refused, dialed.Result)
+	s.Equal("sandbox_recipient", dialed.Reason)
+}
+
+// A sequence stored before delays were capped keeps a delay of 31 days and up as it is, and one
+// past what a Duration holds is held at what a Duration holds, about 292 years, not wrapped decades into the past.
+func (s *TransitionSuite) TestAStoredDelayPastTheCapIsKeptAndOnePastADurationDoesNotWrap() {
+	started := s.at(2, 10, 0)
+	seq := s.sequence(false)
+	seq.Steps[0].Attempts[1].DelayMinutes = 31 * 24 * 60
+	settle, _ := afterDial(seq, s.hours, s.chicago, s.contact(1), 1, Dialed{Outcome: outcome.NoAnswer}, started, started)
+	s.Require().NotNil(settle.NextAttemptAt)
+	s.False(settle.NextAttemptAt.Before(started.AddDate(0, 0, 31)), "a 31-day delay is not shortened")
+
+	seq.Steps[0].Attempts[1].DelayMinutes = 200000000
+	settle, _ = afterDial(seq, s.hours, s.chicago, s.contact(1), 1, Dialed{Outcome: outcome.NoAnswer}, started, started)
+	s.Require().NotNil(settle.NextAttemptAt)
+	s.True(settle.NextAttemptAt.After(started.AddDate(200, 0, 0)), settle.NextAttemptAt.String())
 }
 
 func (s *TransitionSuite) TestAContactWithNoOpeningFailsInsteadOfGettingNoTime() {

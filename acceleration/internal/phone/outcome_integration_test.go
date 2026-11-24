@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -308,6 +309,56 @@ func (s *OutcomeSuite) TestACallCancelledBeforeItWasSentWasNeverPlaced() {
 
 	s.ErrorIs(err, ErrNotPlaced)
 	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
+}
+
+// A call that fails before the vendor is asked, on a database blip, rang nobody, which a
+// campaign needs to know to try the person again without using an attempt.
+func (s *OutcomeSuite) TestACallThatFailedBeforeItWasSentWasNeverDialed() {
+	blip := &failingNumberRead{}
+	blip.left.Store(1)
+	s.store.GlobalDB().AddQueryHook(blip)
+
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.ErrorIs(err, ErrNotDialed)
+	s.NotErrorIs(err, ErrNotPlaced, "nothing was cancelled")
+	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
+}
+
+// A failure that placing the call again would meet again is not marked: a campaign would
+// otherwise try a number the app no longer holds for ever.
+func (s *OutcomeSuite) TestACallFromANumberNotHeldIsNotMarkedNeverDialed() {
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: "+15125550199", To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.NotErrorIs(err, ErrNotDialed)
+}
+
+// failingNumberRead fails the next left reads of phone_numbers, as a database blip would, by
+// handing them a context that has already ended.
+type failingNumberRead struct{ left atomic.Int32 }
+
+func (f *failingNumberRead) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.HasPrefix(event.Query, "SELECT") || !strings.Contains(event.Query, `FROM "phone_numbers"`) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	ended, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return ended
+}
+
+func (*failingNumberRead) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// A vendor that fails the dial had the request, so the phone may be ringing.
+func (s *OutcomeSuite) TestACallTheVendorFailedMayHaveRung() {
+	s.vendor.err = errors.New("telnyx is having a day")
+
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.NotErrorIs(err, ErrNotDialed)
 }
 
 func (s *OutcomeSuite) TestACallCancelledWhileTheVendorWasDialingMayHaveRung() {

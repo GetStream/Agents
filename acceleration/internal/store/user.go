@@ -211,6 +211,16 @@ func (r *Users) Forget(ctx context.Context, customerID, userID string) {
 	}
 }
 
+// forgetKeys drops from this process the users named among keys a write has just deleted
+// (Store.forget), at once, as Forget does; with no Redis, nothing else would.
+func (r *Users) forgetKeys(names []string) {
+	for _, name := range names {
+		if customerID, userID, named := splitUserKey(name); named {
+			r.seen.Remove(customerID, userID)
+		}
+	}
+}
+
 // invalidate drops what Redis says has gone stale. A nil message is Redis saying it
 // cannot name the keys -- a flush, or a restart -- so everything goes.
 func (r *Users) invalidate(messages []rueidis.RedisMessage) {

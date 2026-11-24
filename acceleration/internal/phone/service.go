@@ -1209,8 +1209,33 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
+	if err != nil && !sent && !lasting(err) {
+		return Placed{}, notDialed{err}
+	}
 	return placed, err
 }
+
+// lasting reports whether a call failed before it was sent for a reason that placing it again
+// would meet again: the request itself, a number or SIP trunk the app does not hold, its Stream
+// app, or the deployment's own setup (credentials, keys, a public URL, SIP trunks). Such a
+// failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+func lasting(err error) bool {
+	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
+		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
+		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
+		errors.Is(err, errLasting) || (err != nil && streamapp.Settled(err))
+}
+
+// errLasting marks a failure that has no kind of its own and that a second try meets again: a
+// vendor that cannot be built from its configuration, or a password the router's keys cannot
+// open or seal.
+var errLasting = errors.New("phone: a lasting failure")
+
+type lastingError struct{ err error }
+
+func (e lastingError) Error() string        { return e.err.Error() }
+func (e lastingError) Unwrap() error        { return e.err }
+func (e lastingError) Is(target error) bool { return target == errLasting }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
 // whatever the call returns.
@@ -1657,7 +1682,7 @@ func (s *Service) park(
 		}
 		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
 		if err != nil {
-			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
+			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
 		}
 		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
 	}
@@ -1740,6 +1765,17 @@ func notPlaced(ctx context.Context, err error) error {
 // once, the count or its lock not answering in time: it is ErrNotPlaced too, and worth trying
 // again only once the database answers.
 var ErrPlacingFailed = errors.New("phone: the call could not be counted against its organization's calls")
+
+// ErrNotDialed is a call that failed before the vendor was asked to dial it, for a reason that
+// may not be met again, such as a database blip: nobody was rung. It marks the failure, whose
+// own text and kind are kept.
+var ErrNotDialed = errors.New("phone: the call failed before it was dialed")
+
+type notDialed struct{ err error }
+
+func (e notDialed) Error() string        { return e.err.Error() }
+func (e notDialed) Unwrap() error        { return e.err }
+func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.

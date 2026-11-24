@@ -3445,7 +3445,7 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
-        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("paused_reason")]
         public string? PausedReason { get; set; } = default!;
@@ -3550,7 +3550,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Minutes after the previous attempt started, pushed into the calling hours.
+        /// Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("delay_minutes")]
         public long DelayMinutes { get; set; } = default!;
@@ -6167,7 +6167,7 @@ namespace GetStream.VisionAgents.Models
         public string? Outcome { get; set; } = default!;
 
         /// <summary>
-        /// Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
+        /// Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("result")]
         public string Result { get; set; } = default!;
@@ -6401,7 +6401,7 @@ namespace GetStream.VisionAgents.Models
         public string Channel { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address, for channel imessage or all.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;
@@ -10421,7 +10421,7 @@ namespace GetStream.VisionAgents.Models
         public string Id { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;

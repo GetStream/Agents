@@ -792,6 +792,7 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 		return err
 	}
 	s.forget(ctx, stale...)
+	s.Users.forgetKeys(stale)
 	return nil
 }
 
@@ -834,6 +835,8 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		row, err = endImportedAttempt(row, time.Now())
 	case "simulation_runs":
 		row, err = renameImported(row, map[string]string{"held_until": "lease_until"})
+	case "opt_outs":
+		row, err = normalizeImportedOptOut(row)
 	case "agent_configs":
 		row, err = renameImported(row, map[string]string{"sandbox": "sandbox_provider", "episode_cards": "episode_cards_on",
 			"channels": "channels_lines", "chat_channels": "channels_chat"})
@@ -996,38 +999,40 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
 	// commit in order and a reader resuming after one misses none. The row is read through the
 	// lock, so it is taken before the id is drawn and held until the statement's transaction ends.
-	locked, through := "", ""
+	locked, through, returning := "", "", ""
 	if table == "agent_logs" {
 		locked, through = "WITH locked AS (SELECT pg_advisory_xact_lock(hashtextextended(?, ?))) ", "locked, "
 		args = append([]any{customerID, agentLogLockSeed}, args...)
 	}
+	// A row renamed, or a skill moved to another config, is cached under what it was too. What it
+	// was is read in the statement that writes it, locked, so the one forgotten is the one a
+	// concurrent write did not already replace. It is read in the FROM, so before the row is written.
+	if cachedByID(table) {
+		locked, through = fmt.Sprintf("WITH was AS (SELECT (SELECT to_jsonb(h) FROM %s AS h"+
+			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR UPDATE) AS prior) ", spec.name), "was, "
+		args = append([]any{string(row), customerID}, args...)
+		returning = " RETURNING (SELECT prior FROM was), " + cachedRow(table, spec.name)
+	}
 
 	query := fmt.Sprintf(
-		"%sINSERT INTO %s (%s) SELECT %s FROM %sjsonb_populate_record(NULL::%s, %s) AS r%s ON CONFLICT %s %s",
-		locked, spec.name, quoted, selected, through, spec.name, subject, where, spec.conflictTarget(shape), conflict)
+		"%sINSERT INTO %s (%s) SELECT %s FROM %sjsonb_populate_record(NULL::%s, %s) AS r%s ON CONFLICT %s %s%s",
+		locked, spec.name, quoted, selected, through, spec.name, subject, where, spec.conflictTarget(shape), conflict, returning)
 
-	// A row renamed, or a skill moved to another config, is cached under what it was too.
-	var was []byte
-	if cachedByID(table) {
-		err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT to_jsonb(h) FROM %s AS h WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ?",
-			spec.name), string(row), customerID).Scan(&was)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var written int64
+	if returning == "" {
+		result, err := db.ExecContext(ctx, query, args...)
+		if err != nil {
+			if refused := refusedRow(table, err); refused != nil {
+				return refused
+			}
 			return fmt.Errorf("store: import %s: %w", table, err)
 		}
-	}
-
-	result, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
-		if refused := refusedRow(table, err); refused != nil {
-			return refused
+		*stale = append(*stale, cachedKeys(customerID, table, row)...)
+		if written, err = result.RowsAffected(); err != nil {
+			return stack.Wrap(fmt.Errorf("store: import %s: %w", table, err))
 		}
-		return fmt.Errorf("store: import %s: %w", table, err)
-	}
-	*stale = append(*stale, cachedKeys(customerID, table, was)...)
-	*stale = append(*stale, cachedKeys(customerID, table, row)...)
-	written, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: import %s: %w", table, err))
+	} else if written, err = importCached(ctx, db, customerID, table, query, args, stale); err != nil {
+		return err
 	}
 	if written > 0 || spec.copied != "" {
 		return nil
@@ -1060,6 +1065,36 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	return nil
 }
 
+// importCached runs an import's query of a cachedByID table, which returns what each row it wrote
+// was and is, and adds to stale the values both are cached under. It returns how many it wrote.
+func importCached(ctx context.Context, db bun.IDB, customerID, table, query string, args []any, stale *[]string) (int64, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return 0, refused
+		}
+		return 0, fmt.Errorf("store: import %s: %w", table, err)
+	}
+	defer rows.Close()
+	written := int64(0)
+	for rows.Next() {
+		var was, is []byte
+		if err := rows.Scan(&was, &is); err != nil {
+			return 0, fmt.Errorf("store: import %s: %w", table, err)
+		}
+		written++
+		*stale = append(*stale, cachedKeys(customerID, table, was)...)
+		*stale = append(*stale, cachedKeys(customerID, table, is)...)
+	}
+	if err := rows.Err(); err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return 0, refused
+		}
+		return 0, fmt.Errorf("store: import %s: %w", table, err)
+	}
+	return written, nil
+}
+
 // ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
 var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
 
@@ -1069,14 +1104,26 @@ func cachedByID(table string) bool {
 	return slices.Contains([]string{"agent_configs", "router_configs", "skills", "voices"}, table)
 }
 
+// cachedRow is a row of a cachedByID table, as relation names it in a write, in the form cachedKeys
+// reads. A voice's carries the providers of its bindings, whose ids are cached under the voice
+// (VoiceBindings.GetReady) and read only while it is not deleted.
+func cachedRow(table, relation string) string {
+	if table != "voices" {
+		return "to_jsonb(" + relation + ")"
+	}
+	return fmt.Sprintf("to_jsonb(%[1]s) || jsonb_build_object('binding_providers',"+
+		" ARRAY(SELECT vb.provider FROM voice_bindings AS vb WHERE vb.voice_id = %[1]s.id))", relation)
+}
+
 // cachedKeys are the cached values a row of a moved table, as row reads under customerID, is read
 // through: what the table's own writes forget (AgentConfigs.Update and its siblings). An app's
-// policy is cached by its app alone, so any row of it names the same values.
+// policy is cached by its app alone, so any row of it names the same values. A user is held by
+// every replica that saw them (Users.Forget).
 func cachedKeys(customerID, table string, row []byte) []string {
 	if table == "policies" {
 		return policyKeys(ScopeApp, customerID)
 	}
-	if !cachedByID(table) || len(row) == 0 {
+	if (!cachedByID(table) && table != "users") || len(row) == 0 {
 		return nil
 	}
 	// The columns are text, which jsonb_populate_record also fills from a number, so a value is
@@ -1100,7 +1147,14 @@ func cachedKeys(customerID, table string, row []byte) []string {
 	case "router_configs":
 		return []string{routerConfigKey(customerID, text("id")), routerConfigNameKey(customerID, text("name"))}
 	case "voices":
-		return []string{voiceKey(customerID, text("id")), voiceNameKey(customerID, text("name"))}
+		keys := []string{voiceKey(customerID, text("id")), voiceNameKey(customerID, text("name"))}
+		providers, _ := fields["binding_providers"].([]any)
+		for _, provider := range providers {
+			keys = append(keys, voiceBindingKey(customerID, text("id"), fmt.Sprint(provider)))
+		}
+		return keys
+	case "users":
+		return []string{userKey(customerID, text("id"))}
 	}
 	return []string{skillsKey(customerID, text("config_id"))}
 }
@@ -1329,6 +1383,27 @@ func renameImported(row json.RawMessage, renames map[string]string) (json.RawMes
 	return json.Marshal(fields)
 }
 
+// normalizeImportedOptOut writes an imported opt-out's recipient as this deployment keeps it
+// (optOutRecipient), so the one-live-row check and the update guard compare it with what is
+// kept here, and a source that never normalized its rows hands over ones that match.
+func normalizeImportedOptOut(row json.RawMessage) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
+	}
+	var recipient string
+	if err := json.Unmarshal(fields["recipient"], &recipient); err != nil {
+		return row, nil // validateImported refuses a row without one
+	}
+	recipient, _ = optOutRecipient(recipient, "")
+	written, err := json.Marshal(recipient)
+	if err != nil {
+		return nil, err
+	}
+	fields["recipient"] = written
+	return json.Marshal(fields)
+}
+
 // requeueImportedContact gives up the source's lease on a contact it was ringing, since the
 // runner that held it is in the deployment it came from. One in a call keeps its stage with a
 // lease already run out, so once the move is cut over a runner here settles it from its dial,
@@ -1481,7 +1556,14 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 // before the cut-over has less room than the move brought tasks, so each user's marked tasks
 // are resumed oldest first while the room lasts. The rest stay paused and keep the mark: it
 // says the cut-over still owes them a resume, which running it again pays once the user has
-// cancelled or paused tasks here.
+// cancelled or paused tasks here. The room is counted under the lock a create or resume counts
+// under (lockTaskLimits), so neither can take a place the cut-over counted as free.
+//
+// The users are resumed movedHoldersPerTransaction at a time, one transaction each, since each
+// takes one lock per user and config and the server holds only so many at once. One that fails
+// leaves the ones before it done, which running the cut-over again does not redo. Each waits
+// for a task row or a limit at most the serving connection's lock_timeout (3s): a create or
+// resume holds them only for its own transaction, and a cut-over that gives up is run again.
 //
 // It returns how many tasks it resumed, how many it left paused for want of a config, how many
 // for want of room, and the campaigns still running or scheduled there at the last catch-up.
@@ -1490,103 +1572,69 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 // person. Any change of a campaign's state here clears the mark (transitionIn). Running it
 // again resumes nothing twice.
 func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed, skipped, overLimit int64, campaigns []string, err error) {
-	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		var marked []ScheduledTask
-		if err := tx.NewSelect().Model(&marked).
-			Column("id", "user_id", "config_id").
-			Where("customer_id = ?", customerID).
-			Where("move_paused").
-			// A task resumed here by hand keeps the mark, and may have been delivered to its end since.
-			Where("state = ?", ScheduledTaskPaused).
-			Order("created_at", "id").
-			Scan(ctx); err != nil {
-			return fmt.Errorf("store: moved scheduled tasks: %w", err)
-		}
-		limits, held, err := moveRoom(ctx, tx, customerID, marked)
-		if err != nil {
+	var holders []scheduledTaskHolder
+	var rows []struct {
+		UserID   string `bun:"user_id"`
+		ConfigID string `bun:"config_id"`
+	}
+	if err := s.global.NewSelect().Model((*ScheduledTask)(nil)).
+		Distinct().
+		Column("user_id", "config_id").
+		Where("customer_id = ?", customerID).
+		Where("move_paused").
+		Where("state = ?", ScheduledTaskPaused).
+		Order("user_id", "config_id").
+		Scan(ctx, &rows); err != nil {
+		return 0, 0, 0, nil, stack.Wrap(fmt.Errorf("store: moved scheduled tasks: %w", err))
+	}
+	for _, row := range rows {
+		holders = append(holders, scheduledTaskHolder{row.UserID, row.ConfigID})
+	}
+	for chunk := range slices.Chunk(holders, movedHoldersPerTransaction) {
+		var r, k, o int64
+		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+			var err error
+			r, k, o, err = resumeMovedTasks(ctx, tx, customerID, chunk)
 			return err
+		})
+		if err != nil {
+			return 0, 0, 0, nil, stack.Wrap(err)
 		}
-		var resume, unmark []string
-		for _, task := range marked {
-			limit, live := limits[task.ConfigID]
-			if !live {
-				unmark = append(unmark, task.ID)
-				continue
-			}
-			key := scheduledTaskHolder{task.UserID, task.ConfigID}
-			if held[key] >= limit {
-				overLimit++
-				continue
-			}
-			held[key]++
-			resume = append(resume, task.ID)
-		}
-		if len(resume) > 0 {
-			result, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
-				Set("state = ?", ScheduledTaskActive).
-				Set("move_paused = false").
-				Set("updated_at = now()").
-				Where("customer_id = ?", customerID).
-				Where("id IN (?)", bun.In(resume)).
-				Where("move_paused").
-				Where("state = ?", ScheduledTaskPaused).
-				Exec(ctx)
-			if err != nil {
-				return fmt.Errorf("store: resume moved scheduled tasks: %w", err)
-			}
-			if resumed, err = result.RowsAffected(); err != nil {
-				return fmt.Errorf("store: resume moved scheduled tasks: %w", err)
-			}
-		}
-		if len(unmark) > 0 {
-			result, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
-				Set("move_paused = false").
-				Set("updated_at = now()").
-				Where("customer_id = ?", customerID).
-				Where("id IN (?)", bun.In(unmark)).
-				Where("move_paused").
-				Where("state = ?", ScheduledTaskPaused).
-				Exec(ctx)
-			if err != nil {
-				return fmt.Errorf("store: unmark moved scheduled tasks without a config: %w", err)
-			}
-			if skipped, err = result.RowsAffected(); err != nil {
-				return fmt.Errorf("store: unmark moved scheduled tasks without a config: %w", err)
-			}
-		}
-		if err := tx.NewSelect().Model((*Campaign)(nil)).
-			Column("id").
-			Where("customer_id = ?", customerID).
-			Where("move_paused").
-			Order("id").
-			Scan(ctx, &campaigns); err != nil {
-			return fmt.Errorf("store: moved campaigns: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, 0, 0, nil, stack.Wrap(err)
+		resumed, skipped, overLimit = resumed+r, skipped+k, overLimit+o
+	}
+	if err := s.global.NewSelect().Model((*Campaign)(nil)).
+		Column("id").
+		Where("customer_id = ?", customerID).
+		Where("move_paused").
+		Order("id").
+		Scan(ctx, &campaigns); err != nil {
+		return 0, 0, 0, nil, stack.Wrap(fmt.Errorf("store: moved campaigns: %w", err))
 	}
 	return resumed, skipped, overLimit, campaigns, nil
 }
 
+// movedHoldersPerTransaction is how many users on a config one transaction of the cut-over
+// resumes. Each takes a limit lock, and the server's lock table holds max_locks_per_transaction
+// times max_connections at once (64 times 100 by default) for every transaction together.
+var movedHoldersPerTransaction = 500
+
 // scheduledTaskHolder is a user on an agent config, who holds at most its limit of active tasks.
 type scheduledTaskHolder struct{ user, config string }
 
-// moveRoom reads, for the tasks a cut-over is to resume, the limit of each live config they
-// are on and the active tasks each of their users holds on each, in one query each: the
-// configs stay locked until the cut-over's transaction ends, so a config edit waits for it. A
-// config deleted or missing has no limit.
-func moveRoom(ctx context.Context, tx bun.Tx, customerID string, marked []ScheduledTask) (map[string]int, map[scheduledTaskHolder]int, error) {
-	limits, held := map[string]int{}, map[scheduledTaskHolder]int{}
-	if len(marked) == 0 {
-		return limits, held, nil
-	}
+// resumeMovedTasks resumes the marked tasks of some of a customer's users on their configs. It
+// reads the limit of each live config they are on and the active tasks each holds on each, in
+// one query each. It takes the configs, the task rows, then the limits: the order
+// ScheduledTasks.Update takes them in, so a resume of one of these tasks waits for the cut-over,
+// or the cut-over for it, rather than each holding what the other waits for. The configs stay
+// locked until the transaction ends, so a config edit waits for it. A config deleted or
+// missing has no limit. The task rows are read again once locked, so a task resumed or paused
+// by hand meanwhile is counted as it now is and not resumed.
+func resumeMovedTasks(ctx context.Context, tx bun.Tx, customerID string, holders []scheduledTaskHolder) (resumed, skipped, overLimit int64, err error) {
 	// The holders as two arrays read side by side: a list of pairs would be planned as one
 	// condition per pair.
-	users, configIDs := make([]string, 0, len(marked)), make([]string, 0, len(marked))
-	for _, task := range marked {
-		users, configIDs = append(users, task.UserID), append(configIDs, task.ConfigID)
+	users, configIDs := make([]string, 0, len(holders)), make([]string, 0, len(holders))
+	for _, holder := range holders {
+		users, configIDs = append(users, holder.user), append(configIDs, holder.config)
 	}
 
 	var configs []AgentConfig
@@ -1597,10 +1645,39 @@ func moveRoom(ctx context.Context, tx bun.Tx, customerID string, marked []Schedu
 		Where("deleted_at IS NULL").
 		For("SHARE").
 		Scan(ctx); err != nil {
-		return nil, nil, fmt.Errorf("store: lock the configs of moved scheduled tasks: %w", err)
+		return 0, 0, 0, fmt.Errorf("store: lock the configs of moved scheduled tasks: %w", err)
 	}
+	limits := map[string]int{}
 	for _, config := range configs {
 		limits[config.ID] = config.Scheduling.MaxActive()
+	}
+
+	// Oldest first, which is the order the room goes in.
+	var marked []ScheduledTask
+	if err := tx.NewSelect().Model(&marked).
+		Column("id", "user_id", "config_id").
+		Where("customer_id = ?", customerID).
+		Where("(user_id, config_id) IN (SELECT * FROM unnest(?::text[], ?::text[]))", pgdialect.Array(users), pgdialect.Array(configIDs)).
+		Where("move_paused").
+		Where("state = ?", ScheduledTaskPaused).
+		Order("created_at", "id").
+		For("NO KEY UPDATE").
+		Scan(ctx); err != nil {
+		return 0, 0, 0, fmt.Errorf("store: lock moved scheduled tasks: %w", err)
+	}
+	if len(marked) == 0 {
+		return 0, 0, 0, nil
+	}
+	still := make([]scheduledTaskHolder, 0, len(marked))
+	for _, task := range marked {
+		still = append(still, scheduledTaskHolder{task.UserID, task.ConfigID})
+	}
+	if err := lockTaskLimits(ctx, tx, customerID, still); err != nil {
+		return 0, 0, 0, err
+	}
+	users, configIDs = users[:0], configIDs[:0]
+	for _, holder := range still {
+		users, configIDs = append(users, holder.user), append(configIDs, holder.config)
 	}
 
 	var counts []struct {
@@ -1616,12 +1693,61 @@ func moveRoom(ctx context.Context, tx bun.Tx, customerID string, marked []Schedu
 		Where("state = ?", ScheduledTaskActive).
 		Group("user_id", "config_id").
 		Scan(ctx, &counts); err != nil {
-		return nil, nil, fmt.Errorf("store: count scheduled tasks: %w", err)
+		return 0, 0, 0, fmt.Errorf("store: count scheduled tasks: %w", err)
 	}
+	held := map[scheduledTaskHolder]int{}
 	for _, count := range counts {
 		held[scheduledTaskHolder{count.UserID, count.ConfigID}] = count.Count
 	}
-	return limits, held, nil
+	var resume, unmark []string
+	for _, task := range marked {
+		limit, live := limits[task.ConfigID]
+		if !live {
+			unmark = append(unmark, task.ID)
+			continue
+		}
+		key := scheduledTaskHolder{task.UserID, task.ConfigID}
+		if held[key] >= limit {
+			overLimit++
+			continue
+		}
+		held[key]++
+		resume = append(resume, task.ID)
+	}
+	if len(resume) > 0 {
+		result, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
+			Set("state = ?", ScheduledTaskActive).
+			Set("move_paused = false").
+			Set("updated_at = now()").
+			Where("customer_id = ?", customerID).
+			Where("id IN (?)", bun.In(resume)).
+			Where("move_paused").
+			Where("state = ?", ScheduledTaskPaused).
+			Exec(ctx)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("store: resume moved scheduled tasks: %w", err)
+		}
+		if resumed, err = result.RowsAffected(); err != nil {
+			return 0, 0, 0, fmt.Errorf("store: resume moved scheduled tasks: %w", err)
+		}
+	}
+	if len(unmark) > 0 {
+		result, err := tx.NewUpdate().Model((*ScheduledTask)(nil)).
+			Set("move_paused = false").
+			Set("updated_at = now()").
+			Where("customer_id = ?", customerID).
+			Where("id IN (?)", bun.In(unmark)).
+			Where("move_paused").
+			Where("state = ?", ScheduledTaskPaused).
+			Exec(ctx)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("store: unmark moved scheduled tasks without a config: %w", err)
+		}
+		if skipped, err = result.RowsAffected(); err != nil {
+			return 0, 0, 0, fmt.Errorf("store: unmark moved scheduled tasks without a config: %w", err)
+		}
+	}
+	return resumed, skipped, overLimit, nil
 }
 
 // importableNumber says whether an imported number is written here, and refuses one the API
@@ -1952,7 +2078,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 	var stale []string
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range changes {
-			if !appPolicy(change) {
+			if change.Skipped() {
 				continue
 			}
 			switch change.Op {
@@ -1972,20 +2098,22 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 		return err
 	}
 	s.forget(ctx, stale...)
+	s.Users.forgetKeys(stale)
 	return nil
 }
 
-// appPolicy is false for a change to a policy of another scope than an app's. The trigger records
-// a policy under its scope id whatever its scope, so an organization's that shares an id with the
-// app is recorded under the app, and replaying it would write it over the app's (identity).
-func appPolicy(change DataChange) bool {
+// Skipped is whether ApplyChanges leaves the change out: one to a policy of another scope than an
+// app's. The trigger records a policy under its scope id whatever its scope, so an organization's
+// that shares an id with the app is recorded under the app, and replaying it would write it over
+// the app's (identity).
+func (change DataChange) Skipped() bool {
 	if change.Table != "policies" {
-		return true
+		return false
 	}
 	var key struct {
 		Scope string `json:"scope"`
 	}
-	return json.Unmarshal(change.Key, &key) == nil && key.Scope == string(ScopeApp)
+	return json.Unmarshal(change.Key, &key) != nil || key.Scope != string(ScopeApp)
 }
 
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
@@ -2026,7 +2154,8 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 			if column == spec.customer {
 				continue
 			}
-			conditions = append(conditions, fmt.Sprintf("t.%s::text = (?::jsonb ->> '%s')", column, column))
+			// Read as the column's own type, so a time matches however its JSON writes it.
+			conditions = append(conditions, fmt.Sprintf("t.%[1]s = (jsonb_populate_record(NULL::%[2]s, ?::jsonb)).%[1]s", column, spec.name))
 			args = append(args, string(change.Key))
 		}
 	}
@@ -2065,11 +2194,11 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 			return fmt.Errorf("store: delete %s: %w", change.Table, err)
 		}
 		if deleted > 0 {
-			*stale = append(*stale, cachedKeys(customerID, change.Table, nil)...)
+			*stale = append(*stale, cachedKeys(customerID, change.Table, change.Key)...)
 		}
 		return nil
 	}
-	rows, err := db.QueryContext(ctx, query+" RETURNING to_jsonb(t)", args...)
+	rows, err := db.QueryContext(ctx, query+" RETURNING "+cachedRow(change.Table, "t"), args...)
 	if err != nil {
 		if refused := refusedRow(change.Table, err); refused != nil {
 			return refused

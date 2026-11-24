@@ -69,6 +69,8 @@ type store struct {
 	// failing are the path suffixes Fail and FailWith answer, by method, with the status each
 	// is answered with.
 	failing map[string]map[string]int
+	// refusals are what RefuseWith answers instead of Fail's 500 body, by method and suffix.
+	refusals map[string]map[string]Refusal
 	// uploads are the files stored on channels, in the order they came.
 	uploads []Upload
 	// events are the events sent to each channel, by channel id, in the order they came.
@@ -492,11 +494,34 @@ func (s *Server) KnownAuthors() {
 	s.db.knownAuthors = true
 }
 
+// Refusal is an error Stream answers with: its HTTP status, its own error code and message.
+type Refusal struct {
+	Status  int
+	Code    int
+	Message string
+}
+
+// RefuseWith is FailWith answering refusal's code and message, such as Stream's code 2 for an
+// api key it does not know.
+func (s *Server) RefuseWith(method, suffix string, refusal Refusal) {
+	s.FailWith(method, suffix, refusal.Status)
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	if s.db.refusals == nil {
+		s.db.refusals = map[string]map[string]Refusal{}
+	}
+	if s.db.refusals[method] == nil {
+		s.db.refusals[method] = map[string]Refusal{}
+	}
+	s.db.refusals[method][suffix] = refusal
+}
+
 // Heal serves requests of method ending in suffix again.
 func (s *Server) Heal(method, suffix string) {
 	s.db.mu.Lock()
 	defer s.db.mu.Unlock()
 	delete(s.db.failing[method], suffix)
+	delete(s.db.refusals[method], suffix)
 }
 
 // wait keeps the request Hold asked for waiting until it is let go.
@@ -734,8 +759,12 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	for suffix, status := range db.failing[r.Method] {
 		if strings.HasSuffix(r.URL.Path, suffix) {
+			code, message := 4, "boom"
+			if refusal, ok := db.refusals[r.Method][suffix]; ok {
+				code, message = refusal.Code, refusal.Message
+			}
 			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 4, "message": "boom", "StatusCode": status})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": code, "message": message, "StatusCode": status})
 			return
 		}
 	}

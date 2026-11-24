@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -234,8 +235,8 @@ func (r *ScheduledTasks) Insert(ctx context.Context, task *ScheduledTask, maxAct
 // maxActive already. Two creates or resumes at once would otherwise both count room for one more,
 // so the count is taken under a lock on the user and config held until the transaction ends.
 func refuseOverLimit(ctx context.Context, tx bun.Tx, task *ScheduledTask, maxActive int) error {
-	if err := lockUntilCommit(ctx, tx, task.CustomerID+"/"+task.UserID+"/"+task.ConfigID, scheduledTaskLimitLockSeed); err != nil {
-		return fmt.Errorf("store: lock scheduled task limit: %w", err)
+	if err := lockTaskLimits(ctx, tx, task.CustomerID, []scheduledTaskHolder{{task.UserID, task.ConfigID}}); err != nil {
+		return err
 	}
 	count, err := activeScheduledTasks(ctx, tx, task.CustomerID, task.UserID, task.ConfigID)
 	if err != nil {
@@ -243,6 +244,25 @@ func refuseOverLimit(ctx context.Context, tx bun.Tx, task *ScheduledTask, maxAct
 	}
 	if count >= maxActive {
 		return ErrTooManyScheduledTasks
+	}
+	return nil
+}
+
+// lockTaskLimits takes the lock each of a customer's users on a config counts their active
+// limit under, held until tx ends. Sorted, so two transactions taking several wait for each
+// other instead of deadlocking.
+func lockTaskLimits(ctx context.Context, tx bun.Tx, customerID string, holders []scheduledTaskHolder) error {
+	keys := make([]string, 0, len(holders))
+	for _, holder := range holders {
+		keys = append(keys, customerID+"/"+holder.user+"/"+holder.config)
+	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
+	// unnest reads the array in order, so the locks are taken in it.
+	if _, err := tx.ExecContext(ctx,
+		"SELECT pg_advisory_xact_lock(hashtextextended(key, ?)) FROM unnest(?::text[]) AS key",
+		scheduledTaskLimitLockSeed, pgdialect.Array(keys)); err != nil {
+		return fmt.Errorf("store: lock scheduled task limit: %w", err)
 	}
 	return nil
 }
@@ -541,20 +561,27 @@ func (r *ScheduledTasks) Delete(ctx context.Context, customerID, id string) erro
 
 // DeleteForSession removes every task that follows up in a
 // session, as deleting that session must: a user who deleted a conversation
-// is not contacted from it again.
+// is not contacted from it again. The changes recorded of those tasks and
+// their runs hold the user's words, so each becomes a delete with no payload,
+// as forgetting the user makes them (deleteTasks).
 func (r *ScheduledTasks) DeleteForSession(ctx context.Context, customerID, sessionID string) error {
 	if customerID == "" || sessionID == "" {
 		return nil
 	}
-	_, err := r.store.global.NewDelete().Model((*ScheduledTask)(nil)).
-		Where("customer_id = ?", customerID).
-		Where("session_id = ? OR origin_session_id = ?", sessionID, sessionID).
-		Exec(ctx)
+	_, err := deleteTasks(ctx, r.store.global, customerID, func(q bun.QueryBuilder) bun.QueryBuilder {
+		return q.Where("session_id = ? OR origin_session_id = ?", sessionID, sessionID)
+	}, true, sessionTaskChanges, customerID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete scheduled tasks for session: %w", err))
 	}
 	return nil
 }
+
+// sessionTaskChanges picks, as dc, the recorded changes of the tasks deleteTasks deletes and of
+// their runs, by id: a task's changes from before it followed up in the session do not name it.
+const sessionTaskChanges = `dc.customer_id = ? AND (
+	(dc.table_name = 'scheduled_tasks' AND dc.payload->>'id' IN (SELECT id FROM deleted))
+	OR (dc.table_name = 'scheduled_task_runs' AND dc.payload->>'task_id' IN (SELECT id FROM deleted)))`
 
 // SetSession records the session a task follows up in, once its
 // first occurrence has opened one. It touches nothing else: the task may be
@@ -864,11 +891,12 @@ func (r *ScheduledTasks) Postpone(ctx context.Context, customerID, taskID, runID
 	return held, nil
 }
 
-// Renew extends a claim the worker still holds. False is a
-// claim it no longer holds: an update, pause or delete took it.
+// Renew extends a claim the worker still holds, never to earlier than it is: a renewal still
+// on its way when Postpone held the task for quiet hours would cut the hold to one lease.
+// False is a claim it no longer holds: an update, pause or delete took it.
 func (r *ScheduledTasks) Renew(ctx context.Context, customerID, taskID, leasedBy string, lease time.Duration) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
-		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
+		Set("lease_until = GREATEST(lease_until, now() + make_interval(secs => ?))", lease.Seconds()).
 		Where("customer_id = ?", customerID).
 		Where("id = ?", taskID).
 		Where("leased_by = ?", leasedBy).

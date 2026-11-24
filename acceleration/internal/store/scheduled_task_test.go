@@ -293,6 +293,27 @@ func (s *StoreSuite) TestQuietHoursRoundTrip() {
 	s.Equal("07:00", found.QuietHours.End)
 }
 
+func (s *StoreSuite) TestARenewalAfterAHoldDoesNotCutItShort() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	until := time.Now().Add(2 * time.Hour)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].LeasedBy, until)
+	s.Require().NoError(err)
+	s.Require().True(held)
+
+	held, err = s.store.ScheduledTasks.Renew(s.ctx, "acme", "one", claimed[0].LeasedBy, time.Minute)
+	s.Require().NoError(err)
+	s.True(held, "the claim is still the worker's")
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(task.LeaseUntil)
+	s.WithinDuration(until, *task.LeaseUntil, time.Second, "the hold outlasts the renewal's minute")
+}
+
 func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
@@ -1512,9 +1533,14 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
 	}), "PauseForConfig")
-	s.Equal(1, s.countQueries(func() {
+	// The transaction, the tasks and their runs locked, and the delete with its changes redacted.
+	s.Equal(5, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1"))
 	}), "DeleteForSession")
+	// The transaction and the lock, which finds none.
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-none"))
+	}), "DeleteForSession of a session with no tasks")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
 	// The lost runs by hand settled, then one batch of runs and one of tasks, with nothing to prune.
 	s.Equal(3, s.countQueries(func() {

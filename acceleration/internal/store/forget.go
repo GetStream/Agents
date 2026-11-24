@@ -118,10 +118,12 @@ func forgottenCopies(db bun.IDB, customerID string) *bun.UpdateQuery {
 // and records entry, with these counts added to its changes, in the same transaction. The
 // changes recorded of their campaigns, deleted ones' included, name the replacement too
 // (renamedChanges). A campaign's contacts and their attempts stay: they are the app's data
-// about third parties, not the user's.
+// about third parties, not the user's. It outlives ctx, its statements sharing the store's write
+// timeout, and drops the user's cached policy whatever the commit answered, and again after a
+// COMMIT whose answer was lost (detachedWrite).
 func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replacement string, entry *AuditEntry) (UserSettings, error) {
 	var counts UserSettings
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range []struct {
 			count *int64
 			exec  func(context.Context, ...any) (sql.Result, error)
@@ -143,9 +145,7 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 		}
 		entry.Changes = append(entry.Changes, counts.Changes()...)
 		return recordAuditEntry(ctx, tx, entry)
-	})
-	// Dropped whatever the outcome, since a commit that fails can still have landed.
-	s.Policies.forget(ctx, ScopeUser, UserScopeID(appID, userID))
+	}, func() []string { return s.Policies.keys(ctx, ScopeUser, UserScopeID(appID, userID)) })
 	if err != nil {
 		return UserSettings{}, stack.Wrap(fmt.Errorf("store: forget user settings: %w", err))
 	}
@@ -195,37 +195,61 @@ func (s *Store) CountUserTasks(ctx context.Context, appID, userID string) (UserT
 // each becomes a delete of its row, with no payload, under its own number: deleting it would
 // raise the oldest number kept, and expire the cursors of other apps' moves.
 func (s *Store) ForgetUserTasks(ctx context.Context, appID, userID string) (UserTasks, error) {
+	counts, err := deleteTasks(ctx, s.global, appID, func(q bun.QueryBuilder) bun.QueryBuilder {
+		return q.Where("user_id = ?", userID)
+	}, false, userTaskChanges, appID, userID, userID)
+	if err != nil {
+		return UserTasks{}, stack.Wrap(fmt.Errorf("store: forget user tasks: %w", err))
+	}
+	return counts, nil
+}
+
+// deleteTasks deletes the app's tasks that tasks narrows, and their runs by cascade, and makes
+// each change that changes picks, as dc, a delete of its row with no payload under its own number,
+// in one transaction. changes may read the ids deleted from the CTE deleted.
+//
+// onlyLocked deletes just the tasks the lock found, and nothing when it found none, for a set a
+// write can move a task into after the lock (SetSession), whose runs would not be locked.
+// Otherwise tasks is read again by the delete, so a task made after the lock goes with the
+// changes that name it.
+func deleteTasks(ctx context.Context, db bun.IDB, appID string, tasks func(bun.QueryBuilder) bun.QueryBuilder,
+	onlyLocked bool, changes string, args ...any) (UserTasks, error) {
 	var counts UserTasks
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A write to a task or a run that commits while this waits on its row recorded a change
 		// the redaction would not see: waiting here first lets the next statement see it. Some
 		// run writes lock only the run (TakeCall), so the runs are locked too, after their
 		// tasks, as Claim and Finish lock them.
 		var locked []string
 		if err := tx.NewSelect().Model((*ScheduledTask)(nil)).Column("id").
-			Where("customer_id = ? AND user_id = ?", appID, userID).For("UPDATE").Scan(ctx, &locked); err != nil {
+			Where("customer_id = ?", appID).ApplyQueryBuilder(tasks).Order("id").For("UPDATE").Scan(ctx, &locked); err != nil {
 			return err
+		}
+		if onlyLocked && len(locked) == 0 {
+			return nil
 		}
 		var runs []string
 		if err := tx.NewSelect().Model((*ScheduledTaskRun)(nil)).Column("id").
-			Where("customer_id = ? AND task_id IN (?)", appID, bun.In(locked)).For("UPDATE").Scan(ctx, &runs); err != nil {
+			Where("customer_id = ? AND task_id IN (?)", appID, bun.In(locked)).Order("id").For("UPDATE").Scan(ctx, &runs); err != nil {
 			return err
 		}
-		// One statement, so the delete and the redaction read one snapshot: a task of the
-		// user's that commits between two statements would be deleted with its changes kept.
-		// The redaction's fallback to the live task reads that snapshot, from before the delete.
+		// One statement, so the delete and the redaction read one snapshot: a task that commits
+		// between two statements would be deleted with its changes kept. The redaction's reads of
+		// the live tasks read that snapshot, from before the delete.
 		redacted := tx.NewUpdate().Model((*dataChange)(nil)).Set("op = ?", ChangeDelete).Set("payload = NULL").
-			Where(userTaskChanges, appID, userID, userID).Returning("1")
-		deleted := tx.NewDelete().Model((*ScheduledTask)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Returning("1")
+			Where(changes, args...).Returning("1")
+		deleted := tx.NewDelete().Model((*ScheduledTask)(nil)).Where("customer_id = ?", appID).Returning("id")
+		if onlyLocked {
+			deleted = deleted.Where("id IN (?)", bun.In(locked))
+		} else {
+			deleted = deleted.ApplyQueryBuilder(tasks)
+		}
 		return tx.NewSelect().With("deleted", deleted).With("redacted", redacted).
 			ColumnExpr("(SELECT count(*) FROM deleted) AS tasks").
 			ColumnExpr("(SELECT count(*) FROM redacted) AS changes").
 			Scan(ctx, &counts)
 	})
-	if err != nil {
-		return UserTasks{}, stack.Wrap(fmt.Errorf("store: forget user tasks: %w", err))
-	}
-	return counts, nil
+	return counts, err
 }
 
 // forgottenUserTables are the tables with a user_id column that forgetting a user reaches: the
@@ -237,7 +261,7 @@ var forgottenUserTables = []string{"requests", "limits", "usage_resets", "limit_
 // each with why.
 var keptUserTables = map[string]string{
 	"agent_sessions": "the user's conversations, which the app deletes one by one (DELETE /v1/agents/sessions/{id}), " +
-		"their tasks with them",
+		"their tasks with them and the changes recorded of those tasks and their runs emptied (DeleteForSession)",
 	"agent_logs": "the app's log of what its agents did; nothing deletes or rewrites it, forget included",
 	"call_legs":  "the legs of phone calls as billed, with the numbers on them; forget does not rewrite them",
 	"channel_links": "one-time codes that tie a number texting in to the user, spent once (used_at) " +

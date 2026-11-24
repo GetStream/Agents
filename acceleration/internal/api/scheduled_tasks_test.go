@@ -1161,6 +1161,8 @@ func (s *ScheduledTasksSuite) TestDeletingASessionDeletesItsTasks() {
 	user := s.data.createUser()
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
 		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","in":"PT2H","timezone":"Europe/Amsterdam"}`})
+	ctx := context.Background()
+	s.Require().NoError(s.store.StartDataCapture(ctx, s.customerID(), time.Hour, time.Second))
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
@@ -1169,6 +1171,55 @@ func (s *ScheduledTasksSuite) TestDeletingASessionDeletesItsTasks() {
 
 	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
 	s.Empty(s.tasksOf(user), "the deleted conversation's tasks went with it")
+	changes, _, err := s.store.Changes(ctx, s.customerID(), 0, 1000)
+	s.Require().NoError(err)
+	var recorded int
+	for _, change := range changes {
+		if change.Table == "scheduled_tasks" {
+			recorded++
+			s.Equal(store.ChangeDelete, change.Op, "no change of the task holds its words")
+			s.Empty(change.Payload)
+		}
+	}
+	s.GreaterOrEqual(recorded, 2, "the task's insert, emptied, and its delete")
+}
+
+func (s *ScheduledTasksSuite) TestASessionWhoseTasksCouldNotBeDeletedIsKeptToDeleteAgain() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	opened := s.openScheduling(user, config, nil)
+	ctx := context.Background()
+	next := time.Now().Add(time.Hour)
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &store.ScheduledTask{
+		CustomerID: s.customerID(), ConfigID: config, UserID: user.userID, APIKey: s.app.key,
+		CallerKind: "authenticated", SessionID: opened.Id, Title: "Stretch", Instructions: "Remind them to stretch.",
+		StartLocal: time.Now().UTC(), Timezone: "Europe/Amsterdam", NextRunAt: &next,
+		State: store.ScheduledTaskActive, CreatedBy: "api",
+	}, 25))
+	// The store refuses to delete this app's tasks until the trigger is dropped.
+	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE FUNCTION tasks_kept() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN IF OLD.customer_id = '`+s.customerID()+`' THEN RAISE EXCEPTION 'tasks kept'; END IF; RETURN OLD; END $$`)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE TRIGGER tasks_kept BEFORE DELETE ON scheduled_tasks FOR EACH ROW EXECUTE FUNCTION tasks_kept()")
+	s.Require().NoError(err)
+	dropped := false
+	drop := func() {
+		if !dropped {
+			_, err := s.store.GlobalDB().ExecContext(ctx, "DROP FUNCTION tasks_kept() CASCADE")
+			s.Require().NoError(err)
+			dropped = true
+		}
+	}
+	defer drop()
+
+	s.Equal(http.StatusInternalServerError, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/sessions/"+opened.Id, nil, nil),
+		"the session is kept while its tasks are")
+	s.Len(s.tasksOf(user), 1)
+
+	drop()
+	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
+	s.Empty(s.tasksOf(user), "deleting it again deletes its tasks")
 }
 
 func (s *ScheduledTasksSuite) TestDeletingAConfigPausesItsTasks() {
