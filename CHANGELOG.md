@@ -869,10 +869,6 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 
 ## Bug Fixes
 
-### A sandbox's proxy credential works only while its run is in flight
-
-Under `code_sandbox.broker: proxy`, each run of code now gets its own proxy credential, and the router deletes it when the run ends. Before, one credential lasted for the sandbox's whole session, and its record expired 31 minutes after the last run started. A credential that code prints and the model repeats is already dead, and no later run uses it again. A background process that an earlier run left in the sandbox loses the proxy when that run ends (#2318).
-
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
 A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again, and the first retry now runs the turn once more, in the conversation or on a text channel, also when another router holds the session, or in a thread, so the user gets the reply once the money can be checked. A conversation turn refused again on that retry fails the run under `spend_check_unavailable` once its retries are spent, never `delivered`. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
