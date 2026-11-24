@@ -6363,11 +6363,13 @@ type CreateSessionRequest struct {
 	// Languages Language hints, which narrow the candidates in every modality.
 	Languages *[]string `json:"languages,omitempty"`
 
-	// Llm A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
-	Llm       *string `json:"llm,omitempty"`
-	MaxTokens *int    `json:"max_tokens,omitempty"`
+	// Llm A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
+	Llm *string `json:"llm,omitempty"`
 
-	// MaxToolRounds The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+	// MaxTokens Server-side only: a device sending it is refused with a 403.
+	MaxTokens *int `json:"max_tokens,omitempty"`
+
+	// MaxToolRounds The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
 	MaxToolRounds *int `json:"max_tool_rounds,omitempty"`
 
 	// Memory Who the session's memories are about. Without a user id nothing is recalled or stored, which is the case for a call with nobody identified on it.
@@ -6395,19 +6397,19 @@ type CreateSessionRequest struct {
 	// ReturnUrl The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands.
 	ReturnUrl *string `json:"return_url,omitempty"`
 
-	// Search Omit it and the config decides, or search-fast when there is no config.
+	// Search Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
 	Search *string `json:"search,omitempty"`
 
 	// StartVoice Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.
 	StartVoice *bool `json:"start_voice,omitempty"`
 
-	// Sts A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
+	// Sts A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
 	Sts *string `json:"sts,omitempty"`
 
-	// Stt Omit it and the config decides, or en-low-latency when there is no config.
+	// Stt Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
 	Stt *string `json:"stt,omitempty"`
 
-	// Tags Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+	// Tags Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
 	Tags *map[string]string `json:"tags,omitempty"`
 
 	// Team The team the session's work is counted under, its team spend limits included, as team:<name> is among a token's usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller's token names, else the agent config's team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for.
@@ -6423,7 +6425,7 @@ type CreateSessionRequest struct {
 	ToolTimeoutMs *int           `json:"tool_timeout_ms,omitempty"`
 	Tools         *[]SessionTool `json:"tools,omitempty"`
 
-	// Tts Omit it and the config decides, or en-low-latency when there is no config.
+	// Tts Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
 	Tts *string `json:"tts,omitempty"`
 
 	// Ui Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
@@ -6434,7 +6436,7 @@ type CreateSessionRequest struct {
 	UserName *string       `json:"user_name,omitempty"`
 	Video    *SessionVideo `json:"video,omitempty"`
 
-	// Voice The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+	// Voice The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
 	Voice *string `json:"voice,omitempty"`
 }
 
