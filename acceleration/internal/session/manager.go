@@ -1093,7 +1093,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// Said after the session is here to be found, so a peer that forwards a request on
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
-		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, spec.AgentID, spec.ConversationID)
+		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, m.hookApp(spec.StreamApp), spec.AgentID, spec.ConversationID)
 	}
 	// Asked again now the session is held: a status that came while the call was being
 	// joined found no session to end, and one that comes after this finds it. The session
@@ -1917,6 +1917,16 @@ func (m *Manager) appScope(app int64) store.AppScope {
 		deployment = m.options.Stream.DeploymentApp()
 	}
 	return store.AppOf(app, deployment)
+}
+
+// hookApp is the Stream app the directory holds the agent of a session pinned app in, as a hook
+// from that app finds it: zero for the deployment's own, whether the session is pinned to its id
+// or to none, since a hook from it may come before that id is known (hookOrigin's app).
+func (m *Manager) hookApp(app int64) int64 {
+	if m.appScope(app).Unpinned {
+		return 0
+	}
+	return app
 }
 
 // taken reports whether a new session's id is held where the session would meet it: by a

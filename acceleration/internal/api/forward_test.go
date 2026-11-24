@@ -157,6 +157,24 @@ func (s *ForwardedSessionSuite) TestARequestWithNoCredentialsIsRefusedHereRather
 	s.Equal(http.StatusUnauthorized, s.unauthenticatedClient.do(http.MethodGet, path, nil, nil))
 }
 
+// Two customers may each hold a conversation of one cid, each on a node of its own: an answer to a
+// call held for approval is carried to the node of the caller's own customer's, whether it lands on
+// the node running the other customer's or on one running neither.
+func (s *ForwardedSessionSuite) TestAnApprovalReachesTheNodeOfTheCallersConversationOfACidTwoHold() {
+	id := s.utils.uuid()
+	cid := "agent:" + id
+	s.heldWhereNothingAnswers(id, cid)
+	theirs := s.data.backendOfAnotherApp().on(s.other).createSession(textSession(&id))
+	s.Require().Equal(cid, value(theirs.ConversationId), "the other customer's conversation is of the cid")
+	path := "/v1/agents/conversations/" + cid + "/tool_approvals"
+	answer := map[string]any{"tool_call_id": "call", "request_id": "request", "allowed": true}
+
+	s.Equal(http.StatusServiceUnavailable, s.serverClient.on(s.other).do(http.MethodPost, path, answer, nil),
+		"landing on the node running the other customer's, the answer is carried to the caller's, which cannot be reached")
+	s.Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, path, answer, nil),
+		"landing on a node running neither")
+}
+
 // The same for an answer to a call held for approval, which names a conversation, not a session.
 func (s *ForwardedSessionSuite) TestAnApprovalWithNoCredentialsIsRefusedHereRatherThanCarried() {
 	cid := "messaging:" + s.utils.uuid()
@@ -175,11 +193,11 @@ func (s *ForwardedSessionSuite) heldWhereNothingAnswers(id, cid string) {
 	gone := httptest.NewUnstartedServer(nil)
 	directory := s.nodeDirectory(gone, s.shard, slog.New(slog.DiscardHandler))
 	gone.Close()
-	directory.Hold(s.T().Context(), s.customerID(), id, "", cid)
+	directory.Hold(s.T().Context(), s.customerID(), id, 0, "", cid)
 }
 
 // wasAsked reports whether the model was given something to answer.
-func (s *ForwardedSessionSuite) wasAsked(text string) bool {
+func (s *RouterSuite) wasAsked(text string) bool {
 	for _, request := range s.vision.requests() {
 		for _, message := range request.Input {
 			if message.Content == text {

@@ -100,15 +100,16 @@ func (s *Server) nodeFor(r *http.Request) (string, bool) {
 		return "", false
 	}
 	if cid, ok := approvalInPath(r.URL.Path); ok {
+		// Another customer's session may answer in a conversation of the cid, in its own app.
 		if s.sessions != nil {
-			if _, running := s.sessions.ByConversationWhere(cid, nil); running {
+			if _, running := s.sessions.ByConversationWhere(cid, func(owner string, _ int64) bool { return owner == customer }); running {
 				return "", false
 			}
 		}
-		address, err := s.directory.NodeByConversation(r.Context(), cid)
+		address, err := s.directory.NodeByConversation(r.Context(), customer, cid)
 		if err != nil {
 			s.logger.Warn("could not find out which node is answering in a conversation",
-				"conversation", cid, "error", err)
+				"customer", customer, "conversation", cid, "error", err)
 			return "", false
 		}
 		return address, true
@@ -187,10 +188,16 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 		return false, false
 	}
 
-	address, err := s.directory.NodeByAgent(ctx, event.ChannelID)
+	// The directory holds an agent of the deployment's own app as app zero (session.Manager's
+	// Hold), whether the hook knows that app's id or not.
+	app := origin.app
+	if origin.deployment {
+		app = 0
+	}
+	address, err := s.directory.NodeByAgent(ctx, app, event.ChannelID)
 	if err != nil {
 		s.logger.Warn("could not find out which node is answering in a channel",
-			"channel", event.ChannelID, "error", err)
+			"channel", event.ChannelID, "stream_app", origin.app, "error", err)
 		return false, false
 	}
 	if address == "" || address == s.directory.Address() {

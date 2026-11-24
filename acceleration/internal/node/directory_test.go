@@ -51,7 +51,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	s.Require().NoError(err)
 	directory.Close()
 	for _, session := range []string{"s1", "s2", "s3"} {
-		directory.Hold(s.ctx, "acme", session, "agent-"+session, "messaging:"+session)
+		directory.Hold(s.ctx, "acme", session, 0, "agent-"+session, "messaging:"+session)
 	}
 	directory.Wait(s.ctx, "acme")
 	directory.Wait(s.ctx, "globex")
@@ -59,7 +59,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	s.Require().Len(keys, 3*3+2+2+1)
+	s.Require().Len(keys, 3*5+2+2+1)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -74,7 +74,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	peer, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-b:1", Prefix: s.prefix})
 	s.Require().NoError(err)
 	peer.Close()
-	held, err := peer.NodeByConversation(s.ctx, "messaging:s3")
+	held, err := peer.NodeByConversation(s.ctx, "acme", "messaging:s3")
 	s.Require().NoError(err)
 	s.Equal("node-a:1", held)
 	waiting, err := peer.Waiting(s.ctx, "globex")
@@ -90,8 +90,8 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 func (s *DirectorySuite) TestTwoCustomersSessionsOfOneIdAreFoundApart() {
 	first := s.directoryAt("node-a:1")
 	second := s.directoryAt("node-b:1")
-	first.Hold(s.ctx, "acme", "order-42", "", "")
-	second.Hold(s.ctx, "globex", "order-42", "", "")
+	first.Hold(s.ctx, "acme", "order-42", 0, "", "")
+	second.Hold(s.ctx, "globex", "order-42", 0, "", "")
 
 	peer := s.directoryAt("node-c:1")
 	s.Equal("node-a:1", s.nodeOf(peer, "acme", "order-42"))
@@ -110,7 +110,7 @@ func (s *DirectorySuite) TestASessionHeldUnderItsIdAloneIsNotFound() {
 // key of the id when its customer's is not there, and would carry another customer's request
 // for the id to this node.
 func (s *DirectorySuite) TestASessionIsNotHeldUnderItsIdAlone() {
-	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", "", "")
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", 0, "", "")
 
 	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:order-42").Build()).AsInt64()
 	s.Require().NoError(err)
@@ -118,9 +118,51 @@ func (s *DirectorySuite) TestASessionIsNotHeldUnderItsIdAlone() {
 	s.Equal("node-a:1", s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
 }
 
+// Two customers' sessions of one id in Stream apps of their own each write as the agent of the
+// id and answer in the conversation of the id, on nodes of their own: each is found by its app,
+// or by its customer, whichever node said so last.
+func (s *DirectorySuite) TestTwoCustomersAgentsAndConversationsOfOneNameAreFoundApart() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", 111, "order-42", "agent:order-42")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "order-42", 222, "order-42", "agent:order-42")
+
+	peer := s.directoryAt("node-c:1")
+	for app, address := range map[int64]string{111: "node-a:1", 222: "node-b:1"} {
+		held, err := peer.NodeByAgent(s.ctx, app, "order-42")
+		s.Require().NoError(err)
+		s.Equal(address, held, "the agent in app %d", app)
+	}
+	for customer, address := range map[string]string{"acme": "node-a:1", "globex": "node-b:1"} {
+		held, err := peer.NodeByConversation(s.ctx, customer, "agent:order-42")
+		s.Require().NoError(err)
+		s.Equal(address, held, "%s's conversation", customer)
+	}
+}
+
+// A router of the release before holds an agent and a conversation by their names alone, and
+// reads them so: they are held so as well, and what it held is found.
+func (s *DirectorySuite) TestAnAgentAndAConversationAreHeldByTheirNamesAloneForTheReleaseBefore() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", 111, "order-42", "agent:order-42")
+	for _, key := range []string{":agent:order-42", ":channel:agent:order-42"} {
+		held, err := s.client.Do(s.ctx, s.client.B().Get().Key(s.prefix+key).Build()).ToString()
+		s.Require().NoError(err)
+		s.Equal("node-a:1", held, key)
+	}
+
+	for key, address := range map[string]string{":agent:support": "node-b:1", ":channel:agent:support": "node-b:1"} {
+		s.Require().NoError(s.client.Do(s.ctx, s.client.B().Set().Key(s.prefix+key).Value(address).Build()).Error())
+	}
+	peer := s.directoryAt("node-c:1")
+	held, err := peer.NodeByAgent(s.ctx, 111, "support")
+	s.Require().NoError(err)
+	s.Equal("node-b:1", held)
+	held, err = peer.NodeByConversation(s.ctx, "acme", "agent:support")
+	s.Require().NoError(err)
+	s.Equal("node-b:1", held)
+}
+
 func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	directory := s.directoryAt("node-a:1")
-	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	directory.Hold(s.ctx, "acme", "order-42", 0, "", "")
 
 	directory.Release(s.ctx, "acme", "order-42")
 

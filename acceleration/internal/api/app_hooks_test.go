@@ -158,6 +158,41 @@ func (s *AppHooksSuite) TestAMessageHookCarriedToAnotherNodesWorkerIsDispatchedT
 	s.Equal(s.channelID, s.await(worker, "message")["channel_id"])
 }
 
+// Customers may each run a session of one id, in the deployment's app or in Stream apps of their
+// own, each on a node of its own and all writing as the agent of the id: a message in any one's
+// channel is answered by the session of its own app, wherever the hook lands.
+func (s *AppHooksSuite) TestAMessageReachesTheSessionOfItsAppOfAnAgentThreeAppsRun() {
+	opened := CreateSessionRequest{AgentId: &s.channelID, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true)}
+	s.useApp(s.data.createApp())
+	s.serverClient.on(s.otherNode()).createSession(opened)
+	hooks := []func(body string) int{func(body string) int { return s.hook("/v1/chat/hooks/stream", body, suiteStreamSecret, "") }}
+	for range 2 {
+		s.useApp(s.numberedApp(streamAppID()))
+		app, apiKey := s.appID(), "own-key-"+s.utils.uuid()
+		s.answerAs(apiKey, app)
+		s.forwarded(apiKey)
+		s.serverClient.on(s.otherNode()).createSession(opened)
+		hooks = append(hooks, func(body string) int {
+			request := s.request("/v1/chat/hooks/stream/"+strconv.FormatInt(app, 10), body, sign(body, ownAppSecret))
+			vouched(request, app, apiKey)
+			response, err := s.server.Client().Do(request)
+			s.Require().NoError(err)
+			s.Require().NoError(response.Body.Close())
+			return response.StatusCode
+		})
+	}
+
+	for i, hook := range hooks {
+		text := fmt.Sprintf("is order %d on its way?", i)
+		s.Require().Equal(http.StatusOK, hook(fmt.Sprintf(`{"type": "message.new", "channel_id": %q, "channel_type": "agent",
+  "created_at": %q, "channel_custom": {}, "message": {"id": %q, "text": %q, "user": {"id": "sam", "name": "Sam"}}}`,
+			s.channelID, time.Now().UTC().Format(time.RFC3339Nano), "message-"+s.utils.uuid(), text)))
+
+		s.Require().Eventually(func() bool { return s.wasAsked(text) }, settleFor, 10*time.Millisecond,
+			"the message in app %d never reached its session", i)
+	}
+}
+
 func (s *AppHooksSuite) TestAnAppsHookIsNeverCheckedWithTheDeploymentSecret() {
 	// The deployment's secret signs only the deployment app's hooks.
 	s.Equal(http.StatusUnauthorized, s.hook(s.appPath("/v1/chat/hooks/stream"),

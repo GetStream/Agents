@@ -67,6 +67,9 @@ type Directory struct {
 	handouts string
 	logger   *slog.Logger
 	cancel   context.CancelFunc
+	// agentsIn holds an agent by its Stream app, where agents holds it by its name alone, which
+	// the release before reads.
+	agentsIn string
 
 	mu sync.Mutex
 	// held maps a session this node is running to the agent it writes as and the
@@ -84,8 +87,12 @@ type offerKey struct{ customerID, agentID string }
 // one id.
 type heldSession struct{ customerID, sessionID string }
 
-// claim is what a session this node holds is found by besides its own id.
-type claim struct{ agentID, conversationID string }
+// claim is what a session this node holds is found by besides its own id: the agent it writes
+// as in its Stream app, and the conversation it answers in.
+type claim struct {
+	app                     int64
+	agentID, conversationID string
+}
 
 // offerEntry is one node's offer as Redis holds it. A hash cannot expire its fields one at
 // a time, so each says when it lapses.
@@ -128,6 +135,7 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 		held:     map[heldSession]claim{},
 		waiting:  map[string]int{},
 		offered:  map[offerKey][]byte{},
+		agentsIn: prefix + ":app-agent:",
 	}
 	directory.sayShard(ctx)
 	go directory.renew(ctx)
@@ -169,20 +177,23 @@ func (d *Directory) shardCommands() []rueidis.Completed {
 }
 
 // Hold says this node is running a customer's session, and goes on saying so until Release.
+// app is the Stream app the session acts in, zero for the deployment's own.
 //
 // The agent id is held beside it because an arriving message names a channel and no
 // session at all, so the node that can answer it has to be findable by the agent writing
-// there. The conversation id (the channel's cid) is held too, because a person's answer to
-// a call held for their approval names the conversation and no session either: the
-// Router's own session in a channel of a type an agent config answers in runs on whichever
-// node took the hook.
-func (d *Directory) Hold(ctx context.Context, customerID, sessionID, agentID, conversationID string) {
+// there. It is held in its app, which is all a hook says of whose it is: two customers' sessions
+// in apps of their own may write as one agent. The conversation id (the channel's cid) is held
+// too, by the session's customer, because a person's answer to a call held for their approval
+// names the conversation and no session either: the Router's own session in a channel of a type
+// an agent config answers in runs on whichever node took the hook.
+func (d *Directory) Hold(ctx context.Context, customerID, sessionID string, app int64, agentID, conversationID string) {
 	key := heldSession{customerID, sessionID}
+	held := claim{app, agentID, conversationID}
 	d.mu.Lock()
-	d.held[key] = claim{agentID, conversationID}
+	d.held[key] = held
 	d.mu.Unlock()
 
-	d.write(ctx, key, claim{agentID, conversationID})
+	d.write(ctx, key, held)
 }
 
 // Release says this node is not running a customer's session any more.
@@ -213,16 +224,19 @@ func (d *Directory) Node(ctx context.Context, customerID, sessionID string) (str
 	return d.lookup(ctx, d.sessionKey(heldSession{customerID, sessionID}))
 }
 
-// NodeByAgent is the same for the session writing as an agent, which is what an arriving
-// message has to be answered by.
-func (d *Directory) NodeByAgent(ctx context.Context, agentID string) (string, error) {
-	return d.lookup(ctx, d.agents+agentID)
+// NodeByAgent is the same for the session writing as an agent in a Stream app (zero for the
+// deployment's own), which is what an arriving message has to be answered by. A router of the
+// release before holds the agent by its name alone, read when its app's is not there.
+func (d *Directory) NodeByAgent(ctx context.Context, app int64, agentID string) (string, error) {
+	return d.lookupFirst(ctx, d.appAgentKey(app, agentID), d.agents+agentID)
 }
 
-// NodeByConversation is the same for the session answering in a conversation, by the
-// channel's cid, which is what an answer to a call held for a person's approval names.
-func (d *Directory) NodeByConversation(ctx context.Context, conversationID string) (string, error) {
-	return d.lookup(ctx, d.channels+conversationID)
+// NodeByConversation is the same for a customer's session answering in a conversation, by
+// the channel's cid, which is what an answer to a call held for a person's approval names. A
+// router of the release before holds the conversation by its cid alone, read when the
+// customer's is not there.
+func (d *Directory) NodeByConversation(ctx context.Context, customerID, conversationID string) (string, error) {
+	return d.lookupFirst(ctx, d.channelKey(customerID, conversationID), d.channels+conversationID)
 }
 
 // Wait says this node has a dispatch worker connected for a customer, and goes on saying
@@ -347,10 +361,39 @@ func (d *Directory) lookup(ctx context.Context, key string) (string, error) {
 	return address, err
 }
 
+// lookupFirst is what the first of keys that is held says, read in one round trip.
+func (d *Directory) lookupFirst(ctx context.Context, keys ...string) (string, error) {
+	commands := make(rueidis.Commands, 0, len(keys))
+	for _, key := range keys {
+		commands = append(commands, d.redis.B().Get().Key(key).Build())
+	}
+	for _, result := range d.redis.DoMulti(ctx, commands...) {
+		address, err := result.ToString()
+		if rueidis.IsRedisNil(err) {
+			continue
+		}
+		return address, err
+	}
+	return "", nil
+}
+
 // sessionKey is where a customer's session is held: node:session:<customer>:<id>. A session id
 // holds no colon, so no customer and id make the key of another.
 func (d *Directory) sessionKey(key heldSession) string {
 	return d.sessions + key.customerID + ":" + key.sessionID
+}
+
+// appAgentKey is where the agent of a session in a Stream app is held:
+// node:app-agent:<app>:<agent>. A family of its own, as an agent id may hold a colon: under
+// node:agent: it could be the key of an agent named by its name alone.
+func (d *Directory) appAgentKey(app int64, agentID string) string {
+	return d.agentsIn + strconv.FormatInt(app, 10) + ":" + agentID
+}
+
+// channelKey is where a customer's conversation is held: node:channel:<customer>:<cid>. A cid is
+// a channel type and id with one colon between them, so it is never the key of a cid alone.
+func (d *Directory) channelKey(customerID, conversationID string) string {
+	return d.channels + customerID + ":" + conversationID
 }
 
 // write says this node holds a session, for holdFor.
@@ -364,17 +407,21 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 	}
 }
 
-// writeCommands hold the session under its customer and id.
+// writeCommands hold the session under its customer and id, its agent in its app and its
+// conversation by its customer, and each of those by its name alone as well, which a router of
+// the release before reads.
 func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Completed {
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),
 	}
 	if held.agentID != "" {
 		commands = append(commands,
+			d.redis.B().Set().Key(d.appAgentKey(held.app, held.agentID)).Value(d.address).Ex(holdFor).Build(),
 			d.redis.B().Set().Key(d.agents+held.agentID).Value(d.address).Ex(holdFor).Build())
 	}
 	if held.conversationID != "" {
 		commands = append(commands,
+			d.redis.B().Set().Key(d.channelKey(key.customerID, held.conversationID)).Value(d.address).Ex(holdFor).Build(),
 			d.redis.B().Set().Key(d.channels+held.conversationID).Value(d.address).Ex(holdFor).Build())
 	}
 	return commands
