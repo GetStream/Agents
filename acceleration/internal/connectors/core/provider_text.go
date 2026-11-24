@@ -23,12 +23,13 @@ func LoggedDescription(text string, secrets ...string) string {
 	return CutAtRune(KeepHosts(redactionFrom(secrets).apply(text, true)), DescriptionBytes)
 }
 
-// MessageBytes bounds provider_message on a log line (LoggedMessage): 1 KiB, the ticket's choice
+// MessageBytes bounds what LoggedMessage says: provider_message on a log line, and the error of
+// a failed tool call that the model and the session's events read. 1 KiB, the ticket's choice
 // (AI-1242), enough for a provider's error sentence while a gateway's HTML page cannot fill the
 // log.
 const MessageBytes = 1 << 10
 
-// LoggedMessage is what err, the error a failed call returned, says, for its log line: the
+// LoggedMessage is what err, the error a failed call returned, says on its log line: the
 // tool's own words for an MCP isError (ToolError, whose Error is its Message), the SDK's
 // or the JSON-RPC error's text, or the refusal's reason (session's dispatcher.recheck). Empty
 // for nil.
@@ -39,11 +40,13 @@ const MessageBytes = 1 << 10
 // mcp/streamable.go:2174 and :2560), and a connector's endpoints are all https
 // (internal/connectors/core/AGENTS.md, «Untrusted values cannot steer a request»). It is
 // then passed through redact, when it is not nil: the call's Exchange.Redact, which takes
-// out the last request's path and query and the strings of its credential, since the MCP
+// out every request's path and query and the strings of its credential, since the MCP
 // client puts a JSON-RPC error's message, and a tool its isError text, in the error, and a
 // provider may echo either there (AI-1244). It is then cut to MessageBytes at a UTF-8
-// boundary. The session's dispatcher logs it for a session's tool call, and a connection's
-// validate for a credential the provider refused (api.checkConnection).
+// boundary. The session's dispatcher logs it for a session's tool call, and hands it to the
+// model and the session's events as the call's error unless that is a tool's own isError,
+// which they read whole with only redact applied (dispatcher.send). A connection's validate
+// logs it for a credential the provider refused (api.checkConnection).
 //
 // Example: `Post "https://crm.example/mcp?access_token=x": EOF` is logged as
 // `Post "https://crm.example": EOF`, and `invalid token <the token> for /primary/mcp` as

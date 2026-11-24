@@ -1,10 +1,12 @@
 package core
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -58,9 +60,10 @@ type Exchange struct {
 	// scopeRequired is the provider asking for more access than the grant has, nil when no
 	// answer did.
 	scopeRequired *Outcome
-	// redact is Redact's redaction for the last request that left, nil when none did. A
-	// function, so that %v of an Exchange prints no secret (AGENTS.md «Secrets never print»).
-	redact func(string) string
+	// redact is Redact's redaction for every request that left, longest first, nil when none
+	// did. A function, so that %v of an Exchange prints no secret (AGENTS.md «Secrets never
+	// print»).
+	redact func() redaction
 }
 
 type exchangeKey struct{}
@@ -118,8 +121,9 @@ func (e *Exchange) ErrorBody() string {
 }
 
 // Redact is text, such as the error a tool source returned for the call, with what ErrorBody
-// takes out of a body taken out of it: the last request's path and query, together and apart,
-// and each string of the credential it was sent with (redactionOf). Text is unchanged when no
+// takes out of a body taken out of it, for every request that left: its path and query,
+// together and apart, and each string of the credential it was sent with (redactionOf). A
+// redirect's answer may name the path the call was first sent to. Text is unchanged when no
 // request left. Example: the MCP client's error for a JSON-RPC error that says
 // "invalid token <the token> for /primary/mcp" says "invalid token [redacted] for [redacted]".
 func (e *Exchange) Redact(text string) string {
@@ -128,7 +132,7 @@ func (e *Exchange) Redact(text string) string {
 	if e.redact == nil {
 		return text
 	}
-	return e.redact(text)
+	return e.redact().apply(text, true)
 }
 
 // WWWAuthenticate is the WWW-Authenticate of the last answer, its values joined with ", "
@@ -185,7 +189,10 @@ func (e *Exchange) refused(err error) {
 }
 
 // sending records that a request to host is leaving with a credential, and what of it and
-// that credential Redact takes out (redaction).
+// that credential Redact takes out (redaction), besides what it took out for the requests
+// before it. All of them are taken out in one pass, longest first: a string inside another,
+// such as the first path "/mcp" inside the path "/t/<id>/mcp" it redirected to, would
+// otherwise cut that one apart before it is matched whole.
 func (e *Exchange) sending(host string, redact redaction) {
 	if e == nil {
 		return
@@ -193,7 +200,13 @@ func (e *Exchange) sending(host string, redact redaction) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sent, e.host = true, host
-	e.redact = func(text string) string { return redact.apply(text, true) }
+	var all redaction
+	if e.redact != nil {
+		all = e.redact()
+	}
+	all = slices.Concat(all, redact)
+	slices.SortStableFunc(all, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	e.redact = func() redaction { return all }
 }
 
 // answered records how a request that left ended: with the provider's status, or with err.

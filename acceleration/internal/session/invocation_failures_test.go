@@ -52,7 +52,7 @@ var echoed = "invalid token " + tokenOf("primary") + " for /primary/mcp"
 
 // TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt: a 200 whose JSON-RPC error names the
 // token and the path, which the MCP client puts in the call's error; neither the row nor the
-// line keeps either. What the model reads is the error, as on the base.
+// line keeps either, nor does the error the model reads.
 func (s *CallLogSuite) TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt() {
 	app := s.connection("", "primary")
 	d, logged := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
@@ -60,7 +60,7 @@ func (s *CallLogSuite) TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt() {
 
 	_, err := s.call(d, "crm__whoami", "{}")
 
-	s.Require().ErrorContains(err, echoed)
+	s.Require().ErrorContains(err, "invalid token [redacted] for [redacted]")
 	row := s.row(app)
 	s.Equal(statusOf(http.StatusOK), row.ProviderStatus)
 	s.Equal(`mcp: crm__whoami: calling "tools/call": invalid token [redacted] for [redacted]`, row.ErrorMessage)
@@ -71,8 +71,8 @@ func (s *CallLogSuite) TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt() {
 }
 
 // TestAJSONRPCErrorIn4xxThatEchoesTheTokenIsKeptWithoutIt: the same error in a 400, which the
-// MCP client also puts in the call's error; the row keeps the body and the line both, with
-// neither the token nor the path.
+// MCP client also puts in the call's error; the row keeps the body and the line both, and the
+// model reads the error, each with neither the token nor the path.
 func (s *CallLogSuite) TestAJSONRPCErrorIn4xxThatEchoesTheTokenIsKeptWithoutIt() {
 	app := s.connection("", "primary")
 	d, logged := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
@@ -81,7 +81,7 @@ func (s *CallLogSuite) TestAJSONRPCErrorIn4xxThatEchoesTheTokenIsKeptWithoutIt()
 
 	_, err := s.call(d, "crm__whoami", "{}")
 
-	s.Require().ErrorContains(err, echoed)
+	s.Require().ErrorContains(err, "invalid token [redacted] for [redacted]")
 	row := s.row(app)
 	s.Equal(statusOf(http.StatusBadRequest), row.ProviderStatus)
 	s.Equal(`{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"invalid token [redacted] for [redacted]"}}`, row.ErrorMessage)
@@ -93,8 +93,7 @@ func (s *CallLogSuite) TestAJSONRPCErrorIn4xxThatEchoesTheTokenIsKeptWithoutIt()
 }
 
 // TestAnIsErrorThatEchoesTheTokenIsKeptWithoutIt: a tool's isError text that names the token
-// and the path; the row and the line keep the text without either. What the model reads is the
-// tool's own words, as on the base.
+// and the path; the row, the line and the error the model reads keep the text without either.
 func (s *CallLogSuite) TestAnIsErrorThatEchoesTheTokenIsKeptWithoutIt() {
 	app := s.connection("", "primary")
 	d, logged := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
@@ -102,7 +101,7 @@ func (s *CallLogSuite) TestAnIsErrorThatEchoesTheTokenIsKeptWithoutIt() {
 
 	_, err := s.call(d, "crm__whoami", "{}")
 
-	s.Require().ErrorContains(err, echoed)
+	s.Require().ErrorContains(err, "invalid token [redacted] for [redacted]")
 	row := s.row(app)
 	s.Equal(store.InvocationExternalServer, row.ErrorType)
 	s.Equal("invalid token [redacted] for [redacted]", row.ErrorMessage)
