@@ -1476,6 +1476,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	defer documents.Close()
 	shardRouting := shardmap.Map{Default: settings.ShardRouting.Default,
 		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions}
+	shardClaim := store.ShardClaim{Shard: settings.Shard, Routing: shardRouting,
+		Shards: slices.Collect(maps.Keys(settings.Postgres.Shards))}
 	options := api.Options{
 		Documents:             documents,
 		Routers:               routers,
@@ -1699,6 +1701,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if pgStore != nil && sessions != nil {
 		scheduler = scheduling.NewScheduler(pgStore, server.DeliverScheduledTask, logger)
 		scheduler.SetActivity(activityRecord)
+		scheduler.SetShard(shardClaim)
 		// Before Start: a session the first delivery opens takes the kick then.
 		server.SetSchedulerKick(scheduler.Kick)
 		scheduler.Start(ctx)
@@ -1713,6 +1716,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Dialer:      campaign.NewPhoneDialer(telephony, sessions, pgStore, logger),
 			Transcripts: server,
 			Classifier:  campaign.NewClassifier(streams.LLM),
+			Shard:       shardClaim,
 			Activity:    activityRecord,
 			Logger:      logger,
 		})
