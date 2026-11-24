@@ -457,11 +457,10 @@ func (f *Forwarder) sendDue() (wait time.Duration, again bool) {
 		if free == 0 {
 			return 0, false
 		}
-		now := time.Now()
 		f.mu.Lock()
 		sending := maps.Clone(f.sending)
 		f.mu.Unlock()
-		claimed, err := f.store.EventDeliveries.Claim(f.ctx, now, free, perDestination, sending, now.Add(f.lease))
+		claimed, err := f.store.EventDeliveries.Claim(f.ctx, free, perDestination, sending, f.lease)
 		if err != nil {
 			if f.ctx.Err() == nil {
 				f.logger.Error("could not take the event forwards due", "error", err)

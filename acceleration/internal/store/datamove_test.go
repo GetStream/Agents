@@ -4061,15 +4061,18 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 
 	s.move("acme", "moved")
 
-	later := time.Now().Add(time.Minute)
-	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	var left float64
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
+	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -5472,15 +5475,15 @@ func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
 		ConfigID: "config", Scenario: "ask where the order is", Assertion: "it says where"}
 	s.Require().NoError(s.source.Simulations.Insert(s.ctx, &simulation))
 	run := SimulationRun{CustomerID: "acme", SimulationID: simulation.ID, Mode: SimulationText}
-	leaseUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, time.Hour))
+	s.Require().NotNil(run.LeaseUntil)
 
 	s.importAsOlder("acme", "acme", map[string]map[string]string{"simulation_runs": {"lease_until": "held_until"}})
 
 	moved, err := s.destination.SimulationRuns.Get(s.ctx, "acme", run.ID)
 	s.Require().NoError(err)
 	s.Require().NotNil(moved.LeaseUntil)
-	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
+	s.True(run.LeaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", run.LeaseUntil, moved.LeaseUntil)
 }
 
 // An export from a release before agent_configs grouped its columns names four of them as they
