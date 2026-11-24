@@ -95,7 +95,7 @@ const concurrency = 8
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 func (s *SchemeContract) SetupTest() {
-	s.ctx = context.Background()
+	s.ctx = s.T().Context()
 	s.logs = &lockedBuffer{}
 	s.secrets, s.public = nil, nil
 	// Both handlers, since the JSON one marshals a value and the text one formats it, and a

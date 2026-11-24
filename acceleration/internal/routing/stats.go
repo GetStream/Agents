@@ -436,8 +436,15 @@ func (r *Recorder) lose(config ProviderConfig, entry Stat, cause error) {
 // priced is the stat's row priced, and the quote of its quantities. It builds each row Record
 // writes or lose loses once, so a user id left off is counted once per row.
 func (r *Recorder) priced(config ProviderConfig, entry Stat) (store.Request, pricing.Quote) {
-	request := row(r.modality, config, entry)
+	request, priced := r.price(config, entry)
 	request.UserID = userOnRow(entry.CustomerID, entry.UserID)
+	return request, priced
+}
+
+// price is what priced builds, its user id unchecked, for a caller that only reads what the
+// row costs: a user id left off is counted by the row Record writes, not again here.
+func (r *Recorder) price(config ProviderConfig, entry Stat) (store.Request, pricing.Quote) {
+	request := row(r.modality, config, entry)
 	pricedBy := quote
 	if entry.CostMicros != 0 {
 		pricedBy = quoteBesideQuoted

@@ -65,6 +65,15 @@ func (g Granularity) truncateUnit() string {
 	return "hour"
 }
 
+// next is the start of the bucket after the one at holds, in UTC as the rollups cut them.
+func (g Granularity) next(at time.Time) time.Time {
+	if g == Daily {
+		year, month, day := at.UTC().Date()
+		return time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
+	}
+	return at.UTC().Truncate(time.Hour).Add(time.Hour)
+}
+
 // Valid reports whether the granularity is one this store knows.
 func (g Granularity) Valid() bool {
 	return g == Hourly || g == Daily
@@ -99,24 +108,44 @@ func (r *Buckets) Rollup(ctx context.Context, granularity Granularity, from, to 
 		return 0, stack.Wrap(fmt.Errorf("store: rollup window must be non-empty, got %s to %s", from, to))
 	}
 
-	providers, err := r.rollup(ctx, granularity, from, to)
-	if err != nil {
-		return 0, err
+	// A bucket at a time, each in statements of its own: a wide window in one statement reads
+	// every request in it and runs out of the statement limit, rolling back all of it.
+	var written int64
+	for start := from; start.Before(to); {
+		end := granularity.next(start)
+		if end.After(to) {
+			end = to
+		}
+		providers, err := r.rollup(ctx, granularity, start, end)
+		if err != nil {
+			return written, err
+		}
+		tags, err := r.store.TagBuckets.rollup(ctx, granularity, start, end)
+		if err != nil {
+			return written, err
+		}
+		written += providers + tags
+		start = end
 	}
-	tags, err := r.store.TagBuckets.rollup(ctx, granularity, from, to)
-	if err != nil {
-		return 0, err
-	}
-	return providers + tags, nil
+	return written, nil
 }
 
 // wholeBuckets is a rollup's WHERE on column: the whole buckets [from, to) touches, taking
 // from and to as its two parameters. Postgres keeps timestamps to the microsecond, so to
-// less one is the window's last instant.
+// less one is the window's last instant. A bucket's length is a fixed interval: '1 day'
+// would be a calendar day in the session's zone, an hour short or long across a DST change.
 func wholeBuckets(granularity Granularity, column string) string {
-	return fmt.Sprintf("%[1]s >= date_trunc('%[2]s', ?::timestamptz) AND %[1]s < "+
-		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond') + interval '1 %[2]s'",
-		column, granularity.truncateUnit())
+	return fmt.Sprintf("%[1]s >= date_trunc('%[2]s', ?::timestamptz, 'UTC') AND %[1]s < "+
+		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond', 'UTC') + interval '%[3]s'",
+		column, granularity.truncateUnit(), granularity.length())
+}
+
+// length is one bucket of the granularity as a fixed Postgres interval.
+func (g Granularity) length() string {
+	if g == Daily {
+		return "24 hours"
+	}
+	return "1 hour"
 }
 
 func (r *Buckets) rollup(ctx context.Context, granularity Granularity, from, to time.Time) (int64, error) {
@@ -135,7 +164,7 @@ SELECT
     customer_id,
     provider,
     model,
-    date_trunc('%[2]s', started_at) AS bucket,
+    date_trunc('%[2]s', started_at, 'UTC') AS bucket,
     COALESCE(SUM(audio_ms), 0),
     COALESCE(SUM(characters), 0),
     COALESCE(SUM(input_tokens), 0),
@@ -205,7 +234,7 @@ SELECT
     customer_id,
     provider,
     model,
-    date_trunc('%[1]s', started_at) AS bucket,
+    date_trunc('%[1]s', started_at, 'UTC') AS bucket,
     COALESCE(SUM(audio_ms), 0) AS audio_ms_total,
     COALESCE(SUM(characters), 0) AS characters_total,
     COALESCE(SUM(input_tokens), 0) AS input_tokens_total,

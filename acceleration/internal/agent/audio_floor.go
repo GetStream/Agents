@@ -368,9 +368,9 @@ func (v *audioFloor) heard(inbound InboundAudio) {
 // writes them (Agent.consumeSTT), and asks it for its final when it ends an utterance, where
 // it can be told. Nil is one that could not be opened, whose turns that transcriber ends as
 // it would with no floor.
-func (v *audioFloor) rules(participant stt.Participant, session *sttrouter.Session, languages []string, asker audiofloor.Asker) *audiofloor.Transcriber {
+func (v *audioFloor) rules(ctx context.Context, participant stt.Participant, session *sttrouter.Session, languages []string, asker audiofloor.Asker) *audiofloor.Transcriber {
 	floor := audiofloor.NewFloor(v.client, languages, session.Finalize, v.logger.With("participant", participant.ID))
-	if err := floor.Start(context.Background()); err != nil {
+	if err := floor.Start(ctx); err != nil {
 		v.logger.Warn("chorus-asr will not rule on a participant's floor", "participant", participant.ID, "error", err)
 		return nil
 	}

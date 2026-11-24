@@ -128,7 +128,7 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 		s.releaseEndedCall(r, origin, event)
 		s.endCallEpisodes(r, origin, event)
 		if phoneCall {
-			s.logCallSites(ended)
+			s.logCallSites(r.Context(), ended)
 		}
 
 	case getstream.EventTypeCallSessionParticipantJoined, getstream.EventTypeCallSessionParticipantLeft:

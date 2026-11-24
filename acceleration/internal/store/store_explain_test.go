@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -40,7 +41,15 @@ func (s *StoreSuite) seededDatabase() string {
 		return s.seededDSN
 	}
 	dsn := s.emptyDatabase("store_explain")
-	store, err := Open(dsn)
+	// Seeding is setup, not the store's own work: its inserts of seedRows may run past the
+	// serving statement limit and the driver's read timeout, which the DSN lifts for it.
+	parsed, err := url.Parse(dsn)
+	s.Require().NoError(err)
+	query := parsed.Query()
+	query.Set("statement_timeout", "0")
+	query.Set("read_timeout", "2m")
+	parsed.RawQuery = query.Encode()
+	store, err := Open(parsed.String())
 	s.Require().NoError(err)
 	defer store.Close()
 	s.Require().NoError(store.Migrate(s.ctx))
@@ -262,7 +271,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Requests.RenameUser", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-207", "user-207")
+			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-207", "user-207-renamed")
 			return err
 		}},
 		{name: "Requests.Spend", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
@@ -458,11 +467,14 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return store.Sessions.Upsert(ctx, &AgentSession{ID: "seeded-session-7", CustomerID: "customer-7", AgentName: "agent 7",
 				UserID: "user-7", CallerKind: "user", CreatedAt: s.base})
 		}},
+		{name: "Sessions.Supersede", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
+			return store.Sessions.Supersede(ctx, "customer-8", "seeded-session-8", s.base)
+		}},
 		{name: "Sessions.SetToolTimeout", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.SetToolTimeout(ctx, "customer-7", "seeded-session-7", "search", 1000)
 		}},
 		{name: "Sessions.Close", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, "left")
+			return store.Sessions.Close(ctx, "customer-100", "seeded-session-100", s.base, s.base, "left")
 		}},
 		{name: "Sessions.SawVideo", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.SawVideo(ctx, "customer-7", "seeded-session-7")
@@ -560,7 +572,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Sessions.Ends", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Sessions.Ends(ctx, []string{"seeded-session-7", "seeded-session-207"}, since)
+			_, err := store.Sessions.Ends(ctx, []SessionKey{{"customer-7", "seeded-session-7"}, {"customer-7", "seeded-session-207"}}, since)
 			return err
 		}},
 		{name: "Store.ClaimGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
@@ -712,6 +724,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		}},
 		{name: "Buckets.Select", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Buckets.Select(ctx, "customer-7", BucketFilter{Modality: "llm", Granularity: Hourly, From: since, To: until})
+			return err
+		}},
+		{name: "TagBuckets.Select", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.TagBuckets.Select(ctx, "customer-7", TagBucketFilter{Modality: "llm", Key: "project", Granularity: Hourly, From: since, To: until})
 			return err
 		}},
 		{name: "Sandboxes.Usage", index: "requests_started_idx", run: func(ctx context.Context, store *Store) error {

@@ -3599,6 +3599,39 @@ type ActivityBucket struct {
 	VoiceMinutes float64 `json:"voice_minutes"`
 }
 
+// ActivityDay defines model for ActivityDay.
+type ActivityDay struct {
+	// AppId The app.
+	AppId string `json:"app_id"`
+
+	// Area The area of the API, such as agent_setup or conversations.
+	Area string `json:"area"`
+
+	// Client The client the requests named themselves as: dashboard, cli, sdk or api.
+	Client string `json:"client"`
+
+	// Day The UTC day, YYYY-MM-DD.
+	Day openapi_types.Date `json:"day"`
+
+	// FirstAt When the first request arrived.
+	FirstAt time.Time `json:"first_at"`
+
+	// LastAt When the last request arrived.
+	LastAt time.Time `json:"last_at"`
+
+	// LastRefusalCode The error code of the latest refusal, empty when there was none.
+	LastRefusalCode string `json:"last_refusal_code"`
+
+	// OrganizationId The organization the app was in when the row was last written.
+	OrganizationId string `json:"organization_id"`
+
+	// Refused How many were answered with a status of 400 or more.
+	Refused int64 `json:"refused"`
+
+	// Requests How many requests arrived, refused ones included.
+	Requests int64 `json:"requests"`
+}
+
 // ActivityEnding defines model for ActivityEnding.
 type ActivityEnding struct {
 	// EndReason Why the session ended, with whose fault it was and the stage it came at: agent_hangup, the agent hung up (fault none, stage conversation); transferred, the agent handed the caller to a person (fault none, stage conversation); hangup, the caller left (fault caller, stage conversation); start, nobody joined the phone call in time (fault carrier, stage ringing); unanswered, the call placed was never answered (fault caller, stage ringing); voicemail, an answering machine picked up the call placed, and the agent left its message or hung up (fault none, stage ringing); closed, the session was closed through the API, or replaced by a newer one (fault none, stage conversation); shutdown, the router ended the session as it shut down (fault router, stage conversation); agent_failed, the agent left the call or answered no turn for a failure of the router's own (fault router, stage conversation); model_failed, a model vendor failed: the agent left the call or answered no turn (fault vendor, stage conversation); model_config_refused, the model failed on the customer's own key or model, or refused a setting, and the agent answered no turn (fault customer_config, stage conversation); model_no_credit, the credit or spend limits refused the model's work, and the agent answered no turn (fault customer_credit, stage conversation).
@@ -3654,6 +3687,20 @@ type ActivityMeter struct {
 
 	// Requests How many requests. Runtime and sandbox are time, not requests, and read 0.
 	Requests int64 `json:"requests"`
+}
+
+// ActivityPage defines model for ActivityPage.
+type ActivityPage struct {
+	HasMore bool `json:"has_more"`
+
+	// Items One item per organization, day, app, area and client, sorted in that order.
+	Items []ActivityDay `json:"items"`
+
+	// NextCursor Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last.
+	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Organizations Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
+	Organizations []OrganizationProgress `json:"organizations"`
 }
 
 // ActivitySession defines model for ActivitySession.
@@ -3981,8 +4028,11 @@ type AgentConfigPatch struct {
 	Tts   *string      `json:"tts,omitempty"`
 
 	// UiInstructions What teaches the agent's model to answer with UI. An empty string removes them.
-	UiInstructions *string       `json:"ui_instructions,omitempty"`
-	Video          *SessionVideo `json:"video,omitempty"`
+	UiInstructions *string `json:"ui_instructions,omitempty"`
+
+	// UpdatedAt The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+	UpdatedAt *time.Time    `json:"updated_at,omitempty"`
+	Video     *SessionVideo `json:"video,omitempty"`
 
 	// VisibleTools Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search.
 	VisibleTools *[]string `json:"visible_tools,omitempty"`
@@ -4322,7 +4372,7 @@ type AgentScheduling struct {
 
 // AgentStats defines model for AgentStats.
 type AgentStats struct {
-	// AvgTurns Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+	// AvgTurns Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
 	AvgTurns *float64 `json:"avg_turns"`
 
 	// PeakAt When that peak was first reached. Null when no session was open in the window.
@@ -4966,7 +5016,7 @@ type Campaign struct {
 	StoppedAt *time.Time        `json:"stopped_at,omitempty"`
 	Tags      map[string]string `json:"tags"`
 
-	// Type What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+	// Type What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 	Type CampaignType `json:"type"`
 }
 
@@ -5068,7 +5118,7 @@ type CampaignRequest struct {
 	Sequence *CampaignSequence  `json:"sequence,omitempty"`
 	Tags     *map[string]string `json:"tags,omitempty"`
 
-	// Type What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+	// Type What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 	Type *CampaignType `json:"type,omitempty"`
 }
 
@@ -5125,7 +5175,7 @@ type CampaignTimeZone struct {
 // CampaignTimeZoneMode contact reads the hours where each contact is: their time_zone, else their number's, else fallback. fixed reads them in fixed.
 type CampaignTimeZoneMode string
 
-// CampaignType What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+// CampaignType What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
 type CampaignType string
 
 // CampaignVoicemail defines model for CampaignVoicemail.
@@ -6132,6 +6182,21 @@ type ContactPage struct {
 // ContactStage Where a contact is: enrolled while waiting to be rung, in_progress while a call to them happens or is being read, completed once the sequence is done with them, rejected when their number was refused before any call, stopped when they were left unrung, failed when a call could not be made.
 type ContactStage string
 
+// ContactUpdateRequest defines model for ContactUpdateRequest.
+type ContactUpdateRequest struct {
+	// Instructions What to say to this person. Empty clears it.
+	Instructions *string `json:"instructions,omitempty"`
+
+	// TimeZone An IANA zone. Empty clears it.
+	TimeZone *string `json:"time_zone,omitempty"`
+
+	// ToNumber With or without a country code.
+	ToNumber *string `json:"to_number,omitempty"`
+
+	// Variables Replace all of the contact's variables. Same rules as on add.
+	Variables *map[string]string `json:"variables,omitempty"`
+}
+
 // ContentPart defines model for ContentPart.
 type ContentPart struct {
 	union json.RawMessage
@@ -6175,13 +6240,13 @@ type CreateResponseRequest struct {
 	// ReasoningEffort How long the model may think before this answer, and the replies that finish it after its tools. One of the efforts the session's model accepts, such as none, minimal, low, medium, high or max; any other is a 400. Omitted keeps the session's.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 
-	// Replaces An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
+	// Replaces An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
 	Replaces *string `json:"replaces,omitempty"`
 
 	// RequestId Generated and sent by the SDKs, one per question, so a retry of the same question is answered once. Required for personal persistent text conversations, and ignored by a session not kept in Stream Chat. With one, images are data URIs, at most 8, uploaded to the conversation's channel and shown on the person's message, a voice note is uploaded and shown there too, and the frames of videos are shown to the model alone. A retry with the same id, text, images and voice note starts no second turn, returns no id and does not fetch its videos again: videos are not part of what a retry is matched on. On a session a dispatch worker opened for a message handed out from a channel, that message is already there: nothing is written or uploaded for it, and a reused id is answered as a duplicate even with other text or images.
 	RequestId *string `json:"request_id,omitempty"`
 
-	// Text What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
+	// Text What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
 	Text string `json:"text"`
 
 	// UiAction What the person did in the generated UI of an earlier reply, such as tapping a place or submitting a form, which the text says in their words: an object naming the reply (message_id), the UI's format and the action (name), with what it carries (payload), of at most 8 KB as JSON. Their message carries it as custom.ai_ui_action, and the model is told it after the text.
@@ -6487,7 +6552,7 @@ type CustomModelRequest struct {
 	// Example: https://model-abc123.api.baseten.co/environments/production/sync/v1
 	BaseUrl string `json:"base_url"`
 
-	// ContextWindow Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+	// ContextWindow Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
 	ContextWindow *int64 `json:"context_window,omitempty"`
 
 	// InputModalities Input kinds beyond text the model accepts, e.g. image.
@@ -6749,7 +6814,7 @@ type EqualsOrIn1 struct {
 
 // ErrorDetail defines model for ErrorDetail.
 type ErrorDetail struct {
-	// Code What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces) and too_many_tasks (a 409: the user is at their active-task limit). More may be added, so a client should expect one it does not know.
+	// Code What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.
 	Code string `json:"code"`
 
 	// DocUrl Where the code is explained.
@@ -8031,6 +8096,18 @@ type OrganizationActivity struct {
 
 	// Steps Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused.
 	Steps *[]ActivityStepDay `json:"steps"`
+}
+
+// OrganizationProgress defines model for OrganizationProgress.
+type OrganizationProgress struct {
+	// FurthestStep The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
+	FurthestStep ActivityStep `json:"furthest_step"`
+
+	// OrganizationId The organization.
+	OrganizationId string `json:"organization_id"`
+
+	// Steps Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
+	Steps []ActivityStepDay `json:"steps"`
 }
 
 // PhoneCapability What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.
@@ -12342,6 +12419,9 @@ type UpdateCampaignJSONRequestBody = CampaignRequest
 // AddCampaignContactsJSONRequestBody defines body for AddCampaignContacts for application/json ContentType.
 type AddCampaignContactsJSONRequestBody = AddContactsRequest
 
+// UpdateCampaignContactJSONRequestBody defines body for UpdateCampaignContact for application/json ContentType.
+type UpdateCampaignContactJSONRequestBody = ContactUpdateRequest
+
 // DuplicateCampaignJSONRequestBody defines body for DuplicateCampaign for application/json ContentType.
 type DuplicateCampaignJSONRequestBody = DuplicateCampaignRequest
 
@@ -13428,7 +13508,7 @@ type ClientInterface interface {
 
 	// AddCampaignContactsWithBody Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type.
@@ -13438,7 +13518,7 @@ type ClientInterface interface {
 
 	// AddCampaignContacts Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type.
@@ -13446,12 +13526,40 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/agents/campaigns/{id}/contacts (the `AddCampaignContacts` operationId).
 	AddCampaignContacts(ctx context.Context, id string, body AddCampaignContactsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteCampaignContact Remove one contact of a draft
+	//
+	// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+	DeleteCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetCampaignContact One contact, with every dial made to them
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with GET /v1/agents/campaigns/{id}/contacts/{contact_id} (the `GetCampaignContact` operationId).
 	GetCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateCampaignContactWithBody Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContactWithBody(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateCampaignContact Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContact(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StopCampaignContact Ring a contact no more
 	//
@@ -13483,7 +13591,7 @@ type ClientInterface interface {
 
 	// LaunchCampaignWithBody Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type.
@@ -13493,7 +13601,7 @@ type ClientInterface interface {
 
 	// LaunchCampaign Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type.
@@ -14211,7 +14319,7 @@ type ClientInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -14222,7 +14330,7 @@ type ClientInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -15517,7 +15625,7 @@ type ClientInterface interface {
 	// One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 	// Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 	// A router with shards cannot be the source of a move and answers 400 `not_configured`.
-	// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+	// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 	// Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 	//
 	// Corresponds with GET /v1/data/export (the `ExportData` operationId).
@@ -16996,7 +17104,7 @@ func (c *Client) ListCampaignContacts(ctx context.Context, id string, params *Li
 
 // AddCampaignContactsWithBody Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type.
@@ -17016,7 +17124,7 @@ func (c *Client) AddCampaignContactsWithBody(ctx context.Context, id string, con
 
 // AddCampaignContacts Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type.
@@ -17034,6 +17142,24 @@ func (c *Client) AddCampaignContacts(ctx context.Context, id string, body AddCam
 	return c.Client.Do(req)
 }
 
+// DeleteCampaignContact Remove one contact of a draft
+//
+// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+func (c *Client) DeleteCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteCampaignContactRequest(c.Server, id, contactId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetCampaignContact One contact, with every dial made to them
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
@@ -17041,6 +17167,46 @@ func (c *Client) AddCampaignContacts(ctx context.Context, id string, body AddCam
 // Corresponds with GET /v1/agents/campaigns/{id}/contacts/{contact_id} (the `GetCampaignContact` operationId).
 func (c *Client) GetCampaignContact(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetCampaignContactRequest(c.Server, id, contactId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateCampaignContactWithBody Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *Client) UpdateCampaignContactWithBody(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateCampaignContactRequestWithBody(c.Server, id, contactId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateCampaignContact Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *Client) UpdateCampaignContact(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateCampaignContactRequest(c.Server, id, contactId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -17111,7 +17277,7 @@ func (c *Client) DuplicateCampaign(ctx context.Context, id string, body Duplicat
 
 // LaunchCampaignWithBody Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type.
@@ -17131,7 +17297,7 @@ func (c *Client) LaunchCampaignWithBody(ctx context.Context, id string, contentT
 
 // LaunchCampaign Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type.
@@ -18579,7 +18745,7 @@ func (c *Client) CreateGuestUser(ctx context.Context, body CreateGuestUserJSONRe
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes any type of body and a specified content type.
 //
@@ -18600,7 +18766,7 @@ func (c *Client) ClaimGuestUserWithBody(ctx context.Context, contentType string,
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -21225,7 +21391,7 @@ func (c *Client) ListDataChanges(ctx context.Context, params *ListDataChangesPar
 // One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 // Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 // A router with shards cannot be the source of a move and answers 400 `not_configured`.
-// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 // Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 //
 // Corresponds with GET /v1/data/export (the `ExportData` operationId).
@@ -24449,6 +24615,47 @@ func NewAddCampaignContactsRequestWithBody(server string, id string, contentType
 	return req, nil
 }
 
+// NewDeleteCampaignContactRequest constructs an http.Request for the DeleteCampaignContact method
+func NewDeleteCampaignContactRequest(server string, id string, contactId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "contact_id", contactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/agents/campaigns/%s/contacts/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetCampaignContactRequest constructs an http.Request for the GetCampaignContact method
 func NewGetCampaignContactRequest(server string, id string, contactId string) (*http.Request, error) {
 	var err error
@@ -24486,6 +24693,60 @@ func NewGetCampaignContactRequest(server string, id string, contactId string) (*
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUpdateCampaignContactRequest calls the generic UpdateCampaignContact builder with application/json body
+func NewUpdateCampaignContactRequest(server string, id string, contactId string, body UpdateCampaignContactJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateCampaignContactRequestWithBody(server, id, contactId, "application/json", bodyReader)
+}
+
+// NewUpdateCampaignContactRequestWithBody constructs an http.Request for the UpdateCampaignContact method, with any body, and a specified content type
+func NewUpdateCampaignContactRequestWithBody(server string, id string, contactId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "contact_id", contactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/agents/campaigns/%s/contacts/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -36484,7 +36745,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddCampaignContactsWithBodyWithResponse Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -36494,13 +36755,23 @@ type ClientWithResponsesInterface interface {
 
 	// AddCampaignContactsWithResponse Add people to ring
 	//
-	// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+	// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/agents/campaigns/{id}/contacts (the `AddCampaignContacts` operationId).
 	AddCampaignContactsWithResponse(ctx context.Context, id string, body AddCampaignContactsJSONRequestBody, reqEditors ...RequestEditorFn) (*AddCampaignContactsResponse, error)
+
+	// DeleteCampaignContactWithResponse Remove one contact of a draft
+	//
+	// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+	DeleteCampaignContactWithResponse(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*DeleteCampaignContactResponse, error)
 
 	// GetCampaignContactWithResponse One contact, with every dial made to them
 	//
@@ -36510,6 +36781,26 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /v1/agents/campaigns/{id}/contacts/{contact_id} (the `GetCampaignContact` operationId).
 	GetCampaignContactWithResponse(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*GetCampaignContactResponse, error)
+
+	// UpdateCampaignContactWithBodyWithResponse Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContactWithBodyWithResponse(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error)
+
+	// UpdateCampaignContactWithResponse Change one contact of a draft
+	//
+	// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+	UpdateCampaignContactWithResponse(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error)
 
 	// StopCampaignContactWithResponse Ring a contact no more
 	//
@@ -36543,7 +36834,7 @@ type ClientWithResponsesInterface interface {
 
 	// LaunchCampaignWithBodyWithResponse Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -36553,7 +36844,7 @@ type ClientWithResponsesInterface interface {
 
 	// LaunchCampaignWithResponse Launch a draft
 	//
-	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+	// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -37341,7 +37632,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -37352,7 +37643,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 	// Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-	// A guest already claimed is refused rather than moved again.
+	// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -38777,7 +39068,7 @@ type ClientWithResponsesInterface interface {
 	// One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 	// Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 	// A router with shards cannot be the source of a move and answers 400 `not_configured`.
-	// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+	// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 	// Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -42081,6 +42372,114 @@ func (r AddCampaignContactsResponse) ContentType() string {
 	return ""
 }
 
+// DeleteCampaignContactResponse204Headers the declared response headers of an HTTP 204 response for DeleteCampaignContact
+type DeleteCampaignContactResponse204Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+	XStreamCostEstimated  *string
+	XStreamCostMicros     *int64
+}
+
+// DeleteCampaignContactResponse402Headers the declared response headers of an HTTP 402 response for DeleteCampaignContact
+type DeleteCampaignContactResponse402Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+}
+
+type DeleteCampaignContactResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON402 the response for an HTTP 402 `application/json` response
+	JSON402 *PaymentRequired
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+	// JSON503 the response for an HTTP 503 `application/json` response
+	JSON503 *Unavailable
+	// Headers204 the parsed response headers for an HTTP 204 response
+	Headers204 *DeleteCampaignContactResponse204Headers
+	// Headers402 the parsed response headers for an HTTP 402 response
+	Headers402 *DeleteCampaignContactResponse402Headers
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON400() *BadRequest {
+	return r.JSON400
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON402 returns the response for an HTTP 402 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON402() *PaymentRequired {
+	return r.JSON402
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON403() *Forbidden {
+	return r.JSON403
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON404() *NotFound {
+	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetJSON503 returns the response for an HTTP 503 `application/json` response
+func (r DeleteCampaignContactResponse) GetJSON503() *Unavailable {
+	return r.JSON503
+}
+
+// GetBody returns the raw response body bytes
+func (r DeleteCampaignContactResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteCampaignContactResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteCampaignContactResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DeleteCampaignContactResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 // GetCampaignContactResponse200Headers the declared response headers of an HTTP 200 response for GetCampaignContact
 type GetCampaignContactResponse200Headers struct {
 	XStreamBalanceMicros  *int64
@@ -42183,6 +42582,121 @@ func (r GetCampaignContactResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetCampaignContactResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// UpdateCampaignContactResponse200Headers the declared response headers of an HTTP 200 response for UpdateCampaignContact
+type UpdateCampaignContactResponse200Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+	XStreamCostEstimated  *string
+	XStreamCostMicros     *int64
+}
+
+// UpdateCampaignContactResponse402Headers the declared response headers of an HTTP 402 response for UpdateCampaignContact
+type UpdateCampaignContactResponse402Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+}
+
+type UpdateCampaignContactResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Contact
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON402 the response for an HTTP 402 `application/json` response
+	JSON402 *PaymentRequired
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+	// JSON503 the response for an HTTP 503 `application/json` response
+	JSON503 *Unavailable
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *UpdateCampaignContactResponse200Headers
+	// Headers402 the parsed response headers for an HTTP 402 response
+	Headers402 *UpdateCampaignContactResponse402Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON200() *Contact {
+	return r.JSON200
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON400() *BadRequest {
+	return r.JSON400
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON402 returns the response for an HTTP 402 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON402() *PaymentRequired {
+	return r.JSON402
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON403() *Forbidden {
+	return r.JSON403
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON404() *NotFound {
+	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetJSON503 returns the response for an HTTP 503 `application/json` response
+func (r UpdateCampaignContactResponse) GetJSON503() *Unavailable {
+	return r.JSON503
+}
+
+// GetBody returns the raw response body bytes
+func (r UpdateCampaignContactResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateCampaignContactResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateCampaignContactResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r UpdateCampaignContactResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -51383,6 +51897,8 @@ type UpdateScheduledTaskResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -51421,6 +51937,11 @@ func (r UpdateScheduledTaskResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r UpdateScheduledTaskResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r UpdateScheduledTaskResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -51491,6 +52012,8 @@ type PauseScheduledTaskResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -51529,6 +52052,11 @@ func (r PauseScheduledTaskResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r PauseScheduledTaskResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r PauseScheduledTaskResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -67665,7 +68193,7 @@ func (c *ClientWithResponses) ListCampaignContactsWithResponse(ctx context.Conte
 
 // AddCampaignContactsWithBodyWithResponse Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -67681,7 +68209,7 @@ func (c *ClientWithResponses) AddCampaignContactsWithBodyWithResponse(ctx contex
 
 // AddCampaignContactsWithResponse Add people to ring
 //
-// A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+// A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -67693,6 +68221,22 @@ func (c *ClientWithResponses) AddCampaignContactsWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseAddCampaignContactsResponse(rsp)
+}
+
+// DeleteCampaignContactWithResponse Remove one contact of a draft
+//
+// Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /v1/agents/campaigns/{id}/contacts/{contact_id} (the `DeleteCampaignContact` operationId).
+func (c *ClientWithResponses) DeleteCampaignContactWithResponse(ctx context.Context, id string, contactId string, reqEditors ...RequestEditorFn) (*DeleteCampaignContactResponse, error) {
+	rsp, err := c.DeleteCampaignContact(ctx, id, contactId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteCampaignContactResponse(rsp)
 }
 
 // GetCampaignContactWithResponse One contact, with every dial made to them
@@ -67708,6 +68252,38 @@ func (c *ClientWithResponses) GetCampaignContactWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseGetCampaignContactResponse(rsp)
+}
+
+// UpdateCampaignContactWithBodyWithResponse Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *ClientWithResponses) UpdateCampaignContactWithBodyWithResponse(ctx context.Context, id string, contactId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error) {
+	rsp, err := c.UpdateCampaignContactWithBody(ctx, id, contactId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateCampaignContactResponse(rsp)
+}
+
+// UpdateCampaignContactWithResponse Change one contact of a draft
+//
+// A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /v1/agents/campaigns/{id}/contacts/{contact_id} (the `UpdateCampaignContact` operationId).
+func (c *ClientWithResponses) UpdateCampaignContactWithResponse(ctx context.Context, id string, contactId string, body UpdateCampaignContactJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateCampaignContactResponse, error) {
+	rsp, err := c.UpdateCampaignContact(ctx, id, contactId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateCampaignContactResponse(rsp)
 }
 
 // StopCampaignContactWithResponse Ring a contact no more
@@ -67760,7 +68336,7 @@ func (c *ClientWithResponses) DuplicateCampaignWithResponse(ctx context.Context,
 
 // LaunchCampaignWithBodyWithResponse Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -67776,7 +68352,7 @@ func (c *ClientWithResponses) LaunchCampaignWithBodyWithResponse(ctx context.Con
 
 // LaunchCampaignWithResponse Launch a draft
 //
-// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+// Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -69002,7 +69578,7 @@ func (c *ClientWithResponses) CreateGuestUserWithResponse(ctx context.Context, b
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -69019,7 +69595,7 @@ func (c *ClientWithResponses) ClaimGuestUserWithBodyWithResponse(ctx context.Con
 //
 // For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
 // Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-// A guest already claimed is refused rather than moved again.
+// A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -71242,7 +71818,7 @@ func (c *ClientWithResponses) ListDataChangesWithResponse(ctx context.Context, p
 // One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 // Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 // A router with shards cannot be the source of a move and answers 400 `not_configured`.
-// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 // Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -75565,6 +76141,135 @@ func ParseAddCampaignContactsResponse(rsp *http.Response) (*AddCampaignContactsR
 	return response, nil
 }
 
+// ParseDeleteCampaignContactResponse parses an HTTP response from a DeleteCampaignContactWithResponse call
+func ParseDeleteCampaignContactResponse(rsp *http.Response) (*DeleteCampaignContactResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteCampaignContactResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 402:
+		var dest PaymentRequired
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON402 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Unavailable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		var headers DeleteCampaignContactResponse204Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Estimated"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Estimated", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostEstimated = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostMicros = &value
+		}
+		response.Headers204 = &headers
+	case rsp.StatusCode == 402:
+		var headers DeleteCampaignContactResponse402Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		response.Headers402 = &headers
+	}
+
+	return response, nil
+}
+
 // ParseGetCampaignContactResponse parses an HTTP response from a GetCampaignContactWithResponse call
 func ParseGetCampaignContactResponse(rsp *http.Response) (*GetCampaignContactResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -75671,6 +76376,139 @@ func ParseGetCampaignContactResponse(rsp *http.Response) (*GetCampaignContactRes
 		response.Headers200 = &headers
 	case rsp.StatusCode == 402:
 		var headers GetCampaignContactResponse402Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		response.Headers402 = &headers
+	}
+
+	return response, nil
+}
+
+// ParseUpdateCampaignContactResponse parses an HTTP response from a UpdateCampaignContactWithResponse call
+func ParseUpdateCampaignContactResponse(rsp *http.Response) (*UpdateCampaignContactResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateCampaignContactResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Contact
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 402:
+		var dest PaymentRequired
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON402 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Unavailable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers UpdateCampaignContactResponse200Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Estimated"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Estimated", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostEstimated = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostMicros = &value
+		}
+		response.Headers200 = &headers
+	case rsp.StatusCode == 402:
+		var headers UpdateCampaignContactResponse402Headers
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -86445,6 +87283,13 @@ func ParseUpdateScheduledTaskResponse(rsp *http.Response) (*UpdateScheduledTaskR
 		}
 		response.JSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -86570,6 +87415,13 @@ func ParsePauseScheduledTaskResponse(rsp *http.Response) (*PauseScheduledTaskRes
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError

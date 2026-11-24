@@ -4,6 +4,7 @@ package api
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -126,6 +127,55 @@ func (s *ForwardedSessionSuite) TestAMessageArrivingOnTheWrongNodeIsAnsweredByTh
 		s.Failf("a second agent was started", "%s was given to a worker as well", message.ChannelID)
 	default:
 	}
+}
+
+// Two customers may each run a session of one id, each on a node of its own: a request reaches
+// the session of the caller's own customer, wherever it lands.
+func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {
+	id := s.utils.uuid()
+	other := s.data.backendOfAnotherApp()
+	mine := s.serverClient.createSession(CreateSessionRequest{Id: &id, Incognito: pointerTo(true), Llm: pointerTo("llm-flow")})
+	theirs := other.on(s.other).createSession(CreateSessionRequest{Id: &id, Incognito: pointerTo(true), Llm: pointerTo("echo/echo-model")})
+	third := s.otherNode()
+
+	s.Equal(theirs.Llm, other.getSession(id).Llm, "landing on the node running the other customer's")
+	s.Equal(mine.Llm, s.serverClient.on(s.other).getSession(id).Llm, "landing on the node running the other customer's")
+	s.Equal(theirs.Llm, other.on(third).getSession(id).Llm, "landing on a node running neither")
+	s.Equal(mine.Llm, s.serverClient.on(third).getSession(id).Llm, "landing on a node running neither")
+}
+
+// A request with no credentials is answered here, with its 401, and not carried to the node
+// running the session: from a node that cannot be reached it would be a 503, which tells a
+// stranger the session is live.
+func (s *ForwardedSessionSuite) TestARequestWithNoCredentialsIsRefusedHereRatherThanCarried() {
+	id := s.utils.uuid()
+	s.heldWhereNothingAnswers(id, "")
+	path := "/v1/agents/sessions/" + id
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodGet, path, nil, nil),
+		"the customer's own request is carried to the node, which cannot be reached")
+	s.Equal(http.StatusUnauthorized, s.unauthenticatedClient.do(http.MethodGet, path, nil, nil))
+}
+
+// The same for an answer to a call held for approval, which names a conversation, not a session.
+func (s *ForwardedSessionSuite) TestAnApprovalWithNoCredentialsIsRefusedHereRatherThanCarried() {
+	cid := "messaging:" + s.utils.uuid()
+	s.heldWhereNothingAnswers(s.utils.uuid(), cid)
+	path := "/v1/agents/conversations/" + cid + "/tool_approvals"
+	answer := map[string]any{"tool_call_id": "call", "request_id": "request", "allowed": true}
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, path, answer, nil),
+		"the customer's own answer is carried to the node, which cannot be reached")
+	s.Equal(http.StatusUnauthorized, s.unauthenticatedClient.do(http.MethodPost, path, answer, nil))
+}
+
+// heldWhereNothingAnswers has the directory say a node that cannot be reached runs the
+// customer's session id, answering in the conversation cid.
+func (s *ForwardedSessionSuite) heldWhereNothingAnswers(id, cid string) {
+	gone := httptest.NewUnstartedServer(nil)
+	directory := s.nodeDirectory(gone, s.shard, slog.New(slog.DiscardHandler))
+	gone.Close()
+	directory.Hold(s.T().Context(), s.customerID(), id, "", cid)
 }
 
 // wasAsked reports whether the model was given something to answer.

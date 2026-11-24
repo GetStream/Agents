@@ -847,3 +847,10 @@ func (s *StoreSuite) TestChannelInboundQueryBudgets() {
 		s.Equal(2, pruned)
 	}), "Prune")
 }
+
+// PruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays, with a backlog of more than one statement's worth.
+func (s *StoreSuite) TestABacklogOfWrittenMessagesIsPrunedWhole() {
+	s.inSmallBatches()
+	deletes := s.statementsLike("DELETE FROM channel_thread_inbound", s.TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays)
+	s.Equal(3, deletes, "a row per statement, then the one that finds none")
+}

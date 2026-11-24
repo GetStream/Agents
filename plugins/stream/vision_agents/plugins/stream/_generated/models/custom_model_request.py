@@ -25,7 +25,7 @@ class CustomModelRequest:
         api_key (str | Unset): Sent as a bearer token. Stored sealed and never returned. Left out of an update keeps the
             one stored; empty removes it.
         context_window (int | Unset): Tokens the model accepts, so the router can refuse a conversation that would not
-            fit. Omitted is unknown.
+            fit and keep its default reply cap within it. Omitted is unknown.
         input_modalities (list[str] | Unset): Input kinds beyond text the model accepts, e.g. image.
         per_million_input_tokens (float | Unset): What the host bills per million input tokens in USD, so usage can say
             what a conversation cost. Omitted is free.

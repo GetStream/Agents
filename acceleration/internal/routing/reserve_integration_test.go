@@ -103,7 +103,7 @@ func (s *ReserveSuite) credit(micros int64) {
 	if micros > 0 {
 		s.service.Credit(s.T(), s.org, micros)
 	}
-	s.enforcer.Join(s.app, s.org, usage.DefaultTier)
+	s.enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 	// An account never read admits; once read, holding all of its credit leaves none.
 	probe := uuid.Must(uuid.NewV7())
 	s.Eventually(func() bool {
@@ -213,6 +213,39 @@ func (s *ReserveSuite) TestAFailedCallReleasesItsReservation() {
 	s.Require().Error(err)
 	s.NoError(s.spend(), "a failure bills nothing, so nothing is held for it")
 	s.False(s.rows(1)[0].Success)
+}
+
+func (s *ReserveSuite) TestARecordedHookIsToldOnlyOnceTheReservationIsReleased() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	var held error
+	told := false
+	meter.Recorded = func(routing.Stat, int64) { held, told = s.spend(), true }
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		return nil, errors.New("vendor down")
+	})
+
+	s.Require().Error(err)
+	s.True(told)
+	s.NoError(held, "the hook runs after the reservation is let go, so work it does holds no money")
+}
+
+func (s *ReserveSuite) TestAPanickingRecordedHookStillReleasesTheReservation() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	meter.Recorded = func(routing.Stat, int64) { panic("hook fell over") }
+
+	s.PanicsWithValue("hook fell over", func() {
+		_, _ = routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+			return nil, errors.New("vendor down")
+		})
+	})
+
+	s.NoError(s.spend(), "a failed call holds nothing, though its hook panicked")
+	s.False(s.rows(1)[0].Success, "and the row was queued before the hook ran")
 }
 
 func (s *ReserveSuite) TestWorkThatNamesItsOwnIDReleasesTheReservation() {

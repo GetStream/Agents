@@ -40,7 +40,7 @@ func (s *Server) tellMachineNow(ctx context.Context, told machinePeerRequest) {
 	if s.sessions.Machine(told.CustomerID, told.SessionID, told.Machine) || s.directory == nil || s.forwarder == nil {
 		return
 	}
-	address, err := s.directory.Node(ctx, told.SessionID)
+	address, err := s.directory.Node(ctx, told.CustomerID, told.SessionID)
 	if err != nil {
 		s.logger.Warn("could not find the node holding the session of a call a machine report is for",
 			"session", told.SessionID, "error", err)

@@ -170,6 +170,9 @@ const (
 	// runs first, and the HTTP drain gets the rest of shutdownGrace, so both fit inside the
 	// orchestrator's termination grace period.
 	phoneHangupGrace = 5 * time.Second
+	// legFlushTimeout bounds the last write of the call legs the leg sweep still holds, once
+	// the HTTP and session drains are over: one insert a leg, of at most a few, normally.
+	legFlushTimeout = 5 * time.Second
 	// usageDrainTimeout is how long the usage writer has to write what is queued once
 	// everything that records has stopped: it starts after the HTTP drain, any session drain
 	// and sessions.Shutdown, and counts none of them. What is still queued after it is lost,
@@ -191,7 +194,6 @@ const usage = `usage: router [--config path] [command]
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
   prices                read and check the price list (router prices for its commands)
-  schema drop-strays    drop the empty tables a shard or the shared database kept of the other's set; run once every router is on a release with two migration sets
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
   usage storage         record the last hour of every knowledge base's size, once each (hourly, one job per turbopuffer key)
@@ -277,8 +279,6 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 		return runStreamApps(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
-	case "schema":
-		return runSchema(args, settings, os.Stdout)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
 	case "help", "-h", "--help":
@@ -1199,6 +1199,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
+		// a session still kept get their last write, and before the usage writer closes.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), legFlushTimeout)
+			defer cancel()
+			telephony.StopLegSweep(ctx)
+		}()
 		go checkCallHook(ctx, settings, logger)
 		startPhoneSweeper(ctx, telephony, logger)
 	}
