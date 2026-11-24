@@ -204,7 +204,7 @@ func TestACallerThatHangsUpWhileItsKeyIsCheckedIsNoFailure(t *testing.T) {
 
 	server.Handler().ServeHTTP(response, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/agents/configs", nil))
 
-	require.Equal(t, statusClientClosed, response.Code, response.Body.String())
+	require.Equal(t, 499, response.Code, response.Body.String())
 	require.NotContains(t, logged.String(), "level=ERROR", "a caller hanging up is not an outage")
 	require.Equal(t, goneBefore+1, sumOf(t, "router_http_requests_total", gone), "a caller that gave up is counted")
 	require.Equal(t, answeredBefore, sumOf(t, "router_http_requests_total", answered), "nor as an answer")

@@ -538,6 +538,10 @@ func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
 
 	read()
 	s.True(valid, "dropped and built again")
+	var definition string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_get_indexdef(to_regclass('agent_logs_session_order'))").Scan(&definition))
+	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
 }
 
 func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {

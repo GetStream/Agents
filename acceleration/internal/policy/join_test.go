@@ -4,6 +4,8 @@ package policy
 
 import (
 	"fmt"
+	"net/url"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +45,14 @@ func (s *PolicySuite) organizationOf(appID string) string {
 	return organization
 }
 
+// seenAt is when the app's row was last written.
+func (s *PolicySuite) seenAt(appID string) time.Time {
+	var seen time.Time
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT seen_at FROM app_organizations WHERE app_id = ?", appID).Scan(&seen))
+	return seen
+}
+
 func (s *PolicySuite) TestAnAppNamingOrganizationsInTurnHasOneMembershipWrittenAtATimeAndTheLastWins() {
 	enforcer := s.newEnforcer(s.store, nil)
 	app := "app-" + uuid.NewString()
@@ -60,6 +70,9 @@ func (s *PolicySuite) TestAnAppNamingOrganizationsInTurnHasOneMembershipWrittenA
 	s.Require().NoError(holder.Commit())
 	s.Eventually(func() bool { return s.organizationOf(app) == "org-last" }, 5*time.Second, 10*time.Millisecond,
 		"the organization named last is the one recorded")
+	seen := s.seenAt(app)
+	s.Never(func() bool { return !s.seenAt(app).Equal(seen) }, 300*time.Millisecond, 20*time.Millisecond,
+		"the app's membership is written again once the last organization named landed")
 	closed := make(chan struct{})
 	go func() {
 		enforcer.Close()
@@ -146,7 +159,16 @@ func (s *PolicySuite) TestCloseWaitsForAMembershipBeingWritten() {
 }
 
 func (s *PolicySuite) TestCloseStopsWaitingForAMembershipAfterJoinTimeout() {
-	enforcer, err := New(s.store, quick, nil)
+	// A lock wait past the serving default, so only the store's write timeout ends the write.
+	dsn, err := url.Parse(os.Getenv("ROUTER_POSTGRES_DSN"))
+	s.Require().NoError(err)
+	query := dsn.Query()
+	query.Set("lock_timeout", "60000")
+	dsn.RawQuery = query.Encode()
+	patient, err := store.Open(dsn.String())
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(patient.Close()) })
+	enforcer, err := New(patient, quick, nil)
 	s.Require().NoError(err)
 	app := "app-" + uuid.NewString()
 	_, pid := s.heldMembership(app)
