@@ -527,7 +527,7 @@ func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 // takeOver settles the contacts whose router died mid-call, from the call it placed. None is
 // rung again.
 func (r *Runner) takeOver(ctx context.Context) {
-	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.now(), lease, maxCalls)
+	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, lease, maxCalls)
 	if err != nil {
 		r.logger.Error("could not take over expired campaign leases", "error", err)
 		return
