@@ -100,11 +100,11 @@ export class Items {
    *
    * Fails with `UnnamedTurnError` for a turn the router gave no id.
    */
-  list(options: { limit?: number; cursor?: string } = {}): Promise<Schemas["AgentResponseItemPage"]> {
+  async list(options: { limit?: number; cursor?: string } = {}): Promise<Schemas["AgentResponseItemPage"]> {
     // Without this, the request leaves response_id out and reads every turn in the session:
     // the whole conversation passed off as this turn's, or nothing at all for an incognito one.
     if (this.turn && !this.responseId) {
-      return Promise.reject(new UnnamedTurnError());
+      throw new UnnamedTurnError();
     }
     return this.client.get("/v1/agents/sessions/{id}/responses/items", {
       path: { id: this.sessionId },
