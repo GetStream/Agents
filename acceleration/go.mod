@@ -11,14 +11,14 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/daytona/clients/sdk-go v0.211.2
 	github.com/deepgram/deepgram-go-sdk/v3 v3.7.0
-	github.com/emiago/sipgo v1.2.0
+	github.com/emiago/sipgo v1.7.4
 	github.com/getsentry/sentry-go v0.49.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hibiken/asynq v0.26.0
-	github.com/icholy/digest v1.1.0
+	github.com/icholy/digest v1.2.0
 	github.com/joho/godotenv v1.5.1
 	github.com/klippa-app/go-pdfium v1.21.4
 	github.com/knadh/koanf/parsers/yaml v1.1.1

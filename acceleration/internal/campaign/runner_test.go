@@ -119,6 +119,13 @@ func (s *RunnerSuite) tick(runner *Runner) {
 	runner.reading.Wait()
 }
 
+// leasesPass moves the lease of each contact back by d. For the runner, which compares leases
+// with Postgres's clock, this is the same as when the time d passes.
+func (s *RunnerSuite) leasesPass(d time.Duration) {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET lease_until = lease_until - make_interval(secs => ?)", d.Seconds())
+	s.Require().NoError(err)
+}
+
 func (s *RunnerSuite) contact(campaign store.Campaign, number string) (store.Contact, []store.CampaignAttempt) {
 	contacts, err := s.store.CampaignContacts.Select(s.ctx, campaign.ID, store.ContactFilter{Number: number, Limit: 10})
 	s.Require().NoError(err)
@@ -288,7 +295,7 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 			PlacedAt: &died, Outcome: outcomes[one.Contact.ToNumber]}))
 	}
 	s.transcripts.write(callIDs["+15550000001"], talked())
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.tick(s.runner)
 
@@ -326,7 +333,7 @@ func (s *RunnerSuite) TestADialWhoseOutcomeCannotBeReadIsNotDialedAgainUntilItIs
 	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 		CallType: "default", CallID: attempts[0].CallID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
 		PlacedAt: &placed, Outcome: string(outcome.Busy)}))
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.tick(s.runner)
 
@@ -390,7 +397,7 @@ func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
 	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.runner.takeOver(s.ctx)
 
@@ -407,7 +414,7 @@ func (s *RunnerSuite) TestATakeOverOfAnAttemptNeverDialedLeavesItUnused() {
 	s.clock.advance(3 * 24 * time.Hour)
 	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.runner.takeOver(s.ctx)
 
@@ -1161,7 +1168,7 @@ func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 		CallType: "default", CallID: callID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
 		PlacedAt: &died, Outcome: "busy"}))
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.tick(s.runner)
 

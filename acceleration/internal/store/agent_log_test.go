@@ -62,7 +62,7 @@ func (s *StoreSuite) TestAgentLogRedactsBeforeStorage() {
 
 func (s *StoreSuite) TestAgentLogProviderFailureDetails() {
 	request := &Request{Modality: "search", CustomerID: "failure-details", AgentID: "test-agent", Provider: "perplexity", Model: "search", StartedAt: time.Now(), Success: false, ErrorCode: "build_failed", ErrorMessage: "perplexity: PERPLEXITY_API_KEY is required; api_key=private-key-value"}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	rows, err := s.store.AgentLogs.Select(s.ctx, request.CustomerID, AgentLogFilter{Limit: 1})
 	s.Require().NoError(err)
 	s.Require().Len(rows, 1)
@@ -79,7 +79,7 @@ func (s *StoreSuite) TestAMovedLogRowNeverShowsTheErrorOfTheRequestHoldingItsNum
 	// The destination's own failed request, which a moved log row's number happens to name.
 	own := &Request{Modality: "llm", CustomerID: "moved-logs", AgentID: "agent", Provider: "openai", Model: "gpt",
 		StartedAt: s.base, Success: false, ErrorCode: "upstream_error", ErrorMessage: "the destination's own failure"}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, own))
+	s.Require().NoError(insertRequest(s.ctx, s.store, own))
 	// A row written as an import writes it, details as they came, naming own's number.
 	logged := func(at time.Time, details map[string]any) AgentLog {
 		details["request_id"] = strconv.FormatInt(own.ID, 10)

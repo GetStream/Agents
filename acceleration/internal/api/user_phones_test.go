@@ -475,7 +475,7 @@ func (s *LinqSandboxSuite) SetupTest() {
 // Catches a one-to-one chat under a config with episode_cards off, which opens no episode, whose
 // replies would reach nobody the sandbox lists: the person a chat's replies reach is its
 // episode's row, and with none it is the person who started the chat
-// (store.ChannelThreadStarter), as the sender admit checked. Its reply and a scheduled delivery
+// (store.ChannelThreads.Starter), as the sender admit checked. Its reply and a scheduled delivery
 // go out (AI-2856).
 func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswered() {
 	s.config.EpisodeCards.On = false
@@ -490,7 +490,7 @@ func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswere
 }
 
 // A group chat under a config with episode_cards off has no episode and no one person, and its
-// replies and scheduled deliveries reach the person who started it (store.ChannelThreadStarter),
+// replies and scheduled deliveries reach the person who started it (store.ChannelThreads.Starter),
 // whom the sandbox lists, as base 518ac7e9f's did through the episode it opened whatever the
 // config said (AI-2856 R1.1). Catches a group chat with no episode whose replies reach nobody,
 // so the sandbox holds them back.

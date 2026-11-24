@@ -202,8 +202,7 @@ The rest of the credential's shape is borrowed rather than invented. `vak_live_â
 config is visible as one, and the key id ends in a CRC32 so a truncated paste is rejected
 before the database is asked. `last4` is all the dashboard would ever show of a secret
 again. A revoked key keeps its row, because a year of request rows pointing at a deleted key
-is unattributable noise, and `last_used_at` is written at most once a minute per key, since
-a synchronous update would double the writes of a busy one.
+is unattributable noise.
 
 ## Not done
 

@@ -596,6 +596,7 @@ func (s *Server) streamSTS(
 
 	session, err := s.streams.STS.Start(ctx, stsrouter.Request{
 		CustomerID:    request.CustomerID,
+		Caller:        request.Caller,
 		AgentID:       request.AgentID,
 		CallID:        request.CallID,
 		Tags:          request.Tags,

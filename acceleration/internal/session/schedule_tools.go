@@ -277,7 +277,7 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 		if r.kind == auth.KindGuest {
 			kind = store.UserKindGuest
 		}
-		if err := r.db.SetUserTimezone(ctx, r.spec.CustomerID, r.user, kind, parsed.Timezone); err != nil {
+		if err := r.db.Users.SetTimezone(ctx, r.spec.CustomerID, r.user, kind, parsed.Timezone); err != nil {
 			r.logger.Error("could not store the user's timezone", "user", r.user, "error", err)
 		}
 	}
@@ -619,7 +619,7 @@ func (r *scheduleRunner) snoozeTarget(task store.ScheduledTask, args updateArgs,
 // zone picks the zone for a new task: what was named for it, the session's,
 // the user's stored one, then the config's default.
 func (r *scheduleRunner) zone(ctx context.Context, argument string) (string, error) {
-	stored, err := r.db.UserTimezone(ctx, r.spec.CustomerID, r.user)
+	stored, err := r.db.Users.GetTimezone(ctx, r.spec.CustomerID, r.user)
 	if err != nil {
 		return "", err
 	}

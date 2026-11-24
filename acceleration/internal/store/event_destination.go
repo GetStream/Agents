@@ -97,7 +97,7 @@ type EventDestinationPosition struct {
 // Select returns one row more than this, so a caller can tell the page is not the
 // last without counting.
 func EventDestinationLimit(asked int) int {
-	return clampLimit(asked, defaultEventDestinationLimit, maxEventDestinationLimit)
+	return ClampLimit(asked, defaultEventDestinationLimit, maxEventDestinationLimit)
 }
 
 // EventDestinations are the customer URLs connectors' raw events are forwarded to.

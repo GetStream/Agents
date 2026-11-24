@@ -737,7 +737,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// clock line tells the day, and the scheduling tools read dates, in the zone its
 	// tasks will run in.
 	if user := zoneUser(spec); spec.Timezone == "" && user != "" && m.options.Store != nil {
-		if zone, err := m.options.Store.UserTimezone(ctx, spec.CustomerID, user); err == nil && zone != "" {
+		if zone, err := m.options.Store.Users.GetTimezone(ctx, spec.CustomerID, user); err == nil && zone != "" {
 			spec.Timezone, created.spec.Timezone = zone, zone
 		}
 	}
@@ -1224,7 +1224,7 @@ func (m *Manager) supersede(spec Spec) {
 	}
 }
 
-// RetireWithin bounds how long a retiring session (Session.Retire) may take to write the
+// RetireWithin bounds how long a retiring session (Manager.Retire) may take to write the
 // replies it owes before it is closed all the same: as long as a written message's answer may
 // take (api.askTimeout).
 const RetireWithin = 2 * time.Minute

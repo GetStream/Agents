@@ -118,7 +118,7 @@ func (s *Server) rememberTimezone(ctx context.Context, customerID string, spec s
 	if KindFrom(ctx) == auth.KindGuest {
 		kind = store.UserKindGuest
 	}
-	if err := s.store.SetUserTimezone(ctx, customerID, caller.UserID, kind, spec.Timezone); err != nil {
+	if err := s.store.Users.SetTimezone(ctx, customerID, caller.UserID, kind, spec.Timezone); err != nil {
 		s.logger.Error("could not store the user's timezone", "user", caller.UserID, "error", err)
 	}
 }

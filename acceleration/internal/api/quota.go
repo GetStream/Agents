@@ -28,8 +28,8 @@ func quotaHeaders(header http.Header, status quota.Status) {
 	header.Set(quotaResetHeader, strconv.FormatInt(status.Reset.Unix(), 10))
 }
 
-// modelWork is the routes that start model responses a quota counts: a session, which may
-// greet; a turn; a run; and the sockets that take turns, refused only as they are opened.
+// modelWork is the routes that start work a quota counts: a session, which may greet; a turn;
+// a run; a search; and the sockets that take turns, refused only as they are opened.
 var modelWork = func() *http.ServeMux {
 	routes := http.NewServeMux()
 	nothing := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
@@ -38,7 +38,9 @@ var modelWork = func() *http.ServeMux {
 		"POST /v1/agents/sessions/{id}/respond",
 		"POST /v1/agents/sessions/{id}/responses",
 		"POST /v1/agents/runs",
+		"POST /v1/search",
 		"GET /v1/agents/sessions/{id}/events",
+		"GET /v1/agents/socket",
 		"GET /v1/{modality}/stream",
 	} {
 		routes.Handle(pattern, nothing)

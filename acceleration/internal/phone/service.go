@@ -1463,7 +1463,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	}
 	forget = false
 	// A shared line outlives the call, so its row costs nothing to undo when the dial fails,
-	// and the call's app (CallPin) is known before its leg arrives.
+	// and the call's app (store.CallResources.Pin) is known before its leg arrives.
 	if shared {
 		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			s.forgetOutcome(ctx, token, callID)

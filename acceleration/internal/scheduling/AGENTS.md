@@ -368,7 +368,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestDataMoveSuite/TestTheCutOver*`, `TestATaskTheUser*`, `TestReplicateResumeSuite` (`cmd/router`),
   `TestScheduledTasksSuite/TestATaskAMovePaused*` (`internal/api`),
   `TestScheduleResumeSuite/TestATaskAMovePaused*` (`internal/session`).
-- **History is kept 90 days.** `PruneScheduledTasks` (daily, `pruneScheduledTasks` in `cmd/router`) deletes
+- **History is kept 90 days.** `ScheduledTasks.Prune` (daily, `pruneScheduledTasks` in `cmd/router`) deletes
   runs finished, and completed or failed tasks last changed, over `ScheduledTasksKept` ago. An active or
   paused task stays; its old runs do not. A run by hand still running a day after it started
   (`scheduledTaskManualRunLost`) is written `missed` first: only the router that took the request

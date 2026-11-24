@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -33,11 +35,23 @@ func TestServerSuite(t *testing.T) {
 	runSuite(t, new(ServerSuite))
 }
 
+// insertRequest writes one request as the writer does, through InsertMany, giving it a usage
+// id when it has none, and leaves on request what the write set.
+func insertRequest(ctx context.Context, db *store.Store, request *store.Request) error {
+	if request.UsageID == uuid.Nil {
+		request.UsageID = uuid.Must(uuid.NewV7())
+	}
+	rows := []store.Request{*request}
+	_, err := db.Requests.InsertMany(ctx, rows)
+	*request = rows[0]
+	return err
+}
+
 // SetupSuite records a request for the model this deployment routes to, so that whenever
 // this suite first counts popularity, there is something for the model to have a share of.
 func (s *ServerSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "stt", CustomerID: s.utils.uuid(),
 		Provider: "stub", Model: "stub-model",
 		StartedAt: time.Now(), Success: true,
@@ -228,7 +242,7 @@ func (s *ServerSuite) TestStatsAreScopedToTheCallingCustomer() {
 	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
 
 	// Another customer's traffic in the same bucket must not show up.
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality:   "stt",
 		CustomerID: s.utils.uuid(),
 		Provider:   "stub",
@@ -543,7 +557,7 @@ func (s *ServerSuite) TestNobodyIsToldWhatAnAppSpentWithoutCredentials() {
 
 // recordWho stores billable work of app, billed to organization, for user under categories.
 func (s *ServerSuite) recordWho(app, organization string, costMicros int64, user string, categories ...string) {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "llm", CustomerID: app, OrganizationID: organization, APIKey: "key-" + app, UserID: user,
 		UsageCategories: categories, Provider: "stub", Model: "stub-llm", StartedAt: s.base.Add(5 * time.Minute),
 		CostMicros: costMicros, Billable: true, Success: true,
@@ -584,7 +598,7 @@ func (s *ServerSuite) TestSpendByUserAcrossTheOrganization() {
 
 func (s *ServerSuite) TestALabelValuedOtherIsKeptApartFromTheRest() {
 	for value, cost := range map[string]int64{"other": 5_000, "a": 3_000, "b": 1_000, "c": 500} {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			Modality: "llm", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, APIKey: "key",
 			Provider: "stub", Model: "stub-llm", StartedAt: s.base.Add(5 * time.Minute), CostMicros: cost,
 			Billable: true, Success: true, Tags: map[string]string{"project": value},
@@ -607,7 +621,7 @@ func (s *ServerSuite) TestALabelValuedOtherIsKeptApartFromTheRest() {
 func (s *ServerSuite) TestSpendByOrigin() {
 	organization := s.app.organization.ID
 	s.recordWho(s.customerID(), organization, 1_000, "")
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "stt", CustomerID: s.customerID(), OrganizationID: organization, APIKey: "hook:chat",
 		Provider: "stub", Model: "stub-stt", StartedAt: s.base.Add(5 * time.Minute), CostMicros: 2_000, Billable: true, Success: true,
 	}))
@@ -720,13 +734,13 @@ func (s *ServerSuite) recordTurn(at time.Time, audioMs int64, latencyMs float64,
 	if !success {
 		request.ErrorCode = "provider_fatal"
 	}
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), request))
+	s.Require().NoError(insertRequest(context.Background(), s.store, request))
 }
 
 // recordSynthesis stores a completed text-to-speech synthesis for the suite's app.
 func (s *ServerSuite) recordSynthesis(at time.Time, characters, costMicros int64) {
 	latencyMs := 180.0
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality:   "tts",
 		CustomerID: s.customerID(),
 		Provider:   "stub",
@@ -743,7 +757,7 @@ func (s *ServerSuite) recordSynthesis(at time.Time, characters, costMicros int64
 // recordLabelled stores a completed LLM completion carrying the app's own cost labels.
 func (s *ServerSuite) recordLabelled(at time.Time, costMicros int64, tags map[string]string) {
 	latencyMs := 320.0
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality:     "llm",
 		CustomerID:   s.customerID(),
 		Provider:     "stub",
