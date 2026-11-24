@@ -567,11 +567,9 @@ must have a limit to be granted (404 `no_limit`), and an organization has at mos
 grants, a used-up one not counted (409 `too_many_grants`). `getLimitUsage` lists the subject's live grants and says, per window, when
 its work runs on one.
 
-The organization and app budgets that policies held moved into this table with the migration
-`20261112120000_limits`: each became the organization's or the app's own limit on its interval,
-an app's under the organization it was last seen in, or under itself when it was seen in none.
-The migration stops while an hourly budget exists, since limits have no hourly interval. Coming
-down puts one budget back into each policy from its scope's own limits.
+The organization and app budgets that policies held moved into this table: each became the
+organization's or the app's own limit on its interval, an app's under the organization it was
+last seen in, or under itself when it was seen in none.
 
 ### The account, its credit and its teams
 
@@ -993,8 +991,8 @@ An agent's work is done in one region, `us` or `eu` for now, and never in anothe
 its sessions route to, its knowledge base and its sandbox. The region is the agent's own.
 `agent.yaml` names it as `region` (the sync's `region`), as a config written with the API does
 (`AgentConfigRequest.region`, `AgentConfigPatch.region`), and it is stored in
-`agent_configs.region` (migration `20261202135000_agent_region`, which puts every agent before it
-in `us`). An agent that names none is in `us` (`pricing.DefaultRegion`), and a sync, an update or a
+`agent_configs.region` (an agent stored before the column existed is in `us`). An agent that
+names none is in `us` (`pricing.DefaultRegion`), and a sync, an update or a
 patch that leaves it out keeps the stored one. A region is a letter and up to 31 of a-z, 0-9 and
 hyphens (`pricing.ValidRegion`).
 
@@ -1080,8 +1078,8 @@ Knowledge and sandboxes are not routed, so they are done in the work's region
 
 - **Knowledge.** One turbopuffer backend per region `knowledge.regions` maps
   (`ROUTER_KNOWLEDGE_REGIONS`), `us` always among them as before. A knowledge base stays in the
-  region of its first write through the router, recorded in `knowledge_namespaces` (migration
-  `20261202125000_knowledge_region`, which records every existing base as `us`). Work naming a
+  region of its first write through the router, recorded in `knowledge_namespaces` (a base from
+  before regions is recorded as `us`). Work naming a
   region, an agent's, reads and writes a base kept there, makes one nothing was written to
   there, and is refused one kept in another rather than having it moved. Work naming none, as
   the knowledge API's (`/v1/agents/knowledge`) and a page's read, goes where the base is kept,
@@ -1111,7 +1109,7 @@ vendor the deployment routes whose factory builds with an instance's own key
 and for `daytona`; any other is a 400 `provider_takes_no_key` naming the ones that are. Only a key
 is taken, never an endpoint: the deployment's own is used.
 
-Keys are kept in `provider_keys` (migration `20261202130000_provider_keys`), sealed with the
+Keys are kept in `provider_keys`, sealed with the
 deployment's keyring (`auth.Sealer`, as the other customer secrets are) and bound to the customer,
 the vendor and the region, so a sealed key copied to another row does not open. A key is never
 returned, logged or put in an error: the API lists its last four characters (`key_hint`, empty for a
@@ -2227,7 +2225,7 @@ from the hour `since` falls in, one item per leg with `turns` and the `p50_ms`, 
 The endpoint sums the rows of the organization's current apps, including rows the sweeper has
 not processed yet, while the cost-anomaly check sums `requests.organization_id` over swept
 billable rows, so the two can disagree for two reasons. One is an app that moved organization
-within the window. The other is rows the sweeper has not yet given an organization: `MeterUses`
+within the window. The other is rows the sweeper has not yet given an organization: `Spend.Meters`
 reads an org's apps with no organization filter, while the cost-anomaly check skips rows with an
 empty `organization_id`.
 
@@ -2530,26 +2528,12 @@ a vendor quotes outright, such as a number's monthly rental, is charged at that 
 same factor, which no entry stores; its `base_cost_micros` is the vendor's amount, or 0 with the
 fee charged for a BYOK item.
 
-Migration `20261118120000_price_entry_prices` stored every existing entry's price as what it
-was charged: its rates times its own markup, else the list's in force when it is (or was), and
-gave every item its SKU. Migration `20261130120000_drop_price_markup` then drops the
-`markup_bps` those markups were kept in, on `price_changes` and `price_entries`, which nothing
-had read since.
-
-Migration `20261202120000_price_entry_region` renames `price_entries` to `price_list_entries`
-and adds `region` and `byok`: every existing entry is `us` and not BYOK, and `region` keeps no
-default, so every later insert names one. It ends every existing SKU in `-us`
-(`llm-openai-a` becomes `llm-openai-a-us`, `llm-openai-gpt-4-1-2` becomes
-`llm-openai-gpt-4-1-2-us`), and indexes items by region and BYOK state as well. `requests.sku`
-and the usage ledger are not rewritten: a row keeps the SKU it was billed under, so a row priced
-before the migration names its item's SKU without the region. The rename is what keeps a router
-built before it from reading a BYOK entry as its item's newest price: that router's reads and
-writes of the price list fail, and it keeps pricing with the list it holds in memory, reading
-again every 30 seconds, until it is replaced. The first start after the migration writes one
-`release` change holding only the BYOK twins the files now have, at the fee; every US item keeps
-its price and its SKU. Down takes the region off the SKUs, drops the columns and renames the
-table back, and refuses a list that holds a BYOK or non-US entry, which a router built before
-it would read as a US price.
+An entry from before prices were stored holds what it was charged: its rates times its own
+markup, else the list's in force then. An entry from before regions is `us` and not BYOK, and
+its SKU ends in `-us` (`llm-openai-a` became `llm-openai-a-us`). `region` has no default, so
+every insert names one. `requests.sku` and the usage ledger were not rewritten: a row keeps the
+SKU it was billed under, so a row priced before regions names its item's SKU without the
+region.
 
 | Command | What it does |
 | --- | --- |

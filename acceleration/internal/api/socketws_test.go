@@ -385,13 +385,13 @@ func (s *SocketSessionSuite) opensIn(device *testClient, zone string) {
 func (s *SocketSessionSuite) TestAnAnonymousSocketCannotMoveAUsersTimezone() {
 	user := s.data.createUser()
 	s.opensIn(user, "Europe/Amsterdam")
-	zone, err := s.store.UserTimezone(context.Background(), s.customerID(), user.userID)
+	zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone, "a signed-in user's socket records their zone")
 
 	s.opensIn(s.data.claiming(user.userID), "Asia/Tokyo")
 
-	zone, err = s.store.UserTimezone(context.Background(), s.customerID(), user.userID)
+	zone, err = s.store.Users.GetTimezone(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone, "a name nobody checked speaks for nobody's zone")
 }

@@ -261,7 +261,7 @@ func (h *Hearer) rule(policy Policy, turn harness.FlowTurn, answer Answer) (Chec
 }
 
 // ruleStill reads the model's answer about a turn whose words have held still as the policy's
-// cap reads one (heldStill): the turn has ended with the floor free, on the model's own ruling,
+// cap reads one: the turn has ended with the floor free, on the model's own ruling,
 // whatever p_eot says. It counts no check in a row: the run is a pause's, and this is no pause the
 // speech gate heard.
 func (h *Hearer) ruleStill(policy Policy, answer Answer) (Check, error) {

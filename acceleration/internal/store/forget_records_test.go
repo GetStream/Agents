@@ -132,7 +132,7 @@ func (s *StoreSuite) TestForgettingAUserDeletesTheirProfileAndEmptiesItsChanges(
 		{CustomerID: "other-app", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya Lahey"},
 		{CustomerID: "other-app", ID: "guest-1", Kind: UserKindGuest},
 	} {
-		s.Require().NoError(s.store.RecordUser(s.ctx, &user))
+		s.Require().NoError(s.store.Users.Insert(s.ctx, &user))
 	}
 	_, err := s.store.global.ExecContext(s.ctx, "UPDATE users SET claimed_by = 'anya', claimed_at = now() WHERE id = 'guest-1'")
 	s.Require().NoError(err)
@@ -250,9 +250,9 @@ func (s *StoreSuite) TestForgettingAUserRenamesThemOnTheirCallLegs() {
 
 func (s *DataMoveSuite) TestAMoveFollowingAForgottenUserEndsWithoutTheirProfile() {
 	s.capture("acme")
-	s.Require().NoError(s.source.RecordUser(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
 	cursor := s.move("acme", "acme")
-	s.Require().NoError(s.source.RecordUser(s.ctx, &User{CustomerID: "acme", ID: "grace", Kind: UserKindAuthenticated, Name: "Grace"}))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "grace", Kind: UserKindAuthenticated, Name: "Grace"}))
 	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
 		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
 	})

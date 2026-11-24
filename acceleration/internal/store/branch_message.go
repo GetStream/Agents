@@ -57,9 +57,7 @@ func (r *BranchMessages) UpsertMany(ctx context.Context, messages []AgentBranchM
 		if err := messages[i].Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		if messages[i].Message == nil {
-			messages[i].Message = map[string]any{}
-		}
+		messages[i].Message = orEmptyMap(messages[i].Message)
 	}
 	// No conflict target is named: every unique index arbitrates the insert, so it depends on
 	// none of them. The copies kept already are replaced below, the customer's own only.
@@ -118,23 +116,6 @@ func (r *BranchMessages) Select(ctx context.Context, customerID, sessionID strin
 		return cmp.Or(a.ChatCreatedAt.Compare(b.ChatCreatedAt), strings.Compare(a.OriginalMessageID, b.OriginalMessageID))
 	}, 0)
 	return distinct(all, func(m AgentBranchMessage) string { return m.OriginalMessageID }), nil
-}
-
-// Delete deletes every copy of a session's hidden messages, and answers how many it deleted.
-func (r *BranchMessages) Delete(ctx context.Context, customerID, sessionID string) (int64, error) {
-	if customerID == "" || sessionID == "" {
-		return 0, stack.Wrap(errors.New("store: a customer and a session id are required"))
-	}
-	deleted, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Exec(ctx)
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: delete branch messages: %w", err))
-	}
-	return deleted, nil
 }
 
 // DeleteUser deletes every copy of a hidden message in the sessions of an app's end user, on

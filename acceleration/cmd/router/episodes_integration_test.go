@@ -165,7 +165,7 @@ func (s *EpisodeSweeperSuite) TestAnEndedEpisodeWhoseSummaryLeaseRanOutHasItsSum
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, plain))
 	s.idleEpisode(customer, plain.ID)
 	closedAt := time.Now()
-	closed, err := s.store.Episodes.CloseIdle(s.ctx, closedAt.Add(-time.Hour), closedAt, 10, closedAt.Add(-time.Second), "closer")
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, closedAt.Add(-time.Hour), closedAt, 10, -time.Second, "closer")
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
 

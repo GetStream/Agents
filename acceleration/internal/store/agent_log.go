@@ -160,7 +160,7 @@ func (r *AgentLogs) HighWater(ctx context.Context, customerID string) (int64, er
 // the filter reads forward.
 func (r *AgentLogs) Select(ctx context.Context, customerID string, f AgentLogFilter) ([]AgentLog, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	rows := []AgentLog{}
 	q := r.store.global.NewSelect().Model(&rows).ExcludeColumn("details").Where("customer_id = ?", customerID)
@@ -220,8 +220,8 @@ func (r *AgentLogs) Get(ctx context.Context, customerID string, id int64) (Agent
 	if err != nil {
 		return AgentLog{}, stack.Wrap(fmt.Errorf("store: agent log: %w", err))
 	}
-	// The log row's own details carry the error since 20260914175000_agent_log_failures.sql,
-	// and are the answer. A request's id is only unique in the database that numbered it, with
+	// The log row's own details carry the error, and are the answer; a row written before they
+	// did carries none. A request's id is only unique in the database that numbered it, with
 	// shards or after a data move, which gives a moved request an id of its new deployment's, so
 	// an older row's request is found by that number only when it also started when the row
 	// says it happened, for the same agent: both writers log a request at its started_at.

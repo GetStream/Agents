@@ -182,7 +182,7 @@ func (s *SchedulerSuite) TestAnOccurrenceWhoseRunWasNotWrittenIsNotCounted() {
 	delivered := make(chan struct{}, 1)
 	lose := func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		if claimed.Task.ID == task.ID {
-			// The run row gone, so FinishScheduledTaskRun's read of it fails.
+			// The run row gone, so store.ScheduledTasks.Finish's read of it fails.
 			_, err := s.db.GlobalDB().ExecContext(ctx, `DELETE FROM scheduled_task_runs WHERE id = ?`, claimed.Run.ID)
 			s.Require().NoError(err)
 			delivered <- struct{}{}
