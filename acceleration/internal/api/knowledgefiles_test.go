@@ -169,6 +169,30 @@ func (s *KnowledgeFilesSuite) TestADocumentRemovedBeforeItsFileIsReadLeavesNothi
 	s.Empty(s.listed())
 }
 
+// A removal reads the document, deletes its passages and then its row. A read of its file
+// that finishes between the two writes passages the removal did not count, and those go too.
+func (s *KnowledgeFilesSuite) TestAFileReadWhileItsDocumentIsRemovedLeavesNoPassage() {
+	_, sent, _ := s.upload("removing.pdf", extractFixture(s.T(), "manual.pdf"), "")
+	removing, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), sent.Id)
+	s.Require().NoError(err)
+	// The row as the removal read it: as uploaded, before the read counted any passage on it.
+	removing.Passages = 0
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+
+	asked := routing.WithAttribution(context.Background(), routing.Attribution{APIKey: s.app.key})
+	s.Require().NoError(s.router.removeKnowledgeDocument(asked, removing))
+
+	_, passages := s.knowledge.stored()
+	var left []string
+	for _, passage := range passages {
+		if strings.HasPrefix(passage.Source, "removing.pdf") {
+			left = append(left, passage.Source)
+		}
+	}
+	s.Empty(left, "no passage of the removed document is found")
+	s.Empty(s.listed())
+}
+
 func (s *KnowledgeFilesSuite) TestAFileWhoseWriteFailedPartWayIsDeletedWithEveryPassageItWrote() {
 	s.knowledge.refuseWritesAfter(1)
 	s.T().Cleanup(func() { s.knowledge.failWrites(false) })

@@ -20,7 +20,8 @@ func (s *StoreSuite) TestAKnowledgeDocumentIsOnlyItsOwnCustomers() {
 	s.Require().NoError(err)
 	s.Require().Len(listed, 1)
 	s.Equal(mine.ID, listed[0].ID)
-	s.ErrorIs(s.store.KnowledgeDocuments.Delete(s.ctx, "other-app", mine.ID), ErrNoKnowledgeDocument)
+	_, err = s.store.KnowledgeDocuments.Delete(s.ctx, "other-app", mine.ID)
+	s.ErrorIs(err, ErrNoKnowledgeDocument)
 	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &KnowledgeDocument{ID: mine.ID, CustomerID: "other-app"}, "")
 	s.Require().NoError(err)
 	s.False(finished)
@@ -143,5 +144,8 @@ func (s *StoreSuite) TestKnowledgeDocumentQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() { s.knowledgeDocument("acme-app", "docs", "faq.pdf") }))
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", file.ID)) }))
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", file.ID)
+		s.Require().NoError(err)
+	}))
 }

@@ -261,28 +261,28 @@ func (r *KnowledgeDocuments) Select(ctx context.Context, customerID string, filt
 	return documents, nil
 }
 
-// Delete forgets a document. Its passages are the caller's to remove, since they are not in
-// this database.
-func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id string) error {
+// Delete forgets a document, and returns how many passages it last counted. Its passages are
+// the caller's to remove, since they are not in this database. The count is the row's as it
+// was deleted: a read of its file that wrote passages after the caller read the row counted
+// them on it first (Cover).
+func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id string) (int, error) {
 	if customerID == "" || id == "" {
-		return stack.Wrap(errors.New("store: a customer and a knowledge document id are required"))
+		return 0, stack.Wrap(errors.New("store: a customer and a knowledge document id are required"))
 	}
 
-	result, err := r.store.global.NewDelete().Model((*KnowledgeDocument)(nil)).
+	var passages []int
+	err := r.store.global.NewDelete().Model((*KnowledgeDocument)(nil)).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
-		Exec(ctx)
+		Returning("passages").
+		Scan(ctx, &passages)
 	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: delete knowledge document: %w", err))
+		return 0, stack.Wrap(fmt.Errorf("store: delete knowledge document: %w", err))
 	}
-	deleted, err := updatedOne(result, "delete knowledge document")
-	if err != nil {
-		return err
+	if len(passages) == 0 {
+		return 0, unknownKnowledgeDocument(id)
 	}
-	if !deleted {
-		return unknownKnowledgeDocument(id)
-	}
-	return nil
+	return passages[0], nil
 }
 
 // DeleteBase forgets every document and marks every page of one knowledge base as gone, and

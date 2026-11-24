@@ -446,13 +446,18 @@ func (s *Server) forgetKnowledge(
 
 // removeKnowledgeDocument deletes a document's passages and then its row. The passages go
 // first: a document we have forgotten but are still answering out of is the failure worth
-// avoiding.
+// avoiding. A read of its file can finish between the two and write passages document does
+// not count, so those the row counted as it was deleted go after it.
 func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) error {
-	ids := ingest.IDs(document.Source, 0, document.Passages)
-	if err := s.knowledgeFor(ctx, document.CustomerID, "").Delete(ctx, document.Namespace, ids); err != nil {
+	owned := s.knowledgeFor(ctx, document.CustomerID, "")
+	if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, document.Passages)); err != nil {
 		return err
 	}
-	if err := s.store.KnowledgeDocuments.Delete(ctx, document.CustomerID, document.ID); err != nil {
+	passages, err := s.store.KnowledgeDocuments.Delete(ctx, document.CustomerID, document.ID)
+	if err != nil {
+		return err
+	}
+	if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, document.Passages, passages)); err != nil {
 		return err
 	}
 	if s.knowledgeFiles != nil {
