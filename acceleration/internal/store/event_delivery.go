@@ -97,11 +97,12 @@ ON CONFLICT (destination_id, id) DO NOTHING`,
 	return int(queued), nil
 }
 
-// Claim takes at most limit deliveries due now, oldest due first, moves each one's next
-// attempt a lease on, so no other worker takes it while this one sends it, and counts the
+// Claim takes at most limit deliveries due now, oldest due first, moves the next attempt of each
+// to the end of a lease, so no other worker takes it while this one sends it, and counts the
 // attempt. Rows another worker is claiming at the same moment are skipped, not waited for.
-// Both are counted on Postgres's clock: the next claim, on any router, judges the lease, so a
-// router whose clock is off neither ends nor stretches it.
+// Claim compares the due time and the lease with Postgres's clock, and writes the lease with the
+// same clock. Thus a router with an incorrect clock does not end a lease too early or make it
+// too long.
 //
 // It takes at most perDestination deliveries of one destination, less the ones of it the
 // caller is still sending (sending, by destination id). So one destination that never answers

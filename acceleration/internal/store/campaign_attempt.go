@@ -154,8 +154,9 @@ type Classifying struct {
 // by now. Each is put off by lease, so another runner retries it if this one dies, and its
 // contact is leased to owner so owner can settle it. Only a contact's latest answered dial is
 // read, and not while another runner holds the contact, nor while a data move's source still
-// reads it (move_paused). The contact's lease is written and judged on Postgres's clock, so a
-// runner whose clock is ahead does not read a dial another is still reading.
+// reads it (move_paused). Postgres's clock sets the lease of the contact, and the claim compares
+// the lease with the same clock. Thus a runner with a clock that is ahead does not read a dial
+// that another runner reads at the same time.
 func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Classifying, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a claim needs an owner"))

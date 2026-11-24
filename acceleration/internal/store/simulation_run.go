@@ -95,9 +95,9 @@ type SimulationRuns struct {
 }
 
 // Start writes a run and all of its conversations at once, so a run that has only just begun
-// already shows how many ways it is going to ask. It is leased for lease, and Renew keeps it
-// held after that. Leases are counted on Postgres's clock, which Abandon judges them by on any
-// router.
+// already shows how many ways it is going to ask. It is leased for the time in lease, and Renew
+// keeps it held after that. Postgres's clock sets each lease, and Abandon on each router
+// compares the lease with the same clock.
 func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []SimulationCase, lease time.Duration) error {
 	if len(cases) == 0 {
 		return stack.Wrap(&ValidationError{Model: "simulation run", Field: "cases", Reason: "is empty: a run needs at least one conversation to have"})
@@ -209,8 +209,9 @@ func (r *SimulationRuns) Select(ctx context.Context, customerID string, filter S
 	return runs, nil
 }
 
-// Renew holds the runs a router is having for lease more, on Postgres's clock, and returns the
-// ones among them it should stop: asked to from anywhere, or no longer running.
+// Renew holds the runs of a router for the time in lease more, on Postgres's clock. It returns
+// the runs that the router must stop: runs with a stop request, and runs that are not in the
+// running state.
 func (r *SimulationRuns) Renew(ctx context.Context, ids []string, lease time.Duration) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -249,7 +250,8 @@ func (r *SimulationRuns) Stop(ctx context.Context, customerID, id string) error 
 // Abandon marks as errored, finished at now, the runs whose router stopped renewing them, and
 // cancels their conversations. Nothing else will finish them: the conversations were held in
 // that router, and it is gone. A run another router is still renewing is left alone, however
-// old it is: its lease is judged on Postgres's clock, which wrote it, not on this router's.
+// old it is. Abandon compares the lease with Postgres's clock, which wrote it, not with the clock
+// of this router.
 func (r *SimulationRuns) Abandon(ctx context.Context, now time.Time) error {
 	now = now.UTC()
 

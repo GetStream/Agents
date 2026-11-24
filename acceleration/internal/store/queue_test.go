@@ -19,14 +19,14 @@ func (s *StoreSuite) timePasses(table string, d time.Duration) {
 	s.Require().NoError(err)
 }
 
-// leasesPass moves every lease_until in table d back, as timePasses does next attempts.
+// leasesPass moves each lease_until in table back by d, as timePasses does for next_attempt_at.
 func (s *StoreSuite) leasesPass(table string, d time.Duration) {
 	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		fmt.Sprintf("UPDATE %s SET lease_until = lease_until - make_interval(secs => ?)", table), d.Seconds())
 	s.Require().NoError(err)
 }
 
-// leftOnTheDatabasesClock is how long until has to run by Postgres's now().
+// leftOnTheDatabasesClock returns the time from Postgres's now() to until.
 func (s *StoreSuite) leftOnTheDatabasesClock(until time.Time) time.Duration {
 	var seconds float64
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT EXTRACT(EPOCH FROM ?::timestamptz - now())", until).Scan(&seconds))

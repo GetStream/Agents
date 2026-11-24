@@ -107,8 +107,8 @@ func (s *ForwarderSuite) TestAForwardWhoseSenderDiesEveryTimeIsGivenUpAfterItsAt
 	s.Require().NoError(err)
 	customer := s.destinationOf(stopped, target.URL)
 	s.Require().NoError(stopped.Forward(s.ctx, Event{CustomerID: customer, ConnectorID: "slack_bot", Body: []byte(`{"dies":1}`)}))
-	// Due a minute ago: Forward dated it by this process's clock, and the claims judge it by
-	// Postgres's, which may run a little behind.
+	// Make it due one minute ago. Forward sets the due time with the clock of this process, but
+	// the claims compare it with Postgres's clock, which can be a little behind.
 	_, err = s.store.GlobalDB().ExecContext(s.ctx, `UPDATE connector_event_deliveries SET next_attempt_at = now() - interval '1 minute'
 		WHERE destination_id IN (SELECT id FROM connector_event_destinations WHERE customer_id = ?)`, customer)
 	s.Require().NoError(err)

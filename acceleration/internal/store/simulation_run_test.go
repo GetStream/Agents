@@ -94,7 +94,7 @@ func (s *StoreSuite) TestAnotherCustomerCannotStopARun() {
 	s.Empty(stop)
 }
 
-// startedRun starts a run of one conversation for a customer, leased for a given time.
+// startedRun starts a run of one conversation for customerID, with a lease for the time in lease.
 func (s *StoreSuite) startedRun(customerID string, lease time.Duration) SimulationRun {
 	simulation := s.simulation(customerID)
 	run := SimulationRun{CustomerID: customerID, SimulationID: simulation.ID, Mode: SimulationText}

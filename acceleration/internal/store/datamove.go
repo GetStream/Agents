@@ -1397,9 +1397,9 @@ func normalizeImportedOptOut(row json.RawMessage) (json.RawMessage, error) {
 // runner that held it is in the deployment it came from. One in a call keeps its stage with a
 // lease already run out, so once the move is cut over a runner here settles it from its dial,
 // as it would one whose runner died: its next attempt waits its delay. That lease ends at the
-// Unix epoch, which Postgres's clock is past however far the importing router's clock is ahead
-// of it. One awaiting its answered call's outcome keeps waiting, and has the transcript read
-// here.
+// Unix epoch. Postgres's clock is always after that time, also when the clock of the importing
+// router is ahead. One awaiting its answered call's outcome keeps waiting, and has the
+// transcript read here.
 func requeueImportedContact(row json.RawMessage) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {

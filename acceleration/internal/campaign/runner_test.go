@@ -119,8 +119,8 @@ func (s *RunnerSuite) tick(runner *Runner) {
 	runner.reading.Wait()
 }
 
-// leasesPass moves every contact's lease d back, as if d went by on Postgres's clock, which
-// judges the leases.
+// leasesPass moves the lease of each contact back by d. For the runner, which compares leases
+// with Postgres's clock, this is the same as when the time d passes.
 func (s *RunnerSuite) leasesPass(d time.Duration) {
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET lease_until = lease_until - make_interval(secs => ?)", d.Seconds())
 	s.Require().NoError(err)

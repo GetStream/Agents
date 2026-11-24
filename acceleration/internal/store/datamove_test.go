@@ -4064,7 +4064,7 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 	var left float64
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
-	s.Less(left, -(24 * time.Hour).Seconds(), "run out on Postgres's clock, however far this router's clock is ahead of it")
+	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
 	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")

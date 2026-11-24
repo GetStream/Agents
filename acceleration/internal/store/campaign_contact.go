@@ -413,8 +413,9 @@ type Claimed struct {
 	Contact  Contact
 }
 
-// Claim leases up to limit contacts that are due to be rung at now, to owner for lease. The
-// lease is counted on Postgres's clock, which TakeOverExpired judges it by on any router.
+// Claim gives owner a lease on a maximum of limit contacts that are due for a call at now. Each
+// lease ends after the time in lease, on Postgres's clock. TakeOverExpired on each router
+// compares the lease with the same clock.
 // A campaign never has more contacts in progress than its concurrency, however many runners
 // claim at once.
 func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
@@ -488,11 +489,13 @@ SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 	return claimed, nil
 }
 
-// TakeOverExpired leases to owner, for lease, up to limit contacts whose call's runner stopped
-// renewing its lease, most likely because it died. The new owner settles the call; it never
-// dials again. Leases are written and judged on Postgres's clock, so a router whose clock is
-// ahead does not take over a call still going. A contact of a campaign a data move paused is
-// the source's until the cut-over, and its dial may not have been imported yet.
+// TakeOverExpired leases to owner up to limit contacts whose call's runner stopped renewing its
+// lease, most likely because it died. The new owner settles the call; it never dials again.
+// Each new lease ends after the time in lease, on Postgres's clock. TakeOverExpired compares the
+// old leases with the same clock. Thus a router with a clock that is ahead does not take a call
+// that is still in progress.
+// A contact of a campaign a data move paused is the source's until the cut-over, and its dial
+// may not have been imported yet.
 func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, lease time.Duration, limit int) ([]Claimed, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a take-over needs an owner"))

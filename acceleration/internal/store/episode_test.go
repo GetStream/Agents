@@ -349,7 +349,7 @@ func (s *StoreSuite) TestAnEpisodeWhoseSummaryLeaseRanOutIsTakenAgainOnce() {
 	s.Equal(episode.ID, taken[0].ID)
 	s.Equal("agent:omni-+15550100", taken[0].ConversationID)
 	s.Require().NotNil(taken[0].LeaseUntil)
-	s.InDelta(5*time.Minute, s.leftOnTheDatabasesClock(*taken[0].LeaseUntil), float64(time.Second), "the lease it was taken under")
+	s.InDelta(5*time.Minute, s.leftOnTheDatabasesClock(*taken[0].LeaseUntil), float64(time.Second), "the new lease, five minutes on Postgres's clock")
 	s.Equal("router-b", taken[0].LeasedBy, "the router that took it over")
 	again, err := s.store.Episodes.ClaimSummaries(s.ctx, 10, 5*time.Minute, "router-a")
 	s.Require().NoError(err)

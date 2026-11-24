@@ -218,9 +218,9 @@ WITH closed AS (
 )` + withContact
 
 // CloseIdle ends, at now, at most limit thread episodes of any customer with no message since
-// idleSince, each leased to holder for its summary for lease, on Postgres's clock, which every
-// router's ClaimSummaries judges it by. A call's episode is never idle: its call ends it
-// (EndCall).
+// idleSince, each leased to holder for its summary for the time in lease. Postgres's clock sets
+// the lease, and ClaimSummaries on each router compares the lease with the same clock. A call's
+// episode is never idle: its call ends it (EndCall).
 func (r *Episodes) CloseIdle(ctx context.Context, idleSince, now time.Time, limit int, lease time.Duration, holder string) ([]ClosedEpisode, error) {
 	closed := []ClosedEpisode{}
 	if limit < 1 {
@@ -256,7 +256,7 @@ WITH closed AS (
 )` + withContact
 
 // EndCall ends, at now, the episodes in progress of the call callID in the app scope names,
-// each leased to holder for its summary for lease, on Postgres's clock as CloseIdle's. A call
+// each leased to holder for its summary for the time in lease, on Postgres's clock. A call
 // id is unique only within its app, so the scope is the app the call event came from, as
 // CallResources.Release takes it. None is no error: a call under an agent config without
 // episode cards has none.
@@ -292,9 +292,10 @@ WITH due AS (
     RETURNING ep.*
 )` + withContact
 
-// ClaimSummaries takes at most limit ended episodes whose summary lease ran out, each leased to
-// holder for lease. Both are on Postgres's clock, so a router whose clock is off neither ends
-// another's lease early nor holds its own longer.
+// ClaimSummaries takes at most limit ended episodes whose summary lease ended, each leased to
+// holder for the time in lease. Postgres's clock examines the old lease and sets the new lease.
+// Thus a router with an incorrect clock does not end the lease of another router too early, and
+// does not keep its own lease too long.
 func (r *Episodes) ClaimSummaries(ctx context.Context, limit int, lease time.Duration, holder string) ([]ClosedEpisode, error) {
 	claimed := []ClosedEpisode{}
 	if limit < 1 {
