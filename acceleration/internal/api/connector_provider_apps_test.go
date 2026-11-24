@@ -196,6 +196,7 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseFirstSaveFailsI
 
 	s.Require().Equal(http.StatusOK, status, string(answer))
 	s.Equal(rotations+1, s.slack.ConfigTokenRotations())
+	s.Equal(int64(-1), s.failing.left.Load(), "the seam failed the first save and let the second through: two saves ran")
 	status, answer = s.serverClient.call(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"})
 	s.Require().Equal(http.StatusOK, status, "the pair the retry saved is the one kept: "+string(answer))
 	s.Equal(rotations+1, s.slack.ConfigTokenRotations(), "kept and still good, so not rotated again")
