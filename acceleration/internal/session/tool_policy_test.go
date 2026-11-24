@@ -67,7 +67,7 @@ func (s *ToolPolicySuite) TestAWorkersToolKeepsItsPolicies() {
 	}}}
 
 	spec := Spec{CustomerID: "acme", AgentID: "support"}
-	tools, _ := m.hostedTools(spec, newToolLoading(spec), "session-1", nil, nil, nil)
+	tools, _ := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", nil, nil, nil)
 
 	s.Require().Len(tools, 1)
 	s.True(tools[0].Interruptible)
@@ -81,7 +81,7 @@ func (s *ToolPolicySuite) TestAWorkersToolAsksItsApprovalQuestion() {
 	}}}
 
 	spec := Spec{CustomerID: "acme", AgentID: "support"}
-	tools, _ := m.hostedTools(spec, newToolLoading(spec), "session-1", nil, nil, nil)
+	tools, _ := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", nil, nil, nil)
 
 	s.Require().Len(tools, 2)
 	s.Equal(&harness.ToolApproval{Title: "Book flight {flight_id}?"}, tools[0].Approval)

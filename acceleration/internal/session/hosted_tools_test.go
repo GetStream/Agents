@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -51,13 +52,13 @@ func TestASessionNamingAHostedAgentIsOfferedTheWorkersTools(t *testing.T) {
 	hosts := &fakeHosts{}
 	m := &Manager{logger: slog.Default(), hosts: hosts}
 	caller := &callerTools{}
-	declared := []harness.Tool{{Name: "search_docs", Description: "The browser's search"}}
+	declared := []harness.Tool{{Name: "search_docs", Description: "The backend's search"}}
 
-	// The shape a browser opens: an agent id, no stored config, and its own search.
-	spec := Spec{CustomerID: "acme", AgentID: "stream-support"}
-	tools, runner := m.hostedTools(spec, newToolLoading(spec), "session-1", nil, declared, caller)
+	// The shape a backend opens: an agent id, no stored config, and its own search.
+	spec := Spec{CustomerID: "acme", AgentID: "stream-support", CallerKind: auth.KindServer}
+	tools, runner := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", nil, declared, caller)
 
-	if len(tools) != 2 || tools[0].Description != "The browser's search" || tools[1].Name != "investigate_sdk" {
+	if len(tools) != 2 || tools[0].Description != "The backend's search" || tools[1].Name != "investigate_sdk" {
 		t.Fatalf("offered %+v", tools)
 	}
 	if _, err := runner.Run(context.Background(), llm.ToolCall{ID: "1", Name: "investigate_sdk"}); err != nil {
@@ -83,7 +84,7 @@ func TestASessionOpenedByAgentNameIsOfferedTheWorkersTools(t *testing.T) {
 		CustomerID: "acme", AgentID: "01JC-generated", ConfigID: "cfg-1", AgentName: "stream-support",
 		ToolGroups: []store.ToolGroup{{Name: "support", Tools: []string{"investigate_sdk", "search_docs"}}},
 	}
-	tools, runner := m.hostedTools(spec, newToolLoading(spec), "session-1", nil, nil, &callerTools{})
+	tools, runner := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", nil, nil, &callerTools{})
 
 	if len(tools) != 2 || tools[0].Name != "investigate_sdk" {
 		t.Fatalf("offered %+v", tools)
@@ -101,12 +102,12 @@ func TestASessionNamingAnotherAgentIsOfferedNothingHosted(t *testing.T) {
 	caller := &callerTools{}
 
 	sales := Spec{CustomerID: "acme", AgentID: "sales"}
-	tools, runner := m.hostedTools(sales, newToolLoading(sales), "s", nil, nil, caller)
+	tools, runner := m.hostedTools(sales, newToolLoading(sales), m.workerTools(sales, newToolLoading(sales)), "s", nil, nil, caller)
 	if len(tools) != 0 || runner != caller {
 		t.Fatalf("offered %+v", tools)
 	}
 	byConfig := Spec{CustomerID: "acme", ConfigID: "stream-support"}
-	tools, _ = m.hostedTools(byConfig, newToolLoading(byConfig), "s", nil, nil, caller)
+	tools, _ = m.hostedTools(byConfig, newToolLoading(byConfig), m.workerTools(byConfig, newToolLoading(byConfig)), "s", nil, nil, caller)
 	if len(tools) != 0 {
 		t.Fatalf("a session naming the agent only as a config was offered %+v", tools)
 	}
@@ -121,7 +122,7 @@ func TestAHostedCallCarriesTheConversationItWasMadeIn(t *testing.T) {
 	conversation := hostedConversation{}
 
 	spec := Spec{CustomerID: "acme", AgentID: "stream-support"}
-	_, runner := m.hostedTools(spec, newToolLoading(spec), "session-1", conversation, nil, nil)
+	_, runner := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", conversation, nil, nil)
 	if _, err := runner.Run(context.Background(), llm.ToolCall{ID: "1", Name: "investigate_sdk"}); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestAWorkersToolNoGroupNamesIsNotOffered(t *testing.T) {
 		ToolGroups: []store.ToolGroup{{Name: "docs", Tools: []string{"search_docs"}}},
 	}
 
-	tools, _ := m.hostedTools(spec, newToolLoading(spec), "session-1", nil, nil, &callerTools{})
+	tools, _ := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", nil, nil, &callerTools{})
 
 	if len(tools) != 1 || tools[0].Name != "search_docs" {
 		t.Fatalf("offered %+v", tools)
@@ -156,7 +157,7 @@ func TestAToolHostedForEveryAgentIsOfferedWhereAToolGroupNamesIt(t *testing.T) {
 		CustomerID: "acme", AgentID: "01JC-generated", ConfigID: "cfg-1", AgentName: "concierge",
 		ToolGroups: []store.ToolGroup{{Name: "outside", Tools: []string{"weather_lookup"}}},
 	}
-	tools, runner := m.hostedTools(weather, newToolLoading(weather), "session-1", nil, nil, &callerTools{})
+	tools, runner := m.hostedTools(weather, newToolLoading(weather), m.workerTools(weather, newToolLoading(weather)), "session-1", nil, nil, &callerTools{})
 	if len(tools) != 1 || tools[0].Name != "weather_lookup" {
 		t.Fatalf("offered %+v", tools)
 	}
@@ -168,7 +169,7 @@ func TestAToolHostedForEveryAgentIsOfferedWhereAToolGroupNamesIt(t *testing.T) {
 	}
 
 	unconfigured := Spec{CustomerID: "acme", AgentID: "browser-agent"}
-	if tools, _ := m.hostedTools(unconfigured, newToolLoading(unconfigured), "s", nil, nil, &callerTools{}); len(tools) != 0 {
+	if tools, _ := m.hostedTools(unconfigured, newToolLoading(unconfigured), m.workerTools(unconfigured, newToolLoading(unconfigured)), "s", nil, nil, &callerTools{}); len(tools) != 0 {
 		t.Errorf("a session with no config to enable them was offered %+v", tools)
 	}
 }
@@ -181,7 +182,7 @@ func TestAnAgentsOwnHostedToolWinsOverOneHostedForEveryAgent(t *testing.T) {
 		ToolGroups: []store.ToolGroup{{Name: "docs", Tools: []string{"search_docs"}}},
 	}
 
-	tools, runner := m.hostedTools(spec, newToolLoading(spec), "session-1", nil, nil, &callerTools{})
+	tools, runner := m.hostedTools(spec, newToolLoading(spec), m.workerTools(spec, newToolLoading(spec)), "session-1", nil, nil, &callerTools{})
 	if len(tools) != 1 || tools[0].Description != "The worker's search" {
 		t.Fatalf("offered %+v", tools)
 	}

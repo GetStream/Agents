@@ -541,6 +541,19 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	if err != nil {
 		return nil, err
 	}
+	// A conversation carried on says its agent once it is open. For every other session the
+	// tools are settled before anything is opened.
+	carriedOn := spec.PersistConversation && spec.ConversationID != ""
+	var workers workerTools
+	settleTools := func() error {
+		workers = m.workerTools(spec, loading)
+		return workers.keepWorkersTools(&spec)
+	}
+	if !carriedOn {
+		if err := settleTools(); err != nil {
+			return nil, err
+		}
+	}
 	if spec.PersistConversation {
 		service, err := m.Conversations()
 		if err != nil {
@@ -589,7 +602,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// knows the one its transcript was written under.
 		spec.AgentID = conv.Agent()
 		spec.ContextTruncated = truncated
-		conv.DescribeTools(toolDisplays(spec.Tools))
 		// A fork opens an empty channel of its own and then reads the parent's, so the model
 		// carries on from what was said while the transcripts stay separate. The parent's
 		// half goes first because it happened first.
@@ -608,6 +620,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 				conv.Release()
 			}
 		}()
+		if carriedOn {
+			if err := settleTools(); err != nil {
+				return nil, err
+			}
+		}
+		conv.DescribeTools(toolDisplays(spec.Tools))
 	} else if spec.ConversationID != "" {
 		service, err := m.Conversations()
 		if err != nil {
@@ -711,7 +729,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	sources := map[string]ToolSource{}
 	markTools(sources, tools, ToolFromSession)
 	var callers agent.ToolRunner = created.tools
-	tools, callers = m.hostedTools(spec, loading, created.id, hostedProgress{created}, tools, callers)
+	tools, callers = m.hostedTools(spec, loading, workers, created.id, hostedProgress{created}, tools, callers)
 	markTools(sources, tools[len(spec.Tools):], ToolFromWorker)
 	tools, callers = moderationTools(spec, stream, tools, callers)
 	if line != nil || m.reading(spec) || m.searching(spec) || spec.endsCalls() {

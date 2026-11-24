@@ -3,13 +3,18 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // ToolHosts are the workers that run tools for sessions they did not open. The dispatch pool
@@ -23,33 +28,83 @@ type ToolHosts interface {
 // Set once, before sessions are served.
 func (m *Manager) HostTools(hosts ToolHosts) { m.hosts = hosts }
 
-// hostedTools adds what workers run for the session's agent to what the caller declared,
-// and returns the runner that sends those calls to them. A name the caller declared stays
-// the caller's: whoever opened the session is the one it asked to run it.
+// workerTools are the tools workers host for a session as it opens.
+type workerTools struct {
+	// hostedAs is the agent id own are hosted under.
+	hostedAs string
+	own      []dispatch.Tool
+	// everyAgent are the ones hosted for every agent (dispatch.EveryAgent).
+	everyAgent []dispatch.Tool
+}
+
+// workerTools reads what workers host for the session's agent.
 //
 // The agent is the session's agent id, or failing that the name its config was opened by,
-// since a session opened by name carries an agent id of its own. The worker running a call
-// reaches the session through conversation. A tool no group of the session's config names
-// is left out: the worker connected before the session opened, so there is nobody to refuse.
-//
-// Tools hosted for every agent (dispatch.EveryAgent) come after the agent's own, and only
-// where a group of the session's config names them: registered once for the app, each agent
-// takes the ones its agent.yaml enables, so the others are not worth a warning.
-func (m *Manager) hostedTools(spec Spec, loading toolLoading, sessionID string, conversation dispatch.Progress, declared []harness.Tool, next agent.ToolRunner) ([]harness.Tool, agent.ToolRunner) {
+// since a session opened by name carries an agent id of its own.
+func (m *Manager) workerTools(spec Spec, loading toolLoading) workerTools {
+	var found workerTools
 	if m.hosts == nil {
-		return declared, next
+		return found
 	}
-	var offered []dispatch.Tool
-	hostedAs := ""
 	for _, agentID := range []string{spec.AgentID, spec.AgentName} {
 		if agentID == "" {
 			continue
 		}
-		if offered, _ = m.hosts.HostedTools(spec.CustomerID, agentID); len(offered) > 0 {
-			hostedAs = agentID
+		if found.own, _ = m.hosts.HostedTools(spec.CustomerID, agentID); len(found.own) > 0 {
+			found.hostedAs = agentID
 			break
 		}
 	}
+	if loading.configured {
+		found.everyAgent, _ = m.hosts.HostedTools(spec.CustomerID, dispatch.EveryAgent)
+	}
+	return found
+}
+
+// keepWorkersTools leaves the names workers host to the workers, in a session no backend
+// opened: a worker is the app's backend, and a backend's tool is not a device's to run
+// (Session.seatRuns). A new session that declares one is refused. A fork and a conversation
+// carried on bring tools declared before, so the worker's is used in place of theirs.
+func (w workerTools) keepWorkersTools(spec *Spec) error {
+	if spec.CallerKind == auth.KindServer {
+		return nil
+	}
+	hosted := func(tool harness.Tool) bool {
+		return slices.ContainsFunc(slices.Concat(w.own, w.everyAgent),
+			func(worker dispatch.Tool) bool { return worker.Name == tool.Name })
+	}
+	if spec.Reopened.IsZero() && spec.ForkedFrom == "" {
+		var taken []string
+		for _, tool := range spec.Tools {
+			if hosted(tool) {
+				taken = append(taken, tool.Name)
+			}
+		}
+		if len(taken) > 0 {
+			return stack.Wrap(fmt.Errorf("%w: %s", ErrToolTaken, strings.Join(taken, ", ")))
+		}
+		return nil
+	}
+	spec.Tools = slices.DeleteFunc(slices.Clone(spec.Tools), hosted)
+	return nil
+}
+
+// hostedTools adds what workers run for the session's agent to what the caller declared,
+// and returns the runner that sends those calls to them. A name a backend declared on its
+// session stays its own; no other caller has one a worker hosts (keepWorkersTools).
+//
+// The worker running a call reaches the session through conversation. A tool no group of the
+// session's config names is left out: the worker connected before the session opened, so
+// there is nobody to refuse.
+//
+// Tools hosted for every agent (dispatch.EveryAgent) come after the agent's own, and only
+// where a group of the session's config names them: registered once for the app, each agent
+// takes the ones its agent.yaml enables, so the others are not worth a warning.
+func (m *Manager) hostedTools(spec Spec, loading toolLoading, workers workerTools, sessionID string, conversation dispatch.Progress, declared []harness.Tool, next agent.ToolRunner) ([]harness.Tool, agent.ToolRunner) {
+	if m.hosts == nil {
+		return declared, next
+	}
+	hostedAs := workers.hostedAs
 	taken := map[string]bool{}
 	for _, tool := range declared {
 		taken[tool.Name] = true
@@ -69,7 +124,7 @@ func (m *Manager) hostedTools(spec Spec, loading toolLoading, sessionID string, 
 		declared = append(declared, offered)
 	}
 	var ungrouped []string
-	for _, tool := range offered {
+	for _, tool := range workers.own {
 		if taken[tool.Name] {
 			continue
 		}
@@ -79,12 +134,9 @@ func (m *Manager) hostedTools(spec Spec, loading toolLoading, sessionID string, 
 		}
 		offer(hostedAs, tool)
 	}
-	if loading.configured {
-		everyAgent, _ := m.hosts.HostedTools(spec.CustomerID, dispatch.EveryAgent)
-		for _, tool := range everyAgent {
-			if !taken[tool.Name] && loading.grouped(tool.Name) {
-				offer(dispatch.EveryAgent, tool)
-			}
+	for _, tool := range workers.everyAgent {
+		if !taken[tool.Name] && loading.grouped(tool.Name) {
+			offer(dispatch.EveryAgent, tool)
 		}
 	}
 	if len(ungrouped) > 0 {

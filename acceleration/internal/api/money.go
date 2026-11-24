@@ -112,6 +112,8 @@ func refusedRequest(err error) error {
 	switch {
 	case errors.Is(err, session.ErrToolNotConfigured):
 		return toolNotConfigured(err)
+	case errors.Is(err, session.ErrToolTaken):
+		return conflict(err.Error())
 	case errors.Is(err, session.ErrNoMemory):
 		return errNoMemory
 	case errors.Is(err, session.ErrNotConfigured):

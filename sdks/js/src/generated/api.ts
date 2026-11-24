@@ -17071,7 +17071,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered) */
+            /** @description A session with that id already exists, a tool an end user's device declared is one a worker hosts for the session's agent, or the call placed for this phone session ended without an answer (call_unanswered) */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;

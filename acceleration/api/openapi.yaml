@@ -19055,7 +19055,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered)
+          description: A session with that id already exists, a tool an end user's device declared is one a worker hosts for the session's agent, or the call placed for this phone session ended without an answer (call_unanswered)
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
