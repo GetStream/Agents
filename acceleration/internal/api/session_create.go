@@ -174,6 +174,10 @@ var errDeviceMemoryUser = forbidden("memory.user_id is sent server-side unless i
 var errAnonymousMemory = forbidden("memory needs a signed-in user: an anonymous caller's name is a claim " +
 	"nobody checked, so the memories kept under it could be anyone's")
 
+// errAnonymousConversation refuses conversation_id to a caller whose user id nobody checked.
+var errAnonymousConversation = forbidden("conversation_id needs a verified caller: an anonymous caller " +
+	"carries its conversation on by its session id")
+
 // refuseSessionRequest reports the failure a new session's request is refused with before
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
@@ -320,6 +324,9 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	}
 	if request.Tags != nil && !ServerSideFrom(ctx) {
 		return errDeviceTags, true
+	}
+	if value(request.LegacyConversationId) != "" && !KindFrom(ctx).Verified() {
+		return errAnonymousConversation, true
 	}
 	if request.Memory != nil && value(request.Memory.UserId) != "" && !ServerSideFrom(ctx) {
 		if !KindFrom(ctx).Verified() {

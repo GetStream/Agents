@@ -225,6 +225,25 @@ func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAServerSideField() {
 	}
 }
 
+// A start frame naming a conversation's channel is refused a caller whose name nobody checked,
+// as createSession refuses it.
+func (s *SocketSessionSuite) TestAStartFrameFromANameWithoutATokenOpensNoConversation() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	alice.stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+
+	connection := s.data.claiming(alice.userID).opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "session": map[string]any{"conversation_id": *opened.ConversationId},
+	}))
+	refused := s.readFrame(connection)
+
+	s.Equal("error", refused["type"], "the socket answered %v", refused)
+	s.Equal("forbidden", refused["code"])
+	s.Contains(refused["error"], "conversation_id")
+}
+
 // assertSocketRefuses checks a device's start frame is refused as its create was, and that
 // both say the field's own refusal rather than another field's.
 func (s *SocketSessionSuite) assertSocketRefuses(device *testClient, sent map[string]any, refusal APIError) {
