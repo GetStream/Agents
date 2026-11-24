@@ -1194,11 +1194,11 @@ func (s *TelnyxUnpaidSuite) ringingOn(model string) ringing {
 
 // callOn is ringing, on model, with the call taken on its run and not placed yet.
 func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
-	window, longest := scheduledPhoneWindow, scheduledCallLimit
+	window, longest := s.router.phoneWindow, s.router.callLimit
 	// The limit is longer than the test waits for the call to be let go: a call let go is one
 	// the agent hung up, or the test ended.
-	scheduledPhoneWindow, scheduledCallLimit = deliveryWait, 2*deliveryWait
-	s.T().Cleanup(func() { scheduledPhoneWindow, scheduledCallLimit = window, longest })
+	s.router.phoneWindow, s.router.callLimit = deliveryWait, 2*deliveryWait
+	s.T().Cleanup(func() { s.router.phoneWindow, s.router.callLimit = window, longest })
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
 	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
