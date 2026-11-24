@@ -229,8 +229,9 @@ func (s *KnowledgeGateSuite) TestABaseInTheCustomersOwnAccountIsReadWithNoCredit
 		5*time.Second, 5*time.Millisecond, "the credit is read")
 
 	s.NoError(s.search())
-	s.Zero(s.held.Load(), "the fee on a query is under a micro")
-	s.NoError(s.fetch(1))
+	s.Zero(s.held.Load(), "nothing is set aside for a query their own vendor bills")
+	s.NoError(s.fetch(1_024))
+	s.Zero(s.held.Load())
 
 	s.suspend()
 	s.ErrorIs(s.search(), policy.ErrSuspended)

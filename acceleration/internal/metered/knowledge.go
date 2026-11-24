@@ -191,10 +191,12 @@ func (k *Knowledge) meter(owner routing.Owner, backend knowledge.Backend, place 
 }
 
 // lookup is the meter of a read made in that many queries, which sets aside the least they are
-// billed.
+// billed: nothing in the customer's own account, where their vendor bills them.
 func (k *Knowledge) lookup(owner routing.Owner, backend knowledge.Backend, place store.KnowledgePlace, queries int) routing.Meter {
 	meter := k.meter(owner, backend, place, KnowledgeLookup)
-	meter.Estimate[pricing.BytesQueried] = lookupMinimum * int64(queries)
+	if !meter.Config.BYOK {
+		meter.Estimate[pricing.BytesQueried] = lookupMinimum * int64(queries)
+	}
 	return meter
 }
 
