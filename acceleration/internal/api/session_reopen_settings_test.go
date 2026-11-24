@@ -20,7 +20,8 @@ import (
 // SessionReopenSettingsSuite covers what a conversation carried on keeps of what its caller
 // opened it with, the tool_timeout_ms and the declared tools, and what resumeSession says
 // over them. A stopped session is no longer held, so the next request carries it on from its
-// row, as a router that never held it would.
+// row, as a router that never held it would; one that ended here (endHere) is carried on from
+// the spec it ran on. A fork keeps them as a conversation carried on does.
 type SessionReopenSettingsSuite struct {
 	RouterSuite
 }
@@ -177,6 +178,50 @@ func (s *SessionReopenSettingsSuite) TestADeviceDoesNotSetTheToolsOrTimeoutItsBa
 	s.Equal(180_000, held.ToolTimeoutMs)
 }
 
+func (s *SessionReopenSettingsSuite) TestABackendsToolsAreNotCarriedOnByItsUsersDeviceFromAConversationEndedHere() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.Tools = s.declared("refund_order")
+	opened := s.serverClient.actingFor(user).createSession(request)
+	s.endHere(opened.Id)
+
+	s.Require().Equal(http.StatusOK,
+		user.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, nil))
+
+	s.Empty(s.heldSpec(opened.Id).Tools, "the device would answer the backend's tool")
+}
+
+func (s *SessionReopenSettingsSuite) TestADeviceDoesNotSetTheToolsOrTimeoutItsBackendCarriesOnWithFromAConversationEndedHere() {
+	user := s.data.createUser()
+	backend := s.serverClient.actingFor(user)
+	request := textSession(nil)
+	request.ToolTimeoutMs = pointerTo(180_000)
+	request.Tools = s.declared("refund_order")
+	opened := backend.createSession(request)
+	s.endHere(opened.Id)
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume",
+		ResumeSessionRequest{ToolTimeoutMs: pointerTo(1)}, nil))
+	s.endHere(opened.Id)
+
+	s.Require().Equal(http.StatusOK,
+		backend.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, nil))
+
+	held := s.heldSpec(opened.Id)
+	s.Equal(s.harnessTools("refund_order"), held.Tools)
+	s.Equal(180_000, held.ToolTimeoutMs)
+}
+
+func (s *SessionReopenSettingsSuite) TestAConversationEndedHereIsCarriedOnWithItsTools() {
+	request := textSession(nil)
+	request.Tools = s.declared("lookup_order")
+	opened := s.serverClient.createSession(request)
+	s.endHere(opened.Id)
+
+	s.resume(opened.Id, ResumeSessionRequest{})
+
+	s.Equal(s.harnessTools("lookup_order"), s.heldSpec(opened.Id).Tools)
+}
+
 func (s *SessionReopenSettingsSuite) TestResumesOfAnEndedSessionAtOnceAllCarryItOn() {
 	ended := s.endedWith(180_000, s.declared("lookup_order"))
 
@@ -221,6 +266,28 @@ func (s *SessionReopenSettingsSuite) TestAForkOfAnEndedSessionStillHasTheDefault
 		ForkSessionRequest{Messages: pointerTo(false)}, &forked))
 
 	s.Zero(s.heldSpec(forked.Id).ToolTimeoutMs)
+}
+
+func (s *SessionReopenSettingsSuite) TestABackendsToolsAreNotForkedByItsUsersDevice() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.Tools = s.declared("refund_order")
+	running := s.serverClient.actingFor(user).createSession(request)
+
+	forked := s.fork(user, running.Id)
+
+	s.Empty(s.heldSpec(forked).Tools, "the device would answer the backend's tool")
+}
+
+func (s *SessionReopenSettingsSuite) TestADevicesForkOfItsOwnConversationKeepsItsTools() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.Tools = s.declared("share_location")
+	running := user.createSession(request)
+
+	forked := s.fork(user, running.Id)
+
+	s.Equal(s.harnessTools("share_location"), s.heldSpec(forked).Tools)
 }
 
 func (s *SessionReopenSettingsSuite) TestOnlyItsOwnerResumesASession() {
@@ -340,10 +407,20 @@ func (s *SessionReopenSettingsSuite) respond(id string) {
 		"/v1/agents/sessions/"+id+"/respond", SayRequest{Text: "where is my order"}, nil))
 }
 
-// heldSpec is the spec of the session id this node holds.
+// fork forks the session id as caller, with none of its history, answering the fork's id.
+func (s *SessionReopenSettingsSuite) fork(caller *testClient, id string) string {
+	var forked Session
+	s.Require().Equal(http.StatusCreated, caller.do(http.MethodPost, "/v1/agents/sessions/"+id+"/fork",
+		ForkSessionRequest{Messages: pointerTo(false)}, &forked))
+	return forked.Id
+}
+
+// heldSpec is the spec of the session id this node holds, which is running: one carried on
+// rather than the one that ended under its id.
 func (s *SessionReopenSettingsSuite) heldSpec(id string) session.Spec {
 	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
 	s.Require().True(ok, "session %s is held here", id)
+	s.Require().Equal(session.Live, held.State(), "session %s is running", id)
 	return held.Spec()
 }
 
