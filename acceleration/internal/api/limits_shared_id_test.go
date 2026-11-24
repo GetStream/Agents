@@ -205,6 +205,27 @@ func (s *SelfHostedLimitsSuite) TestAnAppWithTheIdOfARegisteredAppsOrganizationD
 	s.refusedAsManaged(s.backend(s.app.organization.ID, "").call(http.MethodGet, "/v1/spend/limits", nil))
 }
 
+// The organization may have any number of apps.
+func (s *SelfHostedLimitsSuite) TestAnAppWithTheIdOfAnOrganizationOfTwoAppsDoesNotListLimits() {
+	own, _, id := s.sharedID()
+	s.seen(s.utils.uuid(), id)
+
+	s.refusedAsManaged(own.call(http.MethodGet, "/v1/spend/limits", nil))
+}
+
+// What is recorded now is read, not what a cache holds.
+func (s *SelfHostedLimitsSuite) TestAnAppNoLongerInTheOrganizationOfItsOwnIdDoesNotListLimits() {
+	own, _, id := s.sharedID()
+	s.seen(id, id)
+	cached, err := s.store.AppOrganizations.Get(context.Background(), id)
+	s.Require().NoError(err)
+	s.Require().Equal(id, cached.OrganizationID)
+	_, err = s.store.GlobalDB().NewDelete().Model((*store.AppOrganization)(nil)).Where("app_id = ?", id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	s.refusedAsManaged(own.call(http.MethodGet, "/v1/spend/limits", nil))
+}
+
 // An app last seen under another organization is in none of its id's.
 func (s *SelfHostedLimitsSuite) TestAnAppSeenElsewhereWithAnOrganizationsIdDoesNotListLimits() {
 	own, _, id := s.sharedID()
@@ -239,29 +260,78 @@ func (s *SelfHostedLimitsSuite) TestAnAppIsNotRefusedOnceRecordedInTheOrganizati
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+// memberRecordedElsewhere is an app its router recorded under id once, as its backend, recorded
+// under another organization since.
+func (s *SelfHostedLimitsSuite) memberRecordedElsewhere(id string) (organization *testClient, member string) {
+	member = s.utils.uuid()
+	organization = s.backend(member, id)
+	// Any call but one on limits, which records the app before it is answered.
+	organization.call(http.MethodGet, "/v1/account", nil)
+	s.Require().Eventually(func() bool { return s.recorded(member) == id }, 5*time.Second, 20*time.Millisecond)
+	s.seen(member, s.utils.uuid())
+	return organization, member
+}
+
+// recorded is the organization an app is recorded under.
+func (s *SelfHostedLimitsSuite) recorded(app string) string {
+	owners, err := s.store.AppOrganizations.OrganizationsOf(context.Background(), []string{app})
+	s.Require().NoError(err)
+	return owners[app]
+}
+
 // A router records an app under an organization once, so the record can be of one the app named
-// since. A limit it writes is its organization's all the same.
+// since. The organization a call on limits names is its organization all the same.
 func (s *SelfHostedLimitsSuite) TestAnOrganizationIsKnownOnceItHasALimit() {
-	id, member, elsewhere := s.utils.uuid(), s.utils.uuid(), s.utils.uuid()
-	organization := s.backend(member, id)
-	s.Require().Equal(http.StatusOK, organization.do(http.MethodGet, "/v1/spend/limits", nil, nil))
-	s.Require().Eventually(func() bool {
-		recorded, err := s.store.AppOrganizations.OrganizationsOf(context.Background(), []string{member})
-		return err == nil && recorded[member] == id
-	}, 5*time.Second, 20*time.Millisecond, "the router records the app under its organization")
-	s.seen(member, elsewhere)
+	id := s.utils.uuid()
+	organization, member := s.memberRecordedElsewhere(id)
 
 	s.limitAs(organization, teamLimit(4242))
 
 	s.refusedAsManaged(s.backend(id, "").call(http.MethodGet, "/v1/spend/limits", nil))
-	recorded, err := s.store.AppOrganizations.OrganizationsOf(context.Background(), []string{member})
-	s.Require().NoError(err)
-	s.Equal(id, recorded[member])
+	s.Equal(id, s.recorded(member))
 }
 
-// An organization seen after the app made its limits has them too, and they hold both. Once no
-// app is seen under it, the app reads its own again.
-func (s *SelfHostedLimitsSuite) TestAnOrganizationThatComesAndGoesMovesNoLimit() {
+func (s *SelfHostedLimitsSuite) TestAnOrganizationIsKnownOnceItHasAGrant() {
+	id := s.utils.uuid()
+	organization, member := s.memberRecordedElsewhere(id)
+	limit := s.limitAs(organization, teamLimit(4242))
+	s.seen(member, s.utils.uuid())
+
+	grant := s.grantAs(organization)
+
+	own := s.backend(id, "")
+	s.refusedAsManaged(own.call(http.MethodPost, fmt.Sprintf("/v1/spend/limits/grants/%d/revoke", grant.Id), map[string]any{"reason": "x"}))
+	s.refusedAsManaged(own.call(http.MethodDelete, fmt.Sprintf("/v1/spend/limits/%d", limit.Id), nil))
+	s.Equal(GrantLive, s.grantsAs(organization)[0].State)
+	s.Len(s.limitsAs(organization), 1)
+}
+
+// A call on limits by an app recorded in the organization it names writes no record.
+func (s *SelfHostedLimitsSuite) TestAnAppRecordedInItsOrganizationIsNotRecordedAgain() {
+	id := s.utils.uuid()
+	organization, member := s.memberRecordedElsewhere(id)
+	s.seen(member, id)
+	s.failQueries(`INSERT INTO "app_organizations"`)
+
+	s.limitAs(organization, teamLimit(4242))
+}
+
+// Staff's write records no app, whatever its headers name.
+func (s *SelfHostedLimitsSuite) TestStaffsLimitRecordsNoApp() {
+	id, elsewhere := s.utils.uuid(), s.utils.uuid()
+	organization, member := s.memberRecordedElsewhere(id)
+	s.seen(member, elsewhere)
+	staff := organization.with(manageKeyHeader, suiteManageKey).with(actorIDHeader, "staff:"+s.utils.uuid())
+	made := teamLimit(5)
+	made["organization_id"] = id
+
+	s.Require().Equal(http.StatusCreated, staff.do(http.MethodPost, "/v1/manage/spend/limits", made, nil))
+
+	s.Equal(elsewhere, s.recorded(member))
+}
+
+// An organization seen after the app made its limits has them too, and they hold both.
+func (s *SelfHostedLimitsSuite) TestAnOrganizationThatComesLaterHasTheLimits() {
 	id, member := s.utils.uuid(), s.utils.uuid()
 	own, organization := s.backend(id, ""), s.backend(member, id)
 	limit := s.limitAs(own, map[string]any{"subject": "organization", "interval": "daily", "limit_micros": 0})
@@ -273,9 +343,6 @@ func (s *SelfHostedLimitsSuite) TestAnOrganizationThatComesAndGoesMovesNoLimit()
 	s.Equal(limit.Id, s.limitsAs(organization)[0].Id)
 	s.refusedSearch(own)
 	s.refusedSearch(organization)
-
-	s.seen(member, s.utils.uuid())
-	s.Len(s.limitsAs(own), 1)
 }
 
 // A limit of the organization holds the app's work as it holds its own, both ways round.

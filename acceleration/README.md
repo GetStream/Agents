@@ -557,32 +557,6 @@ subject, level and interval is a 409 `limit_exists` naming the first. Writes are
 the same operations for support under `/v1/manage/spend/limits`, with the manage key and an
 `organization_id`; what they write is the customer's.
 
-The apps refused when they name no organization, with what is kept under their id, read-only on
-the shared database:
-
-```sql
-WITH app AS (
-  SELECT app_id AS id FROM app_organizations
-  UNION SELECT id FROM apps
-  UNION SELECT customer_id FROM audit_log WHERE source <> 'manage'
-), member AS (
-  SELECT app_id, organization_id FROM app_organizations
-  UNION
-  SELECT id, organization_id FROM apps p
-  WHERE NOT EXISTS (SELECT 1 FROM app_organizations o WHERE o.app_id = p.id)
-)
-SELECT app.id,
-  (SELECT count(*) FROM limits WHERE organization_id = app.id) AS limits,
-  (SELECT count(*) FROM usage_resets WHERE organization_id = app.id) AS resets,
-  (SELECT count(*) FROM limit_grants WHERE organization_id = app.id) AS grants
-FROM app
-WHERE EXISTS (SELECT 1 FROM member WHERE organization_id = app.id AND app_id <> app.id)
-  AND NOT EXISTS (SELECT 1 FROM member WHERE organization_id = app.id AND app_id = app.id);
-```
-
-An app that only called a model is in none of these tables: look for `customer_id` in each
-shard's `requests` too.
-
 A grant (`POST /v1/spend/limits/grants`, listed with `GET` and ended with
 `POST /v1/spend/limits/grants/{grant_id}/revoke`) is a one-time amount one subject may spend
 past its own limits: once any of them is spent, its work is admitted on the grant, the one that

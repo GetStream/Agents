@@ -557,17 +557,20 @@ func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, er
 		return "", store.LimitAudit{}, errNoLimits
 	}
 	organization := OrganizationFrom(ctx)
-	if organization == "" {
-		organization = customerID
-		shared, err := s.sharedID(ctx, customerID)
-		if err != nil {
+	if organization != "" {
+		if err := s.recordOrganization(ctx, customerID, organization); err != nil {
 			return "", store.LimitAudit{}, err
 		}
-		if shared {
-			return "", store.LimitAudit{}, errLimitsManaged
-		}
+		return organization, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
 	}
-	return organization, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
+	shared, err := s.sharedID(ctx, customerID)
+	if err != nil {
+		return "", store.LimitAudit{}, err
+	}
+	if shared {
+		return "", store.LimitAudit{}, errLimitsManaged
+	}
+	return customerID, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
 }
 
 // sharedID reports whether an app a request names no organization for has the id of an
@@ -578,15 +581,10 @@ func (s *Server) sharedID(ctx context.Context, app string) (bool, error) {
 	return len(members) > 0 && !slices.Contains(members, app), err
 }
 
-// recordOrganization records the caller's app in its organization when it is recorded in
-// another or in none, so that sharedID knows the organization of a limit before the limit is
-// kept. Enforcer.Join records it in the background, and once per router.
-func (s *Server) recordOrganization(ctx context.Context) error {
-	app, _ := CustomerFrom(ctx)
-	organization := OrganizationFrom(ctx)
-	if app == "" || organization == "" {
-		return nil
-	}
+// recordOrganization records an app in the organization its request names when it is recorded in
+// another or in none, so that sharedID knows the organization before it reads or writes a limit.
+// Enforcer.Join records it in the background, and once per router.
+func (s *Server) recordOrganization(ctx context.Context, app, organization string) error {
 	owners, err := s.store.AppOrganizations.OrganizationsOf(ctx, []string{app})
 	if err != nil || owners[app] == organization {
 		return err
@@ -887,9 +885,6 @@ func (s *Server) createLimit(ctx context.Context, organization string, billed bo
 		return nil, err
 	}
 	if err := aboveParent(all, row); err != nil {
-		return nil, err
-	}
-	if err := s.recordOrganization(ctx); err != nil {
 		return nil, err
 	}
 	err = s.store.Limits.Insert(ctx, &row, audit)
