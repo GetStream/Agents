@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -672,6 +674,37 @@ func (s *GuestsSuite) TestAnAddressIsRefusedItsSixtyFirstNewGuestOfAnAppInAnHour
 	s.Equal(ErrorTypeRateLimited, answered.Error.Type)
 	s.Contains(answered.Error.Message, "60 guests of this app this hour")
 	s.Equal(written, s.profileWrites(), "a refused guest is never written to Stream")
+}
+
+func (s *GuestsSuite) TestAnAddressPastItsGuestsIsToldToWaitForTheHoursEnd() {
+	s.mintSixtyGuests()
+	left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)).Seconds()
+
+	refused := s.data.createAnonymous().raw(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusTooManyRequests, refused.StatusCode)
+	wait, err := strconv.Atoi(refused.Header.Get("Retry-After"))
+	s.Require().NoError(err)
+	s.InDelta(left, wait, 5)
+	_, message := s.data.createAnonymous().failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+	_, told, found := strings.Cut(message, "try again in ")
+	s.Require().True(found, message)
+	said, err := strconv.Atoi(strings.TrimSuffix(told, "s"))
+	s.Require().NoError(err, message)
+	s.InDelta(left, said, 5)
+}
+
+func (s *GuestsSuite) TestAnotherAddressStillMintsGuests() {
+	was := s.router.trusted
+	s.router.trusted = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	defer func() { s.router.trusted = was }()
+	s.mintSixtyGuests()
+	other := s.data.createAnonymous()
+	other.header.Set(ForwardedHeader, "203.0.113.9")
+
+	minted := s.mint(other, GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
 }
 
 func (s *GuestsSuite) TestTheBackendStillMintsGuestsOnceAnAddressHasMintedItsHour() {

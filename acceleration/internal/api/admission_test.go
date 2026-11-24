@@ -238,6 +238,22 @@ func (s *AdmissionSuite) TestASuspendedOrganizationMintsNoGuest() {
 	s.Equal("account_suspended", answered.Error.Code)
 }
 
+func (s *AdmissionSuite) TestASuspendedOrganizationRefreshesNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	var held GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &held))
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests",
+		GuestUserRequest{Id: &held.Id, RefreshSecret: held.RefreshSecret})
+	s.Equal(http.StatusForbidden, status, "the guest's own secret")
+
+	status, _ = s.serverClient.call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &held.Id})
+	s.Equal(http.StatusForbidden, status, "the backend")
+}
+
 func (s *AdmissionSuite) TestAnOrganizationWithNoCreditStillMintsAGuest() {
 	// A guest costs nothing, and the models that cost nothing still answer them.
 	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/echo-model"))

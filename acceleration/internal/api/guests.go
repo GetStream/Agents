@@ -120,8 +120,10 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 	if caller := CallerFrom(ctx); !caller.ServerSide && caller.IP != "" {
 		key := newGuestsPrefix + url.QueryEscape(customerID) + ":" + caller.IP
 		if _, over := s.newGuests.Admit(ctx, "", key, guestsPerAddress, guestWindow); over > 0 {
-			return nil, rateLimited(fmt.Sprintf("this address has minted %d guests of this app this hour: try again in %ds",
-				guestsPerAddress, max(int(over.Seconds()), 1)))
+			wait := waitSeconds(over)
+			return nil, huma.ErrorWithHeaders(rateLimited(fmt.Sprintf(
+				"this address has minted %d guests of this app this hour: try again in %ss", guestsPerAddress, wait)),
+				http.Header{"Retry-After": {wait}})
 		}
 	}
 	userID := guestPrefix + store.NewID()
@@ -482,7 +484,7 @@ func (s *Server) registerGuests(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The guest and a token for them"},
 			"403": errorResponse("This app does not admit guests, or its organization is suspended"),
-			"429": errorResponse("This address has minted as many guests of this app as it may this hour"),
+			"429": errorResponse("This address has minted as many guests of this app as it may this hour: retry after Retry-After"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.createGuestUser)
