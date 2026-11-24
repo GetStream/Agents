@@ -591,6 +591,34 @@ func TestASentenceItsRefusedFinalTextEndedTakesNoMore(t *testing.T) {
 	require.EqualValues(t, 1, rows[0].Characters)
 }
 
+func TestABargeInAfterARefusedFinalTextBillsTheSentenceItEnded(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, owner := reservingSession(t, money, 1_000_000, true)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "b", Final: true}), policy.ErrNoCredits)
+	require.NoError(t, session.Interrupt())
+
+	// The adapter counts 9; the row bills the one sent.
+	spoken(t, session, provider, "u1", 9)
+	rows := rowsOf(t, money, owner, 1)
+	require.EqualValues(t, 1, rows[0].Characters)
+}
+
+// A streaming voice speaks text sent after its final text in the same utterance.
+func TestAStreamingUtteranceGoesOnAfterARefusedFinalTextOnceThereIsCredit(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, owner := reservingSession(t, money, 1_000_000, false)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "b", Final: true}), policy.ErrNoCredits)
+
+	money.Usage.Credit(t, owner.OrganizationID, 5_000_000)
+	require.Eventually(t, func() bool { return money.Spend(t, owner) == nil }, 5*time.Second, 5*time.Millisecond, "the credit is read")
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "bc", Final: true}))
+	spoken(t, session, provider, "u1", 3)
+	rows := rowsOf(t, money, owner, 1)
+	require.EqualValues(t, 3, rows[0].Characters, "the one completion bills both texts")
+}
+
 func TestAnUtteranceThatWasSentNoTextIsNotEndedByARefusal(t *testing.T) {
 	money := policytest.Start(t, "ttsrouter_reserve")
 	session, provider, owner := reservingSession(t, money, 1_000_000, false)

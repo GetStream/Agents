@@ -1075,7 +1075,7 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		// More of an utterance refused for money leaves one this voice is saying, which settles
 		// only once it is told that is all.
 		finish := mine && refusedMoney(err) && !heard.counts && slices.ContainsFunc(held.unsaid, func(unsaid unsaidUtterance) bool {
-			return unsaid.synthesisID == heard.synthesisID && unsaid.final
+			return unsaid.final
 		})
 		if mine {
 			// Refused, it is never said, and neither is what comes after it.

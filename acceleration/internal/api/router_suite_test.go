@@ -323,14 +323,14 @@ type RouterSuite struct {
 	// voice keeps what every stub voice was told to say. Each socket is given a stub voice
 	// and transcriber of its own, so one a test left open cannot read what the next test
 	// sends; newestVoice and newestEars are the last the router started, read through
+	// speaking and ears.
+	voice *saidLog
 	// hearingOpens, if set, runs as a transcriber opens, once it was admitted.
 	hearingOpens func()
-	// speaking and ears.
-	voice       *saidLog
-	speechMu    sync.Mutex
-	newestVoice *recordingTTS
-	newestEars  *quietSTT
-	newestEdge  *silentEdge
+	speechMu     sync.Mutex
+	newestVoice  *recordingTTS
+	newestEars   *quietSTT
+	newestEdge   *silentEdge
 	// unconfiguredBuilds counts what the "unconfigured" transcriber was asked to build.
 	unconfiguredBuilds atomic.Int64
 	// noted are the "noted" models opened so far, one per session, newest last, for a test

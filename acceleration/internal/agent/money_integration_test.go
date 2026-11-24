@@ -168,25 +168,120 @@ func (s *AgentMoneySuite) TestAReplyRefusedMoreCreditSaysWhatItWasSentAndEnds() 
 
 func (s *AgentMoneySuite) TestAReplyTheNextVoiceIsRefusedCreditForIsNotLeftTalking() {
 	s.voicePriced()
-	s.agents.replacement = newStubTTS(true)
 	s.agents.join(true)
-	lost := s.agents.agent.voice()
-	s.agents.agent.mu.Lock()
-	s.agents.agent.speakingTurn, s.agents.agent.utterances = "turn-1", 1
-	held := &heldReply{turnID: "turn-1", written: true, lostAt: time.Now(), unsaid: []unsaidUtterance{
-		{synthesisID: "turn-1", text: "Hello there.", message: MessageSpan{End: 12}, counts: true, counted: true},
-		{synthesisID: "turn-1", text: "How are you?", message: MessageSpan{Start: 13, End: 25}},
-		{synthesisID: "turn-1", final: true},
-	}}
-	s.agents.agent.held = held
-	s.agents.agent.mu.Unlock()
+	held := s.resaying()
 	s.spend(10_000_000)
 
-	s.agents.agent.sayAgain(lost, held)
+	s.agents.agent.sayAgain(s.agents.agent.voice(), held)
 
 	said := s.agents.voice.spoken()
 	s.Require().Len(said, 2)
 	s.Equal(tts.Request{ID: "turn-1", Final: true}, said[1])
 	s.agents.eventually(func() bool { return !s.agents.agent.Busy() }, "the agent is never left talking")
 	s.Require().Len(s.failures("tts"), 1)
+}
+
+// resaying holds a reply of a streaming voice for that voice to say, as one that replaced a lost
+// voice does: two texts of one utterance and its end.
+func (s *AgentMoneySuite) resaying() *heldReply {
+	s.agents.agent.mu.Lock()
+	defer s.agents.agent.mu.Unlock()
+	s.agents.agent.speakingTurn, s.agents.agent.utterances = "turn-1", 1
+	s.agents.agent.held = &heldReply{turnID: "turn-1", written: true, lostAt: time.Now(), unsaid: []unsaidUtterance{
+		{synthesisID: "turn-1", text: "Hello there.", message: MessageSpan{End: 12}, counts: true, counted: true},
+		{synthesisID: "turn-1", text: "How are you?", message: MessageSpan{Start: 13, End: 25}},
+		{synthesisID: "turn-1", final: true},
+	}}
+	return s.agents.agent.held
+}
+
+func (s *AgentMoneySuite) TestAReplyTheNextVoiceIsRefusedAllOfIsNotEndedInIt() {
+	s.voicePriced()
+	s.agents.join(true)
+	held := s.resaying()
+	s.spend(20_000_000)
+
+	s.agents.agent.sayAgain(s.agents.agent.voice(), held)
+
+	s.Empty(s.agents.voice.spoken(), "there is nothing in it to end")
+	s.False(s.agents.agent.Busy())
+}
+
+func (s *AgentMoneySuite) TestAReplyStillBeingWrittenIsEndedOnceByTheReplyItself() {
+	s.voicePriced()
+	s.agents.join(true)
+	held := s.resaying()
+	s.agents.agent.mu.Lock()
+	held.unsaid[2] = unsaidUtterance{synthesisID: "turn-1", text: "And the rest.", message: MessageSpan{Start: 26, End: 39}}
+	held.written = false
+	s.agents.agent.mu.Unlock()
+	s.spend(10_000_000)
+
+	s.agents.agent.sayAgain(s.agents.agent.voice(), held)
+
+	s.Len(s.agents.voice.spoken(), 1, "the reply ends it when it is written")
+}
+
+func (s *AgentMoneySuite) TestAReplyTheNextVoiceFailsIsNotSentMore() {
+	s.agents.join(true)
+	held := s.resaying()
+	taken, release := make(chan struct{}), make(chan struct{})
+	s.agents.voice.mu.Lock()
+	s.agents.voice.synthesizing, s.agents.voice.synthesisRelease = taken, release
+	s.agents.voice.mu.Unlock()
+	said := make(chan struct{})
+	go func() {
+		defer close(said)
+		s.agents.agent.sayAgain(s.agents.agent.voice(), held)
+	}()
+	<-taken
+	s.voiceRefuses(errors.New("the voice dropped the connection"))
+	close(release)
+	<-said
+
+	s.Len(s.agents.voice.spoken(), 2, "a voice that failed is asked for nothing more")
+}
+
+func (s *AgentMoneySuite) TestAReplyRefusedAllCreditLeavesNothingToBeHeard() {
+	s.voicePriced()
+	s.agents.join(false)
+	s.spend(20_000_000)
+	s.agents.model.reply = []string{"Hello there. "}
+
+	_, err := s.agents.agent.RespondTo(s.agents.ctx, "hello", nil, options.LLM{})
+	s.Require().NoError(err)
+
+	s.agents.eventually(func() bool { return len(s.failures("tts")) == 1 }, "the refusal was not reported")
+	s.agents.agent.mu.Lock()
+	defer s.agents.agent.mu.Unlock()
+	s.Empty(s.agents.agent.heard)
+}
+
+func (s *AgentMoneySuite) TestWhatAnUtteranceWasSentIsKeptWhenMoreIsRefused() {
+	s.agents.join(true)
+	s.agents.voice.silent = true
+	voice := s.agents.agent.voice()
+	s.Require().NoError(s.agents.agent.synthesize(voice, "turn-1", tts.Request{ID: "turn-1", Text: "Hello there."}, MessageSpan{End: 12}))
+	s.voiceRefuses(policy.ErrNoCredits)
+	more := tts.Request{ID: "turn-1", Text: "How are you?"}
+	s.Require().ErrorIs(s.agents.agent.synthesize(voice, "turn-1", more, MessageSpan{Start: 13, End: 25}), policy.ErrNoCredits)
+
+	s.agents.agent.mu.Lock()
+	heard := s.agents.agent.heard["turn-1"]
+	s.agents.agent.mu.Unlock()
+	s.Require().NotNil(heard)
+	s.Equal("Hello there.", heard.text)
+	s.Equal(MessageSpan{End: 12}, heard.message)
+
+	s.voiceRefuses(errors.New("the voice dropped the connection"))
+	s.Require().Error(s.agents.agent.synthesize(voice, "turn-1", more, MessageSpan{Start: 13, End: 25}))
+	s.agents.agent.mu.Lock()
+	defer s.agents.agent.mu.Unlock()
+	s.Empty(s.agents.agent.heard, "a voice that failed leaves nothing more to be heard")
+}
+
+func (s *AgentMoneySuite) voiceRefuses(err error) {
+	s.agents.voice.mu.Lock()
+	defer s.agents.voice.mu.Unlock()
+	s.agents.voice.refuses = err
 }

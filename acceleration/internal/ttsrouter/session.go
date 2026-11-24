@@ -174,7 +174,7 @@ func (s *Session) Synthesize(request tts.Request) error {
 		current.characters -= characters
 		left := current.characters
 		// Its last text refused for money, what was sent of it is still to be spoken.
-		finish := unpaid && speaking && left > 0 && request.Final
+		finish := unpaid && left > 0 && request.Final
 		current.ended = finish && !s.provider.Streaming()
 		if !speaking || left <= 0 {
 			s.forget(request.ID, current)
