@@ -56,8 +56,8 @@ agent is stored in: `--dart-define=CUSTOMER_ID=` and
 there with `configure` and run the backend with that app's `STREAM_API_KEY` and
 `STREAM_API_SECRET` instead of a customer id.
 
-The chat asks for `xai/grok-4.7`, a model that reads photos and streams its reasoning, so the
-router needs `XAI_API_KEY`. A call needs `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. The agent needs `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and
 `INWORLD_API_KEY`. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
 `PERPLEXITY_API_KEY`.
 

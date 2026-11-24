@@ -145,6 +145,24 @@ var errDeviceFloorControl = forbidden("floor_control is sent server-side: whethe
 var errDeviceTeam = forbidden("team is sent server-side: a device's work is counted under the team its " +
 	"token was signed for, and naming another would spend that team's budget")
 
+// errDevicePhone refuses a phone line named by an end user's device.
+var errDevicePhone = forbidden("phone is sent server-side: a phone session calls, transfers and " +
+	"presses keys from the app's own numbers, which a device may not")
+
+// errDeviceModels refuses models and limits chosen by an end user's device, as updateSession
+// refuses a device changing them.
+var errDeviceModels = forbidden("llm, stt, tts, sts, search, voice, max_tokens, max_tool_rounds and " +
+	"model_overwrites are sent server-side: which models a session runs on, and how much they " +
+	"may spend, is the app's to decide, which a device may not")
+
+// errDeviceGreeting refuses a greeting sent by an end user's device.
+var errDeviceGreeting = forbidden("greeting is sent server-side: what the agent opens with is " +
+	"the agent speaking, which a device cannot vouch for")
+
+// errDeviceTags refuses cost labels sent by an end user's device.
+var errDeviceTags = forbidden("tags are sent server-side: they label whom the session's spend is " +
+	"billed to, which a device may not decide")
+
 var errDeviceResumeHistory = forbidden("resume_history is sent server-side: how much of a " +
 	"conversation the model is sent is billed to the app, which a device may not decide")
 
@@ -279,6 +297,20 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	}
 	if request.Team != nil && !ServerSideFrom(ctx) {
 		return errDeviceTeam, true
+	}
+	if request.Phone != nil && !ServerSideFrom(ctx) {
+		return errDevicePhone, true
+	}
+	if (request.Llm != nil || request.Stt != nil || request.Tts != nil || request.Sts != nil ||
+		request.Search != nil || request.Voice != nil || request.MaxTokens != nil ||
+		request.MaxToolRounds != nil || request.ModelOverwrites != nil) && !ServerSideFrom(ctx) {
+		return errDeviceModels, true
+	}
+	if request.Greeting != nil && !ServerSideFrom(ctx) {
+		return errDeviceGreeting, true
+	}
+	if request.Tags != nil && !ServerSideFrom(ctx) {
+		return errDeviceTags, true
 	}
 	if request.Memory != nil && value(request.Memory.UserId) != "" && !ServerSideFrom(ctx) {
 		if !KindFrom(ctx).Verified() {

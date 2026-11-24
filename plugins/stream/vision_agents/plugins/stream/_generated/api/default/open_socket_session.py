@@ -75,9 +75,10 @@ def sync_detailed(
     `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused
     with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes
     one up for the records. A `text` session is refused, because the socket carries audio. A field that
-    `createSession` refuses from an end user's device is refused here too: `history` and `call` are
-    server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and
-    `error_type`: the socket carries the audio, so the session joins no Stream call.
+    `createSession` refuses from an end user's device is refused here too: `history`, `call`, `phone`,
+    the models and `tags` are server-side only. A `call` is refused from a backend too, with an `error`
+    frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream
+    call.
     The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames
     are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at
     the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away
@@ -120,9 +121,10 @@ def sync(
     `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused
     with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes
     one up for the records. A `text` session is refused, because the socket carries audio. A field that
-    `createSession` refuses from an end user's device is refused here too: `history` and `call` are
-    server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and
-    `error_type`: the socket carries the audio, so the session joins no Stream call.
+    `createSession` refuses from an end user's device is refused here too: `history`, `call`, `phone`,
+    the models and `tags` are server-side only. A `call` is refused from a backend too, with an `error`
+    frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream
+    call.
     The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames
     are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at
     the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away
@@ -161,9 +163,10 @@ async def asyncio_detailed(
     `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused
     with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes
     one up for the records. A `text` session is refused, because the socket carries audio. A field that
-    `createSession` refuses from an end user's device is refused here too: `history` and `call` are
-    server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and
-    `error_type`: the socket carries the audio, so the session joins no Stream call.
+    `createSession` refuses from an end user's device is refused here too: `history`, `call`, `phone`,
+    the models and `tags` are server-side only. A `call` is refused from a backend too, with an `error`
+    frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream
+    call.
     The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames
     are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at
     the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away
@@ -204,9 +207,10 @@ async def asyncio(
     `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused
     with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes
     one up for the records. A `text` session is refused, because the socket carries audio. A field that
-    `createSession` refuses from an end user's device is refused here too: `history` and `call` are
-    server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and
-    `error_type`: the socket carries the audio, so the session joins no Stream call.
+    `createSession` refuses from an end user's device is refused here too: `history`, `call`, `phone`,
+    the models and `tags` are server-side only. A `call` is refused from a backend too, with an `error`
+    frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream
+    call.
     The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames
     are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at
     the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away

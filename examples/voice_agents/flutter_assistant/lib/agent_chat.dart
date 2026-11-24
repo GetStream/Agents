@@ -28,7 +28,6 @@ class AgentSessions {
             .agent(Assistant.agentName)
             .chat(
               SessionOptions(
-                llm: Assistant.chatModel,
                 tools: Assistant.tools,
                 returnUrl: Assistant.returnUrl,
               ),

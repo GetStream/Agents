@@ -878,7 +878,12 @@ func (s *SessionConnectorsSuite) endedSession(config string) string {
 func (s *SessionConnectorsSuite) endedSessionOf(config string, overwrites *ModelOverwrites) string {
 	request := s.session(config, nil)
 	request.ModelOverwrites = overwrites
-	opened := s.client.createSession(request)
+	// Models are the backend's to choose, so it opens the user's session when it names some.
+	opener := s.client
+	if overwrites != nil {
+		opener = s.serverClient.actingFor(s.client)
+	}
+	opened := opener.createSession(request)
 	s.storedSelections(opened.Id)
 	s.client.stopSession(opened.Id)
 	return opened.Id

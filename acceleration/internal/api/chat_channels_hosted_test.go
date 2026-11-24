@@ -79,8 +79,13 @@ func (s *SessionToolsSuite) TestAHostedCallInASessionOpenedWithAUsersTokenIsForT
 	agent := "agent-" + s.utils.uuid()
 	worker := s.hostsLookupOrder(agent)
 	device := s.data.createUser()
+	// The model that reaches for lookup_order is the config's, since a device names no model.
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "orders-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models:     store.AgentModels{LLM: "tooling/tool-model"},
+		ToolGroups: []store.ToolGroup{{Name: "orders", Tools: []string{lookupOrder}}}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	request := textSession(nil)
-	request.AgentId, request.Llm = &agent, pointerTo("tooling/tool-model")
+	request.AgentId, request.ConfigId = &agent, &config.ID
 	opened := device.createSession(request)
 
 	status, body := s.serverClient.actingFor(device).call(http.MethodPost,

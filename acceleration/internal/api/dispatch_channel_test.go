@@ -226,7 +226,7 @@ func (s *MessageHooksSuite) TestACommandToASessionOfItsOwnStillWritesThePersonsM
 		"a backend's session":   {s.serverClient, "support-operator"},
 		"an end user's session": {s.client, s.client.userID},
 	} {
-		opened := opener.client.createSession(CreateSessionRequest{AgentId: pointerTo("agent-" + s.utils.uuid()), Llm: pointerTo("en-low-latency")})
+		opened := opener.client.createSession(CreateSessionRequest{AgentId: pointerTo("agent-" + s.utils.uuid())})
 		s.Require().Equal(chatlog.ChannelType+":"+opened.Id, value(opened.ConversationId), name)
 		watching := opener.client.opens("/v1/agents/sessions/" + opened.Id + "/events")
 		id := s.utils.uuid()
