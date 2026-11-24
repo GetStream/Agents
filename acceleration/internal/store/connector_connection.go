@@ -764,15 +764,9 @@ func (r *ConnectorConnections) saveAtRevision(ctx context.Context, conn bun.ICon
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
 	defer cancel()
 	connection.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if connection.CredentialsSealed == nil {
-		connection.CredentialsSealed = []byte{}
-	}
-	if connection.Metadata == nil {
-		connection.Metadata = map[string]string{}
-	}
-	if connection.GrantedScopes == nil {
-		connection.GrantedScopes = []string{}
-	}
+	connection.CredentialsSealed = orEmpty(connection.CredentialsSealed)
+	connection.Metadata = orEmptyMap(connection.Metadata)
+	connection.GrantedScopes = orEmpty(connection.GrantedScopes)
 	result, err := r.store.global.NewUpdate().Conn(conn).Model(connection).
 		Column(credentialColumns...).
 		Where("id = ?", connection.ID).
