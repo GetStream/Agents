@@ -85,7 +85,8 @@ type Request struct {
 	Meters pricing.Quantities `bun:"meters,type:jsonb,nullzero"`
 	// Attributes chose the price (a service tier, a country) or explain the row.
 	Attributes map[string]string `bun:"attributes,type:jsonb,nullzero"`
-	LatencyMs  *float64          `bun:"latency_ms"`
+	// LatencyMs is nil for a request that failed before reaching the provider: it has none.
+	LatencyMs *float64 `bun:"latency_ms"`
 	// CostMicros is millionths of a dollar: what the work is charged at its entry's prices.
 	CostMicros int64 `bun:"cost_micros,notnull"`
 	// OutputCostMicros is the part of CostMicros the generated tokens were priced at.
@@ -285,18 +286,6 @@ type Requests struct {
 	store *Store
 }
 
-// Insert stores one request, giving it a usage id when it has none. Latency is optional
-// because a request that failed before reaching the provider has none.
-func (r *Requests) Insert(ctx context.Context, request *Request) error {
-	if request.UsageID == uuid.Nil {
-		request.UsageID = uuid.Must(uuid.NewV7())
-	}
-	requests := []Request{*request}
-	_, err := r.InsertMany(ctx, requests)
-	*request = requests[0]
-	return err
-}
-
 // InsertMany writes rows that are not written yet, in one transaction in this shard's
 // database, and returns the usage ids it wrote. A row whose usage id is already there is
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
@@ -460,8 +449,7 @@ func Unwritable(err error) bool {
 // row carried in with its own id leaves behind. InsertMany has moved the sequence past it by
 // then, so trying again at once writes the rows.
 func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
+	return constraint(err) == requestsPrimaryKey
 }
 
 // callsOf is the call each request happened in, in their order: the agent's latest call of the
@@ -824,14 +812,12 @@ func (r *Requests) Spend(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if limit < 1 {
 		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: encode tag filter: %w", err))
@@ -906,11 +892,9 @@ func (r *Requests) TagKeys(
 	tags map[string]string,
 ) ([]TagKeySummary, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: encode tag filter: %w", err))

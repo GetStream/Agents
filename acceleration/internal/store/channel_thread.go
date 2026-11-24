@@ -72,9 +72,7 @@ func (r *ChannelThreads) Link(ctx context.Context, thread *ChannelThread) (creat
 	proposed := thread.ChannelID
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	thread.LastInboundAt, thread.CreatedAt = now, now
-	if thread.ThreadParts == nil {
-		thread.ThreadParts = map[string]string{}
-	}
+	thread.ThreadParts = orEmptyMap(thread.ThreadParts)
 	_, err = r.store.global.NewInsert().Model(thread).
 		On("CONFLICT (customer_id, connector_id, provider_unit_id, thread_key) DO UPDATE").
 		Set("connection_id = EXCLUDED.connection_id").

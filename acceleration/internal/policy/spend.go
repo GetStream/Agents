@@ -34,9 +34,11 @@ const (
 // intervals is, by counter key, the intervals each subject has a limit in, which are the only
 // ones summed from the shards. A read of the subjects the counters could not answer has the
 // read it is part of as its parent, which fails with it; countersFailed says the counters'
-// Redis failed it.
+// Redis failed it. billed is false for the account of an app in no organization, whose
+// organization's spend is that app's alone.
 type spendRead struct {
 	source         spendSource
+	billed         bool
 	refs           []usage.SubjectRef
 	intervals      map[string][]usage.Interval
 	from           time.Time
@@ -498,7 +500,7 @@ func (m *money) planAccount(key string, now time.Time, all bool) *spendRead {
 	}
 	m.mu.Unlock()
 
-	read := &spendRead{source: source, intervals: map[string][]usage.Interval{}}
+	read := &spendRead{source: source, billed: billed(key), intervals: map[string][]usage.Interval{}}
 	unread := false
 	for _, subject := range subjects {
 		for _, interval := range usage.Intervals {
@@ -681,7 +683,7 @@ func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRe
 				reading.Go(func() {
 					defer func() { <-slots }()
 					call, cancel := context.WithTimeout(ctx, readTimeout)
-					spent, err := db.Spend.Subject(call, ref, start)
+					spent, err := db.Spend.Subject(call, ref, start, read.billed)
 					cancel()
 					mu.Lock()
 					defer mu.Unlock()

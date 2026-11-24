@@ -117,7 +117,7 @@ func (s *StoreSuite) TestARegeneratedTurnKeepsACopyOfItsQuestionsDocuments() {
 	s.branchAnswered(s.store, "asked", "", "", s.base)
 	s.attached("lease", "one", "", "jlahey", "asked", s.base.Add(time.Second))
 	// A regenerate leaves the conversation at the replaced turn's parent, then answers again.
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "", s.base.Add(time.Minute), time.Time{}))
 	s.branchAnswered(s.store, "asked-again", "", "asked", s.base.Add(time.Minute))
 
 	s.Require().NoError(s.store.ConversationDocuments.CopyResponse(s.ctx, "app", "one", "asked", "asked-again"))
@@ -132,7 +132,7 @@ func (s *StoreSuite) TestARegeneratedTurnKeepsACopyOfItsQuestionsDocuments() {
 	s.Equal(2, copied.Pages)
 	s.True(copied.CreatedAt.Equal(s.base.Add(time.Second)), "attached when the original was")
 
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute), time.Time{}))
 	s.Equal([]string{"lease"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}),
 		"activating the replaced turn finds its own, and the copy goes with the regenerated one")
 }
@@ -167,7 +167,7 @@ func (s *ShardedStoreSuite) TestACopyIsWrittenBesideTheTurnItWasCopiedTo() {
 	s.branchAnswered(s.store, "asked", "", "", s.base)
 	s.attached("lease", "one", "", "jlahey", "asked", s.base.Add(time.Second))
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
-	s.Require().NoError(s.other.Responses.MoveActivePath(s.ctx, "app", "one", "", s.base.Add(time.Minute)))
+	s.Require().NoError(s.other.Responses.MoveActivePathUntil(s.ctx, "app", "one", "", s.base.Add(time.Minute), time.Time{}))
 	s.branchAnswered(s.other, "asked-again", "", "asked", s.base.Add(time.Minute))
 
 	s.Require().NoError(s.other.ConversationDocuments.CopyResponse(s.ctx, "app", "one", "asked", "asked-again"))
@@ -176,7 +176,7 @@ func (s *ShardedStoreSuite) TestACopyIsWrittenBesideTheTurnItWasCopiedTo() {
 	s.Require().NoError(err)
 	s.Require().Len(documents, 1)
 	s.Equal("asked-again", documents[0].ResponseID)
-	s.Require().NoError(s.store.Responses.MoveActivePath(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute)))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute), time.Time{}))
 	s.Equal([]string{"lease"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}),
 		"the copy is rewound with the turn beside it")
 }

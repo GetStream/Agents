@@ -176,11 +176,11 @@ func (c *Closer) Sweep(ctx context.Context) error {
 	// What a sweep summarizes, no key and no hook started.
 	ctx = routing.WithAttribution(ctx, routing.Attribution{APIKey: routing.JobOrigin("episode_summary")})
 	now := time.Now()
-	closed, err := c.store.Episodes.CloseIdle(ctx, now.Add(-c.idle), now, sweepBatch, now.Add(c.lease), c.holder)
+	closed, err := c.store.Episodes.CloseIdle(ctx, now.Add(-c.idle), now, sweepBatch, c.lease, c.holder)
 	if err != nil {
 		return err
 	}
-	left, err := c.store.Episodes.ClaimSummaries(ctx, now, sweepBatch, now.Add(c.lease), c.holder)
+	left, err := c.store.Episodes.ClaimSummaries(ctx, sweepBatch, c.lease, c.holder)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (c *Closer) Sweep(ctx context.Context) error {
 // agent config without episode_cards is, changes nothing and reaches no Stream.
 func (c *Closer) EndCall(ctx context.Context, scope store.AppScope, callID string) error {
 	now := time.Now()
-	closed, err := c.store.Episodes.EndCall(ctx, scope, callID, now, now.Add(c.lease), c.holder)
+	closed, err := c.store.Episodes.EndCall(ctx, scope, callID, now, c.lease, c.holder)
 	if err != nil || len(closed) == 0 {
 		return err
 	}

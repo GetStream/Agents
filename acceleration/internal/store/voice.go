@@ -202,7 +202,7 @@ func (r *Voices) GetByName(ctx context.Context, customerID, name string) (Voice,
 // holds few, and the API lists them all.
 func (r *Voices) Select(ctx context.Context, customerID string) ([]Voice, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var voices []Voice

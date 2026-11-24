@@ -287,16 +287,6 @@ type tableShapes struct {
 	byName map[string]shape
 }
 
-// DataTables names the tables an export carries, parents first. It is public so a test
-// and the docs have one answer rather than two.
-func DataTables() []string {
-	names := make([]string, 0, len(dataTables))
-	for _, table := range dataTables {
-		names = append(names, table.name)
-	}
-	return names
-}
-
 // StartDataCapture records that a customer is moving, so their changes are written down
 // for the deployment they are moving to.
 //
@@ -829,7 +819,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	case "campaigns":
 		row, err = pauseImported(row, []string{Running, Scheduled}, Paused, false)
 	case "campaign_contacts":
-		row, err = requeueImportedContact(row, time.Now())
+		row, err = requeueImportedContact(row)
 	case "campaign_attempts":
 		row, err = endImportedAttempt(row, time.Now())
 	case "simulation_runs":
@@ -1406,9 +1396,11 @@ func normalizeImportedOptOut(row json.RawMessage) (json.RawMessage, error) {
 // requeueImportedContact gives up the source's lease on a contact it was ringing, since the
 // runner that held it is in the deployment it came from. One in a call keeps its stage with a
 // lease already run out, so once the move is cut over a runner here settles it from its dial,
-// as it would one whose runner died: its next attempt waits its delay. One awaiting its
-// answered call's outcome keeps waiting, and has the transcript read here.
-func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage, error) {
+// as it would one whose runner died: its next attempt waits its delay. That lease ends at the
+// Unix epoch. Postgres's clock is always after that time, also when the clock of the importing
+// router is ahead. One awaiting its answered call's outcome keeps waiting, and has the
+// transcript read here.
+func requeueImportedContact(row json.RawMessage) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
 		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
@@ -1416,10 +1408,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 	until := json.RawMessage("null")
 	switch string(fields["stage"]) {
 	case `"` + InProgress + `"`:
-		var err error
-		if until, err = json.Marshal(now); err != nil {
-			return nil, fmt.Errorf("store: write an imported row: %w", err)
-		}
+		until = json.RawMessage(`"1970-01-01T00:00:00Z"`)
 	case `"` + AwaitingOutcome + `"`:
 	default:
 		return row, nil
@@ -1831,9 +1820,8 @@ func (t dataTable) identity() string {
 	// expiry are what a connection without credentials holds,
 	// so the source credentials' key version and expiry do not come along either, on an import or
 	// on every change applied after it. Nor does its provider unit: a row in an import is
-	// whatever the importer wrote, and a unit stored from it would route another customer's
-	// events to this one. The reconnect it needs proves the unit again
-	// (ConnectorConnections.SetProviderUnit).
+	// whatever the importer wrote, and the column still holds one unit per connector
+	// (connector_connections_provider_unit_idx), so it is emptied here.
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
 			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"

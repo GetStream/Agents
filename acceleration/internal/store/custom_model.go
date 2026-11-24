@@ -69,7 +69,7 @@ const (
 // CustomModelLimit is the page size a model list uses for the limit asked for. Select returns
 // one row more than this, the same as the session queries.
 func CustomModelLimit(asked int) int {
-	return clampLimit(asked, defaultCustomModelLimit, maxCustomModelLimit)
+	return ClampLimit(asked, defaultCustomModelLimit, maxCustomModelLimit)
 }
 
 // CustomModelPosition is where a page of models ends.
@@ -97,9 +97,7 @@ func (r *CustomModels) Insert(ctx context.Context, model *CustomModel) error {
 	}
 
 	model.ID = newID()
-	if model.InputModalities == nil {
-		model.InputModalities = []string{}
-	}
+	model.InputModalities = orEmpty(model.InputModalities)
 	now := time.Now().UTC()
 	model.CreatedAt = now
 	model.UpdatedAt = now
@@ -127,9 +125,7 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 		return stack.Wrap(err)
 	}
 
-	if model.InputModalities == nil {
-		model.InputModalities = []string{}
-	}
+	model.InputModalities = orEmpty(model.InputModalities)
 	model.UpdatedAt = time.Now().UTC()
 	// The name the row had is read in the same statement, locked, so the one forgotten is the
 	// one a concurrent rename did not already replace.
@@ -216,7 +212,7 @@ func (r *CustomModels) GetByName(ctx context.Context, customerID, name string) (
 // Select returns a page of a customer's models, newest first, one more than the limit.
 func (r *CustomModels) Select(ctx context.Context, customerID string, filter CustomModelFilter) ([]CustomModel, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var models []CustomModel
