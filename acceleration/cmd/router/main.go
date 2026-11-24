@@ -88,6 +88,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search/exa"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -1473,6 +1474,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	documents := api.NewDocumentReader(extract.Options{Logger: logger})
 	defer documents.Close()
+	shardRouting := shardmap.Map{Default: settings.ShardRouting.Default,
+		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions}
 	options := api.Options{
 		Documents:             documents,
 		Routers:               routers,
@@ -1490,6 +1493,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Sessions:              sessions,
 		Relay:                 sessionRelay,
 		Directory:             directory,
+		ShardRouting:          shardRouting,
 		Workers:               everyWorker,
 		Streams:               streams,
 		AudioFloor:            floor,

@@ -67,6 +67,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -151,6 +152,10 @@ type Options struct {
 	// only that node can answer is carried to it rather than answered with a 404. Absent
 	// when there is no Redis to keep it in, or no address this node's peers reach it at.
 	Directory *node.Directory
+	// ShardRouting is which shard a hook's work is done in, the same on every router. A hook
+	// meant for another shard than the Directory's is handed to a node there. The zero Map, or
+	// no Directory, keeps every hook where it lands.
+	ShardRouting shardmap.Map
 	// Workers is the deployment's dispatch workers, wherever they are connected: told what
 	// the ones here host, and how a running session's text reaches one elsewhere. Absent
 	// when the Directory or the Relay is.
@@ -357,6 +362,7 @@ type Server struct {
 	sessions           *session.Manager
 	relayed            *relayed
 	directory          *node.Directory
+	shards             shardmap.Map
 	workers            *node.Workers
 	forwarder          *node.Forwarder
 	peerCredentials    [][]byte // what a peer may present: one credential per key of the keyring
@@ -593,6 +599,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		phone:              options.Phone,
 		sessions:           options.Sessions,
 		directory:          options.Directory,
+		shards:             options.ShardRouting,
 		workers:            options.Workers,
 		streams:            options.Streams,
 		audioFloor:         options.AudioFloor,
@@ -1440,6 +1447,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			r = r.WithContext(ctx)
 			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
+			s.recordShard(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)
 		}
@@ -1530,6 +1538,23 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
+			"customer", principal.AppID, "user", principal.UserID, "error", err)
+	}
+}
+
+// recordShard keeps the shard that served a request the user's own client sent, which the load
+// balancer picked by where they are, so their messages are answered there (userShard). A
+// backend's request says nothing of where its user is, and one a peer handed over was routed to
+// another node. A failure is logged, as recordUser's is.
+func (s *Server) recordShard(ctx context.Context, principal auth.Principal) {
+	if s.store == nil || s.directory == nil || s.directory.Shard() == "" || node.Forwarded(ctx) {
+		return
+	}
+	if principal.Kind != auth.KindAuthenticated && principal.Kind != auth.KindGuest {
+		return
+	}
+	if err := s.store.Users.Served(ctx, principal.AppID, principal.UserID, s.directory.Shard()); err != nil {
+		s.logger.Error("could not record the shard serving an end user",
 			"customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }

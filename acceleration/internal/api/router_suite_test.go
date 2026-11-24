@@ -93,6 +93,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -299,6 +300,8 @@ type RouterSuite struct {
 	// about shards to set before it starts the harness. Nodes in two shards have a relay
 	// each. Empty is one deployment of one shard.
 	shard, otherShard string
+	// shardRouting is where every node of the suite sends a hook's work, by shard.
+	shardRouting shardmap.Map
 
 	// unauthenticatedClient sends no credentials. The rest hold the app's key:
 	// anonymousClient goes by a name nothing proves, guestClient and client are signed-in
@@ -786,6 +789,7 @@ func (s *RouterSuite) SetupSuite() {
 		AuthMode:  s.authMode(),
 		// App mode is served only behind a gateway that declares kinds.
 		ProxyDeclaresKind: s.appMode,
+		ShardRouting:      s.shardRouting,
 		Phone:             s.telephony(logger),
 		Simulations:       s.simulations(sessions, streams, logger),
 		Channels:          s.inbound,
@@ -1942,6 +1946,7 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Streams:           s.streams,
 		Sessions:          sessions,
 		Directory:         directory,
+		ShardRouting:      s.shardRouting,
 		Dispatch:          workers,
 		Workers:           everyWorker,
 		Store:             s.store,

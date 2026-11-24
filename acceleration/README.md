@@ -147,6 +147,7 @@ the other commands that read them there.
 | `ROUTER_MOCK_PROVIDERS` | `true` adds `mock/mock-stt`, `mock/mock-tts` and `mock/mock-llm`, which answer from nothing, reach no vendor and bill nothing, for load testing the router itself (see `performance_benchmark/`). No capability alias routes to one, so a session only gets a mock by naming it. Off by default |
 | `ROUTER_TRUSTED_PROXIES` | CIDR ranges your own proxies sit in, comma separated, e.g. `10.0.0.0/8`. Decides how much of `X-Forwarded-For` is believed. Unset means none of it is, and the connection's address is used |
 | `ROUTER_DATA_MOVE_RETENTION` | How long recorded changes are kept while a customer moves between deployments, defaults to `168h`. See [Moving a customer](#moving-a-customer) |
+| `ROUTER_SHARD_ROUTING_DEFAULT`, `ROUTER_SHARD_ROUTING_COUNTRIES`, `ROUTER_SHARD_ROUTING_REGIONS` | Which shard a hook's work is done in (`shard_routing`): the shard for a country not listed, a dialled number's country to its shard (`DE=europe-west4,US=us-east4`), and an agent region other than `us` to its shard (`eu=europe-west4`). Every router of a deployment holds the same. Unset: every hook is done where it lands. See [Shards](#shards) |
 | `ROUTER_LOG_LEVEL`      | `debug`, `info` (default), `warn` or `error`               |
 | `HARNESS_SKILLS`        | Path to a skill set; defaults to the built-in one          |
 | `MEM0_API_KEY`          | mem0 credentials. Without it the agent remembers nothing   |
@@ -1719,6 +1720,15 @@ Percentiles merged from several shards' rollups are approximate: they are weight
 count rather than recomputed. A router with shards cannot be a move's source: its shards'
 tables record no changes after an export, so `GET /v1/data/export` and `GET /v1/data/changes`
 answer 400 `not_configured` there (see [Moving a customer](#moving-a-customer)). It can be a move's target.
+
+Stream sends a hook to whichever router its load balancer picks, so with `shard_routing` set a
+router hands it to a node of the shard where its work belongs. A call follows the dialled
+number's country. A message follows the agent's region when that is not the default, and
+otherwise the shard that last served its writer's own client, which each router keeps in
+`users.shard` (a backend's request and a forwarded one keep nothing). A conversation already
+running stays on its node, and a hook a peer handed over is never handed on to another shard.
+With no node of that shard up, the work is done where it landed and counted in
+`router_shard_handover_fallbacks_total`, which an alert should watch.
 
 ## Agents that are configured rather than spelled out
 
