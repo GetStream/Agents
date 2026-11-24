@@ -61,8 +61,8 @@ yet: `StreamChatAI`'s `AIConversation` and generative UI, and its renderers of A
 Close `SwiftDemo.xcodeproj` first: it opens the same local package, the repository's root, and Xcode
 gives a local package to one window at a time, so the other reports "Missing package product".
 
-The router needs `XAI_API_KEY` for the chat's model and `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY`
-and `INWORLD_API_KEY` for a call. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
+The router needs `GOOGLE_API_KEY` for the agent's model, and `DEEPGRAM_API_KEY` and
+`INWORLD_API_KEY` for a call. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
 `PERPLEXITY_API_KEY`; without one the agent is never offered the tool, and only the router's
 log says so.
 

@@ -53,6 +53,11 @@ def _parse_response(
 
         return response_402
 
+    if response.status_code == 403:
+        response_403 = ErrorResponse.from_dict(response.json())
+
+        return response_403
+
     if response.status_code == 404:
         response_404 = ErrorResponse.from_dict(response.json())
 
@@ -95,6 +100,9 @@ def sync_detailed(
      The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for.
     One question, one answer: routed, failed over and billed like the rest, and with no socket because
     nothing arrives in pieces.
+    An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a
+    search is run is the customer's to decide. Each search counts as one message on the caller's daily
+    quota.
 
     Args:
         body (SearchRequest):
@@ -128,6 +136,9 @@ def sync(
      The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for.
     One question, one answer: routed, failed over and billed like the rest, and with no socket because
     nothing arrives in pieces.
+    An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a
+    search is run is the customer's to decide. Each search counts as one message on the caller's daily
+    quota.
 
     Args:
         body (SearchRequest):
@@ -156,6 +167,9 @@ async def asyncio_detailed(
      The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for.
     One question, one answer: routed, failed over and billed like the rest, and with no socket because
     nothing arrives in pieces.
+    An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a
+    search is run is the customer's to decide. Each search counts as one message on the caller's daily
+    quota.
 
     Args:
         body (SearchRequest):
@@ -187,6 +201,9 @@ async def asyncio(
      The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for.
     One question, one answer: routed, failed over and billed like the rest, and with no socket because
     nothing arrives in pieces.
+    An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a
+    search is run is the customer's to decide. Each search counts as one message on the caller's daily
+    quota.
 
     Args:
         body (SearchRequest):

@@ -259,12 +259,16 @@ func (r *UserPhones) Unlink(ctx context.Context, customerID string, app int64, u
 // sighting, each find the link the one before left (joinLinked reads it under the lock).
 func (r *UserPhones) lockLink(ctx context.Context, link UserPhone, fn func(context.Context, bun.Tx) error) error {
 	return r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		key := link.CustomerID + "/" + strconv.FormatInt(link.StreamAppPK, 10) + "/" + link.UserID
-		if err := lockUntilCommit(ctx, tx, key, userLinkLockSeed); err != nil {
+		if err := lockUntilCommit(ctx, tx, link.lockKey(), userLinkLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock user phone: %w", err))
 		}
 		return fn(ctx, tx)
 	})
+}
+
+// lockKey names the lock of the link (lockLink), with userLinkLockSeed.
+func (p *UserPhone) lockKey() string {
+	return p.CustomerID + "/" + strconv.FormatInt(p.StreamAppPK, 10) + "/" + p.UserID
 }
 
 // linkOf is the link a contact map address is one half of: a Stream user's in the app its
