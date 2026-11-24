@@ -95,9 +95,10 @@ type SimulationRuns struct {
 }
 
 // Start writes a run and all of its conversations at once, so a run that has only just begun
-// already shows how many ways it is going to ask. It is leased until leaseUntil, and Renew keeps
-// it held after that.
-func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []SimulationCase, leaseUntil time.Time) error {
+// already shows how many ways it is going to ask. It is leased for the time in lease, and Renew
+// keeps it held after that. Postgres's clock sets each lease, and Abandon on each router
+// compares the lease with the same clock.
+func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []SimulationCase, lease time.Duration) error {
 	if len(cases) == 0 {
 		return stack.Wrap(&ValidationError{Model: "simulation run", Field: "cases", Reason: "is empty: a run needs at least one conversation to have"})
 	}
@@ -109,8 +110,6 @@ func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []
 	run.Failed = 0
 	run.StartedAt = time.Now().UTC()
 	run.FinishedAt = nil
-	leased := leaseUntil.UTC()
-	run.LeaseUntil = &leased
 	run.StopRequested = false
 	if err := run.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -128,7 +127,9 @@ func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []
 	}
 
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(run).Exec(ctx); err != nil {
+		if _, err := tx.NewInsert().Model(run).
+			Value("lease_until", "now() + make_interval(secs => ?)", lease.Seconds()).
+			Exec(ctx); err != nil {
 			return err
 		}
 		_, err := tx.NewInsert().Model(&cases).Exec(ctx)
@@ -208,16 +209,17 @@ func (r *SimulationRuns) Select(ctx context.Context, customerID string, filter S
 	return runs, nil
 }
 
-// Renew holds the runs a router is having until a later time, and returns the ones among them
-// it should stop: asked to from anywhere, or no longer running.
-func (r *SimulationRuns) Renew(ctx context.Context, ids []string, until time.Time) ([]string, error) {
+// Renew holds the runs of a router for the time in lease more, on Postgres's clock. It returns
+// the runs that the router must stop: runs with a stop request, and runs that are not in the
+// running state.
+func (r *SimulationRuns) Renew(ctx context.Context, ids []string, lease time.Duration) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 
 	var renewed []string
 	err := r.store.global.NewUpdate().Model((*SimulationRun)(nil)).
-		Set("lease_until = ?", until.UTC()).
+		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 		Where("id IN (?)", bun.In(ids)).
 		Where("state = ?", SimulationRunning).
 		Where("NOT stop_requested").
@@ -245,10 +247,11 @@ func (r *SimulationRuns) Stop(ctx context.Context, customerID, id string) error 
 	return nil
 }
 
-// Abandon marks as errored the runs whose router stopped renewing them by now, and cancels
-// their conversations. Nothing else will finish them: the conversations were held in that
-// router, and it is gone. A run another router is still renewing is left alone, however old
-// it is.
+// Abandon marks as errored, finished at now, the runs whose router stopped renewing them, and
+// cancels their conversations. Nothing else will finish them: the conversations were held in
+// that router, and it is gone. A run another router is still renewing is left alone, however
+// old it is. Abandon compares the lease with Postgres's clock, which wrote it, not with the clock
+// of this router.
 func (r *SimulationRuns) Abandon(ctx context.Context, now time.Time) error {
 	now = now.UTC()
 
@@ -257,8 +260,8 @@ func (r *SimulationRuns) Abandon(ctx context.Context, now time.Time) error {
 			Set("state = ?", SimulationCancelled).
 			Set("finished_at = ?", now).
 			Where("state IN (?)", bun.In([]string{SimulationPending, SimulationRunning})).
-			Where("run_id IN (SELECT id FROM simulation_runs WHERE state = ? AND (lease_until IS NULL OR lease_until < ?))",
-				SimulationRunning, now).
+			Where("run_id IN (SELECT id FROM simulation_runs WHERE state = ? AND (lease_until IS NULL OR lease_until < now()))",
+				SimulationRunning).
 			Exec(ctx)
 		if err != nil {
 			return err
@@ -269,7 +272,7 @@ func (r *SimulationRuns) Abandon(ctx context.Context, now time.Time) error {
 			Set("error = ?", "the router having this run stopped while it was still going").
 			Set("finished_at = ?", now).
 			Where("state = ?", SimulationRunning).
-			Where("lease_until IS NULL OR lease_until < ?", now).
+			Where("lease_until IS NULL OR lease_until < now()").
 			Exec(ctx)
 		return err
 	})
