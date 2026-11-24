@@ -185,12 +185,8 @@ func (s *Store) tryCredentialLock(ctx context.Context, namespace, key int32) (bu
 		if err != nil {
 			return bun.Conn{}, fmt.Errorf("store: credential lock connection: %w", err)
 		}
-		var locked bool
-		err = conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(?::integer, ?::integer)", namespace, key).Scan(&locked)
+		locked, err := tryAdvisoryLock(ctx, conn, namespace, key)
 		if err != nil {
-			// The lock may have been granted with the answer lost; closing the connection
-			// ends the session, which releases it.
-			discard(conn)
 			if cause := ended(ctx); cause != nil {
 				return bun.Conn{}, fmt.Errorf("store: wait for credential lock: %w", cause)
 			}
@@ -226,21 +222,53 @@ func ended(ctx context.Context) error {
 	return nil
 }
 
+// tryAdvisoryLock runs pg_try_advisory_lock on conn. A statement that fails or panics may have
+// been granted the lock with the answer lost, so it discards conn: closing it ends the session,
+// which releases the lock.
+func tryAdvisoryLock(ctx context.Context, conn bun.Conn, namespace, key int32) (bool, error) {
+	answered := false
+	defer discardOnPanic(conn, &answered)
+	var locked bool
+	err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(?::integer, ?::integer)", namespace, key).Scan(&locked)
+	answered = true
+	if err != nil {
+		discard(conn)
+	}
+	return locked, err
+}
+
 // releaseCredentialLock unlocks and hands the connection back to the lock pool.
 // pg_advisory_unlock returns false when the lock was not held
 // (https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS);
-// that, or an unlock that fails, closes the connection rather than return a session in a
-// state nobody knows.
+// that, or an unlock that fails or panics, closes the connection rather than return a session
+// in a state nobody knows. Neither returns it to the pool still holding the lock, nor leaves it
+// out of the pool holding it, which would keep the credential locked for every router until
+// this process exits.
 func releaseCredentialLock(ctx context.Context, conn bun.Conn, namespace, key int32) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
 	defer cancel()
+	answered := false
+	defer discardOnPanic(conn, &answered)
 	var released bool
 	err := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock(?::integer, ?::integer)", namespace, key).Scan(&released)
+	answered = true
 	if err != nil || !released {
 		discard(conn)
 		return
 	}
 	_ = conn.Close()
+}
+
+// discardOnPanic discards conn when the statement on it panicked, which it tells by *answered
+// still being false; the panic goes on. A query hook can panic (bunotel's BeforeQuery reads the
+// context), and so can the driver. It discards on a goroutine of its own: a panic inside
+// database/sql's query leaves the Conn's close lock read-held (DB.queryDC in database/sql/sql.go gives it
+// back on an error or when the rows close, not on a panic), and closing it then blocks for good. That goroutine is
+// the only one left blocked then; any other panic closes the connection at once.
+func discardOnPanic(conn bun.Conn, answered *bool) {
+	if !*answered {
+		go discard(conn)
+	}
 }
 
 // discard closes the connection instead of returning it to the pool: database/sql drops a

@@ -626,6 +626,10 @@ func (c panicsOnValue) Value(key any) any {
 func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheLockStatementPanics() {
 	router := s.router()
 	connection := s.connection("acme-app", nil)
+	// One lock taken and given back first leaves an idle lock pool connection, so the panic
+	// comes in the lock statement, not in opening a connection.
+	s.Require().NoError(router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
 	armed := new(atomic.Bool)
 	armed.Store(true)
 
@@ -638,6 +642,7 @@ func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheLockStatementPanics
 	})
 	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic while taking the lock gives the slot back")
 	s.Zero(router.lockSlots.customersLocking())
+	s.assertThePanickedConnectionIsGone(router)
 }
 
 func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheUnlockStatementPanics() {
@@ -654,6 +659,17 @@ func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheUnlockStatementPani
 	})
 	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic while unlocking gives the slot back")
 	s.Zero(router.lockSlots.customersLocking())
+	s.assertThePanickedConnectionIsGone(router)
+}
+
+// assertThePanickedConnectionIsGone checks that the lock pool connection a lock or unlock
+// statement panicked on is closed, so no session is left holding the credential lock, which
+// would keep the connection locked for every router, and the lock pool has its connection back.
+func (s *StoreSuite) assertThePanickedConnectionIsGone(router *Store) {
+	s.Eventually(func() bool { return s.credentialLocks(true) == 0 }, 2*time.Second, 10*time.Millisecond,
+		"no session is left holding the credential lock")
+	s.Eventually(func() bool { return router.locks.Stats().OpenConnections == 0 }, 2*time.Second, 10*time.Millisecond,
+		"the connection is closed, not kept out of the pool or returned to it")
 }
 
 // deadlinePassedUnsaid is a context whose deadline has passed but which does not say so yet:
