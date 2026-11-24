@@ -214,7 +214,12 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseEverySaveFailsI
 	started := time.Now()
 	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"})
 
-	s.GreaterOrEqual(time.Since(started), 3*configTokenSaveFirstPause, "the saves wait 100 ms and then 200 ms between them")
+	took := time.Since(started)
+	s.GreaterOrEqual(took, 3*configTokenSaveFirstPause, "the saves wait 100 ms and then 200 ms between them")
+	// The seam fails each save at once, so the call takes the two pauses (300 ms) and a little
+	// more. 2 s is six times that, for a CI runner under load, and still under what an added
+	// 1 s wait after each of the three saves would take (3.3 s), or after the two retries (2.3 s).
+	s.Less(took, 2*time.Second, "the saves wait for nothing beside the two pauses")
 	s.Equal(http.StatusInternalServerError, status)
 	s.Equal("something went wrong", failure)
 	lost := s.linesWith(configTokenLost)
