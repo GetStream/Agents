@@ -5,6 +5,7 @@ import {
   Client,
   ConfigurationError,
   GUEST_STORAGE_KEY,
+  NoCallError,
   RouterError,
   Session,
   type CreateSessionOptions,
@@ -637,13 +638,16 @@ describe("sessions", () => {
         ],
       },
     });
-    router.serve("GET", "/v1/agents/calls/session-1/timeline", {
+    // A session starts a new call each time voice is started or stopped on it, so the
+    // timeline and decisions are its newest call's, under the call's own id.
+    router.serve("GET", "/v1/agents/calls", { body: [{ id: "call-2", session_id: "session-1" }] });
+    router.serve("GET", "/v1/agents/calls/call-2/timeline", {
       body: [
         { turn_id: "turn-1", started_at: "2026-11-10T09:00:00Z", heard: "are you open late", roundtrip_ms: 840 },
         { turn_id: "turn-2", started_at: "2026-11-10T09:00:04Z", heard: "and on sundays", roundtrip_ms: 910 },
       ],
     });
-    router.serve("GET", "/v1/agents/calls/session-1/events", {
+    router.serve("GET", "/v1/agents/calls/call-2/events", {
       body: [{ at: "2026-11-10T09:00:00Z", kind: "ignore", reason: "spoken to someone else" }],
     });
     const sessions = api.agent("docs").sessions;
@@ -660,24 +664,36 @@ describe("sessions", () => {
     assert.equal(timeline[1]?.heard, "and on sundays");
     assert.equal(timeline[1]?.roundtrip_ms, 910);
     assert.deepEqual(decisions.map((decision) => decision.kind), ["ignore"]);
+    for (const listed of router.requestsTo("GET", "/v1/agents/calls")) {
+      assert.equal(listed.query.get("session_id"), "session-1");
+      assert.equal(listed.query.get("limit"), "1", "only the newest call is wanted");
+    }
+    assert.equal(router.requestsTo("GET", "/v1/agents/calls/session-1/timeline").length, 0);
+  });
+
+  it("says a session with no call has no timeline or decisions, rather than asking for a call by its id", async () => {
+    router.serve("GET", "/v1/agents/calls", { body: [] });
+    const sessions = api.agent("docs").sessions;
+
+    await assert.rejects(sessions.timeline("session-1"), NoCallError);
+    await assert.rejects(sessions.decisions("session-1"), NoCallError);
+    assert.equal(router.requestsTo("GET", "/v1/agents/calls/session-1/timeline").length, 0);
+    assert.equal(router.requestsTo("GET", "/v1/agents/calls/session-1/events").length, 0);
   });
 
   it("says the router does not know a session whose tokens, timeline or decisions were asked for", async () => {
-    const noCall = { error: { message: "no such call", type: "not_found", code: "call_not_found" } };
     const noSession = { error: { message: "no such session", type: "not_found", code: "session_not_found" } };
     router.serve("GET", "/v1/agents/sessions/someone-elses/tokens", { status: 404, body: noSession });
-    for (const read of ["timeline", "events"]) {
-      router.serve("GET", `/v1/agents/calls/someone-elses/${read}`, { status: 404, body: noCall });
-    }
+    // The router lists none of another customer's calls, so the session has none to read.
+    router.serve("GET", "/v1/agents/calls", { body: [] });
     const sessions = api.agent("docs").sessions;
 
-    for (const [reading, code] of [
-      [() => sessions.tokens("someone-elses"), "session_not_found"],
-      [() => sessions.timeline("someone-elses"), "call_not_found"],
-      [() => sessions.decisions("someone-elses"), "call_not_found"],
-    ] as const) {
-      await assert.rejects(reading(), (error: unknown) => error instanceof RouterError && error.code === code);
-    }
+    await assert.rejects(
+      sessions.tokens("someone-elses"),
+      (error: unknown) => error instanceof RouterError && error.code === "session_not_found",
+    );
+    await assert.rejects(sessions.timeline("someone-elses"), NoCallError);
+    await assert.rejects(sessions.decisions("someone-elses"), NoCallError);
   });
 
   it("renames, voices, stops and forks a session it is not holding, by its id", async () => {

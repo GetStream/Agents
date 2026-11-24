@@ -60,6 +60,24 @@ export class SocketClosedError extends Error {
 }
 
 /**
+ * A session's timeline or decisions were asked for, and it has no call to read them from.
+ *
+ * A session starts a new call each time voice is started or stopped on it, and the timeline
+ * and decisions are its newest call's. A session held only in writing, an incognito one, or
+ * one the router does not know has none.
+ */
+export class NoCallError extends Error {
+  /** The session that has no call. */
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`the session has no call: ${sessionId}`);
+    this.name = "NoCallError";
+    this.sessionId = sessionId;
+  }
+}
+
+/**
  * The router would not run a worker's hosted tools for an agent.
  *
  * Kept apart from RouterError because no request failed: the socket is fine, and asking
