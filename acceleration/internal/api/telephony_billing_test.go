@@ -603,19 +603,23 @@ func (s *TelephonySandboxBillingSuite) TestACallASandboxedAppPlacesIsGivenAwayAn
 	s.Equal(int64(60), held.AudioSeconds)
 }
 
-func (s *TelephonySandboxBillingSuite) TestACallToAnAppWithAnApprovedUseCaseIsBilled() {
+// Once a use case is approved the sandbox no longer holds the app, so the calls it places are
+// billed. Catches a sandbox that ignores approval.
+func (s *TelephonySandboxBillingSuite) TestACallAnAppWithAnApprovedUseCasePlacesIsBilled() {
 	s.Require().NoError(s.store.UseCases.Insert(context.Background(), &store.UseCase{
 		CustomerID: s.customerID(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
-	_, callID := s.attached()
-
-	s.Require().Equal(http.StatusOK, s.arriveAt(callID))
+	callID := s.placedLeg("+15125550123", routing.Attribution{APIKey: s.app.key})
+	s.Require().Equal(http.StatusOK, s.participant("joined", callID, "sip-+15125550123", "phone-1"))
 	s.clock.advance(time.Minute)
+
 	s.Require().Equal(http.StatusOK, s.endAt(callID))
 
-	leg := s.phoneRows(phone.ModelCallMinutes, 1)[store.Inbound]
+	leg := s.phoneRows(phone.ModelCallMinutes, 1)[store.Outbound]
 	s.True(leg.Billable)
-	s.Equal(s.minuteReceived(), leg.CostMicros)
+	s.NotContains(leg.Attributes, phone.AttributeDLCSandbox)
+	s.Equal(s.vendorPriced("telnyx", phone.ModelCallMinutes, map[string]string{"direction": "outbound", "country": "US"},
+		pricing.Quantities{pricing.CallSeconds: 60}), leg.CostMicros)
 }
 
 // textReceived is what a one-part SMS from the US costs the app, at Telnyx's rate.
