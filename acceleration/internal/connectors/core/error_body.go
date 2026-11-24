@@ -1,6 +1,7 @@
 package core
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -144,10 +145,12 @@ func secretStrings(credential AccessCredential) []string {
 	return appendStrings(nil, secret)
 }
 
-// redactionFrom is the redaction of each of found longer than a byte, in order, each as it is,
+// redactionFrom is the redaction of each of found longer than a byte, each as it is,
 // URL-escaped and JSON-escaped: a token request's form body is urlencoded (url.Values.Encode,
 // QueryEscape), and its basic auth carries the client secret QueryEscaped (RFC 6749 section
 // 2.3.1), so a provider may echo either form. A JSON body escapes what it echoes (jsonEscaped).
+// The longest is taken out first, so a string that holds another goes out whole: api_key's key
+// X-Key-9f8e holds its header X-Key, which taken out first would leave -9f8e (AI-3675 S1.2).
 func redactionFrom(found []string) redaction {
 	var r redaction
 	for _, s := range found {
@@ -162,6 +165,7 @@ func redactionFrom(found []string) redaction {
 			}
 		}
 	}
+	slices.SortStableFunc(r, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	return r
 }
 

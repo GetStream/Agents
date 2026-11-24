@@ -49,6 +49,13 @@ func (s *LoggedDescriptionSuite) TestAJSONEscapedEchoOfASecretIsRedacted() {
 	s.Equal("go [redacted], php [redacted], plain [redacted], plain php [redacted]", core.LoggedDescription(text, secret))
 }
 
+// TestASecretHoldingAnotherIsTakenOutWhole (AI-3675 S1.2): api_key's key may hold its header
+// name, and taking the name out first would leave the rest of the key.
+func (s *LoggedDescriptionSuite) TestASecretHoldingAnotherIsTakenOutWhole() {
+	s.Equal("seen [redacted], header [redacted]",
+		core.LoggedDescription("seen X-Key-9f8e7d6c5b, header X-Key", "X-Key", "X-Key-9f8e7d6c5b"))
+}
+
 // TestASecretOfOneByteIsLeftAlone: a byte alone names nothing, and taking it out would take
 // out every such byte, as the Exchange's redaction leaves it.
 func (s *LoggedDescriptionSuite) TestASecretOfOneByteIsLeftAlone() {
