@@ -890,3 +890,279 @@ fn connectors_are_hashed_as_written() {
         "c6be0c5bb3f7882ba3be686f1c057a14"
     );
 }
+
+#[test]
+fn hidden_files_are_left_out_of_knowledge() {
+    let (_temporary, root) = directory("jean");
+    write(&root, "agent.yaml", "name: jean\n");
+    write(&root, "knowledge/pricing.md", "A penny.\n");
+    write(&root, "knowledge/.draft.md", "Not yet.\n");
+    write(&root, "knowledge/.git/notes.md", "Not a document.\n");
+    write(&root, "knowledge/__pycache__/notes.md", "Not a document.\n");
+
+    let folder = Folder::load(&root).unwrap();
+
+    let sources: Vec<_> = folder
+        .knowledge
+        .iter()
+        .map(|document| document.source.as_str())
+        .collect();
+    assert_eq!(sources, ["pricing.md"]);
+}
+
+/// What an agent directory syncs is what it holds: a link out of it is refused wherever it is.
+#[cfg(unix)]
+mod links {
+    use std::path::{Path, PathBuf};
+
+    use vision_agents::Folder;
+
+    use super::{directory, write};
+
+    const SKILL: &str = "---\ndescription: Work it out\n---\nReason it through.\n";
+
+    /// Files by name and what they say.
+    type Files = &'static [(&'static str, &'static str)];
+
+    /// Points `name`, under `root`, at `target`.
+    fn link(root: &Path, name: &str, target: impl AsRef<Path>) {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, path).unwrap();
+    }
+
+    fn refused(root: &Path) -> String {
+        let error = Folder::load(root).unwrap_err().to_string();
+        assert!(
+            error.contains("links outside the agent directory"),
+            "{} was refused as {error:?}",
+            root.display()
+        );
+        error
+    }
+
+    #[test]
+    fn a_file_linked_from_outside_the_agent_directory_is_refused() {
+        let cases: [(Files, Files, &str, &str); 15] = [
+            (
+                &[("agent.yaml", "name: jean\n")],
+                &[],
+                "agent.yaml",
+                "agent.yaml",
+            ),
+            (
+                &[("notes.md", "Elsewhere.\n")],
+                &[],
+                "instructions.md",
+                "notes.md",
+            ),
+            (
+                &[("notes.md", "Elsewhere.\n")],
+                &[],
+                "guardrail.md",
+                "notes.md",
+            ),
+            (&[("skills/think.md", SKILL)], &[], "skills", "skills"),
+            (&[("think.md", SKILL)], &[], "skills/think.md", "think.md"),
+            (&[("think/SKILL.md", SKILL)], &[], "skills/think", "think"),
+            (
+                &[("SKILL.md", SKILL)],
+                &[],
+                "skills/think/SKILL.md",
+                "SKILL.md",
+            ),
+            (
+                &[("notes.txt", "Elsewhere.\n")],
+                &[("skills/think/SKILL.md", SKILL)],
+                "skills/think/notes.txt",
+                "notes.txt",
+            ),
+            (
+                &[("reference/notes.txt", "Elsewhere.\n")],
+                &[("skills/think/SKILL.md", SKILL)],
+                "skills/think/reference",
+                "reference",
+            ),
+            (
+                &[("knowledge/doc.md", "Elsewhere.\n")],
+                &[],
+                "knowledge",
+                "knowledge",
+            ),
+            (
+                &[("doc.md", "Elsewhere.\n")],
+                &[],
+                "knowledge/doc.md",
+                "doc.md",
+            ),
+            (
+                &[("urls.yaml", "- https://example.com/elsewhere\n")],
+                &[("knowledge/doc.md", "Here.\n")],
+                "knowledge/urls.yaml",
+                "urls.yaml",
+            ),
+            (
+                &[("simulations/calls.yaml", "[]\n")],
+                &[],
+                "simulations",
+                "simulations",
+            ),
+            (
+                &[("calls.yaml", "[]\n")],
+                &[],
+                "simulations/calls.yaml",
+                "calls.yaml",
+            ),
+            (
+                &[("loose/doc.md", "Elsewhere.\n")],
+                &[("knowledge/doc.md", "Here.\n")],
+                "knowledge/loose",
+                "loose",
+            ),
+        ];
+        let mut read = Vec::new();
+        for (outside, inside, linked, to) in cases {
+            let (_elsewhere, elsewhere) = directory("elsewhere");
+            for (name, content) in outside {
+                write(&elsewhere, name, content);
+            }
+            let (_temporary, root) = directory("jean");
+            if linked != "agent.yaml" {
+                write(&root, "agent.yaml", "name: jean\n");
+            }
+            for (name, content) in inside {
+                write(&root, name, content);
+            }
+            link(&root, linked, elsewhere.join(to));
+
+            match Folder::load(&root) {
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains(&format!("{linked}: links outside the agent directory")) => {}
+                other => read.push(format!(
+                    "{linked}: {:?}",
+                    other.map(|_| "loaded").map_err(|error| error.to_string())
+                )),
+            }
+        }
+        assert!(read.is_empty(), "{read:#?}");
+    }
+
+    #[test]
+    fn a_knowledge_directory_linked_one_level_up_is_refused() {
+        let (_temporary, root) = directory("jean");
+        write(&root, "agent.yaml", "name: jean\n");
+        // Nothing else is up there, so only refusing knowledge/ itself stops a walk reading the
+        // agent's own files back through it.
+        link(&root, "knowledge", root.parent().unwrap());
+
+        assert!(refused(&root).contains("knowledge: links outside"));
+    }
+
+    #[test]
+    fn a_link_that_stays_inside_the_agent_directory_is_read() {
+        let (_temporary, root) = directory("jean");
+        write(&root, "agent.yaml", "name: jean\n");
+        write(&root, "shared/think.md", SKILL);
+        write(&root, "shared/pricing.md", "A penny.\n");
+        link(
+            &root,
+            "skills/think.md",
+            Path::new("..").join("shared/think.md"),
+        );
+        link(
+            &root,
+            "knowledge/pricing.md",
+            Path::new("..").join("shared/pricing.md"),
+        );
+        // The agent directory is itself reached through a link, as a checkout often is.
+        let (_through, through) = directory("through");
+        link(&through, "linked", &root);
+
+        let folder = Folder::load(through.join("linked")).unwrap();
+
+        let skills: Vec<_> = folder
+            .skills
+            .iter()
+            .map(|skill| skill.instructions.as_str())
+            .collect();
+        assert_eq!(skills, ["Reason it through."]);
+        let knowledge: Vec<_> = folder
+            .knowledge
+            .iter()
+            .map(|document| (document.source.as_str(), document.text.as_str()))
+            .collect();
+        assert_eq!(knowledge, [("pricing.md", "A penny.\n")]);
+    }
+
+    #[test]
+    fn an_agent_directory_named_relative_to_the_working_directory_keeps_its_links() {
+        let (_temporary, root) = directory("jean");
+        let (_elsewhere, elsewhere) = directory("elsewhere");
+        write(&root, "agent.yaml", "name: jean\n");
+        write(&root, "shared/think.md", SKILL);
+        write(&root, "shared/pricing.md", "A penny.\n");
+        write(&elsewhere, "notes.md", "Elsewhere.\n");
+        link(&root, "skills/think.md", root.join("shared/think.md"));
+        link(
+            &root,
+            "knowledge/pricing.md",
+            Path::new("..").join("shared/pricing.md"),
+        );
+        // Relative to the working directory, without changing it under the other tests.
+        let mut relative = PathBuf::new();
+        for _ in std::env::current_dir().unwrap().components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(root.strip_prefix("/").unwrap());
+
+        let folder = Folder::load(&relative).unwrap();
+        assert_eq!((folder.skills.len(), folder.knowledge.len()), (1, 1));
+
+        link(&root, "instructions.md", elsewhere.join("notes.md"));
+        refused(&relative);
+    }
+
+    #[test]
+    fn a_name_that_only_shares_a_prefix_is_compared_as_a_whole() {
+        let (_temporary, root) = directory("jean");
+        write(&root, "agent.yaml", "name: jean\n");
+        write(&root, "..shared/a.md", "A penny.\n");
+        link(
+            &root,
+            "knowledge/a.md",
+            Path::new("..").join("..shared/a.md"),
+        );
+
+        let folder = Folder::load(&root).unwrap();
+        assert_eq!(folder.knowledge[0].text, "A penny.\n");
+
+        let sibling = root.with_file_name("jean-2");
+        write(&sibling, "notes.md", "Elsewhere.\n");
+        link(&root, "instructions.md", sibling.join("notes.md"));
+        refused(&root);
+    }
+
+    #[test]
+    fn a_link_to_itself_is_refused() {
+        let mut read = Vec::new();
+        for linked in ["instructions.md", "skills/loop.md", "knowledge/loop.md"] {
+            let (_temporary, root) = directory("jean");
+            write(&root, "agent.yaml", "name: jean\n");
+            link(&root, linked, root.join(linked));
+
+            match Folder::load(&root) {
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains(&format!("{linked}: links outside the agent directory")) => {}
+                other => read.push(format!(
+                    "{linked}: {:?}",
+                    other.map(|_| "loaded").map_err(|error| error.to_string())
+                )),
+            }
+        }
+        assert!(read.is_empty(), "{read:#?}");
+    }
+}

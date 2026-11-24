@@ -223,15 +223,16 @@ impl Folder {
             return Err(Error::folder(path, "not an agent directory"));
         }
 
-        let declaration = match std::fs::read_to_string(path.join(AGENT_FILE)) {
-            Ok(declaration) => declaration,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        // What is loaded is what the directory holds: a link out of it is refused wherever it is.
+        let agent = std::fs::canonicalize(path).map_err(|error| Error::io(path, error))?;
+        let declaration = match read_inside(&agent, &path.join(AGENT_FILE)) {
+            Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Err(Error::folder(
                     path,
                     format!("there is no {AGENT_FILE}, so it is not an agent directory"),
                 ));
             }
-            Err(error) => return Err(Error::io(path.join(AGENT_FILE), error)),
+            read => read?,
         };
         let settings = declare(&declaration)
             .map_err(|message| Error::folder(path.join(AGENT_FILE), message))?;
@@ -247,14 +248,19 @@ impl Folder {
             name,
             declaration: declaration.trim().to_string(),
             settings,
-            instructions: optional(&path.join(INSTRUCTIONS_FILE))?.trim().to_string(),
-            guardrail: optional(&path.join(GUARDRAIL_FILE))?.trim().to_string(),
-            skills: load_skills(&path.join(SKILLS_DIR))?,
-            knowledge: load_knowledge(&path.join(KNOWLEDGE_DIR))?,
+            instructions: optional(&agent, &path.join(INSTRUCTIONS_FILE))?
+                .trim()
+                .to_string(),
+            guardrail: optional(&agent, &path.join(GUARDRAIL_FILE))?
+                .trim()
+                .to_string(),
+            skills: load_skills(&agent, &path.join(SKILLS_DIR))?,
+            knowledge: load_knowledge(&agent, &path.join(KNOWLEDGE_DIR))?,
             knowledge_urls: load_knowledge_urls(
+                &agent,
                 &path.join(KNOWLEDGE_DIR).join(KNOWLEDGE_URLS_FILE),
             )?,
-            simulations: load_simulations(&path.join(SIMULATIONS_DIR))?,
+            simulations: load_simulations(&agent, &path.join(SIMULATIONS_DIR))?,
             path: path.to_path_buf(),
         })
     }
@@ -449,12 +455,34 @@ fn utc_now() -> String {
     )
 }
 
-fn optional(path: &Path) -> Result<String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+fn optional(agent: &Path, path: &Path) -> Result<String> {
+    match read_inside(agent, path) {
+        Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(String::new())
+        }
+        read => read,
+    }
+}
+
+/// The real path of `path`, refused when it is outside the agent directory whose real path is
+/// `agent`, as a link left pointing elsewhere on the machine would be, and when it is a link
+/// that goes round in a loop, which leads nowhere inside it either. A missing path is the
+/// `NotFound` a read of it would be.
+fn inside(agent: &Path, path: &Path) -> Result<PathBuf> {
+    let refused = || Error::folder(path, "links outside the agent directory");
+    match std::fs::canonicalize(path) {
+        Ok(target) if target.starts_with(agent) => Ok(target),
+        Ok(_) => Err(refused()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound && path.is_symlink() => {
+            Err(refused())
+        }
         Err(error) => Err(Error::io(path, error)),
     }
+}
+
+/// Reads `file` from where it really is, once `inside` has let it through.
+fn read_inside(agent: &Path, file: &Path) -> Result<String> {
+    std::fs::read_to_string(inside(agent, file)?).map_err(|error| Error::io(file, error))
 }
 
 /// Reads agent.yaml. A key nobody knows is refused rather than dropped, since a misspelled
@@ -816,12 +844,13 @@ fn scalar(value: &Yaml) -> Option<String> {
 
 /// Reads skills/: a skill is either a markdown file, or a folder holding a SKILL.md and
 /// whatever files it comes with, nested as deep as they are.
-fn load_skills(path: &Path) -> Result<Vec<Skill>> {
+fn load_skills(agent: &Path, path: &Path) -> Result<Vec<Skill>> {
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(Error::io(path, error)),
     };
+    inside(agent, path)?;
     let mut entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
     entries.sort();
 
@@ -832,6 +861,8 @@ fn load_skills(path: &Path) -> Result<Vec<Skill>> {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Before the checks below, which take a link going round in a loop for nothing there.
+        inside(agent, &entry)?;
         let (name, file) = if entry.is_dir() {
             let file = entry.join(SKILL_FILE);
             if !file.is_file() {
@@ -858,11 +889,11 @@ fn load_skills(path: &Path) -> Result<Vec<Skill>> {
         }
         declared.insert(name.clone(), entry_name);
 
-        let content = std::fs::read_to_string(&file).map_err(|error| Error::io(&file, error))?;
+        let content = read_inside(agent, &file)?;
         let mut skill =
             parse_skill(name, &content).map_err(|message| Error::folder(&file, message))?;
         if entry.is_dir() {
-            load_skill_files(&entry, &entry, &mut skill.files)?;
+            load_skill_files(agent, &entry, &entry, &mut skill.files)?;
         }
         skills.push(skill);
     }
@@ -871,10 +902,12 @@ fn load_skills(path: &Path) -> Result<Vec<Skill>> {
 
 /// Reads every file in a skill folder but its SKILL.md, by `/` path relative to the folder.
 fn load_skill_files(
+    agent: &Path,
     root: &Path,
     directory: &Path,
     files: &mut BTreeMap<String, String>,
 ) -> Result<()> {
+    inside(agent, directory)?;
     let entries = std::fs::read_dir(directory).map_err(|error| Error::io(directory, error))?;
     for entry in entries.flatten() {
         let file = entry.path();
@@ -882,13 +915,14 @@ fn load_skill_files(
             continue;
         }
         if file.is_dir() {
-            load_skill_files(root, &file, files)?;
+            load_skill_files(agent, root, &file, files)?;
             continue;
         }
         if file == root.join(SKILL_FILE) {
             continue;
         }
-        let content = std::fs::read(&file).map_err(|error| Error::io(&file, error))?;
+        let content =
+            std::fs::read(inside(agent, &file)?).map_err(|error| Error::io(&file, error))?;
         let text = String::from_utf8(content)
             .map_err(|_| Error::folder(&file, "not text, and a skill brings only text files"))?;
         let relative = file.strip_prefix(root).unwrap_or(&file);
@@ -1023,7 +1057,7 @@ fn parse_deadline(value: &str) -> std::result::Result<Duration, String> {
     Ok(Duration::from_nanos(nanos))
 }
 
-fn load_knowledge(path: &Path) -> Result<Vec<Document>> {
+fn load_knowledge(agent: &Path, path: &Path) -> Result<Vec<Document>> {
     match std::fs::metadata(path) {
         Ok(info) if info.is_dir() => {}
         Ok(_) => return Err(Error::folder(path, "not a directory")),
@@ -1031,12 +1065,14 @@ fn load_knowledge(path: &Path) -> Result<Vec<Document>> {
         Err(error) => return Err(Error::io(path, error)),
     }
     let mut documents = Vec::new();
-    walk(path, path, &mut documents)?;
+    walk(agent, path, path, &mut documents)?;
     Ok(documents)
 }
 
-/// Reads a directory depth first in name order, which is the order Go's WalkDir takes.
-fn walk(root: &Path, directory: &Path, documents: &mut Vec<Document>) -> Result<()> {
+/// Reads a directory depth first in name order, which is the order Go's WalkDir takes, leaving
+/// hidden files and folders and `__pycache__` out, as a skill folder does.
+fn walk(agent: &Path, root: &Path, directory: &Path, documents: &mut Vec<Document>) -> Result<()> {
+    inside(agent, directory)?;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(directory)
         .map_err(|error| Error::io(directory, error))?
         .flatten()
@@ -1045,8 +1081,14 @@ fn walk(root: &Path, directory: &Path, documents: &mut Vec<Document>) -> Result<
     entries.sort();
 
     for file in entries {
+        if file
+            .file_name()
+            .is_some_and(|name| skipped(&name.to_string_lossy()))
+        {
+            continue;
+        }
         if file.is_dir() {
-            walk(root, &file, documents)?;
+            walk(agent, root, &file, documents)?;
             continue;
         }
         let readable = file.extension().is_some_and(|extension| {
@@ -1056,7 +1098,7 @@ fn walk(root: &Path, directory: &Path, documents: &mut Vec<Document>) -> Result<
         if !readable || file == root.join(KNOWLEDGE_URLS_FILE) {
             continue;
         }
-        let text = std::fs::read_to_string(&file).map_err(|error| Error::io(&file, error))?;
+        let text = read_inside(agent, &file)?;
         if text.trim().is_empty() {
             continue;
         }
@@ -1073,8 +1115,8 @@ fn walk(root: &Path, directory: &Path, documents: &mut Vec<Document>) -> Result<
 
 /// Reads the pages a knowledge base is kept filled from. A bad url is refused here, before
 /// anything is written.
-fn load_knowledge_urls(path: &Path) -> Result<Vec<KnowledgeUrl>> {
-    let raw = optional(path)?;
+fn load_knowledge_urls(agent: &Path, path: &Path) -> Result<Vec<KnowledgeUrl>> {
+    let raw = optional(agent, path)?;
     let refused = |message: String| Error::folder(path, message);
     let document = YamlLoader::load_from_str(&raw).map_err(|error| refused(error.to_string()))?;
     let items = match document.into_iter().next() {
@@ -1135,12 +1177,13 @@ fn load_knowledge_urls(path: &Path) -> Result<Vec<KnowledgeUrl>> {
 /// Reads every .yaml and .yml file in simulations/, each a list of simulations. A key
 /// nobody knows is refused, as in agent.yaml, and so is a name two simulations share, since
 /// a sync finds a simulation by its name.
-fn load_simulations(path: &Path) -> Result<Option<Vec<Simulation>>> {
+fn load_simulations(agent: &Path, path: &Path) -> Result<Option<Vec<Simulation>>> {
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::io(path, error)),
     };
+    inside(agent, path)?;
     let mut files: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
@@ -1159,7 +1202,7 @@ fn load_simulations(path: &Path) -> Result<Option<Vec<Simulation>>> {
     let mut simulations = Vec::new();
     let mut named: BTreeMap<String, String> = BTreeMap::new();
     for file in files {
-        let raw = std::fs::read_to_string(&file).map_err(|error| Error::io(&file, error))?;
+        let raw = read_inside(agent, &file)?;
         let refused = |message: String| Error::folder(&file, message);
         let document =
             YamlLoader::load_from_str(&raw).map_err(|error| refused(error.to_string()))?;
