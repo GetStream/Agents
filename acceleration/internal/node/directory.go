@@ -441,8 +441,19 @@ func (d *Directory) HandedOut(ctx context.Context, customerID, cid string) ([]by
 
 // Close stops renewing. What this node held expires rather than being given up, because
 // a process on its way out has a shutdown grace period to finish the calls it is carrying
-// and is still the only node that can answer for them.
-func (d *Directory) Close() { d.cancel() }
+// and is still the only node that can answer for them. New work for its shard is another
+// matter: the node leaves the shard's nodes at once (NodeInShard).
+func (d *Directory) Close() {
+	d.cancel()
+	if d.shard == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := d.redis.Do(ctx, d.redis.B().Zrem().Key(d.inShard+d.shard).Member(d.address).Build()).Error(); err != nil {
+		d.logger.Warn("could not say this node left its shard", "shard", d.shard, "error", err)
+	}
+}
 
 // lookup is the first of keys that is set, in one round trip, and empty when none is.
 func (d *Directory) lookup(ctx context.Context, keys ...string) (string, error) {
