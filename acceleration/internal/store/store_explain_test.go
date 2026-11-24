@@ -26,10 +26,10 @@ import (
 const seedRows = 100_000
 
 // hotTables are the tables that grow with traffic, which no statement may read in full.
-var hotTables = regexp.MustCompile(`\b(requests|agent_sessions|calls|call_legs|agent_logs|image_jobs)\b`)
+var hotTables = regexp.MustCompile(`\b(requests|agent_sessions|calls|call_legs|agent_logs|image_jobs|data_changes)\b`)
 
 // seqScans finds a sequential scan of one of hotTables in a plan.
-var seqScans = regexp.MustCompile(`Seq Scan on (requests|agent_sessions|calls|call_legs|agent_logs|image_jobs)\b`)
+var seqScans = regexp.MustCompile(`Seq Scan on (requests|agent_sessions|calls|call_legs|agent_logs|image_jobs|data_changes)\b`)
 
 // seededDatabase fills a database of its own with seedRows of each hot table, once per run of the
 // suite: the suite's databases are emptied before every test, and seeding them for each would
@@ -64,7 +64,7 @@ func (s *StoreSuite) seededDatabase() string {
 		// Statistics read off every row rather than a sample, so the planner breaks a tie
 		// between two indexes the same way every run.
 		_, err := tx.ExecContext(ctx, "SET LOCAL default_statistics_target = 1000; "+
-			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs, image_jobs")
+			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs, image_jobs, data_changes")
 		return err
 	}))
 	s.seededDSN = dsn
@@ -139,6 +139,12 @@ var seedStatements = []string{
 		CASE WHEN n % 100 = 0 THEN 'queued' WHEN n % 50 = 0 THEN 'failed' ELSE 'done' END,
 		CASE WHEN n % 200 = 0 THEN 'drawn' ELSE '' END, at, at, CASE WHEN n % 100 <> 0 THEN at + interval '1 minute' END
 	FROM generate_series(1, ?1) AS n, LATERAL (SELECT ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
+
+	`INSERT INTO data_changes (customer_id, table_name, op, key, payload, at)
+	SELECT 'customer-' || (s % 200), 'requests', 'insert', jsonb_build_object('usage_id', md5('usage-' || n)::uuid),
+		jsonb_build_object('id', n, 'customer_id', 'customer-' || (s % 200), 'user_id', 'user-' || (s % 20000)), at
+	FROM generate_series(1, ?1) AS n,
+		LATERAL (SELECT n % 25000 + 1 AS s, ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
 }
 
 // explained runs read on a store of the seeded database and answers the plan of each
@@ -272,6 +278,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		}},
 		{name: "Requests.RenameUser", index: "requests_customer_started_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-207", "user-207-renamed")
+			return err
+		}},
+		{name: "Requests.RenameUser changes", index: "data_changes_user_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-407", "user-407-renamed")
 			return err
 		}},
 		{name: "Requests.Spend", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {

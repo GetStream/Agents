@@ -248,7 +248,13 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},
+	// The recorded changes naming an end user, by row, which renaming them rewrites.
+	{"global", "data_changes_user_idx", dataChangesUserIndex},
+	{"shard", "data_changes_user_idx", dataChangesUserIndex},
 }
+
+const dataChangesUserIndex = "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_user_idx ON data_changes " +
+	"(customer_id, table_name, (payload->>'user_id'), (payload->>'id')) WHERE payload->>'user_id' IS NOT NULL"
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed
 // build left invalid first. A build that fails again fails Migrate, so the router does not

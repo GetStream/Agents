@@ -3,10 +3,14 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // recordedFor is every change recorded for a customer, as following their move reads them.
@@ -141,6 +145,52 @@ func (s *StoreSuite) TestForgettingAUserRenamesThemInTheChangesOfACampaignDelete
 
 	s.forget()
 
+	s.Empty(s.payloadsNaming("app", "jlahey"))
+}
+
+// afterRewrites runs after each statement that rewrites recorded changes, while it is active.
+type afterRewrites struct {
+	active atomic.Bool
+	run    func()
+}
+
+func (*afterRewrites) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+func (a *afterRewrites) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if a.active.Load() && strings.Contains(event.Query, "jsonb_set(payload, '{user_id}'") {
+		a.run()
+	}
+}
+
+func (s *StoreSuite) TestRenamingAUserRewritesEachChangeOfTheirRequestsWithItsOwnBatch() {
+	if s.store.Sharded() {
+		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
+	}
+	s.inSmallBatches()
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
+	for i := range 3 {
+		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "app", UserID: "jlahey",
+			Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base.Add(time.Duration(i) * time.Minute), Success: true}))
+	}
+	renamedInserts := func() int {
+		renamed := 0
+		for _, change := range s.recordedOf("app", "requests") {
+			if change.Op == "insert" && strings.Contains(string(change.Payload), `"forgotten"`) {
+				renamed++
+			}
+		}
+		return renamed
+	}
+	var after []int
+	watch := &afterRewrites{run: func() { after = append(after, renamedInserts()) }}
+	s.store.global.AddQueryHook(watch)
+	watch.active.Store(true)
+
+	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+
+	watch.active.Store(false)
+	s.Require().NoError(err)
+	s.EqualValues(3, renamed)
+	s.Equal([]int{1, 2, 3, 3, 3}, after, "a request's insert renamed by its own batch, then the batch finding none, then the changes left")
 	s.Empty(s.payloadsNaming("app", "jlahey"))
 }
 

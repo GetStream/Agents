@@ -718,9 +718,10 @@ func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64
 }
 
 // RenameUser replaces an app's end user id with replacement on every shard's requests,
-// writeBatch of them per statement, and in the changes recorded of their requests in each of
-// those statements (renamedChanges), and answers how many rows it rewrote. A request recorded
-// after the last statement keeps its change as it is.
+// writeBatch of them per statement, and in the changes recorded of those requests in the same
+// statement (renamedChanges). One more statement per shard then renames them in the changes
+// left, of requests deleted or no longer theirs. It answers how many rows it rewrote. A
+// request recorded after the last statement keeps its change as it is.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
 	if replacement == userID {
 		// Nothing to rewrite, and every batch would match the rows it just wrote.
@@ -729,21 +730,28 @@ func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement st
 	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
 		var renamed int64
 		for {
-			// A data-modifying WITH runs to the end whether or not the statement reads it.
-			changes := renamedChanges(db, appID, "requests", userID, replacement)
+			// Read once for both: the batch's rows and their changes.
 			batch := db.NewSelect().Model((*Request)(nil)).Column("id").
 				Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch)
-			result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
-				Where("id IN (?)", batch).Exec(ctx)
+			// A data-modifying WITH runs to the end whether or not the statement reads it.
+			changes := renamedChanges(db, appID, "requests", userID, replacement).
+				Where("payload->>'id' IN (SELECT id::text FROM batch)")
+			result, err := db.NewUpdate().With("batch", batch).With("changes", changes).Model((*Request)(nil)).
+				Set("user_id = ?", replacement).Where("id IN (SELECT id FROM batch)").Exec(ctx)
 			if err != nil {
 				return renamed, err
 			}
 			n, err := result.RowsAffected()
 			renamed += n
-			if err != nil || n < int64(writeBatch) {
+			if err != nil {
 				return renamed, err
 			}
+			if n < int64(writeBatch) {
+				break
+			}
 		}
+		_, err := renamedChanges(db, appID, "requests", userID, replacement).Exec(ctx)
+		return renamed, err
 	})
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))

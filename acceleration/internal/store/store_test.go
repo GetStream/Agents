@@ -555,6 +555,28 @@ func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
 	s.True(valid, "dropped and built again")
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it, on both sides, which both keep changes.
+	databases := []bun.IDB{s.store.GlobalDB(), s.store.ShardDB()}
+	for _, db := range databases {
+		_, err := db.ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_user_idx')")
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	for _, db := range databases {
+		var valid bool
+		var definition string
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
+		s.True(valid, "dropped and built again")
+		s.Equal("CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, "+
+			"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)", definition,
+			"built as the migration builds it")
+	}
+}
+
 // The reconcile reads every shard every few minutes, so it reads only the rows naming a grant,
 // by the partial index, rather than every request.
 func (s *StoreSuite) TestTheGrantReconcileReadsByTheGrantsIndex() {

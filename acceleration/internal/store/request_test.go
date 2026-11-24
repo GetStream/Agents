@@ -681,7 +681,8 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		s.Require().NoError(err)
 		s.Equal(int64(1), count)
 	}), "CountByUser")
-	s.Equal(shards, s.countQueries(func() {
+	// One batch, then the changes left.
+	s.Equal(2*shards, s.countQueries(func() {
 		renamed, err := s.store.Requests.RenameUser(s.ctx, "acme", "sam", "someone")
 		s.Require().NoError(err)
 		s.Equal(int64(1), renamed)
@@ -722,7 +723,7 @@ func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenam
 
 	var renamed int64
 	var err error
-	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+	updates := s.statementsLike(`WITH "batch" AS (SELECT`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)
