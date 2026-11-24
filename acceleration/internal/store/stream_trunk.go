@@ -78,6 +78,10 @@ type TrunkGroupTx struct {
 // the same text.
 const trunkGroupLockSeed = 0
 
+// trunkGroupIdle is how long a trunk group's transaction may sit idle: longer than one call
+// to Stream's API, which its client gives up on after 30 s.
+const trunkGroupIdle = time.Minute
+
 // Get returns one of a customer's Stream trunks by Stream's id.
 func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTrunk, error) {
 	var trunk StreamTrunk
@@ -102,6 +106,13 @@ func (r *StreamTrunks) InGroup(ctx context.Context, group TrunkGroup, fn func(ct
 	}
 	key := "stream_trunks:" + group.CustomerID + ":" + strconv.FormatInt(group.StreamAppPK, 10) + ":" + group.Vendor
 	return r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		// fn calls Stream between its statements, each call allowed as long as the serving
+		// idle limit, so the transaction gets an idle limit that outlasts one. Another router
+		// joining the group waits on the lock while those calls run: its wait is ended by the
+		// statement limit rather than the serving lock limit, which is shorter than one call.
+		if err := boundTransaction(ctx, tx, statementTimeout, trunkGroupIdle, trunkGroupIdle); err != nil {
+			return stack.Wrap(fmt.Errorf("store: trunk group: %w", err))
+		}
 		if err := lockUntilCommit(ctx, tx, key, trunkGroupLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock trunk group: %w", err))
 		}

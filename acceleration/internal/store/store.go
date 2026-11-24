@@ -124,6 +124,68 @@ func Open(dsn string) (*Store, error) {
 	return OpenShards(Options{DSN: dsn})
 }
 
+// The server's own limits on what a serving connection runs. pgdriver gives up on a read
+// after 10 s and drops the socket, but the server runs the statement to its end and commits
+// it, so a write the caller was told failed would still land. statementTimeout ends the
+// statement on the server first, and stays below the driver's read timeout for that.
+// lockTimeout bounds a wait on another session's lock, and idleInTransactionTimeout how long
+// a transaction whose router went quiet keeps its locks. Work that legitimately takes longer
+// raises them for its own transaction (boundTransaction).
+const (
+	statementTimeout         = 8 * time.Second
+	lockTimeout              = 3 * time.Second
+	idleInTransactionTimeout = 30 * time.Second
+)
+
+// sessionDefaults sets the limits above, and UTC as the time zone days and hours are cut in,
+// on every connection, leaving any of them the DSN sets itself.
+func sessionDefaults(conf *pgdriver.Config) {
+	defaults := map[string]any{
+		"statement_timeout":                   fmt.Sprintf("%dms", statementTimeout.Milliseconds()),
+		"lock_timeout":                        fmt.Sprintf("%dms", lockTimeout.Milliseconds()),
+		"idle_in_transaction_session_timeout": fmt.Sprintf("%dms", idleInTransactionTimeout.Milliseconds()),
+		"timezone":                            "UTC",
+	}
+	// Postgres reads a parameter's name in any case, so a DSN's TimeZone is timezone here.
+	for name, value := range conf.ConnParams {
+		defaults[strings.ToLower(name)] = value
+	}
+	conf.ConnParams = defaults
+}
+
+// boundTransaction gives the rest of tx statement, lock and idle limits of its own, for work
+// known to take longer than the serving defaults allow.
+func boundTransaction(ctx context.Context, tx bun.Tx, statement, lock, idle time.Duration) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('statement_timeout', ?, true), set_config('lock_timeout', ?, true), "+
+		"set_config('idle_in_transaction_session_timeout', ?, true)",
+		fmt.Sprintf("%dms", statement.Milliseconds()), fmt.Sprintf("%dms", lock.Milliseconds()), fmt.Sprintf("%dms", idle.Milliseconds()))
+	return err
+}
+
+// writeBatch is how many rows one statement of a prune or a rename touches. A backlog is
+// worked through in statements of this many, each well inside the statement limit: one
+// statement over all of it would run out of time and roll back, every time, while the backlog
+// grew.
+var writeBatch = 5000
+
+// deleteInBatches deletes the rows of table that where matches, writeBatch of them per
+// statement, and returns how many it deleted.
+func deleteInBatches(ctx context.Context, db bun.IDB, table, where string, args ...any) (int64, error) {
+	var deleted int64
+	for {
+		batch := db.NewSelect().TableExpr(table).Column("ctid").Where(where, args...).Limit(writeBatch)
+		result, err := db.NewDelete().TableExpr(table).Where("ctid IN (?)", batch).Exec(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		n, err := result.RowsAffected()
+		deleted += n
+		if err != nil || n < int64(writeBatch) {
+			return deleted, err
+		}
+	}
+}
+
 // connect opens a pool of at most conns connections.
 func connect(dsn string, conns int) (_ *bun.DB, err error) {
 	// pgdriver panics on a DSN it cannot parse, and the panic holds the whole DSN, password
@@ -133,7 +195,7 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults))
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
