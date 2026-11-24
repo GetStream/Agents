@@ -705,6 +705,7 @@ TABLE data_changes
     CONSTRAINT data_changes_pkey PRIMARY KEY (seq)
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
+    CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))
 
 TABLE data_move_cursors
     cursor bigint

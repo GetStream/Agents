@@ -544,6 +544,33 @@ func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
 	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheTaskChangesIndexLeftInvalid() {
+	databases := []bun.IDB{s.store.GlobalDB(), s.store.ShardDB()}
+	built := func(db bun.IDB) (valid bool, definition string) {
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_tasks_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, " +
+		"COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))"
+	for _, db := range databases {
+		_, definition := built(db)
+		s.Equal(want, definition, "as the migration builds it")
+		// As a CONCURRENTLY build that failed leaves it, on both sides, which both keep changes.
+		_, err := db.ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_tasks_idx')")
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	for _, db := range databases {
+		valid, definition := built(db)
+		s.True(valid, "dropped and built again")
+		s.Equal(want, definition, "built again as the migration builds it")
+	}
+}
+
 func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
 	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')")
