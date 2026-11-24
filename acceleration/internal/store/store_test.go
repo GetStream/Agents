@@ -407,6 +407,26 @@ func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 	s.Equal("acme", number.CustomerID)
 }
 
+// Another customer's row for the number on its own trunk, lined in the same app to place calls
+// from it, as one added before a number was held by one customer at a time can be.
+func (s *StoreSuite) TestANumberOnAnotherCustomersOwnTrunkDoesNotMakeACallNamedForTheNumberNobodys() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125551234", Vendor: "twilio", Country: "US",
+		CustomerID: "acme", PurchasedAt: s.base,
+	}))
+	_, err := s.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
+		Set("stream_trunk_id = ?", "trunk-7").
+		Where("e164 = ?", "+15125551234").
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	s.lined(TrunkGroup{CustomerID: "globex", Vendor: sipTrunkVendor}, "+15125551234", "trunk-9")
+
+	number, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
+
+	s.Require().NoError(err)
+	s.Equal("acme", number.CustomerID)
+}
+
 func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",

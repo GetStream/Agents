@@ -783,7 +783,7 @@ func sipTrunkFailure(err error) error {
 		return notConfigured(err.Error())
 	case errors.Is(err, store.ErrNoSIPTrunk):
 		return notFound(err.Error())
-	case errors.Is(err, store.ErrSIPTrunkInUse), errors.Is(err, store.ErrNumberHeld):
+	case errors.Is(err, store.ErrSIPTrunkInUse), errors.Is(err, store.ErrNumberHeld), errors.Is(err, store.ErrNumberHeldElsewhere):
 		return conflict(err.Error())
 	case errors.Is(err, phone.ErrInvalidSIPTrunk):
 		return invalidRequest(err.Error())

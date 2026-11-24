@@ -4934,11 +4934,20 @@ func (s *DataMoveSuite) TestANumberIsReadByItsColumnsAsTheyAreNamed() {
 	s.Empty(held)
 }
 
-func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
+func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedOnceWhoHeldItHereGaveItBack() {
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 	s.Require().NoError(giveBack(s.ctx, s.destination, "acme", "+15550000115", time.Time{}))
+
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000115", sipTrunkVendor, "sip_trunk_id", trunk)))
+	_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000115")
+	s.NoError(err)
+}
+
+func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsHereIsNotImportedOntoATrunk() {
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
 	}))
@@ -4947,12 +4956,101 @@ func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
 	}))
 
 	trunk := s.trunkOf(s.destination, "other").ID
-	for _, e164 := range []string{"+15550000115", "+15550000116", "+15550000117"} {
-		s.NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
-			s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk)), e164)
-		_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", e164)
-		s.NoError(err, e164)
+	for _, e164 := range []string{"+15550000116", "+15550000117"} {
+		row := s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk)
+		for _, err := range []error{
+			s.destination.ImportRow(s.ctx, "other", "phone_numbers", row),
+			s.destination.ApplyChanges(s.ctx, "other", []DataChange{{Table: "phone_numbers", Op: ChangeInsert, Payload: row}}),
+		} {
+			s.ErrorIs(err, ErrNumberHeldElsewhere, e164)
+			s.ErrorIs(err, ErrInvalidImport, e164)
+			s.NotContains(err.Error(), "acme", e164)
+		}
 	}
+
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Empty(held)
+}
+
+// A number given back at the source is only its bill's history, which moves whoever holds the
+// number here now.
+func (s *DataMoveSuite) TestANumberGivenBackIsImportedWhoeverHoldsItHere() {
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000118", Vendor: "plivo", Country: "US", CustomerID: "acme",
+	}))
+
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000118", sipTrunkVendor, "sip_trunk_id", trunk, "released_at", time.Now().UTC())))
+
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(held, 1)
+	s.NotNil(held[0].ReleasedAt)
+}
+
+// Both customers hold the number on their own trunks here, as two that added it before a
+// number was held by one customer at a time can. The source's change to one's row still
+// arrives, so its changes do not stop at the number.
+func (s *DataMoveSuite) TestANumberTheCustomerHoldsHereIsWrittenAgainWhoeverElseHoldsIt() {
+	trunk := s.trunkOf(s.destination, "other").ID
+	row := s.importedNumber("+15550000120", sipTrunkVendor, "sip_trunk_id", trunk)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000120", Vendor: sipTrunkVendor, Country: "US", CustomerID: "acme",
+		SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
+	}))
+	var changed map[string]any
+	s.Require().NoError(json.Unmarshal(row, &changed))
+	changed["tags"] = map[string]string{"team": "sales"}
+	again, err := json.Marshal(changed)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "other", []DataChange{{Table: "phone_numbers", Op: ChangeUpdate, Payload: again}}))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000120")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"team": "sales"}, held.Tags)
+}
+
+// The import holds the number's lock until it commits: its insert is kept waiting on its trunk's
+// row while a customer adds the number to its own trunk, which has to wait for the import and
+// then finds the number held.
+func (s *DataMoveSuite) TestOfAnImportAndAnAddOfOneNumberAtOnceTheSecondIsRefused() {
+	theirs, ours := s.trunkOf(s.destination, "other"), s.trunkOf(s.destination, "acme")
+	tx, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(s.ctx, "SELECT 1 FROM sip_trunks WHERE id = ? FOR UPDATE", theirs.ID)
+	s.Require().NoError(err)
+	waiting := func(want int) func() bool {
+		return func() bool {
+			var count int
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&count))
+			return count >= want
+		}
+	}
+
+	imported := make(chan error, 1)
+	go func() {
+		imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+			s.importedNumber("+15550000121", sipTrunkVendor, "sip_trunk_id", theirs.ID))
+	}()
+	s.Require().Eventually(waiting(1), 5*time.Second, 10*time.Millisecond)
+	added := make(chan error, 1)
+	go func() {
+		added <- s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+			E164: "+15550000121", Country: "US", CustomerID: "acme", SIPTrunkID: ours.ID,
+		})
+	}()
+	s.Require().Eventually(waiting(2), 5*time.Second, 10*time.Millisecond)
+	s.Require().NoError(tx.Commit())
+
+	s.NoError(<-imported)
+	s.ErrorIs(<-added, ErrNumberHeldElsewhere)
 }
 
 // importedNumber is a number as an import file can carry it, under an id nothing here has,

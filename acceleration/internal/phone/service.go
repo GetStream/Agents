@@ -2002,6 +2002,16 @@ func (s *Service) dialVendor(ctx context.Context, held store.PhoneNumber) (Provi
 	if err := s.sipTrunksReady(); err != nil {
 		return nil, nil, err
 	}
+	// A vendor sold the number to another customer, which a trunk's word does not outweigh. Stream
+	// lists a number on one trunk per app, so lined for this call in the app the buyer's line is
+	// made in, it would leave them unable to attach it or call from it there.
+	bought, err := s.store.PhoneNumbers.BoughtElsewhere(ctx, held.CustomerID, held.E164)
+	if err != nil {
+		return nil, nil, err
+	}
+	if bought {
+		return nil, nil, stack.Wrap(Invalid(store.ErrNumberHeldElsewhere))
+	}
 	trunk, err := s.openSIPTrunk(ctx, held.CustomerID, held.SIPTrunkID)
 	if err != nil {
 		return nil, nil, err

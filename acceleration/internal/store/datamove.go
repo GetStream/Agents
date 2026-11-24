@@ -790,7 +790,17 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
 	spec, _ := dataTableByName(table)
 	var stale []string
-	if err := s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale); err != nil {
+	var err error
+	if table == "phone_numbers" {
+		// A number is checked against who else holds it under a lock its write has to keep
+		// (holders), and only a transaction keeps one.
+		err = s.sideOf(spec).RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+			return s.importRow(ctx, tx, customerID, table, row, &stale)
+		})
+	} else {
+		err = s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
+	}
+	if err != nil {
 		return err
 	}
 	s.forget(ctx, stale...)
@@ -1826,14 +1836,20 @@ func resumeMovedTasks(ctx context.Context, tx bun.Tx, customerID string, holders
 // case, and its bills move in its requests: written here it would be billed again (Rentals)
 // and given back at this deployment's vendor account. So it is not written, and the customer
 // keeps it by buying or porting it here.
+//
+// A number on the customer's own trunk that another customer holds here is refused, as adding
+// it to the trunk is (PhoneNumbers.InsertOnSIPTrunk), unless the customer holds it here too:
+// a row the customer wrote before that rule is still its own to write again. One given back is
+// only its bill's history.
 func importableNumber(ctx context.Context, db bun.IDB, customerID string, row json.RawMessage) (bool, error) {
 	// Read the way the insert reads it, by exact column name: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var e164, vendor sql.NullString
 	var cost sql.NullInt64
+	var released bool
 	if err := db.QueryRowContext(ctx,
-		"SELECT e164, vendor, monthly_cost_micros FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
-		string(row)).Scan(&e164, &vendor, &cost); err != nil {
+		"SELECT e164, vendor, monthly_cost_micros, released_at IS NOT NULL FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
+		string(row)).Scan(&e164, &vendor, &cost, &released); err != nil {
 		if refused := refusedRow("phone_numbers", err); refused != nil {
 			return false, refused
 		}
@@ -1845,6 +1861,16 @@ func importableNumber(ctx context.Context, db bun.IDB, customerID string, row js
 	number := PhoneNumber{CustomerID: customerID, E164: e164.String, Vendor: vendor.String, MonthlyCostMicros: cost.Int64}
 	if err := number.Validate(); err != nil {
 		return false, stack.Wrap(err)
+	}
+	if released {
+		return true, nil
+	}
+	held, err := holders(ctx, db, number.E164)
+	if err != nil {
+		return false, err
+	}
+	if len(held) > 0 && !slices.Contains(held, customerID) {
+		return false, invalidImport(stack.Wrap(fmt.Errorf("store: import phone_numbers %s: %w", number.E164, ErrNumberHeldElsewhere)))
 	}
 	return true, nil
 }

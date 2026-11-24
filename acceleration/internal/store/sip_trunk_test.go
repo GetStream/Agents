@@ -86,18 +86,115 @@ func (s *StoreSuite) TestANumberOnATrunkIsHeldUnderSIPTrunk() {
 	s.Equal(int64(0), held.MonthlyCostMicros)
 }
 
-func (s *StoreSuite) TestTwoCustomersCanAddTheSameNumberToTheirTrunks() {
+func (s *StoreSuite) TestANumberOnAnotherCustomersTrunkCannotBeAddedToATrunk() {
 	acme, other := s.trunk("acme"), s.trunk("other")
-
 	s.Require().NoError(s.trunkNumber("acme", acme.ID, "+15550000103"))
-	s.Require().NoError(s.trunkNumber("other", other.ID, "+15550000103"))
 
-	for customer, trunk := range map[string]string{"acme": acme.ID, "other": other.ID} {
-		held, err := s.store.PhoneNumbers.GetByE164(s.ctx, customer, "+15550000103")
-		s.Require().NoError(err)
-		s.Equal(trunk, held.SIPTrunkID)
-		s.Equal(customer, held.CustomerID)
-	}
+	err := s.trunkNumber("other", other.ID, "+15550000103")
+
+	s.ErrorIs(err, ErrNumberHeldElsewhere)
+	s.NotContains(err.Error(), "acme")
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000103")
+	s.ErrorIs(err, ErrNoNumber)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000103")
+	s.Require().NoError(err)
+	s.Equal(acme.ID, held.SIPTrunkID)
+}
+
+func (s *StoreSuite) TestANumberAnotherCustomerBoughtCannotBeAddedToATrunk() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000110", Vendor: "twilio", Country: "US", CustomerID: "acme",
+	}))
+	trunk := s.trunk("other")
+
+	s.ErrorIs(s.trunkNumber("other", trunk.ID, "+15550000110"), ErrNumberHeldElsewhere)
+	_, err := s.store.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000110")
+	s.ErrorIs(err, ErrNoNumber)
+}
+
+func (s *StoreSuite) TestANumberAnotherCustomerGaveBackCanBeAddedToATrunk() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000111", Vendor: "twilio", Country: "US", CustomerID: "acme",
+	}))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15550000111", time.Time{}))
+	trunk := s.trunk("other")
+
+	s.Require().NoError(s.trunkNumber("other", trunk.ID, "+15550000111"))
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000111")
+	s.Require().NoError(err)
+	s.Equal(trunk.ID, held.SIPTrunkID)
+}
+
+// Another customer's registration of the number holds the lock its insert keeps, uncommitted,
+// so the second one has to wait for it to know whether it holds the number.
+func (s *StoreSuite) TestOfTwoCustomersAddingOneNumberAtOnceTheSecondIsRefused() {
+	acme, other := s.trunk("acme"), s.trunk("other")
+	tx, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	held, err := holders(s.ctx, tx, "+15550000112")
+	s.Require().NoError(err)
+	s.Require().Empty(held)
+	s.Require().NoError(insertNumber(s.ctx, tx, &PhoneNumber{
+		E164: "+15550000112", Vendor: sipTrunkVendor, Country: "US", CustomerID: "acme", SIPTrunkID: acme.ID,
+	}))
+
+	added := make(chan error, 1)
+	go func() { added <- s.trunkNumber("other", other.ID, "+15550000112") }()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting))
+		return waiting > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	s.Require().NoError(tx.Commit())
+
+	s.ErrorIs(<-added, ErrNumberHeldElsewhere)
+}
+
+func (s *StoreSuite) TestANumberOnATrunkDoesNotStopAnotherCustomerBuyingIt() {
+	trunk := s.trunk("acme")
+	s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15550000113"))
+
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000113", Vendor: "twilio", Country: "US", CustomerID: "other",
+	}))
+
+	bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15550000113")
+	s.Require().NoError(err)
+	s.True(bought, "the trunk's customer is told another bought it")
+	bought, err = s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "other", "+15550000113")
+	s.Require().NoError(err)
+	s.False(bought, "the buyer's own number is not another's")
+}
+
+func (s *StoreSuite) TestANumberGivenBackIsNotBoughtElsewhere() {
+	trunk := s.trunk("acme")
+	s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15550000114"))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000114", Vendor: "twilio", Country: "US", CustomerID: "other",
+	}))
+	s.Require().NoError(giveBack(s.ctx, s.store, "other", "+15550000114", time.Time{}))
+
+	bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15550000114")
+	s.Require().NoError(err)
+	s.False(bought)
+}
+
+// Two customers' rows on their own trunks, as one written before a number was held by one
+// customer at a time leaves them: neither one was sold the number.
+func (s *StoreSuite) TestANumberOnAnotherCustomersTrunkIsNotBoughtElsewhere() {
+	trunk := s.trunk("acme")
+	s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15550000115"))
+	other := s.trunk("other")
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000115", Vendor: sipTrunkVendor, Country: "US", CustomerID: "other", SIPTrunkID: other.ID,
+	}))
+
+	bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15550000115")
+	s.Require().NoError(err)
+	s.False(bought)
 }
 
 func (s *StoreSuite) TestACustomerCannotAddANumberTwice() {

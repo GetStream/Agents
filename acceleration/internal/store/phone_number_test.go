@@ -236,9 +236,16 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 			E164: "+15125550199", Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
 		}))
 	}), "Insert")
-	s.Equal(3, s.countQueries(func() {
+	// The number's holders are read and it is inserted in a transaction, BEGIN to COMMIT, under
+	// a lock taken first.
+	s.Equal(6, s.countQueries(func() {
 		s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15125550198"))
-	}), "InsertOnSIPTrunk reads the trunk and the number before it inserts")
+	}), "InsertOnSIPTrunk reads the trunk, then locks the number and reads who holds it before it inserts")
+	s.Equal(1, s.countQueries(func() {
+		bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15125550198")
+		s.Require().NoError(err)
+		s.False(bought)
+	}), "BoughtElsewhere")
 	// A write to a number is a transaction, BEGIN to COMMIT, that waits on the row as long as a
 	// trunk group may hold it.
 	s.Equal(4, s.countQueries(func() {

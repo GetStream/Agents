@@ -1286,6 +1286,22 @@ func (s *AppsSuite) callsThroughATrunk() trunkCall {
 // callsThroughATrunkOn is callsThroughATrunk where the stand-in for the sip_trunk provider
 // has the given kind of Stream leg.
 func (s *AppsSuite) callsThroughATrunkOn(leg StreamLeg) trunkCall {
+	// One no other customer holds, as a number on a trunk has to be.
+	e164 := aNumber()
+	call := s.onATrunk(s.customer, e164, leg)
+
+	placed, err := call.service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+	call.placed = placed
+	return call
+}
+
+// onATrunk is a service that dials through customers' own trunks with a stand-in for the
+// sip_trunk provider of the given kind of Stream leg, and the number added to a trunk of the
+// customer's own.
+func (s *AppsSuite) onATrunk(customer, e164 string, leg StreamLeg) trunkCall {
 	sealer, err := auth.NewSealer("apps suite")
 	s.Require().NoError(err)
 	logged := &bytes.Buffer{}
@@ -1296,22 +1312,60 @@ func (s *AppsSuite) callsThroughATrunkOn(leg StreamLeg) trunkCall {
 	})
 	s.Require().NoError(err)
 	password := "trunk-s3cret"
-	trunk, err := service.CreateSIPTrunk(s.ctx, s.customer, SIPTrunkSettings{
+	trunk, err := service.CreateSIPTrunk(s.ctx, customer, SIPTrunkSettings{
 		Name: "main", Host: "trunk.example.com", Username: "trunk-user", Password: &password,
 	})
 	s.Require().NoError(err)
-	// A trunk number must be digits only, and stay unique across runs.
-	e164 := fmt.Sprintf("+1555010%04d", time.Now().UnixNano()%10000)
 	_, err = service.AddTrunkNumber(s.ctx, TrunkNumber{
-		Owner: routing.Owner{CustomerID: s.customer}, TrunkID: trunk.ID, E164: e164, Country: "us",
+		Owner: routing.Owner{CustomerID: customer}, TrunkID: trunk.ID, E164: e164, Country: "us",
 	})
 	s.Require().NoError(err)
+	return trunkCall{service: service, vendor: vendor, logged: logged, password: password}
+}
 
-	placed, err := service.Call(s.ctx, CallRequest{
-		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550001111",
+func (s *AppsSuite) TestACallThroughACustomersTrunkLandsInItsSessionsCallThroughTheNumbersRule() {
+	s.deployment.OneTrunkPerNumber()
+
+	call := s.callsThroughATrunkOn(StreamLegShared)
+
+	from := call.vendor.dialed.From
+	s.Equal("sip:"+from+"@sip.example.test", call.vendor.dialed.Bridge.URI)
+	s.Equal(call.placed.CallID, call.vendor.dialed.CallID, "the bridge names the session's call on its leg")
+	trunks, rules := s.deployment.Trunks(), s.deployment.Rules()
+	s.Require().Len(trunks, 1)
+	s.Require().Len(rules, 1)
+	s.Equal([]string{from}, s.deployment.TrunkNumbers(trunks[0]))
+	rule := s.deployment.Rule(rules[0])
+	s.Equal([]any{from}, rule["called_numbers"])
+	s.Equal([]any{trunks[0]}, rule["trunk_ids"])
+	direct := rule["direct_routing_configs"].(map[string]any)
+	s.Equal(lineCallTemplate, direct["call_id"], "the leg lands in the call its header names")
+}
+
+// The customer that registered the number on its trunk did so first, before the other bought it,
+// and has placed no call from it since.
+func (s *AppsSuite) TestANumberAnotherCustomerBoughtIsNotLinedFromATrunkItWasAddedToFirst() {
+	s.sealed()
+	s.deployment.OneTrunkPerNumber()
+	e164, first := aNumber(), "customer-"+uuid.NewString()
+	trunk := s.onATrunk(first, e164, StreamLegShared)
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+
+	_, err := trunk.service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: first}, From: e164, To: "+15550001111",
 	})
-	s.Require().NoError(err)
-	return trunkCall{placed: placed, service: service, vendor: vendor, logged: logged, password: password}
+
+	s.ErrorIs(err, ErrInvalid, "answered as the caller's to change")
+	s.EqualError(err, store.ErrNumberHeldElsewhere.Error(), "naming nobody")
+	s.Empty(trunk.vendor.dialed.From, "the trunk was not dialled")
+	s.Empty(s.deployment.Trunks(), "nothing was made at Stream")
+	s.Empty(s.deployment.Rules())
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+	s.Require().NoError(err, "the buyer attaches it in the app both share")
+	_, err = s.callFrom(e164)
+	s.NoError(err, "and calls from it")
 }
 
 func (s *AppsSuite) TestACallThroughACustomersTrunkNamesTheTrunksHostOnly() {
