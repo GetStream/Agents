@@ -845,7 +845,9 @@ func (s *BrokerSuite) TestABindWhileRequestsGoThroughGivesEachTheTokenOrNothing(
 			for range 5 {
 				statuses <- s.attempt(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
 				status := s.attempt(mount, "api.github.com", mount.Env["GITHUB_TOKEN"])
-				s.Contains([]int{http.StatusOK, http.StatusProxyAuthRequired}, status)
+				// 403: the request went through CONNECT before BeforeRun ended the run's record, and its
+				// grant is gone when the request inside the tunnel arrives (proxy.go, «grant for this host has ended»).
+				s.Contains([]int{http.StatusOK, http.StatusForbidden, http.StatusProxyAuthRequired}, status)
 			}
 		})
 	}
@@ -859,7 +861,7 @@ func (s *BrokerSuite) TestABindWhileRequestsGoThroughGivesEachTheTokenOrNothing(
 	close(statuses)
 
 	for status := range statuses {
-		s.Contains([]int{http.StatusUnauthorized, http.StatusProxyAuthRequired}, status)
+		s.Contains([]int{http.StatusUnauthorized, http.StatusForbidden, http.StatusProxyAuthRequired}, status)
 	}
 	mount = running(prepared, env)
 	status, _ := s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
