@@ -206,6 +206,10 @@ func (s *StoreSuite) TestSpendQueryBudgets() {
 		s.Require().NoError(err)
 	}), "the organization's apps, then one sum a shard")
 	s.Equal(shards, s.countQueries(func() {
+		_, err := s.store.Spend.Teams(s.ctx, "app-1", []time.Time{s.base}, s.base, false)
+		s.Require().NoError(err)
+	}), "an app in no organization looks up no apps: one sum a shard")
+	s.Equal(shards, s.countQueries(func() {
 		_, err := s.store.Spend.Daily(s.ctx, s.base, s.base.AddDate(0, 0, 1))
 		s.Require().NoError(err)
 	}))

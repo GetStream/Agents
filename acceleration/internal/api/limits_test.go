@@ -648,7 +648,7 @@ func (s *SelfHostedLimitsSuite) backend(app, organization string) *testClient {
 
 // spent records a billable request of app's, costing micros, now, carrying categories.
 func (s *SelfHostedLimitsSuite) spent(app string, micros int64, categories ...string) {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "llm", CustomerID: app, APIKey: "key_a", Provider: "stub", Model: "stub-llm",
 		StartedAt: time.Now(), CostMicros: micros, Billable: true, Success: true, UsageCategories: categories,
 	}))
@@ -748,4 +748,23 @@ func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsTeamsAreItsOwnWorks() 
 	s.Require().Len(teams, 1, "%+v", teams)
 	s.Equal("finance", teams[0].Name)
 	s.Equal([]string{own}, teams[0].Apps)
+}
+
+// An organization's teams are the work of every app seen under it, the one whose id is the
+// organization's among them when it was seen there.
+func (s *SelfHostedLimitsSuite) TestAnOrganizationsTeamsAreTheWorkOfEveryAppSeenUnderIt() {
+	own, organization := s.utils.uuid(), s.utils.uuid()
+	for _, app := range []string{own, organization} {
+		s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
+	}
+	s.spent(own, 300_000, "team:finance")
+	s.spent(organization, 700_000, "team:finance")
+
+	var teams []Team
+	s.Require().Equal(http.StatusOK, s.backend(own, organization).do(http.MethodGet, "/v1/teams", nil, &teams))
+
+	s.Require().Len(teams, 1, "%+v", teams)
+	s.Equal("finance", teams[0].Name)
+	s.ElementsMatch([]string{own, organization}, teams[0].Apps)
+	s.Equal(int64(1_000_000), teams[0].Spent[3].SpentMicros)
 }

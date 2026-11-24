@@ -539,7 +539,7 @@ func (s *SelfHostedAccountSuite) TestNoUsageServiceAnswersNotEnabled() {
 // which is another customer's.
 func (s *SelfHostedAccountSuite) TestTeamsLeaveOutAnAppWhoseIdIsTheOrganizations() {
 	for app, team := range map[string]string{s.customerID(): "finance", s.app.organization.ID: "stranger"} {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			Modality: "llm", CustomerID: app, APIKey: "key_a", Provider: "stub", Model: "stub-llm",
 			StartedAt: time.Now(), CostMicros: 500_000, Billable: true, Success: true, UsageCategories: []string{"team:" + team},
 		}))
