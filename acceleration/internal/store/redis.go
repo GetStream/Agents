@@ -311,7 +311,7 @@ func (s *Store) forget(ctx context.Context, names ...string) bool {
 // A commit other than 0 is the id of a transaction whose COMMIT answer was lost, err that
 // loss, and names its keys. The COMMIT may land at any time, so each attempt deletes all of
 // names whatever the last one answered, and they are deleted once more after Postgres says the
-// transaction has ended (settled).
+// transaction has ended (settled), until Redis takes it or commitWait passes. One with no slot left is deleted no more.
 //
 // The lines it logs count the keys rather than name them: a user's policy key holds the
 // user's id, often an email.
@@ -344,6 +344,7 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 	go func() {
 		defer s.retrying.Done()
 		defer func() { <-slots }()
+		lost := err
 		client := s.cache.Client()
 		// del deletes names, one DEL per key as forget sends them, since a cluster refuses one
 		// across slots, and returns those Redis did not take.
@@ -369,7 +370,7 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 			case <-s.closing.Done():
 				timer.Stop()
 				if commit != 0 {
-					slog.Default().Error("the store closed before a commit whose answer was lost had ended, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
+					slog.Default().Error("the store closed before a commit whose answer was lost had ended, so the rows it changed can stay cached until they expire", "keys", len(names), "error", lost)
 				} else {
 					slog.Default().Error("could not drop cached rows before the store closed", "keys", len(names), "error", err)
 				}
@@ -386,12 +387,28 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 		}
 		if commit != 0 {
 			if !s.settled(commit) {
-				slog.Default().Error("a commit whose answer was lost had not ended when the store stopped waiting, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
+				slog.Default().Error("a commit whose answer was lost had not ended when the store stopped waiting, so the rows it changed can stay cached until they expire", "keys", len(names), "error", lost)
 				if s.closing.Err() != nil {
 					return
 				}
 			}
-			missed = del(names)
+			// The row may have been cached again since the last try, and a Redis that is down
+			// as the commit lands is often down for longer than a refused deletion is tried.
+			bound, cancel := context.WithTimeout(s.closing, commitWait)
+			defer cancel()
+			for wait := forgetBackoff; ; wait = min(2*wait, time.Second) {
+				if names = del(names); len(names) == 0 {
+					return
+				}
+				timer := time.NewTimer(wait)
+				select {
+				case <-bound.Done():
+					timer.Stop()
+					slog.Default().Error("gave up dropping a lost commit's cached rows", "keys", len(names), "error", err)
+					return
+				case <-timer.C:
+				}
+			}
 		}
 		if len(missed) > 0 {
 			slog.Default().Error("gave up dropping cached rows", "keys", len(missed), "attempts", forgetAttempts, "error", err)
@@ -402,8 +419,14 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 // commitWait bounds how long a lost COMMIT answer is waited on. A transaction whose COMMIT
 // never reached the server is rolled back once it has been idle for
 // idleInTransactionTimeout, which began before the answer was lost. One whose DSN sets a longer
-// limit of its own can outlast the wait.
+// limit of its own can outlast the wait, as can a COMMIT that waits on a synchronous replica,
+// which no server limit ends. A Postgres that crashed has forgotten a transaction it wrote
+// nothing of, and answers with an error until the wait is over.
 const commitWait = idleInTransactionTimeout
+
+// pollSlots is how many lost commits ask Postgres at once, so that one that stopped answering
+// holds only that many of the pool's connections.
+const pollSlots = 4
 
 // settled waits until Postgres says transaction xid is no longer in progress, committed or
 // rolled back, and reports whether it said so before commitWait passed or the store closed.
@@ -439,6 +462,12 @@ func (s *Store) settled(xid int64) bool {
 
 // ended asks Postgres, for at most forgetWait, whether transaction xid is no longer in progress.
 func (s *Store) ended(ctx context.Context, xid int64) bool {
+	select {
+	case s.polls <- struct{}{}:
+		defer func() { <-s.polls }()
+	case <-ctx.Done():
+		return false
+	}
 	ctx, cancel := context.WithTimeout(ctx, forgetWait)
 	defer cancel()
 	// NULL is a transaction old enough to have left the commit log: long ended.

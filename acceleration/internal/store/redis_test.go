@@ -728,6 +728,128 @@ func (s *StoreSuite) TestLostCommitsTakeNoRetryFromADeletionRedisRefused() {
 	s.Contains(logged.String(), "lost a commit's answer with no retry free to wait for it", "the 65th lost commit is refused")
 }
 
+func (s *StoreSuite) TestALostCommitsLastDeletionIsTriedUntilRedisTakesIt() {
+	proxy := s.redisProxy()
+	behind, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	logged := &syncBuffer{}
+	s.logTo(logged)
+	open, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = open.Rollback() })
+	var xid int64
+	s.Require().NoError(open.NewSelect().ColumnExpr("pg_current_xact_id()").Scan(s.ctx, &xid))
+	redis := s.store.sharedRedis()
+	key := cacheKey("policy", "jlahey@example.com")
+
+	behind.forgetLater([]string{key}, errors.New("no answer"), xid)
+	s.Never(func() bool { return len(behind.lost) == 0 }, time.Second, 10*time.Millisecond, "past the third deletion")
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+	proxy.setDown(true)
+	s.Require().NoError(open.Commit())
+	// Longer than the 700 ms a deletion Redis refused is tried for, and the second between polls.
+	s.Never(func() bool { return len(behind.lost) == 0 }, 2500*time.Millisecond, 10*time.Millisecond, "Redis is down")
+	proxy.setDown(false)
+	s.Eventually(func() bool {
+		exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		return exists == 0 && len(behind.lost) == 0
+	}, 3*time.Second, 10*time.Millisecond, "the deletion is tried again")
+
+	proxy.setDown(true)
+	behind.forgetLater([]string{key}, errors.New("refused"), 0)
+	s.Eventually(func() bool { return strings.Contains(logged.String(), "gave up dropping cached rows") }, 5*time.Second, 10*time.Millisecond)
+	behind.forgetLater([]string{key}, errors.New("no answer"), xid)
+	s.Never(func() bool { return len(behind.lost) == 0 }, 1500*time.Millisecond, 10*time.Millisecond, "Redis is down")
+	began := time.Now()
+	s.Require().NoError(behind.Close())
+	s.Less(time.Since(began), 3*time.Second, "Close does not wait for Redis")
+	s.Contains(logged.String(), "gave up dropping a lost commit's cached rows")
+	s.NotContains(logged.String(), "jlahey", "a key names an end user")
+}
+
+func (s *StoreSuite) TestALostCommitsLinesNameTheLossAndNoKey() {
+	proxy := s.redisProxy()
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	xid := s.runningTransaction()
+	logged := &syncBuffer{}
+	s.logTo(logged)
+	key := cacheKey("policy", "jlahey@example.com")
+
+	proxy.setDown(true)
+	closing.forgetLater([]string{key}, errors.New("no answer"), xid)
+	s.Require().NoError(closing.Close())
+	closing.forgetLater([]string{key}, errors.New("no answer"), xid)
+
+	s.Contains(logged.String(), "lost a commit's answer as the store closed")
+	s.Equal(2, strings.Count(logged.String(), `error="no answer"`), "not what Redis answered: "+logged.String())
+	s.NotContains(logged.String(), "jlahey", "a key names an end user")
+}
+
+func (s *StoreSuite) TestALostCommitThatWasRolledBackIsWaitedOnNoLonger() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	waiting, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(waiting.Close()) })
+	open, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	var xid int64
+	s.Require().NoError(open.NewSelect().ColumnExpr("pg_current_xact_id()").Scan(s.ctx, &xid))
+	s.Require().NoError(open.Rollback())
+
+	waiting.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+
+	s.Eventually(func() bool { return len(waiting.lost) == 0 }, 3*time.Second, 10*time.Millisecond)
+	s.True(s.store.ended(s.ctx, 3), "an id too old to have a status has ended")
+}
+
+func (s *StoreSuite) TestALostCommitWithNothingCachedIsNotWaitedOn() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	_, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+
+	s.Require().Error(slow.detachedWrite(s.ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.ExecContext(ctx, "SELECT pg_current_xact_id()")
+		return err
+	}, func() []string { return nil }))
+
+	s.Zero(len(slow.lost)+len(slow.retries), "there is no key to drop")
+}
+
+func (s *StoreSuite) TestLostCommitsLeaveThePoolToOthersWhilePostgresStopsAnswering() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	proxy, dsn := s.pgProxy(false)
+	waiting, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = waiting.Close() })
+	xid := s.runningTransaction()
+	for range 64 {
+		waiting.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	}
+
+	proxy.frozen.Store(true)
+	most := 0
+	for deadline := time.Now().Add(6 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		most = max(most, waiting.global.Stats().InUse)
+	}
+	proxy.frozen.Store(false)
+	thawed := time.Now()
+	s.Require().Eventually(func() bool { return waiting.global.PingContext(s.ctx) == nil }, 15*time.Second, time.Millisecond)
+	s.T().Logf("held %d connections at most; first success %v after the thaw", most, time.Since(thawed))
+
+	s.Positive(most, "Postgres is asked")
+	s.LessOrEqual(most, 4, "and holds few of the pool's 40 connections")
+}
+
 func (s *StoreSuite) TestRetriesAskedForWhileTheStoreClosesEndWithIt() {
 	if s.store.cache == nil {
 		s.T().Skipf("%s not set", redisAddressVar)

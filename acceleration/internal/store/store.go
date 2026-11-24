@@ -66,11 +66,13 @@ type Store struct {
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
 	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
-	// lost commit it is waiting on, which it can do for longer. stop ends them
+	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
+	// ask Postgres at once. stop ends them
 	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
 	// retry starts once Close is waiting.
 	retries  chan struct{}
 	lost     chan struct{}
+	polls    chan struct{}
 	closing  context.Context
 	stop     context.CancelFunc
 	retrying sync.WaitGroup
