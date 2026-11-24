@@ -785,6 +785,9 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.LimitGrantUses.Reconcile(ctx)
 			return err
 		}},
+		{name: "Store.ShipStats", index: "requests_started_idx", sharded: true, run: func(ctx context.Context, store *Store) error {
+			return store.ShipStats(ctx, s.base)
+		}},
 	}
 	for _, read := range reads {
 		s.Run(read.name, func() {

@@ -179,7 +179,8 @@ func (t dataTable) rollup() bool {
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
 // with its name and description, to be given a recording and prepared again. And
 // phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
-// which only this deployment's sweep can settle.
+// which only this deployment's sweep can settle. And the shard_ copies of the rollups, with
+// shard_stats_shipped: each shard ships them from its own rows (Store.ShipStats), which move.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},

@@ -1198,6 +1198,116 @@ TABLE shard_numbers
     CONSTRAINT shard_numbers_number_key UNIQUE (number)
     CONSTRAINT shard_numbers_pkey PRIMARY KEY (name)
 
+TABLE shard_stats_daily
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    model text NOT NULL
+    output_tokens_total bigint NOT NULL
+    provider text NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_daily_pkey PRIMARY KEY (modality, customer_id, bucket, provider, model, shard)
+
+TABLE shard_stats_hourly
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    model text NOT NULL
+    output_tokens_total bigint NOT NULL
+    provider text NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_hourly_pkey PRIMARY KEY (modality, customer_id, bucket, provider, model, shard)
+
+TABLE shard_stats_shipped
+    shard text NOT NULL
+    shipped_at timestamp with time zone NOT NULL DEFAULT now()
+    shipped_through timestamp with time zone NOT NULL
+    CONSTRAINT shard_stats_shipped_pkey PRIMARY KEY (shard)
+
+TABLE shard_stats_tags_daily
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    output_tokens_total bigint NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    tag_key text NOT NULL
+    tag_value text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_tags_daily_pkey PRIMARY KEY (modality, customer_id, tag_key, bucket, tag_value, shard)
+
+TABLE shard_stats_tags_hourly
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    output_tokens_total bigint NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    tag_key text NOT NULL
+    tag_value text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_tags_hourly_pkey PRIMARY KEY (modality, customer_id, tag_key, bucket, tag_value, shard)
+
+TABLE shard_turn_latency_hourly
+    agent_id text NOT NULL
+    bin smallint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    count bigint NOT NULL
+    customer_id text NOT NULL
+    leg text NOT NULL
+    shard text NOT NULL
+    CONSTRAINT shard_turn_latency_hourly_pkey PRIMARY KEY (customer_id, bucket, agent_id, leg, bin, shard)
+
+TABLE shard_turn_stats_hourly
+    agent_id text NOT NULL
+    audio_out_ms_total double precision NOT NULL
+    bucket timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    interrupted_count bigint NOT NULL
+    shard text NOT NULL
+    turn_count bigint NOT NULL
+    CONSTRAINT shard_turn_stats_hourly_pkey PRIMARY KEY (customer_id, bucket, agent_id, shard)
+
 TABLE simulation_cases
     call_id text
     ended text NOT NULL DEFAULT ''::text

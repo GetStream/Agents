@@ -1952,7 +1952,12 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+	// A rollup keeps no request's labels, so a label filter reads the requests of every shard.
+	read := s.store.Buckets.Select
+	if s.store.StatsShipped() && len(tags) == 0 {
+		read = s.store.Buckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.BucketFilter{
 		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
@@ -1995,7 +2000,11 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+	read := s.store.TagBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TagBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TagBucketFilter{
 		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
@@ -2043,7 +2052,11 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+	read := s.store.TurnBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TurnBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TurnBucketFilter{
 		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
