@@ -121,9 +121,7 @@ func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []
 		cases[i].RunID = run.ID
 		cases[i].State = SimulationPending
 		cases[i].StartedAt = run.StartedAt
-		if cases[i].Transcript == nil {
-			cases[i].Transcript = []SimulationLine{}
-		}
+		cases[i].Transcript = orEmpty(cases[i].Transcript)
 		if err := cases[i].Validate(); err != nil {
 			return stack.Wrap(err)
 		}

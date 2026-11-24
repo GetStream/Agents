@@ -219,10 +219,7 @@ func (r *Buckets) Select(ctx context.Context, customerID string, f BucketFilter)
 	if f.Modality == "" {
 		return nil, stack.Wrap(errors.New("store: modality is required"))
 	}
-	tags := f.Tags
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags := orEmptyMap(f.Tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer stats: encode tag filter: %w", err))

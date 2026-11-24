@@ -223,9 +223,7 @@ func normalizeSimulation(simulation *Simulation) {
 	if simulation.MaxTurns <= 0 {
 		simulation.MaxTurns = defaultMaxTurns
 	}
-	if simulation.Tags == nil {
-		simulation.Tags = map[string]string{}
-	}
+	simulation.Tags = orEmptyMap(simulation.Tags)
 }
 
 func unknownSimulation(id string) error {

@@ -213,9 +213,7 @@ func recordAuditEntries(ctx context.Context, db bun.IDB, entries []AuditEntry) e
 		if err := entry.Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		if entry.Changes == nil {
-			entry.Changes = []AuditChange{}
-		}
+		entry.Changes = orEmpty(entry.Changes)
 		entry.ID = newID()
 		if !slices.Contains(auditSources, entry.Source) {
 			entry.Source = AuditSourceAPI
