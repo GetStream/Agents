@@ -57,15 +57,20 @@ const usageCommands = `usage: router usage <command>
                              for a batch shipped in between; the user's spend counters, holds
                              and quota buckets in Redis, by name; and in the shared database
                              their own policy and user-level limits, deleted, so the app's
-                             defaults apply, and the id on their resets, grants and campaigns.
+                             defaults apply, and the id on their resets, grants and campaigns;
+                             with them their phone links, channel link codes and profile,
+                             deleted, their contact map rows, unlinked, and the id on the
+                             guests they claimed. The call legs of every shard are rewritten
+                             too, and the agent logs naming them deleted, the changes recorded
+                             of the logs and the profile turned into deletes.
                              Usage and cost stay where they were, under the app. Prints each
                              step's count and writes one audit row (end_user, source cli) that
                              names the replacement and --actor, never the id. --dry-run prints
                              the counts and changes nothing. Every step is safe to repeat: to
                              finish a run that stopped, pass the replacement it printed as
                              --replacement, and only what still names the id is rewritten,
-                             under that one replacement. Sessions, conversation history and
-                             agent_logs stay as they are. Needs ROUTER_USAGE_URL and
+                             under that one replacement. Sessions, with their conversation
+                             history and documents, stay as they are. Needs ROUTER_USAGE_URL and
                              ROUTER_USAGE_MANAGE_KEY.
                              Writes the database
   storage [--hour time]      record an hour of every knowledge base's size: the last hour to have
@@ -546,7 +551,15 @@ func (f forgetting) count(ctx context.Context) error {
 			keys += int(found)
 		}
 	}
+	legs, err := f.store.CallLegs.CountUser(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
 	branches, err := f.store.BranchMessages.CountUser(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
+	logs, err := f.store.AgentLogs.CountUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
@@ -555,17 +568,20 @@ func (f forgetting) count(ctx context.Context) error {
 		return err
 	}
 	_, err = fmt.Fprintf(f.out, "dry run, nothing is changed\nscheduled tasks: %d to delete, %d recorded changes to redact\n"+
-		"requests: %d rows\nbranch snapshots: %d messages to delete\n"+
+		"requests: %d rows\ncall legs: %d rows\nbranch snapshots: %d messages to delete\nagent logs: %d to delete\n"+
 		"usage service: %d events, %d windows\nredis: %d keys\n"+
-		"shared database: %d policies and %d limits to delete; %d resets, %d grants and %d campaigns to rewrite\n",
-		tasks.Tasks, tasks.Changes, requests, branches, service.Events, service.Windows, keys,
-		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns)
+		"shared database: %d policies and %d limits to delete; %d resets, %d grants and %d campaigns to rewrite\n"+
+		"links: %d phone links, %d channel link codes and %d profiles to delete; %d contacts to unlink; %d claimed guests to rewrite\n",
+		tasks.Tasks, tasks.Changes, requests, legs, branches, logs, service.Events, service.Windows, keys,
+		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns,
+		settings.Phones, settings.ChannelLinks, settings.Profiles, settings.Contacts, settings.Claims)
 	return err
 }
 
 // forget replaces the id, in the order each step needs, once the user's scheduled tasks are
 // deleted, so none runs and records the id again meanwhile: the shards first, so nothing ships
-// the id again, and with them the snapshots of messages a rewind hid, which hold the user's words;
+// the id again, their call legs with them, and the snapshots of messages a rewind hid and the
+// agent logs naming the user, which hold the user's words;
 // the usage service twice, the second after settle, for a batch read before the
 // shards were rewritten; Redis once the service writes no counter of the id any more; and the
 // shared database last, with the audit row in the same transaction.
@@ -591,11 +607,25 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\n", requests); err != nil {
 		return err
 	}
+	legs, err := f.store.CallLegs.RenameUser(ctx, f.app, f.user, f.replacement)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f.out, "call legs: %d rows rewritten\n", legs); err != nil {
+		return err
+	}
 	branches, err := f.store.BranchMessages.DeleteUser(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(f.out, "branch snapshots: %d messages deleted\n", branches); err != nil {
+		return err
+	}
+	logs, err := f.store.AgentLogs.DeleteUser(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f.out, "agent logs: %d deleted\n", logs); err != nil {
 		return err
 	}
 	forget := usageservice.ForgetUser{AppID: f.app, UserID: f.user, Replacement: f.replacement}
@@ -635,7 +665,8 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 		CustomerID: f.app, ResourceType: store.AuditEndUser, ResourceID: f.replacement,
 		Action: store.AuditUpdated, Source: store.AuditSourceCLI, ActorID: f.actor,
 		Changes: []store.AuditChange{
-			{Field: "requests", After: requests}, {Field: "branch_messages", After: branches}, {Field: "events", After: first.Events + second.Events},
+			{Field: "requests", After: requests}, {Field: "call_legs", After: legs}, {Field: "branch_messages", After: branches},
+			{Field: "agent_logs", After: logs}, {Field: "events", After: first.Events + second.Events},
 			{Field: "windows", After: first.Windows + second.Windows}, {Field: "redis_keys", After: keys},
 		},
 	}
@@ -644,8 +675,10 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f.out, "shared database: %d policies and %d limits deleted; %d resets, %d grants and %d campaigns rewritten\naudit: %s\n",
-		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns, entry.ID)
+	_, err = fmt.Fprintf(f.out, "shared database: %d policies and %d limits deleted; %d resets, %d grants and %d campaigns rewritten\n"+
+		"links: %d phone links, %d channel link codes and %d profiles deleted; %d contacts unlinked; %d claimed guests rewritten\naudit: %s\n",
+		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns,
+		settings.Phones, settings.ChannelLinks, settings.Profiles, settings.Contacts, settings.Claims, entry.ID)
 	return err
 }
 

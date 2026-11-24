@@ -815,3 +815,52 @@ func (r *CallLegs) ClearTokens(ctx context.Context, placedBefore time.Time) (int
 	}
 	return cleared, nil
 }
+
+// RenameUser replaces an app's end user id with replacement on every shard's call legs,
+// writeBatch of them per statement, so a leg's number is no longer theirs; the legs stay, as
+// billed. It answers how many it rewrote. No change is recorded of a call leg (dataTables).
+func (r *CallLegs) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
+	if replacement == userID {
+		// Nothing to rewrite, and every batch would match the rows it just wrote.
+		return 0, nil
+	}
+	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
+		var renamed int64
+		for {
+			batch := db.NewSelect().Model((*CallLeg)(nil)).Column("id").
+				Where("customer_id = ? AND user_id = ?", appID, userID).Limit(writeBatch)
+			result, err := db.NewUpdate().Model((*CallLeg)(nil)).Set("user_id = ?", replacement).Where("id IN (?)", batch).Exec(ctx)
+			if err != nil {
+				return renamed, err
+			}
+			n, err := result.RowsAffected()
+			renamed += n
+			if err != nil || n < int64(writeBatch) {
+				return renamed, err
+			}
+		}
+	})
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: rename user call legs: %w", err))
+	}
+	var renamed int64
+	for _, count := range counts {
+		renamed += count
+	}
+	return renamed, nil
+}
+
+// CountUser counts what RenameUser would rewrite, on every shard.
+func (r *CallLegs) CountUser(ctx context.Context, appID, userID string) (int64, error) {
+	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int, error) {
+		return db.NewSelect().Model((*CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Count(ctx)
+	})
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: count user call legs: %w", err))
+	}
+	var total int64
+	for _, count := range counts {
+		total += int64(count)
+	}
+	return total, nil
+}

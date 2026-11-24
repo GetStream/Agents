@@ -2387,23 +2387,26 @@ customer's users reaches the usage records. `router usage forget-user --app <app
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a
 hash of an email can be recomputed from it), in order, once their scheduled tasks are deleted
 with their runs, so none runs again, and the changes recorded of them made deletes: the
-requests of every shard; the usage
+requests and call legs of every shard, and the agent logs naming them, deleted with the changes
+recorded of them made deletes; the usage
 service's events and the user's windows (`POST /v1/manage/users/forget`, one transaction, a
 window the replacement already has taking the forgotten one's spend), and again after
 `--settle` (2 minutes) for a batch a shipper read before the shards were rewritten; the user's
 `usage:` counter, `hold:` key and `quota:` buckets in Redis, deleted by name; and in the shared
 database their own policy and user-level limits, deleted, so the app's defaults apply, and the
-id on their resets, grants and campaigns. Usage and cost stay under the app. It writes one
+id on their resets, grants and campaigns; their phone links (as `PUT /v1/agents/users/{user_id}`
+unlinks one), channel link codes and profile (`users`), deleted, its recorded changes made
+deletes; their contact map rows, unlinked; and the id on the guests they claimed. Usage and cost stay under the app. It writes one
 `end_user` audit row naming the replacement and the actor, never the id, and the service one
 `forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Once the
 last step, the shared database's, has started, it completes even if the command is interrupted,
-and the command drops the user's cached policy from every router before it exits. Every
+and the command drops the user's cached policy and profile from every router before it exits. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
-that one replacement, with the run's own audit row. Sessions, conversation history and
-`agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
-`keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
-that forgetting leaves alone. It cannot reach logs, so the logger masks the ids it can tell
+that one replacement, with the run's own audit row. Sessions, with their conversation history
+and documents, stay as they are, and work recorded for the id afterwards carries it again;
+`keptUserColumns` in `internal/store/forget_user_test.go` says why for each column naming an end
+user that forgetting leaves alone. It cannot reach logs, so the logger masks the ids it can tell
 apart: `phone:` and a number anywhere in a line, everything before an email's `@` under `user`,
 `user_id`, `participant`, `bound` and `id` (`logMasks`, `internal/store/logmask.go`), and in the
 logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
