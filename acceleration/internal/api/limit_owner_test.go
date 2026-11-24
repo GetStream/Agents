@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/uptrace/bun"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
@@ -213,6 +215,8 @@ func (s *SelfHostedLimitsSuite) TestALimitOfNobodyKnownIsShownToNeitherOwnerAndT
 	path := fmt.Sprintf("/v1/spend/limits/%d", limit.ID)
 	for _, client := range []*testClient{own, organization} {
 		s.Empty(s.limitsAs(client, "/v1/spend/limits"))
+		s.Empty(s.teamsOf(client))
+		s.Nil(s.usageAs(client).Windows[0].Limit)
 		s.Equal(http.StatusNotFound, client.do(http.MethodGet, path, nil, nil))
 		s.Equal(http.StatusNotFound, client.do(http.MethodPatch, path, map[string]any{"limit_micros": 1}, nil))
 		s.Equal(http.StatusNotFound, client.do(http.MethodDelete, path, nil, nil))
@@ -223,13 +227,70 @@ func (s *SelfHostedLimitsSuite) TestALimitOfNobodyKnownIsShownToNeitherOwnerAndT
 		s.NotContains(string(body), fmt.Sprintf("limit %d", limit.ID))
 	}
 
-	staff := &testClient{suite: &s.RouterSuite, kind: noCredential, header: http.Header{
-		manageKeyHeader: {suiteManageKey}, actorIDHeader: {"staff:" + s.utils.uuid()},
-	}}
+	staff := s.staff()
 	listed := s.limitsAs(staff, "/v1/manage/spend/limits?organization_id="+url.QueryEscape(id))
 	s.Require().Len(listed, 1)
 	s.Equal(http.StatusOK, staff.do(http.MethodPatch, "/v1/manage/spend/limits/"+fmt.Sprint(limit.ID), map[string]any{"limit_micros": 9}, nil))
 	s.Equal(http.StatusNoContent, staff.do(http.MethodDelete, "/v1/manage/spend/limits/"+fmt.Sprint(limit.ID), nil, nil))
+}
+
+// nobodys makes a row of table's one of nobody known.
+func (s *SelfHostedLimitsSuite) nobodys(table string, id int64) {
+	_, err := s.store.ShardDB().NewRaw("UPDATE ? SET billed = NULL WHERE id = ?", bun.Ident(table), id).Exec(context.Background())
+	s.Require().NoError(err)
+}
+
+func (s *SelfHostedLimitsSuite) TestAGrantOfNobodyKnownIsShownToNeitherOwnerAndToStaff() {
+	own, organization, id := s.sameID()
+	s.limitAs(own, 4242)
+	s.limitAs(organization, 4242)
+	made := s.grantAs(own)
+	s.nobodys("limit_grants", made.Id)
+	path := fmt.Sprintf("/spend/limits/grants/%d", made.Id)
+	for _, client := range []*testClient{own, organization} {
+		s.Empty(s.grantsAs(client))
+		s.Empty(s.usageAs(client).Grants)
+		s.Equal(http.StatusNotFound, client.do(http.MethodPost, "/v1"+path+"/revoke", map[string]any{"reason": "x"}, nil))
+	}
+
+	staff := s.staff()
+	var listed LimitGrantPage
+	s.Require().Equal(http.StatusOK, staff.do(http.MethodGet, "/v1/manage/spend/limits/grants?organization_id="+url.QueryEscape(id), nil, &listed))
+	s.Require().Len(listed.Items, 1)
+	s.Equal(http.StatusOK, staff.do(http.MethodPost, "/v1/manage"+path+"/revoke", map[string]any{"reason": "x"}, nil))
+	s.Equal(http.StatusOK, staff.do(http.MethodPost, "/v1/manage"+path+"/unrevoke", map[string]any{"reason": "x"}, nil))
+}
+
+func (s *SelfHostedLimitsSuite) TestAResetOfNobodyKnownIsShownToNeitherOwner() {
+	own, _, id := s.sameID()
+	s.Require().Equal(http.StatusCreated, own.do(http.MethodPost, "/v1/spend/limits",
+		map[string]any{"subject": "organization", "interval": "daily", "limit_micros": 1_000_000}, nil))
+	s.spent(id, 300_000)
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPost, "/v1/spend/limits/usage/reset", map[string]any{"subject": "organization", "reason": "x"}, nil))
+	resets, err := s.store.UsageResets.Select(context.Background(), []string{id}, time.Time{})
+	s.Require().NoError(err)
+	for _, reset := range resets {
+		s.nobodys("usage_resets", reset.ID)
+	}
+
+	s.Zero(s.organizationWindow(own).BaselineMicros)
+}
+
+// A limit of nobody known still refuses the work of both owners of its id.
+func (s *SelfHostedLimitsSuite) TestALimitOfNobodyKnownRefusesTheWorkOfBothOwners() {
+	own, organization, id := s.sameID()
+	limit := store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: id, Interval: usage.Daily, UpdatedBy: "api"}
+	s.Require().NoError(s.store.Limits.Insert(context.Background(), &limit, store.LimitAudit{CustomerID: id, Source: store.AuditSourceManage}))
+	s.nobodys("limits", limit.ID)
+
+	s.True(s.refusedSearch(own))
+	s.True(s.refusedSearch(organization))
+}
+
+func (s *SelfHostedLimitsSuite) staff() *testClient {
+	return &testClient{suite: &s.RouterSuite, kind: noCredential, header: http.Header{
+		manageKeyHeader: {suiteManageKey}, actorIDHeader: {"staff:" + s.utils.uuid()},
+	}}
 }
 
 func (s *SelfHostedLimitsSuite) TestAnAttributedLimitIsItsWritersAgain() {
@@ -267,4 +328,40 @@ func (s *SelfHostedLimitsSuite) TestALimitWrittenOverHTTPRefusesItsOwnersWorkAlo
 		s.True(s.refusedSearch(writer))
 		s.False(s.refusedSearch(other))
 	})
+}
+
+// What an app in no organization writes of its limits holds its next admission.
+func (s *SelfHostedLimitsSuite) TestAnAppsOwnWritesHoldItsNextAdmission() {
+	own, _, id := s.sameID()
+	searched := func() int {
+		status, _ := own.call(http.MethodPost, "/v1/search", SearchRequest{Query: "what is the time"})
+		return status
+	}
+	s.spent(id, 1_000_000)
+	s.Require().Equal(http.StatusOK, searched())
+
+	var limit Limit
+	s.Require().Equal(http.StatusCreated, own.do(http.MethodPost, "/v1/spend/limits",
+		map[string]any{"subject": "organization", "interval": "daily", "limit_micros": 1_000_000}, &limit))
+	s.Equal(http.StatusPaymentRequired, searched(), "created")
+	path := fmt.Sprintf("/v1/spend/limits/%d", limit.Id)
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPatch, path, map[string]any{"limit_micros": 9_000_000}, nil))
+	s.Equal(http.StatusOK, searched(), "raised")
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPatch, path, map[string]any{"limit_micros": 1_000_000}, nil))
+	s.Equal(http.StatusPaymentRequired, searched(), "lowered")
+	var grant LimitGrant
+	s.Require().Equal(http.StatusCreated, own.do(http.MethodPost, "/v1/spend/limits/grants",
+		map[string]any{"subject": "organization", "amount_micros": 9_000_000, "reason": "x"}, &grant))
+	s.Equal(http.StatusOK, searched(), "granted")
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPost, fmt.Sprintf("/v1/spend/limits/grants/%d/revoke", grant.Id), map[string]any{"reason": "x"}, nil))
+	s.Equal(http.StatusPaymentRequired, searched(), "revoked")
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPost, fmt.Sprintf("/v1/spend/limits/grants/%d/unrevoke", grant.Id), map[string]any{"reason": "x"}, nil))
+	s.Equal(http.StatusOK, searched(), "unrevoked")
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPost, fmt.Sprintf("/v1/spend/limits/grants/%d/revoke", grant.Id), map[string]any{"reason": "x"}, nil))
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPost, "/v1/spend/limits/usage/reset", map[string]any{"subject": "organization", "reason": "x"}, nil))
+	s.Equal(http.StatusOK, searched(), "reset")
+	s.Require().Equal(http.StatusOK, own.do(http.MethodPatch, path, map[string]any{"limit_micros": 0}, nil))
+	s.Equal(http.StatusPaymentRequired, searched(), "lowered to nothing")
+	s.Require().Equal(http.StatusNoContent, own.do(http.MethodDelete, path, nil, nil))
+	s.Equal(http.StatusOK, searched(), "deleted")
 }

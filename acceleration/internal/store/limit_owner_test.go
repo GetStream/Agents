@@ -184,3 +184,27 @@ func (s *StoreSuite) TestAWrittenRowCountsTowardItsOwnersGrantAlone() {
 	s.EqualValues(1, s.used(apps.ID))
 	s.EqualValues(1_111, s.used(unknown.ID), "as it counted before rows said whose they are")
 }
+
+// An app recorded in an organization since draws on no grant it has as an app in none.
+func (s *StoreSuite) TestARowOfAnAppInAnOrganizationCountsTowardNoGrantOfItsOwn() {
+	app := uuid.NewString()
+	grant := s.grant(LimitGrant{OrganizationID: app, Billed: new(false), AmountMicros: 10_000})
+	s.member(app, uuid.NewString())
+
+	s.writeAsTheWriter(s.store, s.unresolved(app, 100, grant.ID))
+
+	s.Zero(s.used(grant.ID))
+}
+
+func (s *StoreSuite) TestGrantsOfNobodyKnownAreListedOnlyUnattributed() {
+	id := uuid.NewString()
+	grant := s.grant(LimitGrant{OrganizationID: id})
+	s.before("limit_grants", grant.ID)
+
+	owned, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{Owner: id})
+	s.Require().NoError(err)
+	s.Empty(owned)
+	all, err := s.store.LimitGrants.Select(s.ctx, GrantFilter{Owner: id, Unattributed: true})
+	s.Require().NoError(err)
+	s.Len(all, 1)
+}

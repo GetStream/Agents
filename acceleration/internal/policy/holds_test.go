@@ -172,6 +172,23 @@ func TestAKeyPlannedFirstForADropStillKeepsItsAnswer(t *testing.T) {
 	require.Equal(t, []string{gone.String(), ""}, plan.args, "and the drop is still sent")
 }
 
+// A hold let go of by an app in no organization still answers for the app's account.
+func TestAnAppsDroppedHoldAnswersForItsOwnAccount(t *testing.T) {
+	e, _ := holding(t)
+	m := &e.money
+	alone := appAccount("app-1")
+	org := usage.SubjectRef{OrganizationID: "app-1", Subject: usage.SubjectOrganization}.Key(usage.CounterPrefix)
+	gone := uuid.Must(uuid.NewV7())
+	m.shared = map[uuid.UUID][]string{gone: {"hold:app:{app-1}:organization"}}
+	m.dirty = map[uuid.UUID]dirtyHold{gone: {key: alone, since: time.Now(), version: 1}}
+
+	plans, _ := m.planFlush(time.Now())
+
+	plan := plans["hold:app:{app-1}:organization"]
+	require.NotNil(t, plan)
+	require.Equal(t, remoteSlot{account: alone, counter: org}, plan.slot)
+}
+
 func TestAnIdleAccountGivesItsFoldedIDsBackToTheProcess(t *testing.T) {
 	e, acct := holding(t)
 	e.money.settings.Idle = time.Millisecond

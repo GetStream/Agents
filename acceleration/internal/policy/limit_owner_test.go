@@ -168,3 +168,23 @@ func (s *PolicySuite) TestAnAppsGrantHoldsAreSharedWithItsOwnAccount() {
 	s.eventually(func() bool { return errors.Is(s.admit(b, alone).Spend, ErrBudgetSpent) }, 5*time.Second, 10*time.Millisecond,
 		"the grant is held whole in the other router")
 }
+
+func (s *PolicySuite) TestALimitAndAResetWrittenHereHoldNoOtherOwnersNextAdmission() {
+	alone := s.sameID()
+	enforcer := s.newEnforcer(s.store, nil, func(settings *Settings) { settings.Fresh = time.Hour })
+	s.Require().NoError(s.admit(enforcer, s.app).Spend)
+	s.Require().NoError(s.admit(enforcer, alone).Spend)
+	s.zeroLimit(false)
+	start, _ := usage.Window(usage.Daily, time.Now())
+	s.Require().NoError(s.store.UsageResets.InsertMany(s.ctx, []store.UsageReset{{OrganizationID: s.org, Billed: new(false),
+		Subject: usage.SubjectOrganization, Interval: usage.Daily, WindowStart: start, BaselineMicros: 5, Reason: "x", Actor: "test"}},
+		store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+
+	enforcer.LimitsChanged(s.ctx, s.org)
+
+	s.NoError(s.admit(enforcer, s.app).Spend)
+	enforcer.money.mu.Lock()
+	defer enforcer.money.mu.Unlock()
+	s.Empty(enforcer.money.accounts[s.org].limits)
+	s.Empty(enforcer.money.accounts[s.org].resets)
+}
