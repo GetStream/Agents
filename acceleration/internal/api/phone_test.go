@@ -531,7 +531,7 @@ func (s *CallStatusSuite) hangsUpOnMachines(sessions *session.Manager) (string, 
 
 // endsForVoicemail waits for sessions to stop holding id.
 func (s *CallStatusSuite) endsForVoicemail(sessions *session.Manager, id string) {
-	s.Require().Eventually(func() bool { return !sessions.Running(id) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !sessions.Running(s.customerID(), id) }, 10*time.Second, 20*time.Millisecond,
 		"the session was kept on the answering machine")
 }
 
@@ -574,7 +574,7 @@ func (s *CallStatusSuite) TestAPersonPickingUpKeepsTheSession() {
 	status, _ := s.postMachine(token, url.Values{"AnsweredBy": {"human"}})
 
 	s.Equal(http.StatusNoContent, status)
-	s.Never(func() bool { return !s.manager.Running(id) }, time.Second, 50*time.Millisecond,
+	s.Never(func() bool { return !s.manager.Running(s.customerID(), id) }, time.Second, 50*time.Millisecond,
 		"the session was ended for a person")
 }
 
@@ -678,7 +678,7 @@ func (s *CallStatusSuite) TestABusyStatusEndsItsSessionBeforeTheStartTimeout() {
 
 	s.Require().Equal(http.StatusNoContent, s.postForm(token, url.Values{"CallStatus": {"busy"}}))
 
-	s.Require().Eventually(func() bool { return !s.manager.Running(opened.ID()) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !s.manager.Running(s.customerID(), opened.ID()) }, 10*time.Second, 20*time.Millisecond,
 		"the session waits for its start timeout")
 }
 
@@ -702,7 +702,7 @@ func (s *CallStatusSuite) keptBy(logged *lockedLog, sessions *session.Manager, i
 		}
 		return false
 	}, 10*time.Second, 20*time.Millisecond, "the node did not say it kept the session")
-	s.True(sessions.Running(id), "the session was ended")
+	s.True(sessions.Running(s.customerID(), id), "the session was ended")
 }
 
 // A session can have two calls placed into it. A report that the older went unanswered does
@@ -724,7 +724,7 @@ func (s *CallStatusSuite) TestABusyNewerCallEndsASessionAnOlderCallStillRingsInt
 
 	s.Require().Equal(http.StatusNoContent, s.postForm(newer, url.Values{"CallStatus": {"busy"}}))
 
-	s.Require().Eventually(func() bool { return !s.manager.Running(id) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !s.manager.Running(s.customerID(), id) }, 10*time.Second, 20*time.Millisecond,
 		"the session waits for its start timeout")
 }
 
@@ -777,7 +777,7 @@ func (s *CallStatusSuite) refusesToEnd(answer *node.ForwardResponse, logged *loc
 	s.Equal(int32(http.StatusNotFound), answer.GetStatus(), "body: %s", answer.GetBody())
 	s.Contains(string(answer.GetBody()), `"code":"`+codeCallNotFound+`"`)
 	s.Contains(logged.String(), "refused a peer's ask to end a session")
-	s.Never(func() bool { return !sessions.Running(id) }, time.Second, 50*time.Millisecond,
+	s.Never(func() bool { return !sessions.Running(s.customerID(), id) }, time.Second, 50*time.Millisecond,
 		"the session was ended")
 }
 
@@ -788,7 +788,7 @@ func (s *CallStatusSuite) TestABusyStatusEndsItsSessionOnTheNodeHoldingIt() {
 
 	s.Require().Equal(http.StatusNoContent, s.postForm(token, url.Values{"CallStatus": {"busy"}}))
 
-	s.Require().Eventually(func() bool { return !sessions.Running(id) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !sessions.Running(s.customerID(), id) }, 10*time.Second, 20*time.Millisecond,
 		"the node holding the session kept it")
 }
 
@@ -799,7 +799,7 @@ func (s *CallStatusSuite) TestAPeersAskForACallStoredAsUnansweredEndsItsSession(
 	answer := s.askPeerToEnd(other, s.askedFor(s.customerID(), id))
 
 	s.Equal(int32(http.StatusNoContent), answer.GetStatus(), "body: %s", answer.GetBody())
-	s.False(sessions.Running(id), "the session waits for its start timeout")
+	s.False(sessions.Running(s.customerID(), id), "the session waits for its start timeout")
 }
 
 func (s *CallStatusSuite) TestAPeersAskForACallThatStillRingsIsRefused() {
@@ -830,7 +830,7 @@ func (s *CallStatusSuite) TestAPeersAskWhileAnOlderCallInTheSessionStillRingsEnd
 	answer := s.askPeerToEnd(other, s.askedFor(s.customerID(), id))
 
 	s.Equal(int32(http.StatusNoContent), answer.GetStatus(), "body: %s", answer.GetBody())
-	s.False(sessions.Running(id), "the session waits for its start timeout")
+	s.False(sessions.Running(s.customerID(), id), "the session waits for its start timeout")
 }
 
 func (s *CallStatusSuite) TestAPeersAskForACallSomebodyAnsweredIsRefused() {
@@ -887,7 +887,7 @@ func (s *CallStatusSuite) TestAPeerThatCannotReadTheStoredCallKeepsTheSession() 
 	answer := s.askPeerToEnd(other, s.askedFor(s.customerID(), id))
 
 	s.Equal(int32(http.StatusInternalServerError), answer.GetStatus(), "body: %s", answer.GetBody())
-	s.True(sessions.Running(id), "the session was ended")
+	s.True(sessions.Running(s.customerID(), id), "the session was ended")
 }
 
 // The phone service hands a node an unanswered call once its row is written, so only a
@@ -905,7 +905,7 @@ func (s *CallStatusSuite) TestANodeThatCannotReadTheStoredCallKeepsTheSession() 
 	server.endUnansweredNow(context.Background(), s.customerID(), opened.ID())
 
 	s.Contains(logged.String(), "could not read an unanswered call")
-	s.True(sessions.Running(opened.ID()), "the session was ended")
+	s.True(sessions.Running(s.customerID(), opened.ID()), "the session was ended")
 }
 
 func (s *CallStatusSuite) TestAPeersAskNamingAnotherCustomerIsRefused() {
@@ -941,7 +941,7 @@ func (s *CallStatusSuite) TestAPeerAskOfTheWrongShapeIsRefused() {
 		answer := s.askPeerToEnd(other, asked)
 		s.Equal(int32(http.StatusBadRequest), answer.GetStatus(), "%s: %s", asked, answer.GetBody())
 	}
-	s.True(sessions.Running(id), "the session was ended")
+	s.True(sessions.Running(s.customerID(), id), "the session was ended")
 }
 
 // openPhoneSession opens the session id for a placed call as an SDK does, after placing it.
@@ -1061,7 +1061,7 @@ func (s *CallStatusSuite) TestOpeningASessionAfterItsCallWasBusyIsRefused() {
 	s.Equal(http.StatusConflict, status)
 	s.Equal("call_unanswered", answered.Error.Code)
 	s.Contains(answered.Error.Message, "busy")
-	s.False(s.manager.Running(id))
+	s.False(s.manager.Running(s.customerID(), id))
 	s.Equal(outcome.Busy, s.read(id).Outcome)
 }
 
@@ -1074,7 +1074,7 @@ func (s *CallStatusSuite) TestASessionOpensAfterItsCallCompleted() {
 	defer s.serverClient.stopSession(id)
 
 	s.Equal(http.StatusCreated, status, answered.Error.Message)
-	s.True(s.manager.Running(id))
+	s.True(s.manager.Running(s.customerID(), id))
 }
 
 func (s *CallStatusSuite) TestASessionOpensWhileItsCallRings() {
@@ -1085,7 +1085,7 @@ func (s *CallStatusSuite) TestASessionOpensWhileItsCallRings() {
 	defer s.serverClient.stopSession(id)
 
 	s.Equal(http.StatusCreated, status, answered.Error.Message)
-	s.True(s.manager.Running(id))
+	s.True(s.manager.Running(s.customerID(), id))
 }
 
 // attachedForSessions is a number attached the way attaching does today: every caller gets a

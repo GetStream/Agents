@@ -88,7 +88,9 @@ final class HttpWire implements Wire {
     // never goes to another origin.
     final request = http.Request(method, backend.requestUri(path, query))..followRedirects = false;
     request.headers.addAll(
-      anonymously ? const {'Stream-Auth-Type': 'anonymous'} : await backend.headers(),
+      anonymously
+          ? const {'Stream-Auth-Type': 'anonymous', 'X-Stream-Client': streamClient}
+          : await backend.headers(),
     );
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';

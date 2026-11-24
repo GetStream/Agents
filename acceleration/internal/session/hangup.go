@@ -77,7 +77,7 @@ func (h *hangUp) later() {
 	if h.session.closingNow() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+	ctx, cancel := context.WithTimeout(h.session.ctx, hangUpTimeout)
 	defer cancel()
 	if err := h.EndCall(ctx); err != nil {
 		h.manager.logger.Warn("could not hang up once the call was checked for an answering machine",

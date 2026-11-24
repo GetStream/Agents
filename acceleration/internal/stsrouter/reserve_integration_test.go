@@ -3,6 +3,7 @@
 package stsrouter
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -28,7 +29,7 @@ func TestAConversationWhoseLeaseCannotBeCheckedWaitsAndGoesOn(t *testing.T) {
 	t.Cleanup(func() { leaseRenew = previous })
 	recorder := money.Recorder(routing.STS, prices)
 	provider := newStubSTS()
-	session := newSession(provider, config, owner, recorder, recorder.For(routing.LLM))
+	session := newSession(context.Background(), provider, config, owner, recorder, recorder.For(routing.LLM))
 	t.Cleanup(func() { _ = session.Close() })
 	frame := sts.PcmData{Samples: make([]int16, 240), SampleRate: 24_000, Channels: 1}
 	require.NoError(t, session.ProcessAudio(frame, sts.Participant{}))
@@ -58,7 +59,7 @@ func TestAConversationWhoseLeaseIsRefusedStopsAtItsNextTurn(t *testing.T) {
 	owner := money.Owner(t, 0)
 	recorder := money.Recorder(routing.STS, prices)
 	provider := newStubSTS()
-	session := newSession(provider, config, owner, recorder, recorder.For(routing.LLM))
+	session := newSession(context.Background(), provider, config, owner, recorder, recorder.For(routing.LLM))
 	t.Cleanup(func() { _ = session.Close() })
 
 	heard := session.ProcessAudio(sts.PcmData{Samples: make([]int16, 240), SampleRate: 24_000, Channels: 1}, sts.Participant{})

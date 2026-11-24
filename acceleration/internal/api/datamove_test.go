@@ -4,6 +4,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -221,6 +222,39 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnot
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "client.registration cannot be operator for a custom connector")
 	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
+}
+
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *DataMoveSuite) TestAnImportTheDatabaseCannotWriteIsAFailureWithNoDatabaseText() {
+	id := "custom_" + store.NewID()
+	s.failQueries(id)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(id, `"client": {"registration": ["customer"], "auth_method": "client_secret_post"}, "schemes": ["oauth2_code"],
+			"endpoints": {"mcp": "https://mcp.acme.example/mcp"}, "scopes": {"list": ["read"]}, "category": "CRM", "description": "Acme's CRM"`)}))
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(failure, "store:")
+}
+
+// A row Postgres refuses for what it holds is the export's to correct, and is told so without
+// Postgres's own words, which name the table's indexes and columns.
+func (s *DataMoveSuite) TestAnImportedAgentNamedLikeOneHereIsRefusedWithoutTheIndexName() {
+	agent := s.data.createAgentConfig()
+	var exported dataLine
+	for _, line := range s.export() {
+		if line.Table == "agent_configs" && strings.Contains(string(line.Row), agent.Id) {
+			exported = line
+		}
+	}
+	s.Require().NotEmpty(exported.Table)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true",
+		ndjson([]dataLine{{Table: "agent_configs", Row: s.withID(exported.Row, store.NewID())}}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "another row here already holds")
+	s.NotContains(failure, "agent_configs_name_idx")
 }
 
 // importedConnector is an export's line of a custom definition id whose manifest has fields,
@@ -464,11 +498,14 @@ func (s *DataMoveSuite) TestOtherRequestsAreServedWhileExportsOfManyAppsRun() {
 func (s *DataMoveSuite) TestAnExportHungUpOnLetsGoAtOnce() {
 	s.skipOnARouterWithShards()
 	// 20,000 rows of 64 KiB: reading them all takes seconds, and a batch of them a moment.
-	_, err := s.store.GlobalDB().ExecContext(context.Background(), `
+	// Written 1,000 at a time, so no one statement runs into the driver's read timeout.
+	for range 20 {
+		_, err := s.store.GlobalDB().ExecContext(context.Background(), `
 INSERT INTO agent_configs (id, customer_id, name, instructions)
 SELECT 'agent-' || gen_random_uuid(), ?, 'agent-' || gen_random_uuid(), repeat('x', 64 << 10)
-FROM generate_series(1, 20000)`, s.customerID())
-	s.Require().NoError(err)
+FROM generate_series(1, 1000)`, s.customerID())
+		s.Require().NoError(err)
+	}
 	export := s.stalledExport()
 	s.Require().Equal(http.StatusOK, export.StatusCode)
 	lines := bufio.NewReader(export.Body)
@@ -486,9 +523,7 @@ FROM generate_series(1, 20000)`, s.customerID())
 func (s *DataMoveSuite) TestAnExportReadSlowlyEndsAtItsDeadline() {
 	s.skipOnARouterWithShards()
 	s.seedRowsTooBigToBuffer()
-	s.Equal(exportWait, s.router.exportWait, "the default bound")
-	s.router.exportWait = 2 * time.Second
-	s.T().Cleanup(func() { s.router.exportWait = exportWait })
+	s.withExportWait(2 * time.Second)
 	slow := s.stalledExport()
 	s.Require().Equal(http.StatusOK, slow.StatusCode)
 	go func() {
@@ -504,6 +539,61 @@ func (s *DataMoveSuite) TestAnExportReadSlowlyEndsAtItsDeadline() {
 
 	s.Eventually(func() bool { return len(s.router.exports) == 0 }, letGoWithin, 50*time.Millisecond,
 		"the export read slowly is still running")
+}
+
+// A line cut by the export's deadline breaks the response rather than ending it cleanly, so the
+// client cannot take what it read for an export that stopped between lines.
+func (s *DataMoveSuite) TestAnExportCutAtItsDeadlineReadsAsBroken() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	s.withExportWait(1500 * time.Millisecond)
+	export := s.stalledExport()
+	s.Require().Equal(http.StatusOK, export.StatusCode)
+
+	var read bytes.Buffer
+	chunk := make([]byte, 64<<10)
+	var readErr error
+	for readErr == nil {
+		var n int
+		n, readErr = export.Body.Read(chunk)
+		read.Write(chunk[:n])
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	s.ErrorIs(readErr, io.ErrUnexpectedEOF)
+	s.NotContains(read.String(), `"cursor"`, "the export was cut before its end")
+}
+
+func (s *DataMoveSuite) TestAnExportOutOfTimeBeforeItsFirstRowIsToldToTryAgain() {
+	s.skipOnARouterWithShards()
+	s.data.createAgentConfig()
+	s.withExportWait(time.Nanosecond)
+
+	status, failure := s.serverClient.failure(http.MethodGet, "/v1/data/export", nil)
+
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, "ran out of time before its first row")
+}
+
+func (s *DataMoveSuite) TestAnImportWithBlankLinesIsRead() {
+	s.data.createAgentConfig()
+	exported := s.export()
+	rows := 0
+	var lines []string
+	for _, line := range exported {
+		if line.Table != "" {
+			rows++
+		}
+		encoded, err := json.Marshal(line)
+		s.Require().NoError(err)
+		lines = append(lines, string(encoded))
+	}
+
+	var imported DataImport
+	status := s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", strings.Join(lines, "\n\n  \n"), &imported)
+
+	s.Require().Equal(http.StatusOK, status)
+	s.Equal(int64(rows), imported.Rows)
 }
 
 func (s *DataMoveSuite) TestAnExportWhoseClientStopsReadingIsLetGo() {
@@ -800,6 +890,13 @@ func (s *DataMoveSuite) shardDSN() string {
 	defer shard.Close()
 	s.Require().NoError(migrate(context.Background(), shard, dsn))
 	return dsn
+}
+
+// withExportWait bounds this test's exports as a whole.
+func (s *DataMoveSuite) withExportWait(wait time.Duration) {
+	s.Equal(exportWait, s.router.exportWait, "the default bound")
+	s.router.exportWait = wait
+	s.T().Cleanup(func() { s.router.exportWait = exportWait })
 }
 
 // seedRowsTooBigToBuffer gives the app 32 MiB of agent configs, more than the sockets between

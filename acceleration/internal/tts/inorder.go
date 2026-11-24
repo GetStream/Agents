@@ -1,10 +1,12 @@
 package tts
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sync"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -20,20 +22,23 @@ import (
 // A barge-in drops everything held. Every sentence still settles, because a completion is
 // what a caller counts speech in flight by and what it is billed by: a sentence nobody
 // heard is completed all the same, marked interrupted.
-func InOrder(provider TTS) TTS {
+func InOrder(ctx context.Context, provider TTS) TTS {
 	ordered := &inOrder{
 		TTS:     provider,
+		call:    ctx,
 		emitter: NewEmitter(64),
 		held:    map[string]*heldSynthesis{},
 		closed:  map[string]struct{}{},
 		dropped: map[string]struct{}{},
 	}
-	go ordered.relay()
+	goroutine.Go(ctx, ordered.relay)
 	return ordered
 }
 
 type inOrder struct {
 	TTS
+	// call is the context of the call. The goroutines of the voice start under it.
+	call    context.Context
 	emitter *Emitter
 
 	mu sync.Mutex
@@ -255,9 +260,9 @@ func (o *inOrder) sendLater(events []Event) {
 	if len(events) == 0 {
 		return
 	}
-	go func() {
+	goroutine.Go(o.call, func() {
 		for _, event := range events {
 			o.emitter.Send(event)
 		}
-	}()
+	})
 }

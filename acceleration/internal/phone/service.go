@@ -58,6 +58,8 @@ type Service struct {
 	// heard is the calls whose participant events this process recorded lately (Heard), and
 	// unhooked the apps it lately logged as not delivering them.
 	heard, unhooked recently
+	// unopened are the legs OpenLeg could not write, for the leg sweep (RunLegSweep) to.
+	unopened unopenedLegs
 	// connecting, when set, runs in Connect between reading the phone's kept leave and
 	// connecting its leg, where a leave delivered at the same moment lands.
 	connecting func()
@@ -433,8 +435,9 @@ const unverifiedTier = "not-verified"
 
 // Buy buys a number and records that the customer now holds it.
 //
-// The vendor is the side that costs money, so it goes first: a row without a number is a
-// lie, while a number without a row is a reconcilable mistake that is also logged.
+// The vendor is the side that costs money, so it goes before the number's row: a row without a
+// number would be a lie. An order kept before the vendor is asked makes a number whose row is
+// not written one the sweep records (SweepOrders), rather than one paid for and held by nobody.
 func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber, error) {
 	if purchase.Owner.CustomerID == "" {
 		return store.PhoneNumber{}, stack.Wrap(errors.New("phone: a number must belong to a customer"))
@@ -490,6 +493,20 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if err != nil {
 		return store.PhoneNumber{}, err
 	}
+	// To the microsecond Postgres keeps, so a month billed now and one billed from the stored
+	// row name the same purchase.
+	purchasedAt := s.now().UTC().Truncate(time.Microsecond)
+	order := store.PhoneNumberOrder{
+		CustomerID: purchase.Owner.CustomerID, Vendor: purchase.Vendor, E164: purchase.E164, Action: store.OrderBuy,
+		Country: cmp.Or(purchase.Country, Country(purchase.E164)), MonthlyCostMicros: quoted, Tags: purchase.Owner.Tags,
+		CreatedAt: purchasedAt, NextAttemptAt: purchasedAt.Add(orderSettles),
+	}
+	if s.store != nil {
+		if err := s.store.PhoneNumberOrders.Insert(ctx, &order); err != nil {
+			booked.Release()
+			return store.PhoneNumber{}, err
+		}
+	}
 	// A failed purchase is a row of its own; a bought number is billed by its months, the
 	// first of them below.
 	buying := routing.Meter{
@@ -504,6 +521,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	})
 	if err != nil {
 		booked.Release()
+		s.forgetRefusedOrder(ctx, order, err)
 		return store.PhoneNumber{}, err
 	}
 	if bought.MonthlyCostMicros == 0 {
@@ -519,9 +537,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 		CustomerID:        purchase.Owner.CustomerID,
 		Tags:              purchase.Owner.Tags,
 		VendorID:          bought.VendorID,
-		// To the microsecond Postgres keeps, so a month billed now and one billed from the
-		// stored row name the same purchase.
-		PurchasedAt: s.now().UTC().Truncate(time.Microsecond),
+		PurchasedAt:       purchasedAt,
 	}
 	// The month it was bought in is charged at once, whether or not the row below is kept.
 	s.billMonth(held, purchase.Owner, held.PurchasedAt)
@@ -529,9 +545,14 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if s.store == nil {
 		return held, nil
 	}
-	if err := s.store.PhoneNumbers.Insert(ctx, &held); err != nil {
+	recorded, err := s.store.PhoneNumberOrders.Bought(ctx, order.ID, &held)
+	if err == nil && !recorded {
+		// A sweep took the order first, and recorded the number or found the vendor without it.
+		err = errors.New("its order was settled by the sweep")
+	}
+	if err != nil {
 		// The number is bought either way, so saying so is more useful than failing and
-		// leaving the caller thinking it was not.
+		// leaving the caller thinking it was not. Its order is kept for the sweep.
 		// Support finds the number at the vendor by its order, and the log holds no number.
 		return held, stack.Wrap(fmt.Errorf("phone: a number bought from %s as %q was not recorded: %w",
 			held.Vendor, held.VendorID, err))
@@ -552,17 +573,27 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 	}
 	// Off its trunk first: a trunk Stream would not delete fails the release before the
 	// number is given back, so the release can be tried again.
-	if err := s.unline(ctx, held, "released a number", false); err != nil {
+	if err := s.unline(ctx, held, "released a number", time.Time{}); err != nil {
 		return err
 	}
 	seller, err := s.seller(held.Vendor)
 	if err != nil {
 		return err
 	}
+	releasedAt := time.Now().UTC()
+	var order store.PhoneNumberOrder
 	// A number on the customer's own trunk was never bought here, so there is nobody to
 	// give it back to.
 	if seller != nil {
+		// Kept before the vendor is asked, so a number given back whose row is not released
+		// below is released by the sweep (SweepOrders), rather than billed every month.
+		order = store.PhoneNumberOrder{CustomerID: held.CustomerID, Vendor: held.Vendor, E164: e164, Action: store.OrderRelease,
+			CreatedAt: releasedAt, NextAttemptAt: s.now().Add(orderSettles)}
+		if err := s.store.PhoneNumberOrders.Insert(ctx, &order); err != nil {
+			return err
+		}
 		if err := seller.ReleaseNumber(ctx, e164); err != nil {
+			s.forgetRefusedOrder(ctx, order, err)
 			if age := s.now().Sub(held.PurchasedAt); age < NumberSettles && errors.As(err, new(*VendorError)) {
 				return stack.Wrap(fmt.Errorf("%w: %s was bought %s ago: %w", ErrNumberSettling, e164, age.Round(time.Second), err))
 			}
@@ -571,7 +602,138 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 	}
 	// The trunk and rule the number was attached with would otherwise outlive it, billed
 	// and pointing a number nobody holds at a call.
-	return s.unline(ctx, held, "released a number", true)
+	if err := s.unline(ctx, held, "released a number", releasedAt); err != nil {
+		return err
+	}
+	s.forgetOrder(ctx, order)
+	return nil
+}
+
+// forgetRefusedOrder forgets an order the vendor answered err to, when err shows the vendor did
+// nothing: a 4xx, which it did not carry out, or a refusal before it was asked, by a vendor not
+// implemented or missing a setting, or of an order it cannot take as asked. Any other failure,
+// a timeout, a dropped connection or a 5xx, may come after the vendor bought or released the
+// number, so the order is left to the sweep, which asks the vendor what it holds.
+func (s *Service) forgetRefusedOrder(ctx context.Context, order store.PhoneNumberOrder, err error) {
+	refused, ok := errors.AsType[*VendorError](err)
+	if ok && refused.Status >= 400 && refused.Status < 500 ||
+		errors.Is(err, ErrNotImplemented) || errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrInvalid) {
+		s.forgetOrder(ctx, order)
+	}
+}
+
+// forgetOrder forgets an order whose outcome is recorded, or that the vendor refused. One that
+// cannot be forgotten is left to the sweep, which asks the vendor again.
+func (s *Service) forgetOrder(ctx context.Context, order store.PhoneNumberOrder) {
+	if s.store == nil || order.ID == 0 {
+		return
+	}
+	if err := s.store.PhoneNumberOrders.Delete(context.WithoutCancel(ctx), order.ID); err != nil {
+		s.logger.Warn("could not forget a number's order; the sweep settles it", "order", order.ID, "error", err)
+	}
+}
+
+// orderSettles is how old an order is before the sweep settles it: far longer than a purchase
+// or a release takes, so one still running is never settled under it. orderRetry is how long a
+// sweep holds the orders it claimed, and so when one it could not settle is tried again, by any
+// router. orderSweepBatch bounds how many one sweep claims.
+const (
+	orderSettles    = 10 * time.Minute
+	orderRetry      = time.Hour
+	orderSweepBatch = 100
+)
+
+// SweepOrders settles the purchases and releases of numbers whose outcome was not recorded,
+// by asking each vendor whether it holds the number: one bought and held gets its row, and its
+// first month if the purchase did not bill it; one given back and no longer held is released,
+// as of when it was. Any other order changed nothing and is forgotten. An order whose vendor
+// cannot say is logged for an operator and kept, to be tried again after orderRetry behind the
+// orders due before then. Every router sweeps, and each order is claimed by one of them at a
+// time. It reports how many it settled.
+func (s *Service) SweepOrders(ctx context.Context) (int, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	now := s.now()
+	orders, err := s.store.PhoneNumberOrders.Claim(ctx, now, now.Add(orderRetry), orderSweepBatch)
+	if err != nil {
+		return 0, err
+	}
+	settled := 0
+	for _, order := range orders {
+		if err := s.settleOrder(ctx, order); err != nil {
+			s.logger.Error("could not settle a number's purchase or release", "order", order.ID, "action", order.Action,
+				"vendor", order.Vendor, "customer", order.CustomerID, "error", err)
+			continue
+		}
+		settled++
+	}
+	return settled, nil
+}
+
+// settleOrder settles one order by what its vendor holds, and forgets it.
+func (s *Service) settleOrder(ctx context.Context, order store.PhoneNumberOrder) error {
+	provider, err := s.registry.Open(order.Vendor)
+	if err != nil {
+		return err
+	}
+	finder, ok := provider.(NumberFinder)
+	if !ok {
+		return stack.Wrap(fmt.Errorf("phone: %s cannot say whether it holds a number, so the order is settled by hand", order.Vendor))
+	}
+	vendorID, held, err := finder.HoldsNumber(ctx, order.E164)
+	if err != nil {
+		return err
+	}
+	switch {
+	case order.Action == store.OrderBuy && held:
+		return s.recordBought(ctx, order, vendorID)
+	case order.Action == store.OrderRelease && !held:
+		number, err := s.store.PhoneNumbers.GetByE164(ctx, order.CustomerID, order.E164)
+		if err != nil && !errors.Is(err, store.ErrNoNumber) {
+			return err
+		}
+		// Only the row the order gave back: the number may have been bought again since, or put
+		// on the customer's own trunk.
+		if err == nil && number.Vendor == order.Vendor && !number.PurchasedAt.After(order.CreatedAt) {
+			if err := s.unline(ctx, number, "released a number", order.CreatedAt); err != nil {
+				return err
+			}
+			s.logger.Warn("released a number given back whose release was not recorded", "order", order.ID,
+				"vendor", order.Vendor, "customer", order.CustomerID)
+		}
+	}
+	return s.store.PhoneNumberOrders.Delete(ctx, order.ID)
+}
+
+// recordBought writes the row of a number an order bought, from the order, and bills its first
+// month unless the purchase did. A row that already holds the number, another purchase's, leaves
+// nothing to record.
+func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder, vendorID string) error {
+	number := store.PhoneNumber{
+		E164: order.E164, Vendor: order.Vendor, Country: order.Country, MonthlyCostMicros: order.MonthlyCostMicros,
+		CustomerID: order.CustomerID, Tags: order.Tags, VendorID: vendorID, PurchasedAt: order.CreatedAt,
+	}
+	month := numberMonth(number, number.PurchasedAt).UsageID
+	billed, err := s.store.RecordedUsage(ctx, []uuid.UUID{month})
+	if err != nil {
+		return err
+	}
+	bought, err := s.store.PhoneNumberOrders.Bought(ctx, order.ID, &number)
+	if errors.Is(err, store.ErrNumberRecorded) {
+		return s.store.PhoneNumberOrders.Delete(ctx, order.ID)
+	}
+	if err != nil || !bought {
+		return err
+	}
+	s.logger.Warn("recorded a number bought whose row was not written", "order", order.ID, "vendor", order.Vendor,
+		"vendor_id", vendorID, "customer", order.CustomerID)
+	if !billed[month] {
+		s.billMonth(number, routing.Owner{
+			CustomerID: number.CustomerID, Attribution: routing.Attribution{APIKey: OriginNumberRental}, Tags: number.Tags,
+		}, number.PurchasedAt)
+	}
+	return nil
 }
 
 // Detach stops a number's callers reaching the agent. The number keeps its trunk and rule,
@@ -629,11 +791,11 @@ func (s *Service) seller(vendor string) (Provider, error) {
 }
 
 // unline takes a number off its trunk and deletes its rule, in the app they are in, and
-// forgets them on the number. With release it also gives the number back under the same
-// lock, so a line made for it meanwhile cannot put it back on a trunk. A Stream failure is
-// logged, not returned, so the number is still taken off, save a trunk Stream would not
-// delete (see offTrunk).
-func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string, release bool) error {
+// forgets them on the number. With a releasedAt it also gives the number back, as of then,
+// under the same lock, so a line made for it meanwhile cannot put it back on a trunk. A Stream
+// failure is logged, not returned, so the number is still taken off, save a trunk Stream would
+// not delete (see offTrunk).
+func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string, releasedAt time.Time) error {
 	app := held.StreamAppPK
 	// A call or attach lining the number in another app while this waited for its lock
 	// moves it there, and a release follows it.
@@ -657,12 +819,12 @@ func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string
 					return err
 				}
 			}
-			if release {
-				return tx.ReleaseNumber(number.E164, time.Now().UTC())
+			if !releasedAt.IsZero() {
+				return tx.ReleaseNumber(number.E164, releasedAt)
 			}
 			return nil
 		})
-		if err != nil || !moved || !release {
+		if err != nil || !moved || releasedAt.IsZero() {
 			return err
 		}
 	}
@@ -825,7 +987,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 	// A number lined in another app is taken off there first: the customer's app is where
 	// its calls go now.
 	if held.StreamTrunkID != "" && held.StreamAppPK != pin {
-		if err := s.unline(ctx, held, "re-attached a number in another app", false); err != nil {
+		if err := s.unline(ctx, held, "re-attached a number in another app", time.Time{}); err != nil {
 			return Attached{}, err
 		}
 		held.StreamTrunkID, held.StreamRouteID = "", ""
@@ -846,13 +1008,13 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		}
 		// Attached before its trunk's password was kept, so its trunk cannot be shared: it is
 		// replaced by one of its own, which keeps it.
-		if err := s.unline(ctx, held, "re-attached a number", false); err != nil {
+		if err := s.unline(ctx, held, "re-attached a number", time.Time{}); err != nil {
 			return Attached{}, err
 		}
 	} else if held.StreamTrunkID != "" {
 		// Still on a trunk of its own (detached, or lined for calls out), and Stream refuses a
 		// second trunk naming it.
-		if err := s.unline(ctx, held, "re-attached a number", false); err != nil {
+		if err := s.unline(ctx, held, "re-attached a number", time.Time{}); err != nil {
 			return Attached{}, err
 		}
 	}
@@ -1047,8 +1209,33 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
+	if err != nil && !sent && !lasting(err) {
+		return Placed{}, notDialed{err}
+	}
 	return placed, err
 }
+
+// lasting reports whether a call failed before it was sent for a reason that placing it again
+// would meet again: the request itself, a number or SIP trunk the app does not hold, its Stream
+// app, or the deployment's own setup (credentials, keys, a public URL, SIP trunks). Such a
+// failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+func lasting(err error) bool {
+	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
+		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
+		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
+		errors.Is(err, errLasting) || (err != nil && streamapp.Settled(err))
+}
+
+// errLasting marks a failure that has no kind of its own and that a second try meets again: a
+// vendor that cannot be built from its configuration, or a password the router's keys cannot
+// open or seal.
+var errLasting = errors.New("phone: a lasting failure")
+
+type lastingError struct{ err error }
+
+func (e lastingError) Error() string        { return e.err.Error() }
+func (e lastingError) Unwrap() error        { return e.err }
+func (e lastingError) Is(target error) bool { return target == errLasting }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
 // whatever the call returns.
@@ -1475,7 +1662,7 @@ func (s *Service) park(
 		}
 		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
 		if err != nil {
-			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
+			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
 		}
 		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
 	}
@@ -1543,6 +1730,17 @@ func callBridgeAAD(customerID, token string) []byte {
 // ErrNotPlaced is a call whose context ended before the vendor was asked to dial it: nobody
 // was rung.
 var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
+
+// ErrNotDialed is a call that failed before the vendor was asked to dial it, for a reason that
+// may not be met again, such as a database blip: nobody was rung. It marks the failure, whose
+// own text and kind are kept.
+var ErrNotDialed = errors.New("phone: the call failed before it was dialed")
+
+type notDialed struct{ err error }
+
+func (e notDialed) Error() string        { return e.err.Error() }
+func (e notDialed) Unwrap() error        { return e.err }
+func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.
@@ -1800,7 +1998,7 @@ func (s *Service) sharedLine(ctx context.Context, stream *Stream, pin int64, pro
 	// An attached number stays where its callers are sent. Stream lets a number be on one
 	// trunk per app, so the call can still have one of its own here.
 	if held.StreamTrunkID != "" && held.StreamAppPK != pin && held.AttachedAt == nil {
-		if err := s.unline(ctx, held, "lined a number in another app", false); err != nil {
+		if err := s.unline(ctx, held, "lined a number in another app", time.Time{}); err != nil {
 			return TrunkLine{}, false, err
 		}
 	}

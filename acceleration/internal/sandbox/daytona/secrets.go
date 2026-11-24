@@ -50,9 +50,10 @@ type SecretsOptions struct {
 	// Prefix names the router's environment in every secret, since routers that share a
 	// Daytona organization must never take or sweep each other's.
 	Prefix string
-	// Session is the session the secrets are for.
-	Session string
-	Tokens  sandbox.Tokens
+	// Customer and Session are the session the secrets are for: two customers may each have a
+	// session of one id.
+	Customer, Session string
+	Tokens            sandbox.Tokens
 	// Bind gives a late grant its connection before each run. A late grant needs it.
 	Bind   sandbox.Bind
 	Logger *slog.Logger
@@ -91,8 +92,8 @@ func NewSecrets(o SecretsOptions) (*Secrets, error) {
 	if o.APIKey == "" {
 		return nil, stack.Wrap(errors.New("daytona: DAYTONA_API_KEY is required"))
 	}
-	if o.Prefix == "" || o.Session == "" || o.Tokens == nil {
-		return nil, stack.Wrap(errors.New("daytona: secrets need a prefix, a session and tokens"))
+	if o.Prefix == "" || o.Customer == "" || o.Session == "" || o.Tokens == nil {
+		return nil, stack.Wrap(errors.New("daytona: secrets need a prefix, a customer, a session and tokens"))
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -159,7 +160,9 @@ func (s *Secrets) Prepare(ctx context.Context, grants []sandbox.Grant) (sandbox.
 	return mount, nil
 }
 
-func (s *Secrets) BeforeRun(ctx context.Context) error {
+// BeforeRun gives the run no env of its own: Daytona keeps the secrets with the sandbox, and a
+// secret's name reaches nothing outside it.
+func (s *Secrets) BeforeRun(ctx context.Context) (map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, held := range s.held {
@@ -183,7 +186,7 @@ func (s *Secrets) BeforeRun(ctx context.Context) error {
 			// The secret stays, holding no credential, until Close deletes it.
 			value := withdrawn
 			if _, err := s.client.Secret.Update(ctx, held.id, &types.UpdateSecretParams{Value: &value}); err != nil {
-				return fmt.Errorf("daytona: withdraw secret %s: %w", held.name, err)
+				return nil, fmt.Errorf("daytona: withdraw secret %s: %w", held.name, err)
 			}
 			held.withdrawn = true
 			s.options.Logger.Warn("a connector's credential is withdrawn from the sandbox", "connector", held.grant.Binding,
@@ -196,12 +199,15 @@ func (s *Secrets) BeforeRun(ctx context.Context) error {
 		// Daytona applies an update to every sandbox that uses the secret within 15 seconds
 		// (secrets.md above).
 		if _, err := s.client.Secret.Update(ctx, held.id, &types.UpdateSecretParams{Value: &token.Value}); err != nil {
-			return fmt.Errorf("daytona: refresh secret %s: %w", held.name, err)
+			return nil, fmt.Errorf("daytona: refresh secret %s: %w", held.name, err)
 		}
 		held.revision, held.unbound = token.Revision, false
 	}
-	return nil
+	return nil, nil
 }
+
+// AfterRun has nothing to end: the secrets last as long as the sandbox.
+func (s *Secrets) AfterRun(context.Context) error { return nil }
 
 // abandon is release for a Prepare that failed, which may have failed because ctx ran out: on
 // ctx itself every delete would fail too, and the live token of a secret made before would stay
@@ -236,13 +242,16 @@ func (s *Secrets) release(ctx context.Context) error {
 	return errors.Join(failed...)
 }
 
-// name is va_<prefix>_<session>_<binding>_<random>. The random part keeps two sandboxes of
-// one session id apart: a reopened session, or one taking over from a session of its id that
-// is still closing.
+// name is va_<prefix>_<session>_<customer>_<binding>_<random>. The random part keeps two
+// sandboxes of one session id apart: a reopened session, or one taking over from a session of
+// its id that is still closing.
 func (s *Secrets) name(grant sandbox.Grant) (string, error) {
 	random := make([]byte, 4)
 	if _, err := rand.Read(random); err != nil {
 		return "", stack.Wrap(err)
 	}
-	return unnamed.ReplaceAllString(fmt.Sprintf("va_%s_%s_%s_%s", s.options.Prefix, s.options.Session, grant.Binding, hex.EncodeToString(random)), "_"), nil
+	// The session before its customer, so a sweep of the release before, which reads the session
+	// off the front of the name, still finds it live.
+	return unnamed.ReplaceAllString(fmt.Sprintf("va_%s_%s_%s_%s_%s", s.options.Prefix, s.options.Session, s.options.Customer,
+		grant.Binding, hex.EncodeToString(random)), "_"), nil
 }

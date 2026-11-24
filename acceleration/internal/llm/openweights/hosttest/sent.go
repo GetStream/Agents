@@ -1,7 +1,6 @@
 package hosttest
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -57,7 +56,7 @@ func SentRoles(t *testing.T, build func(baseURL string) (*openaicompat.LLM, erro
 	provider, err := build(server.URL)
 	require.NoError(t, err)
 	t.Cleanup(func() { provider.Close() })
-	stream, err := provider.Create(context.Background(), params)
+	stream, err := provider.Create(t.Context(), params)
 	require.NoError(t, err)
 	for stream.Next() {
 	}

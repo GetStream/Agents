@@ -398,6 +398,9 @@ type Server struct {
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
 	exports   chan struct{}
+	// healthLogs throttles the line a dependency that did not answer the health check logs:
+	// every probe asks.
+	healthLogs quota.Throttle
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -462,6 +465,16 @@ type Server struct {
 	// that finished just after a look waited up to 2 s to leave, and every thread task took 2 s
 	// at least. 100 ms is not a delay a person waiting for a text notices.
 	replyPoll time.Duration
+	// replyWindow bounds reading an answer for a channel (scheduledReplyWindow); phoneWindow is how
+	// long a ring is waited out (scheduledPhoneWindow), and callLimit how long a call a task placed
+	// may last (scheduledCallLimit). Each router holds its own, so a test that shortens them on its
+	// router changes no other suite's: the suites run in parallel in one process.
+	replyWindow time.Duration
+	phoneWindow time.Duration
+	callLimit   time.Duration
+	// resumedAt is the clock a resume counts a task's next run from. A test sets it to resume inside
+	// an hour the wall clock is not in.
+	resumedAt func() time.Time
 
 	// serverSide matches the requests the spec marks server-side only. What is registered on
 	// it is the patterns, and matching one is the answer; its handlers only name the operation
@@ -601,6 +614,10 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
+		replyWindow:        scheduledReplyWindow,
+		phoneWindow:        scheduledPhoneWindow,
+		callLimit:          scheduledCallLimit,
+		resumedAt:          time.Now,
 		quota:              options.Quota,
 		policies:           options.Policies,
 		connectors:         options.Connectors,
@@ -826,7 +843,7 @@ func (s *Server) Handler() http.Handler {
 	// lived socket; blocking the handler's return on event delivery would hold
 	// the connection open past its use. The flush in cmd/router covers shutdown.
 	served := withSentry(mux, withRequestID(withTrace(mux, withMetrics(mux, withTiming(withCORS(s.authMode,
-		s.onOwningNode(s.withCustomer(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
+		s.withCustomer(s.onOwningNode(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
 	if s.directory == nil {
 		return served
 	}
@@ -1383,7 +1400,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
 			r = r.WithContext(ctx)
-			s.policies.Join(principal.AppID, principal.OrganizationID, principal.OrganizationTier)
+			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)
@@ -1659,7 +1676,11 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.store == nil {
 		dependencies["postgres"] = "not configured"
 	} else if err := s.store.Ping(ctx); err != nil {
-		dependencies["postgres"] = err.Error()
+		// Anyone may read the health check, and the error names where the database is.
+		if s.healthLogs.Due("postgres", time.Minute) {
+			s.logger.Error("the database did not answer the health check", "error", err)
+		}
+		dependencies["postgres"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["postgres"] = "ok"
@@ -1668,7 +1689,10 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.live == nil {
 		dependencies["redis"] = "not configured"
 	} else if err := s.live.Ping(ctx); err != nil {
-		dependencies["redis"] = err.Error()
+		if s.healthLogs.Due("redis", time.Minute) {
+			s.logger.Error("redis did not answer the health check", "error", err)
+		}
+		dependencies["redis"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["redis"] = "ok"
@@ -1903,7 +1927,7 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
 		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	stats := make([]TagStatsBucket, 0, len(buckets))
@@ -2022,7 +2046,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	spend := make([]SpendBucket, 0, len(buckets))
@@ -2030,6 +2054,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		spend = append(spend, SpendBucket{
 			Bucket:          bucket.Bucket,
 			Value:           bucket.Value,
+			Other:           bucket.Other,
 			CostMicrosTotal: bucket.CostMicrosTotal,
 			RequestCount:    bucket.RequestCount,
 		})
@@ -2451,9 +2476,9 @@ func (s *Server) registerServer(api huma.API) {
 			"app alone; grouped by \"who:user\" the value is then <app_id>/<user_id>, since a user id is " +
 			"only unique within its app.\n" +
 			"Only the biggest values keep a series of their own, because a label such as customer_id " +
-			"has as many values as the customer has customers. The rest are summed into \"other\", and " +
-			"spend carrying no such label at all into the empty value, so the rows still add up to " +
-			"the total.\n" +
+			"has as many values as the customer has customers. The rest are summed into a row marked " +
+			"other, whose value is \"other\", and spend carrying no such label at all into the empty " +
+			"value, so the rows still add up to the total.\n" +
 			"Reads the request rows rather than the rollups, so today's spend is there without a " +
 			"rollup having run.",
 		// Declared rather than read off the input, so the default is documented without
@@ -2824,8 +2849,9 @@ type RollupResult struct {
 type SpendBucket struct {
 	Bucket          time.Time `json:"bucket"`
 	CostMicrosTotal int64     `json:"cost_micros_total" doc:"Millionths of a dollar, priced from the configured rates."`
+	Other           bool      `json:"other,omitempty" doc:"True on the row that is everything outside the biggest few, summed. Its value is \"other\", which a label can also have: a label of that value is a row of its own, without other."`
 	RequestCount    int64     `json:"request_count"`
-	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
+	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
 }
 
 // StatsBucket is the StatsBucket schema.

@@ -524,10 +524,6 @@ func (s *Server) pauseScheduledTask(ctx context.Context, request *pauseScheduled
 	return &pauseScheduledTaskResponse{Body: rendered}, nil
 }
 
-// resumedAt is the clock a resume counts a task's next run from. A test sets
-// it to resume inside an hour the wall clock is not in.
-var resumedAt = time.Now
-
 func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeScheduledTaskRequest) (*resumeScheduledTaskResponse, error) {
 	customerID, failure := s.scheduledTasksCustomer(ctx)
 	if failure != nil {
@@ -546,7 +542,7 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 			return nil, scheduleFailure(err)
 		}
 		// Counted from now: what a pause slept through is never replayed.
-		next, ok := schedule.Next(resumedAt())
+		next, ok := schedule.Next(s.resumedAt())
 		if !ok {
 			// A one-shot whose time came while it was paused takes no place and runs
 			// on nothing: it is only closed, with the occurrence it slept through on
@@ -607,15 +603,14 @@ func (s *Server) runScheduledTask(ctx context.Context, request *runScheduledTask
 	if err := s.store.ScheduledTaskRuns.Insert(ctx, &run); err != nil {
 		return nil, err
 	}
-	go s.deliverManualRun(task, run)
+	go s.deliverManualRun(context.WithoutCancel(ctx), task, run)
 	return &runScheduledTaskResponse{Body: scheduledTaskRunOf(task, run)}, nil
 }
 
 // deliverManualRun delivers a run made by hand and records how it landed: a
 // delivery too late to make, such as a call that would ring long after the
 // run was asked for, is missed, as a scheduled occurrence's is.
-func (s *Server) deliverManualRun(task store.ScheduledTask, run store.ScheduledTaskRun) {
-	ctx := context.Background()
+func (s *Server) deliverManualRun(ctx context.Context, task store.ScheduledTask, run store.ScheduledTaskRun) {
 	deliveredTo, sessionID, err := s.DeliverScheduledTask(ctx, store.ClaimedScheduledTask{Task: task, Run: run})
 	state := store.ScheduledTaskRunDelivered
 	failure := ""

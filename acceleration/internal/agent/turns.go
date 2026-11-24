@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -63,6 +64,9 @@ type turnTracker struct {
 	finished func(Turn)
 	// owner is who the turn belongs to, which is what its span is labelled with.
 	owner routing.Owner
+	// ctx is the call's, which each turn's span is a child of: the agent's once it joined.
+	// Guarded by mu.
+	ctx context.Context
 	// grace is how long a turn waits for the track to take its queued speech.
 	grace time.Duration
 	// origins is what started each of the call's latest originsKept turns. Like
@@ -183,8 +187,15 @@ func (m *turnMarks) FirstFrameQueued(at time.Time)   { m.tracker.queued(m.turn, 
 func (m *turnMarks) FirstAudiblePulled(at time.Time) { m.tracker.pulled(m.turn, m.id, at) }
 
 func newTurnTracker(owner routing.Owner, finished func(Turn)) *turnTracker {
-	return &turnTracker{open: map[string]*openTurn{}, finished: finished, owner: owner, grace: playoutGrace, origins: map[string]origin{},
+	return &turnTracker{open: map[string]*openTurn{}, finished: finished, owner: owner, ctx: context.Background(), grace: playoutGrace, origins: map[string]origin{},
 		out: map[string]time.Time{}}
+}
+
+// within traces the turns reported from now on under ctx.
+func (t *turnTracker) within(ctx context.Context) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ctx = ctx
 }
 
 // started records what started a turn, before anything of it is measured or said. A caller
@@ -614,7 +625,10 @@ func (t *turnTracker) report(turnID string, current *openTurn, finished *Turn) {
 	if finished == nil {
 		return
 	}
-	traceTurn(t.owner, turnID, current)
+	t.mu.Lock()
+	ctx := t.ctx
+	t.mu.Unlock()
+	traceTurn(ctx, t.owner, turnID, current)
 	if t.finished != nil {
 		t.finished(*finished)
 	}
@@ -748,7 +762,7 @@ func buildTurnRecorder(pgStore *store.Store, owner routing.Owner, logger *slog.L
 }
 
 func (r *turnRecorder) start() *turnRecorder {
-	go r.run()
+	goroutine.Go(r.ctx, r.run)
 	return r
 }
 

@@ -1464,7 +1464,7 @@ export type paths = {
          * Move a guest's conversations onto the account they turned out to be
          * @description For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
          *     Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-         *     A guest already claimed is refused rather than moved again.
+         *     A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
          */
         readonly post: operations["claimGuestUser"];
         readonly delete?: never;
@@ -3207,7 +3207,7 @@ export type paths = {
          * @description One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
          *     Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
          *     A router with shards cannot be the source of a move and answers 400 `not_configured`.
-         *     An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+         *     An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
          *     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
          */
         readonly get: operations["exportData"];
@@ -4383,7 +4383,7 @@ export type paths = {
          * What the calling customer spent, grouped
          * @description Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
          *     scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-         *     Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+         *     Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
          *     Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
          */
         readonly get: operations["getSpend"];
@@ -5061,6 +5061,11 @@ export type components = {
             readonly tts?: string;
             /** @description What teaches the agent's model to answer with UI. An empty string removes them. */
             readonly ui_instructions?: string;
+            /**
+             * Format: date-time
+             * @description The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+             */
+            readonly updated_at?: string;
             readonly video?: components["schemas"]["SessionVideo"];
             /** @description Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search. */
             readonly visible_tools?: readonly string[];
@@ -5864,7 +5869,7 @@ export type components = {
             /** Format: date-time */
             readonly launched_at?: string;
             readonly name: string;
-            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
+            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
             readonly paused_reason?: string;
             readonly sequence: components["schemas"]["CampaignSequence"];
             /**
@@ -5920,7 +5925,7 @@ export type components = {
         readonly CampaignAttempt: {
             /**
              * Format: int64
-             * @description Minutes after the previous attempt started, pushed into the calling hours.
+             * @description Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
              */
             readonly delay_minutes: number;
         };
@@ -6886,7 +6891,7 @@ export type components = {
             readonly ended_at?: string;
             /** @description The outcome an answered call was read as: no_response when nobody but the agent spoke. */
             readonly outcome?: string;
-            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
+            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
             readonly result: string;
             /** Format: date-time */
             readonly started_at: string;
@@ -10462,10 +10467,12 @@ export type components = {
              * @description Millionths of a dollar, priced from the configured rates.
              */
             readonly cost_micros_total: number;
+            /** @description True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other. */
+            readonly other?: boolean;
             /** Format: int64 */
             readonly request_count: number;
             /**
-             * @description The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+             * @description The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
              * @example support
              */
             readonly value: string;
@@ -19671,7 +19678,7 @@ export interface operations {
                 };
             };
             readonly 500: components["responses"]["InternalError"];
-            /** @description This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or a write that was open when the export started is still open after 30 seconds: try again. */
+            /** @description This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or the export ran out of time before its first row; or a write that was open when the export started is still open after 30 seconds: try again. */
             readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;

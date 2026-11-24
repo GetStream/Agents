@@ -551,6 +551,11 @@ type Settle struct {
 	Reason        string
 	// CallID and VendorCallID are the last dial's; empty keeps the ones already stored.
 	CallID, VendorCallID string
+	// LeaseUntil is the lease the owner's claim returned, which every claim and take-over sets
+	// anew. Set, the contact settles only under that same lease: an owner is one process, and a
+	// call that outlives its lease may find the contact taken over, settled and claimed again
+	// by that same process.
+	LeaseUntil *time.Time
 }
 
 // Settle records where a call left a contact and releases owner's lease on it. A contact
@@ -605,6 +610,7 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Where("cp.id = cc.campaign_id").
 			Where("cc.id = ? AND cc.leased_by = ?", contactID, owner).
 			Where("cc.stage IN (?, ?)", InProgress, AwaitingOutcome).
+			Where("(?::timestamptz IS NULL OR cc.lease_until = ?)", settle.LeaseUntil, settle.LeaseUntil).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: settle contact: %w", err)

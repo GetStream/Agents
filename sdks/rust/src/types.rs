@@ -819,6 +819,9 @@ pub struct AgentConfigPatch {
     ///What teaches the agent's model to answer with UI. An empty string removes them.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub ui_instructions: ::std::option::Option<::std::string::String>,
+    ///The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub updated_at: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub video: ::std::option::Option<SessionVideo>,
     ///Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search.
@@ -2668,7 +2671,7 @@ pub struct Campaign {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub launched_at: ::std::option::Option<::std::string::String>,
     pub name: ::std::string::String,
-    ///Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+    ///Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub paused_reason: ::std::option::Option<::std::string::String>,
     pub sequence: CampaignSequence,
@@ -2706,7 +2709,7 @@ pub struct CampaignAnalytics {
 ///`CampaignAttempt`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct CampaignAttempt {
-    ///Minutes after the previous attempt started, pushed into the calling hours.
+    ///Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
     pub delay_minutes: i64,
 }
 ///`CampaignDialDay`
@@ -4732,7 +4735,7 @@ pub struct ContactAttempt {
     ///The outcome an answered call was read as: no_response when nobody but the agent spoke.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub outcome: ::std::option::Option<::std::string::String>,
-    ///Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
+    ///Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
     pub result: ::std::string::String,
     pub started_at: ::std::string::String,
 }
@@ -12862,8 +12865,11 @@ pub struct SpendBucket {
     pub bucket: ::std::string::String,
     ///Millionths of a dollar, priced from the configured rates.
     pub cost_micros_total: i64,
+    ///True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub other: ::std::option::Option<bool>,
     pub request_count: i64,
-    ///The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+    ///The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
     pub value: ::std::string::String,
 }
 ///`SpendHardLimit`

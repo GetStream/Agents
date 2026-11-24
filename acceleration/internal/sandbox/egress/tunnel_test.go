@@ -36,16 +36,16 @@ import (
 const tlsPublicURL = "https://203.0.113.7:8091"
 
 // TestAnHTTPProxyURLGivesTheSandboxWhatBaseDid: with an http URL the broker is as before the
-// tunnel. The expected env and the setup command's SHA-256 are a probe's on base b16b0e64c.
+// tunnel. The expected env and the setup command's SHA-256 are a probe's on base b16b0e64c; the
+// proxy credential is the run's, and the sandbox is created with the proxy's URL alone.
 func (s *BrokerSuite) TestAnHTTPProxyURLGivesTheSandboxWhatBaseDid() {
-	credential, _ := s.mount.Proxy.User.Password()
-	proxy := "http://sbx:" + credential + "@203.0.113.7:8091"
+	proxy := "http://sbx:" + credentialOf(s.mount) + "@203.0.113.7:8091"
 	bundle := "/tmp/va-egress-ca-bundle.pem"
 	s.Equal(map[string]string{"CURL_CA_BUNDLE": bundle, "GIT_SSL_CAINFO": bundle, "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy,
 		"NODE_EXTRA_CA_CERTS": "/tmp/va-egress-ca.pem", "NO_PROXY": "localhost,127.0.0.1,::1", "REQUESTS_CA_BUNDLE": bundle,
 		"SSL_CERT_FILE": bundle, "http_proxy": proxy, "https_proxy": proxy, "no_proxy": "localhost,127.0.0.1,::1",
 		"GIT_HTTP_PROXY_AUTHMETHOD": "basic"}, s.mount.RunEnv)
-	s.Equal(proxy, s.mount.Proxy.String())
+	s.Equal("http://203.0.113.7:8091", s.mount.Proxy.String())
 	s.Equal([]string{"/tmp/va-egress-ca.pem"}, slices.Collect(maps.Keys(s.mount.Files)))
 	s.Require().Len(s.mount.Setup, 1)
 	sum := sha256.Sum256([]byte(s.mount.Setup[0]))
@@ -88,6 +88,9 @@ func (s *TunnelSuite) SetupTest() {
 	s.T().Cleanup(func() { _ = broker.Close(context.Background()) })
 	s.mount, err = broker.Prepare(s.ctx, []sandbox.Grant{github})
 	s.Require().NoError(err)
+	env, err := broker.BeforeRun(s.ctx)
+	s.Require().NoError(err)
+	s.mount = running(s.mount, env)
 
 	free, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
@@ -170,14 +173,13 @@ func (s *TunnelSuite) get() (int, error) {
 // sandbox's loopback, with the credential; node is told to read them; loopback and the CA stay
 // as with http. Daytona's allow list still holds the proxy's address.
 func (s *TunnelSuite) TestAnHTTPSProxyURLSendsClientsToTheTunnel() {
-	credential, _ := s.mount.Proxy.User.Password()
-	local := "http://sbx:" + credential + "@127.0.0.1:3128"
+	local := "http://sbx:" + credentialOf(s.mount) + "@127.0.0.1:3128"
 	bundle := "/tmp/va-egress-ca-bundle.pem"
 	s.Equal(map[string]string{"CURL_CA_BUNDLE": bundle, "GIT_SSL_CAINFO": bundle, "HTTPS_PROXY": local, "HTTP_PROXY": local,
 		"NODE_EXTRA_CA_CERTS": "/tmp/va-egress-ca.pem", "NO_PROXY": "localhost,127.0.0.1,::1", "REQUESTS_CA_BUNDLE": bundle,
 		"SSL_CERT_FILE": bundle, "http_proxy": local, "https_proxy": local, "no_proxy": "localhost,127.0.0.1,::1",
 		"NODE_USE_ENV_PROXY": "1", "GIT_HTTP_PROXY_AUTHMETHOD": "basic"}, s.mount.RunEnv)
-	s.Equal("https://sbx:"+credential+"@203.0.113.7:8091", s.mount.Proxy.String())
+	s.Equal("https://203.0.113.7:8091", s.mount.Proxy.String())
 	s.ElementsMatch([]string{"/tmp/va-egress-ca.pem", "/tmp/va-egress-tunnel.py"}, slices.Collect(maps.Keys(s.mount.Files)))
 	s.Require().Len(s.mount.Setup, 2)
 	s.Equal([]string{s.mount.Setup[1]}, s.mount.EachRun)
@@ -196,7 +198,7 @@ func (s *TunnelSuite) TestAClientReachesTheProxyThroughTheTunnelOverTLSAlone() {
 	s.Equal(http.StatusOK, status)
 	s.Equal([]string{"Bearer gho_live-token-of-the-connection"}, s.rig.host.authorizations())
 	sent := s.wire.sent.String()
-	credential, _ := s.mount.Proxy.User.Password()
+	credential := credentialOf(s.mount)
 	s.Require().NotEmpty(sent)
 	s.Equal(byte(0x16), sent[0], "a TLS handshake record (RFC 8446 section 5.1)")
 	for _, clear := range []string{"CONNECT", "Proxy-Authorization", credential, s.mount.Env["GITHUB_TOKEN"]} {
