@@ -42,6 +42,13 @@ import (
 // reader some detail and nobody on the call anything.
 const watcherBuffer = 256
 
+// DefaultUserID and DefaultUserName are who the agent joins a call and writes Chat as when
+// nobody names it: the only identity an end user's device may ask for by name.
+const (
+	DefaultUserID   = defaultUserID
+	DefaultUserName = defaultUserName
+)
+
 // Defaults a caller can leave out. They are the same ones cmd/agent's flags carry, so a
 // session started with an almost empty spec behaves like the demo.
 const (
