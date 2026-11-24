@@ -215,11 +215,17 @@ func (s *pdfSession) read(index int) (pdfPage, error) {
 	err = s.walk(&page, objects{
 		count: func() (int, error) {
 			counted, err := s.instance.FPDFPage_CountObjects(&requests.FPDFPage_CountObjects{Page: onPage})
-			return counted.Count, err
+			if err != nil {
+				return 0, err
+			}
+			return counted.Count, nil
 		},
 		at: func(i int) (references.FPDF_PAGEOBJECT, error) {
 			object, err := s.instance.FPDFPage_GetObject(&requests.FPDFPage_GetObject{Page: onPage, Index: i})
-			return object.PageObject, err
+			if err != nil {
+				return "", err
+			}
+			return object.PageObject, nil
 		},
 	}, identity, 0, &walked)
 	return page, err
@@ -291,11 +297,17 @@ func (s *pdfSession) walk(page *pdfPage, holder objects, onPage matrix, depth in
 			err = s.walk(page, objects{
 				count: func() (int, error) {
 					counted, err := s.instance.FPDFFormObj_CountObjects(&requests.FPDFFormObj_CountObjects{PageObject: form})
-					return counted.Count, err
+					if err != nil {
+						return 0, err
+					}
+					return counted.Count, nil
 				},
 				at: func(i int) (references.FPDF_PAGEOBJECT, error) {
 					child, err := s.instance.FPDFFormObj_GetObject(&requests.FPDFFormObj_GetObject{PageObject: form, Index: uint64(i)})
-					return child.PageObject, err
+					if err != nil {
+						return "", err
+					}
+					return child.PageObject, nil
 				},
 			}, matrixOf(placed.Matrix).then(onPage), depth+1, walked)
 			if err != nil {
