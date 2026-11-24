@@ -105,7 +105,8 @@ func (s *StoreSuite) TestAClaimTakesTheEarliestDueFirstAndStopsAtMax() {
 	numbers := []string{claimed[0].Contact.ToNumber, claimed[1].Contact.ToNumber}
 	s.ElementsMatch([]string{"+15550002", "+15550001"}, numbers)
 	s.Equal(campaign.ID, claimed[0].Campaign.ID)
-	s.Equal(s.base.Add(time.Minute), claimed[0].Contact.LeaseUntil.UTC())
+	s.Require().NotNil(claimed[0].Contact.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*claimed[0].Contact.LeaseUntil), float64(time.Second), "a minute on Postgres's clock")
 }
 
 func (s *StoreSuite) TestAContactNotYetDueIsNotClaimed() {
@@ -155,17 +156,19 @@ func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverAndALiveOneIsNot() {
 	s.Require().NoError(err)
 	_, err = s.store.CampaignContacts.Claim(s.ctx, "a", s.base.Add(5*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
+	s.leasesPass("campaign_contacts", 2*time.Minute)
 
-	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", s.base.Add(7*time.Minute), time.Minute, 10)
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", time.Minute, 10)
 
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	s.Equal("+15550002", taken[0].Contact.ToNumber)
 	s.Equal("b", taken[0].Contact.LeasedBy)
-	s.Equal(s.base.Add(8*time.Minute), taken[0].Contact.LeaseUntil.UTC())
+	s.Require().NotNil(taken[0].Contact.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*taken[0].Contact.LeaseUntil), float64(time.Second), "a minute on Postgres's clock")
 	s.Equal(campaign.ID, taken[0].Campaign.ID)
 	s.Equal("a", s.contactByNumber(campaign, "+15550001").LeasedBy, "a live lease stays")
-	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", s.base.Add(7*time.Minute), time.Minute, 10)
+	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", time.Minute, 10)
 	s.Require().NoError(err)
 	s.Empty(again, "b's new lease is live")
 }
@@ -304,6 +307,8 @@ func (s *StoreSuite) TestAnAnsweredDialWaitsToBeClassifiedAndIsClaimedOnce() {
 	s.Equal(1, won[0].Attempt.ClassifyTries)
 	s.Equal(classifyAfter.Add(time.Minute), won[0].Attempt.ClassifyAfter.UTC())
 	s.Equal(winner, won[0].Contact.LeasedBy)
+	s.Require().NotNil(won[0].Contact.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*won[0].Contact.LeaseUntil), float64(time.Second), "the contact's lease, a minute on Postgres's clock")
 	s.Equal(AwaitingOutcome, won[0].Contact.Stage)
 	s.Equal(campaign.ID, won[0].Campaign.ID)
 
@@ -476,10 +481,12 @@ func (s *StoreSuite) TestADialWhoseContactAnotherRunnerHoldsIsNotClassified() {
 	_, err = s.store.GlobalDB().NewUpdate().Model((*CampaignAttempt)(nil)).Set("classify_after = ?", s.base.Add(time.Minute)).Where("id = ?", attempt.ID).Exec(s.ctx)
 	s.Require().NoError(err)
 
+	s.leasesPass("campaign_contacts", 9*time.Minute)
 	taken, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base.Add(2*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "a still holds the contact")
 
+	s.leasesPass("campaign_contacts", 2*time.Minute)
 	taken, err = s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base.Add(12*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
 	s.Len(taken, 1, "a's lease ran out")
@@ -666,8 +673,9 @@ func (s *StoreSuite) TestCampaignContactQueryBudgets() {
 	s.Equal(2+1+len(running), s.countQueries(func() { claimed = s.claimDue("a", s.base, 10) }),
 		"Claim locks the due campaigns, then claims each one's share in one statement")
 	s.Len(claimed, 6, "two of each campaign's three, its concurrency")
+	s.leasesPass("campaign_contacts", time.Hour)
 	s.Equal(2, s.countQueries(func() {
-		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", s.base.Add(time.Hour), time.Minute, 10)
+		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", time.Minute, 10)
 		s.Require().NoError(err)
 		s.Len(taken, 6)
 	}), "TakeOverExpired takes every lapsed contact, then reads their campaigns, in one query each")
@@ -709,7 +717,8 @@ func (s *StoreSuite) TestCampaignContactQueryBudgets() {
 func (s *StoreSuite) TestASettleUnderALeaseTakenOverSinceSettlesNothing() {
 	campaign := s.runningCampaign(5, "+15550001")
 	first := s.claimDue("a", s.base, 10)[0].Contact
-	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "a", s.base.Add(2*time.Minute), time.Minute, 10)
+	s.leasesPass("campaign_contacts", 2*time.Minute)
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "a", time.Minute, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	second := taken[0].Contact

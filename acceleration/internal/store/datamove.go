@@ -820,7 +820,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	case "campaigns":
 		row, err = pauseImported(row, []string{Running, Scheduled}, Paused, false)
 	case "campaign_contacts":
-		row, err = requeueImportedContact(row, time.Now())
+		row, err = requeueImportedContact(row)
 	case "campaign_attempts":
 		row, err = endImportedAttempt(row, time.Now())
 	case "simulation_runs":
@@ -1437,9 +1437,11 @@ func normalizeImportedOptOut(row json.RawMessage) (json.RawMessage, error) {
 // requeueImportedContact gives up the source's lease on a contact it was ringing, since the
 // runner that held it is in the deployment it came from. One in a call keeps its stage with a
 // lease already run out, so once the move is cut over a runner here settles it from its dial,
-// as it would one whose runner died: its next attempt waits its delay. One awaiting its
-// answered call's outcome keeps waiting, and has the transcript read here.
-func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage, error) {
+// as it would one whose runner died: its next attempt waits its delay. That lease ends at the
+// Unix epoch. Postgres's clock is always after that time, also when the clock of the importing
+// router is ahead. One awaiting its answered call's outcome keeps waiting, and has the
+// transcript read here.
+func requeueImportedContact(row json.RawMessage) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
 		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
@@ -1447,10 +1449,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 	until := json.RawMessage("null")
 	switch string(fields["stage"]) {
 	case `"` + InProgress + `"`:
-		var err error
-		if until, err = json.Marshal(now); err != nil {
-			return nil, fmt.Errorf("store: write an imported row: %w", err)
-		}
+		until = json.RawMessage(`"1970-01-01T00:00:00Z"`)
 	case `"` + AwaitingOutcome + `"`:
 	default:
 		return row, nil
