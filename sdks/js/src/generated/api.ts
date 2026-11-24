@@ -15597,7 +15597,7 @@ export interface operations {
                     readonly "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description This address has minted as many guests of this app as it may this hour */
+            /** @description This address has minted as many guests of this app as it may this hour: retry after Retry-After */
             readonly 429: {
                 headers: {
                     readonly [name: string]: unknown;

@@ -115,8 +115,8 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 
 // newGuest mints a guest nobody has been before, and a refresh secret to come back with.
 func (s *Server) newGuest(ctx context.Context, customerID string, bound streamapp.Bound, body GuestUserRequest) (*createGuestUserResponse, error) {
-	// Counted before Stream is asked, so a refused guest writes nothing anywhere. A caller
-	// with no address counts against nobody, as in the daily quota.
+	// Counted before the guest is written, so a refused one is in neither Chat nor the store.
+	// A caller with no address counts against nobody, as in the daily quota.
 	if caller := CallerFrom(ctx); !caller.ServerSide && caller.IP != "" {
 		key := newGuestsPrefix + url.QueryEscape(customerID) + ":" + caller.IP
 		if _, over := s.newGuests.Admit(ctx, "", key, guestsPerAddress, guestWindow); over > 0 {

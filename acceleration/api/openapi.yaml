@@ -17198,7 +17198,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: This address has minted as many guests of this app as it may this hour
+          description: 'This address has minted as many guests of this app as it may this hour: retry after Retry-After'
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
