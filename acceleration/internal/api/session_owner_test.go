@@ -139,16 +139,34 @@ func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenOpensNoneOfTh
 	s.Contains(refused.Error.Message, "conversation_id")
 }
 
-func (s *SessionOwnershipSuite) TestAGuestOpensNoneOfTheConversationsOfTheSignedInUserOfTheSameName() {
-	alice := s.data.createUser()
-	opened := alice.createSession(textSession(nil))
-	alice.stopSession(opened.Id)
+func (s *SessionOwnershipSuite) TestAGuestCarriesOnItsOwnConversationByItsChannel() {
+	// A guest's token is verified, and clients built on an older SDK resume a guest's
+	// conversation this way.
+	guest := s.data.createGuest()
+	opened := guest.createSession(textSession(nil))
+	guest.stopSession(opened.Id)
 	resume := textSession(nil)
 	resume.LegacyConversationId = opened.ConversationId
 
-	status, body := s.guestNamed(alice.userID).call(http.MethodPost, "/v1/agents/sessions", resume)
+	resumed := guest.createSession(resume)
 
-	s.Equal(http.StatusForbidden, status, "%s", body)
+	s.Require().NotNil(opened.ConversationId)
+	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
+}
+
+func (s *SessionOwnershipSuite) TestAnAnonymousCallerCarriesOnItsOwnConversationBySessionId() {
+	// conversation_id is not open to it, so the session id is how it goes on with a chat that
+	// ended.
+	someone := s.data.createAnonymous()
+	opened := someone.createSession(textSession(nil))
+	someone.stopSession(opened.Id)
+
+	s.Require().Equal(http.StatusAccepted, someone.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+		CreateResponseRequest{Text: "Still there?", RequestId: pointerTo(s.utils.uuid())}, nil))
+
+	reopened := someone.getSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	s.Equal(*opened.ConversationId, value(reopened.ConversationId))
 }
 
 func (s *SessionOwnershipSuite) TestAUsersOwnDeviceCarriesOnTheirConversationByItsChannel() {
