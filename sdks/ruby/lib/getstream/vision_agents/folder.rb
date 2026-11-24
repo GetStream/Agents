@@ -175,12 +175,14 @@ module GetStream
         @path = File.expand_path(path)
         raise ConfigurationError, "#{path} is not an agent directory" unless File.directory?(@path)
 
+        # What is loaded is what the directory holds: a link out of it is refused wherever it is.
+        @real = File.realpath(@path)
         declared = File.join(@path, AGENT_FILE)
-        unless File.file?(declared)
+        unless inside(declared) && File.file?(declared)
           raise ConfigurationError, "#{path} has no #{AGENT_FILE}, so it is not an agent directory"
         end
 
-        raw = File.read(declared)
+        raw = read(declared)
         @declaration = raw.strip
         @settings = Folder.declare(raw, declared)
         @name = @settings["name"].to_s.empty? ? File.basename(@path) : @settings["name"]
@@ -559,7 +561,26 @@ module GetStream
 
       def optional(file)
         full = File.join(@path, file)
-        File.file?(full) ? File.read(full).strip : ""
+        inside(full) && File.file?(full) ? read(full).strip : ""
+      end
+
+      # The real path of +path+, or nil when nothing is there. One outside the agent directory is
+      # refused, as a link left pointing elsewhere on the machine would be, and so is a link that
+      # goes round in a loop, which leads nowhere inside it either.
+      def inside(path)
+        real = File.realpath(path)
+        return real if real == @real || real.start_with?("#{@real}/")
+
+        raise ConfigurationError, "#{path} links outside the agent directory"
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        nil
+      rescue Errno::ELOOP
+        raise ConfigurationError, "#{path} links outside the agent directory"
+      end
+
+      # Reads +file+ from where it really is, once +inside+ has let it through.
+      def read(file)
+        File.read(inside(file) || file)
       end
 
       # A skill is either a markdown file, or a folder holding a SKILL.md and whatever files
@@ -568,9 +589,12 @@ module GetStream
         directory = File.join(@path, SKILLS_DIR)
         return [] unless File.directory?(directory)
 
+        inside(directory)
         declared = {}
         Dir.children(directory).sort.filter_map do |entry|
           folder = File.join(directory, entry)
+          # Before the checks below, which take a link going round in a loop for nothing there.
+          inside(folder)
           if File.directory?(folder)
             name = entry
             file = File.join(folder, SKILL_FILE)
@@ -584,8 +608,9 @@ module GetStream
           raise ConfigurationError, "skill #{name.inspect} is both #{declared[name]} and #{entry}" if declared.key?(name)
 
           declared[name] = entry
+          content = read(file)
           skill = begin
-            Folder.parse_skill(name, File.read(file))
+            Folder.parse_skill(name, content)
           rescue ConfigurationError => e
             raise ConfigurationError, "#{file}: #{e.message}"
           end
@@ -595,6 +620,7 @@ module GetStream
 
       # Every file in a skill folder but its SKILL.md, by slash path relative to the folder.
       def skill_files(folder, prefix = "")
+        inside(File.join(folder, prefix))
         Dir.children(File.join(folder, prefix)).sort.each_with_object({}) do |entry, files|
           next if skipped?(entry)
 
@@ -603,7 +629,7 @@ module GetStream
           if File.directory?(file)
             files.merge!(skill_files(folder, relative))
           elsif relative != SKILL_FILE
-            text = File.binread(file).force_encoding(Encoding::UTF_8)
+            text = File.binread(inside(file) || file).force_encoding(Encoding::UTF_8)
             raise ConfigurationError, "#{file} is not text, and a skill brings only text files" unless text.valid_encoding?
 
             files[relative] = text
@@ -622,14 +648,18 @@ module GetStream
         return [] unless File.exist?(root)
         raise ConfigurationError, "#{root} is not a directory" unless File.directory?(root)
 
+        inside(root)
         declaration = File.join(root, URLS_FILE)
         Dir.glob("**/*", File::FNM_DOTMATCH, base: root).sort.filter_map do |relative|
           file = File.join(root, relative)
-          next unless File.file?(file) && READABLE.include?(File.extname(relative).downcase)
+          next unless READABLE.include?(File.extname(relative).downcase)
+          # Hidden files and folders and __pycache__ are left out, as in a skill folder.
+          next if relative.split("/").any? { |part| skipped?(part) }
+          next unless inside(file) && File.file?(file)
           # Only the declaration at the root is not a document; deeper, urls.yaml is prose.
           next if file == declaration
 
-          text = File.read(file)
+          text = read(file)
           Document.new(relative, text) unless text.strip.empty?
         end
       end
@@ -639,9 +669,9 @@ module GetStream
       # written.
       def load_urls
         file = File.join(@path, KNOWLEDGE_DIR, URLS_FILE)
-        return [] unless File.file?(file)
+        return [] unless inside(file) && File.file?(file)
 
-        pages = Psych.safe_load(File.read(file), aliases: false) || []
+        pages = Psych.safe_load(read(file), aliases: false) || []
         raise ConfigurationError, "#{file}: should be a list of pages" unless pages.is_a?(Array)
 
         pages.map { |page| Folder.page(page, file) }
@@ -656,12 +686,13 @@ module GetStream
         directory = File.join(@path, SIMULATIONS_DIR)
         return nil unless File.directory?(directory)
 
+        inside(directory)
         named = {}
         Dir.children(directory).sort.flat_map do |entry|
           file = File.join(directory, entry)
-          next [] unless File.file?(file) && %w[.yaml .yml].include?(File.extname(entry).downcase)
+          next [] unless %w[.yaml .yml].include?(File.extname(entry).downcase) && inside(file) && File.file?(file)
 
-          listed = Psych.safe_load(File.read(file), aliases: false) || []
+          listed = Psych.safe_load(read(file), aliases: false) || []
           raise ConfigurationError, "#{file}: should be a list of simulations" unless listed.is_a?(Array)
 
           listed.map do |each|
