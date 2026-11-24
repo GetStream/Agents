@@ -737,6 +737,14 @@ func run(settings config.Config, logger *slog.Logger) error {
 			return err
 		}
 		defer liveClient.Close()
+		// Held until run returns rather than until ctx ends: a draining router still writes
+		// the calls it carries to its shard.
+		agreed, stopAgreeing := context.WithCancel(context.WithoutCancel(ctx))
+		defer stopAgreeing()
+		shards := slices.Collect(maps.Keys(settings.Postgres.Shards))
+		if err := node.AgreeOnShards(agreed, liveClient.Redis(), node.ShardsKey, shards, logger); err != nil {
+			return err
+		}
 	} else {
 		logger.Warn("no redis configured, routing will not use live health", "setting", "redis.addr")
 	}

@@ -1692,6 +1692,11 @@ global one and `migrations/shard` on each shard's, both on the one database of a
 held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
+`shard_dsn` without `shards` is refused. The routers sharing a global Redis keep the shard names
+they agree on there (`node:shards`), and a router naming others refuses to start with
+`postgres.shards differs from the running routers'`. A changed list starts 30 seconds after the
+last router with the old one stopped, so roll a change out by stopping every router first.
+
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
 count rather than recomputed. A router with shards cannot be a move's source: its shards'
 tables record no changes after an export, so `GET /v1/data/export` and `GET /v1/data/changes`

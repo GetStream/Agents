@@ -31,6 +31,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -648,6 +649,38 @@ func (s *RouterStartSuite) TestARunningRouterSaysItTakesTrunkCallsOverUntilItSto
 	}, 10*time.Second, 20*time.Millisecond, "the running router does not say it takes trunk calls over")
 	s.Require().NoError(stop())
 	s.NotContains(s.takingTrunkCalls(client), node, "the stopped router still says it takes trunk calls over")
+}
+
+// Defect: the router serves without agreeing on the shard list, so one missing a shard
+// writes calls where the others never read.
+func (s *RouterStartSuite) TestARouterKnowingOtherShardsThanTheRunningOnesRefusesToStart() {
+	address := os.Getenv("ROUTER_REDIS_ADDR")
+	if address == "" {
+		s.T().Skip("ROUTER_REDIS_ADDR not set")
+	}
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	s.Require().NoError(client.Do(s.ctx, client.B().Set().Key(node.ShardsKey).Value("us-east4,us-west1").Ex(time.Minute).Build()).Error())
+	s.T().Cleanup(func() { s.NoError(client.Do(s.ctx, client.B().Del().Key(node.ShardsKey).Build()).Error()) })
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.Redis.Addr = address
+
+	stopped := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = run(settings, slog.New(slog.DiscardHandler))
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		s.ErrorIs(runErr, node.ErrShardsDisagree)
+	case <-time.After(15 * time.Second):
+		s.NoError(syscall.Kill(os.Getpid(), syscall.SIGTERM))
+		<-stopped
+		s.Fail("the router started with another shard list than the running routers'")
+	}
 }
 
 // takingTrunkCalls is every node that says now that it takes trunk calls over.
