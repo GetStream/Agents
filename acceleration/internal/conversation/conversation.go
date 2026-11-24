@@ -1007,9 +1007,8 @@ func (r RefusedRead) Error() string { return string(r) }
 //
 // The owner is a user id and what sort of caller it was: the caller's id has to equal the
 // owner's, and their kind has to reach it, as it has to reach a session's owner. A channel
-// with no kind recorded, made before it was or by a router that does not record it yet, is
-// its owner's by id alone: nothing says which kind made it, and refusing one would shut its
-// owner out.
+// with no kind recorded, made before it was or by a router that does not record it yet, keeps
+// the access it had: nothing says which kind made it, and refusing one would shut its owner out.
 func ownedBy(custom map[string]any, customer, agentID, caller string, kind auth.Kind) error {
 	if custom[CustomerField] != customer || (agentID != "" && custom["support_agent_id"] != agentID) {
 		return stack.Wrap(RefusedRead("conversation belongs to another customer or agent"))
