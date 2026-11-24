@@ -430,9 +430,11 @@ func (s *StoreSuite) TestAnAccountAnotherReplicaRewroteAsAGuestIsRecordedAgain()
 
 func (s *StoreSuite) TestAUserIsHeldByTheReplicaThatWroteThemHoweverLateItsOwnInvalidation() {
 	writer, line := s.storeOnRedisLine()
-	line.slowInvalidations(30 * time.Millisecond)
 	app := s.freshApp()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "u", UserKindGuest))
+	// The writer's own copy says guest, and its write makes that stale.
 	s.Require().NoError(writer.Users.Seen(s.ctx, app, "u", UserKindGuest))
+	line.slowInvalidations(30 * time.Millisecond)
 	s.Require().NoError(writer.Users.Seen(s.ctx, app, "u", UserKindAuthenticated))
 	s.Require().NoError(writer.sharedRedis().Do(s.ctx, writer.sharedRedis().B().Exists().Key(userKey(app, "u")).Build()).Error())
 
