@@ -142,7 +142,7 @@ func syncPrices(ctx context.Context, tx bun.Tx, load PriceLoad) (PriceChange, []
 	}
 	// The database's clock, so routers whose clocks disagree still name and time their
 	// changes in one order.
-	now, err := databaseNow(ctx, tx)
+	now, err := transactionStart(ctx, tx)
 	if err != nil {
 		return PriceChange{}, nil, err
 	}
@@ -237,7 +237,7 @@ func (r *PriceChanges) Reload(ctx context.Context, load PriceLoad, dryRun bool) 
 			return err
 		}
 		var err error
-		if reload.At, err = databaseNow(ctx, tx); err != nil {
+		if reload.At, err = transactionStart(ctx, tx); err != nil {
 			return err
 		}
 		reload.Changes = []PriceChange{}
@@ -368,7 +368,7 @@ const (
 // PriceChangeLimit is the page size a list of price changes uses for the limit asked for.
 // PriceChanges.Select returns one row more than this.
 func PriceChangeLimit(asked int) int {
-	return clampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
+	return ClampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
 }
 
 // PriceChangePosition is the last change of a page.

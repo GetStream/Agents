@@ -202,7 +202,7 @@ func (s *CallsSuite) TestAGuestImportedAsMintedIsNoGuestTheRouterMinted() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import",
 		`{"table":"users","row":`+row+"}\n", &written))
 	s.Require().Equal(int64(1), written.Tables["users"])
-	held, err := s.store.Guest(context.Background(), s.customerID(), imported)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), imported)
 	s.Require().NoError(err, "the guest is imported")
 	s.False(held.Minted)
 

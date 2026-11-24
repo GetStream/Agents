@@ -157,7 +157,7 @@ type ConnectionPosition struct {
 // Select returns one row more than this, so a caller can tell the page
 // is not the last without counting.
 func ConnectionLimit(asked int) int {
-	return clampLimit(asked, defaultConnectionLimit, maxConnectionLimit)
+	return ClampLimit(asked, defaultConnectionLimit, maxConnectionLimit)
 }
 
 // ConnectorConnections are the accounts customers connected at connectors, in the shared
@@ -206,18 +206,10 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 		connection.CreatedAt = now
 		connection.UpdatedAt = now
 		connection.DeletedAt = nil
-		if connection.Inputs == nil {
-			connection.Inputs = map[string]string{}
-		}
-		if connection.Metadata == nil {
-			connection.Metadata = map[string]string{}
-		}
-		if connection.GrantedScopes == nil {
-			connection.GrantedScopes = []string{}
-		}
-		if connection.CachedTools == nil {
-			connection.CachedTools = []ConnectorTool{}
-		}
+		connection.Inputs = orEmptyMap(connection.Inputs)
+		connection.Metadata = orEmptyMap(connection.Metadata)
+		connection.GrantedScopes = orEmpty(connection.GrantedScopes)
+		connection.CachedTools = orEmpty(connection.CachedTools)
 		_, err = tx.NewInsert().Model(connection).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: create connector connection: %w", err)
@@ -254,9 +246,7 @@ func (r *ConnectorConnections) SetTools(ctx context.Context, customerID, id stri
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
-	if tools == nil {
-		tools = []ConnectorTool{}
-	}
+	tools = orEmpty(tools)
 	raw, err := json.Marshal(tools)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: encode connector connection tools: %w", err))
@@ -774,15 +764,9 @@ func (r *ConnectorConnections) saveAtRevision(ctx context.Context, conn bun.ICon
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
 	defer cancel()
 	connection.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if connection.CredentialsSealed == nil {
-		connection.CredentialsSealed = []byte{}
-	}
-	if connection.Metadata == nil {
-		connection.Metadata = map[string]string{}
-	}
-	if connection.GrantedScopes == nil {
-		connection.GrantedScopes = []string{}
-	}
+	connection.CredentialsSealed = orEmpty(connection.CredentialsSealed)
+	connection.Metadata = orEmptyMap(connection.Metadata)
+	connection.GrantedScopes = orEmpty(connection.GrantedScopes)
 	result, err := r.store.global.NewUpdate().Conn(conn).Model(connection).
 		Column(credentialColumns...).
 		Where("id = ?", connection.ID).

@@ -176,7 +176,7 @@ const (
 )
 
 // LimitPage is the page size Limits.Select uses for the size asked for. It returns one row more.
-func LimitPage(asked int) int { return clampLimit(asked, defaultLimitPage, maxLimitPage) }
+func LimitPage(asked int) int { return ClampLimit(asked, defaultLimitPage, maxLimitPage) }
 
 // LimitChange is what an update of a limit changes: its amount and its note, nil leaving each
 // as it is. What a row limits never changes.

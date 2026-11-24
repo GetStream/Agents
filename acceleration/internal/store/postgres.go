@@ -26,6 +26,16 @@ func isViolation(err error, code string) bool {
 	return errors.As(err, &refused) && refused.Field('C') == code
 }
 
+// constraint is the name of the unique constraint an error violated, empty for anything
+// else.
+func constraint(err error) string {
+	var failure pgdriver.Error
+	if errors.As(err, &failure) && failure.Field('C') == uniqueViolation {
+		return failure.Field('n')
+	}
+	return ""
+}
+
 // IsForeignKeyViolation reports whether err is Postgres refusing a row whose parent row is
 // missing.
 func IsForeignKeyViolation(err error) bool {
@@ -77,6 +87,23 @@ func nullable(text string) any {
 		return nil
 	}
 	return text
+}
+
+// orEmpty is list, or an empty one when it is nil, for a column or a JSON value that holds
+// an empty list and never NULL.
+func orEmpty[S ~[]E, E any](list S) S {
+	if list == nil {
+		return S{}
+	}
+	return list
+}
+
+// orEmptyMap is orEmpty for a map.
+func orEmptyMap[M ~map[K]V, K comparable, V any](values M) M {
+	if values == nil {
+		return M{}
+	}
+	return values
 }
 
 // likeEscaper makes typed text match as itself rather than as a pattern: backslash is LIKE's

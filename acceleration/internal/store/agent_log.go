@@ -160,7 +160,7 @@ func (r *AgentLogs) HighWater(ctx context.Context, customerID string) (int64, er
 // the filter reads forward.
 func (r *AgentLogs) Select(ctx context.Context, customerID string, f AgentLogFilter) ([]AgentLog, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	rows := []AgentLog{}
 	q := r.store.global.NewSelect().Model(&rows).ExcludeColumn("details").Where("customer_id = ?", customerID)

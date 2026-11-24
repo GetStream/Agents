@@ -385,14 +385,14 @@ func (s *StoreSuite) TestAPostponeUnderAStolenClaimHoldsNothing() {
 }
 
 func (s *StoreSuite) TestAUserTimezoneIsStoredAndMoved() {
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 
 	// The latest explicit zone wins, and the row's kind is left alone.
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "guest", "Asia/Tokyo"))
-	zone, err = s.store.UserTimezone(s.ctx, "acme", "sam")
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "guest", "Asia/Tokyo"))
+	zone, err = s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Asia/Tokyo", zone)
 
@@ -1428,15 +1428,15 @@ func (s *StoreSuite) TestAConfigDeleteWhileATaskIsPausedByHandStillPausesTheTask
 }
 
 func (s *StoreSuite) TestAnUnchangedUserTimezoneIsNotWrittenAgain() {
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 	written := s.userRowVersion("sam")
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 	s.Equal(written, s.userRowVersion("sam"), "the same zone again leaves the row alone")
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Asia/Tokyo"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Asia/Tokyo"))
 	s.NotEqual(written, s.userRowVersion("sam"))
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Asia/Tokyo", zone)
 }
@@ -1456,9 +1456,9 @@ func (s *StoreSuite) TestAUserWithNoZoneYetIsGivenOne() {
 		"INSERT INTO users (customer_id, id, kind, name, timezone) VALUES ('acme', 'sam', 'authenticated', '', NULL)")
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 }

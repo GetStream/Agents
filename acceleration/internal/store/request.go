@@ -449,8 +449,7 @@ func Unwritable(err error) bool {
 // row carried in with its own id leaves behind. InsertMany has moved the sequence past it by
 // then, so trying again at once writes the rows.
 func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
+	return constraint(err) == requestsPrimaryKey
 }
 
 // callsOf is the call each request happened in, in their order: the agent's latest call of the
@@ -813,14 +812,12 @@ func (r *Requests) Spend(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if limit < 1 {
 		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: encode tag filter: %w", err))
@@ -895,11 +892,9 @@ func (r *Requests) TagKeys(
 	tags map[string]string,
 ) ([]TagKeySummary, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: encode tag filter: %w", err))

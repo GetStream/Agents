@@ -90,9 +90,7 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 	recording.CreatedAt = now
 	recording.UpdatedAt = now
 	recording.Status = RecordingQueued
-	if recording.Tags == nil {
-		recording.Tags = map[string]string{}
-	}
+	recording.Tags = orEmptyMap(recording.Tags)
 
 	if _, err := r.store.shard.NewInsert().Model(recording).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create recording: %w", err))

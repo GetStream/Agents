@@ -109,9 +109,7 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 		contacts[index].CampaignID = campaignID
 		contacts[index].Stage = Enrolled
 		contacts[index].CreatedAt = now
-		if contacts[index].Variables == nil {
-			contacts[index].Variables = map[string]string{}
-		}
+		contacts[index].Variables = orEmptyMap(contacts[index].Variables)
 		if err := contacts[index].Validate(); err != nil {
 			return nil, nil, stack.Wrap(err)
 		}
@@ -274,9 +272,7 @@ func (r *CampaignContacts) Update(ctx context.Context, campaignID, contactID str
 		if changes.ToNumber == "" {
 			return errors.New("store: a contact needs a number to ring")
 		}
-		if changes.Variables == nil {
-			changes.Variables = map[string]string{}
-		}
+		changes.Variables = orEmptyMap(changes.Variables)
 		err = tx.NewUpdate().Model(&changed).
 			Set("to_number = ?", changes.ToNumber).
 			Set("variables = ?", changes.Variables).
@@ -354,7 +350,7 @@ func (r *CampaignContacts) Select(ctx context.Context, campaignID string, filter
 	if filter.After != nil {
 		query = query.Where("seq > ?", *filter.After)
 	}
-	if err := query.Order("seq ASC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
+	if err := query.Order("seq ASC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query contacts: %w", err))
 	}
 	return contacts, nil

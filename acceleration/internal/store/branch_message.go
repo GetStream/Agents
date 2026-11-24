@@ -57,9 +57,7 @@ func (r *BranchMessages) UpsertMany(ctx context.Context, messages []AgentBranchM
 		if err := messages[i].Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		if messages[i].Message == nil {
-			messages[i].Message = map[string]any{}
-		}
+		messages[i].Message = orEmptyMap(messages[i].Message)
 	}
 	// No conflict target is named: every unique index arbitrates the insert, so it depends on
 	// none of them. The copies kept already are replaced below, the customer's own only.
