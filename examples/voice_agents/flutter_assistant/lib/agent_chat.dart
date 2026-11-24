@@ -3,14 +3,14 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:stream_agents/stream_agents.dart';
 import 'package:stream_chat/stream_chat.dart' as stream;
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
 import 'package:stream_chat_flutter_ai_a2ui/stream_chat_flutter_ai_a2ui.dart';
-import 'package:stream_agents/stream_agents.dart';
+import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 
 import 'assistant.dart';
 import 'device_tools.dart';
-import 'openui_renderer.dart';
 import 'photos.dart';
 import 'trip_components.dart';
 
@@ -130,8 +130,8 @@ class AgentChat with AIConversationTransport<AgentMessage> {
   late final ui = AIUIHost(
     components: TripComponents.all,
     renderers: [
-      OpenUIRenderer(onError: (error, _) => debugPrint('OpenUI: $error')),
       A2UIRenderer(onError: (error, _) => debugPrint('A2UI: $error')),
+      OpenUIRenderer(onError: (error, _) => debugPrint('OpenUI: $error')),
     ],
     send: _answer,
   );

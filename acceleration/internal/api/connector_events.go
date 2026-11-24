@@ -26,8 +26,7 @@ const connectorEventsPath = "/v1/agents/connectors/events/"
 // (T38, AI-878; channels.md on connectors/planning, «Integration modes: one Slack app for each
 // customer»). The URL names the app, and with it the customer and the signing secret, so no
 // lookup by account picks the customer. It names the connector too, because an app id is
-// unique only among one connector's records (connector_oauth_clients_provider_app,
-// 20261006195500).
+// unique only among one connector's records (connector_oauth_clients_provider_app).
 const providerAppEventsPath = "/v1/connectors/events/"
 
 // maxConnectorEventBytes caps the body read before it is verified. Slack's pages name no
@@ -312,7 +311,7 @@ func readConnectorEvent(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 //	each signal -> the connections of its account -> Resolver.Revoke, with when it ended
 //	the messages -> ChannelBridge.Deliver, with app
 //	  none, none skipped and no signal -> an info line
-//	a provider app's delivery -> eventforward.Forward, queued for the customer's event
+//	a provider app's delivery -> eventforward.Forwarder.Forward, queued for the customer's event
 //	  destinations, handled when a signal or an answered message was in it
 //	                                                200, or 500 so the provider retries
 //

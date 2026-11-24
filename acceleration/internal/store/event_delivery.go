@@ -109,7 +109,7 @@ func (r *EventDeliveries) Claim(ctx context.Context, now time.Time, limit, perDe
 	return r.claim(ctx, claimEventDeliveriesQuery, now, limit, perDestination, sending, leaseUntil)
 }
 
-// claimEventDeliveriesQuery is ClaimEventDeliveries' statement. Postgres refuses FOR UPDATE
+// claimEventDeliveriesQuery is Claim's statement. Postgres refuses FOR UPDATE
 // beside a window function in one SELECT, so ranked numbers each destination's due rows first
 // and due locks the ones within the cap.
 //
@@ -150,8 +150,8 @@ RETURNING cedl.destination_id, cedl.id, cedl.headers, cedl.body, cedl.attempts, 
     cedl.provider_headers_until, ced.customer_id, ced.connector_id, ced.url, ced.secret_sealed, ced.kek_version,
     ced.previous_secret_sealed, ced.previous_kek_version, ced.previous_until`
 
-// claim runs query, ClaimEventDeliveries' statement or a test's variant of it
-// with a pause in it, with ClaimEventDeliveries' arguments.
+// claim runs query, Claim's statement or a test's variant of it with a pause in it, with
+// Claim's arguments.
 func (r *EventDeliveries) claim(ctx context.Context, query string, now time.Time, limit, perDestination int, sending map[string]int, leaseUntil time.Time) ([]ClaimedEventDelivery, error) {
 	claimed := []ClaimedEventDelivery{}
 	if limit < 1 || perDestination < 1 {

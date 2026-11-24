@@ -803,7 +803,7 @@ func scheduledPrompt(claimed store.ClaimedScheduledTask, now time.Time) string {
 }
 
 // withOccurrence gives a re-dued one-shot back the instant its start names.
-// An edit re-dues the occurrence at the edit time (store.SaveScheduledTask),
+// An edit re-dues the occurrence at the edit time (store.ScheduledTasks.Update),
 // so its next run no longer reads as the start and FromStored cannot tell
 // which pass of a fall-back hour the start is; the run the edit settled can.
 func (s *Server) withOccurrence(ctx context.Context, claimed store.ClaimedScheduledTask) store.ClaimedScheduledTask {
