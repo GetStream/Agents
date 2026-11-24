@@ -31,8 +31,9 @@ var ErrChangesExpired = errors.New("store: the changes since that cursor are no 
 var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
 // ErrInvalidImport is an export that cannot be written as it is: a table no export carries, a
-// row that does not read, or a row the database refuses for what it holds. Its message names
-// the table and nothing of the database. A database that failed is never one.
+// row that does not read, a row the database refuses for what it holds, or a row whose key
+// another customer holds here (ErrAnotherCustomersRow). Its message names the table, and for that
+// last one the row's own key, but nothing of the database. A database that failed is never one.
 var ErrInvalidImport = errors.New("store: the export cannot be imported")
 
 // invalidImport marks err as ErrInvalidImport without changing its message.
@@ -996,9 +997,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// A row renamed, or a skill moved to another config, is cached under what it was too. What it
 	// was is read in the statement that writes it, locked, so the one forgotten is the one a
 	// concurrent write did not already replace. It is read in the FROM, so before the row is written.
+	// The lock is the one the upsert takes, which a child row being inserted does not wait on.
 	if cachedByID(table) {
 		locked, through = fmt.Sprintf("WITH was AS (SELECT (SELECT to_jsonb(h) FROM %s AS h"+
-			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR UPDATE) AS prior) ", spec.name), "was, "
+			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR NO KEY UPDATE) AS prior) ", spec.name), "was, "
 		args = append([]any{string(row), customerID}, args...)
 		returning = " RETURNING (SELECT prior FROM was), " + cachedRow(table, spec.name)
 	}
@@ -1049,7 +1051,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	if taken {
-		return fmt.Errorf("store: import %s: %w", table, ErrAnotherCustomersRow)
+		key, err := rowKey(table, shape.keys, row)
+		if err != nil {
+			return err
+		}
+		return invalidImport(fmt.Errorf("store: import %s: %w", key, ErrAnotherCustomersRow))
 	}
 	return nil
 }
@@ -1084,8 +1090,27 @@ func importCached(ctx context.Context, db bun.IDB, customerID, table, query stri
 	return written, nil
 }
 
-// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
+// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here,
+// as an ErrInvalidImport that names the row as rowKey does.
 var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
+
+// rowKey names an imported row by its table and the values of its primary key, as
+// agent_configs:{"id":"config-1"}.
+func rowKey(table string, keys []string, row json.RawMessage) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return "", invalidImport(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	key := make(map[string]json.RawMessage, len(keys))
+	for _, column := range keys {
+		key[column] = fields[column]
+	}
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		return "", stack.Wrap(err)
+	}
+	return table + ":" + string(encoded), nil
+}
 
 // cachedByID is whether a moved table's rows are cached by their id and something else they
 // hold, which a write can change.
