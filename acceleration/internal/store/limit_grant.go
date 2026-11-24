@@ -14,11 +14,11 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
-// MaxLiveGrants is the most grants one organization has live at once, so admission's search
+// MaxLiveGrants is the most grants one owner has live at once, so admission's search
 // for one stays a short scan.
 const MaxLiveGrants = 20
 
-// ErrNoGrant is a grant that is not there, or is another organization's.
+// ErrNoGrant is a grant that is not there, or is another owner's.
 var ErrNoGrant = errors.New("store: no such grant")
 
 // ErrTooManyGrants is a grant past MaxLiveGrants live in its organization.
@@ -33,21 +33,24 @@ var ErrGrantExpired = errors.New("store: the grant has expired")
 type LimitGrant struct {
 	bun.BaseModel `bun:"table:limit_grants,alias:lg"`
 
-	ID             int64         `bun:"id,pk,autoincrement"`
-	OrganizationID string        `bun:"organization_id,notnull"`
-	Subject        usage.Subject `bun:"subject,notnull"`
-	AppID          string        `bun:"app_id,notnull"`
-	APIKey         string        `bun:"api_key,notnull"`
-	UserID         string        `bun:"user_id,notnull"`
-	Category       string        `bun:"category,notnull"`
-	AmountMicros   int64         `bun:"amount_micros,notnull"`
-	UsedMicros     int64         `bun:"used_micros,notnull"`
-	ExpiresAt      *time.Time    `bun:"expires_at"`
-	RevokedAt      *time.Time    `bun:"revoked_at"`
-	RevokedBy      string        `bun:"revoked_by,notnull"`
-	Reason         string        `bun:"reason,notnull"`
-	Actor          string        `bun:"actor,notnull"`
-	CreatedAt      time.Time     `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	ID             int64  `bun:"id,pk,autoincrement"`
+	OrganizationID string `bun:"organization_id,notnull"`
+	// Billed is whether OrganizationID is an organization's id, or an app's in none. Nil is a row
+	// from before it was kept (AttributeLimits).
+	Billed       *bool         `bun:"billed"`
+	Subject      usage.Subject `bun:"subject,notnull"`
+	AppID        string        `bun:"app_id,notnull"`
+	APIKey       string        `bun:"api_key,notnull"`
+	UserID       string        `bun:"user_id,notnull"`
+	Category     string        `bun:"category,notnull"`
+	AmountMicros int64         `bun:"amount_micros,notnull"`
+	UsedMicros   int64         `bun:"used_micros,notnull"`
+	ExpiresAt    *time.Time    `bun:"expires_at"`
+	RevokedAt    *time.Time    `bun:"revoked_at"`
+	RevokedBy    string        `bun:"revoked_by,notnull"`
+	Reason       string        `bun:"reason,notnull"`
+	Actor        string        `bun:"actor,notnull"`
+	CreatedAt    time.Time     `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 }
 
 // Validate refuses a grant its table's checks would: one outside an organization, for a
@@ -114,7 +117,8 @@ func grantFields(g *LimitGrant) map[string]any {
 	return fields
 }
 
-// SelectLive is the organizations' grants that are neither revoked, expired at now, nor used up.
+// SelectLive is the grants whose organization id is one of organizationIDs, whoever they belong
+// to (OwnedBy, HeldTo), that are neither revoked, expired at now, nor used up.
 func (r *LimitGrants) SelectLive(ctx context.Context, organizationIDs []string, now time.Time) ([]LimitGrant, error) {
 	grants := []LimitGrant{}
 	if len(organizationIDs) == 0 {
@@ -133,6 +137,7 @@ func (r *LimitGrants) SelectLive(ctx context.Context, organizationIDs []string, 
 // the organization's lock, so two grants made at once cannot both be the twenty-first.
 func (r *LimitGrants) Insert(ctx context.Context, grant *LimitGrant, audit LimitAudit) error {
 	grant.UsedMicros = 0
+	grant.Billed = organizationOwned(grant.Billed)
 	if err := grant.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -140,7 +145,8 @@ func (r *LimitGrants) Insert(ctx context.Context, grant *LimitGrant, audit Limit
 		if err := lockUntilCommit(ctx, tx, "limit_grants:"+grant.OrganizationID, 0); err != nil {
 			return err
 		}
-		query := tx.NewSelect().Model((*LimitGrant)(nil)).Where("organization_id = ?", grant.OrganizationID)
+		query := tx.NewSelect().Model((*LimitGrant)(nil))
+		query = whereOwner(query, LimitOwner(grant.OrganizationID, *grant.Billed), false)
 		live, err := whereLive(query, bun.Safe("now()")).Count(ctx)
 		if err != nil {
 			return err
@@ -163,16 +169,16 @@ func (r *LimitGrants) Insert(ctx context.Context, grant *LimitGrant, audit Limit
 	return nil
 }
 
-// Get is one grant by id, of the organization, or of any when organizationID is empty.
-func (r *LimitGrants) Get(ctx context.Context, organizationID string, id int64) (LimitGrant, error) {
-	return grantOf(ctx, r.store.global, organizationID, id, false)
+// Get is one grant by id, of the owner, or of any when owner is empty.
+func (r *LimitGrants) Get(ctx context.Context, owner string, id int64) (LimitGrant, error) {
+	return grantOf(ctx, r.store.global, owner, id, false)
 }
 
-func grantOf(ctx context.Context, db bun.IDB, organizationID string, id int64, lock bool) (LimitGrant, error) {
+func grantOf(ctx context.Context, db bun.IDB, owner string, id int64, lock bool) (LimitGrant, error) {
 	var grant LimitGrant
 	query := db.NewSelect().Model(&grant).Where("id = ?", id)
-	if organizationID != "" {
-		query = query.Where("organization_id = ?", organizationID)
+	if owner != "" {
+		query = whereOwner(query, owner, false)
 	}
 	if lock {
 		query = query.For("UPDATE")
@@ -187,13 +193,12 @@ func grantOf(ctx context.Context, db bun.IDB, organizationID string, id int64, l
 	return grant, nil
 }
 
-// Revoke ends a grant of the organization, or of any when organizationID is empty, and
-// records it with the reason. Revoking one already revoked changes nothing and records
+// Revoke ends a grant of the owner, or of any when owner is empty, and records it with the reason. Revoking one already revoked changes nothing and records
 // nothing. The grant and what it paid for stay, for the history.
-func (r *LimitGrants) Revoke(ctx context.Context, organizationID string, id int64, by, reason string, audit LimitAudit) (LimitGrant, error) {
+func (r *LimitGrants) Revoke(ctx context.Context, owner string, id int64, by, reason string, audit LimitAudit) (LimitGrant, error) {
 	var revoked LimitGrant
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		before, err := grantOf(ctx, tx, organizationID, id, true)
+		before, err := grantOf(ctx, tx, owner, id, true)
 		if err != nil {
 			return err
 		}
@@ -222,24 +227,23 @@ func (r *LimitGrants) Revoke(ctx context.Context, organizationID string, id int6
 	return revoked, nil
 }
 
-// Unrevoke makes a revoked grant of the organization, or of any when organizationID is
-// empty, live again, and records it with the reason. Unrevoking one that is not revoked
+// Unrevoke makes a revoked grant of the owner, or of any when owner is empty, live again, and records it with the reason. Unrevoking one that is not revoked
 // changes nothing and records nothing. An expired grant is ErrGrantExpired, and one that would
 // be past MaxLiveGrants live in its organization ErrTooManyGrants: the count and the write
 // hold the organization's lock, as Insert's do.
-func (r *LimitGrants) Unrevoke(ctx context.Context, organizationID string, id int64, reason string, audit LimitAudit) (LimitGrant, error) {
+func (r *LimitGrants) Unrevoke(ctx context.Context, owner string, id int64, reason string, audit LimitAudit) (LimitGrant, error) {
 	var unrevoked LimitGrant
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// The organization's lock is taken before the row's, as Insert takes it before it
 		// writes, and an organization id is never changed.
-		found, err := grantOf(ctx, tx, organizationID, id, false)
+		found, err := grantOf(ctx, tx, owner, id, false)
 		if err != nil {
 			return err
 		}
 		if err := lockUntilCommit(ctx, tx, "limit_grants:"+found.OrganizationID, 0); err != nil {
 			return err
 		}
-		before, err := grantOf(ctx, tx, found.OrganizationID, id, true)
+		before, err := grantOf(ctx, tx, owner, id, true)
 		if err != nil {
 			return err
 		}
@@ -251,7 +255,8 @@ func (r *LimitGrants) Unrevoke(ctx context.Context, organizationID string, id in
 			return ErrGrantExpired
 		}
 		if before.UsedMicros < before.AmountMicros {
-			query := tx.NewSelect().Model((*LimitGrant)(nil)).Where("organization_id = ?", before.OrganizationID)
+			query := tx.NewSelect().Model((*LimitGrant)(nil))
+			query = whereOwner(query, Holders(before)[0], false)
 			live, err := whereLive(query, bun.Safe("now()")).Count(ctx)
 			if err != nil {
 				return err
@@ -284,14 +289,16 @@ func (r *LimitGrants) Unrevoke(ctx context.Context, organizationID string, id in
 	return unrevoked, nil
 }
 
-// GrantFilter picks one organization's grants. Each empty field is every grant.
+// GrantFilter picks one owner's grants. Each empty field is every grant.
 type GrantFilter struct {
-	OrganizationID string
-	Subject        usage.Subject
-	AppID          string
-	APIKey         string
-	UserID         string
-	Category       string
+	Owner string
+	// Unattributed also keeps the grants of the owner's id not known to be anyone's.
+	Unattributed bool
+	Subject      usage.Subject
+	AppID        string
+	APIKey       string
+	UserID       string
+	Category     string
 	// CategoryPrefix and NotCategoryPrefix keep the grants whose category does, or does not,
 	// start with them.
 	CategoryPrefix    string
@@ -310,11 +317,11 @@ type GrantFilter struct {
 // Select lists an organization's grants newest first, before filter.Before when it is not 0,
 // LimitPage(filter.Limit) and one more. Revoked and expired grants are listed too.
 func (r *LimitGrants) Select(ctx context.Context, filter GrantFilter) ([]LimitGrant, error) {
-	if filter.OrganizationID == "" {
-		return nil, stack.Wrap(errors.New("store: listing grants needs an organization"))
+	if filter.Owner == "" {
+		return nil, stack.Wrap(errors.New("store: listing grants needs an owner"))
 	}
 	grants := []LimitGrant{}
-	query := r.store.global.NewSelect().Model(&grants).Where("organization_id = ?", filter.OrganizationID)
+	query := whereOwner(r.store.global.NewSelect().Model(&grants), filter.Owner, filter.Unattributed)
 	for column, value := range map[string]string{
 		"subject": string(filter.Subject), "app_id": filter.AppID, "api_key": filter.APIKey, "user_id": filter.UserID, "category": filter.Category,
 	} {

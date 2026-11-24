@@ -294,18 +294,22 @@ func (m *money) limitsStale(acct *account, refs []usage.SubjectRef, now time.Tim
 // whether the read, when one was due, landed.
 func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) bool {
 	now := time.Now()
-	due := map[string]string{}
+	var due []string
 	m.mu.Lock()
 	for _, key := range keys {
 		if acct := m.accounts[key]; acct != nil && now.Sub(acct.limitsRead) >= m.settings.Fresh {
-			due[limitsOrganization(key)] = key
+			due = append(due, key)
 		}
 	}
 	m.mu.Unlock()
 	if len(due) == 0 {
 		return true
 	}
-	organizations := slices.Sorted(mapsKeys(due))
+	organizations := make([]string, 0, len(due))
+	for _, key := range due {
+		organizations = append(organizations, limitsOrganization(key))
+	}
+	organizations = slices.Compact(slices.Sorted(slices.Values(organizations)))
 	call, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	limits, err := db.Limits.SelectOf(call, organizations)
@@ -329,9 +333,10 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 	landed := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for organization, key := range due {
+	for _, key := range due {
 		if acct := m.accounts[key]; acct != nil {
-			m.keepLimits(acct, byOrganization[organization], resetsOf[organization], landed)
+			organization := limitsOrganization(key)
+			m.keepLimits(acct, store.HeldTo(key, byOrganization[organization]), store.HeldTo(key, resetsOf[organization]), landed)
 		}
 	}
 	return true
@@ -386,7 +391,7 @@ func (m *money) readGrants(ctx context.Context, db *store.Store, keys []string) 
 	}
 	for _, key := range keys {
 		if acct := m.accounts[key]; acct != nil {
-			acct.keepGrants(byOrganization[limitsOrganization(key)], from)
+			acct.keepGrants(store.HeldTo(key, byOrganization[limitsOrganization(key)]), from)
 		}
 	}
 }

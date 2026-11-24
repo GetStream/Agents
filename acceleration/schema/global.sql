@@ -140,6 +140,7 @@ TABLE audit_log
     CREATE INDEX audit_log_agent_idx ON public.audit_log USING btree (customer_id, agent_id, created_at DESC, id DESC)
     CREATE INDEX audit_log_customer_idx ON public.audit_log USING btree (customer_id, created_at DESC, id DESC)
     CREATE INDEX audit_log_resource_idx ON public.audit_log USING btree (customer_id, resource_type, created_at DESC, id DESC)
+    CREATE INDEX audit_log_limit_idx ON public.audit_log USING btree (resource_id) WHERE (resource_type = 'limit'::text)
 
 TABLE business_profiles
     authorized_contact_email text NOT NULL DEFAULT ''::text
@@ -909,6 +910,7 @@ TABLE limit_grants
     amount_micros bigint NOT NULL
     api_key text NOT NULL DEFAULT ''::text
     app_id text NOT NULL DEFAULT ''::text
+    billed boolean
     category text NOT NULL DEFAULT ''::text
     created_at timestamp with time zone NOT NULL DEFAULT now()
     expires_at timestamp with time zone
@@ -933,6 +935,7 @@ TABLE limit_grants
 TABLE limits
     api_key text NOT NULL DEFAULT ''::text
     app_id text NOT NULL DEFAULT ''::text
+    billed boolean
     category text NOT NULL DEFAULT ''::text
     created_at timestamp with time zone NOT NULL DEFAULT now()
     id bigint NOT NULL DEFAULT nextval('limits_id_seq'::regclass)
@@ -951,7 +954,9 @@ TABLE limits
     CONSTRAINT limits_limit_micros_check CHECK ((limit_micros >= 0))
     CONSTRAINT limits_organization_id_check CHECK ((organization_id <> ''::text))
     CONSTRAINT limits_pkey PRIMARY KEY (id)
-    CREATE UNIQUE INDEX limits_one_per_level ON public.limits USING btree (organization_id, subject, level, "interval", app_id, api_key, user_id, category)
+    CREATE UNIQUE INDEX limits_one_per_level_app ON public.limits USING btree (organization_id, subject, level, "interval", app_id, api_key, user_id, category) WHERE (billed IS NOT TRUE)
+    CREATE UNIQUE INDEX limits_one_per_level_organization ON public.limits USING btree (organization_id, subject, level, "interval", app_id, api_key, user_id, category) WHERE (billed IS NOT FALSE)
+    CREATE INDEX limits_organization_idx ON public.limits USING btree (organization_id, id)
 
 TABLE notices
     claimed_at timestamp with time zone NOT NULL DEFAULT now()
@@ -1332,6 +1337,7 @@ TABLE usage_resets
     api_key text NOT NULL DEFAULT ''::text
     app_id text NOT NULL DEFAULT ''::text
     baseline_micros bigint NOT NULL
+    billed boolean
     category text NOT NULL DEFAULT ''::text
     created_at timestamp with time zone NOT NULL DEFAULT now()
     id bigint NOT NULL DEFAULT nextval('usage_resets_id_seq'::regclass)

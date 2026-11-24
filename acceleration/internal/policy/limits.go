@@ -57,7 +57,7 @@ func subjectsOf(owner routing.Owner, organization string) []usage.SubjectRef {
 	return refs
 }
 
-// limitKey is one row's place in limits_one_per_level.
+// limitKey is one row's place in limits_one_per_level_organization or limits_one_per_level_app.
 type limitKey struct {
 	subject  usage.Subject
 	level    store.LimitLevel

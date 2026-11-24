@@ -965,23 +965,22 @@ func dollars(micros int64) string {
 	return fmt.Sprintf("%s$%s.%02d", sign, grouped.String(), cents%100)
 }
 
-// appAccountPrefix starts the key of an app's own account. No organization id holds a NUL.
-const appAccountPrefix = "\x00app\x00"
-
 // appAccount is the key of the account an app in no known organization keeps its own limits
-// on. It bills nobody, so the usage service is never asked about it.
-func appAccount(appID string) string { return appAccountPrefix + appID }
+// on. It bills nobody, so the usage service is never asked about it. An account's key is the owner
+// of its limits.
+func appAccount(appID string) string { return store.AppOwner(appID) }
 
 // billed reports whether an account is an organization's, which the usage service bills.
-func billed(key string) bool { return !strings.HasPrefix(key, appAccountPrefix) }
+func billed(key string) bool {
+	_, billed := store.OwnerID(key)
+	return billed
+}
 
 // limitsOrganization is the organization an account's limits name: the organization, or for an
 // app in none the app itself, as its limits rows carry it.
 func limitsOrganization(key string) string {
-	if app, own := strings.CutPrefix(key, appAccountPrefix); own {
-		return app
-	}
-	return key
+	id, _ := store.OwnerID(key)
+	return id
 }
 
 // noun is what an account is in a log message: an organization's, or an app's own.
@@ -994,10 +993,7 @@ func noun(key string) string {
 
 // who names an account in a log line: the organization, or the app whose own account it is.
 func who(key string) []any {
-	if app, own := strings.CutPrefix(key, appAccountPrefix); own {
-		return []any{"app", app}
-	}
-	return []any{"organization", key}
+	return []any{noun(key), limitsOrganization(key)}
 }
 
 // knownTier is the tier this process last knew the organization by, without reading anything.

@@ -253,7 +253,8 @@ func (s *ForgetUserSuite) spendOf(app string) [4]int64 {
 // here, and their counter in the usage service's, which shipping their rows mirrored.
 func (s *ForgetUserSuite) userKeys(app, user string) (routers, counters []string) {
 	ref := usageservice.SubjectRef{OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user}
-	routers = append([]string{policy.HoldKey(ref)}, quota.UserKeys(app, user, time.Now())...)
+	own := usageservice.SubjectRef{OrganizationID: app, Subject: usageservice.SubjectUser, AppID: app, UserID: user}
+	routers = append([]string{policy.HoldKey(ref, true), policy.HoldKey(own, false)}, quota.UserKeys(app, user, time.Now())...)
 	for _, key := range routers {
 		s.Require().NoError(s.routers.Do(s.ctx, s.routers.B().Hset().Key(key).FieldValue().FieldValue("messages", "3").Build()).Error())
 	}

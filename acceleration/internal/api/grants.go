@@ -221,13 +221,13 @@ func (s *Server) registerLimitGrants(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.listGrants(ctx, organization, request)
+		return s.listGrants(ctx, s.limitsOwner(ctx, organization), false, request)
 	})
 	huma.Register(api, manage(list), func(ctx context.Context, request *manageListGrantsRequest) (*grantPageResponse, error) {
 		if s.store == nil {
 			return nil, errNoLimits
 		}
-		return s.listGrants(ctx, request.OrganizationId, &request.ListGrantsParams)
+		return s.listGrants(ctx, request.OrganizationId, true, &request.ListGrantsParams)
 	})
 
 	revoke := op("revokeLimitGrant", http.MethodPost, "/v1/spend/limits/grants/{grant_id}/revoke", "Revoke a grant",
@@ -238,7 +238,7 @@ func (s *Server) registerLimitGrants(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.revokeGrant(ctx, organization, request, audit)
+		return s.revokeGrant(ctx, s.limitsOwner(ctx, organization), request, audit)
 	})
 	huma.Register(api, manage(revoke), func(ctx context.Context, request *grantIDRequest) (*grantResponse, error) {
 		if s.store == nil {
@@ -259,7 +259,7 @@ func (s *Server) registerLimitGrants(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.unrevokeGrant(ctx, organization, request, audit)
+		return s.unrevokeGrant(ctx, s.limitsOwner(ctx, organization), request, audit)
 	})
 	huma.Register(api, manage(unrevoke), func(ctx context.Context, request *grantUnrevokeRequest) (*grantResponse, error) {
 		if s.store == nil {
@@ -305,7 +305,8 @@ func (s *Server) createGrant(ctx context.Context, organization string, billed bo
 	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
 		return nil, err
 	}
-	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
+	owner := store.LimitOwner(organization, billed)
+	limits, err := s.limitsOf(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +318,7 @@ func (s *Server) createGrant(ctx context.Context, organization string, billed bo
 			Message: "the subject has no limit, so a grant to it would never be drawn"}
 	}
 	grant := store.LimitGrant{
-		OrganizationID: organization, Subject: ref.Subject, AppID: ref.AppID, APIKey: ref.APIKey, UserID: ref.UserID,
+		OrganizationID: organization, Billed: &billed, Subject: ref.Subject, AppID: ref.AppID, APIKey: ref.APIKey, UserID: ref.UserID,
 		Category: ref.Category, AmountMicros: sent.AmountMicros, ExpiresAt: sent.ExpiresAt, Reason: sent.Reason,
 		Actor: actorName(audit),
 	}
@@ -329,18 +330,18 @@ func (s *Server) createGrant(ctx context.Context, organization string, billed bo
 	if err != nil {
 		return nil, err
 	}
-	s.policies.LimitsChanged(ctx, organization)
+	s.policies.LimitsChanged(ctx, owner)
 	return &createdGrantResponse{Status: http.StatusCreated, Body: grantOf(grant, now)}, nil
 }
 
-func (s *Server) listGrants(ctx context.Context, organization string, request *ListGrantsParams) (*grantPageResponse, error) {
+func (s *Server) listGrants(ctx context.Context, owner string, staff bool, request *ListGrantsParams) (*grantPageResponse, error) {
 	before, err := decodeCursor[grantPosition](&request.Cursor)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 	now := time.Now()
 	filter := store.GrantFilter{
-		OrganizationID: organization, AppID: request.AppId, APIKey: request.ApiKeyId, UserID: request.UserId,
+		Owner: owner, Unattributed: staff, AppID: request.AppId, APIKey: request.ApiKeyId, UserID: request.UserId,
 		Category: request.Category, Now: now,
 	}
 	switch request.Subject {
@@ -388,20 +389,20 @@ func (s *Server) listGrants(ctx context.Context, organization string, request *L
 	return &grantPageResponse{Body: answer}, nil
 }
 
-func (s *Server) revokeGrant(ctx context.Context, organization string, request *grantIDRequest, audit store.LimitAudit) (*grantResponse, error) {
-	revoked, err := s.store.LimitGrants.Revoke(ctx, organization, request.GrantId, actorName(audit), request.Body.Reason, audit)
+func (s *Server) revokeGrant(ctx context.Context, owner string, request *grantIDRequest, audit store.LimitAudit) (*grantResponse, error) {
+	revoked, err := s.store.LimitGrants.Revoke(ctx, owner, request.GrantId, actorName(audit), request.Body.Reason, audit)
 	if errors.Is(err, store.ErrNoGrant) {
 		return nil, errNoSuchGrant
 	}
 	if err != nil {
 		return nil, err
 	}
-	s.policies.LimitsChanged(ctx, revoked.OrganizationID)
+	s.policies.LimitsChanged(ctx, store.Holders(revoked)...)
 	return &grantResponse{Body: grantOf(revoked, time.Now())}, nil
 }
 
-func (s *Server) unrevokeGrant(ctx context.Context, organization string, request *grantUnrevokeRequest, audit store.LimitAudit) (*grantResponse, error) {
-	unrevoked, err := s.store.LimitGrants.Unrevoke(ctx, organization, request.GrantId, request.Body.Reason, audit)
+func (s *Server) unrevokeGrant(ctx context.Context, owner string, request *grantUnrevokeRequest, audit store.LimitAudit) (*grantResponse, error) {
+	unrevoked, err := s.store.LimitGrants.Unrevoke(ctx, owner, request.GrantId, request.Body.Reason, audit)
 	switch {
 	case errors.Is(err, store.ErrNoGrant):
 		return nil, errNoSuchGrant
@@ -414,6 +415,6 @@ func (s *Server) unrevokeGrant(ctx context.Context, organization string, request
 	case err != nil:
 		return nil, err
 	}
-	s.policies.LimitsChanged(ctx, unrevoked.OrganizationID)
+	s.policies.LimitsChanged(ctx, store.Holders(unrevoked)...)
 	return &grantResponse{Body: grantOf(unrevoked, time.Now())}, nil
 }

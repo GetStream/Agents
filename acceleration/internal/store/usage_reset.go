@@ -17,8 +17,11 @@ import (
 type UsageReset struct {
 	bun.BaseModel `bun:"table:usage_resets,alias:ur"`
 
-	ID             int64          `bun:"id,pk,autoincrement"`
-	OrganizationID string         `bun:"organization_id,notnull"`
+	ID             int64  `bun:"id,pk,autoincrement"`
+	OrganizationID string `bun:"organization_id,notnull"`
+	// Billed is whether OrganizationID is an organization's id, or an app's in none. Nil is a row
+	// from before it was kept (AttributeLimits).
+	Billed         *bool          `bun:"billed"`
 	Subject        usage.Subject  `bun:"subject,notnull"`
 	AppID          string         `bun:"app_id,notnull"`
 	APIKey         string         `bun:"api_key,notnull"`
@@ -56,7 +59,8 @@ type UsageResets struct {
 	store *Store
 }
 
-// Select is the organizations' resets of windows that started at since or later.
+// Select is the resets whose organization id is one of organizationIDs, whoever they belong to
+// (OwnedBy, HeldTo), of windows that started at since or later.
 func (r *UsageResets) Select(ctx context.Context, organizationIDs []string, since time.Time) ([]UsageReset, error) {
 	resets := []UsageReset{}
 	if len(organizationIDs) == 0 {
@@ -82,6 +86,7 @@ func (r *UsageResets) InsertMany(ctx context.Context, resets []UsageReset, audit
 		}
 		for i := range resets {
 			resets[i].WindowStart = resets[i].WindowStart.UTC()
+			resets[i].Billed = organizationOwned(resets[i].Billed)
 		}
 		if _, err := tx.NewInsert().Model(&resets).Returning("*").Exec(ctx); err != nil {
 			return err

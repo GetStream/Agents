@@ -1475,7 +1475,7 @@ func (s *PolicySuite) TestWithNoUsageServiceAWrittenRowLetsItsHoldGo() {
 
 func (s *PolicySuite) TestAnAppInNoOrganizationKeepsToItsOwnLimit() {
 	alone := s.app + "-alone"
-	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: alone, AppID: alone, LimitMicros: 1_000_000})
+	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: alone, Billed: new(false), AppID: alone, LimitMicros: 1_000_000})
 	s.spend(alone, 1_000_000)
 
 	s.spendRefused(s.enforcer, alone, ErrBudgetSpent)
@@ -1490,7 +1490,7 @@ func (s *PolicySuite) TestAnAppInNoOrganizationKeepsToItsOwnLimit() {
 func (s *PolicySuite) TestAnAppInNoOrganizationCountsOnlyItselfTowardItsOrganizationsLimit() {
 	alone, stranger := s.app+"-alone", s.app+"-stranger"
 	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: stranger, OrganizationID: alone}))
-	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: alone, LimitMicros: 1_000_000})
+	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: alone, Billed: new(false), LimitMicros: 1_000_000})
 	s.spend(stranger, 1_000_000)
 
 	s.never(func() bool { return s.admit(s.enforcer, alone).Spend != nil }, 300*time.Millisecond, 10*time.Millisecond,

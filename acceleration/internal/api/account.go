@@ -440,7 +440,7 @@ func (s *Server) listTeams(ctx context.Context, organization string, billed bool
 		return nil, errNoLimits
 	}
 	now := time.Now()
-	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
+	limits, err := s.limitsOf(ctx, store.LimitOwner(organization, billed))
 	if err != nil {
 		return nil, err
 	}

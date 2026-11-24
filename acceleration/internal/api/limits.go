@@ -403,13 +403,13 @@ func (s *Server) registerLimits(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.listLimits(ctx, organization, request)
+		return s.listLimits(ctx, s.limitsOwner(ctx, organization), false, request)
 	})
 	huma.Register(api, manage(list), func(ctx context.Context, request *manageListLimitsRequest) (*limitPageResponse, error) {
 		if s.store == nil {
 			return nil, errNoLimits
 		}
-		return s.listLimits(ctx, request.OrganizationId, &request.ListLimitsParams)
+		return s.listLimits(ctx, request.OrganizationId, true, &request.ListLimitsParams)
 	})
 
 	create := op("createLimit", http.MethodPost, "/v1/spend/limits", "Create a spend limit",
@@ -448,7 +448,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.getLimit(ctx, organization, request.LimitId)
+		return s.getLimit(ctx, s.limitsOwner(ctx, organization), request.LimitId)
 	})
 	huma.Register(api, manage(get), func(ctx context.Context, request *limitIDRequest) (*limitResponse, error) {
 		if s.store == nil {
@@ -465,7 +465,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.updateLimit(ctx, organization, request.LimitId, request.Body, audit)
+		return s.updateLimit(ctx, s.limitsOwner(ctx, organization), request.LimitId, request.Body, audit)
 	})
 	huma.Register(api, manage(update), func(ctx context.Context, request *updateLimitRequest) (*limitResponse, error) {
 		if s.store == nil {
@@ -483,7 +483,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.deleteLimit(ctx, organization, request.LimitId, audit)
+		return nil, s.deleteLimit(ctx, s.limitsOwner(ctx, organization), request.LimitId, audit)
 	})
 	manageRemove := manage(remove)
 	manageRemove.Responses = remove.Responses
@@ -563,6 +563,19 @@ func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, er
 // billedOrganization reports whether the caller's organization is one the usage service bills,
 // rather than an app that is its own.
 func (s *Server) billedOrganization(ctx context.Context) bool { return OrganizationFrom(ctx) != "" }
+
+// limitsOwner is whose limits, resets and grants the caller reads and writes: its organization's
+// or, for an app in none, its own.
+func (s *Server) limitsOwner(ctx context.Context, organization string) string {
+	return store.LimitOwner(organization, s.billedOrganization(ctx))
+}
+
+// limitsOf is every limit of the owner's, which no other owner's of the same id is among.
+func (s *Server) limitsOf(ctx context.Context, owner string) ([]store.Limit, error) {
+	id, _ := store.OwnerID(owner)
+	limits, err := s.store.Limits.SelectOf(ctx, []string{id})
+	return store.OwnedBy(owner, limits), err
+}
 
 // checkLimitApps answers errNoSuchApp for a subject in an app the organization does not hold,
 // so no caller reads another organization's spend or writes a limit, a reset or a grant on its
@@ -784,13 +797,13 @@ func apiSubject(subject usage.Subject, category string) (LimitSubject, string, s
 	return LimitSubject(subject), "", category
 }
 
-func (s *Server) listLimits(ctx context.Context, organization string, request *ListLimitsParams) (*limitPageResponse, error) {
+func (s *Server) listLimits(ctx context.Context, owner string, staff bool, request *ListLimitsParams) (*limitPageResponse, error) {
 	after, err := decodeCursor[limitPosition](&request.Cursor)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 	filter := store.LimitFilter{
-		OrganizationID: organization, Level: store.LimitLevel(request.Level), AppID: request.AppId, APIKey: request.ApiKeyId,
+		Owner: owner, Unattributed: staff, Level: store.LimitLevel(request.Level), AppID: request.AppId, APIKey: request.ApiKeyId,
 		UserID: request.UserId, Category: request.Category, Interval: usage.Interval(request.Interval),
 	}
 	switch request.Subject {
@@ -816,7 +829,7 @@ func (s *Server) listLimits(ctx context.Context, organization string, request *L
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.Limits.SelectOf(ctx, []string{organization})
+	all, err := s.limitsOf(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -845,10 +858,11 @@ func (s *Server) createLimit(ctx context.Context, organization string, billed bo
 	}
 	row := store.Limit{
 		Subject: ref.Subject, Level: level, OrganizationID: organization, AppID: ref.AppID, APIKey: ref.APIKey,
-		UserID: ref.UserID, Category: ref.Category, Interval: interval, LimitMicros: sent.LimitMicros, Note: sent.Note,
+		Billed: &billed, UserID: ref.UserID, Category: ref.Category, Interval: interval, LimitMicros: sent.LimitMicros, Note: sent.Note,
 		UpdatedBy: actorName(audit),
 	}
-	all, err := s.store.Limits.SelectOf(ctx, []string{organization})
+	owner := store.LimitOwner(organization, billed)
+	all, err := s.limitsOf(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -857,34 +871,38 @@ func (s *Server) createLimit(ctx context.Context, organization string, billed bo
 	}
 	err = s.store.Limits.Insert(ctx, &row, audit)
 	var exists *store.ErrLimitExists
-	if errors.As(err, &exists) {
+	if errors.As(err, &exists) && exists.ID == 0 {
+		return nil, APIError{Type: ErrorTypeConflict, Code: codeLimitExists, Message: fmt.Sprintf(
+			"the subject has a %s limit at that level already, which support can change", interval)}
+	}
+	if exists != nil {
 		return nil, APIError{Type: ErrorTypeConflict, Code: codeLimitExists, Message: fmt.Sprintf(
 			"the subject has a %s limit at that level already: limit %d; change it instead", interval, exists.ID)}
 	}
 	if err != nil {
 		return nil, err
 	}
-	s.policies.LimitsChanged(ctx, organization)
+	s.policies.LimitsChanged(ctx, owner)
 	return &createdLimitResponse{Status: http.StatusCreated, Body: limitOf(row, append(all, row))}, nil
 }
 
-func (s *Server) getLimit(ctx context.Context, organization string, id int64) (*limitResponse, error) {
-	row, err := s.store.Limits.Get(ctx, organization, id)
+func (s *Server) getLimit(ctx context.Context, owner string, id int64) (*limitResponse, error) {
+	row, err := s.store.Limits.Get(ctx, owner, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
 	}
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.Limits.SelectOf(ctx, []string{row.OrganizationID})
+	all, err := s.limitsOf(ctx, store.Holders(row)[0])
 	if err != nil {
 		return nil, err
 	}
 	return &limitResponse{Body: limitOf(row, all)}, nil
 }
 
-func (s *Server) updateLimit(ctx context.Context, organization string, id int64, change LimitChange, audit store.LimitAudit) (*limitResponse, error) {
-	existing, err := s.store.Limits.Get(ctx, organization, id)
+func (s *Server) updateLimit(ctx context.Context, owner string, id int64, change LimitChange, audit store.LimitAudit) (*limitResponse, error) {
+	existing, err := s.store.Limits.Get(ctx, owner, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
 	}
@@ -894,7 +912,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	all, err := s.store.Limits.SelectOf(ctx, []string{existing.OrganizationID})
+	all, err := s.limitsOf(ctx, store.Holders(existing)[0])
 	if err != nil {
 		return nil, err
 	}
@@ -905,7 +923,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 			return nil, err
 		}
 	}
-	updated, err := s.store.Limits.Update(ctx, existing.OrganizationID, id,
+	updated, err := s.store.Limits.Update(ctx, owner, id,
 		store.LimitChange{LimitMicros: change.LimitMicros, Note: change.Note, UpdatedBy: actorName(audit)}, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
@@ -913,7 +931,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 	if err != nil {
 		return nil, err
 	}
-	s.policies.LimitsChanged(ctx, existing.OrganizationID)
+	s.policies.LimitsChanged(ctx, store.Holders(existing)...)
 	for i := range all {
 		if all[i].ID == id {
 			all[i] = updated
@@ -922,8 +940,8 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 	return &limitResponse{Body: limitOf(updated, all)}, nil
 }
 
-func (s *Server) deleteLimit(ctx context.Context, organization string, id int64, audit store.LimitAudit) error {
-	existing, err := s.store.Limits.Get(ctx, organization, id)
+func (s *Server) deleteLimit(ctx context.Context, owner string, id int64, audit store.LimitAudit) error {
+	existing, err := s.store.Limits.Get(ctx, owner, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
@@ -933,14 +951,14 @@ func (s *Server) deleteLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	err = s.store.Limits.Delete(ctx, existing.OrganizationID, id, audit)
+	err = s.store.Limits.Delete(ctx, owner, id, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
 	if err != nil {
 		return err
 	}
-	s.policies.LimitsChanged(ctx, existing.OrganizationID)
+	s.policies.LimitsChanged(ctx, store.Holders(existing)...)
 	return nil
 }
 
@@ -997,7 +1015,8 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if s.policies == nil {
 		return nil, errNoLimits
 	}
-	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
+	owner := store.LimitOwner(organization, billed)
+	limits, err := s.limitsOf(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -1012,6 +1031,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if err != nil {
 		return nil, err
 	}
+	resets = store.OwnedBy(owner, resets)
 	spent, err := s.policies.SubjectsSpend(ctx, refs, billed)
 	if err != nil {
 		return nil, stack.Wrap(err)
@@ -1020,6 +1040,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if err != nil {
 		return nil, err
 	}
+	live = store.OwnedBy(owner, live)
 	var hardLimit *SpendHardLimitUsage
 	if billed {
 		standing, ok, err := s.policies.Standing(ctx, organization)
@@ -1108,7 +1129,8 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
 		return nil, err
 	}
-	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
+	owner := store.LimitOwner(organization, billed)
+	limits, err := s.limitsOf(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -1132,7 +1154,7 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 			baseline = read.SpentMicros
 		}
 		resets = append(resets, store.UsageReset{
-			OrganizationID: organization, Subject: ref.Subject, AppID: ref.AppID, APIKey: ref.APIKey, UserID: ref.UserID,
+			OrganizationID: organization, Billed: &billed, Subject: ref.Subject, AppID: ref.AppID, APIKey: ref.APIKey, UserID: ref.UserID,
 			Category: ref.Category, Interval: interval, WindowStart: start, BaselineMicros: baseline,
 			Reason: sent.Reason, Actor: actorName(audit),
 		})
@@ -1140,7 +1162,7 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 	if err := s.store.UsageResets.InsertMany(ctx, resets, audit); err != nil {
 		return nil, err
 	}
-	s.policies.LimitsChanged(ctx, organization)
+	s.policies.LimitsChanged(ctx, owner)
 	answer, err := s.subjectUsage(ctx, ref, billed)
 	if err != nil {
 		return nil, err

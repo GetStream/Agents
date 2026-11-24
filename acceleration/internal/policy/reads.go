@@ -161,11 +161,11 @@ func (e *Enforcer) Standing(ctx context.Context, organizationID string) (usage.S
 	return usage.Standing{}, false, nil
 }
 
-// LimitsChanged reads an organization's limits and resets again now, after this process wrote
-// one, so its next admission holds to what was written; other routers read it within Fresh.
-// organization is the one the limits name, the app's own id for an app in none.
-func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
-	if e == nil || e.money.off() {
+// LimitsChanged reads the limits, resets and grants of owners of one id again now, after this
+// process wrote one, so their next admission holds to what was written; other routers read it
+// within Fresh.
+func (e *Enforcer) LimitsChanged(ctx context.Context, owners ...string) {
+	if e == nil || e.money.off() || len(owners) == 0 {
 		return
 	}
 	db := e.config
@@ -173,7 +173,8 @@ func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
 		return
 	}
 	m := &e.money
-	m.readGrants(ctx, db, []string{organization, appAccount(organization)})
+	m.readGrants(ctx, db, owners)
+	organization := limitsOrganization(owners[0])
 	limits, err := db.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		m.failedRead("could not read a customer's spend limits again after a write", err, "organization", organization)
@@ -185,9 +186,9 @@ func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
 		return
 	}
 	m.mu.Lock()
-	for _, key := range []string{organization, appAccount(organization)} {
+	for _, key := range owners {
 		if acct := m.accounts[key]; acct != nil {
-			m.keepLimits(acct, limits, resets, time.Now())
+			m.keepLimits(acct, store.HeldTo(key, limits), store.HeldTo(key, resets), time.Now())
 		}
 	}
 	m.mu.Unlock()
