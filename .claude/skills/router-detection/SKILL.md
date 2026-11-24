@@ -60,7 +60,8 @@ that looks like "there is no package", which is the exact failure terms exist to
 ## Overwrites
 
 `options.overwrites` carries what the vocabulary has no word for, keyed by provider. No
-detection provider takes one today, and each refuses one it is sent.
+detection provider takes one today: the provider an overwrite names refuses it, and the next
+candidate is asked without it.
 
 - There is no Workflow of the caller's own. Roboflow runs a Workflow on the account of the key
   it is sent with, which is the deployment's, and a Workflow can run any block Roboflow has:

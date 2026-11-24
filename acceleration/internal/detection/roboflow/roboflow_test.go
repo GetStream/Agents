@@ -156,7 +156,7 @@ func (s *RoboflowSuite) TestAWorkflowIsBilledAnImageForEveryModelCallRoboflowLis
 	found, err := s.provider(ModelFaces).Detect(context.Background(), frame())
 
 	s.Require().NoError(err)
-	s.Equal(4, found.Billed, "two detectors over the image, and CLIP once for each face's crop")
+	s.Equal(4, found.Billed, "every model call Roboflow lists is an image, whatever came back")
 }
 
 func (s *RoboflowSuite) TestAWorkflowWhoseCallsAreNotListedIsBilledTheImageAndEachEmbedding() {

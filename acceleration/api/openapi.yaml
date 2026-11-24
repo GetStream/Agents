@@ -5008,7 +5008,7 @@ components:
           type: number
         overwrites:
           additionalProperties: {}
-          description: 'Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it, and one naming a provider that is not a candidate is refused.'
+          description: 'Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.'
           type: object
         providers:
           description: A priority list of where to try, in the order given, which wins over target when it holds anything.

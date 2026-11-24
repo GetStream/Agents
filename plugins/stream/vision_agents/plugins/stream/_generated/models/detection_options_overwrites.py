@@ -13,7 +13,8 @@ T = TypeVar("T", bound="DetectionOptionsOverwrites")
 @_attrs_define
 class DetectionOptionsOverwrites:
     """Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes
-    any today: the provider an overwrite names refuses it, and one naming a provider that is not a candidate is refused.
+    any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a
+    provider that is not a candidate is refused.
 
     """
 

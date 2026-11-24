@@ -5689,7 +5689,7 @@ pub struct DetectionOptions {
     ///Drop boxes scored below this. Only a model that scores its boxes is asked.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub min_confidence: ::std::option::Option<f64>,
-    ///Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it, and one naming a provider that is not a candidate is refused.
+    ///Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.
     #[serde(default, skip_serializing_if = "::serde_json::Map::is_empty")]
     pub overwrites: ::serde_json::Map<::std::string::String, ::serde_json::Value>,
     ///A priority list of where to try, in the order given, which wins over target when it holds anything.
