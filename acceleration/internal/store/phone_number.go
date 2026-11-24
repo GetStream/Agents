@@ -162,9 +162,7 @@ func insertNumber(ctx context.Context, db bun.IDB, number *PhoneNumber) error {
 	}
 	// A vendor that says nothing about what a number carries is not the same as a null
 	// column, and the array is not nullable.
-	if number.Capabilities == nil {
-		number.Capabilities = []string{}
-	}
+	number.Capabilities = orEmpty(number.Capabilities)
 
 	if _, err := db.NewInsert().Model(number).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number: %w", err))

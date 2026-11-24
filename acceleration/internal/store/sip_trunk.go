@@ -72,9 +72,7 @@ func (r *SIPTrunks) Insert(ctx context.Context, trunk *SIPTrunk) error {
 	}
 	now := time.Now().UTC()
 	trunk.CreatedAt, trunk.UpdatedAt = now, now
-	if trunk.Codecs == nil {
-		trunk.Codecs = []string{}
-	}
+	trunk.Codecs = orEmpty(trunk.Codecs)
 	if _, err := r.store.global.NewInsert().Model(trunk).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create sip trunk: %w", err))
 	}
@@ -119,9 +117,7 @@ func (r *SIPTrunks) Update(ctx context.Context, trunk *SIPTrunk) error {
 		return stack.Wrap(err)
 	}
 	trunk.UpdatedAt = time.Now().UTC()
-	if trunk.Codecs == nil {
-		trunk.Codecs = []string{}
-	}
+	trunk.Codecs = orEmpty(trunk.Codecs)
 	result, err := r.store.global.NewUpdate().Model(trunk).
 		Column("name", "host", "port", "transport", "username", "password_sealed",
 			"password_kek_version", "late_offer", "codecs", "updated_at").
