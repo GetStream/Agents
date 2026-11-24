@@ -14892,7 +14892,7 @@ type ClientInterface interface {
 
 	// ForkSessionWithBody Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes any type of body and a specified content type.
@@ -14902,7 +14902,7 @@ type ClientInterface interface {
 
 	// ForkSession Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes a body of the `application/json` content type.
@@ -19861,7 +19861,7 @@ func (c *Client) InterruptSessionCommand(ctx context.Context, id string, request
 
 // ForkSessionWithBody Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes any type of body and a specified content type.
@@ -19881,7 +19881,7 @@ func (c *Client) ForkSessionWithBody(ctx context.Context, id string, contentType
 
 // ForkSession Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes a body of the `application/json` content type.
@@ -38269,7 +38269,7 @@ type ClientWithResponsesInterface interface {
 
 	// ForkSessionWithBodyWithResponse Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -38279,7 +38279,7 @@ type ClientWithResponsesInterface interface {
 
 	// ForkSessionWithResponse Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -70549,7 +70549,7 @@ func (c *ClientWithResponses) InterruptSessionCommandWithResponse(ctx context.Co
 
 // ForkSessionWithBodyWithResponse Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -70565,7 +70565,7 @@ func (c *ClientWithResponses) ForkSessionWithBodyWithResponse(ctx context.Contex
 
 // ForkSessionWithResponse Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork runs on the models the parent has.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).

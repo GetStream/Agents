@@ -225,6 +225,54 @@ func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAServerSideField() {
 	}
 }
 
+// The router's credentials act as whoever a session names the agent, so neither createSession
+// nor the socket lets a device name another user, an agent id or a display name for it.
+func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAnotherAgentIdentity() {
+	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
+		s.Run("user_id/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, map[string]any{"user_id": "someone-else"}, errDeviceAgentUser)
+		})
+		s.Run("agent_id/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, map[string]any{"agent_id": "support"}, errDeviceAgentID)
+		})
+		s.Run("user_name/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, map[string]any{"user_name": "Your Bank"}, errDeviceAgentUserName)
+		})
+	}
+}
+
+// A voice session is keyed under its call id, which is the session id a device may choose, so
+// a device's voice session, on the socket or by createSession, is given an agent id nobody
+// chose, while a backend's keeps its id.
+func (s *SocketSessionSuite) TestADevicesVoiceSessionIsNotKeyedUnderTheIdItChose() {
+	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
+		chosen := "someone-" + s.utils.uuid()
+
+		answered := s.socketStartedWith(device, map[string]any{"id": chosen})
+
+		s.Equal(chosen, answered["id"], string(device.kind))
+		s.NotEqual(chosen, answered["agent_id"], string(device.kind))
+		s.NotEmpty(answered["agent_id"], string(device.kind))
+
+		called := "someone-" + s.utils.uuid()
+		created := device.createSession(CreateSessionRequest{Id: &called, StartVoice: pointerTo(true)})
+		s.NotEqual(called, created.AgentId, "createSession, %s", device.kind)
+		s.NotEmpty(created.AgentId, "createSession, %s", device.kind)
+	}
+	chosen := "backend-" + s.utils.uuid()
+	s.Equal(chosen, s.socketStartedWith(s.serverClient, map[string]any{"id": chosen})["agent_id"])
+}
+
+// socketStartedWith starts a socket session asked for as asked and returns the session it was
+// answered with.
+func (s *SocketSessionSuite) socketStartedWith(client *testClient, asked map[string]any) map[string]any {
+	connection := client.opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "sample_rate": 24_000, "session": asked}))
+	answered := s.readFrame(connection)
+	s.Require().Equal("session", answered["type"], "the socket answered %v", answered)
+	return answered["session"].(map[string]any)
+}
+
 // A start frame naming a conversation's channel is refused a caller whose name nobody checked,
 // as createSession refuses it.
 func (s *SocketSessionSuite) TestAStartFrameFromANameWithoutATokenOpensNoConversation() {

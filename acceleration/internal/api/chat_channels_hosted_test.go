@@ -76,17 +76,14 @@ func (s *RouterSuite) hostedCallUser(worker *websocket.Conn) any {
 // The control: a session a person opened with their own token names them on a hosted call, as
 // on base b466fb795 (probe of this test there).
 func (s *SessionToolsSuite) TestAHostedCallInASessionOpenedWithAUsersTokenIsForThem() {
-	agent := "agent-" + s.utils.uuid()
-	worker := s.hostsLookupOrder(agent)
-	device := s.data.createUser()
-	// The model that reaches for lookup_order is the config's, since a device names no model.
+	// A device names no agent id, so the worker hosts the tool for the config it opens by name.
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "orders-" + s.utils.uuid(), Mode: store.AgentModeText,
 		Models:     store.AgentModels{LLM: "tooling/tool-model"},
 		ToolGroups: []store.ToolGroup{{Name: "orders", Tools: []string{lookupOrder}}}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
-	request := textSession(nil)
-	request.AgentId, request.ConfigId = &agent, &config.ID
-	opened := device.createSession(request)
+	worker := s.hostsLookupOrder(config.Name)
+	device := s.data.createUser()
+	opened := device.createSession(CreateSessionRequest{ConfigId: &config.ID})
 
 	status, body := s.serverClient.actingFor(device).call(http.MethodPost,
 		"/v1/agents/sessions/"+opened.Id+"/respond", RespondRequest{Text: "where is my order", RequestId: pointerTo("request-" + s.utils.uuid())})

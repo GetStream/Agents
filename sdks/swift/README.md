@@ -271,8 +271,8 @@ try await agents.rewind(sessionID: session.id, to: turns[0].id)
 let branch = try await session.fork(ForkOptions(responseID: turns[0].id))
 ```
 
-Follow the fork with `attach(sessionID:)`. It runs on the models the conversation has: which models
-a fork runs on is the backend's to choose, and the router refuses a device that names them.
+Follow the fork with `attach(sessionID:)`. It keeps the parent's overwrites, or runs on the
+config it names: models are the backend's to choose, and the router refuses a device that names them.
 
 A session, typed or spoken, is kept in Stream Chat unless it is `incognito`, and a conversation
 kept there cannot be rewound, since its transcript would bring the turns back; fork it at the response

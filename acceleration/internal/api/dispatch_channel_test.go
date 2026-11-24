@@ -96,22 +96,19 @@ func (s *MessageHooksSuite) TestAnotherPersonsMessageIsAnsweredByTheWorkersSessi
 }
 
 // TestOnlyTheBackendOfTheChannelsCustomerOpensItsChannel: a session another customer's
-// backend, the customer's own end user, or its backend acting for one of its users opens
-// under the channel's id keeps a channel of its own, as on base.
+// backend, or the customer's backend acting for one of its users, opens under the channel's
+// id keeps a channel of its own, as on base. The customer's own end user names no agent id.
 func (s *MessageHooksSuite) TestOnlyTheBackendOfTheChannelsCustomerOpensItsChannel() {
 	handed := s.handedOut()
 	owner := s.app
 	asked := CreateSessionRequest{AgentId: &handed.AgentID}
 
-	for name, opener := range map[string]*testClient{
-		"end user":                  s.client,
-		"backend acting for a user": s.serverClient.actingFor(s.client),
-	} {
-		opened := opener.createSession(asked)
-		s.Equal(chatlog.ChannelType+":"+opened.Id, value(opened.ConversationId), name)
-	}
+	status, body := s.client.call(http.MethodPost, "/v1/agents/sessions", asked)
+	s.Equal(http.StatusForbidden, status, "end user: %s", body)
+	opened := s.serverClient.actingFor(s.client).createSession(asked)
+	s.Equal(chatlog.ChannelType+":"+opened.Id, value(opened.ConversationId), "backend acting for a user")
 	s.useApp(s.data.createApp())
-	opened := s.serverClient.createSession(asked)
+	opened = s.serverClient.createSession(asked)
 	s.Equal(chatlog.ChannelType+":"+opened.Id, value(opened.ConversationId), "another customer")
 	s.useApp(owner)
 }
@@ -220,13 +217,14 @@ func (s *MessageHooksSuite) TestAWorkersQuestionAskedAgainIsAnsweredOnce() {
 // (probe in the PR's author log).
 func (s *MessageHooksSuite) TestACommandToASessionOfItsOwnStillWritesThePersonsMessage() {
 	for name, opener := range map[string]struct {
-		client *testClient
-		author string
+		client  *testClient
+		author  string
+		agentID *string
 	}{
-		"a backend's session":   {s.serverClient, "support-operator"},
-		"an end user's session": {s.client, s.client.userID},
+		"a backend's session":   {s.serverClient, "support-operator", pointerTo("agent-" + s.utils.uuid())},
+		"an end user's session": {s.client, s.client.userID, nil},
 	} {
-		opened := opener.client.createSession(CreateSessionRequest{AgentId: pointerTo("agent-" + s.utils.uuid())})
+		opened := opener.client.createSession(CreateSessionRequest{AgentId: opener.agentID})
 		s.Require().Equal(chatlog.ChannelType+":"+opened.Id, value(opened.ConversationId), name)
 		watching := opener.client.opens("/v1/agents/sessions/" + opened.Id + "/events")
 		id := s.utils.uuid()

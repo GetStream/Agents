@@ -374,19 +374,43 @@ func (s *SessionVerbsSuite) TestADeviceMayNotNameModelsOnAFork() {
 			parent := device.createSession(request)
 			fork := "/v1/agents/sessions/" + parent.Id + "/fork"
 
-			for _, sent := range []ModelOverwrites{{Llm: pointerTo("counted/counted-model")}, {}} {
-				status, failure := device.failure(http.MethodPost, fork, ForkSessionRequest{ModelOverwrites: &sent})
-				s.Equal(http.StatusForbidden, status)
-				s.Contains(failure, "model_overwrites are sent server-side")
+			named := &ModelOverwrites{Llm: pointerTo("counted/counted-model")}
+			refused := func() {
+				for _, sent := range []ForkSessionRequest{
+					{ModelOverwrites: named}, {ModelOverwrites: &ModelOverwrites{}},
+					{ModelOverwrites: named, ConfigId: request.ConfigId},
+				} {
+					status, failure := device.failure(http.MethodPost, fork, sent)
+					s.Equal(http.StatusForbidden, status)
+					s.Contains(failure, "model_overwrites are sent server-side")
+				}
+				s.Zero(s.forksOf(parent.Id), "a refused fork opens no session")
 			}
-			s.Zero(s.forksOf(parent.Id), "a refused fork opens no session")
+			refused()
 
 			var forked Session
 			s.Require().Equal(http.StatusCreated, device.do(http.MethodPost, fork, ForkSessionRequest{}, &forked))
 			s.Equal("noted/noted-model", value(forked.Llm), "a plain fork keeps the parent's configured model")
 			s.Equal(1, s.forksOf(parent.Id))
+
+			parent = device.createSession(request)
+			fork = "/v1/agents/sessions/" + parent.Id + "/fork"
+			device.stopSession(parent.Id)
+			refused()
 		})
 	}
+}
+
+func (s *SessionVerbsSuite) TestADevicesForkOfARunningSessionKeepsItsOverwrites() {
+	request := textSession(nil)
+	request.ModelOverwrites = &ModelOverwrites{Llm: pointerTo("counted/counted-model")}
+	parent := s.serverClient.actingFor(s.client).createSession(request)
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost,
+		"/v1/agents/sessions/"+parent.Id+"/fork", ForkSessionRequest{}, &forked))
+
+	s.Equal("counted/counted-model", value(forked.Llm))
 }
 
 func (s *SessionVerbsSuite) TestABackendsForkForAUserRunsOnTheModelsItNames() {

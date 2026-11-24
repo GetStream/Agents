@@ -178,6 +178,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	spec := specOf(start.Session, customerID, config)
 	// A socket session carries audio, so voice is started on it whatever the frame says.
 	spec.Text = false
+	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
