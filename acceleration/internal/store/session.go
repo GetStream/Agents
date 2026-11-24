@@ -608,10 +608,15 @@ func (r *Sessions) ChooseConnection(ctx context.Context, customerID, id, name, c
 	return nil
 }
 
-// Exists reports whether any customer has a session with this id.
-func (r *Sessions) Exists(ctx context.Context, id string) (bool, error) {
+// Exists reports whether a session of the id is held where a new one of the customer's, acting
+// in app, would meet it: a session of the customer's own, or another customer's in that Stream
+// app, whose call and channel are named after the id as well. Another app's is not.
+func (r *Sessions) Exists(ctx context.Context, customerID, id string, app AppScope) (bool, error) {
 	_, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (bool, error) {
-		exists, err := db.NewSelect().Model((*AgentSession)(nil)).Where("id = ?", id).Exists(ctx)
+		exists, err := db.NewSelect().Model((*AgentSession)(nil)).
+			Where("id = ?", id).
+			Where("(customer_id = ? OR ?)", customerID, app.clause()).
+			Exists(ctx)
 		if err == nil && !exists {
 			err = sql.ErrNoRows
 		}

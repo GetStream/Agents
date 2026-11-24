@@ -40,6 +40,18 @@ func (s *RouterSuite) numberedApp(id int64) testApp {
 	return s.data.keyed(organization, app)
 }
 
+// backendInAppOfItsOwn is the backend of a new customer acting in a Stream app of its own.
+func (s *RouterSuite) backendInAppOfItsOwn() *testClient {
+	id := streamAppID()
+	app := s.numberedApp(id)
+	s.giveApp(app.app.ID, id, "key-"+app.app.ID)
+	mine := s.app
+	s.app = app
+	backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
+	s.app = mine
+	return backend
+}
+
 func (s *RouterSuite) appID() int64 {
 	id, err := strconv.ParseInt(s.customerID(), 10, 64)
 	s.Require().NoError(err)

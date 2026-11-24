@@ -13,11 +13,9 @@ import (
 	"time"
 
 	getstream "github.com/GetStream/getstream-go/v5"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -280,27 +278,61 @@ func (s *SessionCreateSuite) TestAnIdAnotherSessionHasIsRefused() {
 		"the session has ended and its row still holds the id")
 }
 
-// A session's row is keyed by its id alone until the release after this one, so two customers
-// asking for one id at once, each acting in a Stream app of its own, get one session between
-// them: the other is refused, and the one created is its own customer's alone.
-func (s *SessionCreateSuite) TestTwoCustomersInStreamAppsOfTheirOwnAskingForOneIdAtOnceGetOneSession() {
+// Two customers, each acting in a Stream app of its own, may each have a session of one id, asked
+// for at once: both are created, and each customer reads, carries on, lists and closes its own
+// alone.
+func (s *SessionCreateSuite) TestTwoCustomersInStreamAppsOfTheirOwnEachHaveASessionOfOneId() {
 	id := s.utils.uuid()
 	customers := []*testClient{s.backendInAppOfItsOwn(), s.backendInAppOfItsOwn()}
+	projects := []string{s.utils.uuid(), s.utils.uuid()}
 	statuses := make([]int, len(customers))
 	var wg sync.WaitGroup
 	for i, customer := range customers {
-		wg.Go(func() { statuses[i] = customer.do(http.MethodPost, "/v1/agents/sessions", incognitoText(&id), nil) })
+		request := textSession(&id)
+		request.ProjectId = &projects[i]
+		wg.Go(func() { statuses[i] = customer.do(http.MethodPost, "/v1/agents/sessions", request, nil) })
 	}
 	wg.Wait()
+	s.Require().Equal([]int{http.StatusCreated, http.StatusCreated}, statuses)
 
-	s.ElementsMatch([]int{http.StatusCreated, http.StatusConflict}, statuses)
-	created, refused := customers[0], customers[1]
-	if statuses[0] != http.StatusCreated {
-		created, refused = refused, created
+	for i, customer := range customers {
+		s.Equal(projects[i], value(customer.getSession(id).ProjectId), "customer %d reads its own", i)
+		s.answerAs(customer, id, "Where is my order?")
 	}
-	s.Equal(id, created.getSession(id).Id)
-	status, _ := refused.call(http.MethodGet, "/v1/agents/sessions/"+id, nil)
-	s.Equal(http.StatusNotFound, status, "the refused customer reaches the other's session")
+	customers[0].stopSession(id)
+	s.Require().Eventually(func() bool { return s.endedRow(customers[0], id, projects[0]) }, settleFor, 20*time.Millisecond,
+		"the first customer's session never ended")
+	s.Equal(Live, customers[1].getSession(id).State, "the second customer's session is closed with the first's")
+	customers[1].stopSession(id)
+	s.Require().Eventually(func() bool { return s.endedRow(customers[1], id, projects[1]) }, settleFor, 20*time.Millisecond,
+		"the second customer's session never ended")
+	for i, customer := range customers {
+		s.Equal([]string{id}, ids(customer.querySessions(inProject(projects[i])).Items), "customer %d lists its own", i)
+		s.Empty(customer.querySessions(inProject(projects[1-i])).Items, "customer %d lists the other's", i)
+	}
+}
+
+// endedRow reports whether the customer reads its session of id as ended, off its row, in its
+// project.
+func (s *SessionCreateSuite) endedRow(customer *testClient, id, project string) bool {
+	var read Session
+	return customer.do(http.MethodGet, "/v1/agents/sessions/"+id, nil, &read) == http.StatusOK &&
+		read.State == Ended && value(read.ProjectId) == project
+}
+
+// The same once the first customer's session ended, when its row alone holds the id.
+func (s *SessionCreateSuite) TestACustomerSharingAStreamAppIsRefusedAnIdAnotherHeld() {
+	id, project := s.utils.uuid(), s.utils.uuid()
+	request := textSession(&id)
+	request.ProjectId = &project
+	s.serverClient.createSession(request)
+	s.serverClient.stopSession(id)
+	s.Require().Eventually(func() bool {
+		listed := s.serverClient.querySessions(inProject(project)).Items
+		return len(listed) == 1 && listed[0].ClosedAt != nil
+	}, settleFor, 20*time.Millisecond, "the closed session was never written down")
+
+	s.Equal(http.StatusConflict, s.data.backendOfAnotherApp().do(http.MethodPost, "/v1/agents/sessions", textSession(&id), nil))
 }
 
 // Two customers acting in one Stream app would put two agents on one call and in one channel,
@@ -310,18 +342,6 @@ func (s *SessionCreateSuite) TestACustomerSharingAStreamAppIsRefusedAnIdAnotherH
 	s.serverClient.createSession(incognitoText(&id))
 
 	s.Equal(http.StatusConflict, s.data.backendOfAnotherApp().do(http.MethodPost, "/v1/agents/sessions", incognitoText(&id), nil))
-}
-
-// backendInAppOfItsOwn is the backend of a new customer acting in a Stream app of its own.
-func (s *SessionCreateSuite) backendInAppOfItsOwn() *testClient {
-	id := streamAppID()
-	app := s.numberedApp(id)
-	s.giveApp(app.app.ID, id, "key-"+app.app.ID)
-	mine := s.app
-	s.app = app
-	backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
-	s.app = mine
-	return backend
 }
 
 // incognitoText is a conversation in writing that keeps no row, so only the node running it
@@ -423,7 +443,7 @@ func (s *SessionCreateSuite) TestAnIncognitoSessionKeepsNothingOfTheHistoryItWas
 
 	ctx := context.Background()
 	s.Never(func() bool {
-		kept, err := s.store.Sessions.Exists(ctx, opened.Id)
+		kept, err := s.store.Sessions.Exists(ctx, s.customerID(), opened.Id, store.AppScope{})
 		return err != nil || kept
 	}, time.Second, 50*time.Millisecond, "an incognito session has no row")
 	responses, err := s.store.Responses.Select(ctx, s.customerID(), opened.Id, store.ResponseFilter{Limit: 10})

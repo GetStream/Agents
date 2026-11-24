@@ -270,7 +270,7 @@ func (s *RuntimeSuite) TestASessionThatFailsToOpenIsNotBilled() {
 	s.Require().Error(err)
 
 	s.Empty(s.runtime(id), "the time spent failing to join is not the customer's")
-	kept, err := s.store.Sessions.Exists(s.ctx, id)
+	kept, err := s.store.Sessions.Exists(s.ctx, s.customer, id, store.AppScope{})
 	s.Require().NoError(err)
 	s.False(kept, "a session that never opened is not one to list or count")
 }

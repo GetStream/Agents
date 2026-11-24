@@ -440,31 +440,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		return nil, stack.Wrap(errors.New("session: the manager is shut down"))
 	}
 	held, live := m.sessions[Key{spec.CustomerID, spec.ID}]
-	another := m.heldByAnother(spec.CustomerID, spec.ID)
 	m.mu.Unlock()
-	if another || live && !replaces(spec, held) {
+	if live && !replaces(spec, held) {
 		return nil, stack.Wrap(ErrSessionExists)
-	}
-	// The id is the row's primary key whoever owns it, so one somebody already used would
-	// write this session over theirs. A reopened one is the same session, its owner checked
-	// by whoever reopened it.
-	if m.options.Store != nil && spec.Reopened.IsZero() {
-		taken, err := m.options.Store.Sessions.Exists(ctx, spec.ID)
-		if err != nil {
-			return nil, stack.Wrap(err)
-		}
-		// A session's channel is named after it, and a thread channel's id is taken by the
-		// external thread it holds. Compared case-folded, as threadConversation does.
-		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
-			if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
-				return nil, stack.Wrap(err)
-			}
-			taken = err == nil
-		}
-		if taken {
-			return nil, stack.Wrap(ErrSessionExists)
-		}
 	}
 	// Before anything is joined or paid for: a vendor often says a call was busy before its
 	// session opens.
@@ -508,6 +486,13 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// backfill claim it.
 	if stream.Client == nil && m.options.Stream != nil && m.options.Stream.PerApp() {
 		spec.StreamApp = store.ForeignStreamApp
+	}
+	taken, err := m.taken(ctx, spec)
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
+	if taken {
+		return nil, stack.Wrap(ErrSessionExists)
 	}
 
 	var remembering *metered.Memory
@@ -1093,7 +1078,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		fail()
 		return nil, stack.Wrap(errors.New("session: the manager is shut down"))
 	}
-	if held, raced := m.sessions[created.Key()]; raced && !replaces(spec, held) || m.heldByAnother(spec.CustomerID, created.id) {
+	if held, raced := m.sessions[created.Key()]; raced && !replaces(spec, held) || m.heldInApp(spec.CustomerID, created.id, spec.StreamApp) {
 		m.mu.Unlock()
 		turnedAway = true
 		created.handedOver.Store(true)
@@ -1898,23 +1883,65 @@ func (m *Manager) Running(customerID, id string) bool {
 	return running
 }
 
-// HeldByAnother reports whether this process is running a session of the id for a customer
-// other than customerID. A session's row is keyed by its id alone, whoever's it is, so a second
-// customer's session under one is refused.
-func (m *Manager) HeldByAnother(customerID, id string) bool {
+// HeldInApp reports whether this process is running a session of the id for a customer other
+// than customerID in the Stream app pinned app. Its call and its channel are named after the id
+// in that app, so a second customer's session there would share them.
+func (m *Manager) HeldInApp(customerID, id string, app int64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.heldByAnother(customerID, id)
+	return m.heldInApp(customerID, id, app)
 }
 
-// heldByAnother is HeldByAnother with m.mu held.
-func (m *Manager) heldByAnother(customerID, id string) bool {
-	for key := range m.sessions {
-		if key.ID == id && key.CustomerID != customerID {
+// heldInApp is HeldInApp with m.mu held.
+func (m *Manager) heldInApp(customerID, id string, app int64) bool {
+	scope := m.appScope(app)
+	for key, held := range m.sessions {
+		if key.ID == id && key.CustomerID != customerID && m.appScope(held.spec.StreamApp) == scope {
 			return true
 		}
 	}
 	return false
+}
+
+// appScope is the rows of the Stream app pinned app.
+func (m *Manager) appScope(app int64) store.AppScope {
+	var deployment int64
+	if m.options.Stream != nil {
+		deployment = m.options.Stream.DeploymentApp()
+	}
+	return store.AppOf(app, deployment)
+}
+
+// taken reports whether a new session's id is held where the session would meet it: by a
+// session of its customer's own, or by another customer's in the Stream app it acts in, whose
+// call and channel are named after the id there too. Another customer's in another app is not.
+// A reopened session is the same session, its owner checked by whoever reopened it.
+func (m *Manager) taken(ctx context.Context, spec Spec) (bool, error) {
+	if m.HeldInApp(spec.CustomerID, spec.ID, spec.StreamApp) {
+		return true, nil
+	}
+	if m.options.Store == nil || !spec.Reopened.IsZero() {
+		return false, nil
+	}
+	app := m.appScope(spec.StreamApp)
+	taken, err := m.options.Store.Sessions.Exists(ctx, spec.CustomerID, spec.ID, app)
+	if err != nil || taken {
+		return taken, err
+	}
+	// A session's channel is named after it, and a thread channel's id is taken by the external
+	// thread it holds. Compared case-folded, as threadConversation does.
+	folded := strings.ToLower(spec.ID)
+	if !strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
+		return false, nil
+	}
+	thread, err := m.options.Store.ChannelThreads.Get(ctx, folded)
+	if errors.Is(err, store.ErrNoChannelThread) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return m.appScope(thread.StreamAppPK) == app, nil
 }
 
 // SandboxesIn reports whether a session's sandbox can be made in region: a config naming a

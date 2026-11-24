@@ -100,6 +100,23 @@ func (s *SocketSessionSuite) TestClosingTheSocketEndsTheSession() {
 	}, 2*settleFor, 50*time.Millisecond, "the session outlived the socket holding it")
 }
 
+// Another customer's session of an id, in a Stream app of its own, keeps no customer from
+// starting a session of the id on a socket.
+func (s *SocketSessionSuite) TestASocketStartsASessionOfAnIdAnotherCustomerHoldsInAnotherApp() {
+	id := s.utils.uuid()
+	s.backendInAppOfItsOwn().createSession(textSession(&id))
+	connection := s.serverClient.opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "sample_rate": 24_000,
+		"session": map[string]any{"id": id, "greeting": map[string]any{"text": s.utils.uuid()}},
+	}))
+
+	answered := s.readFrame(connection)
+	s.Require().Equal("session", answered["type"], "the socket answered %v", answered)
+	s.Equal(id, answered["session"].(map[string]any)["id"])
+}
+
 func (s *SocketSessionSuite) TestASocketThatDoesNotStartWithAStartFrameIsRefused() {
 	connection := s.serverClient.opens("/v1/agents/socket")
 	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "hello"}))

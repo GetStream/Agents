@@ -1219,7 +1219,7 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		{"ChooseConnection", 0, 1, func() error {
 			return s.store.Sessions.ChooseConnection(s.ctx, "app", row.ID, "crm", "connection")
 		}},
-		{"Exists", 1, 0, func() error { _, err := s.store.Sessions.Exists(s.ctx, row.ID); return err }},
+		{"Exists", 1, 0, func() error { _, err := s.store.Sessions.Exists(s.ctx, "app", row.ID, AppScope{App: 7}); return err }},
 		{"Get", 1, 0, func() error { _, err := s.store.Sessions.Get(s.ctx, "app", row.ID); return err }},
 		{"ConversationPin", 0, 1, func() error {
 			_, _, err := s.store.Sessions.ConversationPin(s.ctx, "app", "conversation")
@@ -1322,6 +1322,30 @@ func (s *StoreSuite) TestTwoCustomersSessionsOfOneIdAreRowsOfTheirOwn() {
 		s.Require().Len(listed, 1, customer)
 		s.Equal(title, listed[0].Title, customer)
 	}
+}
+
+// A new session meets an id held by a session of its customer's own, or by another customer's
+// in the Stream app it acts in, whose call and channel are named after the id there too.
+// Another app's session of the id is no clash. Rows of the deployment's own app are pinned to
+// it or to nothing, as they were written before rows named an app.
+func (s *StoreSuite) TestAnIdIsTakenByTheCustomersOwnSessionOrAnotherOfItsStreamApp() {
+	s.opened("own", "app", s.base, func(session *AgentSession) { session.StreamAppPK = 8 })
+	s.opened("shared", "somebody-else", s.base, func(session *AgentSession) { session.StreamAppPK = 7 })
+	s.opened("unpinned", "somebody-else", s.base, nil)
+	s.opened("elsewhere", "somebody-else", s.base, func(session *AgentSession) { session.StreamAppPK = 8 })
+	taken := func(id string, app AppScope) bool {
+		exists, err := s.store.Sessions.Exists(s.ctx, "app", id, app)
+		s.Require().NoError(err)
+		return exists
+	}
+
+	s.True(taken("own", AppOf(7, 0)), "the customer's own, in whichever app")
+	s.True(taken("shared", AppOf(7, 0)), "another customer's in the app")
+	s.False(taken("elsewhere", AppOf(7, 0)), "another customer's in another app")
+	s.False(taken("unpinned", AppOf(7, 0)), "another customer's in the deployment's app, which is not 7")
+	s.True(taken("unpinned", AppOf(7, 7)), "the deployment's app is 7, and holds what was written there unpinned")
+	s.True(taken("shared", AppOf(0, 7)), "the deployment's app, unpinned")
+	s.False(taken("nobody", AppOf(7, 0)))
 }
 
 // A sandbox is swept once its session ended, and the sweep read whichever customer's row had

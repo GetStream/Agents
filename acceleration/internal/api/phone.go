@@ -1016,20 +1016,29 @@ func (s *Server) callApp(ctx context.Context, customerID, callType, callID strin
 	return s.callPinApp(ctx, customerID, callType, callID)
 }
 
-// anotherCustomersSession reports whether a session id is held by another customer, whose
-// agent's call a call routed under it would join. Session ids are unique across customers.
-// One nobody holds yet is not: a caller may name the session it is about to start.
+// anotherCustomersSession reports whether a session id is held by another customer in the
+// Stream app the customer's call is placed in, whose agent's call, agent:<id> there, a call
+// routed under it would join. Another app's session of the id is no such call. One nobody holds
+// yet is not either: a caller may name the session it is about to start.
 func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id string) (bool, error) {
 	if s.sessions != nil && s.sessions.Running(customerID, id) {
 		return false, nil
 	}
-	if s.sessions != nil && s.sessions.HeldByAnother(customerID, id) {
+	var app, deployment int64
+	if s.stream != nil {
+		pin, err := s.stream.Pin(ctx, customerID)
+		if err != nil {
+			return false, err
+		}
+		app, deployment = pin, s.stream.DeploymentApp()
+	}
+	if s.sessions != nil && s.sessions.HeldInApp(customerID, id, app) {
 		return true, nil
 	}
 	if s.store == nil {
 		return false, nil
 	}
-	taken, err := s.store.Sessions.Exists(ctx, id)
+	taken, err := s.store.Sessions.Exists(ctx, customerID, id, store.AppOf(app, deployment))
 	if err != nil || !taken {
 		return false, err
 	}

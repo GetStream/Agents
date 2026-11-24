@@ -238,6 +238,19 @@ func (s *PhoneSuite) TestACallCannotBeRoutedIntoAnotherCustomersSession() {
 	s.Equal(http.StatusConflict, status)
 }
 
+// A session of the id another customer holds in a Stream app of its own is no call this
+// customer's would join: the call is routed under the id in this customer's app.
+func (s *PhoneSuite) TestACallMayBeRoutedUnderAnIdAnotherCustomerHoldsInAnotherApp() {
+	theirs := s.backendInAppOfItsOwn().createSession(textSession(nil)).Id
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/phone/calls", PlaceCallRequest{
+		From: "+15125551234", To: "+19005550100", SessionId: &theirs,
+	})
+
+	s.Equal(http.StatusForbidden, status)
+	s.Contains(failure, "premium-rate")
+}
+
 func (s *PhoneSuite) TestAHumanCannotBeTransferredIntoAnotherCustomersSession() {
 	theirs := s.data.backendOfAnotherApp().createSession(textSession(nil)).Id
 

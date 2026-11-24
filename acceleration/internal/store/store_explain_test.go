@@ -480,7 +480,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return store.Sessions.ChooseConnection(ctx, "customer-7", "seeded-session-7", "github", "connection")
 		}},
 		{name: "Sessions.Exists", index: "agent_sessions_id_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Sessions.Exists(ctx, "seeded-session-7")
+			_, err := store.Sessions.Exists(ctx, "customer-8", "seeded-session-7", AppOf(2, 0))
 			return err
 		}},
 		{name: "Sessions.Get", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
