@@ -34,11 +34,12 @@ func (s *PolicySuite) waitingBehind(holder int) int {
 	return waiting
 }
 
-// organizationOf is the organization the app's row names now, read past the cache.
+// organizationOf is the organization the app's row names now, read past the cache, or empty
+// with no row.
 func (s *PolicySuite) organizationOf(appID string) string {
 	var organization string
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT organization_id FROM app_organizations WHERE app_id = ?", appID).Scan(&organization))
+		"SELECT coalesce((SELECT organization_id FROM app_organizations WHERE app_id = ?), '')", appID).Scan(&organization))
 	return organization
 }
 
