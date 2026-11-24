@@ -737,7 +737,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// clock line tells the day, and the scheduling tools read dates, in the zone its
 	// tasks will run in.
 	if user := zoneUser(spec); spec.Timezone == "" && user != "" && m.options.Store != nil {
-		if zone, err := m.options.Store.UserTimezone(ctx, spec.CustomerID, user); err == nil && zone != "" {
+		if zone, err := m.options.Store.Users.GetTimezone(ctx, spec.CustomerID, user); err == nil && zone != "" {
 			spec.Timezone, created.spec.Timezone = zone, zone
 		}
 	}
@@ -2566,6 +2566,10 @@ func memoryFailed(ctx context.Context, err error) error {
 
 // newID is a handle for an agent or a turn. It is random rather than sequential because it
 // is the only thing standing between two customers who both guessed at an id.
+// NewAgentID is a fresh agent id, which nobody chose, for a session that must not be keyed under
+// an id its caller picked.
+func NewAgentID() string { return newID() }
+
 func newID() string {
 	raw := make([]byte, 16)
 	// rand.Read on crypto/rand never returns an error, which is why the result is not

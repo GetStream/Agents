@@ -191,7 +191,7 @@ func (s *StoreSuite) TestAScheduledPriceChangeIsCancelledOnce() {
 	audit := s.auditOf(change.Name)
 	s.Require().Len(audit, 2)
 	s.Equal(AuditCancelled, audit[1].Action)
-	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming)
 }
@@ -418,7 +418,7 @@ func (s *StoreSuite) TestPriceEntryQueryBudgets() {
 		s.Len(active, 3)
 	}), "Active")
 	s.Equal(2, s.countQueries(func() {
-		upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+		upcoming, err := s.store.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 		s.Require().NoError(err)
 		s.Len(upcoming, 1)
 	}), "Upcoming")

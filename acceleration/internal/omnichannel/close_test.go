@@ -474,7 +474,7 @@ func (s *CloserSuite) TestTwoRoutersSweepingAtOnceSummarizeEachEpisodeOnce() {
 func (s *CloserSuite) TestAnEpisodeAStoppedRouterLeftEndedIsSummarizedByTheNextSweep() {
 	opened, _ := s.idleThread("where is my order 12?")
 	now := time.Now()
-	_, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(-time.Second), "closer")
+	_, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, -time.Second, "closer")
 	s.Require().NoError(err)
 	s.Equal(store.EpisodeEnded, s.status(opened))
 

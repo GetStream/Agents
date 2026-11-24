@@ -987,7 +987,10 @@ func (s *PausesSuite) handedOver() {
 	s.T().Helper()
 	s.Require().Eventually(func() bool { return len(s.agent.overheardSoFar()) > 0 }, 2*time.Second, time.Millisecond,
 		"the stop was thrown away with the pause")
-	s.Never(func() bool { return len(s.agent.overheardSoFar()) > 1 }, 100*time.Millisecond, time.Millisecond, "handed over twice")
+	// Never returns without waiting for its last check, so the check reads agent: the next
+	// test's SetupTest replaces s.agent.
+	agent := s.agent
+	s.Never(func() bool { return len(agent.overheardSoFar()) > 1 }, 100*time.Millisecond, time.Millisecond, "handed over twice")
 	ruled := s.agent.overheardSoFar()[0]
 	s.Equal(harness.Stop, ruled.Ruling.Floor)
 	s.Equal(overEcho, ruled.Words, "the pause's words, which the agent tells its own echo by")
@@ -1034,7 +1037,8 @@ func (s *PausesSuite) TestAStopAtAPauseWithNoWordsIsNotHandedOver() {
 	s.stopAtAPause("")
 	s.answered()
 	s.say(200, true)
-	s.Never(func() bool { return len(s.agent.overheardSoFar()) > 0 }, 600*time.Millisecond, time.Millisecond,
+	agent := s.agent
+	s.Never(func() bool { return len(agent.overheardSoFar()) > 0 }, 600*time.Millisecond, time.Millisecond,
 		"a stop with no words was handed over")
 }
 
@@ -1065,7 +1069,8 @@ func (s *PausesSuite) TestAStopAtAPauseIsNotHandedOverOnceItsUtteranceHasEnded()
 	s.Require().Len(s.agent.rulings(), 1)
 	s.say(20, false)
 	release()
-	s.Never(func() bool { return len(s.agent.overheardSoFar()) > 0 }, 300*time.Millisecond, time.Millisecond,
+	agent := s.agent
+	s.Never(func() bool { return len(agent.overheardSoFar()) > 0 }, 300*time.Millisecond, time.Millisecond,
 		"a stop about an utterance that has ended was handed over")
 }
 

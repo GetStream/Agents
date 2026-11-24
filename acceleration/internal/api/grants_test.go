@@ -254,6 +254,17 @@ func (s *LimitsSuite) TestAGrantNeedsALimit() {
 	s.Equal(codeNoLimit, failure.Code)
 }
 
+// A default for every user of the organization covers a user of any app a grant names.
+func (s *LimitsSuite) TestAGrantToAnotherOrganizationsUserIsNotFoundAndNotMade() {
+	stranger := s.data.createApp()
+	s.create(map[string]any{"subject": "user", "level": "organization", "interval": "daily", "limit_micros": 1_000_000})
+
+	s.refusedAsNoSuchApp(s.serverClient.call(http.MethodPost, "/v1/spend/limits/grants",
+		map[string]any{"subject": "user", "app_id": stranger.app.ID, "user_id": "u1", "amount_micros": 5, "reason": "x"}))
+
+	s.Empty(s.grants(""))
+}
+
 func (s *LimitsSuite) TestAGrantMoreThanAYearAwayOrPastIsRefused() {
 	s.create(map[string]any{"subject": "organization", "interval": "monthly", "limit_micros": 5})
 	for _, expires := range []time.Time{time.Now().Add(367 * 24 * time.Hour), time.Now().Add(-time.Minute)} {

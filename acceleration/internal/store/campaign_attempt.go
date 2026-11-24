@@ -154,7 +154,9 @@ type Classifying struct {
 // by now. Each is put off by lease, so another runner retries it if this one dies, and its
 // contact is leased to owner so owner can settle it. Only a contact's latest answered dial is
 // read, and not while another runner holds the contact, nor while a data move's source still
-// reads it (move_paused).
+// reads it (move_paused). Postgres's clock sets the lease of the contact, and the claim compares
+// the lease with the same clock. Thus a runner with a clock that is ahead does not read a dial
+// that another runner reads at the same time.
 func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Classifying, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a claim needs an owner"))
@@ -170,7 +172,7 @@ func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner strin
 	SELECT ca.id FROM campaign_attempts ca
 	JOIN campaign_contacts cc ON cc.id = ca.contact_id
 	WHERE ca.classify_state = ? AND ca.classify_after <= ? AND cc.stage = ?
-		AND (cc.leased_by = '' OR cc.lease_until IS NULL OR cc.lease_until < ?)
+		AND (cc.leased_by = '' OR cc.lease_until IS NULL OR cc.lease_until < now())
 		AND NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)
 		AND NOT EXISTS (SELECT 1 FROM campaign_attempts newer
 			WHERE newer.contact_id = ca.contact_id AND newer.classify_state = ca.classify_state
@@ -181,7 +183,7 @@ func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner strin
 )
 UPDATE campaign_attempts ca SET classify_after = ?, classify_tries = ca.classify_tries + 1
 FROM due WHERE ca.id = due.id
-RETURNING ca.*`, classifyPending, now, AwaitingOutcome, now, limit, now.Add(lease)).Scan(ctx, &attempts)
+RETURNING ca.*`, classifyPending, now, AwaitingOutcome, limit, now.Add(lease)).Scan(ctx, &attempts)
 		if err != nil {
 			return fmt.Errorf("store: claim classifications: %w", err)
 		}
@@ -196,7 +198,7 @@ RETURNING ca.*`, classifyPending, now, AwaitingOutcome, now, limit, now.Add(leas
 		var contacts []Contact
 		err = tx.NewUpdate().Model(&contacts).
 			Set("leased_by = ?", owner).
-			Set("lease_until = ?", now.Add(lease)).
+			Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 			Where("id IN (?)", bun.In(contactIDs)).
 			Returning("*").
 			Scan(ctx)
@@ -258,22 +260,6 @@ func (r *CampaignAttempts) PutOff(ctx context.Context, owner, attemptID string, 
 	}
 	if released == 0 {
 		return stack.Wrap(ErrNotLeaseHolder)
-	}
-	return nil
-}
-
-// Classified records an answered dial's outcome. A dial deleted with its campaign, or no longer
-// pending because another runner read it or its contact settled, is nothing to record.
-func (r *CampaignAttempts) Classified(ctx context.Context, attemptID, outcome string, _ bool) error {
-	_, err := r.store.global.NewUpdate().Model((*CampaignAttempt)(nil)).
-		Set("classify_state = ?", classifyDone).
-		Set("classify_after = NULL").
-		Set("outcome = ?", outcome).
-		Where("id = ?", attemptID).
-		Where("classify_state = ?", classifyPending).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: classified: %w", err))
 	}
 	return nil
 }

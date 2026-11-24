@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -307,6 +308,11 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 // with what to change, and anything else, such as a database that failed, whose text names
 // where the database is, as a failure of ours that names nothing.
 func writeImportFailure(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrAnotherCustomersRow) {
+		// Who holds the key is the operator's to know, so a caller is told only which row it is.
+		writeError(w, invalidRequest(strings.Replace(err.Error(), store.ErrAnotherCustomersRow.Error(), "this row cannot be written here", 1)))
+		return
+	}
 	var invalid *store.ValidationError
 	if errors.Is(err, store.ErrInvalidImport) || errors.Is(err, store.ErrNotACustomConnector) || errors.As(err, &invalid) {
 		writeError(w, invalidRequest(err.Error()))

@@ -49,6 +49,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 
 	spec := specOf(*request.Body, customerID, config)
+	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	// Who asked comes from the credential rather than from specOf, which merges the request
 	// with the config and so only ever sees what the caller was willing to say about
@@ -118,7 +119,7 @@ func (s *Server) rememberTimezone(ctx context.Context, customerID string, spec s
 	if KindFrom(ctx) == auth.KindGuest {
 		kind = store.UserKindGuest
 	}
-	if err := s.store.SetUserTimezone(ctx, customerID, caller.UserID, kind, spec.Timezone); err != nil {
+	if err := s.store.Users.SetTimezone(ctx, customerID, caller.UserID, kind, spec.Timezone); err != nil {
 		s.logger.Error("could not store the user's timezone", "user", caller.UserID, "error", err)
 	}
 }
@@ -156,11 +157,71 @@ var errDeviceMemoryUser = forbidden("memory.user_id is sent server-side unless i
 var errAnonymousMemory = forbidden("memory needs a signed-in user: an anonymous caller's name is a claim " +
 	"nobody checked, so the memories kept under it could be anyone's")
 
+// keyDeviceAgent gives an end user's device's voice session an agent id nobody chose.
+//
+// Why: a voice session that names no agent id is keyed under its call id, which is its session
+// id, and a device picks that. The agent id is the Chat user the conversation is created by
+// and written as, which a device may not choose (errDeviceAgentID). A text session is given a
+// fresh one already. One that carries on a conversation is left as it is: opening that
+// conversation refuses an agent id other than the one it was kept under.
+func keyDeviceAgent(ctx context.Context, spec *session.Spec) {
+	if ServerSideFrom(ctx) || spec.Text || spec.AgentID != "" || spec.ConversationID != "" {
+		return
+	}
+	spec.AgentID = session.NewAgentID()
+}
+
+// errDeviceAgentUser refuses an end user's device naming the user the agent joins and writes as.
+var errDeviceAgentUser = forbidden("user_id is sent server-side unless it is the default " +
+	session.DefaultUserID + " or the caller's own user id: the agent joins the call and writes " +
+	"Chat messages as the user it names, which a device may not choose for somebody else")
+
+// errDeviceAgentUserName refuses an end user's device naming the agent's display name.
+var errDeviceAgentUserName = forbidden("user_name is sent server-side unless it is the default " +
+	session.DefaultUserName + ": it is stored as the name of the Chat user the agent writes as, " +
+	"which a device may not rename")
+
+// errDeviceAgentID refuses an agent id named by an end user's device.
+var errDeviceAgentID = forbidden("agent_id is sent server-side: the agent's Chat messages and the " +
+	"channel it keeps are written as it, which a device may not choose")
+
+// refuseDeviceAgentIdentity reports the failure a new session is refused with when an end
+// user's device names who the agent is. The router's own credentials act as that identity,
+// so a device may only ask for the default, or, for user_id, its own verified user id.
+//
+// Why: generated clients fill in the schema defaults for user_id and user_name, so a device
+// sending exactly those is let through rather than refused.
+func refuseDeviceAgentIdentity(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
+	if ServerSideFrom(ctx) {
+		return APIError{}, false
+	}
+	if id := value(request.AgentId); id != "" {
+		return errDeviceAgentID, true
+	}
+	if user := value(request.UserId); user != "" && user != session.DefaultUserID {
+		caller := CallerFrom(ctx).UserID
+		if !KindFrom(ctx).Verified() || caller == "" || user != caller {
+			return errDeviceAgentUser, true
+		}
+	}
+	if name := value(request.UserName); name != "" && name != session.DefaultUserName {
+		return errDeviceAgentUserName, true
+	}
+	return APIError{}, false
+}
+
+// errAnonymousConversation refuses conversation_id to a caller whose user id nobody checked.
+var errAnonymousConversation = forbidden("conversation_id needs a verified caller: an anonymous caller " +
+	"carries its conversation on by its session id")
+
 // refuseSessionRequest reports the failure a new session's request is refused with before
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
 func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
 	if failure, refused := refuseServerSideFields(ctx, request); refused {
+		return failure, true
+	}
+	if failure, refused := refuseDeviceAgentIdentity(ctx, request); refused {
 		return failure, true
 	}
 	// The same rules as createAuthorization's, since it is the same attempt that seals it.
@@ -179,6 +240,13 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 		}
 		if signed := routing.AttributionFrom(ctx).Team(); signed != "" && signed != *team {
 			return invalidRequest(fmt.Sprintf("team %q is not the team %q the token was signed for, which the session is counted under", *team, signed)), true
+		}
+	}
+	for _, named := range [][2]string{
+		{"user_id", value(request.UserId)}, {"agent_id", value(request.AgentId)}, {"memory.user_id", memoryUserID(request.Memory)},
+	} {
+		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
+			return failure, true
 		}
 	}
 	// A zone nobody knows is refused where it is named, rather than at the first task
@@ -280,6 +348,9 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	if request.Team != nil && !ServerSideFrom(ctx) {
 		return errDeviceTeam, true
 	}
+	if value(request.LegacyConversationId) != "" && !KindFrom(ctx).Verified() {
+		return errAnonymousConversation, true
+	}
 	if request.Memory != nil && value(request.Memory.UserId) != "" && !ServerSideFrom(ctx) {
 		if !KindFrom(ctx).Verified() {
 			return errAnonymousMemory, true
@@ -289,6 +360,14 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// memoryUserID is the user id a session's memory names, empty when it names none.
+func memoryUserID(memory *SessionMemory) string {
+	if memory == nil {
+		return ""
+	}
+	return value(memory.UserId)
 }
 
 // registerSessionCreate declares the operations served in session_create.go.

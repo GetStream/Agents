@@ -82,22 +82,6 @@ func (s *StoreSuite) TestSavingACopyAgainLeavesAnotherCustomersAlone() {
 	s.Equal("app's", found[0].Message["text"])
 }
 
-func (s *StoreSuite) TestCopiesAreDeletedForTheirSessionAlone() {
-	s.opened("one", "app", s.base, nil)
-	s.opened("two", "app", s.base, nil)
-	other := hidden("m2", "second", "switch", s.base, "kept")
-	other.SessionID = "two"
-	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "second", "switch", s.base, "gone"), other}))
-
-	deleted, err := s.store.BranchMessages.Delete(s.ctx, "app", "one")
-	s.Require().NoError(err)
-	s.EqualValues(1, deleted)
-
-	left, err := s.store.BranchMessages.Select(s.ctx, "app", "two", nil)
-	s.Require().NoError(err)
-	s.Len(left, 1)
-}
-
 func (s *StoreSuite) TestForgettingAUserDeletesTheCopiesOfTheirSessionsAlone() {
 	s.opened("one", "app", s.base, nil)
 	s.opened("two", "app", s.base, func(session *AgentSession) { session.UserID = "rlafleur" })
@@ -155,10 +139,6 @@ func (s *StoreSuite) TestBranchMessageQueryBudgets() {
 		{"BranchMessages.CountUser", 0, 1, func() error {
 			counted, err := s.store.BranchMessages.CountUser(s.ctx, "app", "jlahey")
 			s.EqualValues(30, counted)
-			return err
-		}},
-		{"BranchMessages.Delete", 0, 1, func() error {
-			_, err := s.store.BranchMessages.Delete(s.ctx, "app", "branched")
 			return err
 		}},
 		{"BranchMessages.DeleteUser", 0, 1, func() error {

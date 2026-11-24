@@ -113,9 +113,7 @@ func (r *BusinessProfiles) Upsert(ctx context.Context, profile *BusinessProfile)
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	profile.CreatedAt, profile.UpdatedAt = now, now
-	if profile.VerificationDocuments == nil {
-		profile.VerificationDocuments = []string{}
-	}
+	profile.VerificationDocuments = orEmpty(profile.VerificationDocuments)
 	_, err := r.store.global.NewInsert().Model(profile).
 		On("CONFLICT (customer_id) DO UPDATE").
 		Set("legal_business_name = EXCLUDED.legal_business_name").
