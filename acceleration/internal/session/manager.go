@@ -2593,6 +2593,10 @@ func memoryFailed(ctx context.Context, err error) error {
 
 // newID is a handle for an agent or a turn. It is random rather than sequential because it
 // is the only thing standing between two customers who both guessed at an id.
+// NewAgentID is a fresh agent id, which nobody chose, for a session that must not be keyed under
+// an id its caller picked.
+func NewAgentID() string { return newID() }
+
 func newID() string {
 	raw := make([]byte, 16)
 	// rand.Read on crypto/rand never returns an error, which is why the result is not
