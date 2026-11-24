@@ -4,6 +4,7 @@ package api
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -133,6 +134,27 @@ func (s *SessionEventsSuite) TestTheSocketCanMakeTheAgentSpeak() {
 		}
 		return false
 	}, settleFor, 5*time.Millisecond, "the socket could not make the agent talk")
+}
+
+func (s *SessionEventsSuite) TestAUsersDeviceCannotMakeTheAgentSpeakWordsTheModelDidNotChoose() {
+	said := "one moment, " + s.utils.uuid()
+	owner := s.data.createUser()
+	backend := s.serverClient.actingFor(owner)
+	opened := backend.createSession(CreateSessionRequest{StartVoice: pointerTo(true)})
+	watching := owner.opens("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{"type": "say", "text": said}))
+
+	refused := s.await(watching, "error")
+	s.Equal("command", refused["context"])
+	s.Contains(refused["error"], "server-side only")
+	// Speech reaches the voice asynchronously: a line said after it shows the refused one never came.
+	next := "next, " + s.utils.uuid()
+	s.Require().Equal(http.StatusNoContent, backend.do(http.MethodPost,
+		"/v1/agents/sessions/"+opened.Id+"/say", SayRequest{Text: next}, nil))
+	s.Require().Eventually(func() bool { return slices.Contains(s.voice.spoken(), next) },
+		settleFor, 5*time.Millisecond)
+	s.NotContains(s.voice.spoken(), said, "a refused say never reaches the voice")
 }
 
 func (s *SessionEventsSuite) TestTheCallDoesNotOutliveASocketThatEndsIt() {
