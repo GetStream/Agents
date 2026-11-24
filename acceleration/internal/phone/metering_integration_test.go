@@ -875,7 +875,7 @@ func (s *MeteringSuite) TestANumberBoughtWithoutItsRowIsRecordedByTheSweep() {
 	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
 	s.Require().ErrorIs(err, store.ErrNoNumber)
 	month := s.row(ModelNumber)
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -897,7 +897,7 @@ func (s *MeteringSuite) TestANumberGivenBackWithoutItsReleaseIsReleasedByTheSwee
 	returned := time.Now()
 	_, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.Require().NoError(err, "the vendor has it back, and the row still holds it")
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -920,7 +920,7 @@ func (s *MeteringSuite) TestANumberBoughtWhoseAnswerWasLostIsRecordedByTheSweep(
 	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Message: "no answer", Cause: context.DeadlineExceeded}
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
 	s.Require().Error(err)
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -945,7 +945,7 @@ func (s *MeteringSuite) TestANumberGivenBackWhoseAnswerWasAFailureIsReleasedByTh
 	s.vendor.holds = map[string]bool{s.e164: true}
 	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusBadGateway}
 	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err := s.service.SweepOrders(s.ctx)
 
@@ -962,7 +962,7 @@ func (s *MeteringSuite) TestANumberTheVendorStillHoldsAfterAFailedReleaseStaysHe
 	s.vendor.releaseErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusServiceUnavailable}
 	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
 	s.Require().Equal(1, s.orders())
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err := s.service.SweepOrders(s.ctx)
 
@@ -983,7 +983,7 @@ func (s *MeteringSuite) TestAnOrderAVendorCannotSettleIsKeptAndNotAskedAboutEver
 	s.Require().Error(err)
 	// The vendor as one that has no NumberFinder.
 	s.registry.Register(s.vendor.vendor, func() (Provider, error) { return struct{ Provider }{s.vendor}, nil })
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 	s.Require().NoError(err)
@@ -1007,7 +1007,7 @@ func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber
 	s.Require().Error(err)
 	s.vendor.err = nil
 	s.Require().Equal(1, s.orders())
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -1022,7 +1022,7 @@ func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber
 func (s *MeteringSuite) TestAPurchaseFromAVendorNotImplementedLeavesNoOrder() {
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: "bics", E164: aNumber(), Owner: s.owner()})
 	s.Require().ErrorIs(err, ErrNotImplemented)
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -1053,6 +1053,17 @@ func (s *MeteringSuite) TestAPurchaseTheVendorCannotTakeAsAskedLeavesNoOrder() {
 }
 
 // orders counts the customer's orders still to settle.
+// ordersSettle lets this customer's orders get old enough to settle: on the suite's clock, which
+// stamps them, and on Postgres's, which a sweep's claim judges them by.
+func (s *MeteringSuite) ordersSettle() {
+	settled := orderSettles + time.Minute
+	s.clock.advance(settled)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.PhoneNumberOrder)(nil)).
+		Set("next_attempt_at = next_attempt_at - make_interval(secs => ?)", settled.Seconds()).
+		Where("customer_id = ?", s.customer).Exec(s.ctx)
+	s.Require().NoError(err)
+}
+
 func (s *MeteringSuite) orders() int {
 	count, err := s.store.GlobalDB().NewSelect().Model((*store.PhoneNumberOrder)(nil)).
 		Where("customer_id = ?", s.customer).Count(s.ctx)

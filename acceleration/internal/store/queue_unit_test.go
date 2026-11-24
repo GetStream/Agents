@@ -17,6 +17,7 @@ func TestEveryQueuesModelHasItsKeyAndAttempts(t *testing.T) {
 		reflect.TypeFor[ChannelInbound]():              channelInbounds,
 		reflect.TypeFor[ImageJob]():                    imageJobs,
 		reflect.TypeFor[ConnectionEventSubscription](): connectionEventSubscriptions,
+		reflect.TypeFor[PhoneNumberOrder]():            phoneNumberOrders,
 	} {
 		table := tables.Get(model)
 		require.Contains(t, table.FieldMap, q.key, q.name)
