@@ -317,6 +317,23 @@ func (s *ProjectTagSuite) TestARowFromBeforeIsTaggedByWhoOpenedIt() {
 	s.Equal([]string{"alpha"}, s.answered(owner, s.fork(owner, backends.Id, ForkSessionRequest{}).Id))
 }
 
+// Carried on, a row from before is given the tag it reads as.
+func (s *ProjectTagSuite) TestACarriedOnRowFromBeforeSaysItsProjectTag() {
+	owner := s.data.createUser()
+	backend := s.serverClient.actingFor(owner)
+	backends, devices := s.open(backend, "alpha"), s.open(owner, "alpha")
+	for id, want := range map[string]string{backends.Id: "alpha", devices.Id: ""} {
+		s.fromBefore(id)
+		s.reopened(backend, id)
+		s.closeOn(s.manager, id)
+
+		row, err := s.store.Sessions.Get(context.Background(), s.customerID(), id)
+		s.Require().NoError(err)
+		s.Require().NotNil(row.ProjectTag)
+		s.Equal(want, *row.ProjectTag)
+	}
+}
+
 func (s *ProjectTagSuite) TestAForksRowFromBeforeIsNotTagged() {
 	owner := s.data.createUser()
 	backend := s.serverClient.actingFor(owner)

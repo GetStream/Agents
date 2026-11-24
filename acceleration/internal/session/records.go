@@ -699,7 +699,10 @@ func sessionRow(created *Session) store.AgentSession {
 	row.CallerKind = string(spec.CallerKind)
 	row.APIKey, row.UsageCategories = spec.Attribution.APIKey, spec.Attribution.UsageCategories
 	row.Team = usage.Team(spec.Attribution.UsageCategories)
-	row.ProjectTag = new(spec.ProjectTag)
+	// No other row says a new session's, a fork's among them.
+	if !spec.projectTagUnsure || spec.Reopened.IsZero() {
+		row.ProjectTag = new(spec.ProjectTag)
+	}
 	// What opens the session's memory (Manager.Create), so a delete knows whether there is
 	// anything in the memory store to forget.
 	row.Remembers = new(spec.Memory.UserID != "")

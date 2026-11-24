@@ -188,6 +188,9 @@ type Spec struct {
 	ProjectTag string
 	// tagged is whether Tags holds ProjectTag because it was merged in, not spelled out.
 	tagged bool
+	// projectTagUnsure is whether ProjectTag is a guess made for want of a shard's answer
+	// (store.AgentSession.ProjectTagUnsure), which the session's row is not given.
+	projectTagUnsure bool
 	// Custom is whatever the caller wants to remember about the session, handed back
 	// untouched and never read here. A field this package interpreted would be a field it
 	// could break.
@@ -747,7 +750,7 @@ func (s *Spec) NameProject(project *string, kind auth.Kind) {
 
 // KeepProject sets the project as a session's row keeps it.
 func (s *Spec) KeepProject(row store.AgentSession) {
-	s.Project, s.ProjectTag = row.Project, row.TaggedProject()
+	s.Project, s.ProjectTag, s.projectTagUnsure = row.Project, row.TaggedProject(), row.ProjectTagUnsure
 }
 
 // Written is the spec once voice is stopped: on no call, and on one model, as Normalize

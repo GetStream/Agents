@@ -517,6 +517,58 @@ func (s *StoreSuite) TestACarriedOnSessionKeepsItsProjectTag() {
 	}
 }
 
+// A row from before the project tag was kept is given it once, as the session is carried on.
+func (s *StoreSuite) TestACarriedOnRowFromBeforeIsGivenItsProjectTag() {
+	s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}))
+
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("alpha") })
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(found.ProjectTag)
+	s.Equal("alpha", *found.ProjectTag)
+}
+
+// Only a row carried on before the project tag was kept asks the other shards, no longer than
+// one that never answers may take, and until it is carried on again.
+func (s *StoreSuite) TestASilentShardDoesNotHoldASessionsRead() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	asks := &AgentSession{ID: "asks", CustomerID: "app", Project: "alpha", CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, asks))
+	none := &AgentSession{ID: "none", CustomerID: "app", CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, none))
+	once := &AgentSession{ID: "once", CustomerID: "app", Project: "alpha", CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, once))
+	took := func(id string) (AgentSession, time.Duration) {
+		began := time.Now()
+		found, err := down.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Equal("alpha", found.TaggedProject())
+		return found, time.Since(began)
+	}
+
+	found, held := took("asks")
+	s.Less(held, 3*time.Second)
+	s.True(found.ProjectTagUnsure)
+	found, held = took("once")
+	s.Less(held, time.Second)
+	s.False(found.ProjectTagUnsure)
+
+	began := time.Now()
+	_, err := down.Sessions.Get(s.ctx, "app", "none")
+	s.Require().NoError(err)
+	s.Less(time.Since(began), time.Second, "a session with no project has no tag to ask for")
+
+	asks.ProjectTag = new("alpha")
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, asks))
+	_, held = took("asks")
+	s.Less(held, time.Second, "it says its tag now")
+}
+
 // A router of the release before opens a session without saying its project tag, so the kind of
 // caller that opened it says, unless it is a fork.
 func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {

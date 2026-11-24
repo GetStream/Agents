@@ -106,11 +106,13 @@ type AgentSession struct {
 	Description string `bun:"description,notnull"`
 	// Project is what the conversation belongs to.
 	Project string `bun:"project,notnull"`
-	// ProjectTag is the project the session's usage is tagged with, the last one a server-side
-	// caller named, which a device's fork may have named another Project over. Empty for none.
-	// Written as the session opens and never changed. Nil, as on a row made before it was kept,
-	// is not known (TaggedProject).
+	// ProjectTag is the project the session's usage is tagged with unless its config's tags, or
+	// explicit ones, name another: the last a server-side caller named, which a device's fork may
+	// have named another Project over. Empty for none. Written as the session opens, or is carried
+	// on from a row made before it was kept, where it is nil (TaggedProject), and never changed.
 	ProjectTag *string `bun:"project_tag"`
+	// ProjectTagUnsure is whether ProjectTag is nil because a shard that may say it did not answer.
+	ProjectTagUnsure bool `bun:"-"`
 	// Custom is the caller's own, handed back untouched and never read by the router.
 	Custom          map[string]any  `bun:"custom,type:jsonb,nullzero"`
 	ModelOverwrites ModelOverwrites `bun:"model_overwrites,type:jsonb,nullzero"`
@@ -182,7 +184,7 @@ func (s *AgentSession) Validate() error {
 		done()
 }
 
-// TaggedProject is the project the session's usage is tagged with, empty for none. For a row
+// TaggedProject is what ProjectTag says, empty for none. For a row
 // from before it was kept it is the session's project if a server-side caller opened it, except
 // for a fork: its project may be its parent's, which anybody may have named.
 func (s *AgentSession) TaggedProject() string {
@@ -363,6 +365,7 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 			// remembered before is still in the store, so once true it stays true. Not known
 			// stays not known: NULL OR false is NULL.
 			Set("remembers = ?TableAlias.remembers OR saved.remembers").
+			Set("project_tag = COALESCE(?TableAlias.project_tag, saved.project_tag)").
 			Where("?TableAlias.customer_id = saved.customer_id").
 			Where("?TableAlias.id = saved.id").
 			// A write of a run opened before the one the row holds is late, from a router that held
@@ -676,23 +679,27 @@ func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession
 
 // keepProjectTag gives a row a router of the release before wrote, carrying the session on from
 // another shard, the project tag an earlier run's row there has. A row opened here once, or one
-// that says its tag, is read no further, and a shard that is down leaves it not known.
+// that says its tag, is read no further, and carrying the session on stores the tag (Upsert). A
+// shard that does not answer leaves it unsure.
 func (r *Sessions) keepProjectTag(ctx context.Context, session *AgentSession) {
-	if session.ProjectTag != nil || session.Project == "" || len(r.store.peers) == 0 || !session.OpenedAt.After(session.CreatedAt) {
+	if session.ProjectTag != nil || len(r.store.peers) == 0 || !session.OpenedAt.After(session.CreatedAt) ||
+		session.Project == "" && session.ForkedFrom == "" {
 		return
 	}
-	tag, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (*string, error) {
-		var tag *string
-		err := db.NewSelect().Model((*AgentSession)(nil)).Column("project_tag").
-			Where("id = ?", session.ID).
-			Where("customer_id = ?", session.CustomerID).
-			Where("project_tag IS NOT NULL").
-			Scan(ctx, &tag)
-		return tag, err
-	})
-	if err == nil {
-		session.ProjectTag = tag
-	}
+	tags, failed := answeringShards(ctx, r.store, "project tag", peerReadTimeout, func(tag *string) bool { return tag != nil },
+		func(ctx context.Context, db bun.IDB) (*string, error) {
+			var tag *string
+			err := db.NewSelect().Model((*AgentSession)(nil)).Column("project_tag").
+				Where("id = ?", session.ID).
+				Where("customer_id = ?", session.CustomerID).
+				Scan(ctx, &tag)
+			if errors.Is(err, sql.ErrNoRows) {
+				err = nil
+			}
+			return tag, err
+		})
+	session.ProjectTag = cmp.Or(tags...)
+	session.ProjectTagUnsure = session.ProjectTag == nil && cmp.Or(failed...) != nil
 }
 
 // ConversationPin is the Stream app a customer's conversation was kept in, read off the

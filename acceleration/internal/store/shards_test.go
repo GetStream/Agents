@@ -221,6 +221,37 @@ func (s *ShardedStoreSuite) TestASessionTheReleaseBeforeCarriedOnElsewhereKeepsI
 	}
 }
 
+// A device's fork naming no project has its backend's tag all the same.
+func (s *ShardedStoreSuite) TestAForkNamingNoProjectCarriedOnElsewhereKeepsItsProjectTag() {
+	opened := s.base.Add(time.Hour)
+	left := AgentSession{ID: "fork", CustomerID: "app", ForkedFrom: "parent", ProjectTag: new("alpha"), CreatedAt: s.base, OpenedAt: s.base}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &left))
+	carried := AgentSession{ID: "fork", CustomerID: "app", ForkedFrom: "parent", CreatedAt: s.base, OpenedAt: opened}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &carried))
+	s.Require().NoError(s.other.Sessions.Supersede(s.ctx, "app", "fork", opened))
+
+	for _, store := range []*Store{s.store, s.other} {
+		found, err := store.Sessions.Get(s.ctx, "app", "fork")
+		s.Require().NoError(err)
+		s.Equal("alpha", found.TaggedProject())
+		s.False(found.ProjectTagUnsure)
+	}
+}
+
+func (s *ShardedStoreSuite) TestAProjectTagFoundWhileAThirdShardIsDownIsSure() {
+	opened := s.base.Add(time.Hour)
+	left := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", ProjectTag: new("beta"), CreatedAt: s.base, OpenedAt: s.base}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &left))
+	carried := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", CreatedAt: s.base, OpenedAt: opened}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &carried))
+
+	found, err := s.withAShardDown(s.other.shardDSN, s.shardDSN).Sessions.Get(s.ctx, "app", "one")
+
+	s.Require().NoError(err)
+	s.Equal("beta", found.TaggedProject())
+	s.False(found.ProjectTagUnsure)
+}
+
 func (s *ShardedStoreSuite) TestAnotherSessionsProjectTagIsNotASessionsOwn() {
 	for _, theirs := range []AgentSession{{ID: "one", CustomerID: "globex"}, {ID: "two", CustomerID: "app"}} {
 		theirs.Project, theirs.ProjectTag, theirs.CreatedAt = "alpha", new("alpha"), s.base
@@ -233,6 +264,7 @@ func (s *ShardedStoreSuite) TestAnotherSessionsProjectTagIsNotASessionsOwn() {
 
 	s.Require().NoError(err)
 	s.Empty(found.TaggedProject())
+	s.False(found.ProjectTagUnsure, "every shard answered")
 }
 
 // Not known while the shard that says is down: the session is found all the same.
@@ -244,6 +276,7 @@ func (s *ShardedStoreSuite) TestASessionsProjectTagInAShardThatIsDownFailsNoRead
 
 	s.Require().NoError(err)
 	s.Equal("alpha", found.TaggedProject())
+	s.True(found.ProjectTagUnsure)
 }
 
 func (s *ShardedStoreSuite) TestASupersedeTriedAgainAfterAShardFailedTakesWhatTheEarlierRowSaid() {

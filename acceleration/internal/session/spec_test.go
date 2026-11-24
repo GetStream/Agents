@@ -467,6 +467,21 @@ func (s *SpecSuite) TestAProjectIsAsShortAsATag() {
 	s.NoError(reopened.Normalize(), "its row is there already")
 }
 
+// A tag guessed while a shard that may say it did not answer is not written over what that
+// shard says. A session that has no other row, such as a fork of one, has the tag it runs with.
+func (s *SpecSuite) TestAGuessedProjectTagIsNotWrittenToACarriedOnSessionsRow() {
+	row := func(unsure bool, reopened time.Time) store.AgentSession {
+		var spec Spec
+		spec.KeepProject(store.AgentSession{Project: "Health", CallerKind: "server", ProjectTagUnsure: unsure})
+		spec.Reopened = reopened
+		return sessionRow(&Session{spec: spec})
+	}
+
+	s.Nil(row(true, time.Now()).ProjectTag)
+	s.Equal(new("Health"), row(false, time.Now()).ProjectTag)
+	s.Equal(new("Health"), row(true, time.Time{}).ProjectTag)
+}
+
 func (s *SpecSuite) TestAnExplicitProjectTagWins() {
 	spec := s.spec(nil)
 	spec.NameProject(new("Health"), auth.KindServer)
