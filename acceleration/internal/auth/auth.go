@@ -180,6 +180,15 @@ func (k Kind) Verified() bool {
 	return k == KindServer || k == KindAuthenticated || k == KindGuest
 }
 
+// Reaches reports whether a caller of kind k going by userID may have what is kept under the
+// same user id for a caller of kind owner. The customer's backend reaches all of it, anybody
+// else what their own kind opened, and a verified user also what a backend opened in their name
+// (session.Owner.Reaches).
+func (k Kind) Reaches(owner Kind, userID string) bool {
+	return k == KindServer || k == owner ||
+		(owner == KindServer && k.Verified() && userID != "")
+}
+
 // Principal is who a request is from. AppID is the tenant: it is what rows are keyed by,
 // and what CustomerFrom reports.
 type Principal struct {

@@ -140,6 +140,81 @@ func (s *SessionOwnershipSuite) TestAGuestReachesItsOwnConversationAndNobodyElse
 	s.assertDoesNotReach(s.data.signedInAs(guest.userID), opened.Id)
 }
 
+func (s *SessionOwnershipSuite) TestAGuestDoesNotCarryOnTheConversationOfTheSignedInUserOfTheSameName() {
+	alice := s.data.createUser()
+
+	s.refusesToCarryOn(s.guestNamed(alice.userID), s.ended(alice))
+}
+
+func (s *SessionOwnershipSuite) TestASignedInUserDoesNotCarryOnTheConversationOfTheGuestOfTheSameName() {
+	guest := s.guestNamed(s.utils.uuid())
+
+	s.refusesToCarryOn(s.data.signedInAs(guest.userID), s.ended(guest))
+}
+
+func (s *SessionOwnershipSuite) TestAGuestCarriesOnItsConversationWithTheTokenItWasMinted() {
+	var minted GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &minted))
+	// The token the router mints a guest carries no role, so it reads as a signed-in user's.
+	page := s.data.signedInAs(minted.Id)
+
+	s.carriesOn(page, s.ended(page))
+}
+
+func (s *SessionOwnershipSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversation() {
+	guest := s.data.createGuest()
+
+	s.carriesOn(guest, s.ended(guest))
+}
+
+func (s *SessionOwnershipSuite) TestAUserAndAGuestCarryOnTheConversationTheirBackendOpenedForThem() {
+	for _, device := range []*testClient{s.data.createUser(), s.data.createGuest()} {
+		s.carriesOn(device, s.ended(s.backendFor(device.userID)))
+	}
+}
+
+func (s *SessionOwnershipSuite) TestABackendCarriesOnTheConversationOfTheUserItNames() {
+	for _, device := range []*testClient{s.data.createUser(), s.data.createGuest()} {
+		s.carriesOn(s.backendFor(device.userID), s.ended(device))
+	}
+}
+
+func (s *SessionOwnershipSuite) TestAnAnonymousCallerCarriesOnItsOwnEndedSession() {
+	someone := s.data.createAnonymous()
+	opened := s.ended(someone)
+
+	s.Require().Equal(http.StatusAccepted, someone.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+		CreateResponseRequest{Text: "Still there?", RequestId: pointerTo(s.utils.uuid())}, nil))
+
+	s.Equal(*opened.ConversationId, value(someone.getSession(opened.Id).ConversationId))
+}
+
+func (s *SessionOwnershipSuite) TestAUserForksTheConversationTheirBackendOpenedForThem() {
+	alice := s.data.createUser()
+	opened := s.ended(s.backendFor(alice.userID))
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated,
+		alice.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork", ForkSessionRequest{}, &forked))
+
+	s.NotEqual(value(opened.ConversationId), value(forked.ConversationId))
+}
+
+func (s *SessionOwnershipSuite) TestABackendReadsTheConversationOfTheUserItNames() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+	asked := s.utils.uuid()
+	s.Require().Equal(http.StatusAccepted, alice.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+		CreateResponseRequest{Text: "Where is my order?", RequestId: &asked}, nil))
+	conversation := "/v1/agents/conversations/" + *opened.ConversationId
+	backend := s.backendFor(alice.userID)
+
+	s.Equal(http.StatusOK, backend.do(http.MethodGet, conversation+"/messages?agent_id="+opened.AgentId, nil, nil))
+	s.Equal(http.StatusOK, backend.do(http.MethodGet, conversation+"/commands/"+asked+"?agent_id="+opened.AgentId, nil, nil))
+}
+
 func (s *SessionOwnershipSuite) TestAnAnonymousCallerReachesTheSessionItOpenedAndNotAnothers() {
 	// Anonymous is a supported way to hold a conversation, not a way to be refused one:
 	// the name is unverified, so it is kept apart from every verified user of the same
@@ -318,6 +393,39 @@ func (s *SessionOwnershipSuite) onACall() CreateSessionRequest {
 // between a guest id and one of the customer's own user ids.
 func (s *SessionOwnershipSuite) guestNamed(name string) *testClient {
 	return s.signedIn(jwt.MapClaims{"user_id": name, "role": "guest"}, auth.AuthTypeJWT, guest, name)
+}
+
+// ended is a written session caller opened, over now.
+func (s *SessionOwnershipSuite) ended(caller *testClient) Session {
+	opened := caller.createSession(textSession(nil))
+	caller.stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	return opened
+}
+
+// backendFor is the app's backend, acting for the user.
+func (s *SessionOwnershipSuite) backendFor(userID string) *testClient {
+	backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
+	backend.header.Set(auth.UserHeader, userID)
+	return backend
+}
+
+// resuming is a written session on the conversation opened was held on.
+func (s *SessionOwnershipSuite) resuming(opened Session) CreateSessionRequest {
+	request := textSession(nil)
+	request.LegacyConversationId = opened.ConversationId
+	return request
+}
+
+func (s *SessionOwnershipSuite) carriesOn(caller *testClient, opened Session) {
+	s.Equal(*opened.ConversationId, value(caller.createSession(s.resuming(opened)).ConversationId))
+}
+
+func (s *SessionOwnershipSuite) refusesToCarryOn(caller *testClient, opened Session) {
+	status, body := caller.call(http.MethodPost, "/v1/agents/sessions", s.resuming(opened))
+
+	s.Equal(http.StatusBadRequest, status, "%s", body)
+	s.Contains(string(body), "another user")
 }
 
 // titled is a written session with a title a search can find it by.

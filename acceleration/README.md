@@ -392,6 +392,12 @@ opening the conversation and handing over the id is the ordinary shape of an int
 Anonymous is left out of that, since an anonymous name is a claim nobody checked and
 allowing it would make guessing whose a session was enough to read it.
 
+A persistent conversation is matched the same way. Its channel records whose it is and which
+sort of caller that was (`support_owner_id`, `support_owner_kind`), and opening it or reading it
+back needs the user id to match and the kind to reach it as above; a backend names the user.
+Another member of a shared conversation has to be a verified user. A channel made before
+`support_owner_kind` has none, and is its owner's by user id alone.
+
 `internal/session` enforces all of this rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be
 wrong in their own way.

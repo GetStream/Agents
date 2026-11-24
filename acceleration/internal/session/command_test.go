@@ -856,7 +856,7 @@ func (s *SessionSuite) TestAVoiceNoteToAConversationNoLongerTheCallersIsRefusedB
 	s.Require().NoError(err)
 	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true,
 		AgentID: agentID, ConversationID: "agent:" + channelID,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}}
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
 	alice, err := s.manager.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	spec.Caller.UserID = "bob"
@@ -1199,7 +1199,7 @@ func (s *SessionSuite) TestSharedConversationHandsOffAfterWatcherDetachAndReject
 	setMembers("alice", "bob")
 	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true,
 		AgentID: agentID, ConversationID: "agent:" + channelID,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}}
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
 	alice, err := s.manager.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	_, detachAlice := alice.Watch()
@@ -1308,6 +1308,43 @@ func (s *SessionSuite) TestAVoiceSessionRestoresChatHistoryWithoutPersisting() {
 		{Role: llm.User, Content: "The project name is Nimbus"},
 		{Role: llm.Assistant, Content: "Hello."},
 	}, voice.current().History())
+}
+
+func (s *SessionSuite) TestAVoiceSessionOfAnotherKindOfCallerRestoresNoHistory() {
+	s.persists()
+	spec := s.writtenBy(auth.KindAuthenticated)
+	spec.Text, spec.PersistConversation, spec.CallID = false, false, "athv-nimbus"
+	spec.STTTarget, spec.TTSTarget = "en-low-latency", "low-latency"
+	spec.CallerKind = auth.KindGuest
+
+	_, err := s.manager.Create(s.ctx, spec)
+	s.ErrorContains(err, "another user")
+}
+
+func (s *SessionSuite) TestAForkByAnotherKindOfCallerRecallsNothing() {
+	s.persists()
+	parent := s.writtenBy(auth.KindAuthenticated)
+	fork := parent
+	fork.AgentID, fork.ConversationID = "fork", ""
+	fork.Recall = &Recall{ConversationID: parent.ConversationID, AgentID: parent.AgentID}
+
+	_, err := s.manager.Create(s.ctx, fork)
+	s.Require().NoError(err)
+	fork.CallerKind = auth.KindGuest
+	_, err = s.manager.Create(s.ctx, fork)
+	s.ErrorContains(err, "another user")
+}
+
+// writtenBy is the spec of a written conversation employee-1, a caller of kind, opened, which
+// no session holds.
+func (s *SessionSuite) writtenBy(kind auth.Kind) Spec {
+	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true, AgentID: "test-agent",
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"}, CallerKind: kind}
+	written, err := s.manager.Create(s.ctx, spec)
+	s.Require().NoError(err)
+	spec.ConversationID = written.Spec().ConversationID
+	s.Require().NoError(written.Close())
+	return spec
 }
 
 func (s *SessionSuite) TestACommandRunningWhenTheRouterStopsIsLeftInterrupted() {

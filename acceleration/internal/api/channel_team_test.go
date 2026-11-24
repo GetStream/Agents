@@ -24,7 +24,7 @@ import (
 var (
 	channelFieldsBefore = []string{"created_by_id", "custom", "members"}
 	channelCustomBefore = []string{
-		"plan", "support_agent_id", "support_customer_id", "support_memory_scope", "support_owner_id", "support_trigger",
+		"plan", "support_agent_id", "support_customer_id", "support_memory_scope", "support_owner_id", "support_owner_kind", "support_trigger",
 	}
 )
 

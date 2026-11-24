@@ -564,6 +564,23 @@ func (s *GuestsSuite) TestAClaimedGuestsConversationIsTheAccountsByListAndById()
 	s.Equal(http.StatusOK, account.do(http.MethodGet, "/v1/agents/sessions/"+talked, nil, nil), "and opens it by id")
 }
 
+func (s *GuestsSuite) TestAClaimedGuestKeepsItsConversationAndTheAccountReadsItBack() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talking := s.asGuest(guest)
+	opened := talking.createSession(textSession(nil))
+	talking.stopSession(opened.Id)
+	s.Require().NoError(s.manager.FlushRecords(context.Background()))
+	s.claim(guest, account.userID)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	resumed := talking.createSession(resume)
+
+	s.Require().NotNil(opened.ConversationId)
+	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
+	s.Equal(opened.Id, account.getSession(opened.Id).Id)
+}
+
 func (s *GuestsSuite) TestAClaimedGuestsScheduledTaskIsListedToTheAccount() {
 	guestID, account := s.recordGuest(), s.data.createUser()
 	task := s.scheduledFor(guestID, auth.KindGuest)

@@ -532,6 +532,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		spec.ConversationID, spec.Dispatched, spec.HandedOutBy = cid, true, by
 		ctx = persistent.RouterOpensDispatched(ctx, cid)
 	}
+	ctx = persistent.WithCallerKind(ctx, spec.CallerKind)
 	var conv *persistent.Conversation
 	var previous []llm.Message
 	if m.options.ResumeHistories != nil {
@@ -1372,8 +1373,7 @@ func (o Owner) Reaches(other Owner) bool {
 	if o.UserID != other.UserID {
 		return false
 	}
-	return o.Kind == other.Kind ||
-		(other.Kind == auth.KindServer && o.Kind.Verified() && o.UserID != "")
+	return o.Kind.Reaches(other.Kind, o.UserID)
 }
 
 // reachedKinds is the kinds of caller whose sessions under this owner's user id the owner
