@@ -31,10 +31,13 @@ const (
 )
 
 const (
-	stepOne          = "step_1"
-	maxAttempts      = 10
-	MaxGoal          = 2000
-	MaxVoicemail     = 1000
+	stepOne      = "step_1"
+	maxAttempts  = 10
+	MaxGoal      = 2000
+	MaxVoicemail = 1000
+	// MaxDelayMinutes is 30 days. A delay in minutes is made a time.Duration in nanoseconds,
+	// which overflows past about 153 million minutes and would land the next attempt in the past.
+	MaxDelayMinutes  = 30 * 24 * 60
 	doNotCallName    = "Do not call"
 	doNotCallMeaning = "The person asked not to be called or contacted again."
 )
@@ -218,6 +221,9 @@ func (st Step) validate() error {
 		}
 		if i > 0 && a.DelayMinutes < 1 {
 			return fmt.Errorf("attempt %d needs a delay of at least 1 minute", i+1)
+		}
+		if a.DelayMinutes > MaxDelayMinutes {
+			return fmt.Errorf("attempt %d has a delay over %d minutes (30 days)", i+1, MaxDelayMinutes)
 		}
 	}
 	switch st.Voicemail.Action {

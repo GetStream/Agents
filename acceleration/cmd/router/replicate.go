@@ -345,8 +345,11 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 			if err := pgStore.ApplyChanges(ctx, customerID, page.Changes); err != nil {
 				return err
 			}
+			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", page.Cursor)
+		}
+		// A page can move the cursor with no change on it: past changes the source leaves out.
+		if page.Cursor > cursor {
 			cursor = page.Cursor
-			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", cursor)
 		}
 		// Saved after every read rather than only one that brought changes: a read is what keeps
 		// the source recording the app's changes (carryOn).

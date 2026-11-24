@@ -201,8 +201,10 @@ func (s *Server) fillCustomModel(ctx context.Context, model *store.CustomModel, 
 // a self-hosted one that allows private endpoints takes any http or https URL.
 func (s *Server) endpointComplaint(ctx context.Context, raw string) error {
 	if !s.privateModels {
+		// One answer for every refusal: egress's own errors tell a name that does not resolve
+		// from one that resolves to a private address.
 		if err := egress.ValidatePublicHTTPSURL(ctx, raw); err != nil {
-			return invalidRequest("base_url must be a public https URL: " + err.Error())
+			return invalidRequest("base_url must be a public https URL without userinfo, query or fragment")
 		}
 		return nil
 	}
@@ -352,7 +354,7 @@ type CustomModelRequest struct {
 	BaseUrl                string    `json:"base_url" doc:"The endpoint root, up to and including /v1, that chat completions are posted under." minLength:"1" example:"https://model-abc123.api.baseten.co/environments/production/sync/v1"`
 	Model                  string    `json:"model" doc:"The id the endpoint serves the weights under." minLength:"1" example:"Qwen/Qwen3.8-27B"`
 	ApiKey                 *string   `json:"api_key,omitempty" doc:"Sent as a bearer token. Stored sealed and never returned. Left out of an update keeps the one stored; empty removes it." writeOnly:"true"`
-	ContextWindow          *int64    `json:"context_window,omitempty" doc:"Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown." minimum:"0"`
+	ContextWindow          *int64    `json:"context_window,omitempty" doc:"Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown." minimum:"0"`
 	InputModalities        *[]string `json:"input_modalities,omitempty" doc:"Input kinds beyond text the model accepts, e.g. image."`
 	PerMillionInputTokens  *float64  `json:"per_million_input_tokens,omitempty" doc:"What the host bills per million input tokens in USD, so usage can say what a conversation cost. Omitted is free." minimum:"0"`
 	PerMillionOutputTokens *float64  `json:"per_million_output_tokens,omitempty" doc:"What the host bills per million output tokens in USD. Omitted is free." minimum:"0"`

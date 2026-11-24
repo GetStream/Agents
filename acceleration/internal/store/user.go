@@ -116,8 +116,10 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 		// Read through the client-side cache, which is what puts the key under Redis's
 		// tracking: a later claim deleting it drops this entry on every replica holding
 		// one. A Redis that cannot be reached is a slow deployment and not a broken one,
-		// so the answer there is the same as a miss.
-		found, err := redis.DoCache(ctx, redis.B().Get().Key(name).Cache(), userTTL).ToString()
+		// so the answer there is the same as a miss, within cacheWait.
+		read, cancel := context.WithTimeout(ctx, cacheWait)
+		found, err := redis.DoCache(read, redis.B().Get().Key(name).Cache(), userTTL).ToString()
+		cancel()
 		switch {
 		case err == nil && found != "" && settles(found, sighting):
 			r.seen.Keep(customerID, userID, found, time.Time{})
@@ -143,7 +145,10 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 
 	if redis != nil {
 		set := redis.B().Set().Key(name).Value(sighting).Ex(userTTL).Build()
-		if err := redis.Do(ctx, set).Error(); err != nil {
+		write, cancel := context.WithTimeout(ctx, cacheWait)
+		err := redis.Do(write, set).Error()
+		cancel()
+		if err != nil {
 			slog.Default().Error("could not cache a user in redis",
 				"customer", customerID, "user", userID, "error", err)
 		}
@@ -203,6 +208,16 @@ func (r *Users) Forget(ctx context.Context, customerID, userID string) {
 	if err := redis.Do(ctx, redis.B().Del().Key(userKey(customerID, userID)).Build()).Error(); err != nil {
 		slog.Default().Error("could not drop a cached user",
 			"customer", customerID, "user", userID, "error", err)
+	}
+}
+
+// forgetKeys drops from this process the users named among keys a write has just deleted
+// (Store.forget), at once, as Forget does; with no Redis, nothing else would.
+func (r *Users) forgetKeys(names []string) {
+	for _, name := range names {
+		if customerID, userID, named := splitUserKey(name); named {
+			r.seen.Remove(customerID, userID)
+		}
 	}
 }
 

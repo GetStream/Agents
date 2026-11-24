@@ -705,8 +705,10 @@ func (r *PriceChanges) Cancel(ctx context.Context, name, reason, actorID, actorN
 		if change.CancelledAt != nil {
 			return nil
 		}
-		now, err := databaseNow(ctx, tx)
-		if err != nil {
+		// The clock now, not the transaction's start: the cancel may have waited for the lock
+		// while the change came into force.
+		var now time.Time
+		if err := tx.QueryRowContext(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
 			return err
 		}
 		if change.Kind != PriceChangeAPI || !change.EffectiveAt.After(now) {

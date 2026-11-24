@@ -8,16 +8,22 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -38,6 +44,10 @@ type RecordedCreateSuite struct {
 	ctx      context.Context
 	store    *store.Store
 	customer string
+	// dsn is the suite's database, which store keeps every table in.
+	dsn string
+	// logged is what the test's managers logged.
+	logged *syncBuffer
 }
 
 func TestRecordedCreateSuite(t *testing.T) {
@@ -50,7 +60,8 @@ func (s *RecordedCreateSuite) SetupSuite() {
 		s.T().Skip("ROUTER_POSTGRES_DSN is not set")
 	}
 	s.ctx = context.Background()
-	db, err := store.Open(testenv.Database(dsn, "recorded_create"))
+	s.dsn = testenv.Database(dsn, "recorded_create")
+	db, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.store = db
@@ -59,6 +70,7 @@ func (s *RecordedCreateSuite) SetupSuite() {
 
 func (s *RecordedCreateSuite) SetupTest() {
 	s.customer = "recorded-" + uuid.NewString()
+	s.logged = &syncBuffer{}
 }
 
 func (s *RecordedCreateSuite) TestAGreetingSlowerThanTheRowIsStored() {
@@ -86,7 +98,7 @@ func (s *RecordedCreateSuite) TestTheStoredToolsKeepSearch() {
 	s.Require().NoError(created.Close())
 	s.Require().NoError(m.records.Flush(s.ctx))
 
-	stored, err := s.store.SessionTools.Get(s.ctx, created.ID())
+	stored, err := s.store.SessionTools.Get(s.ctx, s.customer, created.ID())
 	s.Require().NoError(err)
 	names := make([]string, 0, len(stored))
 	for _, tool := range stored {
@@ -173,9 +185,9 @@ func (s *RecordedCreateSuite) TestTheSpecReadsRaceNoChose() {
 	m := s.manager(newQuietEdge(), &stubTTS{emitter: tts.NewEmitter(64)}, nil)
 	joining := s.joining(m)
 	joining.naming = &naming{titles: s.titler(m, "Refund a late order")}
-	m.sessions[joining.id] = joining
+	m.sessions[joining.Key()] = joining
 	// Shutdown closes what is registered, and this session has no agent to close.
-	s.T().Cleanup(func() { delete(m.sessions, joining.id) })
+	s.T().Cleanup(func() { delete(m.sessions, joining.Key()) })
 	owner := OwnerOf(joining.spec)
 	reads := map[string]func(){
 		"the session row":   func() { sessionRow(joining) },
@@ -205,6 +217,146 @@ func (s *RecordedCreateSuite) TestTheSpecReadsRaceNoChose() {
 	}
 }
 
+// Another router opened the id for another customer while this one joined its call: the
+// check that the id is free ran on both before either row was written. This one's row is
+// refused once its session is held, which ends it and keeps its turns and call off the id.
+func (s *RecordedCreateSuite) TestASessionWhoseIDAnotherCustomerTookOnceItWasHeldIsEnded() {
+	late := s.manager(newQuietEdge(), &stubTTS{emitter: tts.NewEmitter(64)}, nil)
+	release := s.holdWriter(late)
+	other := "other-" + s.customer
+	spec := s.spec(Spec{ID: "shared-" + uuid.NewString(), Greeting: "Hi, I'm listening."})
+	spec.CustomerID = other
+
+	lost := testutil.ToFloat64(recordsLost.WithLabelValues(lostItems))
+	created, err := late.Create(s.ctx, spec)
+	s.Require().NoError(err)
+	s.opened(spec.ID)
+	release()
+
+	s.Require().Eventually(func() bool { return created.State() == Ended }, settleFor, 10*time.Millisecond,
+		"the session on another customer's id is still running")
+	_, held := late.Get(spec.ID, Owner{CustomerID: other, Kind: auth.KindServer})
+	s.False(held)
+	s.Require().NoError(late.records.Flush(s.ctx))
+	s.theOwnersOnly(spec.ID, other)
+	s.Require().NotEmpty(created.conversation(), "the greeting is what a review would read")
+	late.reviews.running.Wait()
+	s.NotContains(s.logged.String(), "review the call", "a session with no row of its own is reviewed")
+	s.Equal(EndClosed, created.EndedFor(), "the refused session ends as closed")
+	s.Equal(1, strings.Count(s.logged.String(), `level=WARN msg="ending a session whose id another customer's session has"`),
+		"the refusal is logged once, at WARN")
+	s.NotContains(s.logged.String(), "could not record the session starting", "and not as a write that failed")
+	s.Equal(lost, testutil.ToFloat64(recordsLost.WithLabelValues(lostItems)), "the refused session's items are not counted as lost")
+}
+
+// A carry-on skips the check that the id is free, so its row can be refused as a new
+// session's is, by another customer's written on another shard meanwhile.
+func (s *RecordedCreateSuite) TestACarriedOnSessionWhoseIDAnotherCustomerTookIsEnded() {
+	other := "other-" + s.customer
+	late := s.chatting(s.store, chattest.Client(s.T()))
+	caller := routing.Caller{UserID: "employee-1"}
+	first, err := late.Create(s.ctx, Spec{CustomerID: other, Text: true, PersistConversation: true,
+		LLMTarget: "en-low-latency", Caller: caller})
+	s.Require().NoError(err)
+	s.Require().NoError(first.Close())
+	s.Require().NoError(late.records.Flush(s.ctx))
+	// Meanwhile the id became the suite customer's, as another shard's row would make it.
+	s.Require().NoError(s.store.Sessions.Delete(s.ctx, other, first.ID()))
+	s.opened(first.ID())
+
+	created, err := late.Create(s.ctx, Spec{ID: first.ID(), CustomerID: other, Text: true, PersistConversation: true,
+		ConversationID: first.Spec().ConversationID, Reopened: first.CreatedAt(), LLMTarget: "en-low-latency", Caller: caller})
+	if !errors.Is(err, ErrSessionExists) {
+		s.Require().NoError(err)
+		s.Require().Eventually(func() bool { return created.State() == Ended }, settleFor, 10*time.Millisecond,
+			"the carried-on session on another customer's id is still running")
+	}
+	_, held := late.Get(first.ID(), Owner{CustomerID: other, Kind: auth.KindServer})
+	s.False(held)
+	s.Require().NoError(late.records.Flush(s.ctx))
+	s.theOwnersOnly(first.ID(), other)
+}
+
+// The same, with the row refused before Create held the session.
+func (s *RecordedCreateSuite) TestASessionWhoseIDAnotherCustomerTookBeforeItWasHeldIsTurnedAway() {
+	joining, joined := make(chan struct{}), make(chan struct{})
+	late := s.manager(gatedEdge{newQuietEdge(), joining, joined}, &stubTTS{emitter: tts.NewEmitter(64)}, nil)
+	other := "other-" + s.customer
+	spec := s.spec(Spec{ID: "shared-" + uuid.NewString(), Greeting: "Hi, I'm listening."})
+	spec.CustomerID = other
+	refused := make(chan error, 1)
+	go func() {
+		_, err := late.Create(s.ctx, spec)
+		refused <- err
+	}()
+	select {
+	case <-joining:
+	case <-time.After(settleFor):
+		s.FailNow("the session never joined its call")
+	}
+	s.opened(spec.ID)
+
+	// Create waits to hold the session until the writer has refused its row.
+	late.mu.Lock()
+	unlock := sync.OnceFunc(late.mu.Unlock)
+	defer unlock()
+	close(joined)
+	s.Require().Eventually(func() bool {
+		return strings.Contains(s.logged.String(), "ending a session whose id another customer's session has")
+	}, settleFor, 10*time.Millisecond, "the row was not refused")
+	unlock()
+
+	select {
+	case err := <-refused:
+		s.Require().ErrorIs(err, ErrSessionExists)
+	case <-time.After(settleFor):
+		s.FailNow("Create did not return")
+	}
+	_, held := late.Get(spec.ID, Owner{CustomerID: other, Kind: auth.KindServer})
+	s.False(held, "the session on another customer's id is held")
+	s.Require().NoError(late.records.Flush(s.ctx))
+	s.theOwnersOnly(spec.ID, other)
+}
+
+// opened writes the suite customer's running session id, as the router that opened it first
+// would.
+func (s *RecordedCreateSuite) opened(id string) {
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{ID: id, CustomerID: s.customer,
+		Title: "the first one", State: store.SessionRunning, CreatedAt: time.Now().UTC()}))
+}
+
+// theOwnersOnly checks that session id is still the suite customer's, running as it was, and
+// that nothing of other's was written under it.
+func (s *RecordedCreateSuite) theOwnersOnly(id, other string) {
+	row, err := s.store.Sessions.Get(s.ctx, s.customer, id)
+	s.Require().NoError(err)
+	s.Equal(store.SessionRunning, row.State)
+	s.Equal("the first one", row.Title)
+	turns, err := s.store.Responses.Select(s.ctx, other, id, store.ResponseFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Empty(turns, "the refused session's turns are under the id")
+	calls, err := s.store.Calls.Select(s.ctx, other, store.CallFilter{SessionID: id})
+	s.Require().NoError(err)
+	s.Empty(calls, "the refused session's call is under the id")
+}
+
+// holdWriter stalls m's writer on a session row another transaction is inserting, until the
+// returned release rolls that transaction back.
+func (s *RecordedCreateSuite) holdWriter(m *Manager) (release func()) {
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	release = sync.OnceFunc(func() { s.NoError(tx.Rollback()) })
+	s.T().Cleanup(release)
+	held := store.AgentSession{ID: uuid.NewString(), CustomerID: s.customer, State: store.SessionRunning, CreatedAt: time.Now().UTC()}
+	_, err = tx.ExecContext(s.ctx, "INSERT INTO agent_sessions (id, customer_id, state) VALUES (?, ?, ?)",
+		held.ID, held.CustomerID, store.SessionRunning)
+	s.Require().NoError(err)
+	m.records.Opened(held, nil, nil)
+	s.Require().Eventually(func() bool { return len(m.records.(*sessionRecorder).queue) == 0 }, settleFor, 5*time.Millisecond,
+		"the writer never took the held row")
+	return release
+}
+
 // joining is a session as Create holds it while the greeting is spoken: handed the recorder,
 // its row not queued yet.
 func (s *RecordedCreateSuite) joining(m *Manager) *Session {
@@ -216,7 +368,7 @@ func (s *RecordedCreateSuite) joining(m *Manager) *Session {
 
 // queued queues row as Create does once the greeting is over, and reads it back.
 func (s *RecordedCreateSuite) queued(m *Manager, joining *Session, row store.AgentSession) store.AgentSession {
-	m.records.Opened(row, nil)
+	m.records.Opened(row, nil, nil)
 	joining.startRecording()
 	s.Require().NoError(m.records.Flush(s.ctx))
 	rows, err := s.store.Sessions.Select(s.ctx, s.customer, store.SessionFilter{Limit: 10})
@@ -252,7 +404,13 @@ func (s *RecordedCreateSuite) spec(spec Spec) Spec {
 // manager is a session manager over the suite's Postgres, joining every call on edge and
 // speaking with voice. A nil finder leaves the deployment without search.
 func (s *RecordedCreateSuite) manager(edge agent.Edge, voice tts.TTS, finder search.Provider) *Manager {
-	logger := slog.New(slog.DiscardHandler)
+	return s.managerOn(s.store, nil, edge, voice, finder)
+}
+
+// managerOn is manager over on, keeping conversations in conversations unless it is nil.
+func (s *RecordedCreateSuite) managerOn(on *store.Store, conversations *persistent.Service, edge agent.Edge, voice tts.TTS,
+	finder search.Provider) *Manager {
+	logger := slog.New(slog.NewTextHandler(s.logged, nil))
 	transcription := sttrouter.NewRegistry()
 	transcription.Register("stub", func(routing.Spec) (stt.STT, error) { return &stubSTT{emitter: stt.NewEmitter(64)}, nil })
 	transcriber, err := sttrouter.New(sttrouter.Options{Config: stubConfig(), Registry: transcription, Logger: logger})
@@ -270,7 +428,7 @@ func (s *RecordedCreateSuite) manager(edge agent.Edge, voice tts.TTS, finder sea
 	s.T().Cleanup(speaker.Close)
 
 	options := ManagerOptions{
-		LLM: reasoner, STT: transcriber, TTS: speaker, Store: s.store, Logger: logger,
+		LLM: reasoner, STT: transcriber, TTS: speaker, Store: on, Conversations: conversations, Logger: logger,
 		Edge: func(context.Context, Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) { return edge, nil },
 	}
 	if finder != nil {
@@ -283,6 +441,67 @@ func (s *RecordedCreateSuite) manager(edge agent.Edge, voice tts.TTS, finder sea
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(m.Shutdown()) })
 	return m
+}
+
+func (s *RecordedCreateSuite) TestAChatReopenedInAnotherShardIsListedByTheRowItRunsIn() {
+	here, there := s.twoShards()
+	chat := chattest.Client(s.T())
+	held := s.chatting(there, chat)
+	first, err := held.Create(s.ctx, Spec{CustomerID: s.customer, Text: true, PersistConversation: true,
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"}})
+	s.Require().NoError(err)
+	s.Require().NoError(first.Close())
+	s.Require().NoError(held.records.Flush(s.ctx))
+	_, err = there.Sessions.Pin(s.ctx, s.customer, first.ID(), true, time.Now().UTC())
+	s.Require().NoError(err)
+
+	carrying := s.chatting(here, chat)
+	reopened, err := carrying.Create(s.ctx, Spec{ID: first.ID(), CustomerID: s.customer, Text: true, PersistConversation: true,
+		ConversationID: first.Spec().ConversationID, Reopened: first.CreatedAt(), LLMTarget: "en-low-latency",
+		Caller: routing.Caller{UserID: "employee-1"}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = reopened.Close() })
+	s.Require().NoError(carrying.records.Flush(s.ctx))
+
+	running, err := here.Sessions.Get(s.ctx, s.customer, first.ID())
+	s.Require().NoError(err)
+	s.NotNil(running.PinnedAt, "the row it runs in lost the pin it had before")
+	left, err := there.Sessions.Get(s.ctx, s.customer, first.ID())
+	s.Require().NoError(err)
+	s.Equal(store.SessionRunning, left.State, "read where it left, it is listed by its closed row there")
+}
+
+// twoShards are the stores of a router of each of two shards, over the suite's database.
+func (s *RecordedCreateSuite) twoShards() (here, there *store.Store) {
+	dsn := os.Getenv("ROUTER_POSTGRES_DSN")
+	a, b := testenv.Database(dsn, "recorded_shard_a"), testenv.Database(dsn, "recorded_shard_b")
+	open := func(own string) *store.Store {
+		router, err := store.OpenShards(store.Options{DSN: s.dsn, ShardDSN: own, Shards: map[string]string{"a": a, "b": b}})
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(router.Close()) })
+		s.Require().NoError(router.Migrate(s.ctx))
+		return router
+	}
+	return open(a), open(b)
+}
+
+// chatting is a session manager over on that keeps its conversations in chat.
+func (s *RecordedCreateSuite) chatting(on *store.Store, chat *getstream.Stream) *Manager {
+	conversations := persistent.NewForChat(chat)
+	s.T().Cleanup(conversations.Close)
+	return s.managerOn(on, conversations, newQuietEdge(), &stubTTS{emitter: tts.NewEmitter(64)}, nil)
+}
+
+// gatedEdge is a call whose join says it began on joining and waits for joined.
+type gatedEdge struct {
+	*quietEdge
+	joining, joined chan struct{}
+}
+
+func (e gatedEdge) Join(ctx context.Context) error {
+	close(e.joining)
+	<-e.joined
+	return e.quietEdge.Join(ctx)
 }
 
 // refusingEdge is a call that will not have the agent.

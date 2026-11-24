@@ -1,3 +1,9 @@
+/// The release this is: the `version` in pubspec.yaml, which a package cannot read when it runs.
+const sdkVersion = '0.7.0';
+
+/// This SDK and its release, as the router reads it: any client named stream-agents- is an SDK.
+const streamClient = 'stream-agents-dart-v$sdkVersion';
+
 /// Hands over a token for the user, and a fresh one when asked again.
 ///
 /// A function rather than a string, because a token expires and a long conversation should
@@ -109,15 +115,23 @@ final class Backend {
   /// `Stream-Auth-Type: jwt` declares a device, and is sent even to an open router, which
   /// would otherwise take a caller with no proxy in front of it for a backend. The key travels
   /// in the query instead, where both Stream's proxy and the router read it.
+  ///
+  /// `X-Stream-Client` names this SDK and its release, which the router counts its requests
+  /// under. A socket carries none: it has only its query.
   Future<Map<String, String>> headers() async {
     if (_byCustomer) {
       return {
         'X-Customer-Id': customerId,
         'Stream-Auth-Type': 'jwt',
+        'X-Stream-Client': streamClient,
         if (userId.isNotEmpty) 'X-Stream-User-Id': userId,
       };
     }
-    return {'Authorization': 'Bearer ${await _token()}', 'Stream-Auth-Type': 'jwt'};
+    return {
+      'Authorization': 'Bearer ${await _token()}',
+      'Stream-Auth-Type': 'jwt',
+      'X-Stream-Client': streamClient,
+    };
   }
 
   /// The URL for a request path, with the query values that are set and the API key, the

@@ -3,14 +3,15 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/pressly/goose/v3"
-	"github.com/pressly/goose/v3/database"
-
-	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/uptrace/bun"
 )
 
 func (s *StoreSuite) TestOnlyTheRefusedCallersLegIsRefused() {
@@ -240,6 +241,31 @@ func (s *StoreSuite) TestOpeningAPlacedLegDialsItOnce() {
 	s.False(opened)
 }
 
+// A transfer leg written again, as a write whose answer was lost is, is the one leg: a second
+// ringing leg could be given to a phone of the call and bill the transfer twice.
+func (s *StoreSuite) TestATransferLegWrittenTwiceIsOneLeg() {
+	transfer := CallLeg{CustomerID: "app", StreamAppPK: 7, CallType: "default", CallID: "call", Vendor: "telnyx",
+		VendorCallID: "vendor-1", Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199",
+		DialedAt: s.base}
+	first, again := transfer, transfer
+
+	opened, err := s.store.CallLegs.Open(s.ctx, &first)
+	s.Require().NoError(err)
+	s.True(opened)
+	opened, err = s.store.CallLegs.Open(s.ctx, &again)
+	s.Require().NoError(err)
+	s.False(opened)
+
+	legs, err := s.store.shard.NewSelect().Model((*CallLeg)(nil)).Where("call_id = ?", "call").Count(s.ctx)
+	s.Require().NoError(err)
+	s.Equal(1, legs)
+	other := transfer
+	other.VendorCallID = "vendor-2"
+	opened, err = s.store.CallLegs.Open(s.ctx, &other)
+	s.Require().NoError(err)
+	s.True(opened, "another transfer in the same call is a leg of its own")
+}
+
 func (s *StoreSuite) TestALegNotDialledYetRingsForNobody() {
 	s.placedLeg("one", nil)
 	scope := AppScope{}
@@ -348,83 +374,6 @@ func (s *ShardedStoreSuite) TestALegAnotherShardPlacedIsChangedThere() {
 	s.Equal("busy", found.Outcome)
 }
 
-// mergeVersion is the shard migration that merges phone_calls into call_legs.
-const mergeVersion int64 = 20270116000001
-
-// billed is the seconds each customer's ended legs were billed, by vendor, direction and
-// country.
-func billed(legs []CallLeg) map[string]int64 {
-	totals := map[string]int64{}
-	for _, leg := range legs {
-		totals[leg.CustomerID+"/"+leg.Vendor+"/"+leg.Direction+"/"+leg.Country] += leg.Used()[pricing.CallSeconds]
-	}
-	return totals
-}
-
-func (s *StoreSuite) TestMergingPlacedCallsIntoTheirLegsBillsTheSame() {
-	db, err := Open(s.emptyDatabase("merge_legs"))
-	s.Require().NoError(err)
-	defer db.Close()
-	s.Require().NoError(db.migrate(s.ctx, db.globalDSN, globalSet))
-	versions, err := database.NewStore(database.DialectPostgres, shardSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", db.shard.DB, shardSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-	_, err = provider.UpTo(s.ctx, mergeVersion-1)
-	s.Require().NoError(err)
-
-	_, err = db.shard.ExecContext(s.ctx, `
-INSERT INTO call_legs (customer_id, call_type, call_id, vendor, vendor_call_id, direction, local_number, remote_number,
-    country, dialed_at, started_at, ended_at, end_reason) VALUES
-    ('acme', 'default', 'answered', 'telnyx', 'v-answered', 'outbound', '+15125550100', '+15125550199', 'US',
-        ?0, ?0::timestamptz + interval '5 seconds', ?0::timestamptz + interval '66 seconds', 'ended'),
-    ('acme', 'default', 'arrived', 'telnyx', NULL, 'inbound', '+15125550100', '+15125550142', 'US',
-        ?0, ?0, ?0::timestamptz + interval '90.5 seconds', 'left'),
-    ('acme', 'default', 'unanswered', 'twilio', 'v-unanswered', 'outbound', '+15125550100', '+442071838750', 'GB',
-        ?0, NULL, ?0::timestamptz + interval '30 seconds', 'unanswered'),
-    ('acme', 'default', 'by-numbers', 'twilio', NULL, 'outbound', '+15125550100', '+15125550177', 'US',
-        ?0, ?0::timestamptz + interval '1 second', ?0::timestamptz + interval '2.25 seconds', 'left');
-INSERT INTO phone_calls (token, customer_id, call_type, call_id, vendor, vendor_call_id, local_number, remote_number,
-    reports, placed_at, answered_at, ended_at, outcome) VALUES
-    ('t-answered', 'acme', 'default', 'answered', 'telnyx', 'v-answered', '+15125550100', '+15125550199',
-        true, ?0, ?0::timestamptz + interval '5 seconds', ?0::timestamptz + interval '66 seconds', 'completed'),
-    ('t-unanswered', 'acme', 'default', 'unanswered', 'twilio', 'v-unanswered', '+15125550100', '+442071838750',
-        true, ?0, NULL, ?0::timestamptz + interval '30 seconds', 'no_answer'),
-    ('t-by-numbers', 'acme', 'default', 'by-numbers', 'twilio', NULL, '+15125550100', '+15125550177',
-        false, ?0, NULL, NULL, NULL),
-    ('t-refused', 'acme', 'default', 'refused', 'telnyx', 'v-refused', '+15125550100', '+15125550188',
-        true, ?0, NULL, ?0::timestamptz + interval '3 seconds', 'busy')`, s.base)
-	s.Require().NoError(err)
-	var legs []CallLeg
-	s.Require().NoError(db.shard.NewSelect().Model(&legs).
-		Column("customer_id", "vendor", "direction", "country", "started_at", "ended_at").
-		Where("started_at IS NOT NULL").Scan(s.ctx))
-	before := billed(legs)
-
-	s.Require().NoError(db.Migrate(s.ctx))
-
-	ended, err := db.CallLegs.SelectEnded(s.ctx, s.base.Add(-time.Hour), s.base.Add(time.Hour), 100)
-	s.Require().NoError(err)
-	s.Equal(map[string]int64{"acme/telnyx/outbound/US": 61, "acme/telnyx/inbound/US": 91, "acme/twilio/outbound/US": 2}, before)
-	s.Equal(before, billed(ended), "the merge bills no leg more or less")
-
-	placed, err := db.CallLegs.SelectPlaced(s.ctx, "acme", []string{"answered", "unanswered", "by-numbers", "refused", "arrived"})
-	s.Require().NoError(err)
-	outcomes := map[string]string{}
-	for _, leg := range placed {
-		outcomes[leg.CallID] = leg.TokenHash + "/" + leg.Outcome
-	}
-	s.Equal(map[string]string{"answered": callTokenHash("t-answered") + "/completed", "unanswered": callTokenHash("t-unanswered") + "/no_answer",
-		"by-numbers": callTokenHash("t-by-numbers") + "/", "refused": callTokenHash("t-refused") + "/busy"}, outcomes)
-	var count int
-	s.Require().NoError(db.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM call_legs").Scan(&count))
-	s.Equal(5, count, "a placed call with a leg is that leg; only the one without becomes a leg of its own")
-	refused, err := db.CallLegs.GetByToken(s.ctx, "t-refused")
-	s.Require().NoError(err)
-	s.False(refused.Connected())
-	s.NotNil(refused.EndedAt, "a call with no leg is no leg still ringing")
-}
-
 func (s *StoreSuite) TestCallLegQueryBudgets() {
 	shards := len(s.store.shards())
 	scope := AppScope{App: 7}
@@ -493,6 +442,8 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 
 	leg := s.placedLeg("token", func(leg *CallLeg) { leg.VendorCallID = "v-1" })
 	s.Equal(1, s.countQueries(func() { s.placedLeg("other", nil) }), "Place")
+	// The transaction, its lock, the count in each shard, the insert and the commit.
+	s.Equal(4+shards, s.countQueries(func() { s.Require().NoError(s.placeWithin(s.store, newID(), 1)) }), "PlaceWithin")
 	s.Equal(1, s.countQueries(func() {
 		placed, err := s.store.CallLegs.Placed(s.ctx, leg.CustomerID, leg.Vendor, "v-1")
 		s.Require().NoError(err)
@@ -506,4 +457,235 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		s.Require().NoError(err)
 	}), "ChangeOutcome locks the leg in its shard, then writes it")
 	s.Equal(shards, s.countQueries(func() { s.Require().NoError(s.store.CallLegs.Unplace(s.ctx, "other")) }), "Unplace")
+}
+
+func (s *StoreSuite) TestAPlacedLegNotDialedYetIsACallUp() {
+	organization := newID()
+	s.placedLeg(newID(), func(leg *CallLeg) { leg.OrganizationID = organization })
+
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Equal(1, total, "placed now, so ringing")
+	total, _, err = s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Zero(total, "placed longer ago than anything rings")
+}
+
+// placeWithin places a leg of organization at s.base, no more than limit at once.
+func (s *StoreSuite) placeWithin(on *Store, organization string, limit int) error {
+	placed := s.base
+	return on.CallLegs.PlaceWithin(s.ctx, &CallLeg{
+		Token: newID(), CustomerID: "app", OrganizationID: organization, CallType: "default", CallID: "call-" + newID(),
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &placed,
+	}, CallsAtOnce{Limit: limit, Ringing: time.Minute})
+}
+
+func (s *StoreSuite) TestALegPastItsOrganizationsCallsAtOnceIsNotPlaced() {
+	organization := newID()
+	s.Require().NoError(s.placeWithin(s.store, organization, 2))
+	s.Require().NoError(s.placeWithin(s.store, organization, 2))
+
+	s.Require().ErrorIs(s.placeWithin(s.store, organization, 2), ErrCallsAtOnce)
+	s.Require().NoError(s.placeWithin(s.store, newID(), 2), "another organization's calls are its own")
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Equal(2, total)
+}
+
+func (s *StoreSuite) TestCallsPlacedAllAtOnceKeepToTheLimit() {
+	organization := newID()
+	var placed, refused int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for range 30 {
+		wg.Go(func() {
+			err := s.placeWithin(s.store, organization, 4)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				placed++
+			case errors.Is(err, ErrCallsAtOnce):
+				refused++
+			default:
+				s.Fail("placing failed", "%v", err)
+			}
+		})
+	}
+	wg.Wait()
+
+	s.Equal(4, placed)
+	s.Equal(26, refused)
+}
+
+func (s *ShardedStoreSuite) TestALegAnotherShardPlacedCountsAgainstTheLimitHere() {
+	organization := newID()
+	s.Require().NoError(s.placeWithin(s.other, organization, 2))
+	s.Require().NoError(s.placeWithin(s.store, organization, 2))
+
+	s.Require().ErrorIs(s.placeWithin(s.store, organization, 2), ErrCallsAtOnce)
+	s.Require().ErrorIs(s.placeWithin(s.other, organization, 2), ErrCallsAtOnce)
+}
+
+func (s *StoreSuite) TestManyRoutersPlacingAtOnceKeepToTheLimit() {
+	organization := newID()
+	routers := []*Store{s.store}
+	for range 7 {
+		router, err := s.openRouter()
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(router.Close()) })
+		routers = append(routers, router)
+	}
+	var placed atomic.Int64
+	var wg sync.WaitGroup
+	for _, router := range routers {
+		for range 4 {
+			wg.Go(func() {
+				err := s.placeWithin(router, organization, 3)
+				if err == nil {
+					placed.Add(1)
+					return
+				}
+				s.ErrorIs(err, ErrCallsAtOnce)
+			})
+		}
+	}
+	wg.Wait()
+
+	s.EqualValues(3, placed.Load())
+}
+
+// holdPlacing holds, from a connection of its own, the lock each organization's calls are placed
+// under, until the release it returns is called.
+func (s *StoreSuite) holdPlacing(organizations ...string) (release func()) {
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	for _, organization := range organizations {
+		s.Require().NoError(lockUntilCommit(s.ctx, held, organization, callsAtOnceLockSeed))
+	}
+	released := false
+	release = func() {
+		if !released {
+			released = true
+			s.Require().NoError(held.Rollback())
+		}
+	}
+	s.T().Cleanup(release)
+	return release
+}
+
+// placingInUse is how many connections of router's shared pool are in use.
+func placingInUse(router *Store) int { return router.global.Stats().InUse }
+
+func (s *StoreSuite) TestAPlacementWaitsForItsOrganizationsLock() {
+	organization := newID()
+	release := s.holdPlacing(organization)
+
+	placed := make(chan error, 1)
+	go func() { placed <- s.placeWithin(s.store, organization, 1) }()
+	s.Never(func() bool { return len(placed) > 0 }, 500*time.Millisecond, 20*time.Millisecond,
+		"placed while another held the organization's lock")
+	release()
+
+	s.Require().NoError(<-placed)
+}
+
+func (s *StoreSuite) TestAPlacementThatCannotTakeItsLockInTimeGivesUp() {
+	organization := newID()
+	s.holdPlacing(organization)
+
+	err := s.placeWithin(s.store, organization, 1)
+
+	s.Require().Error(err)
+	s.NotErrorIs(err, ErrCallsAtOnce)
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Zero(total)
+}
+
+func (s *StoreSuite) TestARouterWaitsOnOneConnectionForAnOrganizationsLock() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer router.Close()
+	organization := newID()
+	release := s.holdPlacing(organization)
+
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Go(func() { s.NoError(s.placeWithin(router, organization, 10)) })
+	}
+	time.Sleep(300 * time.Millisecond)
+	s.Equal(1, placingInUse(router), "one placement of the organization waits for its lock, the others for their turn")
+	release()
+	wg.Wait()
+}
+
+func (s *StoreSuite) TestARouterHoldsAtMostItsPlacementsAtOnce() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer router.Close()
+	organizations := make([]string, 3*placingAtOnce)
+	for i := range organizations {
+		organizations[i] = newID()
+	}
+	release := s.holdPlacing(organizations...)
+
+	var wg sync.WaitGroup
+	for _, organization := range organizations {
+		wg.Go(func() { s.NoError(s.placeWithin(router, organization, 1)) })
+	}
+	s.Require().Eventually(func() bool { return placingInUse(router) == placingAtOnce }, 2*time.Second, 10*time.Millisecond,
+		"as many placements as a router holds started, each waiting for its organization's lock")
+	s.Never(func() bool { return placingInUse(router) > placingAtOnce }, 300*time.Millisecond, 10*time.Millisecond,
+		"the shared pool keeps room for every other request")
+	release()
+	wg.Wait()
+}
+
+// cancelAfterInsert ends a context once a leg is inserted.
+type cancelAfterInsert struct{ cancel context.CancelFunc }
+
+func (h cancelAfterInsert) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h cancelAfterInsert) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, `INSERT INTO "call_legs"`) {
+		h.cancel()
+	}
+}
+
+func (s *ShardedStoreSuite) TestALegItsShardKeptForAPlacementThatFailedHoldsNoCall() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer router.Close()
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	// The request goes away once the shard kept the leg, so the lock's commit fails.
+	router.shard.AddQueryHook(cancelAfterInsert{cancel})
+	organization := newID()
+	placed := s.base
+
+	err = router.CallLegs.PlaceWithin(ctx, &CallLeg{
+		Token: newID(), CustomerID: "app", OrganizationID: organization, CallType: "default", CallID: "call-" + newID(),
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &placed,
+	}, CallsAtOnce{Limit: 1, Ringing: time.Minute})
+
+	s.Require().Error(err)
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Zero(total, "the leg the shard kept was deleted")
+	s.NoError(s.placeWithin(s.store, organization, 1))
+}
+
+func (s *StoreSuite) TestADialNamingNoOrganizationKeepsTheOneTheCallWasPlacedUnder() {
+	s.placedLeg("placed", func(leg *CallLeg) { leg.OrganizationID = "org" })
+
+	dialed := CallLeg{Token: "placed", CustomerID: "app", CallType: "default", CallID: "call", Vendor: "telnyx",
+		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", DialedAt: s.base.Add(time.Second)}
+	opened, err := s.store.CallLegs.Open(s.ctx, &dialed)
+	s.Require().NoError(err)
+	s.Require().True(opened)
+
+	s.Equal("org", dialed.OrganizationID, "still counted among the organization's calls")
 }

@@ -123,6 +123,9 @@ type Endpoint struct {
 	Model string
 	// APIKey is empty for an endpoint that takes none.
 	APIKey string
+	// ContextWindow is how many tokens the endpoint serves the model with, zero when not
+	// known.
+	ContextWindow int64
 	// Client is how requests reach it. On a router tenants share it dials public addresses
 	// only, because the endpoint is whatever a tenant wrote.
 	Client *http.Client
@@ -623,7 +626,7 @@ func (r *Router[P]) Resolve(ctx context.Context, target string, languageHints []
 	}
 
 	if len(matching) == 0 {
-		return nil, stack.Wrap(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ",")))
+		return nil, stack.Wrap(Refused(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ","))))
 	}
 
 	candidates := r.candidates(ctx, matching)

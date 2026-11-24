@@ -326,7 +326,8 @@ func (s *Server) setPhoneNumberAgent(ctx context.Context, request *setPhoneNumbe
 		return nil, errNumberNotAttached
 	}
 	if err != nil {
-		return nil, err
+		// Deleted since configFor read it.
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	held.ConfigID = config.ID
 	return &setPhoneNumberAgentResponse{Body: phoneNumber(held)}, nil
@@ -483,6 +484,11 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
 		logger.Error("could not answer a placed call", "error", err)
+		// The vendor fetches again on a 5xx, by when the shard holding the bridge may answer.
+		if errors.Is(err, store.ErrShardUnanswered) {
+			writeError(w, unavailable("could not read the call's plan, try again"))
+			return
+		}
 		writeError(w, notFound("that call is not waiting to be answered"))
 		return
 	}
@@ -668,6 +674,9 @@ var (
 	errNumberOnItsOwnCall = conflict("Every caller of this number joins one call: attach the number again so each caller gets a session of their own.")
 	errTelephonySuspended = APIError{Type: ErrorTypePermission, Code: codeTelephonySuspended,
 		Message: "This app's telephony is suspended. Contact Stream support."}
+	errVerificationRequired = APIError{Type: ErrorTypePermission, Code: codeVerificationRequired,
+		Message: "Verify your organization in the Stream dashboard to buy phone numbers. " +
+			"If you just did, try again in a minute."}
 )
 
 // clientPhoneFailures are the failures of a phone operation answered in their own words, as
@@ -687,6 +696,9 @@ var clientPhoneFailures = []error{
 func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrSuspended) {
 		return errTelephonySuspended
+	}
+	if errors.Is(err, phone.ErrVerificationRequired) {
+		return errVerificationRequired
 	}
 	// A number, a call and a transfer are all billed, so the organization's money refuses them
 	// as it refuses a model that costs money.
@@ -1014,9 +1026,11 @@ func (s *Server) callApp(ctx context.Context, customerID, callType, callID strin
 // agent's call a call routed under it would join. Session ids are unique across customers.
 // One nobody holds yet is not: a caller may name the session it is about to start.
 func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id string) (bool, error) {
-	if s.sessions != nil && s.sessions.Running(id) {
-		_, own := s.sessions.Get(id, session.Owner{CustomerID: customerID, Kind: auth.KindServer})
-		return !own, nil
+	if s.sessions != nil && s.sessions.Running(customerID, id) {
+		return false, nil
+	}
+	if s.sessions != nil && s.sessions.HeldByAnother(customerID, id) {
+		return true, nil
 	}
 	if s.store == nil {
 		return false, nil

@@ -44,7 +44,7 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 	customer.onDialog = func(id string) { reg.add(id, customer) }
 	stream.onDialog = func(id string) { reg.add(id, stream) }
 
-	call := newCall(customer, stream, log)
+	call := newCall(ctx, customer, stream, log)
 	call.onChange = cfg.OnChange
 	handle(srv, reg, call)
 
@@ -177,7 +177,7 @@ func handle(srv *sipgo.Server, reg *registry, call *Call) {
 		if err := l.readBye(req, tx); err != nil {
 			l.log.Warn("answering BYE failed", "error", err)
 		}
-		ctx, cancel := cleanupContext(context.Background())
+		ctx, cancel := cleanupContext(call.ctx)
 		defer cancel()
 		call.onBye(ctx, l.side)
 	})
@@ -188,7 +188,7 @@ func handle(srv *sipgo.Server, reg *registry, call *Call) {
 			unknown(req, tx)
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(call.ctx, 30*time.Second)
 		defer cancel()
 		forward := func(ctx context.Context, offer []byte) ([]byte, error) {
 			return call.onReinvite(ctx, l.side, offer)
@@ -210,7 +210,7 @@ func handle(srv *sipgo.Server, reg *registry, call *Call) {
 			unknown(req, tx)
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), keepaliveTimeout)
+		ctx, cancel := context.WithTimeout(call.ctx, keepaliveTimeout)
 		defer cancel()
 		contentType := ""
 		if h := req.GetHeader("Content-Type"); h != nil {
@@ -283,11 +283,11 @@ func keepalive(call *Call, l *sipLeg, interval time.Duration) {
 		case <-call.Done():
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), keepaliveTimeout)
+			ctx, cancel := context.WithTimeout(call.ctx, keepaliveTimeout)
 			err := l.keepalive(ctx)
 			cancel()
 			if err != nil {
-				cctx, ccancel := cleanupContext(context.Background())
+				cctx, ccancel := cleanupContext(call.ctx)
 				call.lost(cctx, l.side, err)
 				ccancel()
 				return
