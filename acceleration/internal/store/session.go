@@ -280,7 +280,7 @@ type Sessions struct {
 // running is findable and one the process died during is not simply lost. Saving the same
 // session twice updates the row: a retried write must not become a second conversation. It
 // also opens a text session that ended again, which is how one is carried on under its id.
-// Saving one under an id another customer's row has is ErrIDTaken, and leaves that row alone.
+// Another customer's session of the id is a row of its own, which a save leaves alone.
 //
 // Incognito sessions never get here. The manager does not call this for one, which is what
 // the flag means -- not a row that is hidden, but no row at all.
@@ -366,8 +366,8 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 		if written == 1 {
 			return nil
 		}
-		// Nothing written: the row is another customer's, or this customer's own of a run
-		// opened since, which a late write leaves as it is.
+		// Nothing written: the row is this customer's own of a run opened since, which a late
+		// write leaves as it is, or was deleted since the insert.
 		own, err := r.store.shard.NewSelect().Model((*AgentSession)(nil)).
 			Where("id = ?", session.ID).
 			Where("customer_id = ?", session.CustomerID).

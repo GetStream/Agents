@@ -376,7 +376,8 @@ func (s *StoreSuite) TestAnotherCustomersFinishedTurnDoesNotMoveASessionsClock()
 	s.opened("one", "app", s.base, nil)
 	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
-	// The foreign key is the session id alone, so another customer's turn can name it.
+	// Another customer may have a session of the id, whose turn names it.
+	s.opened("one", "somebody-else", s.base, nil)
 	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "theirs", SessionID: "one", CustomerID: "somebody-else", CreatedAt: s.base}))
 
 	s.Require().NoError(s.store.Responses.Finish(s.ctx, "somebody-else", "theirs", ResponseCompleted, "", s.base.Add(time.Hour)))

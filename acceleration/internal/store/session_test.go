@@ -4,9 +4,7 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +29,7 @@ func (s *StoreSuite) opened(id, customerID string, at time.Time, change func(*Ag
 	}
 	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, session))
 	_, err := s.store.shard.NewUpdate().Model((*AgentSession)(nil)).
-		Set("updated_at = ?", at).Where("id = ?", id).Exec(s.ctx)
+		Set("updated_at = ?", at).Where("customer_id = ?", customerID).Where("id = ?", id).Exec(s.ctx)
 	s.Require().NoError(err)
 	session.UpdatedAt = at
 	return session
@@ -1248,13 +1246,12 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		{"Delete", 0, 2, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
 	})
 
-	// Run twice: only a read by the id alone would tell another customer's row from the
-	// customer's own deleted between the statements, which is inserted again.
+	// Another customer's session of an id is a row of its own, which the insert writes.
 	var err error
-	s.Equal(6, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		err = s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "seeded-00", CustomerID: "another-app", State: SessionRunning})
-	}), "Upsert under another customer's id")
-	s.ErrorIs(err, ErrIDTaken)
+	}), "Upsert of another customer's session of the id")
+	s.NoError(err)
 }
 
 // refusedUnwritten checks err refused a row as invalid and that table holds none whose column is key.
@@ -1301,20 +1298,30 @@ func (s *StoreSuite) TestAnotherCustomersWriteToASessionIdChangesNothing() {
 	}
 }
 
-// Two creates of one id can both find it free, and a reopen does not look: the second save
-// used to write its title, custom data, channel and state into the first customer's row.
-func (s *StoreSuite) TestAnotherCustomerSavingASessionUnderItsIdLeavesTheRowAlone() {
-	s.opened("one", "app", s.base, nil)
+// Two customers may each have a session of one id: each is a row of its own, which the other's
+// saves, reads, lists and closes neither reach nor are refused by.
+func (s *StoreSuite) TestTwoCustomersSessionsOfOneIdAreRowsOfTheirOwn() {
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.Title = "app's" })
 	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
 
-	err = s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "somebody-else", Title: "theirs",
-		Custom: map[string]any{"order": "theirs"}, ConversationID: "agent:theirs", State: SessionClosed})
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "somebody-else", Title: "theirs",
+		Custom: map[string]any{"order": "theirs"}, ConversationID: "agent:theirs", State: SessionRunning, CreatedAt: s.base, OpenedAt: s.base}))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "somebody-else", "one", s.base, s.base.Add(time.Hour), "hangup"))
 
-	s.ErrorIs(err, ErrIDTaken)
 	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Equal(before, after, "app's session is as it was")
+	theirs, err := s.store.Sessions.Get(s.ctx, "somebody-else", "one")
+	s.Require().NoError(err)
+	s.Equal("theirs", theirs.Title)
+	s.NotNil(theirs.ClosedAt)
+	for customer, title := range map[string]string{"app": "app's", "somebody-else": "theirs"} {
+		listed, err := s.store.Sessions.Select(s.ctx, customer, SessionFilter{})
+		s.Require().NoError(err)
+		s.Require().Len(listed, 1, customer)
+		s.Equal(title, listed[0].Title, customer)
+	}
 }
 
 // A sandbox is swept once its session ended, and the sweep read whichever customer's row had
@@ -1359,33 +1366,6 @@ func (s *StoreSuite) TestOneCustomersSavesOfANewSessionAtOnceAllSucceed() {
 	})
 }
 
-// The release after this one keys agent_sessions by customer and id, and builds that index
-// beside the key of the id before it swaps them, while this release still runs. A save naming
-// the id as its conflict failed beside both: on the index it did not name, or deadlocked.
-func (s *StoreSuite) TestOneCustomersSavesOfANewSessionAtOnceAllSucceedBesideAKeyOfCustomerAndId() {
-	_, err := s.store.shard.ExecContext(s.ctx, "CREATE UNIQUE INDEX agent_sessions_customer_id_id_key ON agent_sessions (customer_id, id)")
-	s.Require().NoError(err)
-	s.T().Cleanup(func() {
-		_, err := s.store.shard.ExecContext(s.ctx, "DROP INDEX agent_sessions_customer_id_id_key")
-		s.Require().NoError(err)
-	})
-
-	s.savedAtOnce(func(ctx context.Context, session *AgentSession, _ int) error {
-		return s.store.Sessions.Upsert(ctx, session)
-	})
-}
-
-// A router of the release before saves a session conflicting on its id while this release's
-// run beside it: neither fails the other's.
-func (s *StoreSuite) TestASaveOfTheReleaseBeforeSucceedsBesideThisOnesAtOnce() {
-	s.savedAtOnce(func(ctx context.Context, session *AgentSession, i int) error {
-		if i%2 == 0 {
-			return s.savedAsBefore(ctx, session)
-		}
-		return s.store.Sessions.Upsert(ctx, session)
-	})
-}
-
 // savedAtOnce has one customer save each of ten new sessions from eight places at once, with
 // save, which is told which of the eight it is, and requires every save to succeed.
 func (s *StoreSuite) savedAtOnce(save func(ctx context.Context, session *AgentSession, i int) error) {
@@ -1411,41 +1391,6 @@ func (s *StoreSuite) savedAtOnce(save func(ctx context.Context, session *AgentSe
 	}
 }
 
-// savedAsBefore saves a session as a router of the release before does: conflicting on its id,
-// and updating the customer's own row only.
-func (s *StoreSuite) savedAsBefore(ctx context.Context, session *AgentSession) error {
-	now := time.Now().UTC()
-	session.CreatedAt, session.UpdatedAt, session.State, session.Modality = now, now, SessionRunning, ModalityText
-	session.Custom, session.ConnectorSelections = map[string]any{}, []SessionConnectorSelection{}
-	result, err := s.store.shard.NewInsert().Model(session).
-		On("CONFLICT (id) DO UPDATE").
-		Set("title = EXCLUDED.title").
-		Set("description = EXCLUDED.description").
-		Set("custom = EXCLUDED.custom").
-		Set("conversation_id = EXCLUDED.conversation_id").
-		Set("state = EXCLUDED.state").
-		Set("closed_at = NULL").
-		Set("end_reason = ''").
-		Set("updated_at = EXCLUDED.updated_at").
-		Set("opened_at = EXCLUDED.opened_at").
-		Set("superseded_at = CASE WHEN ?TableAlias.superseded_at > EXCLUDED.opened_at THEN ?TableAlias.superseded_at END").
-		Set("tool_timeout_ms = CASE WHEN ?TableAlias.caller_kind = EXCLUDED.caller_kind " +
-			"THEN EXCLUDED.tool_timeout_ms ELSE ?TableAlias.tool_timeout_ms END").
-		Set("caller_tools = CASE WHEN ?TableAlias.caller_kind = EXCLUDED.caller_kind " +
-			"THEN EXCLUDED.caller_tools ELSE ?TableAlias.caller_tools END").
-		Set("remembers = ?TableAlias.remembers OR EXCLUDED.remembers").
-		Where("?TableAlias.customer_id = EXCLUDED.customer_id").
-		Where("EXCLUDED.opened_at IS NULL OR ?TableAlias.opened_at IS NULL OR ?TableAlias.opened_at <= EXCLUDED.opened_at").
-		Exec(ctx)
-	if err != nil {
-		return err
-	}
-	if written, err := result.RowsAffected(); err != nil || written != 1 {
-		return fmt.Errorf("wrote %d rows: %w", written, err)
-	}
-	return nil
-}
-
 // The API read a row's tools only once it found the row was the caller's; the store handed
 // them to whoever named the id.
 func (s *StoreSuite) TestASessionsToolsAreReadOnlyByItsCustomer() {
@@ -1457,31 +1402,21 @@ func (s *StoreSuite) TestASessionsToolsAreReadOnlyByItsCustomer() {
 	s.ErrorIs(err, ErrNoSessionTools)
 }
 
-// A router of the release before writes a session's tools naming no customer: they are the
-// customer's whose session it is.
-func (s *StoreSuite) TestToolsNamingNoCustomerAreTheSessionsCustomers() {
-	s.opened("one", "app", s.base, nil)
-	s.toolsAsBefore("one", "lookup_order")
+// Two customers may each have a session of one id, each with tools of its own: a save replaces
+// the customer's own, and a read finds them alone.
+func (s *StoreSuite) TestTwoCustomersToolsOfOneSessionIdAreKeptApart() {
+	for _, customer := range []string{"app", "somebody-else"} {
+		s.opened("one", customer, s.base, nil)
+		s.Require().NoError(s.store.SessionTools.Upsert(s.ctx, customer, "one", []ToolDefinition{{Name: customer + "_lookup"}}))
+	}
 
-	tools, err := s.store.SessionTools.Get(s.ctx, "app", "one")
+	s.Require().NoError(s.store.SessionTools.Upsert(s.ctx, "app", "one", []ToolDefinition{{Name: "app_refund"}}))
 
-	s.Require().NoError(err)
-	s.Equal([]ToolDefinition{{Name: "lookup_order"}}, tools)
-	_, err = s.store.SessionTools.Get(s.ctx, "somebody-else", "one")
-	s.ErrorIs(err, ErrNoSessionTools)
-}
-
-// Two customers may each have a session of one id once the tools are keyed by both: tools
-// naming another customer are not read under the id of this one's session.
-func (s *StoreSuite) TestToolsNamingAnotherCustomerAreNotReadUnderTheId() {
-	s.opened("one", "app", s.base, nil)
-	_, err := s.store.shard.ExecContext(s.ctx,
-		`INSERT INTO agent_session_tools (session_id, customer_id, tools, updated_at) VALUES ('one', 'somebody-else', '[{"name":"refund_order"}]', now())`)
-	s.Require().NoError(err)
-
-	_, err = s.store.SessionTools.Get(s.ctx, "app", "one")
-
-	s.ErrorIs(err, ErrNoSessionTools)
+	for customer, tool := range map[string]string{"app": "app_refund", "somebody-else": "somebody-else_lookup"} {
+		tools, err := s.store.SessionTools.Get(s.ctx, customer, "one")
+		s.Require().NoError(err)
+		s.Equal([]ToolDefinition{{Name: tool}}, tools, customer)
+	}
 }
 
 func (s *StoreSuite) TestSavedToolsNameTheirCustomer() {
@@ -1492,74 +1427,50 @@ func (s *StoreSuite) TestSavedToolsNameTheirCustomer() {
 	s.Equal("app", s.toolsCustomer("one"))
 }
 
-// The release after this one keys a session's tools by customer and session, and no longer
-// takes a row that names no customer.
-func (s *StoreSuite) TestReplacingToolsThatNamedNoCustomerNamesTheirs() {
-	s.opened("one", "app", s.base, nil)
-	s.toolsAsBefore("one", "lookup_order")
+// A router of the release before goes on saving tools while this one's run beside it, naming
+// no conflict target and setting the customer on its update, under a key it was not built for:
+// each customer's are its own.
+func (s *StoreSuite) TestToolsSavedAsTheReleaseBeforeSavesThemAreEachCustomersOwn() {
+	for _, customer := range []string{"app", "somebody-else"} {
+		s.opened("one", customer, s.base, nil)
+		s.toolsSavedAsBefore(customer, "one", customer+"_lookup")
+	}
+	s.toolsSavedAsBefore("app", "one", "app_refund")
 
-	s.Require().NoError(s.store.SessionTools.Upsert(s.ctx, "app", "one", []ToolDefinition{{Name: "refund_order"}}))
-
-	s.Equal("app", s.toolsCustomer("one"))
-	tools, err := s.store.SessionTools.Get(s.ctx, "app", "one")
-	s.Require().NoError(err)
-	s.Equal([]ToolDefinition{{Name: "refund_order"}}, tools)
+	for customer, tool := range map[string]string{"app": "app_refund", "somebody-else": "somebody-else_lookup"} {
+		tools, err := s.store.SessionTools.Get(s.ctx, customer, "one")
+		s.Require().NoError(err)
+		s.Equal([]ToolDefinition{{Name: tool}}, tools, customer)
+	}
 }
 
-// A save names no conflict target, so tools are kept and replaced under the key the release
-// after this one gives them, where one naming the session alone fails every save.
-func (s *StoreSuite) TestToolsAreKeptAndReplacedUnderAKeyOfCustomerAndSession() {
-	s.keyedBy("agent_session_tools", []string{"session_id"}, []string{"customer_id", "session_id"})
-	s.opened("one", "app", s.base, nil)
-
-	s.Require().NoError(s.store.SessionTools.Upsert(s.ctx, "app", "one", []ToolDefinition{{Name: "lookup_order"}}))
-	s.Require().NoError(s.store.SessionTools.Upsert(s.ctx, "app", "one", []ToolDefinition{{Name: "refund_order"}}))
-
-	tools, err := s.store.SessionTools.Get(s.ctx, "app", "one")
+// toolsSavedAsBefore saves a session's tools with the statements a router of the release before
+// sends: an insert naming no conflict target, then an update of the customer's row, or of one
+// naming no customer under the customer's session, and requires one of them to write it.
+func (s *StoreSuite) toolsSavedAsBefore(customer, session, tool string) {
+	tools := fmt.Sprintf(`[{"name": %q}]`, tool)
+	inserted, err := s.store.shard.ExecContext(s.ctx, `INSERT INTO agent_session_tools (session_id, customer_id, tools, updated_at)
+SELECT ?, ?, ?::jsonb, now() WHERE EXISTS (SELECT 1 FROM agent_sessions WHERE id = ? AND customer_id = ?)
+ON CONFLICT DO NOTHING`, session, customer, tools, session, customer)
 	s.Require().NoError(err)
-	s.Equal([]ToolDefinition{{Name: "refund_order"}}, tools)
+	if written, err := inserted.RowsAffected(); err == nil && written == 1 {
+		return
+	}
+	updated, err := s.store.shard.ExecContext(s.ctx, `UPDATE agent_session_tools AS t SET tools = ?::jsonb, updated_at = now(), customer_id = ?
+WHERE session_id = ? AND (t.customer_id = ? OR t.customer_id IS NULL AND
+	EXISTS (SELECT 1 FROM agent_sessions AS s WHERE s.id = t.session_id AND s.customer_id = ?))`, tools, customer, session, customer, customer)
+	s.Require().NoError(err)
+	written, err := updated.RowsAffected()
+	s.Require().NoError(err)
+	s.Require().EqualValues(1, written, "%s's tools of %s were saved", customer, session)
 }
 
-// toolsAsBefore writes a session's tools as a router of the release before does: naming no
-// customer.
-func (s *StoreSuite) toolsAsBefore(session, tool string) {
-	_, err := s.store.shard.ExecContext(s.ctx,
-		"INSERT INTO agent_session_tools (session_id, tools, updated_at) VALUES (?, jsonb_build_array(jsonb_build_object('name', ?::text)), now())",
-		session, tool)
-	s.Require().NoError(err)
-}
-
-// toolsCustomer is the customer a session's tools row names, empty for none.
+// toolsCustomer is the customer a session's tools row names.
 func (s *StoreSuite) toolsCustomer(session string) string {
-	var customer sql.NullString
+	var customer string
 	s.Require().NoError(s.store.shard.QueryRowContext(s.ctx,
 		"SELECT customer_id FROM agent_session_tools WHERE session_id = ?", session).Scan(&customer))
-	return customer.String
-}
-
-// keyedBy gives a table of this shard the primary key after for the test's length, as the
-// release after this one does, and puts back before once the test emptied it. A column a key
-// made NOT NULL that was not before is let go of again.
-func (s *StoreSuite) keyedBy(table string, before, after []string) {
-	var nullable []string
-	s.Require().NoError(s.store.shard.NewSelect().TableExpr("information_schema.columns").Column("column_name").
-		Where("table_schema = current_schema()").Where("table_name = ?", table).Where("is_nullable = 'YES'").
-		Where("column_name IN (?)", bun.In(after)).Scan(s.ctx, &nullable))
-	swap := func(columns []string) error {
-		_, err := s.store.shard.ExecContext(s.ctx, fmt.Sprintf(
-			"ALTER TABLE %[1]s DROP CONSTRAINT %[1]s_pkey, ADD CONSTRAINT %[1]s_pkey PRIMARY KEY (%[2]s)", table, strings.Join(columns, ", ")))
-		return err
-	}
-	s.Require().NoError(swap(after))
-	s.T().Cleanup(func() {
-		_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM "+table)
-		s.Require().NoError(err)
-		s.Require().NoError(swap(before))
-		for _, column := range nullable {
-			_, err := s.store.shard.ExecContext(s.ctx, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL", table, column))
-			s.Require().NoError(err)
-		}
-	})
+	return customer
 }
 
 func (s *StoreSuite) TestAnotherCustomersToolsForASessionIdAreNotKept() {

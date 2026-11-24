@@ -790,7 +790,6 @@ TABLE episodes
     CONSTRAINT episodes_pkey PRIMARY KEY (id)
     CONSTRAINT episodes_source_check CHECK ((source = ANY (ARRAY['call'::text, 'sms'::text, 'whatsapp'::text, 'slack'::text, 'imessage'::text, 'chat'::text]))) NOT VALID
     CONSTRAINT episodes_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'ended'::text, 'summarized'::text, 'summary_failed'::text])))
-    CREATE UNIQUE INDEX episodes_call_session ON public.episodes USING btree (session_id)
     CREATE INDEX episodes_contact ON public.episodes USING btree (contact_id, started_at DESC)
     CREATE UNIQUE INDEX episodes_customer_call_session ON public.episodes USING btree (customer_id, session_id)
     CREATE INDEX episodes_lease ON public.episodes USING btree (lease_until) WHERE (lease_until IS NOT NULL)

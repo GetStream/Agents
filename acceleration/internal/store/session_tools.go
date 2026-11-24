@@ -30,20 +30,14 @@ type agentSessionTools struct {
 
 	SessionID string `bun:"session_id,pk"`
 	// CustomerID is whose session it is, since two customers may each have a session of one id.
-	// Empty, stored as NULL, on a row from before it was kept: the session's row says whose.
-	CustomerID string           `bun:"customer_id,nullzero"`
+	CustomerID string           `bun:"customer_id,notnull"`
 	Tools      []ToolDefinition `bun:"tools,type:jsonb,notnull"`
 	UpdatedAt  time.Time        `bun:"updated_at,notnull"`
 }
 
-// customersTools is the condition that a row of agent_session_tools is the customer the next
-// two placeholders name's: by its own customer, or by its session's on a row that names none.
-const customersTools = "(?TableAlias.customer_id = ? OR ?TableAlias.customer_id IS NULL AND " +
-	"EXISTS (SELECT 1 FROM agent_sessions AS s WHERE s.id = ?TableAlias.session_id AND s.customer_id = ?))"
-
-// Validate refuses tools that name no session.
+// Validate refuses tools that name no session, or no customer.
 func (t *agentSessionTools) Validate() error {
-	return validate("session tools").required("session_id", t.SessionID).done()
+	return validate("session tools").required("session_id", t.SessionID).required("customer_id", t.CustomerID).done()
 }
 
 // ErrNoSessionTools is a session that recorded no tools.
@@ -89,13 +83,11 @@ ON CONFLICT DO NOTHING`,
 	if written == 1 {
 		return nil
 	}
-	// A row that names no customer gets the customer whose session it is.
 	result, err = r.store.shard.NewUpdate().Model((*agentSessionTools)(nil)).
 		Set("tools = ?::jsonb", string(encoded)).
 		Set("updated_at = ?", row.UpdatedAt).
-		Set("customer_id = ?", customerID).
+		Where("customer_id = ?", customerID).
 		Where("session_id = ?", sessionID).
-		Where(customersTools, customerID, customerID).
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
@@ -114,9 +106,7 @@ ON CONFLICT DO NOTHING`,
 func (r *SessionTools) Get(ctx context.Context, customerID, sessionID string) ([]ToolDefinition, error) {
 	stored, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (agentSessionTools, error) {
 		var stored agentSessionTools
-		err := db.NewSelect().Model(&stored).Where("session_id = ?", sessionID).
-			Where(customersTools, customerID, customerID).
-			Scan(ctx)
+		err := db.NewSelect().Model(&stored).Where("customer_id = ?", customerID).Where("session_id = ?", sessionID).Scan(ctx)
 		return stored, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {

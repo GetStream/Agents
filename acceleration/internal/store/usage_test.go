@@ -137,7 +137,8 @@ func (s *StoreSuite) TestActivityIsOnlyTheCallingCustomers() {
 // whichever customer's session had it.
 func (s *StoreSuite) TestActivityCountsOnlyThePeopleOfTheCustomersOwnSessions() {
 	theirs := s.opened("one", "globex", s.base, nil)
-	s.turned(&AgentSession{ID: theirs.ID, CustomerID: "acme"}, "acme-turn", s.base.Add(time.Minute), nil)
+	mine := s.opened(theirs.ID, "acme", s.base, func(session *AgentSession) { session.UserID = "" })
+	s.turned(mine, "acme-turn", s.base.Add(time.Minute), nil)
 
 	buckets, err := s.store.CustomerActivity(s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 
@@ -308,7 +309,7 @@ func (s *StoreSuite) TestToolUsageOfOneAgentIsOutOfThatAgentsSessions() {
 // session id alone: another customer's session of that id put them under its agent.
 func (s *StoreSuite) TestOneAgentsTurnsAndToolsAreReadOffTheCustomersOwnSessions() {
 	theirs := s.opened("one", "globex", s.base, func(session *AgentSession) { session.ConfigID = "cfg-a" })
-	mine := &AgentSession{ID: theirs.ID, CustomerID: "acme"}
+	mine := s.opened(theirs.ID, "acme", s.base, func(session *AgentSession) { session.ConfigID = "cfg-b" })
 	s.turned(mine, "acme-turn", s.base.Add(time.Minute), nil)
 	s.calledTool(mine, "acme-turn", "refund", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
 

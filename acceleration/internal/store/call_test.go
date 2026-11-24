@@ -61,6 +61,7 @@ func (s *StoreSuite) TestWritingToAChannelReachesTheLastConversationOnIt() {
 func (s *StoreSuite) TestAChannelsAgentConfigIsReadOffTheCustomersOwnSession() {
 	agentID := "agent-of-a-borrowed-id"
 	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "session-of-a-borrowed-id", CustomerID: "globex", ConfigID: "globex_support"}))
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "session-of-a-borrowed-id", CustomerID: "acme"}))
 	call := Call{
 		ID: "call-of-a-borrowed-id", SessionID: "session-of-a-borrowed-id", CustomerID: "acme",
 		CallID: "call-1", AgentID: agentID, StartedAt: s.base,

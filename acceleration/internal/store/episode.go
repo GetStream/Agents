@@ -352,7 +352,7 @@ type EpisodeCard struct {
 	Episode `bun:",extend"`
 	// Until is the earliest of when the episode ended, when its call's session closed and
 	// when the next episode in its thread channel started. A call channel can hold several
-	// callers' calls (episodes_call_session), so a call's lines end there. Nil while none
+	// callers' calls (episodes_customer_call_session), so a call's lines end there. Nil while none
 	// of them is known.
 	Until *time.Time `bun:"until,scanonly"`
 	// ContactKind and ContactAddress are how the episode's person is known, from its contact

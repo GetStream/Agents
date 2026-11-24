@@ -248,6 +248,8 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},
+	// A session by its id alone, which its key does not lead with.
+	{"shard", "agent_sessions_id_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_id_idx ON agent_sessions (id)"},
 }
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed

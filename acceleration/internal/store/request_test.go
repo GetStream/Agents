@@ -233,6 +233,7 @@ func (s *StoreSuite) TestABatchLogsEachRowInItsOwnCall() {
 // customer's session had the call's session id.
 func (s *StoreSuite) TestARowsLogTakesNoAgentConfigFromAnotherCustomersSession() {
 	s.opened("borrowed", "calls-b", s.base, func(session *AgentSession) { session.ConfigID = "cfg-b" })
+	s.opened("borrowed", "calls-a", s.base, func(session *AgentSession) { session.ConfigID = "" })
 	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "call-borrowed", SessionID: "borrowed", CallID: "stream-1",
 		CustomerID: "calls-a", AgentID: "agent", StartedAt: s.base}))
 	row := s.usageRow("calls-a", func(request *Request) {

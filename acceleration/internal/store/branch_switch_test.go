@@ -236,7 +236,7 @@ func (s *StoreSuite) TestBranchesAreOnlyTheirOwnCustomers() {
 	s.Zero(deleted)
 	stolen := hidden("m1", "asked", "switch", s.base, "theirs")
 	stolen.CustomerID = "somebody-else"
-	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{stolen}))
+	s.Error(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{stolen}), "somebody-else has no session of the id")
 	messages, err = s.store.BranchMessages.Select(s.ctx, "app", "one", nil)
 	s.Require().NoError(err)
 	s.Require().Len(messages, 1)

@@ -158,6 +158,26 @@ func (s *StoreSuite) TestAThreadWhoseEpisodeEndedOpensANewOne() {
 	s.NotEqual(first.ID, next.ID)
 }
 
+// Two customers may each have a session of one id, in Stream apps of their own, and each a call
+// episode of it.
+func (s *StoreSuite) TestTwoCustomersEachHaveACallEpisodeOfOneSessionId() {
+	for i, customer := range []string{"acme-app", "globex-app"} {
+		entry := contact("+15550100", "agent:phone-15550199")
+		entry.CustomerID, entry.StreamAppPK = customer, int64(4242+i)
+		_, err := s.store.ContactMapEntries.Map(s.ctx, entry)
+		s.Require().NoError(err)
+		episode := s.episodeOf(entry.ID, "agent:phone-15550199")
+		episode.CustomerID, episode.StreamAppPK = customer, entry.StreamAppPK
+		episode.Source, episode.CallID, episode.SessionID = EpisodeCall, "phone-15550199", "session-one"
+
+		opened, err := s.store.Episodes.Open(s.ctx, episode)
+
+		s.Require().NoError(err, customer)
+		s.True(opened, customer)
+	}
+	s.Equal(2, s.episodeRows())
+}
+
 func (s *StoreSuite) TestOnlyACallEpisodeNamesASession() {
 	person := s.mapped("+15550100")
 	thread := s.episodeOf(person, "agent:thread-one")

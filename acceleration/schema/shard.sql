@@ -9,8 +9,8 @@ TABLE agent_branch_messages
     response_id text NOT NULL DEFAULT ''::text
     session_id text NOT NULL
     switch_id text NOT NULL
-    CONSTRAINT agent_branch_messages_pkey PRIMARY KEY (session_id, original_message_id)
-    CONSTRAINT agent_branch_messages_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+    CONSTRAINT agent_branch_messages_customer_id_session_id_fkey FOREIGN KEY (customer_id, session_id) REFERENCES agent_sessions(customer_id, id) ON DELETE CASCADE
+    CONSTRAINT agent_branch_messages_pkey PRIMARY KEY (customer_id, session_id, original_message_id)
     CREATE INDEX agent_branch_messages_response_idx ON public.agent_branch_messages USING btree (session_id, response_id)
 
 TABLE agent_branch_switches
@@ -26,9 +26,9 @@ TABLE agent_branch_switches
     state text NOT NULL DEFAULT 'snapshotted'::text
     target_response_id text NOT NULL
     updated_at timestamp with time zone NOT NULL DEFAULT now()
+    CONSTRAINT agent_branch_switches_customer_id_session_id_fkey FOREIGN KEY (customer_id, session_id) REFERENCES agent_sessions(customer_id, id) ON DELETE CASCADE
     CONSTRAINT agent_branch_switches_kind_check CHECK ((kind = ANY (ARRAY['regenerate'::text, 'edit'::text, 'activate'::text])))
     CONSTRAINT agent_branch_switches_pkey PRIMARY KEY (id)
-    CONSTRAINT agent_branch_switches_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
     CONSTRAINT agent_branch_switches_state_check CHECK ((state = ANY (ARRAY['snapshotted'::text, 'rewound'::text, 'resending'::text, 'done'::text])))
     CREATE INDEX agent_branch_switches_session_idx ON public.agent_branch_switches USING btree (session_id, hidden_from)
     CREATE INDEX agent_branch_switches_unfinished_idx ON public.agent_branch_switches USING btree (session_id, created_at) WHERE (state <> 'done'::text)
@@ -60,18 +60,18 @@ TABLE agent_responses
     said text NOT NULL DEFAULT ''::text
     session_id text NOT NULL
     status text NOT NULL DEFAULT 'running'::text
+    CONSTRAINT agent_responses_customer_id_session_id_fkey FOREIGN KEY (customer_id, session_id) REFERENCES agent_sessions(customer_id, id) ON DELETE CASCADE
     CONSTRAINT agent_responses_pkey PRIMARY KEY (id)
-    CONSTRAINT agent_responses_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
     CREATE INDEX agent_responses_parent_idx ON public.agent_responses USING btree (session_id, parent_response_id)
     CREATE INDEX agent_responses_session_idx ON public.agent_responses USING btree (session_id, created_at, id)
 
 TABLE agent_session_tools
-    customer_id text
+    customer_id text NOT NULL
     session_id text NOT NULL
     tools jsonb NOT NULL
     updated_at timestamp with time zone NOT NULL
-    CONSTRAINT agent_session_tools_pkey PRIMARY KEY (session_id)
-    CONSTRAINT agent_session_tools_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+    CONSTRAINT agent_session_tools_customer_id_session_id_fkey FOREIGN KEY (customer_id, session_id) REFERENCES agent_sessions(customer_id, id) ON DELETE CASCADE
+    CONSTRAINT agent_session_tools_pkey PRIMARY KEY (customer_id, session_id)
 
 TABLE agent_sessions
     agent_id text NOT NULL DEFAULT ''::text
@@ -112,12 +112,13 @@ TABLE agent_sessions
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     usage_categories text[] NOT NULL DEFAULT '{}'::text[]
     user_id text NOT NULL DEFAULT ''::text
-    CONSTRAINT agent_sessions_pkey PRIMARY KEY (id)
+    CONSTRAINT agent_sessions_pkey PRIMARY KEY (customer_id, id)
     CREATE INDEX agent_sessions_agent_id_idx ON public.agent_sessions USING btree (customer_id, agent_id, updated_at DESC, id DESC)
     CREATE INDEX agent_sessions_agent_idx ON public.agent_sessions USING btree (customer_id, agent_name, updated_at DESC, id DESC)
     CREATE INDEX agent_sessions_conversation_idx ON public.agent_sessions USING btree (customer_id, conversation_id, created_at DESC)
     CREATE INDEX agent_sessions_custom_idx ON public.agent_sessions USING gin (custom jsonb_path_ops)
     CREATE INDEX agent_sessions_customer_idx ON public.agent_sessions USING btree (customer_id, created_at DESC, id DESC)
+    CREATE INDEX agent_sessions_id_idx ON public.agent_sessions USING btree (id)
     CREATE INDEX agent_sessions_last_message_idx ON public.agent_sessions USING btree (customer_id, COALESCE(last_response_at, created_at) DESC, id DESC)
     CREATE INDEX agent_sessions_modality_idx ON public.agent_sessions USING btree (customer_id, modality, updated_at DESC, id DESC)
     CREATE INDEX agent_sessions_pinned_idx ON public.agent_sessions USING btree (customer_id, ((pinned_at IS NOT NULL)) DESC, COALESCE(last_response_at, created_at) DESC, id DESC)
@@ -262,8 +263,8 @@ TABLE calls
     to_number text
     tts text NOT NULL DEFAULT ''::text
     voice text NOT NULL DEFAULT ''::text
+    CONSTRAINT calls_customer_id_session_id_fkey FOREIGN KEY (customer_id, session_id) REFERENCES agent_sessions(customer_id, id) ON DELETE SET NULL (session_id)
     CONSTRAINT calls_pkey PRIMARY KEY (id)
-    CONSTRAINT calls_session_id_fkey FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
     CREATE INDEX calls_agent_idx ON public.calls USING btree (agent_id, started_at DESC)
     CREATE INDEX calls_customer_agent_idx ON public.calls USING btree (customer_id, agent_id, started_at DESC)
     CREATE INDEX calls_customer_campaign_idx ON public.calls USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL)

@@ -479,7 +479,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		{name: "Sessions.ChooseConnection", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.ChooseConnection(ctx, "customer-7", "seeded-session-7", "github", "connection")
 		}},
-		{name: "Sessions.Exists", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Exists", index: "agent_sessions_id_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Exists(ctx, "seeded-session-7")
 			return err
 		}},
@@ -494,9 +494,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		{name: "Sessions.Delete", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Delete(ctx, "customer-199", "seeded-session-99999")
 		}},
-		// What calls_session_id_fkey runs on the calls of a session deleted, which no hook sees.
+		// What calls_customer_id_session_id_fkey runs on the calls of a session deleted, which no hook sees.
 		{name: "Sessions.Delete frees its calls", index: "calls_session_started_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.shard.NewRaw("UPDATE calls SET session_id = NULL WHERE session_id = ?", "seeded-session-99998").Exec(ctx)
+			_, err := store.shard.NewRaw("UPDATE calls SET session_id = NULL WHERE customer_id = ? AND session_id = ?",
+				"customer-198", "seeded-session-99998").Exec(ctx)
 			return err
 		}},
 		{name: "ImageJobs.Claim", index: "image_jobs_undecided", inOrder: true, run: func(ctx context.Context, store *Store) error {
@@ -523,7 +524,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{Order: SessionOrder{PinnedFirst: true}})
 			return err
 		}},
-		{name: "Sessions.Select by review score", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Select by review score", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{Order: SessionOrder{By: SessionSortReviewScore}})
 			return err
 		}},
@@ -546,7 +547,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Select(ctx, "customer-7", SessionFilter{Where: &where})
 			return err
 		}},
-		{name: "Sessions.Search", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Sessions.Search", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Sessions.Search(ctx, "customer-7", "call 7", SessionFilter{})
 			return err
 		}},
@@ -630,7 +631,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.CustomerActivity(ctx, "customer-7", ActivityDaily, since, until)
 			return err
 		}},
-		{name: "Store.CustomerConcurrencyPeak", index: "agent_sessions_agent_idx", run: func(ctx context.Context, store *Store) error {
+		{name: "Store.CustomerConcurrencyPeak", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CustomerConcurrencyPeak(ctx, "customer-7", since, until)
 			return err
 		}},
