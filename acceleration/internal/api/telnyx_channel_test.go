@@ -72,6 +72,16 @@ const (
 	telnyxHelp    = "Reply STOP to unsubscribe."
 )
 
+// Messages that are STOP, START or HELP however they are written, and sentences that hold one
+// of the words but are no keyword. The bridge's lines and internal/channels' lines are tested
+// with the same texts, so a keyword reads the same on either.
+var (
+	stopTexts     = []string{"Stop.", "  stop  ", "STOP!", "Unsubscribe", "cancel.", "opt-out", "Opt out", "stop all", "optout", "End"}
+	startTexts    = []string{"Start!", "unstop"}
+	helpTexts     = []string{"Help?", "info"}
+	keywordInText = []string{"stop texting me", "please cancel my order"}
+)
+
 func TestTelnyxChannelSuite(t *testing.T) {
 	runSuite(t, new(TelnyxChannelSuite))
 }
@@ -419,6 +429,49 @@ func (s *TelnyxChannelSuite) TestEachStopWordRecordsAnOptOutAndEachStartWordRevo
 		s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, word), time.Now()))
 		s.settled()
 		s.Zero(s.liveOptOuts(person), word)
+	}
+}
+
+// A STOP is read without its case, spaces or punctuation, and with its synonyms.
+func (s *TelnyxChannelSuite) TestKeywordsStopWrittenAnyWayIsRecordedAndConfirmed() {
+	for i, text := range stopTexts {
+		person := "+1312555" + strconv.Itoa(3000+i)
+		s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, text), time.Now()))
+		s.Equal(telnyxMessage{from: s.line, to: person, text: telnyxStopped}, s.took(i + 1)[i].withoutAuthorization(), text)
+		s.Equal(1, s.liveOptOuts(person), text)
+	}
+}
+
+// A START is read as a STOP is, and lifts the opt-out.
+func (s *TelnyxChannelSuite) TestKeywordsStartWrittenAnyWayLiftsTheOptOut() {
+	for i, text := range startTexts {
+		person := "+1312555" + strconv.Itoa(3100+i)
+		s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, "STOP"), time.Now()))
+		s.took(2*i + 1)
+		s.Require().Equal(1, s.liveOptOuts(person))
+		s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, text), time.Now()))
+		s.Equal(telnyxMessage{from: s.line, to: person, text: telnyxStarted}, s.took(2*i + 2)[2*i+1].withoutAuthorization(), text)
+		s.Zero(s.liveOptOuts(person), text)
+	}
+}
+
+// A HELP is read as a STOP is, INFO included, and answered without the agent.
+func (s *TelnyxChannelSuite) TestKeywordsHelpWrittenAnyWayIsAnswered() {
+	for i, text := range helpTexts {
+		person := "+1312555" + strconv.Itoa(3200+i)
+		s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, text), time.Now()))
+		s.Equal(telnyxMessage{from: s.line, to: person, text: telnyxHelp}, s.took(i + 1)[i].withoutAuthorization(), text)
+		s.Zero(s.liveOptOuts(person), text)
+	}
+}
+
+// A sentence that holds a keyword is the agent's to read, and opts nobody out.
+func (s *TelnyxChannelSuite) TestKeywordsInASentenceReachTheAgent() {
+	for i, text := range keywordInText {
+		person := "+1312555" + strconv.Itoa(3300+i)
+		s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, text), time.Now()))
+		s.Equal(text, s.written(s.threadChannel(person), 1)[0]["text"])
+		s.Zero(s.liveOptOuts(person), text)
 	}
 }
 

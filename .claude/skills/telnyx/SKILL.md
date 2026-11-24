@@ -191,8 +191,9 @@ ticket comments (AI-1842, AI-1843).
 
 ## What the bridge does to a text
 
-- **STOP, START and HELP never reach the agent** (`internal/channelbridge/keywords.go`).
-  Telnyx answers them itself and says so in `data.payload.autoresponse_type`. The bridge
+- **STOP, START and HELP never reach the agent** (`internal/channelbridge/keywords.go`),
+  read without case or punctuation, with their synonyms (UNSUBSCRIBE, CANCEL, OPT OUT, INFO
+  and the rest). `internal/channels` lines read them with the same code. Telnyx answers them itself and says so in `data.payload.autoresponse_type`. The bridge
   answers only the rest, such as REVOKE and OPT OUT. STOP writes an opt-out. A person with an
   opt-out reaches no agent and gets no reply.
 - **The sandbox gate** (`dlc.Gate`) can hold back a text or a reply on a line that is not

@@ -4,18 +4,10 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"slices"
-	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
-)
-
-// The words carriers expect a texting program to obey, whatever the agent would have said.
-var (
-	stopWords  = []string{"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "OPTOUT", "REVOKE"}
-	startWords = []string{"START", "UNSTOP"}
-	helpWords  = []string{"HELP", "INFO"}
 )
 
 // What a keyword is answered with when the number's use case says nothing.
@@ -39,8 +31,7 @@ var errKeywordNotRecorded = errors.New("the message could not be recorded; deliv
 // one waits for the outcome. Neither the write nor the bill is cut by the provider hanging up
 // on a slow delivery.
 func (s *Service) claim(ctx context.Context, account store.ChannelAccount, message Message) (bool, error) {
-	word := keywordOf(message.Text)
-	stop, start := slices.Contains(stopWords, word), slices.Contains(startWords, word)
+	word, stop, start, _ := channelbridge.Keyword(message.Text)
 	if !stop && !start {
 		fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
 		if fresh {
@@ -75,8 +66,7 @@ func (s *Service) claim(ctx context.Context, account store.ChannelAccount, messa
 // whether the message was one; claim recorded it. The confirmation goes out past the gate:
 // telling somebody they are unsubscribed is the one message they are still owed.
 func (s *Service) keyword(ctx context.Context, account store.ChannelAccount, line Account, provider Provider, message Message) bool {
-	word := keywordOf(message.Text)
-	stop, start, help := slices.Contains(stopWords, word), slices.Contains(startWords, word), slices.Contains(helpWords, word)
+	_, stop, start, help := channelbridge.Keyword(message.Text)
 	if !stop && !start && !help {
 		return false
 	}
@@ -96,9 +86,4 @@ func (s *Service) keyword(ctx context.Context, account store.ChannelAccount, lin
 	}
 	s.say(ctx, line, provider, message, Reply{Text: reply}, answering(account.CustomerID, ""))
 	return true
-}
-
-// keywordOf is the word a message is, as the keyword lists spell it.
-func keywordOf(text string) string {
-	return strings.ToUpper(strings.TrimSpace(text))
 }
