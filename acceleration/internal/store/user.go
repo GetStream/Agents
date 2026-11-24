@@ -50,8 +50,8 @@ const seenCapacity = 10_000
 //
 // A deployment with no Redis keeps the LRU and writes to Postgres on a miss, and so does
 // one whose Redis is unreachable. Nothing here fails a request because a cache is missing,
-// and nothing here fails a request at all: recording who called is not what the caller
-// asked for.
+// and recording who called fails no request at all: it is not what the caller asked for.
+// A guest's row, secret and claim are here too, and those do answer with their errors.
 //
 // The email a backend says its user signs in with is said on every request too, and is
 // held in an LRU of its own, by user and address, for emailTTL: a changed address is written
@@ -133,11 +133,11 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 	var err error
 	switch sighting {
 	case UserKindAuthenticated:
-		err = r.store.RecordAccount(ctx, customerID, userID)
+		err = r.RecordAccount(ctx, customerID, userID)
 	case namedUser:
-		err = r.store.RecordUser(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
+		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
 	default:
-		err = r.store.RecordUser(ctx, &User{CustomerID: customerID, ID: userID, Kind: sighting})
+		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: sighting})
 	}
 	if err != nil {
 		return err
@@ -164,7 +164,7 @@ func settles(held, sighting string) bool {
 	return sighting != UserKindAuthenticated || held == UserKindAuthenticated
 }
 
-// Email records the address a backend said a user signs in with (SetUserEmail), and does
+// Email records the address a backend said a user signs in with (SetEmail), and does
 // nothing for the address this process last wrote for them within emailTTL. A backend may
 // say it on every request. A changed address is written at once; one another replica wrote
 // under this one is written again here once emailTTL ends, so a row lags for at most that
@@ -182,7 +182,7 @@ func (r *Users) Email(ctx context.Context, customerID, userID, email string) err
 	lock.Lock()
 	defer lock.Unlock()
 	now := time.Now()
-	if err := r.store.SetUserEmail(ctx, customerID, userID, email); err != nil {
+	if err := r.SetEmail(ctx, customerID, userID, email); err != nil {
 		return err
 	}
 	r.emails.Keep(customerID, userID, email, now.Add(r.emailTTL))
@@ -297,11 +297,6 @@ func newSeen(capacity int) *seen {
 	}
 }
 
-// Get reports whether a user is held, and marks them as the most recently used.
-func (s *seen) Get(app, id string) bool {
-	return s.Holds(app, id, "", time.Time{})
-}
-
 // Value returns what a user is held with, and marks them as the most recently used.
 func (s *seen) Value(app, id string) (string, bool) {
 	s.mu.Lock()
@@ -313,12 +308,6 @@ func (s *seen) Value(app, id string) (string, bool) {
 	}
 	s.order.MoveToFront(element)
 	return element.Value.(seenEntry).value, true
-}
-
-// Add holds a user, evicting the least recently used one across every app when the cache
-// is full.
-func (s *seen) Add(app, id string) {
-	s.Keep(app, id, "", time.Time{})
 }
 
 // Holds reports whether a user is held with value and their hold has not expired by now,
@@ -382,14 +371,6 @@ func (s *seen) Clear() {
 
 	s.order.Init()
 	s.apps = map[string]map[string]*list.Element{}
-}
-
-// Len is how many users are held across every app.
-func (s *seen) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.order.Len()
 }
 
 // evict removes one element and the partition it empties. The caller holds the lock.

@@ -101,7 +101,7 @@ var revokedErrors = map[core.SignalKind]string{
 
 // ErrNotConnected says the connection's status is not connected: it is pending a consent, it
 // needs a reconnect, or it was disconnected. Or it is connected on a definition revision a
-// later one marked broken (store.BrokenConnectorRevision). Only the person who owns it can fix
+// later one marked broken (store.ConnectorBrokenRevisions.Get). Only the person who owns it can fix
 // that.
 var ErrNotConnected = errors.New("resolver: the connection is not connected")
 

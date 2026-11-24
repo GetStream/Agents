@@ -1059,6 +1059,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Registry: stsrouter.DefaultRegistry(),
 			Store:    pgStore,
 			Live:     liveClient,
+			Quota:    limiter,
 			Gate:     gate,
 			Pricer:   prices,
 			Writer:   usageWriter,
