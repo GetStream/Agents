@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -573,6 +574,9 @@ type stubTTS struct {
 	said       []tts.Request
 	interrupts int
 	active     map[string]struct{}
+	// settled is every synthesis the stub reported complete, which a provider never reports
+	// again.
+	settled map[string]struct{}
 	// reconnecting holds interruption open while the test delivers work that would
 	// normally arrive during the provider's replacement connection.
 	interruptStarted chan struct{}
@@ -599,7 +603,9 @@ type stubTTS struct {
 }
 
 func newStubTTS(streaming bool) *stubTTS {
-	return &stubTTS{emitter: tts.NewEmitter(64), streaming: streaming, active: map[string]struct{}{}}
+	return &stubTTS{
+		emitter: tts.NewEmitter(64), streaming: streaming, active: map[string]struct{}{}, settled: map[string]struct{}{},
+	}
 }
 
 func (s *stubTTS) Start(ctx context.Context) error {
@@ -655,6 +661,9 @@ func (s *stubTTS) Synthesize(request tts.Request) error {
 		})
 	}
 	if request.Final {
+		s.mu.Lock()
+		s.settled[request.ID] = struct{}{}
+		s.mu.Unlock()
 		s.emitter.Send(tts.SynthesisComplete{
 			SynthesisID:       request.ID,
 			Characters:        int64(utf8.RuneCountInString(request.Text)),
@@ -678,6 +687,7 @@ func (s *stubTTS) Interrupt() error {
 		for id := range s.active {
 			active = append(active, id)
 			delete(s.active, id)
+			s.settled[id] = struct{}{}
 		}
 	}
 	s.mu.Unlock()
@@ -6683,15 +6693,19 @@ func (s *AgentSuite) writtenToSilentVoice() string {
 }
 
 // refusesVoice loses the voice the way a provider refusing the agent's voice does: an error
-// that loses it, then each synthesis it had been sent reported cut.
+// that loses it, then each synthesis it had been sent and not finished reported cut. One it
+// finished was settled then and is not reported again.
 func (s *AgentSuite) refusesVoice() {
 	s.voice.emitter.Send(tts.Error{
 		Provider: "stub", Model: "stub-tts", Fatal: true,
 		Err: errors.New("free users cannot use library voices via the API"),
 	})
+	s.voice.mu.Lock()
+	settled := maps.Clone(s.voice.settled)
+	s.voice.mu.Unlock()
 	var ids []string
 	for _, request := range s.voice.spoken() {
-		if !slices.Contains(ids, request.ID) {
+		if _, done := settled[request.ID]; !done && !slices.Contains(ids, request.ID) {
 			ids = append(ids, request.ID)
 			s.voice.emitter.Send(tts.SynthesisComplete{SynthesisID: request.ID, Interrupted: true})
 		}
