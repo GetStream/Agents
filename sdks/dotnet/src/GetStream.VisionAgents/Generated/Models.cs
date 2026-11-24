@@ -1243,6 +1243,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("ui_instructions")]
         public string? UiInstructions { get; set; } = default!;
 
+        /// <summary>
+        /// The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("updated_at")]
+        public System.DateTimeOffset? UpdatedAt { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("video")]
         public SessionVideo? Video { get; set; } = default!;
 
@@ -1966,7 +1972,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+        /// Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("avg_turns")]
         public double? AvgTurns { get; set; } = default!;

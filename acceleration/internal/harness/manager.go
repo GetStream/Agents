@@ -13,7 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/emit"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -43,6 +46,9 @@ type manager struct {
 	// retired are subagents a swap replaced, kept open for the tasks still running on them.
 	retired []*opening
 	capture func(context.Context, CaptureRequest) ([]llm.ContentPart, error)
+	// call is the context of the call (Options.Call). The tasks and the subagent start under
+	// it.
+	call context.Context
 	// load reads a skill that was offered by name alone.
 	load    func(context.Context, string) (Loaded, error)
 	ctx     context.Context
@@ -244,14 +250,18 @@ func (m *manager) Create(
 
 	m.abandon(superseded)
 
-	go m.start(created)
+	goroutine.Go(m.call, func() { m.start(created) })
 	return created.id, nil
 }
 
 // chargedAs returns ctx marked with who sent the turn asked, and as scheduled when a
-// scheduled task fired it (llmrouter Session.charged). Nothing else of asked is kept, its
-// cancellation least of all: delegated work outlives the turn that asked for it.
+// scheduled task fired it (llmrouter Session.charged), traced under the turn's span. Nothing
+// else of asked is kept, its cancellation least of all: delegated work outlives the turn that
+// asked for it.
 func chargedAs(ctx, asked context.Context) context.Context {
+	if span := trace.SpanFromContext(asked); span.SpanContext().IsValid() {
+		ctx = trace.ContextWithSpan(ctx, span)
+	}
 	if sender, ok := routing.CallerFrom(asked); ok {
 		ctx = routing.WithCaller(ctx, sender)
 	}

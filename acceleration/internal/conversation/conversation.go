@@ -179,6 +179,20 @@ var ErrCommandConflict = errors.New("command ID was already used with different 
 // It is the one refusal worth trying again: the reply finishes and the turn is free.
 var ErrResponseRunning = errors.New("a response is already running")
 
+// ErrInvalid is a command or a conversation asked for in a way it cannot be carried out: the
+// caller's own mistake. Its message says what to change. A failure of Chat or of the database
+// is never one.
+var ErrInvalid = errors.New("conversation: invalid request")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
+
 // ReadBackPrefix starts the id of a follow-up whose reply is read back: a scheduled delivery
 // run again sends the reply it already got (FollowUpFinished) rather than run the turn twice.
 // Only such a follow-up keeps a copy of its reply and files; no other one is ever read back.
@@ -192,7 +206,7 @@ var validAuthorID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 // maxCommandText is the most text one command carries, in bytes.
 const maxCommandText = 1024 * 1024
 
-var errInvalidCommand = errors.New("invalid command ID or text")
+var errInvalidCommand = invalid(errors.New("invalid command ID or text"))
 
 var validCommandID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
@@ -258,7 +272,10 @@ type known struct {
 	customer, cid string
 }
 type Conversation struct {
-	mu sync.Mutex
+	// ctx is the context of the request that opened the conversation, without its
+	// cancellation: the writes its own loop sends to Stream are traced under it.
+	ctx context.Context
+	mu  sync.Mutex
 	// sendMu is held across each stored write flush sends, from reading the head of Pending to
 	// taking it off, and by anything else that takes ops off Pending: mu is released while
 	// Stream is asked, so without it a write taken off meanwhile would make flush take off the
@@ -583,8 +600,8 @@ func (s *Service) opens(key known) func() {
 		s.mu.Unlock()
 	}
 }
-func (s *Service) make(d ledger) *Conversation {
-	c := &Conversation{service: s, data: d, turns: map[string]string{}, created: map[string]bool{}, hidden: map[string]bool{}, stopped: make(chan struct{}), done: make(chan struct{})}
+func (s *Service) make(ctx context.Context, d ledger) *Conversation {
+	c := &Conversation{ctx: context.WithoutCancel(ctx), service: s, data: d, turns: map[string]string{}, created: map[string]bool{}, hidden: map[string]bool{}, stopped: make(chan struct{}), done: make(chan struct{})}
 	s.all[known{d.Customer, d.CID}] = c
 	go c.run()
 	return c
@@ -658,7 +675,7 @@ func (s *Service) CreateInApp(ctx context.Context, app int64, customer, agentID,
 
 func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid string, fresh bool, caller, voiceAgent string, custom map[string]any, team string, scopes ...memory.Scope) (*Conversation, []llm.Message, bool, error) {
 	if voiceAgent != "" && !validAuthorID.MatchString(voiceAgent) {
-		return nil, nil, false, stack.Wrap(errors.New("invalid voice transcript author"))
+		return nil, nil, false, stack.Wrap(invalid(errors.New("invalid voice transcript author")))
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -667,7 +684,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		scope = scopes[0]
 	}
 	if !Openable(ctx, cid) {
-		return nil, nil, false, stack.Wrap(errors.New("invalid conversation channel"))
+		return nil, nil, false, stack.Wrap(invalid(errors.New("invalid conversation channel")))
 	}
 	// Everything from here is this conversation's turn: what it holds is read, Stream is
 	// asked, and what came back is written, with nothing else opening it in between. The
@@ -686,7 +703,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		c.mu.Lock()
 		if c.data.Customer != customer || (agentID != "" && c.data.Agent != agentID) || c.data.Owner == "" && caller != "" {
 			c.mu.Unlock()
-			return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another customer or agent"))
+			return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another customer or agent")))
 		}
 		agentID = c.data.Agent
 		if c.active {
@@ -717,13 +734,13 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 			}
 		}
 		if !page.dispatched && !sameMemoryScope(page.memoryScope, scope) {
-			return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another memory scope; reopen with its original organization"))
+			return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another memory scope; reopen with its original organization")))
 		}
 
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.data.Owner != caller && !page.shared {
-			return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another user"))
+			return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another user")))
 		}
 		c.data.Owner = caller
 		c.shared, c.thread, c.dispatched, c.sessionCommand = page.shared, page.thread, page.dispatched, page.sessionCommand
@@ -781,7 +798,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		}
 	}
 	if !page.dispatched && !sameMemoryScope(page.memoryScope, scope) {
-		return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another memory scope; reopen with its original organization"))
+		return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another memory scope; reopen with its original organization")))
 	}
 	if agentID == "" {
 		agentID = page.agent
@@ -793,7 +810,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		s.mu.Unlock()
 		return nil, nil, false, stack.Wrap(errors.New("conversation service is closed"))
 	}
-	c := s.make(ledger{CID: cid, Customer: customer, Agent: agentID, Owner: caller, Commands: commandsIn(page.Messages), StreamApp: pin})
+	c := s.make(ctx, ledger{CID: cid, Customer: customer, Agent: agentID, Owner: caller, Commands: commandsIn(page.Messages), StreamApp: pin})
 	s.mu.Unlock()
 	// Nobody here holds the conversation, so a reply Stream still shows as running was
 	// left by a process that stopped.
@@ -884,7 +901,7 @@ func (s *Service) ContextForCaller(ctx context.Context, customer, agentID, cid, 
 		return nil, false, nil
 	}
 	if len(voiceAgent) > 1 || (len(voiceAgent) == 1 && voiceAgent[0] != "" && !validAuthorID.MatchString(voiceAgent[0])) {
-		return nil, false, stack.Wrap(errors.New("invalid voice transcript author"))
+		return nil, false, stack.Wrap(invalid(errors.New("invalid voice transcript author")))
 	}
 	pending, hidden := s.unwritten(customer, cid)
 	page, err := s.history(ctx, customer, agentID, cid, "", caller, pending, hidden, voiceAgent...)
@@ -928,7 +945,7 @@ func (s *Service) Describe(ctx context.Context, customer, cid, title, descriptio
 	// session holds (internal/session), which OpenInApp already let through. A channel of another
 	// type is the customer's own, and keeps its name: the session renaming it holds no word for it.
 	if !Openable(ctx, cid) {
-		return stack.Wrap(errors.New("invalid conversation channel"))
+		return stack.Wrap(invalid(errors.New("invalid conversation channel")))
 	}
 	set := map[string]any{}
 	if title != "" {
@@ -2491,7 +2508,7 @@ func (c *Conversation) flushOne() (bool, *FinishedReply, error) {
 	}
 	visible := c.data.VisibleTools
 	c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	err := c.send(ctx, op, false, visible)
 	cancel()
 	c.mu.Lock()
@@ -2651,7 +2668,7 @@ func (c *Conversation) run() {
 			c.indicate(next)
 			if live {
 				c.lived = now
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 				err := c.send(ctx, operation{Message: *m, reasoning: window, live: &snapshot}, true, visible)
 				cancel()
 				// A refused or slow live update holds back every update after it, so the reply
@@ -2730,7 +2747,7 @@ func (c *Conversation) indicate(next indication) {
 // sendIndicator sends ai_indicator.update with state, or ai_indicator.clear without one.
 func (c *Conversation) sendIndicator(messageID, state string) {
 	event := IndicatorEvent(c.data.Agent, messageID, state)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 	defer cancel()
 	client, err := c.chat(ctx)
 	if err != nil {

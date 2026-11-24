@@ -8,13 +8,16 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	getstream "github.com/GetStream/getstream-go/v5"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -37,6 +40,17 @@ func (s *SessionCreateSuite) TestASessionIsHeldByTheIdTheDeviceChose() {
 
 	s.Equal(id, s.client.createSession(textSession(&id)).Id)
 	s.Equal(id, s.client.getSession(id).Id)
+}
+
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *SessionCreateSuite) TestASessionTheDatabaseCannotCheckIsAFailureWithNoDatabaseText() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+
+	status, body := s.client.call(http.MethodPost, "/v1/agents/sessions", textSession(&id))
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
 }
 
 func (s *SessionCreateSuite) TestASessionIsHeldByTheIdTheBackendChose() {
@@ -264,6 +278,58 @@ func (s *SessionCreateSuite) TestAnIdAnotherSessionHasIsRefused() {
 
 	s.Equal(http.StatusConflict, s.client.do(http.MethodPost, "/v1/agents/sessions", textSession(&id), nil),
 		"the session has ended and its row still holds the id")
+}
+
+// A session's row is keyed by its id alone until the release after this one, so two customers
+// asking for one id at once, each acting in a Stream app of its own, get one session between
+// them: the other is refused, and the one created is its own customer's alone.
+func (s *SessionCreateSuite) TestTwoCustomersInStreamAppsOfTheirOwnAskingForOneIdAtOnceGetOneSession() {
+	id := s.utils.uuid()
+	customers := []*testClient{s.backendInAppOfItsOwn(), s.backendInAppOfItsOwn()}
+	statuses := make([]int, len(customers))
+	var wg sync.WaitGroup
+	for i, customer := range customers {
+		wg.Go(func() { statuses[i] = customer.do(http.MethodPost, "/v1/agents/sessions", incognitoText(&id), nil) })
+	}
+	wg.Wait()
+
+	s.ElementsMatch([]int{http.StatusCreated, http.StatusConflict}, statuses)
+	created, refused := customers[0], customers[1]
+	if statuses[0] != http.StatusCreated {
+		created, refused = refused, created
+	}
+	s.Equal(id, created.getSession(id).Id)
+	status, _ := refused.call(http.MethodGet, "/v1/agents/sessions/"+id, nil)
+	s.Equal(http.StatusNotFound, status, "the refused customer reaches the other's session")
+}
+
+// Two customers acting in one Stream app would put two agents on one call and in one channel,
+// both named after the id, so the second is refused the id the first holds.
+func (s *SessionCreateSuite) TestACustomerSharingAStreamAppIsRefusedAnIdAnotherHolds() {
+	id := s.utils.uuid()
+	s.serverClient.createSession(incognitoText(&id))
+
+	s.Equal(http.StatusConflict, s.data.backendOfAnotherApp().do(http.MethodPost, "/v1/agents/sessions", incognitoText(&id), nil))
+}
+
+// backendInAppOfItsOwn is the backend of a new customer acting in a Stream app of its own.
+func (s *SessionCreateSuite) backendInAppOfItsOwn() *testClient {
+	id := streamAppID()
+	app := s.numberedApp(id)
+	s.giveApp(app.app.ID, id, "key-"+app.app.ID)
+	mine := s.app
+	s.app = app
+	backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
+	s.app = mine
+	return backend
+}
+
+// incognitoText is a conversation in writing that keeps no row, so only the node running it
+// knows the id is held.
+func incognitoText(id *string) CreateSessionRequest {
+	request := textSession(id)
+	request.Incognito = pointerTo(true)
+	return request
 }
 
 func (s *SessionCreateSuite) TestASessionIsCreatedListedUpdatedAndRead() {

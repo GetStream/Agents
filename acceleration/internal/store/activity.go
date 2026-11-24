@@ -475,10 +475,9 @@ func (r *Activities) Prune(ctx context.Context, now time.Time) (int, error) {
 // day, and returns how many it deleted.
 func pruneDays(ctx context.Context, db bun.IDB, table string, now time.Time) (int, error) {
 	before := now.UTC().AddDate(0, 0, -ActivityKeepDays).Format(time.DateOnly)
-	result, err := db.NewDelete().TableExpr(table).Where("day < ?::date", before).Exec(ctx)
+	deleted, err := deleteInBatches(ctx, db, table, "day < ?::date", before)
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune %s: %w", table, err))
+		return int(deleted), stack.Wrap(fmt.Errorf("store: prune %s: %w", table, err))
 	}
-	deleted, _ := result.RowsAffected()
 	return int(deleted), nil
 }

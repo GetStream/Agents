@@ -17,7 +17,7 @@ const testTimeout = 50 * time.Millisecond
 
 func (s *SessionSuite) timedOut(created *Session) {
 	s.eventually(func() bool {
-		return created.State() == Ended && !s.manager.Running(created.ID())
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
 	}, "the session did not end at its timeout")
 	_, found := s.manager.Get(created.ID(), OwnerOf(created.Spec()))
 	s.False(found, "an ended session is still found")
@@ -28,7 +28,7 @@ func (s *SessionSuite) timedOut(created *Session) {
 func (s *SessionSuite) outlives(created *Session) {
 	time.Sleep(3 * testTimeout)
 	s.Equal(Live, created.State())
-	s.True(s.manager.Running(created.ID()), "the session was taken off")
+	s.True(s.manager.Running(created.Spec().CustomerID, created.ID()), "the session was taken off")
 }
 
 func (s *SessionSuite) TestASessionWithoutATimeoutKeepsRunning() {
@@ -147,9 +147,9 @@ func (s *SessionSuite) TestAReopenedSessionIsNotEndedByTheOldTimeout() {
 	old.end(TimeoutHangup)
 
 	s.Equal(Live, reopened.State())
-	s.True(s.manager.Running(reopened.ID()), "the reopened session was taken off")
+	s.True(s.manager.Running(reopened.Spec().CustomerID, reopened.ID()), "the reopened session was taken off")
 	if claims {
-		address, err := s.directory.Node(s.ctx, reopened.ID())
+		address, err := s.directory.Node(s.ctx, reopened.Spec().CustomerID, reopened.ID())
 		s.Require().NoError(err)
 		s.Equal("node-a:1", address, "the reopened session's claim was released")
 	}

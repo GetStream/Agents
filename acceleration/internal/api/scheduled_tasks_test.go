@@ -494,7 +494,7 @@ func (s *ScheduledTasksSuite) runWorker() {
 		s.attempts.Add(1)
 		return s.router.DeliverScheduledTask(ctx, claimed)
 	}
-	worker := scheduling.NewScheduler(s.store, deliver, slog.New(slog.DiscardHandler))
+	worker := s.newScheduler(deliver, slog.New(slog.DiscardHandler))
 	worker.Start(context.Background())
 	s.worker = worker
 	s.router.SetSchedulerKick(worker.Kick)
@@ -1509,7 +1509,7 @@ func (s *ScheduledTasksSuite) TestAnEditOfATaskPausedMeanwhileIsRefusedAndLeaves
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(codeTaskChanged, failure.Error.Code)
+	s.Equal("task_changed", failure.Error.Code)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Equal("Stretch", task.Title)
@@ -1527,7 +1527,7 @@ func (s *ScheduledTasksSuite) TestAPauseOfATaskEditedMeanwhileIsRefusedAndKeepsT
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(codeTaskChanged, failure.Error.Code)
+	s.Equal("task_changed", failure.Error.Code)
 	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
 }
 
@@ -1545,7 +1545,7 @@ func (s *ScheduledTasksSuite) TestAResumeOfATaskEditedMeanwhileIsRefusedAndKeeps
 	})
 
 	s.Equal(http.StatusConflict, status)
-	s.Equal(codeTaskChanged, failure.Error.Code)
+	s.Equal("task_changed", failure.Error.Code)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
 	s.Equal("Renamed", task.Title)
@@ -2899,9 +2899,9 @@ func (s *ScheduledTasksSuite) pausedInTheSecondPass(id string) time.Time {
 
 // resumingAt has a resume count from now rather than the wall clock.
 func (s *ScheduledTasksSuite) resumingAt(now time.Time) {
-	kept := resumedAt
-	resumedAt = func() time.Time { return now }
-	s.T().Cleanup(func() { resumedAt = kept })
+	kept := s.router.resumedAt
+	s.router.resumedAt = func() time.Time { return now }
+	s.T().Cleanup(func() { s.router.resumedAt = kept })
 }
 
 // utcTaskRequest is taskRequest in UTC, so a task's local start is its instant.
@@ -3540,9 +3540,7 @@ func (s *ScheduledTasksSuite) TestAnUnreachablePhoneFallsBackToWhatsApp() {
 }
 
 func (s *ScheduledTasksSuite) TestAPhoneOnlyTaskFailsWhenNoCallCanBePlaced() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAtOnce()
 
 	user := s.data.createUser()
 	config := s.agentToRing(user)
@@ -3693,20 +3691,22 @@ func (s *ScheduledTasksSuite) TestACallThatOutlastsTheWaitIsUserOnCall() {
 }
 
 func (s *ScheduledTasksSuite) TestACallNobodyPicksUpIsNotAnswered() {
-	window := scheduledPhoneWindow
-	scheduledPhoneWindow = 50 * time.Millisecond
-	s.T().Cleanup(func() { scheduledPhoneWindow = window })
+	window := s.router.phoneWindow
+	s.router.phoneWindow = 50 * time.Millisecond
+	s.T().Cleanup(func() { s.router.phoneWindow = window })
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
 	opened := s.openScheduling(user, config, nil)
 	found, live := s.router.sessions.Get(opened.Id, s.ownerOf(user))
 	s.Require().True(live)
 
+	started := time.Now()
 	err := s.router.holdCall(context.Background(), found, scheduledDelivery{})
 	s.Equal(scheduling.ReasonNotAnswered, scheduling.ReasonOf(err), "the ring ran out: %v", err)
+	s.Less(time.Since(started), deliveryWait, "the ring was the router's 50 ms, not the default 90 s")
 	s.True(s.failure(err).Final, "the user is not rung again")
 
-	scheduledPhoneWindow = time.Minute
+	s.router.phoneWindow = time.Minute
 	held := make(chan error, 1)
 	go func() { held <- s.router.holdCall(context.Background(), found, scheduledDelivery{}) }()
 	s.Require().Equal(http.StatusNoContent, user.do(http.MethodDelete, "/v1/agents/sessions/"+opened.Id, nil, nil))
@@ -3726,9 +3726,9 @@ func (s *ScheduledTasksSuite) ownerOf(user *testClient) session.Owner {
 
 func (s *ScheduledTasksSuite) TestAReplyNeverWrittenIsNoReply() {
 	s.retryAtOnce()
-	window := scheduledReplyWindow
-	scheduledReplyWindow = time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	number, writer := s.lineNumber(), s.writerNumber()
 	s.connectWhatsApp(number)
 	config := s.agentOnWhatsApp(number)
@@ -3765,11 +3765,31 @@ func (s *ScheduledTasksSuite) TestAFailureOnEveryChannelIsListedUnderTheFirstCha
 	s.Equal(scheduling.ReasonUnreachable, *s.failedRun(s.tasksOf(user)[0]).Error)
 }
 
-// retryAtOnce has a failed occurrence tried again straight away, twice.
+// retryAtOnce has a failed occurrence tried again straight away, twice, by the workers the test
+// starts next (newScheduler).
 func (s *RouterSuite) retryAtOnce() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAfter(time.Millisecond, time.Millisecond)
+}
+
+// retryAfter has the workers the test starts next retry a failed occurrence after waits. They are
+// the suite's, never the scheduler's own: suites run in parallel, and one that changed a value
+// every worker reads changed the retries of the others' workers mid-test.
+func (s *RouterSuite) retryAfter(waits ...time.Duration) {
+	s.retries = waits
+	s.T().Cleanup(func() { s.retries = nil })
+}
+
+// newScheduler is a scheduled-task worker delivering with deliver, retrying as the test set
+// (retryAfter, finishAtOnce), else as the scheduler does.
+func (s *RouterSuite) newScheduler(deliver scheduling.DeliverFunc, logger *slog.Logger) *scheduling.Scheduler {
+	worker := scheduling.NewScheduler(s.store, deliver, logger)
+	if s.retries != nil {
+		worker.SetRetries(s.retries)
+	}
+	if s.finishRetries != nil {
+		worker.SetFinishRetries(s.finishRetries)
+	}
+	return worker
 }
 
 // failedRun waits for the task's latest run to fail, and returns it.
@@ -3918,11 +3938,11 @@ func (s *ScheduledTasksSuite) TestAFirstOccurrenceRetriedTwiceFollowsUpInTheOneS
 	s.Equal(1, ran, "every attempt followed up in the one session")
 }
 
-// finishAtOnce has a finish that failed written again straight away, three times.
+// finishAtOnce has a finish that failed written again straight away, three times, by the workers
+// the test starts next (newScheduler).
 func (s *ScheduledTasksSuite) finishAtOnce() {
-	retries := scheduling.FinishRetries
-	scheduling.FinishRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
-	s.T().Cleanup(func() { scheduling.FinishRetries = retries })
+	s.finishRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	s.T().Cleanup(func() { s.finishRetries = nil })
 }
 
 // failFinishes has the database refuse the next times writes that finish a run of the test's
@@ -3962,6 +3982,40 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseFinishFailsOnceIsTextedOnce()
 	s.Equal("whatsapp", run.DeliveredTo)
 	s.Equal(1, run.Attempts, "the worker that texted the run finished it")
 	s.Equal([]string{"Done."}, s.sink.to(writer))
+}
+
+// finishRefusedTwice texts a task's run with waits to write the finish again, the database
+// refusing its first two writes, and returns the run once the worker is done with it.
+func (s *ScheduledTasksSuite) finishRefusedTwice(waits int) store.ScheduledTaskRun {
+	number, writer := s.lineNumber(), s.writerNumber()
+	s.connectWhatsApp(number)
+	config := s.agentOnWhatsApp(number)
+	user := s.data.createUser()
+	s.seedWriter(user, config, number, writer)
+	opened := s.openScheduling(user, config, nil)
+	s.taskOn(user, config, opened.Id, []string{"whatsapp"})
+	s.finishAtOnce()
+	s.finishRetries = s.finishRetries[:waits]
+	s.failFinishes(2)
+	s.runWorker()
+	task := s.tasksOf(user)[0]
+	s.makeDue(task)
+	s.Require().Eventually(func() bool { return len(s.sink.to(writer)) == 1 && s.worker.Running() == 0 },
+		30*time.Second, 50*time.Millisecond, "the worker never texted the run and gave up or finished it")
+	runs := s.runsOf(task)
+	s.Require().Len(runs, 1)
+	return runs[0]
+}
+
+// A finish that failed is written again once per wait the worker is given, no more: one wait
+// writes it twice, both refused, and leaves the run running.
+func (s *ScheduledTasksSuite) TestAFinishIsNotWrittenAgainPastTheWaitsItIsGiven() {
+	s.Equal(store.ScheduledTaskRunRunning, s.finishRefusedTwice(1).State)
+}
+
+// Three waits write the finish a third time, once two refusals are past.
+func (s *ScheduledTasksSuite) TestAFinishIsWrittenAgainOncePerWaitItIsGiven() {
+	s.Equal(store.ScheduledTaskRunDelivered, s.finishRefusedTwice(3).State)
 }
 
 // A run whose text went out and whose outcome was never written, its worker stopped or its
@@ -4087,9 +4141,9 @@ func (s *ScheduledTasksSuite) TestAReplyThatFailedIsNotWaitedOnWhenTheOccurrence
 
 func (s *ScheduledTasksSuite) TestARetryWaitsForAReplyStillBeingWritten() {
 	s.retryAtOnce()
-	window := scheduledReplyWindow
-	scheduledReplyWindow = 6 * time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = 6 * time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	number, writer := s.lineNumber(), s.writerNumber()
 	s.connectWhatsApp(number)
 	config := s.agentOnWhatsApp(number)
@@ -4212,7 +4266,7 @@ func (s *ScheduledTasksSuite) TestATurnInterruptedByItsRouterStoppingRunsAgainOn
 	_, err := s.cutOff(stopping, task, run, func() { s.Require().NoError(sessions.Shutdown()) })
 	s.Require().Error(err)
 	// A stopped router's claim on the session runs out; the test does not wait for it.
-	stopping.directory.Release(context.Background(), opened.Id)
+	stopping.directory.Release(context.Background(), s.customerID(), opened.Id)
 
 	deliveredTo, err := s.deliverRun(task, run)
 

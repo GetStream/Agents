@@ -2,6 +2,7 @@ package ttsrouter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -36,7 +37,7 @@ func (s *TTSRouterSuite) timedVoice(provider *stubTTS, region string, byok bool)
 	recorder := routing.NewRecorder(routing.TTS, nil, nil, prices, slog.Default())
 	var logs bytes.Buffer
 	owner := routing.Owner{CustomerID: "acme", AgentID: "concierge", CallID: "default:lobby"}
-	session := newSession(provider, config, owner, recorder, slog.New(slog.NewJSONHandler(&logs, nil)))
+	session := newSession(context.Background(), provider, config, owner, recorder, slog.New(slog.NewJSONHandler(&logs, nil)))
 	s.T().Cleanup(func() {
 		_ = session.Close()
 		recorder.Close()

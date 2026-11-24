@@ -58,7 +58,7 @@ func (s *Store) withCredentialLock(ctx context.Context, customerID, id string, f
 	if err != nil {
 		return err
 	}
-	defer releaseCredentialLock(conn, credentialLockNamespace, key)
+	defer releaseCredentialLock(ctx, conn, credentialLockNamespace, key)
 	return fn(conn)
 }
 
@@ -113,8 +113,8 @@ func (s *Store) acquireCredentialLock(ctx context.Context, namespace, key int32)
 // (https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS);
 // that, or an unlock that fails, closes the connection rather than return a session in a
 // state nobody knows.
-func releaseCredentialLock(conn bun.Conn, namespace, key int32) {
-	ctx, cancel := context.WithTimeout(context.Background(), credentialDetachedTimeout)
+func releaseCredentialLock(ctx context.Context, conn bun.Conn, namespace, key int32) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
 	defer cancel()
 	var released bool
 	err := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock(?::integer, ?::integer)", namespace, key).Scan(&released)
