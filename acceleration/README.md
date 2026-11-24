@@ -2912,6 +2912,11 @@ row taken back where it was first recorded is the row it was copied from. A dele
 change batch is found by the `usage_id` made from the one the change names, and never removes
 a request this deployment recorded itself.
 
+A row refused because another tenant here holds its key stops the move, and the error names the
+row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
+`POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
+to the operator of this deployment.
+
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.
 Voice recordings live in the bucket rather than in Postgres, so their rows move and copying
@@ -3100,8 +3105,9 @@ contract.
 ## Persistent text conversations
 
 Every text session is kept in a Stream Chat `agent:support-<uuid>` channel unless it is
-`incognito`; pass `conversation_id` to bind to an existing one. The configured agent ID is
-preserved; the backend verifies the channel's customer and agent ownership on
+`incognito`; pass `conversation_id` to bind to an existing one. A `conversation_id` from
+an anonymous caller is refused with a 403: such a caller carries its conversation on by session
+id. The configured agent ID is preserved; the backend verifies the channel's customer and agent ownership on
 resume and on `GET /v1/agents/conversations/{cid}/messages?agent_id=...&before=...`.
 This endpoint returns up to 100 messages and a `before` cursor. Completed ordinary
 user/assistant messages restore model context, capped at 100 messages and 60,000

@@ -192,7 +192,7 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 	for i, scenario := range scenarios {
 		cases = append(cases, store.SimulationCase{Variation: i, Scenario: scenario})
 	}
-	if err := r.store.SimulationRuns.Start(ctx, &run, cases, time.Now().Add(holdFor)); err != nil {
+	if err := r.store.SimulationRuns.Start(ctx, &run, cases, holdFor); err != nil {
 		return store.SimulationRun{}, err
 	}
 
@@ -509,7 +509,7 @@ func (r *Runner) keep(ctx context.Context) {
 		held := slices.Collect(maps.Keys(r.running))
 		r.mu.Unlock()
 
-		stop, err := r.store.SimulationRuns.Renew(ctx, held, time.Now().Add(holdFor))
+		stop, err := r.store.SimulationRuns.Renew(ctx, held, holdFor)
 		if err != nil {
 			r.logger.Error("could not renew the simulation runs this router holds", "error", err)
 		}
