@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { describe, it } from "node:test";
 
 import { ConfigurationError } from "../src/index.js";
@@ -18,6 +18,13 @@ async function agentDir(files: Record<string, string | Uint8Array>): Promise<str
     await writeFile(file, content);
   }
   return root;
+}
+
+/** Points `name`, under `root`, at `target`. */
+async function link(root: string, name: string, target: string): Promise<void> {
+  const path = join(root, name);
+  await mkdir(join(path, ".."), { recursive: true });
+  await symlink(target, path);
 }
 
 describe("loadFolder", () => {
@@ -587,6 +594,118 @@ describe("loadFolder", () => {
     await symlink(elsewhere, join(skills, "skills"));
     await assert.rejects(() => loadFolder(skills), /skills links outside the agent directory/);
   });
+
+  const skill = "---\ndescription: Work it out\n---\nReason it through.\n";
+  const linkedOut: { linked: string; to: string; outside: Record<string, string>; inside?: Record<string, string> }[] = [
+    { linked: "agent.yaml", to: "agent.yaml", outside: { "agent.yaml": "name: jean\n" } },
+    { linked: "instructions.md", to: "notes.md", outside: { "notes.md": "Elsewhere.\n" } },
+    { linked: "guardrail.md", to: "notes.md", outside: { "notes.md": "Elsewhere.\n" } },
+    { linked: "skills", to: "skills", outside: { "skills/think.md": skill } },
+    { linked: "skills/think.md", to: "think.md", outside: { "think.md": skill } },
+    { linked: "skills/think/SKILL.md", to: "SKILL.md", outside: { "SKILL.md": skill } },
+    {
+      linked: "skills/think/notes.txt",
+      to: "notes.txt",
+      outside: { "notes.txt": "Elsewhere.\n" },
+      inside: { "skills/think/SKILL.md": skill },
+    },
+    { linked: "knowledge", to: "knowledge", outside: { "knowledge/doc.md": "Elsewhere.\n" } },
+    { linked: "knowledge/doc.md", to: "doc.md", outside: { "doc.md": "Elsewhere.\n" } },
+    {
+      linked: "knowledge/urls.yaml",
+      to: "urls.yaml",
+      outside: { "urls.yaml": "- https://example.com/elsewhere\n" },
+      inside: { "knowledge/doc.md": "Here.\n" },
+    },
+    { linked: "simulations", to: "simulations", outside: { "simulations/calls.yaml": "[]\n" } },
+    { linked: "simulations/calls.yaml", to: "calls.yaml", outside: { "calls.yaml": "[]\n" } },
+  ];
+  for (const { linked, to, outside, inside } of linkedOut) {
+    it(`refuses ${linked} linked from outside the agent directory, since a sync would send what it leads to`, async () => {
+      const elsewhere = await agentDir(outside);
+      const path = await agentDir(inside ?? {});
+      if (linked === "agent.yaml") {
+        await rm(join(path, "agent.yaml"));
+      }
+      await link(path, linked, join(elsewhere, to));
+
+      await assert.rejects(() => loadFolder(path), (error: unknown) => {
+        assert.ok(error instanceof ConfigurationError);
+        assert.match(error.message, /links outside the agent directory/);
+        return true;
+      });
+    });
+  }
+
+  it("refuses a knowledge folder linked to the directory the agent directory is in", async () => {
+    const path = await agentDir({});
+    await writeFile(join(path, "..", "doc.md"), "Elsewhere.\n");
+    await symlink(join(path, ".."), join(path, "knowledge"));
+
+    await assert.rejects(() => loadFolder(path), /knowledge links outside the agent directory/);
+  });
+
+  it("reads a link that stays inside the agent directory, and a directory reached through a link", async () => {
+    const path = await agentDir({
+      "shared/notes.md": "Be brief.\n",
+      "shared/think.md": skill,
+      "shared/pricing.md": "A penny.\n",
+      "shared/calls.yaml": "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n",
+    });
+    await link(path, "instructions.md", join("shared", "notes.md"));
+    await link(path, "skills/think.md", join("..", "shared", "think.md"));
+    await link(path, "knowledge/pricing.md", join("..", "shared", "pricing.md"));
+    await link(path, "simulations/calls.yaml", join("..", "shared", "calls.yaml"));
+    // The agent directory is itself reached through a link, as a checkout often is.
+    const through = join(await mkdtemp(join(tmpdir(), "vision-agents-")), "linked");
+    await symlink(path, through);
+
+    const folder = await loadFolder(through);
+
+    assert.equal(folder.instructions, "Be brief.");
+    assert.deepEqual(folder.skills.map((each) => each.instructions), ["Reason it through."]);
+    assert.deepEqual(folder.knowledge, [{ source: "pricing.md", text: "A penny.\n" }]);
+    assert.deepEqual(folder.simulations?.map((each) => each.name), ["lunch"]);
+  });
+
+  it("keeps the links of an agent directory named relative to the working directory", async () => {
+    const path = await agentDir({ "shared/think.md": skill, "shared/pricing.md": "A penny.\n" });
+    await link(path, "skills/think.md", join(path, "shared", "think.md"));
+    await link(path, "knowledge/pricing.md", join("..", "shared", "pricing.md"));
+    const named = relative(process.cwd(), path);
+
+    const folder = await loadFolder(named);
+    assert.equal(folder.skills.length, 1);
+    assert.equal(folder.knowledge.length, 1);
+
+    const elsewhere = await agentDir({ "notes.md": "Elsewhere.\n" });
+    await link(path, "instructions.md", join(elsewhere, "notes.md"));
+    await assert.rejects(() => loadFolder(named), /instructions\.md links outside the agent directory/);
+  });
+
+  it("compares the agent directory by whole names: a sibling sharing its prefix is outside, a ..shared folder inside", async () => {
+    const path = await agentDir({ "..shared/a.md": "A penny.\n" });
+    await link(path, "knowledge/a.md", join("..", "..shared", "a.md"));
+    assert.deepEqual((await loadFolder(path)).knowledge.map((document) => document.text), ["A penny.\n"]);
+
+    await mkdir(`${path}-2`);
+    await writeFile(join(`${path}-2`, "notes.md"), "Elsewhere.\n");
+    await link(path, "instructions.md", join(`${path}-2`, "notes.md"));
+    await assert.rejects(() => loadFolder(path), /instructions\.md links outside the agent directory/);
+  });
+
+  for (const linked of ["instructions.md", "skills/loop.md", "knowledge/loop.md"]) {
+    it(`refuses ${linked} linked to itself, rather than going round or skipping it`, async () => {
+      const path = await agentDir({});
+      await link(path, linked, join(path, linked));
+
+      await assert.rejects(() => loadFolder(path), (error: unknown) => {
+        assert.ok(error instanceof ConfigurationError);
+        assert.match(error.message, /links outside the agent directory/);
+        return true;
+      });
+    });
+  }
 
   it("reads skills in name order", async () => {
     const path = await agentDir({
