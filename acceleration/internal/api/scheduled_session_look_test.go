@@ -71,7 +71,7 @@ type handOff struct {
 func (s *ScheduledTasksSuite) handingOff(ctx context.Context, sessionID string) <-chan handOff {
 	done := make(chan handOff, 1)
 	go func() {
-		_, handed, err := s.router.handDeliveryToPeer(ctx, scheduledDelivery{SessionID: sessionID, TaskID: rand.Text()})
+		_, handed, err := s.router.handDeliveryToPeer(ctx, scheduledDelivery{CustomerID: s.customerID(), SessionID: sessionID, TaskID: rand.Text()})
 		done <- handOff{handed, err}
 	}()
 	return done
@@ -169,7 +169,7 @@ func (s *ScheduledTasksSuite) TestADeliveryGivesUpOnAPeerThatKeepsTheSessionAfte
 func (s *ScheduledTasksSuite) unreadableEntry(sessionID string) {
 	redis := s.live.Redis()
 	list := s.relayPrefix + ":probe:" + sessionID
-	entry := s.relayPrefix + ":session:" + sessionID
+	entry := s.relayPrefix + ":session:" + s.customerID() + ":" + sessionID
 	s.Require().NoError(redis.Do(context.Background(), redis.B().Rpush().Key(list).Element("x").Build()).Error())
 	s.Require().NoError(redis.Do(context.Background(), redis.B().Rename().Key(list).Newkey(entry).Build()).Error())
 	s.T().Cleanup(func() { redis.Do(context.Background(), redis.B().Del().Key(entry).Build()) })
