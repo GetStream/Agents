@@ -700,7 +700,8 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Spend.Teams", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Spend.Teams(ctx, "org-7", []time.Time{since}, s.base.AddDate(0, 0, -1))
+			// Of an app in no organization, as the category sum below is.
+			_, err := store.Spend.Teams(ctx, "customer-7", []time.Time{since}, s.base.AddDate(0, 0, -1), false)
 			return err
 		}},
 		{name: "Spend.Subject", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {

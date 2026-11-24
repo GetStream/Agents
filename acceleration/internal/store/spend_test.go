@@ -202,7 +202,7 @@ func (s *StoreSuite) TestSpendQueryBudgets() {
 		s.Require().NoError(err)
 	}), "the organization's apps, then one sum a shard")
 	s.Equal(1+shards, s.countQueries(func() {
-		_, err := s.store.Spend.Teams(s.ctx, organization, []time.Time{s.base}, s.base)
+		_, err := s.store.Spend.Teams(s.ctx, organization, []time.Time{s.base}, s.base, true)
 		s.Require().NoError(err)
 	}), "the organization's apps, then one sum a shard")
 	s.Equal(shards, s.countQueries(func() {
