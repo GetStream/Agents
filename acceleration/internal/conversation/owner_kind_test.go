@@ -138,6 +138,13 @@ func (s *OwnerKindSuite) TestASharedConversationsOtherMemberIsAVerifiedUser() {
 	s.Equal([]auth.Kind{auth.KindServer, auth.KindAuthenticated, auth.KindGuest}, s.readableBy(cid, "bob"))
 }
 
+func (s *OwnerKindSuite) TestAMemberOfASharedConversationWithNoKindRecordedIsAVerifiedUser() {
+	cid := s.shared("")
+
+	s.Equal([]auth.Kind{auth.KindServer, auth.KindAuthenticated, auth.KindGuest}, s.readableBy(cid, "bob"))
+	s.reachedOnlyBy(cid, auth.KindServer, auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous, "")
+}
+
 func (s *OwnerKindSuite) TestASharedConversationsCallerIsCheckedAgainAsTheKindThatOpenedIt() {
 	// Kept with no kind and opened for none, then opened by bob while it is still held.
 	cid := s.shared("")

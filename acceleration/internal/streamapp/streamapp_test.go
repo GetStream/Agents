@@ -353,6 +353,21 @@ func (s *StreamAppSuite) TestAnAnswerResolvedAcrossAnInvalidationIsNotKept() {
 	s.Equal("new-key", second.Identity.APIKey, "and is not kept past it")
 }
 
+func (s *StreamAppSuite) TestAUserTokenSaysTheRoleItIsMintedWith() {
+	clients := NewClients(deployment(), ClientsOptions{})
+	bound, err := clients.For(context.Background(), "acme")
+	s.Require().NoError(err)
+
+	for role, said := range map[string]any{"guest": "guest", "": nil} {
+		token, _, err := clients.MintUserTokenAs(context.Background(), bound, "", "guest-1", role, time.Hour)
+		s.Require().NoError(err)
+		claims := jwt.MapClaims{}
+		_, err = jwt.ParseWithClaims(token, claims, func(*jwt.Token) (any, error) { return []byte("deploy-secret"), nil })
+		s.Require().NoError(err)
+		s.Equal(said, claims["role"])
+	}
+}
+
 func (s *StreamAppSuite) TestAUserTokenSignedWithTheAppsSecretGoesWithTheKeyOfThatSecret() {
 	// Only the gateway can sign for another key; a secret signs for its own.
 	clients := NewClients(deployment(), ClientsOptions{})

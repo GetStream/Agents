@@ -273,6 +273,49 @@ func (s *GuestsSuite) TestAGuestTokenWithTheGuestRoleRefreshesTheSameGuest() {
 	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
 }
 
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItRefreshesTo() {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	seen := s.guestSeenInAToken()
+	opened := s.asGuest(seen).createSession(textSession(nil))
+	s.asGuest(seen).stopSession(opened.Id)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+	s.Require().NotNil(opened.ConversationId)
+
+	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
+
+	resumed := s.holding(again).createSession(resume)
+	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
+	status, _ := s.data.signedInAs(seen).failure(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Equal(http.StatusBadRequest, status, "a signed-in user of the same name")
+}
+
+func (s *GuestsSuite) TestARefreshedTokenSaysTheRoleOnlyOfTheTokenPresented() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	asked := GuestUserRequest{Id: &first.Id, Custom: &map[string]any{"role": "guest"}}
+
+	s.Equal("guest", s.claimsOf(s.mint(s.asGuest(first.Id), asked))["role"])
+	s.NotContains(s.claimsOf(first), "role")
+	s.NotContains(s.claimsOf(s.mint(s.data.signedInAs(first.Id), asked)), "role", "by their own token with no role")
+	s.NotContains(s.claimsOf(s.mint(s.serverClient, asked)), "role", "by the backend")
+	asked.RefreshSecret = s.mint(s.serverClient, GuestUserRequest{Id: &first.Id}).RefreshSecret
+	again := s.mint(s.data.createAnonymous(), asked)
+	s.Equal(first.Id, again.Id)
+	s.NotContains(s.claimsOf(again), "role", "by their refresh secret")
+}
+
+func (s *GuestsSuite) TestAClaimedGuestWhoseTokenSaysTheRoleIsNotMintedAgain() {
+	guest := s.recordGuest()
+	s.claim(guest, s.utils.uuid())
+
+	status, failure := s.asGuest(guest).failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &guest})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "has been claimed")
+}
+
 func (s *GuestsSuite) TestARefreshSecretBringsTheSameGuestBackWithANewSecret() {
 	first := s.mint(s.data.createAnonymous(), GuestUserRequest{
 		Name: pointerTo("Alice"), Custom: &map[string]any{"plan": "pro"},
@@ -758,9 +801,23 @@ func (s *GuestsSuite) claim(guest, account string) ClaimGuestResult {
 	return claimed
 }
 
-// asGuest is a client holding a guest's token for the id, as a minted guest does.
+// asGuest is a client holding a guest's token for the id, as the app signs one: it says the role.
 func (s *GuestsSuite) asGuest(id string) *testClient {
 	return s.signedIn(jwt.MapClaims{"user_id": id, "role": "guest"}, auth.AuthTypeJWT, guest, id)
+}
+
+// claimsOf is what the guest's token says.
+func (s *GuestsSuite) claimsOf(minted GuestUser) jwt.MapClaims {
+	claims := jwt.MapClaims{}
+	_, _, err := jwt.NewParser().ParseUnverified(minted.Token, claims)
+	s.Require().NoError(err)
+	return claims
+}
+
+// holding is a client whose token says what the guest's does. The suite's Stream app has another
+// secret than its API key, so the token itself is signed again.
+func (s *GuestsSuite) holding(minted GuestUser) *testClient {
+	return s.signedIn(s.claimsOf(minted), auth.AuthTypeJWT, guest, minted.Id)
 }
 
 // scheduledFor is a task for the user, written as a caller of that kind would have.

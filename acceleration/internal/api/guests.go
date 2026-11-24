@@ -98,7 +98,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 	if err := s.updateGuestProfile(ctx, bound, userID, name, value(body.Custom)); err != nil {
 		return nil, err
 	}
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, userID)
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, userID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -131,8 +131,9 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 //
 // Three things prove it:
 //   - the app's backend, which can mint a token for anyone anyway;
-//   - the guest's own token, still valid, naming this id. The token the router mints carries
-//     no role claim, so it reads as KindAuthenticated rather than KindGuest; a caller that
+//   - the guest's own token, still valid, naming this id. A token the router first mints
+//     carries no role claim, so it reads as KindAuthenticated rather than KindGuest; the token
+//     a KindGuest refreshes to says the role theirs did. A caller that
 //     only named an id in a header is KindAnonymous and proves nothing;
 //   - the refresh secret the guest was last handed, which is spent by being used.
 func (s *Server) returningGuest(ctx context.Context, customerID string, bound streamapp.Bound, requested string, body GuestUserRequest) (*createGuestUserResponse, error) {
@@ -181,7 +182,13 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		}
 	}
 
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested)
+	// What a guest keeps is kept for the kind their token proves (auth.Kind.Reaches), so the
+	// next token proves the same one.
+	var role string
+	if kind == auth.KindGuest {
+		role = guestRole
+	}
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +232,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested)
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, "")
 	if err != nil {
 		return nil, err
 	}
@@ -251,10 +258,11 @@ func (s *Server) updateGuestProfile(ctx context.Context, bound streamapp.Bound, 
 	return stack.Wrap(err)
 }
 
-// mintGuestToken mints a guest's Stream token and says when it stops working.
-func (s *Server) mintGuestToken(ctx context.Context, bound streamapp.Bound, userID string) (string, time.Time, error) {
+// mintGuestToken mints a guest's Stream token, saying role when it is not empty, and says when
+// it stops working.
+func (s *Server) mintGuestToken(ctx context.Context, bound streamapp.Bound, userID, role string) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(guestTokenValidity)
-	token, _, err := s.stream.MintUserToken(ctx, bound, requestKeyFrom(ctx), userID, guestTokenValidity)
+	token, _, err := s.stream.MintUserTokenAs(ctx, bound, requestKeyFrom(ctx), userID, role, guestTokenValidity)
 	if err != nil {
 		return "", time.Time{}, stack.Wrap(err)
 	}
