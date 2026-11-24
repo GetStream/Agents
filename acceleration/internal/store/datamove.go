@@ -779,6 +779,10 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // is what lets a move be resumed after it was interrupted.
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
 	spec, _ := dataTableByName(table)
+	row, err := importableRow(ctx, customerID, table, row)
+	if err != nil {
+		return err
+	}
 	var stale []string
 	if err := s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale); err != nil {
 		return err
@@ -801,8 +805,26 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
 	"attached_at", "config_id"}
 
-// importRow writes one row of an export or of a change (ImportRow). It adds to stale the cached
-// values the row was and is read through, for the caller to forget once the write has committed.
+// importableRow is row as importRow writes it, or why it is not imported: a connector definition
+// only as the API would store it (importableDefinition). Every caller runs it before importRow and
+// outside any transaction, since checking a definition can resolve its base URL's host, and a slow
+// resolver would hold applyChanges' transaction open as long as the request lasts.
+func importableRow(ctx context.Context, customerID, table string, row json.RawMessage) (json.RawMessage, error) {
+	if table != "connector_definitions" {
+		return row, nil
+	}
+	// The built-in customer owns the built-in definitions every app shares, and an import
+	// never writes them: `router replicate` without --as hands over "" until a row names
+	// a customer.
+	if customerID == BuiltinCustomer {
+		return nil, fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+	}
+	return importableDefinition(ctx, row)
+}
+
+// importRow writes one row of an export or of a change (ImportRow), which importableRow has
+// checked. It adds to stale the cached values the row was and is read through, for the caller to
+// forget once the write has committed.
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage, stale *[]string) error {
 	if slices.Contains(retiredTables, table) {
 		return nil
@@ -835,17 +857,6 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	}
 	if table == "phone_numbers" {
 		if importable, err := importableNumber(ctx, db, customerID, row); err != nil || !importable {
-			return err
-		}
-	}
-	if table == "connector_definitions" {
-		// The built-in customer owns the built-in definitions every app shares, and an import
-		// never writes them: `router replicate` without --as hands over "" until a row names
-		// a customer.
-		if customerID == BuiltinCustomer {
-			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
-		}
-		if row, err = importableDefinition(ctx, row); err != nil {
 			return err
 		}
 	}
@@ -1943,6 +1954,18 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string, changes []DataChange) error {
 	if len(changes) == 0 {
 		return nil
+	}
+	// Before the transaction opens (importableRow).
+	changes = slices.Clone(changes)
+	for i, change := range changes {
+		if change.Op == ChangeDelete || !appPolicy(change) {
+			continue
+		}
+		payload, err := importableRow(ctx, customerID, change.Table, change.Payload)
+		if err != nil {
+			return err
+		}
+		changes[i].Payload = payload
 	}
 	var stale []string
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {

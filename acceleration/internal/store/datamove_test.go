@@ -2445,6 +2445,27 @@ func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused()
 	s.Zero(s.definitionsNamed(id))
 }
 
+// TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens: AI-3676 S1.3, checking a
+// definition can resolve its base URL's host, so a change set's definitions are checked before
+// its transaction opens, not row by row inside it. The first change names no table and fails
+// only once inside the transaction; the definition after it is refused first.
+func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens() {
+	id := "custom_" + newID()
+	private := strings.Replace(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1),
+		`"id": "custom_acme"`, `"id": "`+id+`"`, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{
+		{Table: "no_such_table", Op: ChangeInsert, Payload: json.RawMessage(`{}`)},
+		{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1,
+			"name": "Weather", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + private + `}`)},
+	})
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.NotErrorIs(err, ErrInvalidImport)
+	s.Zero(s.definitionsNamed(id))
+}
+
 // TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
 // (core.Manifest.Validate) hold for an import as for the API.
 func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused() {
