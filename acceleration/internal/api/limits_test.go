@@ -683,11 +683,12 @@ func (s *SelfHostedLimitsSuite) TestAnotherOrganizationsAppsSpendIsNotRead() {
 	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(s.customerID())), "its own app alone is read")
 }
 
-// An app in no organization holds only itself: an organization whose id is the app's is
-// another customer's.
+// A request that names no organization reads its app alone, also when the app is recorded in
+// the organization of its own id with others.
 func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationReadsOnlyItself() {
 	own := s.utils.uuid()
 	backend := s.backend(own, "")
+	s.seen(own, own)
 	s.spent(own, 300_000)
 	stranger := s.stranger(own)
 
@@ -713,11 +714,12 @@ func (s *SelfHostedLimitsSuite) TestAnAppReadsItsOwnSpendWhateverOrganizationIsR
 	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(own)))
 }
 
-// An app in no organization is its own organization, which no other app is in: one seen under
-// an organization whose id is the app's is another customer's.
+// The organization of a request that names none is its app alone, also when the app is recorded
+// in the organization of its own id with others.
 func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsOrganizationIsItselfAlone() {
 	own := s.utils.uuid()
 	backend := s.backend(own, "")
+	s.seen(own, own)
 	s.spent(own, 300_000)
 	s.stranger(own)
 

@@ -36,6 +36,9 @@ var (
 	// errNoSuchApp answers another organization's app as it answers an app that does not
 	// exist, so the answer says nothing of whose it is.
 	errNoSuchApp = notFound("app_id names no app of the organization")
+	// errLimitsManaged is the one answer to every limits operation of an app with sharedID, so it
+	// says nothing of any limit or organization.
+	errLimitsManaged = forbidden("the spend limits of this app are managed by support")
 )
 
 // What a limit's ids may hold. A key is never an origin (hook:chat), which holds a ':'. A user
@@ -544,7 +547,7 @@ func (s *Server) registerLimits(api huma.API) {
 
 // limitsCaller is the organization a customer's limits call is about and who it is recorded
 // as made by. An app seen in no organization, as with a self-hosted router's own keys, is its
-// own.
+// own, unless its id is also an organization's (sharedID), whose limits are its apps' alone.
 func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -556,8 +559,47 @@ func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, er
 	organization := OrganizationFrom(ctx)
 	if organization == "" {
 		organization = customerID
+		shared, err := s.sharedID(ctx, customerID)
+		if err != nil {
+			return "", store.LimitAudit{}, err
+		}
+		if shared {
+			return "", store.LimitAudit{}, errLimitsManaged
+		}
 	}
 	return organization, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
+}
+
+// sharedID reports whether an app a request names no organization for has the id of an
+// organization it is not in: one another app was last seen under, or is registered under. It
+// reads Postgres, so an organization counts as soon as an app of it is recorded.
+func (s *Server) sharedID(ctx context.Context, app string) (bool, error) {
+	apps, err := s.store.AppOrganizations.Apps(ctx, app)
+	if err != nil {
+		return false, err
+	}
+	// Apps always holds the id itself.
+	if len(apps) == 1 {
+		return false, nil
+	}
+	owners, err := s.store.AppOrganizations.OrganizationsOf(ctx, []string{app})
+	return owners[app] != app, err
+}
+
+// recordOrganization records the caller's app in its organization when it is recorded in
+// another or in none. Enforcer.Join does so in the background, after which a limit would be
+// kept before sharedID knows of its organization.
+func (s *Server) recordOrganization(ctx context.Context) error {
+	app, _ := CustomerFrom(ctx)
+	organization := OrganizationFrom(ctx)
+	if app == "" || organization == "" {
+		return nil
+	}
+	owners, err := s.store.AppOrganizations.OrganizationsOf(ctx, []string{app})
+	if err != nil || owners[app] == organization {
+		return err
+	}
+	return s.store.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: app, OrganizationID: organization})
 }
 
 // billedOrganization reports whether the caller's organization is one the usage service bills,
@@ -853,6 +895,9 @@ func (s *Server) createLimit(ctx context.Context, organization string, billed bo
 		return nil, err
 	}
 	if err := aboveParent(all, row); err != nil {
+		return nil, err
+	}
+	if err := s.recordOrganization(ctx); err != nil {
 		return nil, err
 	}
 	err = s.store.Limits.Insert(ctx, &row, audit)
