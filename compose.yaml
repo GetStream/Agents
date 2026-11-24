@@ -44,14 +44,15 @@ services:
       ROUTER_USAGE_TOKEN: ${USAGE_INGEST_TOKEN:-local-usage-token}
       # The Redis the usage service mirrors spend to, which spend limits read every second.
       ROUTER_USAGE_REDIS_URL: redis://redis:6379
-      # Seals the secrets the router holds. Any random string works; keep it, since changing
-      # it leaves the stored ones unreadable. Generate one into .env with:
-      #   echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
-      ROUTER_DEV_KEK: "${ROUTER_DEV_KEK:?set ROUTER_DEV_KEK in .env: echo \"ROUTER_DEV_KEK=$$(openssl rand -hex 32)\" >> .env}"
+      # Seals the secrets the router holds; the router refuses to start without it. Any random
+      # string works. Make it once and keep it, since changing it leaves the stored ones
+      # unreadable:  echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
+      ROUTER_DEV_KEK: "${ROUTER_DEV_KEK:-}"
       # Off: an organization starts with no credit in the usage service above, and a voice
       # session's hosted models (speech, voice, the flow controller) are priced, so enforcing
       # would answer every one 402 until somebody grants credit to themselves. Usage is still
-      # priced and shipped. Set ROUTER_LIMITS_MODE=enforce (or shadow) in .env to test limits.
+      # priced and shipped. This variable wins over limits.mode in a mounted config file, so
+      # set ROUTER_LIMITS_MODE=enforce (or shadow) in .env to test limits.
       ROUTER_LIMITS_MODE: "${ROUTER_LIMITS_MODE:-off}"
     ports:
       - "${ROUTER_PUBLISH_ADDRESS:-127.0.0.1}:8080:8080"
