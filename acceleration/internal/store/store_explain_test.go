@@ -704,22 +704,24 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Spend.Subject", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectApp, AppID: "customer-7"}, since)
+			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectApp, AppID: "customer-7"}, since, true)
 			return err
 		}},
 		{name: "Spend.Subject of a user", index: "requests_user_spend_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectUser, AppID: "customer-7",
-				UserID: "user-7"}, since)
+				UserID: "user-7"}, since, true)
 			return err
 		}},
 		{name: "Spend.Subject of a key", index: "requests_key_spend_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectAPIKey, AppID: "customer-7",
-				APIKey: "key-7"}, since)
+				APIKey: "key-7"}, since, true)
 			return err
 		}},
+		// Of an app in no organization, customer-7: the seed records no app under an organization,
+		// so a billed one's sum names none.
 		{name: "Spend.Subject of a category", index: "requests_category_spend_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "org-7", Subject: usage.SubjectCategory,
-				Category: "team:team-7"}, since)
+			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "customer-7", Subject: usage.SubjectCategory,
+				Category: "team:team-7"}, since, false)
 			return err
 		}},
 		{name: "Spend.Daily", index: "requests_started_idx", run: func(ctx context.Context, store *Store) error {

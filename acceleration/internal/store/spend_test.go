@@ -59,7 +59,7 @@ func (s *StoreSuite) TestASubjectsSpendIsItsBillableRowsAlone() {
 		{OrganizationID: "org-1", Subject: usage.SubjectCategory, Category: "team:finance"}:                    500,
 		{OrganizationID: "org-1", Subject: usage.SubjectAppCategory, AppID: "app-1", Category: "team:finance"}: 100,
 	} {
-		spent, err := s.store.Spend.Subject(s.ctx, ref, since)
+		spent, err := s.store.Spend.Subject(s.ctx, ref, since, true)
 		s.Require().NoError(err)
 		s.Equal(want, spent, "%+v", ref)
 	}
@@ -194,11 +194,11 @@ func (s *StoreSuite) TestSpendQueryBudgets() {
 		s.Require().NoError(err)
 	}), "one sum a shard")
 	s.Equal(shards, s.countQueries(func() {
-		_, err := s.store.Spend.Subject(s.ctx, usage.SubjectRef{Subject: usage.SubjectApp, OrganizationID: organization, AppID: "app-1"}, s.base)
+		_, err := s.store.Spend.Subject(s.ctx, usage.SubjectRef{Subject: usage.SubjectApp, OrganizationID: organization, AppID: "app-1"}, s.base, true)
 		s.Require().NoError(err)
 	}))
 	s.Equal(1+shards, s.countQueries(func() {
-		_, err := s.store.Spend.Subject(s.ctx, usage.SubjectRef{Subject: usage.SubjectOrganization, OrganizationID: organization}, s.base)
+		_, err := s.store.Spend.Subject(s.ctx, usage.SubjectRef{Subject: usage.SubjectOrganization, OrganizationID: organization}, s.base, true)
 		s.Require().NoError(err)
 	}), "the organization's apps, then one sum a shard")
 	s.Equal(1+shards, s.countQueries(func() {
