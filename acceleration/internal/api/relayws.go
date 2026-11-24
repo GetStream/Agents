@@ -363,8 +363,29 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 	if spec.PersistConversation && spec.Caller.UserID != owner.UserID {
 		return
 	}
+	// And the one carryOn asks: an end user watches only while still in the team of the
+	// session's config. Stream is asked off the bus's one subscription, which every node's
+	// requests come in on, and for no longer than the asker waits for the answer.
+	if owner.Kind != auth.KindServer && spec.ConfigID != "" {
+		go func() {
+			asking, cancel := context.WithTimeout(ctx, attachWait)
+			defer cancel()
+			if err := s.refuseOwnerOutsideTeam(asking, owner, spec.ConfigID); err != nil {
+				if _, refused := errors.AsType[APIError](err); !refused {
+					s.logger.Error("could not check a relayed watcher's team", "session", request.Session, "error", err)
+				}
+				return
+			}
+			s.holdProxyFor(ctx, state, request, found, owner)
+		}()
+		return
+	}
+	s.holdProxyFor(ctx, state, request, found, owner)
+}
 
-	held := session.OwnerOf(spec)
+// holdProxyFor attaches the watcher request asks for to found, as owner, once it may watch.
+func (s *Server) holdProxyFor(ctx context.Context, state *relayed, request relay.Request, found *session.Session, owner session.Owner) {
+	held := session.OwnerOf(found.Spec())
 	key := relay.Owner{CustomerID: held.CustomerID, UserID: held.UserID}.Key()
 
 	seat := session.Seat{

@@ -29,6 +29,7 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
                  v
         internal/api/scheduled_delivery.go DeliverScheduledTask
                  |   quiet hours? -> Postponed
+                 |   an end user's task, they out of its config's team? -> not_in_team, final
                  |   channel_thread? -> internal/api/scheduled_thread_delivery.go deliverOnThread
                  |   session live here | on a peer (POST /internal/scheduled-tasks/deliver)
                  |   | ended: reopen from its row | none yet: open one
@@ -347,6 +348,24 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
 - **A caller's own tool with a scheduling name keeps the name.**
   `TestScheduledTasksSuite/TestACallersOwnScheduleTaskKeepsTheName`.
 - **Another user's task is a 404.** `TestScheduledTasksSuite/TestTheOwnerReachesATaskItsBackendMadeAndAnotherUserDoesNot`.
+- **A task is its config's team's (AgentTeams).** In an app that keeps each team's configs to its
+  own users, a device is answered a task on a config of a team its user is not in now as one that
+  does not exist, by every operation it may call, delete included; the list leaves those out in its
+  query (`ScheduledTaskFilter.Configs`), and one on a deleted config. A backend is not checked. A
+  task its end user made (`caller_kind` not `server`) runs only while they are in the team: one who
+  left it fails the occurrence `not_in_team`, final, before any session is found or opened, on every
+  path (live here, on a peer, reopened, opened); a task its backend made is not checked. Teams Stream
+  could not read fail the attempt, retried.
+  `TestScheduledTasksSuite/TestATaskOfATeamTheUserLeftIsAnsweredAsATaskThatDoesNotExist`,
+  `TestScheduledTasksSuite/TestAUserStillInATasksTeamReachesItByEveryOperation`,
+  `TestScheduledTasksSuite/TestABackendReachesATaskOfATeamItsUserLeftWithoutAskingStream`,
+  `TestScheduledTasksSuite/TestTheListLeavesOutTasksOfAnotherTeamAndStillFillsEachPage`,
+  `TestScheduledTasksSuite/TestATaskOfATeamIsReachedByNoUserWhileTheirTeamsCannotBeRead`,
+  `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamFailsWithoutRunningTheAgent`,
+  `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamIsNotFollowedUpInTheirRunningChat`,
+  `TestScheduledTasksSuite/TestATaskOfAUserStillInItsAgentsTeamIsDelivered`,
+  `TestScheduledTasksSuite/TestATaskItsBackendMadeForAUserOutsideTheTeamIsDelivered`,
+  `TestScheduledTasksSuite/TestAnOccurrenceWhoseTeamsCannotBeReadFailsAndTheTaskGoesOn`.
 - **A scheduled turn is never on the user's day.** `TestScheduledTasksSuite/TestADueTaskIsNotCountedOnItsUsersDay`.
 - **A call in progress is waited out**, and a session on another node is handed over.
   `TestScheduledTasksSuite/TestATaskThatComesDueOnACallWaitsForTheCallToEnd`,

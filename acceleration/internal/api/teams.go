@@ -6,7 +6,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -33,6 +35,12 @@ func (s *Server) teamsGateFor(ctx context.Context, customerID string) (teamsGate
 	if ServerSideFrom(ctx) {
 		return teamsGate{}, nil
 	}
+	return s.userTeamsGate(ctx, customerID, CallerFrom(ctx))
+}
+
+// userTeamsGate is the gate of an end user, named outright where no request of theirs says
+// who is asking.
+func (s *Server) userTeamsGate(ctx context.Context, customerID string, user routing.Caller) (teamsGate, error) {
 	settings, err := s.configs.Apps.GetSettings(ctx, customerID)
 	if err != nil {
 		return teamsGate{}, err
@@ -40,7 +48,7 @@ func (s *Server) teamsGateFor(ctx context.Context, customerID string) (teamsGate
 	if !settings.AgentTeamsChecked() {
 		return teamsGate{}, nil
 	}
-	teams, err := s.callerTeams(ctx, customerID)
+	teams, err := s.callerTeams(ctx, customerID, user)
 	if err != nil {
 		return teamsGate{}, err
 	}
@@ -87,14 +95,30 @@ func (s *Server) refuseOutsideTeam(ctx context.Context, customerID, configID str
 	return err
 }
 
-// callerTeams is the teams of the end user asking, as their user in the customer's own
+// refuseOwnerOutsideTeam is refuseOutsideTeam for owner, asked where no request of theirs is:
+// a watcher relayed from another node, or an occurrence of their scheduled task. Their backend
+// is not checked, as it is not on a request.
+func (s *Server) refuseOwnerOutsideTeam(ctx context.Context, owner session.Owner, configID string) error {
+	if configID == "" || s.store == nil || owner.Kind == auth.KindServer {
+		return nil
+	}
+	teams, err := s.userTeamsGate(ctx, owner.CustomerID, routing.Caller{
+		UserID: owner.UserID, Verified: owner.UserID != "" && owner.Kind.Verified(),
+	})
+	if err != nil || !teams.checked {
+		return err
+	}
+	_, err = s.configOpenedWith(ctx, owner.CustomerID, configID, teams)
+	return err
+}
+
+// callerTeams is the teams of the end user caller, as their user in the customer's own
 // Stream app holds them: an app the customer holds a token for, or the deployment's own app
 // when the customer is that app's. A customer that only borrows the deployment's app reads
 // none: user ids there are not the customer's and whoever holds that app writes their teams.
 // A caller with no token is in none: the user id it goes by is a claim nobody checked,
 // and reading that user's teams would let anybody borrow them.
-func (s *Server) callerTeams(ctx context.Context, customerID string) ([]string, error) {
-	caller := CallerFrom(ctx)
+func (s *Server) callerTeams(ctx context.Context, customerID string, caller routing.Caller) ([]string, error) {
 	if !caller.Verified {
 		return nil, nil
 	}

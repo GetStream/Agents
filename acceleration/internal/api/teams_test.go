@@ -12,6 +12,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
@@ -624,6 +625,84 @@ func (s *AgentTeamsSuite) TestWithTheSettingOffASocketReopenIsNotCheckedAndStrea
 	s.Equal(asked, s.teamReads())
 }
 
+// A chat still running is carried on only for a user still in its config's team, as one that
+// ended is: Anya left team red while her red chat ran.
+func (s *AgentTeamsSuite) TestAChatStillRunningIsCarriedOnOnlyForAUserStillInItsConfigsTeam() {
+	for path, body := range map[string]any{"/responses": s.asking(), "/resume": nil} {
+		anya := s.inTeams("red")
+		opened := anya.createSession(s.recorded(s.configOf("red")))
+		s.Equal(http.StatusAccepted, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses", s.asking())),
+			"%s: still in its team", path)
+		s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+		s.running(opened.Id)
+
+		status, message := anya.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+path, body)
+
+		s.Equal(http.StatusNotFound, status, "%s: %s", path, message)
+		s.Equal(errUnknownConfig.Message, message, path)
+	}
+}
+
+// The events socket of a chat still running is opened only for a user still in its config's
+// team, as one onto a chat that ended is.
+func (s *AgentTeamsSuite) TestAChatStillRunningIsWatchedOnlyByAUserStillInItsConfigsTeam() {
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.recorded(s.configOf("red")))
+	_, status := anya.watch("/v1/agents/sessions/" + opened.Id + "/events")
+	s.Equal(http.StatusSwitchingProtocols, status, "still in its team")
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.running(opened.Id)
+
+	status, message := anya.refusal("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusNotFound, status, message)
+	s.Equal(errUnknownConfig.Message, message)
+}
+
+// The node running a chat asks the same of a socket on another node, which is then answered as
+// for a session no node is running.
+func (s *AgentTeamsSuite) TestAChatRunningOnAnotherNodeIsWatchedOnlyByAUserStillInItsConfigsTeam() {
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.naming(s.configOf("red")))
+	_, status := anya.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+	s.Equal(http.StatusSwitchingProtocols, status, "still in its team")
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.running(opened.Id)
+
+	_, status = anya.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusNotFound, status)
+}
+
+// The node running a chat takes a caller with no token for nobody in particular, as a node
+// taking its request would: the user it claims to be does not lend it their teams.
+func (s *AgentTeamsSuite) TestACallerWithNoTokenWatchingFromAnotherNodeIsInNoTeamWhoeverItClaimsToBe() {
+	other, _ := s.otherRouter(nil)
+	claiming := s.data.claiming(s.inTeams("red").userID)
+	opened := claiming.createSession(s.naming(s.configOf("")))
+	asked := s.teamReads()
+
+	_, status := claiming.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status)
+	s.Equal(asked, s.teamReads(), "Stream is not asked about the user it claims to be")
+}
+
+// A backend is not limited by teams on whichever node it watches from, and a watcher relayed
+// for it asks Stream nothing.
+func (s *AgentTeamsSuite) TestABackendWatchesAChatOfAnyTeamRunningOnAnotherNodeWithoutAskingStream() {
+	other, _ := s.otherRouter(nil)
+	backend := s.serverClient.actingFor(s.inTeams("blue"))
+	opened := backend.createSession(s.naming(s.configOf("red")))
+	asked := s.teamReads()
+
+	_, status := backend.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status)
+	s.Equal(asked, s.teamReads())
+}
+
 // A backend forks and carries on any session of another team or a deleted config, without
 // asking Stream, as it opens any config.
 func (s *AgentTeamsSuite) TestABackendForksAndCarriesOnASessionOfAnyTeamWithoutAskingStream() {
@@ -692,6 +771,13 @@ func (s *AgentTeamsSuite) asking() CreateResponseRequest {
 // forking is the path that forks the session id.
 func (s *AgentTeamsSuite) forking(id string) string {
 	return "/v1/agents/sessions/" + id + "/fork"
+}
+
+// running requires the session to be running on the suite's node, so that what a test asks
+// next is asked of a running session rather than of one carried on.
+func (s *AgentTeamsSuite) running(id string) {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok && held.State() != session.Ended, "session %s is running here", id)
 }
 
 // status is the status of a call, for an assertion that reads only that.
