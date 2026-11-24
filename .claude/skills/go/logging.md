@@ -33,7 +33,7 @@ Read before you log a value, or read one back out of a log.
 - It knows shapes only: `sk-...`, `ghp_...`, a JWT, `Bearer x`, `password=x`, a `+` and 7 digits, `phone:` and 7 digits, and an email under an end user's id (below). Log ids, never a secret.
 - A number without `+` is masked only after `phone:`, or as the whole value of a `number`, `caller`, `to` or `from` attribute: log one under those names.
 - The logger redacts only what is logged. `errors.md` says what text may be stored or reach a caller.
-- Text you store goes through `store.SafeLogText`, which also cuts it (past 8192 bytes, to 2048 runes).
+- Text you store goes through `store.SafeLogText`, which also cuts it (past 8192 bytes, to 2048 runes). What a turn said, thought or answered is the exception: it goes through `turnText` (`internal/store/logs.go`), which redacts it and keeps it whole up to `maxTurnText`. A turn's failure text still goes through `SafeLogText`.
 - Text you must send whole, such as a refusal the caller can correct, goes through `store.RedactLogText`.
 - Log a connector's error as `core.LoggedMessage(err, exchange.Redact)`.
 
