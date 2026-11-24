@@ -434,6 +434,27 @@ func (s *SocketCloseLogSuite) TestADispatchWorkersCloseFrameAfterAPingIsLoggedWi
 	}
 }
 
+func (s *SocketCloseLogSuite) TestADispatchWorkersCloseFrameAfterHostToolsIsLoggedWithItsCode() {
+	// Catches the write of the reply to host_tools, which the reader's answer to the close
+	// refuses, logged as client_gone.
+	for range 25 {
+		connection, id := s.worker(nil)
+
+		s.Require().NoError(connection.WriteJSON(frame{
+			"type":     "host_tools",
+			"agent_id": "stream-support",
+			"tools": []frame{{
+				"name":        "lookup",
+				"description": "d",
+				"parameters":  frame{"type": "object"},
+			}},
+		}))
+		s.closesWith(connection, 4005)
+
+		s.Contains(s.closeLine(id), " close_reason=client_closed close_code=4005 ")
+	}
+}
+
 func (s *SocketCloseLogSuite) TestADroppedDispatchWorkerIsClientGone() {
 	connection, id := s.worker(nil)
 
