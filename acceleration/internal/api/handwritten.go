@@ -200,7 +200,8 @@ func documentHandWritten(api huma.API) {
 			"shows `text` as the summary of the call's step until it ends. On speech-to-speech, " +
 			"OpenAI Realtime, Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; " +
 			"other models only report it. With `verbatim` true, " +
-			"the agent says or posts `text` as written instead. A newer update replaces one not yet " +
+			"the agent says or posts `text` as written instead; from an end user's device `verbatim` " +
+			"is taken as false. A newer update replaces one not yet " +
 			"said, and a call's result replaces both. `custom`, an object, replaces the call's `custom` " +
 			"in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and " +
 			"is not said. Every watcher is sent `tool_updated` (`id`, " +

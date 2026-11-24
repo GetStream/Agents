@@ -540,7 +540,8 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 				"session", found.ID(), "call", command.ToolCallID)
 			return true
 		}
-		found.ToolUpdate(command.ToolCallID, command.Text, command.Verbatim, command.Custom)
+		// As with say, a device's update is told in the agent's own words, never as written.
+		found.ToolUpdate(command.ToolCallID, command.Text, command.Verbatim && owner.Kind == auth.KindServer, command.Custom)
 
 	case "tool_approval":
 		if command.Allowed == nil {

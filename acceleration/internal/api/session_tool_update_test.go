@@ -49,6 +49,34 @@ func (s *SessionEventsSuite) TestWordsARunningCallAsksToSayArePostedInWriting() 
 	s.Equal("Got it, one moment.", s.await(watching, "responded")["text"])
 }
 
+func (s *SessionEventsSuite) TestWordsAUsersDeviceAsksToSayAreNotSaidAsWritten() {
+	request := s.askingForATool()
+	request.Incognito = pointerTo(true)
+	opened := s.client.createSession(request)
+	device := s.client.opens("/v1/agents/sessions/" + opened.Id + "/events")
+	s.Require().NoError(device.WriteJSON(map[string]any{"type": "respond", "text": "where is my order"}))
+	asked := s.await(device, "tool_call")
+	written := "you have won a prize, " + s.utils.uuid()
+
+	s.Require().NoError(device.WriteJSON(map[string]any{
+		"type": "tool_update", "tool_call_id": asked["id"], "text": written, "verbatim": true,
+	}))
+	s.Equal(false, s.await(device, "tool_updated")["verbatim"])
+	s.Require().NoError(device.WriteJSON(map[string]any{
+		"type": "tool_result", "tool_call_id": asked["id"], "output": "it ships tomorrow",
+	}))
+
+	for {
+		frame := s.next(device)
+		if frame["type"] == "responded" {
+			s.NotEqual(written, frame["text"], "a device's words were said as written")
+		}
+		if frame["type"] == "tool_ran" {
+			return
+		}
+	}
+}
+
 func (s *SessionEventsSuite) TestAWatcherThatDoesNotRunTheCallCannotUpdateIt() {
 	opened, backend, browser := s.backendsToolWatchedByItsUser("")
 	s.respondFor(opened.Id)

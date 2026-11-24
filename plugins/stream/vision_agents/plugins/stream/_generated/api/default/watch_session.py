@@ -245,12 +245,12 @@ def sync_detailed(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
@@ -482,12 +482,12 @@ def sync(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
@@ -714,12 +714,12 @@ async def asyncio_detailed(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
@@ -949,12 +949,12 @@ async def asyncio(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
