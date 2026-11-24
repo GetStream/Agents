@@ -770,7 +770,7 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // customer inside every row it carries, and believing that would let anybody holding
 // credentials for one app write into another. For a row that belongs to a customer
 // through a parent there is no column to overwrite, so the parent is checked instead and
-// a row whose parent is somebody else's is silently not written. A row whose key a row of
+// a row whose parent is somebody else's is not written (OnRowLeftOut). A row whose key a row of
 // another customer holds here is refused (ErrAnotherCustomersRow).
 //
 // It upserts, so importing the same export twice is the same as importing it once, which
@@ -810,7 +810,6 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if !found {
 		return invalidImport(fmt.Errorf("store: %q is not a table an export carries", table))
 	}
-	sent := row
 	row, err := s.importPin(ctx, customerID, table, row)
 	if err != nil {
 		return err
@@ -1051,11 +1050,18 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	if taken {
-		key, err := rowKey(table, shape.keys, sent)
+		key, err := rowKey(table, shape.keys, row)
 		if err != nil {
 			return err
 		}
 		return invalidImport(fmt.Errorf("store: import %s: %w", key, ErrAnotherCustomersRow))
+	}
+	if spec.parent != "" && s.leftOut != nil {
+		key, err := rowKey(table, shape.keys, row)
+		if err != nil {
+			return err
+		}
+		s.leftOut(key)
 	}
 	return nil
 }
@@ -1093,6 +1099,16 @@ func importCached(ctx context.Context, db bun.IDB, customerID, table, query stri
 // ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here,
 // as an ErrInvalidImport that names the row as rowKey does.
 var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
+
+// OnRowLeftOut has told called with each row an import leaves out because the row it belongs to
+// is not the importing customer's here, named as rowKey does. It is set before the first import.
+func (s *Store) OnRowLeftOut(told func(row string)) { s.leftOut = told }
+
+// KeyColumns are the columns of a table's primary key, for a table an export carries.
+func (s *Store) KeyColumns(ctx context.Context, table string) ([]string, error) {
+	shape, err := s.shapeOf(ctx, table)
+	return shape.keys, err
+}
 
 // rowKey names a row as it was sent, by its table and the values of its primary key, in the
 // form `router replicate --skip` takes: agent_configs:{"id":"config-1"}.

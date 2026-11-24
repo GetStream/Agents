@@ -556,7 +556,7 @@ func (s *ReplicateRepeatSuite) TestAChangedRowAnotherAppHoldsStopsThePageAndSkip
 	s.Require().ErrorIs(err, store.ErrAnotherCustomersRow)
 	s.ErrorContains(err, `agent_configs:{"id":"config-2"}`)
 	s.ErrorContains(err, "--skip")
-	s.Equal("", s.label(1), "the page is applied whole or not at all")
+	s.Equal("", s.label(1), "one database's part of a page is applied whole or not at all")
 	cursor := *s.saved().Cursor
 
 	s.skip = []string{`agent_configs:{"id":"config-2"}`}
@@ -582,4 +582,82 @@ func (s *ReplicateRepeatSuite) TestSkipLeavesOutOnlyTheRowsItNames() {
 
 	s.Require().ErrorIs(err, store.ErrAnotherCustomersRow)
 	s.ErrorContains(err, `agent_configs:{"id":"config-2"}`)
+}
+
+func (s *ReplicateRepeatSuite) TestSkipRefusesAKeyThatIsNotTheTablesOwn() {
+	s.config(s.source, "config-1", "acme", "mine")
+	for value, reason := range map[string]string{
+		`agent_configs:{"customer_id":"acme"}`:                 "its whole key (id), not by customer_id",
+		`agent_configs:{"id":"config-1","customer_id":"acme"}`: "its whole key (id), not by customer_id, id",
+		`agent_configs:{}`:                         "its whole key (id)",
+		`agent_branch_messages:{"session_id":"s"}`: "its whole key (original_message_id, session_id), not by session_id",
+		`agents:{"id":"config-1"}`:                 `"agents" is not a table an export carries`,
+		`:{"id":"config-1"}`:                       `"" is not a table an export carries`,
+	} {
+		s.skip = []string{value}
+		s.ErrorContains(s.once("acme", false), reason, value)
+	}
+	s.Zero(s.exports, "refused before the source is asked for anything")
+	s.skip = []string{`agent_branch_messages:{"session_id":"s","original_message_id":"m"}`}
+	s.Require().NoError(s.once("acme", false), "a composite key in any order")
+	owner, _ := s.configOn("config-1")
+	s.Equal("acme", owner)
+}
+
+// exec runs a statement in a store's database.
+func (s *ReplicateRepeatSuite) exec(in *store.Store, query string, args ...any) {
+	_, err := in.GlobalDB().ExecContext(s.ctx, query, args...)
+	s.Require().NoError(err)
+}
+
+func (s *ReplicateRepeatSuite) TestARowThatBelongsToOneLeftOutIsLoggedInTheCopyAndInAChange() {
+	campaign := "INSERT INTO campaigns (id, customer_id, name) VALUES ('campaign-1', ?, 'Renewals'), (?, ?, 'Other')"
+	contact := "INSERT INTO campaign_contacts (id, campaign_id, to_number) VALUES (?, ?, ?)"
+	s.exec(s.source, campaign, "acme", "campaign-2", "acme")
+	s.exec(s.target, campaign, "resident", "campaign-3", "resident")
+	s.exec(s.source, contact, "copied", "campaign-1", e164(1))
+	s.exec(s.source, contact, "kept", "campaign-2", e164(2))
+	s.skip = []string{`campaigns:{"id":"campaign-1"}`}
+	const leftOut = `left out a row whose parent row is not this app's here" row="campaign_contacts:{\"id\":\"`
+
+	s.Require().NoError(s.once("acme", false))
+
+	s.Equal(1, strings.Count(s.logs.String(), leftOut))
+	s.Contains(s.logs.String(), leftOut+`copied\"}"`)
+	s.exec(s.source, contact, "changed", "campaign-1", e164(3))
+
+	s.Require().NoError(s.once("acme", false))
+
+	s.Equal(2, strings.Count(s.logs.String(), leftOut))
+	s.Contains(s.logs.String(), leftOut+`changed\"}"`)
+	var contacts string
+	s.Require().NoError(s.target.GlobalDB().QueryRowContext(s.ctx, "SELECT string_agg(id, ',') FROM campaign_contacts").Scan(&contacts))
+	s.Equal("kept", contacts)
+
+	// Copied again, a contact already here is written over, and is not one left out.
+	s.logs.Reset()
+	s.Require().NoError(s.once("acme", true))
+	s.NotContains(s.logs.String(), leftOut+"kept")
+}
+
+func (s *ReplicateRepeatSuite) TestARowOfACompositeKeyIsRefusedByItsWholeKeyAndSkippedByIt() {
+	for in, customer := range map[*store.Store]string{s.source: "acme", s.target: "resident"} {
+		s.exec(in, "INSERT INTO agent_sessions (id, customer_id, state) VALUES ('session-1', ?, 'ended')", customer)
+		s.exec(in, `INSERT INTO agent_branch_messages (session_id, original_message_id, customer_id, switch_id, chat_created_at, author_id)
+			VALUES ('session-1', 'message-1', ?, 'switch-1', now(), 'user-1')`, customer)
+	}
+	s.recorded(1)
+	s.skip = []string{`agent_sessions:{"id":"session-1"}`}
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrAnotherCustomersRow)
+	const key = `agent_branch_messages:{"original_message_id":"message-1","session_id":"session-1"}`
+	s.ErrorContains(err, "import "+key+":")
+	s.skip = append(s.skip, key)
+	s.Require().NoError(s.once("acme", false))
+	s.Equal("", s.label(1))
+	var owner string
+	s.Require().NoError(s.target.GlobalDB().QueryRowContext(s.ctx, "SELECT customer_id FROM agent_branch_messages").Scan(&owner))
+	s.Equal("resident", owner)
 }

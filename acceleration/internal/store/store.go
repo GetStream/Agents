@@ -65,6 +65,8 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
+	// leftOut is told of each row an import left out (OnRowLeftOut). Nil outside router replicate.
+	leftOut func(row string)
 	// retries holds a slot for each deletion forgetLater is trying again. stop ends them
 	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
 	// retry starts once Close is waiting.

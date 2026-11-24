@@ -212,12 +212,22 @@ func (s *ReplicateSourceSuite) TestTheCutOverRefusesToCatchUpFromTheSourceFirst(
 }
 
 func (s *ReplicateSourceSuite) TestSkipIsATableAndAKeyObject() {
-	for _, value := range []string{"agent_configs", "agent_configs:", `:{"id":"config-1"}`, "agent_configs:{}",
+	for _, value := range []string{"agent_configs", "agent_configs:", `agent_configs:{"id":"config-1"} {"id":"config-2"}`,
 		`agent_configs:["config-1"]`, `agent_configs:{"id":"config-1"`} {
 		_, err := parseReplicate([]string{"--from", "https://source.example", "--api-key", sourceKey, "--api-secret", sourceSecret,
 			"--skip", value})
 		s.ErrorContains(err, "--skip is table:key", value)
 	}
+}
+
+func (s *ReplicateSourceSuite) TestSkipNamesEveryRowOfATableItIsGiven() {
+	options, err := parseReplicate([]string{"--from", "https://source.example", "--api-key", sourceKey, "--api-secret", sourceSecret,
+		"--skip", `agent_configs:{"id":"a"}`, "--skip", `agent_configs:{"id":"b"}`})
+	s.Require().NoError(err)
+
+	s.Equal(`agent_configs:{"id":"a"}`, options.skip.names("agent_configs", []byte(`{"id":"a"}`)))
+	s.Equal(`agent_configs:{"id":"b"}`, options.skip.names("agent_configs", []byte(`{"id":"b"}`)))
+	s.Empty(options.skip.names("agent_configs", []byte(`{"id":"c"}`)))
 }
 
 func (s *ReplicateSourceSuite) TestSkipNamesARowByEveryValueOfItsKey() {

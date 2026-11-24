@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,7 +45,9 @@ const replicateUsage = `usage: router replicate --from <url> --api-key <key> --a
   --skip        a row to leave out, as table:key, such as 'agent_configs:{"id":"config-1"}'.
                 A run stops at a row whose key another app here holds and names it this way:
                 once you know the row is not this app's to bring, pass it on that run and every
-                later one. Repeat the flag for more than one row
+                later one. The key is the row's whole primary key. Repeat the flag for more
+                than one row. A row that belongs to a row left out, such as a contact of a
+                campaign, is left out too. Each row left out is logged
   --resume      the cut-over, once the deployment copied from no longer delivers: resume
                 the scheduled tasks the copy paused because they were active there, each
                 at its first occurrence after now, and name the campaigns still running or
@@ -120,6 +123,12 @@ func runReplicate(args []string, settings config.Config, logger *slog.Logger) er
 // copyAndFollow copies the app here, or carries on from the last run's cursor, and follows the
 // source's changes from there.
 func (o replicateOptions) copyAndFollow(ctx context.Context, settings config.Config, pgStore *store.Store, reservation *store.IDReservation, logger *slog.Logger) error {
+	if err := o.skip.check(ctx, pgStore); err != nil {
+		return err
+	}
+	pgStore.OnRowLeftOut(func(row string) {
+		logger.Warn("left out a row whose parent row is not this app's here", "row", row)
+	})
 	customerID, cursor, err := copyEverything(ctx, o.source, pgStore, reservation, o.as, o.full, o.skip,
 		settings.DataMove.Retention, logger)
 	if err != nil {
@@ -154,12 +163,28 @@ type skippedRows []skippedRow
 // parseSkip reads a --skip value, table:key as ErrAnotherCustomersRow names a row.
 func parseSkip(value string) (skippedRow, error) {
 	table, key, _ := strings.Cut(value, ":")
-	// A key that is not a JSON object decodes to no fields.
-	fields, _ := decodeFields(json.RawMessage(key))
-	if table == "" || len(fields) == 0 {
+	fields, err := decodeFields(json.RawMessage(key))
+	if err != nil {
 		return skippedRow{}, fmt.Errorf(`--skip is table:key, as a refused row is named, such as 'agent_configs:{"id":"config-1"}', not %q`, value)
 	}
 	return skippedRow{table: table, key: fields}, nil
+}
+
+// check refuses a row of a table no export carries, or one not named by exactly the columns of
+// its table's primary key, which would name other rows too.
+func (rows skippedRows) check(ctx context.Context, pgStore *store.Store) error {
+	for _, skipped := range rows {
+		columns, err := pgStore.KeyColumns(ctx, skipped.table)
+		if err != nil {
+			return fmt.Errorf("--skip: %w", err)
+		}
+		named := slices.Sorted(maps.Keys(skipped.key))
+		if columns = slices.Sorted(slices.Values(columns)); !slices.Equal(named, columns) {
+			return fmt.Errorf("--skip: a row of %s is named by its whole key (%s), not by %s",
+				skipped.table, strings.Join(columns, ", "), strings.Join(named, ", "))
+		}
+	}
+	return nil
 }
 
 // names is the --skip value that names a row of table, or "" when none does: one whose fields
@@ -199,6 +224,9 @@ func decodeFields(object json.RawMessage) (map[string]any, error) {
 	var fields map[string]any
 	if err := decoder.Decode(&fields); err != nil {
 		return nil, err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("more than one JSON value")
 	}
 	return fields, nil
 }
