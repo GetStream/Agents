@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -52,4 +54,17 @@ func TestTheSessionsSandboxesAreLabelledWithTheDeploymentAndShard(t *testing.T) 
 	settings.Shard = ""
 	labels = newSandboxes(settings, nil, nil, nil, nil).Labels(routing.Owner{})
 	require.Equal(t, map[string]string{metered.LabelEnv: "development", metered.LabelRouter: routing.Unsharded}, labels)
+}
+
+func TestTheSecretSweeperReachesEveryKeyCustomersKeep(t *testing.T) {
+	require.Nil(t, daytonaKeysOf(nil), "without a database or a keyring no customer's organization is swept")
+	unopened := errors.New("a key that does not open")
+	kept := func(context.Context) ([]keptDaytonaKey, error) {
+		return []keptDaytonaKey{{key: "key-a", apps: []string{"app-1", "app-2"}}, {key: "key-b", apps: []string{"app-3"}}}, unopened
+	}
+
+	keys, err := daytonaKeysOf(kept)(context.Background())
+
+	require.Equal(t, []string{"key-a", "key-b"}, keys)
+	require.ErrorIs(t, err, unopened, "and a key that does not open is still said")
 }

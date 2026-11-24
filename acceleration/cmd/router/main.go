@@ -1229,7 +1229,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if directory != nil {
 		defer directory.Close()
 	}
-	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets), logger); err != nil {
+	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, daytonaKeysOf(customerDaytonaKeys(pgStore, secrets)), logger); err != nil {
 		return err
 	}
 
