@@ -78,12 +78,14 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 }
 
 // newUA builds what both legs send and receive on. Requests on the customer client pass
-// guard first, and every TLS connection, the Stream leg's too, goes only where guard allows.
+// guard first, and every TCP and TLS connection, the Stream leg's too, goes only where guard
+// allows.
 func newUA(guard guard) (ua *sipgo.UserAgent, customerClient, streamClient *sipgo.Client, srv *sipgo.Server, err error) {
 	ua, err = sipgo.NewUA(
 		sipgo.WithUserAgent("sipbridge"),
 		sipgo.WithUserAgenTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
 		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerTransports(sip.TransportsConfig{
+			TCP: &sip.TransportTCP{DialerCreate: guard.dialer},
 			TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: guard.dialer}},
 		})),
 	)

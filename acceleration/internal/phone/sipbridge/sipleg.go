@@ -145,6 +145,10 @@ func (l *sipLeg) Invite(ctx context.Context, body []byte) ([]byte, error) {
 			// so the retry already carries the address the other side can reach us on.
 			if res.StatusCode == sip.StatusUnauthorized || res.StatusCode == sip.StatusProxyAuthRequired {
 				natContact(dlg.InviteRequest.Contact(), res)
+				// The resend adds this challenge's Record-Route as Route, on top of any an
+				// earlier resend added.
+				for dlg.InviteRequest.RemoveHeader("Route") {
+				}
 			}
 			return nil
 		},

@@ -124,13 +124,13 @@ func startProbe(t *testing.T) *probe {
 	return p
 }
 
-// customerClient is the customer leg's client as Dial builds it, guarded by g.
-func customerClient(t *testing.T, g guard) *sipgo.Client {
+// guardedUA is the UA and customer leg's client as Dial builds them, guarded by g.
+func guardedUA(t *testing.T, g guard) (*sipgo.UserAgent, *sipgo.Client) {
 	t.Helper()
 	ua, client, _, _, err := newUA(g)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ua.Close() })
-	return client
+	return ua, client
 }
 
 // DNS rebinding over TLS: the guard keeps the name for the certificate, so sipgo resolves it
@@ -138,19 +138,34 @@ func customerClient(t *testing.T, g guard) *sipgo.Client {
 // system's, which sipgo uses, with loopback.
 func TestATLSRequestNeverConnectsToAPrivateAddressTheNameRebindsTo(t *testing.T) {
 	probe := startProbe(t)
-	client := customerClient(t, guard{resolver: &answers{byHost: map[string][][]string{
+	_, client := guardedUA(t, guard{resolver: &answers{byHost: map[string][][]string{
 		"localhost": {{"8.8.8.8"}},
 	}}}.withDefaults())
 
 	_, err := client.TransactionRequest(t.Context(), requestTo("localhost", probe.port, "TLS"))
 
-	require.ErrorContains(t, err, "is not a public address")
+	// Only the dialer refuses with this; the guard's own lookup saw a public address.
+	require.ErrorContains(t, err, "sipbridge: refusing to connect:")
+	require.Zero(t, probe.accepted.Load())
+}
+
+// sipgo answers a request whose connection has closed over a new connection to its Via
+// host, without the guard's requester. Here a request goes to the transport the same way.
+func TestATCPConnectionOpenedWithoutTheGuardsCheckCannotReachAPrivateAddress(t *testing.T) {
+	probe := startProbe(t)
+	ua, client := guardedUA(t, guard{}.withDefaults())
+	req := requestTo("127.0.0.1", probe.port, "TCP")
+	require.NoError(t, sipgo.ClientRequestAddVia(client, req))
+
+	err := ua.TransportLayer().WriteMsg(req)
+
+	require.ErrorContains(t, err, "sipbridge: refusing to connect: 127.0.0.1 is not a public address")
 	require.Zero(t, probe.accepted.Load())
 }
 
 func TestATLSRequestConnectsToAnAddressTheGuardAllows(t *testing.T) {
 	probe := startProbe(t)
-	client := customerClient(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
+	_, client := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
 
 	// The probe speaks no TLS, so the handshake fails once the connection is open.
 	_, err := client.TransactionRequest(t.Context(), requestTo("127.0.0.1", probe.port, "TLS"))
@@ -241,18 +256,19 @@ func startSIPServer(t *testing.T, contactHost string, status int) *sipServer {
 	return s
 }
 
-// guardedLeg is a customer leg as Dial builds it, with a guard that lets only loopback through.
+// guardedLeg is a customer leg to server as Dial builds it, with a guard that lets only
+// loopback through.
 func guardedLeg(t *testing.T, server *sipServer) *sipLeg {
 	t.Helper()
-	ua, err := sipgo.NewUA()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ua.Close() })
-	client, err := sipgo.NewClient(ua, sipgo.WithClientNAT())
-	require.NoError(t, err)
-	g := guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults()
-	client.TxRequester = guardedRequester{guard: g, tx: ua.TransactionLayer()}
+	return guardedLegTo(t, server.addr)
+}
 
-	host, portText, _ := net.SplitHostPort(server.addr)
+// guardedLegTo is guardedLeg to the trunk at addr.
+func guardedLegTo(t *testing.T, addr string) *sipLeg {
+	t.Helper()
+	_, client := guardedUA(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
+
+	host, portText, _ := net.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portText)
 	target := sip.Uri{User: "+15550002222", Host: host, Port: port, UriParams: sip.NewParams()}
 	target.UriParams.Add("transport", "tcp")

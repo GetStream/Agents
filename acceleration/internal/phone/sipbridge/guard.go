@@ -88,8 +88,10 @@ func (g guard) addrs(ctx context.Context, host string) ([]netip.Addr, error) {
 }
 
 // dialer is sipgo's default dialer, which refuses an address the guard does not allow before
-// it connects. Over TLS check keeps the name, so sipgo resolves it again when it dials, and
-// that answer can differ from the one check saw.
+// it connects. It checks what check cannot see: over TLS check keeps the name, so
+// sipgo resolves it again when it dials, and that answer can differ from the one check saw.
+// And sipgo answers a request whose connection has closed over a new connection to the
+// request's Via host, which the other side picks.
 func (g guard) dialer(laddr net.Addr) net.Dialer {
 	return net.Dialer{Timeout: time.Minute, LocalAddr: laddr, Control: g.control}
 }
