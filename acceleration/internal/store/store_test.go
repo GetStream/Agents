@@ -556,9 +556,18 @@ func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
 }
 
 func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
-	// As a CONCURRENTLY build that failed leaves it, on both sides, which both keep changes.
 	databases := []bun.IDB{s.store.GlobalDB(), s.store.ShardDB()}
+	built := func(db bun.IDB) (valid bool, definition string) {
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, " +
+		"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)"
 	for _, db := range databases {
+		_, definition := built(db)
+		s.Equal(want, definition, "as the migration builds it")
+		// As a CONCURRENTLY build that failed leaves it, on both sides, which both keep changes.
 		_, err := db.ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_user_idx')")
 		s.Require().NoError(err)
 	}
@@ -566,14 +575,9 @@ func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
 	s.Require().NoError(s.store.Migrate(s.ctx))
 
 	for _, db := range databases {
-		var valid bool
-		var definition string
-		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
-			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
+		valid, definition := built(db)
 		s.True(valid, "dropped and built again")
-		s.Equal("CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, "+
-			"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)", definition,
-			"built as the migration builds it")
+		s.Equal(want, definition, "built again as the migration builds it")
 	}
 }
 
