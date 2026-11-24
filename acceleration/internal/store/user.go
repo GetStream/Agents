@@ -122,7 +122,7 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 		cancel()
 		switch {
 		case err == nil && found != "" && settles(found, sighting):
-			r.seen.Keep(customerID, userID, found, time.Time{})
+			r.hold(ctx, customerID, userID, found)
 			return nil
 		case err != nil && !rueidis.IsRedisNil(err):
 			slog.Default().Error("could not read a user from redis, writing postgres",
@@ -144,28 +144,44 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 	}
 
 	if redis != nil {
-		// Writing the key ends this process's tracking of it, so a later deletion would not drop
-		// the entry held below. Redis sends this process the invalidation of its own copy after
-		// the SET's reply, so once the EXISTS after it is answered that has been applied (as in
-		// Store.forget), and the read through the cache that follows tracks the key again.
+		// Writing the key ends this process's tracking of it, which the read in hold starts again.
+		// Redis sends this process the invalidation of its own copy after the SET's reply. Once
+		// the EXISTS after it is answered that has been applied (as in Store.forget), so hold does
+		// not read the old copy and drop the user.
 		set := redis.B().Set().Key(name).Value(sighting).Ex(userTTL).Build()
 		write, cancel := context.WithTimeout(ctx, cacheWait)
 		err := redis.DoMulti(write, set, redis.B().Exists().Key(name).Build())[0].Error()
-		if err == nil {
-			err = redis.DoCache(write, redis.B().Get().Key(name).Cache(), userTTL).Error()
-		}
 		cancel()
-		// The key was deleted in between, so the user is not held: the next request records them.
-		if rueidis.IsRedisNil(err) {
+		if err == nil {
+			r.hold(ctx, customerID, userID, sighting)
 			return nil
 		}
-		if err != nil {
-			slog.Default().Error("could not cache a user in redis",
-				"customer", customerID, "user", userID, "error", err)
-		}
+		slog.Default().Error("could not cache a user in redis",
+			"customer", customerID, "user", userID, "error", err)
 	}
 	r.seen.Keep(customerID, userID, sighting, time.Time{})
 	return nil
+}
+
+// hold holds a user with what Redis holds for them, unless it no longer holds that.
+//
+// The user is held before the read that tracks the key: held after it, an invalidation sent in
+// between would find nothing to drop. A read answered by this process's own copy needs no round
+// trip, and is safe: the copy is dropped before the user is (invalidate).
+func (r *Users) hold(ctx context.Context, customerID, userID, value string) {
+	r.seen.Keep(customerID, userID, value, time.Time{})
+	redis := r.store.sharedRedis()
+	read, cancel := context.WithTimeout(ctx, cacheWait)
+	defer cancel()
+	found, err := redis.DoCache(read, redis.B().Get().Key(userKey(customerID, userID)).Cache(), userTTL).ToString()
+	if err == nil && found == value {
+		return
+	}
+	r.seen.Remove(customerID, userID)
+	if err != nil && !rueidis.IsRedisNil(err) {
+		slog.Default().Error("could not read a user back from redis",
+			"customer", customerID, "user", userID, "error", err)
+	}
 }
 
 // settles reports whether a user held with held needs no write for sighting. Only a user's
