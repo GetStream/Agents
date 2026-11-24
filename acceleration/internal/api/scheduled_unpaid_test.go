@@ -140,8 +140,6 @@ func (s *TelnyxUnpaidSuite) settledByTheWorkerAfter(task store.ScheduledTask, be
 // the settled run and how many attempts the second worker made.
 func (s *TelnyxUnpaidSuite) takenOver(task store.ScheduledTask, between func()) (store.ScheduledTaskRun, int32) {
 	var failed atomic.Int32
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{time.Hour}
 	lost := scheduling.NewScheduler(s.store, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		deliveredTo, sessionID, err := s.router.DeliverScheduledTask(ctx, claimed)
 		if err != nil {
@@ -149,7 +147,7 @@ func (s *TelnyxUnpaidSuite) takenOver(task store.ScheduledTask, between func()) 
 		}
 		return deliveredTo, sessionID, err
 	}, slog.New(slog.NewTextHandler(s.logged, nil)))
-	scheduling.DeliveryRetries = retries
+	lost.SetRetries([]time.Duration{time.Hour})
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
 	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
@@ -177,7 +175,7 @@ func (s *TelnyxUnpaidSuite) takenOver(task store.ScheduledTask, between func()) 
 
 	s.retryAtOnce()
 	var attempts atomic.Int32
-	worker := scheduling.NewScheduler(s.store, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+	worker := s.newScheduler(func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
 		attempts.Add(1)
 		return s.router.DeliverScheduledTask(ctx, claimed)
 	}, slog.New(slog.NewTextHandler(s.logged, nil)))
@@ -779,7 +777,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainByTheWork
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(scheduling.ReasonReplyFailed, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts)
+	s.Equal(int32(1+len(s.retries)), attempts)
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
 	_, _, rerun := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
@@ -1317,11 +1315,11 @@ func (s *TelnyxUnpaidSuite) ringingOn(model string) ringing {
 
 // callOn is ringing, on model, with the call taken on its run and not placed yet.
 func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
-	window, longest := scheduledPhoneWindow, scheduledCallLimit
+	window, longest := s.router.phoneWindow, s.router.callLimit
 	// The limit is longer than the test waits for the call to be let go: a call let go is one
 	// the agent hung up, or the test ended.
-	scheduledPhoneWindow, scheduledCallLimit = deliveryWait, 2*deliveryWait
-	s.T().Cleanup(func() { scheduledPhoneWindow, scheduledCallLimit = window, longest })
+	s.router.phoneWindow, s.router.callLimit = deliveryWait, 2*deliveryWait
+	s.T().Cleanup(func() { s.router.phoneWindow, s.router.callLimit = window, longest })
 	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
 	s.seedSMSLine(number)
 	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
