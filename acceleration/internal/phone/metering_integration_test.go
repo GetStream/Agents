@@ -1052,7 +1052,6 @@ func (s *MeteringSuite) TestAPurchaseTheVendorCannotTakeAsAskedLeavesNoOrder() {
 	s.Zero(s.orders())
 }
 
-// orders counts the customer's orders still to settle.
 // ordersSettle lets this customer's orders get old enough to settle: on the suite's clock, which
 // stamps them, and on Postgres's, which a sweep's claim judges them by.
 func (s *MeteringSuite) ordersSettle() {
@@ -1064,6 +1063,7 @@ func (s *MeteringSuite) ordersSettle() {
 	s.Require().NoError(err)
 }
 
+// orders counts the customer's orders still to settle.
 func (s *MeteringSuite) orders() int {
 	count, err := s.store.GlobalDB().NewSelect().Model((*store.PhoneNumberOrder)(nil)).
 		Where("customer_id = ?", s.customer).Count(s.ctx)
