@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -98,15 +99,58 @@ func (r *AppOrganizations) OrganizationOf(ctx context.Context, appID string) (st
 	if seen.OrganizationID != "" {
 		return seen.OrganizationID, nil
 	}
-	var registered []string
-	err = r.store.global.NewSelect().Model((*App)(nil)).Column("organization_id").Where("id = ?", appID).Scan(ctx, &registered)
+	registered, err := r.registered(ctx, []string{appID})
 	if err != nil {
-		return "", stack.Wrap(fmt.Errorf("store: organization of app: %w", err))
+		return "", err
 	}
-	if len(registered) == 0 {
-		return "", nil
+	return registered[appID], nil
+}
+
+// OrganizationsOf is OrganizationOf of every app, read from Postgres rather than the cache, in
+// at most two statements however many there are. An app neither names is left out.
+func (r *AppOrganizations) OrganizationsOf(ctx context.Context, appIDs []string) (map[string]string, error) {
+	var seen []AppOrganization
+	err := r.store.global.NewSelect().Model(&seen).Column("app_id", "organization_id").
+		Where("app_id IN (?)", bun.In(appIDs)).Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organizations of apps: %w", err))
 	}
-	return registered[0], nil
+	owners := make(map[string]string, len(appIDs))
+	for _, membership := range seen {
+		owners[membership.AppID] = membership.OrganizationID
+	}
+	var unseen []string
+	for _, app := range appIDs {
+		if _, ok := owners[app]; !ok {
+			unseen = append(unseen, app)
+		}
+	}
+	if len(unseen) == 0 {
+		return owners, nil
+	}
+	registered, err := r.registered(ctx, unseen)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(owners, registered)
+	return owners, nil
+}
+
+// registered is the organization each app is registered under, leaving out an app registered
+// under none.
+func (r *AppOrganizations) registered(ctx context.Context, appIDs []string) (map[string]string, error) {
+	var apps []App
+	err := r.store.global.NewSelect().Model(&apps).Column("id", "organization_id").Where("id IN (?)", bun.In(appIDs)).Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organization of app: %w", err))
+	}
+	owners := make(map[string]string, len(apps))
+	for _, app := range apps {
+		if app.OrganizationID != "" {
+			owners[app.ID] = app.OrganizationID
+		}
+	}
+	return owners, nil
 }
 
 // Apps is every app of an organization: those requests last named it for, those

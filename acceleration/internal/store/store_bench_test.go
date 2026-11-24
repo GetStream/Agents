@@ -316,7 +316,7 @@ func BenchmarkRequestsInsert(b *testing.B) {
 	h := newBench(b)
 	h.run(b, nil, func(int) error {
 		request := h.request()
-		return h.store.Requests.Insert(h.ctx, &request)
+		return insertRequest(h.ctx, h.store, &request)
 	})
 }
 

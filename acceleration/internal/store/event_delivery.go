@@ -97,19 +97,22 @@ ON CONFLICT (destination_id, id) DO NOTHING`,
 	return int(queued), nil
 }
 
-// Claim takes at most limit deliveries due at now, oldest due first, moves each one's next
-// attempt to leaseUntil, so no other worker takes it while this one sends it, and counts the
+// Claim takes at most limit deliveries due now, oldest due first, moves the next attempt of each
+// to the end of a lease, so no other worker takes it while this one sends it, and counts the
 // attempt. Rows another worker is claiming at the same moment are skipped, not waited for.
+// Claim compares the due time and the lease with Postgres's clock, and writes the lease with the
+// same clock. Thus a router with an incorrect clock does not end a lease too early or make it
+// too long.
 //
 // It takes at most perDestination deliveries of one destination, less the ones of it the
 // caller is still sending (sending, by destination id). So one destination that never answers
 // holds perDestination of the caller's sends, and other destinations' deliveries are taken
 // past its own.
-func (r *EventDeliveries) Claim(ctx context.Context, now time.Time, limit, perDestination int, sending map[string]int, leaseUntil time.Time) ([]ClaimedEventDelivery, error) {
-	return r.claim(ctx, claimEventDeliveriesQuery, now, limit, perDestination, sending, leaseUntil)
+func (r *EventDeliveries) Claim(ctx context.Context, limit, perDestination int, sending map[string]int, lease time.Duration) ([]ClaimedEventDelivery, error) {
+	return r.claim(ctx, claimEventDeliveriesQuery, limit, perDestination, sending, lease)
 }
 
-// claimEventDeliveriesQuery is ClaimEventDeliveries' statement. Postgres refuses FOR UPDATE
+// claimEventDeliveriesQuery is Claim's statement. Postgres refuses FOR UPDATE
 // beside a window function in one SELECT, so ranked numbers each destination's due rows first
 // and due locks the ones within the cap.
 //
@@ -133,26 +136,26 @@ WITH sending AS (
             + coalesce(sending.count, 0) AS slot
     FROM connector_event_deliveries AS cedl
     LEFT JOIN sending ON sending.destination_id = cedl.destination_id
-    WHERE cedl.next_attempt_at <= ?
+    WHERE cedl.next_attempt_at <= now()
 ), due AS (
     SELECT cedl.destination_id, cedl.id FROM connector_event_deliveries AS cedl
     JOIN ranked ON ranked.destination_id = cedl.destination_id AND ranked.id = cedl.id
-    WHERE ranked.slot <= ? AND cedl.next_attempt_at <= ?
+    WHERE ranked.slot <= ? AND cedl.next_attempt_at <= now()
     ORDER BY cedl.next_attempt_at
     LIMIT ?
     FOR UPDATE OF cedl SKIP LOCKED
 )
 UPDATE connector_event_deliveries AS cedl
-SET next_attempt_at = ?, attempts = cedl.attempts + 1
+SET next_attempt_at = now() + make_interval(secs => ?), attempts = cedl.attempts + 1
 FROM due, connector_event_destinations AS ced
 WHERE cedl.destination_id = due.destination_id AND cedl.id = due.id AND ced.id = cedl.destination_id
 RETURNING cedl.destination_id, cedl.id, cedl.headers, cedl.body, cedl.attempts, cedl.next_attempt_at, cedl.created_at,
     cedl.provider_headers_until, ced.customer_id, ced.connector_id, ced.url, ced.secret_sealed, ced.kek_version,
     ced.previous_secret_sealed, ced.previous_kek_version, ced.previous_until`
 
-// claim runs query, ClaimEventDeliveries' statement or a test's variant of it
-// with a pause in it, with ClaimEventDeliveries' arguments.
-func (r *EventDeliveries) claim(ctx context.Context, query string, now time.Time, limit, perDestination int, sending map[string]int, leaseUntil time.Time) ([]ClaimedEventDelivery, error) {
+// claim runs query, Claim's statement or a test's variant of it with a pause in it, with
+// Claim's arguments.
+func (r *EventDeliveries) claim(ctx context.Context, query string, limit, perDestination int, sending map[string]int, lease time.Duration) ([]ClaimedEventDelivery, error) {
 	claimed := []ClaimedEventDelivery{}
 	if limit < 1 || perDestination < 1 {
 		return claimed, nil
@@ -161,8 +164,8 @@ func (r *EventDeliveries) claim(ctx context.Context, query string, now time.Time
 	for destination, count := range sending {
 		busy, counts = append(busy, destination), append(counts, count)
 	}
-	err := r.store.global.NewRaw(query, pgdialect.Array(busy), pgdialect.Array(counts), now.UTC(), perDestination, now.UTC(), limit,
-		leaseUntil.UTC()).Scan(ctx, &claimed)
+	err := r.store.global.NewRaw(query, pgdialect.Array(busy), pgdialect.Array(counts), perDestination, limit,
+		lease.Seconds()).Scan(ctx, &claimed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim event deliveries: %w", err))
 	}

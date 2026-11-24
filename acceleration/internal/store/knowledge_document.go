@@ -245,7 +245,7 @@ func (r *KnowledgeDocuments) Get(ctx context.Context, customerID, id string) (Kn
 // written first. Their text is left out unless the filter asks for it.
 func (r *KnowledgeDocuments) Select(ctx context.Context, customerID string, filter KnowledgeDocumentFilter) ([]KnowledgeDocument, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var documents []KnowledgeDocument

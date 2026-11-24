@@ -80,7 +80,7 @@ func (*SyncAgentRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *
 // The caps are the ones the same values have elsewhere: 63 is the longest alias
 // AgentConnectorBinding's name pattern allows, 64 the longest custom connector id
 // (custom_ and 57 more, internal/api/connectors.go) and 120 the longest connection label
-// (CreateConnectionRequest). A built-in connector id is shorter than a custom one.
+// (ConnectionRequest). A built-in connector id is shorter than a custom one.
 type LeftOutConnector struct {
 	Name        string `json:"name" minLength:"1" maxLength:"63" doc:"The alias agent.yaml gave the connector."`
 	ConnectorId string `json:"connector_id" minLength:"1" maxLength:"64" doc:"The connector agent.yaml named, or the alias when it named none."`

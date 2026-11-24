@@ -740,6 +740,7 @@ func (a *Agent) openSpeech(ctx context.Context, s Settings, delegating bool) (*s
 	on := true
 	session, err := a.options.STS.Start(routing.WithAttribution(ctx, a.options.Attribution), stsrouter.Request{
 		CustomerID:    a.options.CustomerID,
+		Caller:        a.options.Caller,
 		AgentID:       a.options.AgentID,
 		CallID:        a.options.CallID,
 		Region:        a.options.Region,

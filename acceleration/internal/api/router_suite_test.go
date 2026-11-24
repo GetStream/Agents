@@ -2181,6 +2181,15 @@ func (s *RouterSuite) useApp(app testApp) {
 // be the ones an endpoint reads back.
 func (s *RouterSuite) customerID() string { return s.app.app.ID }
 
+// endHere ends a session in this node the way one nobody watches ends, which leaves it held
+// under its id, ended, with the spec it ran on.
+func (s *RouterSuite) endHere(id string) {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok, "session %s is held here", id)
+	s.Require().NoError(held.Close())
+	s.Require().Equal(session.Ended, held.State())
+}
+
 // heldCall records call as one of a session's, of its customer and agent, under the config
 // and in the conversation named: the session first, as its recorder writes them, since the
 // call names it.

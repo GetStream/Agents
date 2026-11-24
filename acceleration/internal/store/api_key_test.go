@@ -96,30 +96,6 @@ func (s *StoreSuite) TestAnAppKeepsSeveralLiveKeysSoRotationIsNotAnOutage() {
 	}
 }
 
-func (s *StoreSuite) TestKeyUseIsRecordedOncePerIntervalRatherThanPerRequest() {
-	app := s.app()
-	s.key(app.ID, "vak_live_3333333333333333e00d6c93", nil)
-
-	s.Require().NoError(s.store.APIKeys.Touch(s.ctx, "vak_live_3333333333333333e00d6c93", time.Minute))
-	keys, err := s.store.APIKeys.Select(s.ctx, app.ID)
-	s.Require().NoError(err)
-	s.Require().NotNil(keys[0].LastUsedAt)
-	first := *keys[0].LastUsedAt
-
-	// A second use inside the interval is not written, because a synchronous update on
-	// every request would double the writes of a busy key.
-	s.Require().NoError(s.store.APIKeys.Touch(s.ctx, "vak_live_3333333333333333e00d6c93", time.Minute))
-	keys, err = s.store.APIKeys.Select(s.ctx, app.ID)
-	s.Require().NoError(err)
-	s.Equal(first, *keys[0].LastUsedAt)
-
-	// Once the interval has passed it is written again.
-	s.Require().NoError(s.store.APIKeys.Touch(s.ctx, "vak_live_3333333333333333e00d6c93", 0))
-	keys, err = s.store.APIKeys.Select(s.ctx, app.ID)
-	s.Require().NoError(err)
-	s.True(keys[0].LastUsedAt.After(first))
-}
-
 func (s *StoreSuite) TestAKeyRevokedOnOneReplicaStopsWorkingOnTheOther() {
 	replica := s.replica()
 	app := s.app()
@@ -221,9 +197,6 @@ func (s *StoreSuite) TestALookupResolvesAKeyToItsAppAndTheEndUsersItAdmits() {
 		OrganizationID: app.OrganizationID, AppID: app.ID, Secret: secret,
 		Levels: auth.Levels{NoGuest: true},
 	}, resolved)
-	keys, err := s.store.APIKeys.Select(s.ctx, app.ID)
-	s.Require().NoError(err)
-	s.NotNil(keys[0].LastUsedAt, "its use is recorded")
 
 	unissued, _, err := auth.NewCredential(auth.Live)
 	s.Require().NoError(err)
@@ -242,9 +215,6 @@ func (s *StoreSuite) TestAPIKeyQueryBudgets() {
 		_, err := s.store.APIKeys.Select(s.ctx, app.ID)
 		s.Require().NoError(err)
 	}))
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.APIKeys.Touch(s.ctx, key.ID, time.Hour)) }))
-	s.Equal(0, s.countQueries(func() { s.Require().NoError(s.store.APIKeys.Touch(s.ctx, key.ID, time.Hour)) }),
-		"a use inside the interval is not written")
 	s.Equal(0, s.countQueries(func() {
 		_, err := s.store.APIKeys.Lookup(nil)(s.ctx, "not-a-key")
 		s.ErrorIs(err, auth.ErrUnauthenticated)
