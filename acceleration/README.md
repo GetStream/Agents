@@ -2924,6 +2924,15 @@ row taken back where it was first recorded is the row it was copied from. A dele
 change batch is found by the `usage_id` made from the one the change names, and never removes
 a request this deployment recorded itself.
 
+A row refused because another tenant here holds its key stops the import, and the error names
+it by table and key: `agent_configs:{"id":"config-1"}`. `POST /v1/data/import` answers it 400;
+leave that line out of the file. A `replicate` run stops at it every time, in the copy or in a
+page of changes, which is applied whole or not at all. Find out whose the row is first. If it is
+not this app's to bring, run again with `--skip 'agent_configs:{"id":"config-1"}'`, on that run
+and every later one, the last `--once` included: the run leaves out that row and every change to
+it, logs each one it left out, and writes the rest. A row of the app that names the one left out,
+such as a scheduled task on that config, still arrives; `--resume` leaves such a task paused.
+
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.
 Voice recordings live in the bucket rather than in Postgres, so their rows move and copying

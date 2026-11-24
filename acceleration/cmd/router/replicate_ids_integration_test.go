@@ -105,14 +105,14 @@ func (s *ReplicateIDsSuite) replicateWith(reservation *store.IDReservation, expo
 	source := &deployment{url: server.URL, key: sourceKey, secret: sourceSecret, authType: auth.AuthTypeServer, client: server.Client()}
 	logger := slog.New(slog.DiscardHandler)
 
-	customerID, cursor, err := copyEverything(s.ctx, source, s.target, reservation, "", false, time.Hour, logger)
+	customerID, cursor, err := copyEverything(s.ctx, source, s.target, reservation, "", false, nil, time.Hour, logger)
 	if err != nil {
 		return err
 	}
 	if live != nil {
 		live()
 	}
-	return follow(s.ctx, source, s.target, reservation, customerID, cursor, time.Millisecond, true, logger)
+	return follow(s.ctx, source, s.target, reservation, customerID, cursor, time.Millisecond, true, nil, logger)
 }
 
 // numbersLive is a live hook recording a number of another app's on the target each time it runs.

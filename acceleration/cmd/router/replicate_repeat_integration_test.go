@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,10 @@ type ReplicateRepeatSuite struct {
 	changesDown bool
 	// pageSize is how many changes the source answers in a page.
 	pageSize int
+	// skip is the --skip values a run passes.
+	skip []string
+	// logs is what the runs logged.
+	logs *bytes.Buffer
 }
 
 func TestReplicateRepeatSuite(t *testing.T) {
@@ -50,6 +55,7 @@ func TestReplicateRepeatSuite(t *testing.T) {
 func (s *ReplicateRepeatSuite) SetupTest() {
 	s.ctx = context.Background()
 	s.exports, s.truncated, s.changesDown, s.pageSize = 0, false, false, 500
+	s.skip, s.logs = nil, &bytes.Buffer{}
 	s.source = s.emptyStore("repeat_source")
 	s.target = s.emptyStore("repeat_target")
 	s.server = httptest.NewServer(http.HandlerFunc(s.serveSource))
@@ -125,12 +131,15 @@ func (s *ReplicateRepeatSuite) onceWithin(as string, full bool, retention time.D
 	if full {
 		args = append(args, "--full")
 	}
+	for _, row := range s.skip {
+		args = append(args, "--skip", row)
+	}
 	options, err := parseReplicate(args)
 	s.Require().NoError(err)
 	reservation, err := s.target.ReserveImportedIDs(s.ctx)
 	s.Require().NoError(err)
 	settings := config.Config{DataMove: config.DataMove{Retention: retention}}
-	return options.copyAndFollow(s.ctx, settings, s.target, reservation, slog.New(slog.DiscardHandler))
+	return options.copyAndFollow(s.ctx, settings, s.target, reservation, slog.New(slog.NewTextHandler(s.logs, nil)))
 }
 
 func (s *ReplicateRepeatSuite) once(as string, full bool) error {
@@ -456,8 +465,10 @@ CREATE TRIGGER refuse_poison BEFORE INSERT OR UPDATE ON phone_numbers FOR EACH R
 	s.tagged(s.source, 1, "fine")
 	s.tagged(s.source, 2, "poison")
 
-	s.Require().Error(s.once("acme", false))
+	err = s.once("acme", false)
 
+	s.Require().Error(err)
+	s.NotContains(err.Error(), "--skip", "only a row another app holds is one to skip")
 	s.Equal("fine", s.label(1), "the page before it landed")
 	_, err = s.target.GlobalDB().ExecContext(s.ctx, "DROP TRIGGER refuse_poison ON phone_numbers")
 	s.Require().NoError(err)
@@ -496,4 +507,79 @@ func (s *ReplicateRepeatSuite) TestOnlyATableInTheSharedDatabaseMakesAnAppHeld()
 	table, err = s.target.HoldingTable(s.ctx, "acme")
 	s.Require().NoError(err)
 	s.Equal("phone_numbers", table)
+}
+
+// config writes an agent config of a customer's in a store, under an id of its own.
+func (s *ReplicateRepeatSuite) config(in *store.Store, id, customerID, name string) {
+	_, err := in.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES (?, ?, ?, 'be brief')", id, customerID, name)
+	s.Require().NoError(err)
+}
+
+// configOn is the owner and name of an agent config on the target, empty when it holds none.
+func (s *ReplicateRepeatSuite) configOn(id string) (owner, name string) {
+	_ = s.target.GlobalDB().QueryRowContext(s.ctx, "SELECT customer_id, name FROM agent_configs WHERE id = ?", id).Scan(&owner, &name)
+	return owner, name
+}
+
+func (s *ReplicateRepeatSuite) TestACopiedRowAnotherAppHoldsStopsTheRunNamingItAndSkipLeavesItOut() {
+	s.config(s.source, "config-1", "acme", "mine")
+	s.recorded(1)
+	s.config(s.target, "config-1", "resident", "theirs")
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrAnotherCustomersRow)
+	s.ErrorContains(err, `agent_configs:{"id":"config-1"}`)
+	s.ErrorContains(err, "--skip")
+	s.Equal("missing", s.label(1), "the copy stopped at the row")
+
+	s.skip = []string{`agent_configs:{"id": "config-1"}`}
+	s.Require().NoError(s.once("acme", false))
+
+	s.Equal("", s.label(1), "every other row landed")
+	owner, name := s.configOn("config-1")
+	s.Equal("resident", owner)
+	s.Equal("theirs", name)
+	s.Contains(s.logs.String(), `left out a row --skip names" row="agent_configs:{\"id\":\"config-1\"}"`)
+}
+
+func (s *ReplicateRepeatSuite) TestAChangedRowAnotherAppHoldsStopsThePageAndSkipLetsTheRestOfItLand() {
+	s.recorded(1)
+	s.Require().NoError(s.once("acme", false))
+	s.config(s.source, "config-2", "acme", "mine")
+	s.tagged(s.source, 1, "after")
+	s.config(s.target, "config-2", "resident", "theirs")
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrAnotherCustomersRow)
+	s.ErrorContains(err, `agent_configs:{"id":"config-2"}`)
+	s.ErrorContains(err, "--skip")
+	s.Equal("", s.label(1), "the page is applied whole or not at all")
+	cursor := *s.saved().Cursor
+
+	s.skip = []string{`agent_configs:{"id":"config-2"}`}
+	s.Require().NoError(s.once("acme", false))
+
+	s.Equal("after", s.label(1), "the rest of the page landed")
+	owner, name := s.configOn("config-2")
+	s.Equal("resident", owner)
+	s.Equal("theirs", name)
+	s.Greater(*s.saved().Cursor, cursor)
+	s.Contains(s.logs.String(), `left out a change to a row --skip names" row="agent_configs:{\"id\":\"config-2\"}"`)
+}
+
+func (s *ReplicateRepeatSuite) TestSkipLeavesOutOnlyTheRowsItNames() {
+	s.config(s.source, "config-1", "acme", "mine")
+	s.config(s.source, "config-2", "acme", "mine too")
+	s.config(s.target, "config-1", "resident", "theirs")
+	s.config(s.target, "config-2", "resident", "theirs too")
+	// The same key in another table, and the other key in this one.
+	s.skip = []string{`skills:{"id":"config-2"}`, `agent_configs:{"id":"config-1"}`}
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrAnotherCustomersRow)
+	s.ErrorContains(err, `agent_configs:{"id":"config-2"}`)
 }

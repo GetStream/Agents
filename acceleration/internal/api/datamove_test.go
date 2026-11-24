@@ -259,6 +259,25 @@ func (s *DataMoveSuite) TestAnImportedAgentNamedLikeOneHereIsRefusedWithoutTheIn
 	s.NotContains(failure, "agent_configs_name_idx")
 }
 
+// A row whose key another app holds here is the export's to correct, and the answer names it.
+func (s *DataMoveSuite) TestAnImportedRowWhoseKeyAnotherAppHoldsIsRefusedNamingIt() {
+	theirs := s.data.createAgentConfig()
+	var exported dataLine
+	for _, line := range s.export() {
+		if line.Table == "agent_configs" && strings.Contains(string(line.Row), theirs.Id) {
+			exported = line
+		}
+	}
+	s.Require().NotEmpty(exported.Table)
+	s.useApp(s.data.createApp())
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{exported}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `agent_configs:{"id":"`+theirs.Id+`"}`)
+	s.Contains(failure, "belongs to another customer here")
+}
+
 // importedConnector is an export's line of a custom definition id whose manifest has fields,
 // JSON members, beside its id, name and MCP source.
 func (s *DataMoveSuite) importedConnector(id, fields string) dataLine {

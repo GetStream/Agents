@@ -683,8 +683,11 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 	row, err := json.Marshal(s.export("acme").of("agent_configs")[0])
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row), ErrAnotherCustomersRow)
+	err = s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row)
 
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.ErrorIs(err, ErrInvalidImport, "the export's to correct, not the router's failure")
+	s.ErrorContains(err, `agent_configs:{"id":"`+id+`"}`)
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT name, customer_id FROM agent_configs WHERE id = ?", id).Scan(&name, &owner))
@@ -705,7 +708,9 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ApplyChanges(s.ctx, "intruder", changes), ErrAnotherCustomersRow, "the insert is refused")
+	err = s.destination.ApplyChanges(s.ctx, "intruder", changes)
+	s.ErrorIs(err, ErrAnotherCustomersRow, "the insert is refused")
+	s.ErrorContains(err, `agent_configs:{"id":"`+id+`"}`)
 	deletes := slices.DeleteFunc(changes, func(change DataChange) bool { return change.Op != ChangeDelete })
 	s.Require().NotEmpty(deletes)
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", deletes))
@@ -3686,7 +3691,9 @@ func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigWasDeletedHereBefore
 
 func (s *DataMoveSuite) TestTheCutOverLeavesATaskWhoseConfigIsAnotherCustomersHerePaused() {
 	s.seedScheduledTask("st-active", "acme", ScheduledTaskActive)
-	// The destination holds config-1 for somebody else, so the move cannot bring it.
+	// The destination holds config-1 for somebody else, so the move cannot bring it. The import
+	// refuses it, and `router replicate --skip 'agent_configs:{"id":"config-1"}'` leaves it out and
+	// imports the rest, as this loop does.
 	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-1', 'resident', 'theirs', 'be brief')")
 	s.Require().NoError(err)

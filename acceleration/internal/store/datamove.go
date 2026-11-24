@@ -820,6 +820,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if !found {
 		return invalidImport(fmt.Errorf("store: %q is not a table an export carries", table))
 	}
+	sent := row
 	row, err := s.importPin(ctx, customerID, table, row)
 	if err != nil {
 		return err
@@ -1060,7 +1061,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	if taken {
-		return fmt.Errorf("store: import %s: %w", table, ErrAnotherCustomersRow)
+		key, err := rowKey(table, shape.keys, sent)
+		if err != nil {
+			return err
+		}
+		return invalidImport(fmt.Errorf("store: import %s: %w", key, ErrAnotherCustomersRow))
 	}
 	return nil
 }
@@ -1095,8 +1100,27 @@ func importCached(ctx context.Context, db bun.IDB, customerID, table, query stri
 	return written, nil
 }
 
-// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
+// ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here,
+// as an ErrInvalidImport that names the row as rowKey does.
 var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
+
+// rowKey names a row as it was sent, by its table and the values of its primary key, in the
+// form `router replicate --skip` takes: agent_configs:{"id":"config-1"}.
+func rowKey(table string, keys []string, row json.RawMessage) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return "", invalidImport(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	key := make(map[string]json.RawMessage, len(keys))
+	for _, column := range keys {
+		key[column] = fields[column]
+	}
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		return "", stack.Wrap(err)
+	}
+	return table + ":" + string(encoded), nil
+}
 
 // cachedByID is whether a moved table's rows are cached by their id and something else they
 // hold, which a write can change.
