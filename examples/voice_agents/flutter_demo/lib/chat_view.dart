@@ -42,11 +42,9 @@ class _ChatViewState extends State<ChatView> {
     _opening = true;
     if (_failure != null) setState(() => _failure = null);
     try {
-      // A model that streams its reasoning, which is what fills the reply's thinking panel.
-      // The call keeps the agent's own model, which answers sooner.
       final session = await Demo.agents
           .agent(Demo.agentName)
-          .chat(SessionOptions(llm: 'xai/grok-4.7', tools: Demo.tools));
+          .chat(SessionOptions(tools: Demo.tools));
       final chat = await AgentChat.open(session);
       if (!mounted) {
         await chat.close();

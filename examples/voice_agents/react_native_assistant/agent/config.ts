@@ -23,8 +23,6 @@ export const AgentConfig = {
   customerId: process.env.EXPO_PUBLIC_AGENT_CUSTOMER_ID || 'examples',
   /** The agent, by the name in its `agent.yaml`. */
   agentName: process.env.EXPO_PUBLIC_AGENT_NAME || 'swift_assistant',
-  /** A model that streams its reasoning, so replies have reasoning steps. */
-  chatModel: 'xai/grok-4.7',
   user: {
     id: process.env.EXPO_PUBLIC_AGENT_USER_ID || 'rn-ai-sample-user',
     name: 'Alex',

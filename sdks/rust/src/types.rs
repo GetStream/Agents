@@ -5062,7 +5062,7 @@ pub struct CreateSessionRequest {
     ///The model that controls the floor in this session, and how long a caller may wait once they stop, over the agent config's. Left out or null, the config's; an empty object is no choice, which the router's default rules; {model: flow-controller} keeps the flow controller whatever that default. A model the session was opened with, named here or the config's then, is its for its life, reopened included; no choice is stored as none, so a reopened session takes its config's choice as it is then, and the router's default after it. Server-side only: a device sending it is refused with a 403, because whether a model rules when the agent answers is the app's to decide.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub floor_control: ::std::option::Option<FloorControl>,
-    ///What the agent opens the call with, over what the config says.
+    ///What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub greeting: ::std::option::Option<Greeting>,
     ///The conversation so far, for a backend that keeps its own: a thread in its own Slack app, say, that outlives any one session. Send it when a session closed and the thread goes on: open a new session with the thread's messages here, oldest first, then send the message to answer to the responses endpoint. The model is handed them before the first response, as a resumed conversation's history is. They are recorded nowhere, as turns, transcript or Chat messages, so add incognito to keep nothing at all. Up to 100 messages and 60000 characters of text, the most a session reads back of a conversation the router kept; more is refused rather than cut. Server-side only: a device sending it is refused with a 403, because an assistant message puts words in the agent's mouth.
@@ -5083,12 +5083,13 @@ pub struct CreateSessionRequest {
     ///Language hints, which narrow the candidates in every modality.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub languages: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
-    ///A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
+    ///A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub llm: ::std::option::Option<::std::string::String>,
+    ///Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub max_tokens: ::std::option::Option<i64>,
-    ///The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+    ///The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub max_tool_rounds: ::std::option::Option<i64>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -5096,11 +5097,13 @@ pub struct CreateSessionRequest {
     ///How sure the transcriber must be before the agent answers rather than checks what was meant.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub min_confidence: ::std::option::Option<f64>,
+    ///Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub model_overwrites: ::std::option::Option<ModelOverwrites>,
     ///The agent placed this call, so let recordings finish and answer their menus.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub navigating: ::std::option::Option<bool>,
+    ///Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub phone: ::std::option::Option<SessionPhone>,
     ///What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
@@ -5112,19 +5115,19 @@ pub struct CreateSessionRequest {
     ///The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub return_url: ::std::option::Option<::std::string::String>,
-    ///Omit it and the config decides, or search-fast when there is no config.
+    ///Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub search: ::std::option::Option<::std::string::String>,
     ///Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub start_voice: ::std::option::Option<bool>,
-    ///A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
+    ///A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sts: ::std::option::Option<::std::string::String>,
-    ///Omit it and the config decides, or en-low-latency when there is no config.
+    ///Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub stt: ::std::option::Option<::std::string::String>,
-    ///Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+    ///Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
     #[serde(
         default,
         skip_serializing_if = ":: std :: collections :: BTreeMap::is_empty"
@@ -5144,7 +5147,7 @@ pub struct CreateSessionRequest {
     pub tool_timeout_ms: ::std::option::Option<i64>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tools: ::std::option::Option<::std::vec::Vec<SessionTool>>,
-    ///Omit it and the config decides, or en-low-latency when there is no config.
+    ///Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<::std::string::String>,
     ///Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
@@ -5157,7 +5160,7 @@ pub struct CreateSessionRequest {
     pub user_name: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub video: ::std::option::Option<SessionVideo>,
-    ///The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+    ///The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub voice: ::std::option::Option<::std::string::String>,
 }
@@ -6261,6 +6264,7 @@ pub struct ForkSessionRequest {
     ///Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub messages: ::std::option::Option<bool>,
+    ///Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub model_overwrites: ::std::option::Option<ModelOverwrites>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
