@@ -76,3 +76,34 @@ func TestABackendNamesAnyAgentIdentity(t *testing.T) {
 
 	require.False(t, refused)
 }
+
+// A device's voice session is keyed under its call id, which is the session id it chose, so it
+// is given an agent id nobody chose instead.
+func TestADevicesVoiceSessionIsNotKeyedUnderTheIdItChose(t *testing.T) {
+	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous} {
+		spec := session.Spec{ID: "bob"}
+		keyDeviceAgent(deviceAsking(kind, "alice"), &spec)
+
+		require.NotEmpty(t, spec.AgentID, string(kind))
+		require.NotEqual(t, "bob", spec.AgentID, string(kind))
+	}
+}
+
+func TestABackendsVoiceSessionIsStillKeyedUnderItsCall(t *testing.T) {
+	spec := session.Spec{ID: "bob"}
+	keyDeviceAgent(backendAsking(), &spec)
+
+	require.Empty(t, spec.AgentID, "Normalize keys it under its call id")
+}
+
+// A text session gets a fresh agent id from Normalize, and a resumed one its conversation's.
+func TestADevicesTextOrResumedSessionKeepsItsAgentIDUnset(t *testing.T) {
+	for name, spec := range map[string]session.Spec{
+		"text":    {ID: "bob", Text: true},
+		"resumed": {ID: "bob", ConversationID: "agent:mine"},
+	} {
+		keyDeviceAgent(deviceAsking(auth.KindAuthenticated, "alice"), &spec)
+
+		require.Empty(t, spec.AgentID, name)
+	}
+}

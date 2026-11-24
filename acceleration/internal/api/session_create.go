@@ -49,6 +49,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 
 	spec := specOf(*request.Body, customerID, config)
+	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	// Who asked comes from the credential rather than from specOf, which merges the request
 	// with the config and so only ever sees what the caller was willing to say about
@@ -155,6 +156,20 @@ var errDeviceMemoryUser = forbidden("memory.user_id is sent server-side unless i
 // errAnonymousMemory refuses memory to a caller whose user id nobody checked.
 var errAnonymousMemory = forbidden("memory needs a signed-in user: an anonymous caller's name is a claim " +
 	"nobody checked, so the memories kept under it could be anyone's")
+
+// keyDeviceAgent gives an end user's device's voice session an agent id nobody chose.
+//
+// Why: a voice session that names no agent id is keyed under its call id, which is its session
+// id, and a device picks that. The agent id is the Chat user the conversation is created by
+// and written as, which a device may not choose (errDeviceAgentID). A text session is given a
+// fresh one already. One that carries on a conversation is left as it is: opening that
+// conversation refuses an agent id other than the one it was kept under.
+func keyDeviceAgent(ctx context.Context, spec *session.Spec) {
+	if ServerSideFrom(ctx) || spec.Text || spec.AgentID != "" || spec.ConversationID != "" {
+		return
+	}
+	spec.AgentID = session.NewAgentID()
+}
 
 // errDeviceAgentUser refuses an end user's device naming the user the agent joins and writes as.
 var errDeviceAgentUser = forbidden("user_id is sent server-side unless it is the default " +
