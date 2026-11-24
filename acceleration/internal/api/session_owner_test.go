@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
@@ -118,6 +119,49 @@ func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenReachesNothin
 	opened := alice.createSession(textSession(nil))
 
 	s.assertDoesNotReach(s.data.claiming(alice.userID), opened.Id)
+}
+
+func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenOpensNoneOfTheirConversations() {
+	// A conversation's owner is kept as a name alone, so naming its channel with the owner's
+	// name in a header would carry on their conversation and read it back.
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	alice.stopSession(opened.Id)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	status, body := s.data.claiming(alice.userID).call(http.MethodPost, "/v1/agents/sessions", resume)
+
+	s.Require().Equal(http.StatusForbidden, status, "%s", body)
+	var refused ErrorResponse
+	s.Require().NoError(json.Unmarshal(body, &refused))
+	s.Equal("forbidden", refused.Error.Code)
+	s.Contains(refused.Error.Message, "conversation_id")
+}
+
+func (s *SessionOwnershipSuite) TestAGuestOpensNoneOfTheConversationsOfTheSignedInUserOfTheSameName() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	alice.stopSession(opened.Id)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	status, body := s.guestNamed(alice.userID).call(http.MethodPost, "/v1/agents/sessions", resume)
+
+	s.Equal(http.StatusForbidden, status, "%s", body)
+}
+
+func (s *SessionOwnershipSuite) TestAUsersOwnDeviceCarriesOnTheirConversationByItsChannel() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	alice.stopSession(opened.Id)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	resumed := alice.createSession(resume)
+
+	s.Require().NotNil(opened.ConversationId)
+	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
 }
 
 func (s *SessionOwnershipSuite) TestAGuestIsNotTheSignedInUserOfTheSameName() {
