@@ -1560,7 +1560,8 @@ func settleSkippedRuns(ctx context.Context, tx bun.Tx, customerID string, tasks 
 //
 // The users are resumed movedHoldersPerTransaction at a time, one transaction each, since each
 // takes one lock per user and config and the server holds only so many at once. One that fails
-// leaves the ones before it done, which running the cut-over again does not redo. Each waits
+// leaves the ones before it done, which running the cut-over again does not redo, and what
+// they did is returned with its error. Each waits
 // for a task row or a limit at most the serving connection's lock_timeout (3s): a create or
 // resume holds them only for its own transaction, and a cut-over that gives up is run again.
 //
@@ -1597,7 +1598,7 @@ func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed
 			return err
 		})
 		if err != nil {
-			return 0, 0, 0, nil, stack.Wrap(err)
+			return resumed, skipped, overLimit, nil, stack.Wrap(err)
 		}
 		resumed, skipped, overLimit = resumed+r, skipped+k, overLimit+o
 	}
@@ -1607,7 +1608,7 @@ func (s *Store) ResumeMovedRows(ctx context.Context, customerID string) (resumed
 		Where("move_paused").
 		Order("id").
 		Scan(ctx, &campaigns); err != nil {
-		return 0, 0, 0, nil, stack.Wrap(fmt.Errorf("store: moved campaigns: %w", err))
+		return resumed, skipped, overLimit, nil, stack.Wrap(fmt.Errorf("store: moved campaigns: %w", err))
 	}
 	return resumed, skipped, overLimit, campaigns, nil
 }
