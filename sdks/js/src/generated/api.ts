@@ -10034,9 +10034,9 @@ export type components = {
         };
         /** @description Who the session's memories are about. Without a user id nothing is recalled or stored, which is the case for a call with nobody identified on it. */
         readonly SessionMemory: {
-            /** @description Separates two deployments sharing one memory account. */
+            /** @description Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows recall but keeps nothing from the user. */
             readonly app_id?: string;
-            /** @description The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. */
+            /** @description The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a user must not reach across groups, such as workspaces, need a user id per group, named by the backend. */
             readonly filter?: {
                 readonly [key: string]: string;
             };
