@@ -662,10 +662,10 @@ func (s *SelfHostedLimitsSuite) stranger(organization string) string {
 	return app
 }
 
-// dailySpend is what app spent today, as the backend reads it.
-func (s *SelfHostedLimitsSuite) dailySpend(backend *testClient, app string) int64 {
+// dailySpend is what the one subject query names spent today, as the backend reads it.
+func (s *SelfHostedLimitsSuite) dailySpend(backend *testClient, query string) int64 {
 	var read []SubjectUsage
-	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+url.QueryEscape(app), nil, &read))
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/spend/limits/usage?"+query, nil, &read))
 	s.Require().Len(read, 1)
 	return read[0].Windows[0].SpentMicros
 }
@@ -678,7 +678,7 @@ func (s *SelfHostedLimitsSuite) TestAnotherOrganizationsAppsSpendIsNotRead() {
 	s.refusedAsNoSuchApp(backend.call(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+
 		url.QueryEscape(s.customerID())+"&app_id="+url.QueryEscape(stranger), nil))
 
-	s.Equal(int64(300_000), s.dailySpend(backend, s.customerID()), "its own app alone is read")
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(s.customerID())), "its own app alone is read")
 }
 
 // An app in no organization holds only itself: an organization whose id is the app's is
@@ -691,7 +691,7 @@ func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationReadsOnlyItself() {
 
 	s.refusedAsNoSuchApp(backend.call(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+url.QueryEscape(stranger), nil))
 
-	s.Equal(int64(300_000), s.dailySpend(backend, own))
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(own)))
 }
 
 // The organization a request names is recorded after it, and a router that recorded the app
@@ -708,5 +708,28 @@ func (s *SelfHostedLimitsSuite) TestAnAppReadsItsOwnSpendWhateverOrganizationIsR
 	}, 5*time.Second, 20*time.Millisecond, "the router records the app under its organization")
 	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: own, OrganizationID: s.utils.uuid()}))
 
-	s.Equal(int64(300_000), s.dailySpend(backend, own))
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(own)))
+}
+
+// An app in no organization is its own organization, which no other app is in: one seen under
+// an organization whose id is the app's is another customer's.
+func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsOrganizationIsItselfAlone() {
+	own := s.utils.uuid()
+	backend := s.backend(own, "")
+	s.spent(own, 300_000)
+	s.stranger(own)
+
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=organization"))
+}
+
+// An organization is the apps seen under it, not an app whose id is the organization's, which
+// is another customer's.
+func (s *SelfHostedLimitsSuite) TestAnOrganizationsSpendLeavesOutAnAppWhoseIdIsItsOwn() {
+	own, organization := s.utils.uuid(), s.utils.uuid()
+	backend := s.backend(own, organization)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: own, OrganizationID: organization}))
+	s.spent(own, 300_000)
+	s.spent(organization, 700_000)
+
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=organization"))
 }

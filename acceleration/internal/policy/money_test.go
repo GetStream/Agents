@@ -1484,6 +1484,32 @@ func (s *PolicySuite) TestAnAppInNoOrganizationKeepsToItsOwnLimit() {
 	}
 }
 
+// An app in no organization is its own organization, which no other app is in: one seen under
+// an organization whose id is the app's is another customer's.
+func (s *PolicySuite) TestAnAppInNoOrganizationCountsOnlyItselfTowardItsOrganizationsLimit() {
+	alone, stranger := s.app+"-alone", s.app+"-stranger"
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: stranger, OrganizationID: alone}))
+	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: alone, LimitMicros: 1_000_000})
+	s.spend(stranger, 1_000_000)
+
+	s.never(func() bool { return s.admit(s.enforcer, alone).Spend != nil }, 300*time.Millisecond, 10*time.Millisecond,
+		"what another customer's app spent is not the app's")
+	s.spend(alone, 1_000_000)
+	s.spendRefused(s.enforcer, alone, ErrBudgetSpent)
+}
+
+// An organization's limit counts the apps seen under it, not an app whose id is the
+// organization's, which is another customer's.
+func (s *PolicySuite) TestAnOrganizationCountsNoAppWhoseIdIsItsOwn() {
+	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: s.org, LimitMicros: 1_000_000})
+	s.spend(s.org, 1_000_000)
+
+	s.never(func() bool { return s.admit(s.enforcer, s.app).Spend != nil }, 300*time.Millisecond, 10*time.Millisecond,
+		"what an app of the organization's id spent is not the organization's")
+	s.spend(s.app, 1_000_000)
+	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
+}
+
 func (s *PolicySuite) TestAnAppInNoOrganizationWithNoLimitIsNeverRefused() {
 	enforcer := s.billed()
 	alone := s.app + "-alone"
