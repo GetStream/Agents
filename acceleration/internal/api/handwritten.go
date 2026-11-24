@@ -294,6 +294,8 @@ func documentHandWritten(api huma.API) {
 			"and so does a session refused for money: `account_suspended` (`permission`), or " +
 			"`insufficient_credits`, `system_limit_reached` or `spend_limit_reached` " +
 			"(`payment_required`).\n" +
+			"A caller who has spent their daily quota is refused the handshake with 429 and " +
+			"`Retry-After`, and a speech-to-speech conversation that spends it closes.\n" +
 			"The session lasts as long as the socket. Closing the socket, or sending `stop`, ends " +
 			"the conversation. A conversation that ends closes the socket.",
 		Responses: map[string]*huma.Response{
