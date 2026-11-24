@@ -156,6 +156,10 @@ var errDeviceMemoryUser = forbidden("memory.user_id is sent server-side unless i
 var errAnonymousMemory = forbidden("memory needs a signed-in user: an anonymous caller's name is a claim " +
 	"nobody checked, so the memories kept under it could be anyone's")
 
+// errAnonymousConversation refuses conversation_id to a caller whose user id nobody checked.
+var errAnonymousConversation = forbidden("conversation_id needs a verified caller: an anonymous caller " +
+	"carries its conversation on by its session id")
+
 // refuseSessionRequest reports the failure a new session's request is refused with before
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
@@ -179,6 +183,13 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 		}
 		if signed := routing.AttributionFrom(ctx).Team(); signed != "" && signed != *team {
 			return invalidRequest(fmt.Sprintf("team %q is not the team %q the token was signed for, which the session is counted under", *team, signed)), true
+		}
+	}
+	for _, named := range [][2]string{
+		{"user_id", value(request.UserId)}, {"agent_id", value(request.AgentId)}, {"memory.user_id", memoryUserID(request.Memory)},
+	} {
+		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
+			return failure, true
 		}
 	}
 	// A zone nobody knows is refused where it is named, rather than at the first task
@@ -280,6 +291,9 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	if request.Team != nil && !ServerSideFrom(ctx) {
 		return errDeviceTeam, true
 	}
+	if value(request.LegacyConversationId) != "" && !KindFrom(ctx).Verified() {
+		return errAnonymousConversation, true
+	}
 	if request.Memory != nil && value(request.Memory.UserId) != "" && !ServerSideFrom(ctx) {
 		if !KindFrom(ctx).Verified() {
 			return errAnonymousMemory, true
@@ -289,6 +303,14 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// memoryUserID is the user id a session's memory names, empty when it names none.
+func memoryUserID(memory *SessionMemory) string {
+	if memory == nil {
+		return ""
+	}
+	return value(memory.UserId)
 }
 
 // registerSessionCreate declares the operations served in session_create.go.

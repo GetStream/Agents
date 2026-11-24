@@ -3100,8 +3100,9 @@ contract.
 ## Persistent text conversations
 
 Every text session is kept in a Stream Chat `agent:support-<uuid>` channel unless it is
-`incognito`; pass `conversation_id` to bind to an existing one. The configured agent ID is
-preserved; the backend verifies the channel's customer and agent ownership on
+`incognito`; pass `conversation_id` to bind to an existing one. A `conversation_id` from
+an anonymous caller is refused with a 403: such a caller carries its conversation on by session
+id. The configured agent ID is preserved; the backend verifies the channel's customer and agent ownership on
 resume and on `GET /v1/agents/conversations/{cid}/messages?agent_id=...&before=...`.
 This endpoint returns up to 100 messages and a `before` cursor. Completed ordinary
 user/assistant messages restore model context, capped at 100 messages and 60,000
