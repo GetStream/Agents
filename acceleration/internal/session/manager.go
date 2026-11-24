@@ -1311,7 +1311,7 @@ func (m *Manager) takeOver(ctx context.Context, service *persistent.Service, own
 
 	var left []*Session
 	for _, found := range held {
-		if !owner.Reaches(OwnerOf(found.spec)) && !sharedWith(ctx, service, owner, found.spec.AgentID, cid) {
+		if holder := OwnerOf(found.Spec()); !owner.Reaches(holder) && !sharedWith(ctx, service, owner, holder, found.spec.AgentID, cid) {
 			continue
 		}
 		// Asked again: the conversation's read let go of the lock, and somebody may watch it now.
@@ -1331,9 +1331,14 @@ func (m *Manager) takeOver(ctx context.Context, service *persistent.Service, own
 	}
 }
 
-// sharedWith reports whether the conversation cid is shared with owner: open to every member
-// of it, as the conversation's own read of it for owner says, owner being one of them.
-func sharedWith(ctx context.Context, service *persistent.Service, owner Owner, agentID, cid string) bool {
+// sharedWith reports whether the conversation cid, which holder's session has, is shared with
+// owner as another member of it, as the conversation's own read of it for owner says. A member is
+// known by user id, so only a signed-in user is one: a guest's id may equal a member's, and the
+// holder's id under another kind is not another member.
+func sharedWith(ctx context.Context, service *persistent.Service, owner, holder Owner, agentID, cid string) bool {
+	if owner.Kind != auth.KindAuthenticated || owner.UserID == holder.UserID {
+		return false
+	}
 	page, err := service.HistoryForCaller(ctx, owner.CustomerID, agentID, cid, "", owner.UserID)
 	return err == nil && page.Shared()
 }

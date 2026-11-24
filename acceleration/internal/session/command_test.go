@@ -856,7 +856,7 @@ func (s *SessionSuite) TestAVoiceNoteToAConversationNoLongerTheCallersIsRefusedB
 	s.Require().NoError(err)
 	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true,
 		AgentID: agentID, ConversationID: "agent:" + channelID,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}}
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
 	alice, err := s.manager.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	spec.Caller.UserID = "bob"
@@ -1199,7 +1199,7 @@ func (s *SessionSuite) TestSharedConversationHandsOffAfterWatcherDetachAndReject
 	setMembers("alice", "bob")
 	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true,
 		AgentID: agentID, ConversationID: "agent:" + channelID,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}}
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
 	alice, err := s.manager.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	_, detachAlice := alice.Watch()

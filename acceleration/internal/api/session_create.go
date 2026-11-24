@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
@@ -59,7 +58,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
 	created, err := s.sessions.Create(ctx, spec)
-	if errors.Is(err, session.ErrSessionExists) || errors.Is(err, conversation.ErrAlreadyOpen) {
+	if errors.Is(err, session.ErrSessionExists) {
 		return nil, conflict(err.Error())
 	}
 	if errors.Is(err, session.ErrNoAgentCallType) {

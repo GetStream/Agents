@@ -200,6 +200,25 @@ func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAServerSideField() {
 	}
 }
 
+// A start frame naming a conversation another session holds open is told so, as createSession is.
+func (s *SocketSessionSuite) TestAStartFrameForAConversationHeldOpenIsAConflict() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+
+	connection := s.serverClient.actingFor(s.data.createUser()).opens("/v1/agents/socket")
+	watching := alice.opens("/v1/agents/sessions/" + opened.Id + "/events")
+	defer func() { _ = watching.Close() }()
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "session": map[string]any{"conversation_id": *opened.ConversationId, "agent_id": opened.AgentId},
+	}))
+	refused := s.readFrame(connection)
+
+	s.Equal("error", refused["type"], "the socket answered %v", refused)
+	s.Equal("conversation is already open", refused["error"])
+	s.True(s.manager.Running(s.customerID(), opened.Id))
+}
+
 // assertSocketRefuses checks a device's start frame is refused as its create was, and that
 // both say the field's own refusal rather than another field's.
 func (s *SocketSessionSuite) assertSocketRefuses(device *testClient, sent map[string]any, refusal APIError) {

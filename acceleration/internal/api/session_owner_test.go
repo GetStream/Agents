@@ -142,19 +142,51 @@ func (s *SessionOwnershipSuite) TestAnotherUsersReopenLeavesTheSessionHoldingThe
 	s.assertReaches(alice, opened.Id)
 }
 
-// A caller only claiming the name of the user a backend opened a conversation for does not
-// reach that session, so it is told the conversation is open and the session carries on.
-func (s *SessionOwnershipSuite) TestClaimingTheNameABackendOpenedAConversationForLeavesItsSessionRunning() {
+// A guest going by a signed-in user's id does not reach their session, so it is told the
+// conversation is open and the session carries on.
+func (s *SessionOwnershipSuite) TestAGuestOfTheSameNameLeavesTheSessionHoldingAUsersConversationRunning() {
 	alice := s.data.createUser()
-	opened := s.serverClient.actingFor(alice).createSession(textSession(nil))
+	opened := alice.createSession(textSession(nil))
 	s.Require().NotNil(opened.ConversationId)
 
 	reopen := textSession(nil)
 	reopen.LegacyConversationId = opened.ConversationId
-	status, message := s.data.claiming(alice.userID).failure(http.MethodPost, "/v1/agents/sessions", reopen)
+	status, message := s.guestNamed(alice.userID).failure(http.MethodPost, "/v1/agents/sessions", reopen)
 
 	s.Equal(http.StatusConflict, status, message)
-	s.True(s.manager.Running(s.customerID(), opened.Id), "the backend's session is still running")
+	s.True(s.manager.Running(s.customerID(), opened.Id), "alice's session is still running")
+}
+
+// And the other way about: the user is not the guest of their name.
+func (s *SessionOwnershipSuite) TestAUserIsToldAGuestOfTheirNameHoldsTheConversationOpen() {
+	alice := s.data.createUser()
+	opened := s.guestNamed(alice.userID).createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+
+	reopen := textSession(nil)
+	reopen.LegacyConversationId = opened.ConversationId
+	status, message := alice.failure(http.MethodPost, "/v1/agents/sessions", reopen)
+
+	s.Equal(http.StatusConflict, status, message)
+	s.True(s.manager.Running(s.customerID(), opened.Id), "the guest's session is still running")
+}
+
+// A chat whose conversation another session holds open is answered as a create of it is.
+func (s *SessionOwnershipSuite) TestCarryingOnAChatWhoseConversationIsOpenElsewhereIsAConflict() {
+	alice := s.data.createUser()
+	ended := alice.createSession(textSession(nil))
+	alice.stopSession(ended.Id)
+	request := textSession(nil)
+	request.LegacyConversationId = ended.ConversationId
+	holding := alice.createSession(request)
+	watching := alice.opens("/v1/agents/sessions/" + holding.Id + "/events")
+	defer func() { _ = watching.Close() }()
+
+	status, body := alice.call(http.MethodPost, "/v1/agents/sessions/"+ended.Id+"/responses",
+		CreateResponseRequest{Text: "Still there?", RequestId: pointerTo(s.utils.uuid())})
+
+	s.Equal(http.StatusConflict, status, string(body))
+	s.True(s.manager.Running(s.customerID(), holding.Id))
 }
 
 func (s *SessionOwnershipSuite) TestClaimingAUsersNameWithoutATokenReachesNothing() {
