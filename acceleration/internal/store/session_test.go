@@ -500,6 +500,41 @@ func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.Empty(found.EndReason, "a reopened session shows why its last run ended")
 }
 
+// Who named a session's project is written as it opens. A router of the release before, which
+// carries it on during a deploy or after a rollback, names no column for it, and a later write of
+// this release's does not change it.
+func (s *StoreSuite) TestACarriedOnSessionKeepsWhoNamedItsProject() {
+	for id, named := range map[string]bool{"backends": true, "devices": false} {
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectServerSide = &named })
+
+		s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: id, CustomerID: "app"}))
+		other := !named
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectServerSide = &other })
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Require().NotNil(found.ProjectServerSide)
+		s.Equal(named, *found.ProjectServerSide)
+	}
+}
+
+// A router of the release before opens a session without saying who named its project, so the
+// kind of caller that opened it says, unless it is a fork.
+func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {
+	for id, opened := range map[string]AgentSession{
+		"backend": {CallerKind: "server"}, "user": {CallerKind: "authenticated"}, "guest": {CallerKind: "guest"},
+		"anonymous": {CallerKind: "anonymous"}, "fork": {CallerKind: "server", ForkedFrom: "backend"},
+	} {
+		opened.ID, opened.CustomerID, opened.Project = id, "app", "alpha"
+		s.Require().NoError(s.savedAsBefore(s.ctx, &opened))
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Nil(found.ProjectServerSide)
+		s.Equal(id == "backend", found.ProjectIsTag(), id)
+	}
+}
+
 func (s *StoreSuite) TestACloseFromTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
 	first, again := s.base, s.base.Add(time.Hour)
 	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = first })

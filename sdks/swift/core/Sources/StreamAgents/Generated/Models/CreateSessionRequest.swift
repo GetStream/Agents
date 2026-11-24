@@ -52,7 +52,7 @@ final class CreateSessionRequest: Sendable, Codable, JSONEncodable {
     let navigating: Bool?
     /// The number the session acts from, which is what turns transferring on.
     let phone: SessionPhone?
-    /// What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+    /// What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
     let projectId: String?
     /// How a conversation is handed back to the model when a session carries it on.
     let resumeHistory: ResumeHistory?

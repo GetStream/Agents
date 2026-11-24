@@ -181,6 +181,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(start.Session.ProjectId, spec.CallerKind)
 	spec.Edge = edge
 
 	created, err := s.sessions.Create(ctx, spec)

@@ -15,6 +15,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -103,9 +104,12 @@ type AgentSession struct {
 	Team        string `bun:"team,notnull"`
 	Title       string `bun:"title,notnull"`
 	Description string `bun:"description,notnull"`
-	// Project is what the conversation belongs to, a column as well as a cost tag so a
-	// list grouped by project needs no JSON unpacking.
+	// Project is what the conversation belongs to.
 	Project string `bun:"project,notnull"`
+	// ProjectServerSide is whether a server-side caller named Project, which is then a cost tag
+	// too (ProjectIsTag). Written as the session opens and never changed. Nil, as on a row made
+	// before it was kept, is not known.
+	ProjectServerSide *bool `bun:"project_server_side"`
 	// Custom is the caller's own, handed back untouched and never read by the router.
 	Custom          map[string]any  `bun:"custom,type:jsonb,nullzero"`
 	ModelOverwrites ModelOverwrites `bun:"model_overwrites,type:jsonb,nullzero"`
@@ -175,6 +179,17 @@ func (s *AgentSession) Validate() error {
 		check(s.ToolTimeoutMs >= 0, "tool_timeout_ms", "is negative").
 		check(s.ReviewScore == nil || *s.ReviewScore >= 1 && *s.ReviewScore <= 5, "review_score", "is not from 1 to 5").
 		done()
+}
+
+// ProjectIsTag reports whether the session's usage is tagged with its project: only one a
+// server-side caller named is. For a row from before that was kept, the kind of caller that
+// opened the session says, except for a fork: its project may be its parent's, which anybody
+// may have named.
+func (s *AgentSession) ProjectIsTag() bool {
+	if s.ProjectServerSide != nil {
+		return *s.ProjectServerSide
+	}
+	return s.ForkedFrom == "" && s.CallerKind == string(auth.KindServer)
 }
 
 // ErrNoSession is a session that is not there: never saved, or deleted since.

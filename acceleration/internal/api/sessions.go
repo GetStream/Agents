@@ -185,6 +185,7 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		spec.Recall = &session.Recall{Messages: recalled}
 	}
 	spec.CustomerID = customerID
+	spec.NameProject(body.ProjectId, KindFrom(ctx))
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
@@ -809,7 +810,8 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.Text = true
 	spec.PersistConversation = true
 	spec.ConversationID = row.ConversationID
-	spec.Title, spec.Description, spec.Project = row.Title, row.Description, row.Project
+	spec.Title, spec.Description = row.Title, row.Description
+	spec.KeepProject(*row)
 	spec.Custom = row.Custom
 	spec.ModelOverwrites = row.ModelOverwrites
 	if row.ResumeHistory != (store.ResumeHistory{}) {
@@ -961,7 +963,6 @@ func specOf(request CreateSessionRequest, customerID string, config *store.Agent
 	spec.NoUI = request.Ui != nil && !*request.Ui
 	spec.Title = override(spec.Title, request.Title)
 	spec.Description = override(spec.Description, request.Description)
-	spec.Project = override(spec.Project, request.ProjectId)
 	if request.Custom != nil {
 		spec.Custom = *request.Custom
 	}
@@ -1363,7 +1364,8 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		// The conversation goes on after its history, which a greeting would interrupt:
 		// a reopen says none either (sessionToAnswer).
 		spec.Greeting = ""
-		spec.Title, spec.Description, spec.Project = row.Title, row.Description, row.Project
+		spec.Title, spec.Description = row.Title, row.Description
+		spec.KeepProject(*row)
 		spec.Custom, spec.ModelOverwrites = row.Custom, row.ModelOverwrites
 		spec.ConnectorSelections = selectionsOf(*row)
 		spec.ReturnURL = row.ReturnURL
@@ -1390,7 +1392,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		fresh := session.FromConfig(*config)
 		fresh.Text = true
 		fresh.Title, fresh.Description = spec.Title, spec.Description
-		fresh.Project, fresh.Custom = spec.Project, spec.Custom
+		fresh.Project, fresh.ProjectTag, fresh.Custom = spec.Project, spec.ProjectTag, spec.Custom
 		fresh.ConnectorSelections = spec.ConnectorSelections
 		fresh.ReturnURL = spec.ReturnURL
 		fresh.NoUI = spec.NoUI
@@ -1401,7 +1403,6 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	spec.ForkedFrom = parentID
 	spec.Title = override(spec.Title, request.Title)
 	spec.Description = override(spec.Description, request.Description)
-	spec.Project = override(spec.Project, request.ProjectId)
 	spec.ToolTimeoutMs = override(spec.ToolTimeoutMs, request.ToolTimeoutMs)
 	spec.Incognito = value(request.Incognito)
 	if request.Custom != nil {
@@ -1800,7 +1801,7 @@ type ForkSessionRequest struct {
 	ToolTimeoutMs   *int                    `json:"tool_timeout_ms,omitempty" doc:"How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession."`
 	Messages        *bool                   `json:"messages,omitempty" doc:"Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants." default:"true"`
 	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty"`
-	ProjectId       *string                 `json:"project_id,omitempty"`
+	ProjectId       *string                 `json:"project_id,omitempty" doc:"What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the \"project\" cost tag, as on createSession, unless a running parent's tags already name one. A device's groups the fork and changes no cost tag."`
 	ResponseId      *string                 `json:"response_id,omitempty" doc:"Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false."`
 	Title           *string                 `json:"title,omitempty"`
 }

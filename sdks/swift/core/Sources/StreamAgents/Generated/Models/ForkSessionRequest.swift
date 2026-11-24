@@ -14,6 +14,7 @@ final class ForkSessionRequest: Sendable, Codable, JSONEncodable {
     /// What to change about the models for one session, over whatever its agent config decided.
     /// It is one object rather than a dozen fields at the top level because it is one idea: everything here overrides the config, and a caller reading a session back wants to see what they changed in one place rather than diffed against a config they would have to fetch. Only the safe knobs are here. Instructions and tools are not, because a caller able to rewrite those could make a session impersonate a different agent. A backend sets one session's instructions with the instructions of CreateSessionRequest instead, which a device may not send.
     let modelOverwrites: ModelOverwritesPayload?
+    /// What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the "project" cost tag, as on createSession, unless a running parent's tags already name one. A device's groups the fork and changes no cost tag.
     let projectId: String?
     /// Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false.
     let responseId: String?

@@ -1969,6 +1969,10 @@ what drives spend with `GET /v1/{modality}/stats/tags?key=project`, or narrow th
 stats with a repeatable `tag=project:support`. Filtering reads the raw request rows, since a
 rollup bucket has already forgotten which labels its requests carried.
 
+A session's `project_id` is also its `project` tag when a backend sent it. An end user's device
+may send one too, which groups and filters its sessions and tags nothing: its work is tagged
+`project` only by the agent config's own tags, or by the backend session it carries on or forks.
+
 **A turn is not a request.** A request row measures one provider call. A turn measures what
 the caller felt: the gap between finishing a sentence and hearing the answer start, which
 spans three providers and the agent's own handling. Every leg is nullable, because a

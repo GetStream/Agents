@@ -57,6 +57,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	// for it is matched against.
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(request.Body.ProjectId, spec.CallerKind)
 	created, err := s.sessions.Create(ctx, spec)
 	if errors.Is(err, session.ErrSessionExists) {
 		return nil, conflict(err.Error())

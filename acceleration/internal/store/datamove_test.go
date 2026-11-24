@@ -2502,6 +2502,53 @@ func (s *DataMoveSuite) TestAnImportedRowCannotChooseItsStreamApp() {
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(unpinned), "an unpinned row was in somebody's deployment app, not this customer's")
 }
 
+// Who named a session's project moves with it, there and back, as a row and as a change. A row
+// of a source from before it was kept arrives not knowing.
+func (s *DataMoveSuite) TestWhoNamedASessionsProjectMovesWithIt() {
+	yes, no := true, false
+	for id, named := range map[string]*bool{"backends": &yes, "devices": &no, "before": nil} {
+		s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: "acme", ProjectServerSide: named, AgentID: "agent", UserID: "user",
+		}))
+	}
+
+	s.capture("acme")
+	cursor := s.move("acme", "acme")
+	s.assertProjectsNamedBy(s.destination)
+	_, err := s.source.shard.NewUpdate().Model((*AgentSession)(nil)).
+		Set("title = 'renamed'").Where("customer_id = 'acme'").Exec(s.ctx)
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "acme", cursor)
+	s.assertProjectsNamedBy(s.destination)
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_sessions") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	}
+	s.assertProjectsNamedBy(s.source)
+
+	older := s.export("acme").of("agent_sessions")[0]
+	delete(older, "project_server_side")
+	older["id"], older["caller_kind"] = "older", "server"
+	encoded, err := json.Marshal(older)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	arrived, err := s.destination.Sessions.Get(s.ctx, "acme", "older")
+	s.Require().NoError(err)
+	s.Nil(arrived.ProjectServerSide)
+	s.True(arrived.ProjectIsTag())
+}
+
+func (s *DataMoveSuite) assertProjectsNamedBy(store *Store) {
+	for id, want := range map[string]string{"backends": "true", "devices": "false", "before": "null"} {
+		row, err := store.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		got, err := json.Marshal(row.ProjectServerSide)
+		s.Require().NoError(err)
+		s.Equal(want, string(got), id)
+	}
+}
+
 func (s *DataMoveSuite) TestAnExportNamesTheAppANullPinMeant() {
 	// NULL is the app of whichever deployment wrote it, which means nothing elsewhere.
 	s.source.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
