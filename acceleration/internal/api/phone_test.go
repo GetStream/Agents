@@ -238,6 +238,24 @@ func (s *PhoneSuite) TestACallCannotBeRoutedIntoAnotherCustomersSession() {
 	s.Equal(http.StatusConflict, status)
 }
 
+// The same once the other customer's session ended, when its row alone holds the id: the call is
+// refused before it rings anybody, not when it connects.
+func (s *PhoneSuite) TestACallCannotBeRoutedIntoASessionAnotherCustomerHeld() {
+	other := s.data.backendOfAnotherApp()
+	theirs := other.createSession(textSession(nil)).Id
+	other.stopSession(theirs)
+	s.Require().Eventually(func() bool {
+		var read Session
+		return other.do(http.MethodGet, "/v1/agents/sessions/"+theirs, nil, &read) == http.StatusOK && read.State == Ended
+	}, settleFor, 20*time.Millisecond, "the ended session was never written down")
+
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/phone/calls", PlaceCallRequest{
+		From: "+15125551234", To: "+19005550100", SessionId: &theirs,
+	})
+
+	s.Equal(http.StatusConflict, status)
+}
+
 // A session of the id another customer holds in a Stream app of its own is no call this
 // customer's would join: the call is routed under the id in this customer's app.
 func (s *PhoneSuite) TestACallMayBeRoutedUnderAnIdAnotherCustomerHoldsInAnotherApp() {
