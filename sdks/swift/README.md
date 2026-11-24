@@ -269,11 +269,10 @@ the `id` of a `Response`, not the `turnID` a socket event carries:
 let turns = try await agents.responses(sessionID: session.id).items
 try await agents.rewind(sessionID: session.id, to: turns[0].id)
 let branch = try await session.fork(ForkOptions(responseID: turns[0].id))
-
-var harder = ForkOptions()
-harder.modelOverwrites = ModelOverwrites(llm: "llm-thinking", thinking: .high)
-let compared = try await session.fork(harder)   // follow it with attach(sessionID:)
 ```
+
+Follow the fork with `attach(sessionID:)`. It runs on the models the conversation has: which models
+a fork runs on is the backend's to choose, and the router refuses a device that names them.
 
 A session, typed or spoken, is kept in Stream Chat unless it is `incognito`, and a conversation
 kept there cannot be rewound, since its transcript would bring the turns back; fork it at the response

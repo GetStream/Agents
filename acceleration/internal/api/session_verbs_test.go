@@ -364,6 +364,68 @@ func (s *SessionVerbsSuite) TestAForkSaysWhatItCameFrom() {
 	s.Equal("Health", value(forked.ProjectId), "what the fork did not mention it inherits")
 }
 
+// Models are the backend's to choose on a fork as on a new session, and a refused fork opens
+// nothing.
+func (s *SessionVerbsSuite) TestADeviceMayNotNameModelsOnAFork() {
+	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
+		s.Run(string(device.kind), func() {
+			request, project := textSession(nil), s.utils.uuid()
+			request.ProjectId, request.ConfigId = &project, pointerTo(s.config("noted/noted-model"))
+			parent := device.createSession(request)
+			fork := "/v1/agents/sessions/" + parent.Id + "/fork"
+
+			for _, sent := range []ModelOverwrites{{Llm: pointerTo("counted/counted-model")}, {}} {
+				status, failure := device.failure(http.MethodPost, fork, ForkSessionRequest{ModelOverwrites: &sent})
+				s.Equal(http.StatusForbidden, status)
+				s.Contains(failure, "model_overwrites are sent server-side")
+			}
+			s.Zero(s.forksOf(parent.Id), "a refused fork opens no session")
+
+			var forked Session
+			s.Require().Equal(http.StatusCreated, device.do(http.MethodPost, fork, ForkSessionRequest{}, &forked))
+			s.Equal("noted/noted-model", value(forked.Llm), "a plain fork keeps the parent's configured model")
+			s.Equal(1, s.forksOf(parent.Id))
+		})
+	}
+}
+
+func (s *SessionVerbsSuite) TestABackendsForkForAUserRunsOnTheModelsItNames() {
+	parent := s.client.createSession(textSession(nil))
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated, s.serverClient.actingFor(s.client).do(http.MethodPost,
+		"/v1/agents/sessions/"+parent.Id+"/fork",
+		ForkSessionRequest{ModelOverwrites: &ModelOverwrites{Llm: pointerTo("counted/counted-model")}}, &forked))
+
+	s.Equal("counted/counted-model", value(forked.Llm))
+}
+
+// A conversation goes on with the models it was opened with, whoever carries it on.
+func (s *SessionVerbsSuite) TestADeviceCarriesAConversationOnWithTheModelsItWasOpenedWith() {
+	request := textSession(nil)
+	request.ModelOverwrites = &ModelOverwrites{Llm: pointerTo("counted/counted-model")}
+	opened := s.serverClient.actingFor(s.client).createSession(request)
+	s.client.stopSession(opened.Id)
+	_, err := s.store.ShardDB().NewUpdate().Model((*store.AgentSession)(nil)).
+		Set("caller_kind = ?", "authenticated").Where("id = ?", opened.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	var resumed Session
+	s.Require().Equal(http.StatusOK, s.client.do(http.MethodPost,
+		"/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, &resumed))
+
+	s.Equal("counted/counted-model", value(resumed.Llm))
+}
+
+// forksOf is how many sessions were recorded as forks of id.
+func (s *SessionVerbsSuite) forksOf(id string) int {
+	s.Require().NoError(s.manager.FlushRecords(context.Background()))
+	count, err := s.store.ShardDB().NewSelect().Model((*store.AgentSession)(nil)).
+		Where("forked_from = ?", id).Count(context.Background())
+	s.Require().NoError(err)
+	return count
+}
+
 // A session's instructions are its agent's, so not even the backend can give one others:
 // opening it, forking it and changing it all leave them as the config said.
 func (s *SessionVerbsSuite) TestNoRequestGivesASessionOtherInstructions() {

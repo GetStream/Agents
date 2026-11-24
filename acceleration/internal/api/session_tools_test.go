@@ -97,6 +97,19 @@ func (s *SessionToolsSuite) TestASessionSaysWhatItsModelIsOffered() {
 	s.Equal(total, offered.Tokens)
 }
 
+// The names of the phone tools stay the phone's: a session with no phone line is offered
+// neither, though its device declared them.
+func (s *SessionToolsSuite) TestADevicesToolNamedAsAPhoneToolIsNotOfferedWithoutAPhoneLine() {
+	request := textSession(nil)
+	request.Tools = &[]SessionTool{s.lookupOrder(), {Name: "transfer", Description: "hand over"}, {Name: "press", Description: "press keys"}}
+	opened := s.client.createSession(request)
+
+	sources := s.toolSourcesAs(s.serverClient.actingFor(s.client), opened.Id)
+	s.Equal("session", sources[lookupOrder])
+	s.NotContains(sources, "transfer")
+	s.NotContains(sources, "press")
+}
+
 func (s *SessionToolsSuite) TestASessionSaysWhereEachToolItIsOfferedCameFrom() {
 	agent := "agent-" + s.utils.uuid()
 	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
@@ -329,9 +342,14 @@ func (s *SessionToolsSuite) lookupOrder() SessionTool {
 
 // toolSources is where each tool a session is offered came from, by name.
 func (s *SessionToolsSuite) toolSources(sessionID string) map[string]string {
+	return s.toolSourcesAs(s.serverClient, sessionID)
+}
+
+// toolSourcesAs is toolSources read by the client given.
+func (s *SessionToolsSuite) toolSourcesAs(as *testClient, sessionID string) map[string]string {
 	var offered OfferedTools
 	s.Require().Equal(http.StatusOK,
-		s.serverClient.do(http.MethodGet, "/v1/agents/sessions/"+sessionID+"/tools", nil, &offered))
+		as.do(http.MethodGet, "/v1/agents/sessions/"+sessionID+"/tools", nil, &offered))
 	sources := map[string]string{}
 	for _, tool := range offered.Tools {
 		sources[tool.Name] = tool.Source

@@ -273,6 +273,15 @@ func (s *Server) ownApp(customerID string, app int64) bool {
 	return app != 0 && streamapp.CustomerOf(app) == customerID
 }
 
+// refuseDeviceModels reports the failure a request is refused with when an end user's device
+// named models or limits in it. A new session and a fork are both held to it.
+func refuseDeviceModels(ctx context.Context, named bool) (APIError, bool) {
+	if named && !ServerSideFrom(ctx) {
+		return errDeviceModels, true
+	}
+	return APIError{}, false
+}
+
 // refuseServerSideFields reports the failure a new session is refused with when an end user's
 // device sent a field only the backend may send.
 //
@@ -301,10 +310,10 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	if request.Phone != nil && !ServerSideFrom(ctx) {
 		return errDevicePhone, true
 	}
-	if (request.Llm != nil || request.Stt != nil || request.Tts != nil || request.Sts != nil ||
-		request.Search != nil || request.Voice != nil || request.MaxTokens != nil ||
-		request.MaxToolRounds != nil || request.ModelOverwrites != nil) && !ServerSideFrom(ctx) {
-		return errDeviceModels, true
+	if failure, refused := refuseDeviceModels(ctx, request.Llm != nil || request.Stt != nil ||
+		request.Tts != nil || request.Sts != nil || request.Search != nil || request.Voice != nil ||
+		request.MaxTokens != nil || request.MaxToolRounds != nil || request.ModelOverwrites != nil); refused {
+		return failure, true
 	}
 	if request.Greeting != nil && !ServerSideFrom(ctx) {
 		return errDeviceGreeting, true

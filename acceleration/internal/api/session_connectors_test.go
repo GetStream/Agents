@@ -901,8 +901,13 @@ func (s *SessionConnectorsSuite) modelledConfig(llm string, fields map[string]an
 // askFork forks parent with overwrites, asks the fork a question, and returns the fork and the
 // first frame of type wanted it sent back. The fork is stopped once it has.
 func (s *SessionConnectorsSuite) askFork(parent string, overwrites *ModelOverwrites, wanted string) (Session, map[string]any) {
+	// Models are the backend's to choose, so it forks for the user when it names some.
+	forker := s.client
+	if overwrites != nil {
+		forker = s.serverClient.actingFor(s.client)
+	}
 	var forked Session
-	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+	s.Require().Equal(http.StatusCreated, forker.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
 		ForkSessionRequest{Messages: pointerTo(false), ModelOverwrites: overwrites}, &forked))
 	watching := s.client.opens("/v1/agents/sessions/" + forked.Id + "/events")
 	status, failure := s.serverClient.actingFor(s.client).failure(http.MethodPost, "/v1/agents/sessions/"+forked.Id+"/respond",
@@ -913,12 +918,12 @@ func (s *SessionConnectorsSuite) askFork(parent string, overwrites *ModelOverwri
 	return forked, frame
 }
 
-// forkPrompts forks parent onto the model that reviews, asks it a question, stops it, and
+// forkPrompts has the user's backend fork parent onto the model that reviews, asks it a question, stops it, and
 // reads back what it was told. The review's output rule, which ends every review prompt,
 // is left off.
 func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 	var forked Session
-	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+	s.Require().Equal(http.StatusCreated, s.serverClient.actingFor(s.client).do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
 		ForkSessionRequest{Messages: pointerTo(false), ModelOverwrites: &ModelOverwrites{Llm: pointerTo("summarising/summarising-model")}}, &forked))
 	// A device is never given the instructions, so the backend reads what the fork was told.
 	instructions := value(s.serverClient.actingFor(s.client).getSession(forked.Id).Instructions)

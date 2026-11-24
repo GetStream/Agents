@@ -28,6 +28,9 @@ func TestADeviceMayNotChooseASessionsPhoneModelsOrLabels(t *testing.T) {
 		"model_overwrites": {CreateSessionRequest{ModelOverwrites: &ModelOverwrites{Thinking: new(ModelOverwritesThinking("high"))}}, models},
 		"greeting":         {CreateSessionRequest{Greeting: &Greeting{Text: "Your refund is approved."}}, "greeting is sent server-side"},
 		"tags":             {CreateSessionRequest{Tags: &map[string]string{"project": "another"}}, "tags are sent server-side"},
+		"empty llm":        {CreateSessionRequest{Llm: new("")}, models},
+		"empty greeting":   {CreateSessionRequest{Greeting: &Greeting{}}, "greeting is sent server-side"},
+		"empty tags":       {CreateSessionRequest{Tags: &map[string]string{}}, "tags are sent server-side"},
 	}
 	backend := context.WithValue(context.Background(), serverSideContextKey{}, true)
 	for field, refused := range fields {
