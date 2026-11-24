@@ -1730,6 +1730,13 @@ running stays on its node, and a hook a peer handed over is never handed on to a
 With no node of that shard up, the work is done where it landed and counted in
 `router_shard_handover_fallbacks_total`, which an alert should watch.
 
+Work a router claims from the global database is claimed the same way. A scheduled task goes
+to its agent's region's shard, or else its user's `users.shard`; a campaign's dials and their
+take-overs go to the shard of the country of the number it rings from. Work meant for no shard
+the deployment has (`shard_routing` or `postgres.shards`), such as a user no client of theirs
+has reached yet, is claimed anywhere, and so is work left unclaimed five minutes past when it
+could have been, so a shard that is down holds up nothing for longer.
+
 ## Agents that are configured rather than spelled out
 
 A session can be created from a stored configuration instead of a caller repeating the
