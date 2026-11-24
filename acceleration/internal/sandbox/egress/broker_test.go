@@ -533,6 +533,7 @@ func (s *BrokerSuite) TestARunWithEveryGrantWithdrawnEndsTheCredential() {
 
 	s.mount = s.run(s.broker, s.prepared)
 
+	s.Len(credentialOf(s.mount), 26, "the run still sends the proxy a credential, as on base")
 	s.Equal([]string{credential}, s.absent(credential), "the last run's")
 	s.Equal([]string{credentialOf(s.mount)}, s.absent(credentialOf(s.mount)), "this run's")
 	_, _, err := s.get()
@@ -669,6 +670,7 @@ func (s *BrokerSuite) TestClosingEndsTheProxyCredential() {
 	s.ErrorContains(err, "Proxy Authentication Required", "the running code's")
 	s.Require().NoError(s.broker.AfterRun(s.ctx))
 	s.mount = s.run(s.broker, s.prepared)
+	s.Len(credentialOf(s.mount), 26, "a run after Close still sends the proxy a credential, as on base")
 
 	_, _, err = s.get()
 
@@ -869,6 +871,53 @@ func (s *BrokerSuite) TestABindWhileRequestsGoThroughGivesEachTheTokenOrNothing(
 	for _, authorization := range s.rig.host.authorizations() {
 		s.Equal("Bearer gho_live-token-of-the-connection", authorization)
 	}
+}
+
+// A late grant a run bound stays bound in the next run, though Bind gives nothing then: it is the
+// grant the sandbox was handed, and only a withdrawn connection ends it.
+func (s *BrokerSuite) TestALateGrantBoundByOneRunStaysBoundInTheNext() {
+	var mu sync.Mutex
+	bound := linear
+	broker, prepared := s.late(&bound, &mu)
+	mount := s.run(broker, prepared)
+	status, _ := s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
+	s.Require().Equal(http.StatusOK, status)
+	mu.Lock()
+	bound = sandbox.Grant{}
+	mu.Unlock()
+	s.Require().NoError(broker.AfterRun(s.ctx))
+
+	mount = s.run(broker, prepared)
+	status, _ = s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
+
+	s.Equal(http.StatusOK, status, "a grant bound once stays bound")
+}
+
+// A store that takes the next run's Put but refuses the Delete of the last run's
+// credential fails the run, so the last credential is not forgotten while its record lives.
+func (s *BrokerSuite) TestABeforeRunThatCannotEndTheLastCredentialFails() {
+	user := "nodel" + uuid.NewString()
+	s.Require().NoError(s.rig.redis.Do(s.ctx, s.rig.redis.B().AclSetuser().Username(user).Rule("on", "nopass", "~*", "+@all", "-del").Build()).Error())
+	s.T().Cleanup(func() {
+		_ = s.rig.redis.Do(context.Background(), s.rig.redis.B().AclDeluser().Username(user).Build()).Error()
+	})
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, Username: user, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	broker, err := egress.NewBroker(egress.BrokerOptions{Store: egress.NewStore(client), URL: publicURL, CACert: s.rig.caCert,
+		Session: "session-nodel/" + s.rig.run, Tokens: s.tokens})
+	s.Require().NoError(err)
+	prepared, err := broker.Prepare(s.ctx, []sandbox.Grant{github})
+	s.Require().NoError(err)
+	first := s.run(broker, prepared)
+	s.T().Cleanup(func() {
+		_ = s.rig.redis.Do(context.Background(), s.rig.redis.B().Del().Key(egressKey(first)).Build()).Error()
+	})
+	s.Require().Error(broker.AfterRun(s.ctx))
+
+	_, err = broker.BeforeRun(s.ctx)
+
+	s.Error(err, "the last run's credential still reaches the grants")
 }
 
 // TestAConfigWithoutLateGrantsIsServedAsBefore is the control: with a Bind and no late grant,
