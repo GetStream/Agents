@@ -205,10 +205,11 @@ func (s *ExtractSuite) TestReadingStopsAtTheDeadline() {
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 }
 
-// A deadline that has passed kills the worker as the read gives it up, so the kill and the
-// close of the worker overlap. Run under -race, as CI does, a read that closes its worker while
-// the kill is still going on is a data race in PDFium's instance.
-func (s *ExtractSuite) TestAReadStoppedAtTheDeadlineKillsItsWorkerBeforeClosingIt() {
+// A context cancelled before the read starts kills the worker while the read opens the
+// document, and the open that fails then closes the worker. Run under -race, as CI does, a
+// close while the kill is still going on is a data race in PDFium's instance. The kill runs in
+// a goroutine of its own, so a read can also finish before it and return no error.
+func (s *ExtractSuite) TestAReadCancelledBeforeItStartsKillsItsWorkerBeforeClosingIt() {
 	data := s.fixture("manual.pdf")
 	for range 200 {
 		ctx, cancel := context.WithCancel(context.Background())
