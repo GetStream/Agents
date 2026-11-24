@@ -345,6 +345,24 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfIts
 	s.EqualValues(1, buckets[0].ActiveUsers)
 }
 
+// The turn a carried-on session answers after is its own customer's, so another customer's of that
+// id in the shard it went on in is not taken for it.
+func (s *ShardedStoreSuite) TestASessionCarriedOnBesideAnotherCustomersTurnIsOneSession() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	theirs := &AgentSession{ID: "theirs", CustomerID: "globex", AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: s.base}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, theirs))
+	s.Require().NoError(s.other.Responses.Insert(s.ctx, &AgentResponse{ID: "chat-1", SessionID: "theirs", CustomerID: "globex", CreatedAt: s.base}))
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions)
+}
+
 func (s *ShardedStoreSuite) TestASessionCarriedOnIsCountedOnTheDayItBeganWhateverTheWindow() {
 	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
 	session := s.opened("chat", "app", dayOne, nil)

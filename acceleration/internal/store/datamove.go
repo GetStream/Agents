@@ -31,8 +31,8 @@ var ErrChangesExpired = errors.New("store: the changes since that cursor are no 
 var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
 // ErrInvalidImport is an export that cannot be written as it is: a table no export carries, a
-// row that does not read, or a row the database refuses for what it holds. Its message names
-// the table and nothing of the database. A database that failed is never one.
+// row that does not read, or a row refused for what it holds or names. Its message names
+// the table, and the row's own key at most, and nothing of the database. A database that failed is never one.
 var ErrInvalidImport = errors.New("store: the export cannot be imported")
 
 // invalidImport marks err as ErrInvalidImport without changing its message.
@@ -57,7 +57,7 @@ func refusedRow(table string, err error) error {
 	case code == uniqueViolation:
 		reason = "a row holds a value, such as a name, that another row here already holds"
 	case code == foreignKeyViolation:
-		reason = "a row names a row that neither the export nor this app holds"
+		reason = namesNoRow
 	case strings.HasPrefix(code, "23"):
 		reason = "a row breaks a rule of its table"
 	case strings.HasPrefix(code, "22"):
@@ -86,6 +86,9 @@ type dataTable struct {
 	// parent and parentColumn name the row this one belongs to.
 	parent       string
 	parentColumn string
+	// references are the other rows this one names through a foreign key on an id alone, which
+	// any customer's row satisfies. A foreign key that holds the customer too needs none.
+	references []dataReference
 	// filter is an extra predicate on an export, for a table that holds more than one
 	// kind of row.
 	filter string
@@ -110,6 +113,12 @@ type dataTable struct {
 	// the customer sends is the customer's word, not this deployment's.
 	vouched []string
 }
+
+// dataReference is a column of a moved table that names a row of another one by its id.
+type dataReference struct{ column, table string }
+
+// ofSession is the reference of a row that names its session.
+var ofSession = []dataReference{{"session_id", "agent_sessions"}}
 
 // rollup is a table of counts per key that every shard keeps its own rows of, so an export of
 // several shards folds the rows of one key into one.
@@ -173,9 +182,10 @@ var dataTables = []dataTable{
 	{name: "knowledge_documents", customer: "customer_id", vouched: []string{"state", "error", "object_key"}},
 	{name: "campaigns", customer: "customer_id"},
 	{name: "campaign_contacts", parent: "campaigns", parentColumn: "campaign_id"},
-	{name: "campaign_attempts", parent: "campaigns", parentColumn: "campaign_id"},
+	{name: "campaign_attempts", parent: "campaigns", parentColumn: "campaign_id",
+		references: []dataReference{{"contact_id", "campaign_contacts"}}},
 	{name: "simulations", customer: "customer_id"},
-	{name: "simulation_runs", customer: "customer_id"},
+	{name: "simulation_runs", customer: "customer_id", references: []dataReference{{"simulation_id", "simulations"}}},
 	{name: "simulation_cases", parent: "simulation_runs", parentColumn: "run_id"},
 	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
@@ -188,14 +198,14 @@ var dataTables = []dataTable{
 	{name: "agent_sessions", customer: "customer_id", shard: true},
 	{name: "agent_session_tools", customer: "customer_id", parent: "agent_sessions", parentColumn: "session_id", shard: true},
 	// After the sessions their session_id points at.
-	{name: "calls", customer: "customer_id", shard: true},
-	{name: "agent_responses", customer: "customer_id", shard: true},
+	{name: "calls", customer: "customer_id", shard: true, references: ofSession},
+	{name: "agent_responses", customer: "customer_id", shard: true, references: ofSession},
 	{name: "agent_response_items", parent: "agent_responses", parentColumn: "response_id", shard: true},
 	{name: "conversation_documents", customer: "customer_id", shard: true},
 	// The channel's hidden ranges are in the Stream app and stay there, so the copies of what
 	// they hid and the switches that hid it go with their session.
-	{name: "agent_branch_switches", customer: "customer_id", shard: true},
-	{name: "agent_branch_messages", customer: "customer_id", shard: true},
+	{name: "agent_branch_switches", customer: "customer_id", shard: true, references: ofSession},
+	{name: "agent_branch_messages", customer: "customer_id", shard: true, references: ofSession},
 	// Nothing points at a log's id, so a copied log is given one of this deployment's.
 	{name: "agent_logs", customer: "customer_id", copied: "source_id"},
 	// No foreign key points at a request's id. An agent log row names it as text, and
@@ -770,7 +780,8 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // credentials for one app write into another. For a row that belongs to a customer
 // through a parent there is no column to overwrite, so the parent is checked instead and
 // a row whose parent is somebody else's is silently not written. A row whose key a row of
-// another customer holds here is refused (ErrAnotherCustomersRow).
+// another customer holds here is refused (ErrAnotherCustomersRow), and so is one whose
+// references name a row this customer does not hold here.
 //
 // It upserts, so importing the same export twice is the same as importing it once, which
 // is what lets a move be resumed after it was interrupted.
@@ -911,7 +922,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		subject = fmt.Sprintf("?::jsonb || %s", spec.identity())
 	}
 	if spec.parent != "" {
-		where = " WHERE " + spec.owned("r")
+		where = " WHERE " + spec.belonging().held("r")
 	}
 	if spec.copied != "" {
 		where = " WHERE NOT " + spec.copiedBefore(shape, columns)
@@ -932,6 +943,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	}
 	if spec.customer != "" && spec.parent != "" {
 		// The customer forced onto the row, then checked against its parent.
+		args = append(args, customerID)
+	}
+	for _, reference := range spec.references {
+		joined := " AND "
+		if where == "" {
+			joined = " WHERE "
+		}
+		where += fmt.Sprintf("%s(r.%s IS NULL OR %s)", joined, reference.column, reference.held("r"))
 		args = append(args, customerID)
 	}
 	if table == "requests" {
@@ -1051,7 +1070,48 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if taken {
 		return fmt.Errorf("store: import %s: %w", table, ErrAnotherCustomersRow)
 	}
-	return nil
+	if len(spec.references) == 0 {
+		return nil
+	}
+	// A row of a parent that is not this customer's is left out, whatever else it names. Every
+	// other row of these tables is written, so this one names a row the customer does not hold.
+	if spec.parent != "" {
+		var held bool
+		if err := db.QueryRowContext(ctx, fmt.Sprintf(
+			"SELECT EXISTS (SELECT 1 FROM jsonb_populate_record(NULL::%s, ?::jsonb) AS r WHERE %s)",
+			spec.name, spec.owned("r")), string(row), customerID).Scan(&held); err != nil {
+			return fmt.Errorf("store: import %s: %w", table, err)
+		}
+		if !held {
+			return nil
+		}
+	}
+	key, err := rowKey(table, shape.keys, row)
+	if err != nil {
+		return err
+	}
+	return stack.Wrap(invalidImport(fmt.Errorf("store: import %s: %s", key, namesNoRow)))
+}
+
+// namesNoRow says a row names one its customer does not hold here, whether or not another does.
+const namesNoRow = "a row names a row that neither the export nor this app holds"
+
+// rowKey names a row as it was sent, by its table and the values of its primary key:
+// agent_responses:{"id":"response-1"}.
+func rowKey(table string, keys []string, row json.RawMessage) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return "", invalidImport(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	key := make(map[string]json.RawMessage, len(keys))
+	for _, column := range keys {
+		key[column] = fields[column]
+	}
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		return "", stack.Wrap(err)
+	}
+	return table + ":" + string(encoded), nil
 }
 
 // importCached runs an import's query of a cachedByID table, which returns what each row it wrote
@@ -1857,10 +1917,31 @@ func (t dataTable) identity() string {
 // belongs to the customer the query's next placeholder carries.
 func (t dataTable) owned(relation string) string {
 	if t.parent != "" {
-		return fmt.Sprintf("EXISTS (SELECT 1 FROM %s AS p WHERE p.id = %s.%s AND p.customer_id = ?)",
-			t.parent, relation, t.parentColumn)
+		return t.belonging().owned(relation, "")
 	}
 	return fmt.Sprintf("%s.%s = ?", relation, t.customer)
+}
+
+// belonging is the reference of a row of a table with a parent to the row it belongs to.
+func (t dataTable) belonging() dataReference { return dataReference{t.parentColumn, t.parent} }
+
+// owned is the condition that the row this reference names, in the given relation, belongs to
+// the customer the query's next placeholder carries. locking is a locking clause for that row.
+func (r dataReference) owned(relation, locking string) string {
+	named, _ := dataTableByName(r.table)
+	owner := fmt.Sprintf("%s.%s = ?", r.table, named.customer)
+	if named.customer == "" {
+		owner = named.belonging().owned(r.table, "")
+	}
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM %[1]s WHERE %[1]s.id = %[2]s.%[3]s AND %[4]s%[5]s)",
+		r.table, relation, r.column, owner, locking)
+}
+
+// held is owned with the named row locked until the statement's transaction ends, for a row
+// about to be written: the foreign key then looks for the id again, whoever's row it is by
+// then. KEY SHARE is the lock the foreign key takes itself.
+func (r dataReference) held(relation string) string {
+	return r.owned(relation, " FOR KEY SHARE OF "+r.table)
 }
 
 // conflictTarget is the index a row of this table is known by across deployments: what an

@@ -433,7 +433,7 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit, originOnly)
 func answersAfterAnotherShard(id string) string {
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM agent_responses AS carried
     WHERE carried.session_id = %[1]s AND carried.parent_response_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id))`, id)
+        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id AND parent.customer_id = carried.customer_id))`, id)
 }
 
 // carriedIn is the SQL condition, on a session id column, that this shard's row only carries

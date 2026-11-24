@@ -369,6 +369,25 @@ func (s *DataMoveSuite) TestChangesAreAppliedToAnAppThatHoldsData() {
 	s.Equal("edited at the source", s.instructionsOf(agent.Id))
 }
 
+// A row that names a row of another app's is the export's to correct, and the answer names it.
+func (s *DataMoveSuite) TestAnImportedRowThatNamesAnotherAppsRowIsRefusedNamingIt() {
+	theirs, turn := s.utils.uuid(), s.utils.uuid()
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: theirs, CustomerID: s.utils.uuid(),
+		AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: time.Now()}))
+	row := json.RawMessage(`{"id": "` + turn + `", "session_id": "` + theirs + `", "said": "hello", "status": "completed",
+		"error": "", "created_at": "2026-01-01T00:00:00Z"}`)
+
+	for _, line := range []dataLine{{Table: "agent_responses", Row: row},
+		{Change: &store.DataChange{Seq: 1, Table: "agent_responses", Op: store.ChangeInsert, At: time.Now(), Payload: row}}} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
+
+		s.Equal(http.StatusBadRequest, status)
+		s.Contains(failure, `agent_responses:{"id":"`+turn+`"}`)
+		s.Contains(failure, "neither the export nor this app holds")
+		s.NotContains(failure, theirs)
+	}
+}
+
 // A change to a policy of another scope is skipped, so the answer counts no row for it.
 func (s *DataMoveSuite) TestAChangeToAnotherScopesPolicyIsNotCountedAsWritten() {
 	key := `{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) + `}`

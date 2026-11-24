@@ -95,6 +95,22 @@ func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 	s.Equal([]string{"carried", "with-first"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "first"}))
 }
 
+func (s *StoreSuite) TestADocumentIsReadBesideOnlyItsCustomersTurns() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	for _, id := range []string{"rewound", "kept"} {
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "their-" + id, SessionID: "theirs", CustomerID: "somebody-else",
+			Said: "hello", CreatedAt: s.base.Add(-time.Hour)}))
+		s.attached(id, "one", "", "jlahey", "their-"+id, s.base)
+	}
+	_, err := s.store.shard.ExecContext(s.ctx, "UPDATE agent_responses SET rewound_at = now() WHERE id = 'their-rewound'")
+	s.Require().NoError(err)
+
+	s.Equal([]string{"kept", "rewound"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
+	s.Empty(s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "first"}))
+}
+
 func (s *StoreSuite) TestAForkStoppingAtATurnThatIsNotThereIsRefused() {
 	_, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "missing"})
 

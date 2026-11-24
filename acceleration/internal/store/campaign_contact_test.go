@@ -470,6 +470,24 @@ func (s *StoreSuite) TestOnlyTheLatestAnsweredDialOfAContactIsClassified() {
 	s.Empty(later)
 }
 
+func (s *StoreSuite) TestOnlyADialOfTheContactsCampaignIsClassified() {
+	campaign := s.runningCampaign(5, "+15550001", "+15550002")
+	due := s.claimDue("a", s.base, 10)
+	s.Require().Len(due, 2)
+	answered, stray := due[0].Contact, due[1].Contact
+	dial := s.answered("a", campaign, answered, s.base, s.base)
+	for _, contact := range []Contact{answered, stray} {
+		s.strayDial(contact, s.base.Add(time.Minute))
+		s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1}))
+	}
+
+	claimed, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base.Add(time.Hour), time.Minute, 10)
+
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	s.Equal(dial.ID, claimed[0].Attempt.ID)
+}
+
 func (s *StoreSuite) TestADialWhoseContactAnotherRunnerHoldsIsNotClassified() {
 	campaign := s.runningCampaign(5, "+15550001")
 	contact := s.claimDue("a", s.base, 10)[0].Contact

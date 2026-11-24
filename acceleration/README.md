@@ -2903,7 +2903,10 @@ The customer is always the authenticated caller, never anything in the body or t
 so an export is the caller's own data and an import lands under the caller's own app
 however the file was edited on the way. An import upserts and refuses a row whose primary
 key belongs to another tenant, so replaying the same change twice lands where applying it
-once would and a guessed id overwrites nothing. A request row is the exception: each
+once would and a guessed id overwrites nothing. A session's call, turn or branch, a simulation's run and a
+campaign's attempt name only a session, simulation or contact the app holds here: a row that names another
+is refused by its table and primary key (`agent_responses:{"id":"turn-1"}`), and a line of an
+import answers it 400. A request row is the exception: each
 deployment numbers its own, so it is imported with an id the destination gives it, under a
 `usage_id` made from the importing app and the `usage_id` the row had where it was first
 recorded (its source id, for a row from before usage ids), and written once. It keeps that
