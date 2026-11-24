@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,12 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -42,12 +38,6 @@ const replicateUsage = `usage: router replicate --from <url> --api-key <key> --a
                 --full it refuses an app this deployment already holds that no run here saved
                 a cursor for, and one whose last run read the source longer ago than
                 ROUTER_DATA_MOVE_RETENTION
-  --skip        a row to leave out, as table:key, such as 'agent_configs:{"id":"config-1"}'.
-                A run stops at a row whose key another app here holds and names it this way:
-                once you know the row is not this app's to bring, pass it on that run and every
-                later one. The key is the row's whole primary key. Repeat the flag for more
-                than one row. A row that belongs to a row left out, such as a contact of a
-                campaign, is left out too. Each row left out is logged
   --resume      the cut-over, once the deployment copied from no longer delivers: resume
                 the scheduled tasks the copy paused because they were active there, each
                 at its first occurrence after now, and name the campaigns still running or
@@ -123,18 +113,12 @@ func runReplicate(args []string, settings config.Config, logger *slog.Logger) er
 // copyAndFollow copies the app here, or carries on from the last run's cursor, and follows the
 // source's changes from there.
 func (o replicateOptions) copyAndFollow(ctx context.Context, settings config.Config, pgStore *store.Store, reservation *store.IDReservation, logger *slog.Logger) error {
-	if err := o.skip.check(ctx, pgStore); err != nil {
-		return err
-	}
-	pgStore.OnRowLeftOut(func(row string) {
-		logger.Warn("left out a row whose parent row is not this app's here", "row", row)
-	})
-	customerID, cursor, err := copyEverything(ctx, o.source, pgStore, reservation, o.as, o.full, o.skip,
+	customerID, cursor, err := copyEverything(ctx, o.source, pgStore, reservation, o.as, o.full,
 		settings.DataMove.Retention, logger)
 	if err != nil {
 		return err
 	}
-	return follow(ctx, o.source, pgStore, reservation, customerID, cursor, o.poll, o.once, o.skip, logger)
+	return follow(ctx, o.source, pgStore, reservation, customerID, cursor, o.poll, o.once, logger)
 }
 
 // replicateOptions is what the command line asked replicate for.
@@ -147,97 +131,6 @@ type replicateOptions struct {
 	full bool
 	// resume is the cut-over, which reads no source.
 	resume bool
-	// skip is the rows the run leaves out.
-	skip skippedRows
-}
-
-// skippedRow is a row --skip names: the table, and the values of its key the row holds.
-type skippedRow struct {
-	table string
-	key   map[string]any
-}
-
-// skippedRows are the rows a run leaves out of the copy and of every change it applies.
-type skippedRows []skippedRow
-
-// parseSkip reads a --skip value, table:key as ErrAnotherCustomersRow names a row.
-func parseSkip(value string) (skippedRow, error) {
-	table, key, _ := strings.Cut(value, ":")
-	fields, err := decodeFields(json.RawMessage(key))
-	if err != nil {
-		return skippedRow{}, fmt.Errorf(`--skip is table:key, as a refused row is named, such as 'agent_configs:{"id":"config-1"}', not %q`, value)
-	}
-	return skippedRow{table: table, key: fields}, nil
-}
-
-// check refuses a row of a table no export carries, or one not named by exactly the columns of
-// its table's primary key, which would name other rows too.
-func (rows skippedRows) check(ctx context.Context, pgStore *store.Store) error {
-	for _, skipped := range rows {
-		columns, err := pgStore.KeyColumns(ctx, skipped.table)
-		if err != nil {
-			return fmt.Errorf("--skip: %w", err)
-		}
-		named := slices.Sorted(maps.Keys(skipped.key))
-		if columns = slices.Sorted(slices.Values(columns)); !slices.Equal(named, columns) {
-			return fmt.Errorf("--skip: a row of %s is named by its whole key (%s), not by %s",
-				skipped.table, strings.Join(columns, ", "), strings.Join(named, ", "))
-		}
-	}
-	return nil
-}
-
-// names is the --skip value that names a row of table, or "" when none does: one whose fields
-// hold every value of the key.
-func (rows skippedRows) names(table string, row json.RawMessage) string {
-	var fields map[string]any
-	for _, skipped := range rows {
-		if skipped.table != table {
-			continue
-		}
-		if fields == nil {
-			var err error
-			if fields, err = decodeFields(row); err != nil {
-				// The import refuses it with the reason.
-				return ""
-			}
-		}
-		named := true
-		for column, value := range skipped.key {
-			if !reflect.DeepEqual(fields[column], value) {
-				named = false
-				break
-			}
-		}
-		if named {
-			key, _ := json.Marshal(skipped.key)
-			return table + ":" + string(key)
-		}
-	}
-	return ""
-}
-
-// decodeFields reads a JSON object, its numbers as written, so an id past 2^53 matches only itself.
-func decodeFields(object json.RawMessage) (map[string]any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(object))
-	decoder.UseNumber()
-	var fields map[string]any
-	if err := decoder.Decode(&fields); err != nil {
-		return nil, err
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return nil, errors.New("more than one JSON value")
-	}
-	return fields, nil
-}
-
-// withSkipHint adds to an import's refusal of a row another app here holds what the operator does next.
-func withSkipHint(err error) error {
-	if !errors.Is(err, store.ErrAnotherCustomersRow) {
-		return err
-	}
-	return fmt.Errorf("%w. Another app here holds that row's key, so it cannot land under this one. Once you know the row is "+
-		"not this app's to bring, run this again with --skip and the table:key this error names, on this run and every later one", err)
 }
 
 // parseReplicate reads replicate's flags into the source it copies from and how.
@@ -255,12 +148,6 @@ func parseReplicate(args []string) (replicateOptions, error) {
 	once := flags.Bool("once", false, "stop once there is nothing left to catch up on")
 	full := flags.Bool("full", false, "copy everything again over what was done here since")
 	resume := flags.Bool("resume", false, "resume what the copy paused")
-	var skip skippedRows
-	flags.Func("skip", "a row to leave out, as table:key", func(value string) error {
-		row, err := parseSkip(value)
-		skip = append(skip, row)
-		return err
-	})
 	if err := flags.Parse(args); err != nil {
 		return replicateOptions{}, err
 	}
@@ -290,7 +177,6 @@ func parseReplicate(args []string) (replicateOptions, error) {
 		poll: *poll,
 		once: *once,
 		full: *full,
-		skip: skip,
 	}, nil
 }
 
@@ -298,7 +184,7 @@ func parseReplicate(args []string) (replicateOptions, error) {
 // and the cursor its changes carry on from. For an app a run here copied before, it writes
 // nothing and returns the cursor that run saved (carryOn).
 func copyEverything(ctx context.Context, source *deployment, pgStore *store.Store, reservation *store.IDReservation, as string,
-	full bool, skip skippedRows, retention time.Duration, logger *slog.Logger) (string, int64, error) {
+	full bool, retention time.Duration, logger *slog.Logger) (string, int64, error) {
 	asked := time.Now()
 	if as != "" {
 		saved, err := carryOn(ctx, pgStore, as, source.url, full, retention, asked)
@@ -350,15 +236,11 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 					return customerID, *saved, nil
 				}
 			}
-			if named := skip.names(line.Table, line.Row); named != "" {
-				logger.Warn("left out a row --skip names", "row", named)
-				continue
-			}
 			if err := reservation.Cover(ctx, line.Table, line.Row); err != nil {
 				return "", 0, err
 			}
 			if err := pgStore.ImportRow(ctx, customerID, line.Table, line.Row); err != nil {
-				return "", 0, withSkipHint(err)
+				return "", 0, err
 			}
 			rows++
 		case line.Cursor != nil:
@@ -432,8 +314,7 @@ func carryOn(ctx context.Context, pgStore *store.Store, customerID, source strin
 
 // follow replays what happens at the source from the cursor onwards, until there is
 // nothing left and the caller asked to stop, or until the process is interrupted.
-func follow(ctx context.Context, source *deployment, pgStore *store.Store, reservation *store.IDReservation, customerID string, cursor int64, poll time.Duration, once bool,
-	skip skippedRows, logger *slog.Logger) error {
+func follow(ctx context.Context, source *deployment, pgStore *store.Store, reservation *store.IDReservation, customerID string, cursor int64, poll time.Duration, once bool, logger *slog.Logger) error {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
@@ -452,14 +333,6 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 			return fmt.Errorf("reading changes: %w", err)
 		}
 
-		// A delete carries no payload, so it is never left out: it finds no row of the app's to remove.
-		page.Changes = slices.DeleteFunc(page.Changes, func(change store.DataChange) bool {
-			named := skip.names(change.Table, change.Payload)
-			if named != "" {
-				logger.Warn("left out a change to a row --skip names", "row", named, "seq", change.Seq)
-			}
-			return named != ""
-		})
 		if len(page.Changes) > 0 {
 			for _, change := range page.Changes {
 				if change.Op == store.ChangeDelete {
@@ -470,7 +343,7 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 				}
 			}
 			if err := pgStore.ApplyChanges(ctx, customerID, page.Changes); err != nil {
-				return withSkipHint(err)
+				return err
 			}
 			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", page.Cursor)
 		}

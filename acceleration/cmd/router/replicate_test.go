@@ -210,35 +210,3 @@ func (s *ReplicateSourceSuite) TestTheCutOverRefusesToCatchUpFromTheSourceFirst(
 
 	s.Require().ErrorContains(err, "--resume --as <app id>")
 }
-
-func (s *ReplicateSourceSuite) TestSkipIsATableAndAKeyObject() {
-	for _, value := range []string{"agent_configs", "agent_configs:", `agent_configs:{"id":"config-1"} {"id":"config-2"}`,
-		`agent_configs:["config-1"]`, `agent_configs:{"id":"config-1"`} {
-		_, err := parseReplicate([]string{"--from", "https://source.example", "--api-key", sourceKey, "--api-secret", sourceSecret,
-			"--skip", value})
-		s.ErrorContains(err, "--skip is table:key", value)
-	}
-}
-
-func (s *ReplicateSourceSuite) TestSkipNamesEveryRowOfATableItIsGiven() {
-	options, err := parseReplicate([]string{"--from", "https://source.example", "--api-key", sourceKey, "--api-secret", sourceSecret,
-		"--skip", `agent_configs:{"id":"a"}`, "--skip", `agent_configs:{"id":"b"}`})
-	s.Require().NoError(err)
-
-	s.Equal(`agent_configs:{"id":"a"}`, options.skip.names("agent_configs", []byte(`{"id":"a"}`)))
-	s.Equal(`agent_configs:{"id":"b"}`, options.skip.names("agent_configs", []byte(`{"id":"b"}`)))
-	s.Empty(options.skip.names("agent_configs", []byte(`{"id":"c"}`)))
-}
-
-func (s *ReplicateSourceSuite) TestSkipNamesARowByEveryValueOfItsKey() {
-	options, err := parseReplicate([]string{"--from", "https://source.example", "--api-key", sourceKey, "--api-secret", sourceSecret,
-		"--skip", `agent_logs:{"id":9007199254740993}`, "--skip", `policies:{"scope":"app","scope_id":"acme"}`})
-	s.Require().NoError(err)
-
-	s.Equal(`agent_logs:{"id":9007199254740993}`, options.skip.names("agent_logs", []byte(`{"id": 9007199254740993, "text": "hi"}`)))
-	s.Empty(options.skip.names("agent_logs", []byte(`{"id": 9007199254740992}`)), "a number is matched as written")
-	s.Empty(options.skip.names("agent_logs", []byte(`{"id": "9007199254740993"}`)), "a string is not the number")
-	s.Equal(`policies:{"scope":"app","scope_id":"acme"}`, options.skip.names("policies", []byte(`{"scope": "app", "scope_id": "acme"}`)))
-	s.Empty(options.skip.names("policies", []byte(`{"scope": "organization", "scope_id": "acme"}`)), "every value of the key")
-	s.Empty(options.skip.names("policies", []byte(`{"scope_id": "acme"}`)), "a row without one of the key's columns")
-}
