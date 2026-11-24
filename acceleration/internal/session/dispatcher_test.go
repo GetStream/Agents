@@ -233,7 +233,7 @@ func (s *DispatcherSuite) TestACallTheTimeoutCutsOffIsAnUnknownOutcome() {
 // endpoint to its host, and still says what failed underneath.
 func (s *DispatcherSuite) TestACallThatCannotReachItsServerFailsWithoutTheEndpointsPath() {
 	secret := uuid.NewString()
-	hosted := s.hostedEndpoint("/hosted/"+secret+"/mcp", "")
+	hosted := s.hostedEndpoint("/hosted/"+secret+"/mcp", "", "")
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
 	s.Require().NoError(err)
 	hosted.Close()
@@ -250,7 +250,7 @@ func (s *DispatcherSuite) TestACallThatCannotReachItsServerFailsWithoutTheEndpoi
 // the path it was sent to, with no scheme or host before it, and name another endpoint whole.
 func (s *DispatcherSuite) TestAProvidersErrorThatEchoesItsPathFailsWithoutIt() {
 	path, moved := "/hosted/"+uuid.NewString()+"/mcp", uuid.NewString()
-	s.hostedEndpoint(path, "")
+	s.hostedEndpoint(path, "", "")
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
 	s.Require().NoError(err)
 	s.provider.answerRPC("primary", http.StatusBadRequest,
@@ -288,7 +288,8 @@ func (s *DispatcherSuite) TestAToolsOwnLongErrorReachesTheModelWholeWithoutTheEn
 // path is taken out as well as the one the answer came from, which is a prefix of it.
 func (s *DispatcherSuite) TestAProvidersErrorAfterARedirectFailsWithoutTheFirstPath() {
 	secret := uuid.NewString()
-	s.hostedEndpoint("/hosted/"+secret+"/mcp", "/hosted")
+	path := "/hosted/" + secret + "/mcp"
+	s.hostedEndpoint(path, "/hosted", path)
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
 	s.Require().NoError(err)
 	s.provider.answer("primary", http.StatusTemporaryRedirect, http.Header{"Location": {"/hosted"}}, "")
@@ -299,10 +300,27 @@ func (s *DispatcherSuite) TestAProvidersErrorAfterARedirectFailsWithoutTheFirstP
 	s.NotContains(err.Error(), secret)
 }
 
+// TestAProvidersErrorAfterARedirectFailsWithoutThePathItMovedTo: the endpoint "/mcp" redirects
+// the call within its origin to a path that holds it, and the answer there quotes that path.
+// The path is taken out whole, not cut apart where it holds the first one.
+func (s *DispatcherSuite) TestAProvidersErrorAfterARedirectFailsWithoutThePathItMovedTo() {
+	secret := uuid.NewString()
+	moved := "/t/" + secret + "/mcp"
+	s.hostedEndpoint("/mcp", moved, moved)
+	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", s.connection("", "primary"), "whoami")), "", nil))
+	s.Require().NoError(err)
+	s.provider.answer("primary", http.StatusTemporaryRedirect, http.Header{"Location": {moved}}, "")
+
+	_, err = s.call(d, "crm__whoami", "{}")
+
+	s.Require().ErrorContains(err, "no server at")
+	s.NotContains(err.Error(), secret)
+}
+
 // hostedEndpoint has the test's connector reach the provider's primary account through a
 // server of its own at path, which the test may close, and returns that server. At moved,
-// unless it is "", the server answers a 400 whose JSON-RPC error quotes path.
-func (s *DispatcherSuite) hostedEndpoint(path, moved string) *httptest.Server {
+// unless it is "", the server answers a 400 whose JSON-RPC error quotes quoted.
+func (s *DispatcherSuite) hostedEndpoint(path, moved, quoted string) *httptest.Server {
 	target, err := url.Parse(s.provider.URL)
 	s.Require().NoError(err)
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -315,7 +333,7 @@ func (s *DispatcherSuite) hostedEndpoint(path, moved string) *httptest.Server {
 			_ = json.NewDecoder(r.Body).Decode(&message)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(message.ID)+`,"error":{"code":-32600,"message":"no server at `+path+`"}}`)
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(message.ID)+`,"error":{"code":-32600,"message":"no server at `+quoted+`"}}`)
 			return
 		}
 		if r.URL.Path != path {
