@@ -231,86 +231,21 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { <-s.imports }()
 
-	// Asked at the first row rather than up front, so a batch of changes costs no lookup; once
-	// that row is written the app holds it, so the rows after it are not asked about.
-	checked := full
-
-	var cursor *int64
-	rows := int64(0)
-	tables := map[string]int64{}
-
+	imported := dataImport{customerID: customerID, checked: full, tables: map[string]int64{}}
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(nil, maxImportLine)
+	// The deadline is lifted only inside importLine, which answers nothing: net/http reads up to
+	// 256 KiB of what is left of the body before an answer is sent, and that read ends by it.
 	controller := http.NewResponseController(w)
-	// An import that ends at a line, refused or failed, leaves the rest of the body to
-	// net/http, which reads up to 256 KiB of it before answering: that read waits for the
-	// client as long as a line would, not for ever.
-	atLine := false
-	defer func() {
-		if atLine {
-			_ = controller.SetReadDeadline(time.Now().Add(s.importLineWait))
-		}
-	}()
-	for {
-		atLine = false
-		if err := controller.SetReadDeadline(time.Now().Add(s.importLineWait)); err != nil {
-			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
+	if err := controller.SetReadDeadline(time.Now().Add(s.importLineWait)); err != nil {
+		writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
+		return
+	}
+	// A read that failed leaves what came before it as a last token, which is no line.
+	for scanner.Scan() && scanner.Err() == nil {
+		if err := s.importLine(r.Context(), controller, &imported, scanner.Bytes()); err != nil {
+			writeImportFailure(w, r, err)
 			return
-		}
-		// A read that failed leaves what came before it as a last token, which is no line. The
-		// deadline stays then: passed, it ends net/http's read of the rest of the body at once.
-		if !scanner.Scan() || scanner.Err() != nil {
-			break
-		}
-		// The deadline is for the client's next line, not for writing this one: left on the
-		// connection, it would end net/http's read after the body, which cancels the request.
-		if err := controller.SetReadDeadline(time.Time{}); err != nil {
-			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
-			return
-		}
-		atLine = true
-		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
-			continue
-		}
-		var line dataLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			writeError(w, invalidRequest("this is not an export: an import is one JSON object per line: "+err.Error()))
-			return
-		}
-
-		switch {
-		case line.Change != nil:
-			if err := s.store.ApplyChanges(r.Context(), customerID, []store.DataChange{*line.Change}); err != nil {
-				writeImportFailure(w, r, err)
-				return
-			}
-			if !line.Change.Skipped() {
-				rows++
-				tables[line.Change.Table]++
-			}
-		case line.Table != "":
-			if !checked {
-				table, err := s.store.HoldingTable(r.Context(), customerID)
-				if err != nil {
-					writeFailure(w, r, err)
-					return
-				}
-				if table != "" {
-					writeError(w, conflict("this app already has data here (a row in "+table+"), and an export's rows "+
-						"would be written over what was done to them here since: import the changes since its cursor, "+
-						"or pass full=true to copy everything again over what was done here"))
-					return
-				}
-				checked = true
-			}
-			if err := s.store.ImportRow(r.Context(), customerID, line.Table, line.Row); err != nil {
-				writeImportFailure(w, r, err)
-				return
-			}
-			rows++
-			tables[line.Table]++
-		case line.Cursor != nil:
-			cursor = line.Cursor
 		}
 	}
 	if errors.Is(scanner.Err(), bufio.ErrTooLong) {
@@ -326,14 +261,83 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("imported a customer", "customer", customerID, "rows", rows)
-	writeJSON(w, map[string]any{"rows": rows, "tables": tables, "cursor": cursor})
+	s.logger.Info("imported a customer", "customer", customerID, "rows", imported.rows)
+	writeJSON(w, map[string]any{"rows": imported.rows, "tables": imported.tables, "cursor": imported.cursor})
 }
 
-// writeImportFailure answers a line the store did not write: an export the caller can correct
+// dataImport is how far one import has got.
+type dataImport struct {
+	customerID string
+	// Asked at the first row rather than up front, so a batch of changes costs no lookup; once
+	// that row is written the app holds it, so the rows after it are not asked about.
+	checked bool
+	cursor  *int64
+	rows    int64
+	tables  map[string]int64
+}
+
+// importLine writes one line of an import. The read deadline is for the client's next line, not
+// for writing this one: left on the connection, it would end net/http's read after the body,
+// which cancels the request. So it is lifted here, and set again however this returns.
+func (s *Server) importLine(ctx context.Context, controller *http.ResponseController, imported *dataImport, text []byte) (err error) {
+	if err := controller.SetReadDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("api: import read deadline: %w", err)
+	}
+	defer func() {
+		if set := controller.SetReadDeadline(time.Now().Add(s.importLineWait)); set != nil && err == nil {
+			err = fmt.Errorf("api: import read deadline: %w", set)
+		}
+	}()
+	if len(bytes.TrimSpace(text)) == 0 {
+		return nil
+	}
+	var line dataLine
+	if err := json.Unmarshal(text, &line); err != nil {
+		return invalidRequest("this is not an export: an import is one JSON object per line: " + err.Error())
+	}
+
+	switch {
+	case line.Change != nil:
+		if err := s.store.ApplyChanges(ctx, imported.customerID, []store.DataChange{*line.Change}); err != nil {
+			return err
+		}
+		if !line.Change.Skipped() {
+			imported.rows++
+			imported.tables[line.Change.Table]++
+		}
+	case line.Table != "":
+		if !imported.checked {
+			table, err := s.store.HoldingTable(ctx, imported.customerID)
+			if err != nil {
+				return err
+			}
+			if table != "" {
+				return conflict("this app already has data here (a row in " + table + "), and an export's rows " +
+					"would be written over what was done to them here since: import the changes since its cursor, " +
+					"or pass full=true to copy everything again over what was done here")
+			}
+			imported.checked = true
+		}
+		if err := s.store.ImportRow(ctx, imported.customerID, line.Table, line.Row); err != nil {
+			return err
+		}
+		imported.rows++
+		imported.tables[line.Table]++
+	case line.Cursor != nil:
+		imported.cursor = line.Cursor
+	}
+	return nil
+}
+
+// writeImportFailure answers a line that was not written: an export the caller can correct
 // with what to change, and anything else, such as a database that failed, whose text names
 // where the database is, as a failure of ours that names nothing.
 func writeImportFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var refusal APIError
+	if errors.As(err, &refusal) {
+		writeError(w, refusal)
+		return
+	}
 	var invalid *store.ValidationError
 	if errors.Is(err, store.ErrInvalidImport) || errors.Is(err, store.ErrNotACustomConnector) || errors.As(err, &invalid) {
 		writeError(w, invalidRequest(err.Error()))

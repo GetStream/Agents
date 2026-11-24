@@ -592,15 +592,37 @@ func (s *DataMoveSuite) TestAnImportWhoseBodyBreaksIsRefusedAsNotAnExport() {
 	}
 }
 
+// net/http reads the rest of a body before the first of the answer is sent, which is inside the
+// handler for an answer over its buffer of 2 KiB and after it for a shorter one.
 func (s *DataMoveSuite) TestAnImportRefusedAtALineLetsGoOfItsConnectionWhenTheBodyStalls() {
 	s.withImportLineWait(500 * time.Millisecond)
+	long := strings.Repeat("1", 3000)
+	for _, refused := range []struct {
+		name   string
+		sent   string
+		length int64
+	}{
+		{"a short answer, declared length", "{\"cursor\":1}\nnot an export\n", 200},
+		{"a short answer, chunked", "{\"cursor\":1}\nnot an export\n", -1},
+		{"a long number, declared length", "{\"cursor\":" + long + "}\n", 100000},
+		{"a long number, chunked", "{\"cursor\":" + long + "}\n", -1},
+		{"a long table name, declared length", "{\"change\":{\"table\":\"" + long + "\",\"op\":\"insert\",\"id\":1,\"row\":{}}}\n", 100000},
+		{"a long table name, chunked", "{\"change\":{\"table\":\"" + long + "\",\"op\":\"insert\",\"id\":1,\"row\":{}}}\n", -1},
+	} {
+		s.Run(refused.name, func() {
+			status, payload, took, closed := s.stalledImport(refused.sent, refused.length)
 
-	status, payload, took, closed := s.stalledImport("{\"cursor\":1}\nnot an export\n", 200)
-
-	s.Equal(http.StatusBadRequest, status, payload)
-	s.Contains(payload, "this is not an export")
-	s.True(closed, "the connection is kept, with the rest of its body unread")
-	s.Less(took, 5*time.Second, "answered only once the client gave up")
+			s.Equal(http.StatusBadRequest, status, payload)
+			s.Contains(payload, "invalid_request")
+			s.True(closed, "the connection is kept, with the rest of its body unread")
+			s.Less(took, 5*time.Second, "answered only once the client gave up")
+			s.Eventually(func() bool {
+				status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+				return status == http.StatusOK
+			}, settleFor, 10*time.Millisecond, "the refused import still holds its places")
+			s.Zero(len(s.router.imports))
+		})
+	}
 }
 
 func (s *DataMoveSuite) TestAnImportWhoseLinesKeepArrivingOutlastsTheLineWait() {
