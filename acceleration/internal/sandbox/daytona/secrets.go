@@ -50,9 +50,10 @@ type SecretsOptions struct {
 	// Prefix names the router's environment in every secret, since routers that share a
 	// Daytona organization must never take or sweep each other's.
 	Prefix string
-	// Session is the session the secrets are for.
-	Session string
-	Tokens  sandbox.Tokens
+	// Customer and Session are the session the secrets are for: two customers may each have a
+	// session of one id.
+	Customer, Session string
+	Tokens            sandbox.Tokens
 	// Bind gives a late grant its connection before each run. A late grant needs it.
 	Bind   sandbox.Bind
 	Logger *slog.Logger
@@ -91,8 +92,8 @@ func NewSecrets(o SecretsOptions) (*Secrets, error) {
 	if o.APIKey == "" {
 		return nil, stack.Wrap(errors.New("daytona: DAYTONA_API_KEY is required"))
 	}
-	if o.Prefix == "" || o.Session == "" || o.Tokens == nil {
-		return nil, stack.Wrap(errors.New("daytona: secrets need a prefix, a session and tokens"))
+	if o.Prefix == "" || o.Customer == "" || o.Session == "" || o.Tokens == nil {
+		return nil, stack.Wrap(errors.New("daytona: secrets need a prefix, a customer, a session and tokens"))
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -236,13 +237,16 @@ func (s *Secrets) release(ctx context.Context) error {
 	return errors.Join(failed...)
 }
 
-// name is va_<prefix>_<session>_<binding>_<random>. The random part keeps two sandboxes of
-// one session id apart: a reopened session, or one taking over from a session of its id that
-// is still closing.
+// name is va_<prefix>_<session>_<customer>_<binding>_<random>. The random part keeps two
+// sandboxes of one session id apart: a reopened session, or one taking over from a session of
+// its id that is still closing.
 func (s *Secrets) name(grant sandbox.Grant) (string, error) {
 	random := make([]byte, 4)
 	if _, err := rand.Read(random); err != nil {
 		return "", stack.Wrap(err)
 	}
-	return unnamed.ReplaceAllString(fmt.Sprintf("va_%s_%s_%s_%s", s.options.Prefix, s.options.Session, grant.Binding, hex.EncodeToString(random)), "_"), nil
+	// The session before its customer, so a sweep of the release before, which reads the session
+	// off the front of the name, still finds it live.
+	return unnamed.ReplaceAllString(fmt.Sprintf("va_%s_%s_%s_%s_%s", s.options.Prefix, s.options.Session, s.options.Customer,
+		grant.Binding, hex.EncodeToString(random)), "_"), nil
 }

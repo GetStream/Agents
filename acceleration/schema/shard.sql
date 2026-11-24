@@ -66,6 +66,7 @@ TABLE agent_responses
     CREATE INDEX agent_responses_session_idx ON public.agent_responses USING btree (session_id, created_at, id)
 
 TABLE agent_session_tools
+    customer_id text
     session_id text NOT NULL
     tools jsonb NOT NULL
     updated_at timestamp with time zone NOT NULL

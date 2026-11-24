@@ -843,7 +843,7 @@ func (s *Server) Handler() http.Handler {
 	// lived socket; blocking the handler's return on event delivery would hold
 	// the connection open past its use. The flush in cmd/router covers shutdown.
 	served := withSentry(mux, withRequestID(withTrace(mux, withMetrics(mux, withTiming(withCORS(s.authMode,
-		s.onOwningNode(s.withCustomer(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
+		s.withCustomer(s.onOwningNode(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
 	if s.directory == nil {
 		return served
 	}

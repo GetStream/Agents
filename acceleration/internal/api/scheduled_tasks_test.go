@@ -4264,7 +4264,7 @@ func (s *ScheduledTasksSuite) TestATurnInterruptedByItsRouterStoppingRunsAgainOn
 	_, err := s.cutOff(stopping, task, run, func() { s.Require().NoError(sessions.Shutdown()) })
 	s.Require().Error(err)
 	// A stopped router's claim on the session runs out; the test does not wait for it.
-	stopping.directory.Release(context.Background(), opened.Id)
+	stopping.directory.Release(context.Background(), s.customerID(), opened.Id)
 
 	deliveredTo, err := s.deliverRun(task, run)
 

@@ -92,7 +92,7 @@ func (s *RecordedCreateSuite) TestTheStoredToolsKeepSearch() {
 	s.Require().NoError(created.Close())
 	s.Require().NoError(m.records.Flush(s.ctx))
 
-	stored, err := s.store.SessionTools.Get(s.ctx, created.ID())
+	stored, err := s.store.SessionTools.Get(s.ctx, s.customer, created.ID())
 	s.Require().NoError(err)
 	names := make([]string, 0, len(stored))
 	for _, tool := range stored {
@@ -179,9 +179,9 @@ func (s *RecordedCreateSuite) TestTheSpecReadsRaceNoChose() {
 	m := s.manager(newQuietEdge(), &stubTTS{emitter: tts.NewEmitter(64)}, nil)
 	joining := s.joining(m)
 	joining.naming = &naming{titles: s.titler(m, "Refund a late order")}
-	m.sessions[joining.id] = joining
+	m.sessions[joining.Key()] = joining
 	// Shutdown closes what is registered, and this session has no agent to close.
-	s.T().Cleanup(func() { delete(m.sessions, joining.id) })
+	s.T().Cleanup(func() { delete(m.sessions, joining.Key()) })
 	owner := OwnerOf(joining.spec)
 	reads := map[string]func(){
 		"the session row":   func() { sessionRow(joining) },

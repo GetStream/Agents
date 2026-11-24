@@ -900,7 +900,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 	if s.directory == nil || s.forwarder == nil {
 		return none, false, nil
 	}
-	address, err := s.directory.Node(ctx, delivery.SessionID)
+	address, err := s.directory.Node(ctx, delivery.CustomerID, delivery.SessionID)
 	if err != nil || address == "" || address == s.directory.Address() {
 		return none, false, nil
 	}
@@ -939,7 +939,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 		if err := waitFor(ctx, s.scheduledPoll); err != nil {
 			return none, false, err
 		}
-		current, err := s.directory.Node(ctx, delivery.SessionID)
+		current, err := s.directory.Node(ctx, delivery.CustomerID, delivery.SessionID)
 		if err != nil || current == "" || current == s.directory.Address() {
 			return none, false, nil
 		}

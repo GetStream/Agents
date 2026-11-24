@@ -792,6 +792,7 @@ TABLE episodes
     CONSTRAINT episodes_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'ended'::text, 'summarized'::text, 'summary_failed'::text])))
     CREATE UNIQUE INDEX episodes_call_session ON public.episodes USING btree (session_id)
     CREATE INDEX episodes_contact ON public.episodes USING btree (contact_id, started_at DESC)
+    CREATE UNIQUE INDEX episodes_customer_call_session ON public.episodes USING btree (customer_id, session_id)
     CREATE INDEX episodes_lease ON public.episodes USING btree (lease_until) WHERE (lease_until IS NOT NULL)
     CREATE INDEX episodes_open_call ON public.episodes USING btree (call_id) WHERE ((status = 'in_progress'::text) AND (session_id IS NOT NULL))
     CREATE UNIQUE INDEX episodes_open_thread ON public.episodes USING btree (customer_id, thread_channel) WHERE ((status = 'in_progress'::text) AND (session_id IS NULL))
