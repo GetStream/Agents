@@ -59,6 +59,58 @@ func (s *PolicySuite) TestAnAppNamingOrganizationsInTurnHasOneMembershipWrittenA
 	s.Require().NoError(holder.Commit())
 	s.Eventually(func() bool { return s.organizationOf(app) == "org-last" }, 5*time.Second, 10*time.Millisecond,
 		"the organization named last is the one recorded")
+	closed := make(chan struct{})
+	go func() {
+		enforcer.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(joinTimeout / 2):
+		s.FailNow("the app's writes go on once the last organization named landed")
+	}
+}
+
+func (s *PolicySuite) TestAnAppJoiningAnotherOrganizationLaterIsRecordedUnderIt() {
+	enforcer := s.newEnforcer(s.store, nil)
+	app := "app-" + uuid.NewString()
+	enforcer.Join(s.ctx, app, "org-first", openTier)
+	s.Require().Eventually(func() bool { return s.organizationOf(app) == "org-first" }, 5*time.Second, 10*time.Millisecond,
+		"the first organization is recorded")
+
+	enforcer.Join(s.ctx, app, "org-second", openTier)
+
+	s.Eventually(func() bool { return s.organizationOf(app) == "org-second" }, 5*time.Second, 10*time.Millisecond,
+		"an organization named after the first write ended is written too")
+}
+
+func (s *PolicySuite) TestAnOrganizationNamedBehindAWriteIsNotWrittenOnceCloseBegan() {
+	enforcer, err := New(s.store, quick, nil)
+	s.Require().NoError(err)
+	app := "app-" + uuid.NewString()
+	holder, pid := s.heldMembership(app)
+	enforcer.Join(s.ctx, app, "org-first", openTier)
+	s.Require().Eventually(func() bool { return s.waitingBehind(pid) > 0 }, 5*time.Second, 10*time.Millisecond,
+		"the first write waits behind the holder")
+	enforcer.Join(s.ctx, app, "org-second", openTier)
+
+	closed := make(chan struct{})
+	go func() {
+		enforcer.Close()
+		close(closed)
+	}()
+	s.Require().Eventually(func() bool {
+		enforcer.joinsMu.Lock()
+		defer enforcer.joinsMu.Unlock()
+		return enforcer.joinsClosed
+	}, 5*time.Second, 10*time.Millisecond, "Close began")
+	s.Require().NoError(holder.Commit())
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Close never returned")
+	}
+	s.Equal("org-first", s.organizationOf(app), "the write under way when Close began lands, and the one behind it is not started")
 }
 
 func (s *PolicySuite) TestCloseWaitsForAMembershipBeingWritten() {

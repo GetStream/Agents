@@ -439,14 +439,17 @@ func (e *Enforcer) Join(ctx context.Context, appID, organizationID, tier string)
 	e.joining.Add(1)
 	go func() {
 		defer e.joining.Done()
-		for organization := organizationID; organization != ""; {
+		// An organization named later is written on a context of its own, not that request's.
+		for ctx, organization := ctx, organizationID; ; ctx = context.Background() {
 			e.record(ctx, appID, organization)
 			e.joinsMu.Lock()
-			if organization = e.joins[appID]; organization == "" {
+			organization = e.joins[appID]
+			if organization == "" || e.joinsClosed {
 				delete(e.joins, appID)
-			} else {
-				e.joins[appID] = ""
+				e.joinsMu.Unlock()
+				return
 			}
+			e.joins[appID] = ""
 			e.joinsMu.Unlock()
 		}
 	}()

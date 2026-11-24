@@ -48,7 +48,8 @@ const missTTL = time.Minute
 // forgetBackoff after it and each one twice as long after the last. forgetSlots bounds how
 // many are being retried at once, so a Redis that is down costs a few goroutines and not one
 // per write. forgetGrace is how long Close lets them run before it stops them: past the last
-// attempt of one that began as Close did.
+// attempt of one that began as Close did, when Redis answers it promptly. One that waits on a
+// slow Redis can still be cut short at its third attempt.
 const (
 	forgetAttempts = 3
 	forgetBackoff  = 100 * time.Millisecond
