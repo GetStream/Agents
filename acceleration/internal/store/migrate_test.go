@@ -257,6 +257,45 @@ func (s *StoreSuite) TestASessionsRowsFromBeforeItsKeyTookTheCustomerAreKeptAndC
 	s.Zero(turns)
 }
 
+// Keying sessions by their customer takes six tables' locks, keeping each it took while it waits
+// for the next, so its wait is bounded as a whole rather than lock by lock: a migration kept
+// waiting gives up before a serving query queued behind it would, and leaves the keys as they
+// were, to run again at the router's next start.
+func (s *StoreSuite) TestKeyingSessionsByTheirCustomerGivesUpWaitingForItsLocksAsAWhole() {
+	split := s.shardTo("session_keys_kept_waiting", 20270201001540-1)
+	defer split.Close()
+	// Each held for less than the lock timeout, one after the other: waited for one at a time,
+	// the locks are all taken at 6 s.
+	var holders []bun.Tx
+	for i, table := range []string{"agent_session_tools", "agent_responses"} {
+		holding, err := split.shard.BeginTx(s.ctx, nil)
+		s.Require().NoError(err)
+		defer holding.Rollback() //nolint:errcheck // a no-op once rolled back
+		_, err = holding.ExecContext(s.ctx, "LOCK TABLE "+table+" IN ACCESS SHARE MODE")
+		s.Require().NoError(err)
+		released := time.AfterFunc(time.Duration(i+1)*3*time.Second, func() { _ = holding.Rollback() })
+		defer released.Stop()
+		holders = append(holders, holding)
+	}
+
+	s.Require().ErrorContains(split.Migrate(s.ctx), "statement timeout")
+	s.Equal("PRIMARY KEY (id)", s.sessionsKey(split))
+
+	for _, holding := range holders {
+		_ = holding.Rollback() // done already if its time came
+	}
+	s.Require().NoError(split.Migrate(s.ctx))
+	s.Equal("PRIMARY KEY (customer_id, id)", s.sessionsKey(split))
+}
+
+// sessionsKey is the primary key of agent_sessions, as Postgres writes it.
+func (s *StoreSuite) sessionsKey(opened *Store) string {
+	var key string
+	s.Require().NoError(opened.ShardDB().QueryRowContext(s.ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint
+		WHERE conrelid = 'agent_sessions'::regclass AND contype = 'p'`).Scan(&key))
+	return key
+}
+
 // A router of the release before attaches the trigger of a session's tools as of a row its
 // session's customer owns, whenever it starts, and two customers may now each have a session of
 // one id: a change of one customer's tools is recorded as its own, not as the other's.

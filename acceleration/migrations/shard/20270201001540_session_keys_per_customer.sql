@@ -7,6 +7,11 @@ SET LOCAL lock_timeout = '5s';
 -- for as long as the catalogue takes to change. They are all taken first, sessions first, so the
 -- migration never waits for one while it holds some of the others in the middle of its changes.
 -- The rows already there are checked by the next migration, under locks that stop no write.
+-- lock_timeout bounds each of the six waits on its own, while the tables taken before stay
+-- locked: the statement's timeout bounds them together. 2 s, under the 3 s a serving query waits
+-- for a lock, so a query queued behind this one is not failed by it, whether it ends in its
+-- changes or in rolling back to run again at the router's next start.
+SET LOCAL statement_timeout = '2s';
 LOCK TABLE agent_sessions, agent_session_tools, agent_branch_messages, agent_branch_switches, agent_responses, calls
     IN ACCESS EXCLUSIVE MODE;
 
@@ -40,8 +45,11 @@ ALTER TABLE calls ADD CONSTRAINT calls_customer_id_session_id_fkey
 -- +goose Down
 SET LOCAL lock_timeout = '5s';
 
+-- The locks are waited for as in Up; the keys built after them read every row.
+SET LOCAL statement_timeout = '2s';
 LOCK TABLE agent_sessions, agent_session_tools, agent_branch_messages, agent_branch_switches, agent_responses, calls
     IN ACCESS EXCLUSIVE MODE;
+SET LOCAL statement_timeout = DEFAULT;
 
 ALTER TABLE agent_session_tools DROP CONSTRAINT agent_session_tools_customer_id_session_id_fkey;
 ALTER TABLE agent_branch_messages DROP CONSTRAINT agent_branch_messages_customer_id_session_id_fkey;
