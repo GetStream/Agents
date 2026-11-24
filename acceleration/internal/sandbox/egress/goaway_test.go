@@ -292,39 +292,46 @@ func (s *ProxySuite) TestABodyCutShortIsNoRequest() {
 	}
 }
 
-// stalled opens a tunnel and sends a POST to path whose body is declared keptBody and stops one byte short.
-func (s *ProxySuite) stalled(path string) *tls.Conn {
+// stalled opens a tunnel and sends a POST to path whose body stops short: declared keptBody and one byte missing, or
+// chunked with its first chunk of keptBody bytes sent and no end.
+func (s *ProxySuite) stalled(path string, chunked bool) {
 	conn := s.tunnel(&tls.Config{})
-	_, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s",
-		path, s.placeholder, keptBody, strings.Repeat("x", keptBody-1))
+	head := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer %s\r\n", path, s.placeholder)
+	var err error
+	if chunked {
+		_, err = fmt.Fprintf(conn, "%sTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", head, keptBody, strings.Repeat("x", keptBody))
+	} else {
+		_, err = fmt.Fprintf(conn, "%sContent-Length: %d\r\n\r\n%s", head, keptBody, strings.Repeat("x", keptBody-1))
+	}
 	s.Require().NoError(err)
-	return conn
 }
 
-// TestStalledBodiesKeepNoMoreThanTheBudget: with a budget of one keptBody, a tunnel whose body is declared keptBody
-// and stops one byte short holds all of it, so a second such tunnel streams to the host as on the base (18962cc3e)
-// instead of the proxy keeping a second body. On the head before the budget the host got nothing from the second
-// tunnel (64 stalled tunnels held 1,282,816 bytes each, the base 261,248).
+// TestStalledBodiesKeepNoMoreThanTheBudget: with a budget of one keptBody, a tunnel whose body stops short, sized or
+// chunked, holds all of it, so a second such tunnel streams to the host as on the base (18962cc3e) instead of the
+// proxy keeping a second body. On the head before the budget the host got nothing from the second tunnel (64
+// stalled tunnels held 1,282,816 bytes each, the base 261,248).
 func (s *ProxySuite) TestStalledBodiesKeepNoMoreThanTheBudget() {
 	s.readsUploadPack()
-	s.overHTTP2(func(options *egress.Options) { options.KeptBodies = keptBody })
-	arrived := make(chan string, 2)
-	release := make(chan struct{})
-	s.answering(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadFull(r.Body, make([]byte, 1))
-		arrived <- r.URL.Path
-		<-release
-	})
-	defer close(release)
+	for _, chunked := range []bool{false, true} {
+		s.overHTTP2(func(options *egress.Options) { options.KeptBodies = keptBody })
+		arrived := make(chan string, 2)
+		release := make(chan struct{})
+		s.answering(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadFull(r.Body, make([]byte, 1))
+			arrived <- r.URL.Path
+			<-release
+		})
 
-	s.stalled("/o/a.git/git-upload-pack")
-	s.stalled("/o/b.git/git-upload-pack")
+		s.stalled("/o/a.git/git-upload-pack", chunked)
+		s.stalled("/o/b.git/git-upload-pack", chunked)
 
-	select {
-	case path := <-arrived:
-		s.Equal("/o/b.git/git-upload-pack", path)
-	case <-time.After(5 * time.Second):
-		s.Fail("the second stalled body was kept as well: the host got nothing from it")
+		select {
+		case path := <-arrived:
+			s.Equal("/o/b.git/git-upload-pack", path, boolName("chunked", chunked))
+		case <-time.After(5 * time.Second):
+			s.Fail("the second stalled body was kept as well: the host got nothing from it", boolName("chunked", chunked))
+		}
+		close(release)
 	}
 }
 
