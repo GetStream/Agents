@@ -161,12 +161,6 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if written == 0 {
-			// The error document is written under a deadline of its own, not the export's,
-			// which may be what passed.
-			if err := controller.SetWriteDeadline(time.Now().Add(s.exportLineWait)); err != nil {
-				writeFailure(w, r, fmt.Errorf("api: export write deadline: %w", err))
-				return
-			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				writeError(w, errExportTooLong)
 				return
@@ -219,14 +213,14 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		}
 		var line dataLine
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			writeError(w, invalidRequest("this is not an export: "+err.Error()))
+			writeError(w, invalidRequest("this is not an export: an import is one JSON object per line: "+err.Error()))
 			return
 		}
 
 		switch {
 		case line.Change != nil:
 			if err := s.store.ApplyChanges(r.Context(), customerID, []store.DataChange{*line.Change}); err != nil {
-				writeError(w, invalidRequest(err.Error()))
+				writeImportFailure(w, r, err)
 				return
 			}
 			rows++
@@ -247,7 +241,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				checked = true
 			}
 			if err := s.store.ImportRow(r.Context(), customerID, line.Table, line.Row); err != nil {
-				writeError(w, invalidRequest(err.Error()))
+				writeImportFailure(w, r, err)
 				return
 			}
 			rows++
@@ -267,6 +261,18 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("imported a customer", "customer", customerID, "rows", rows)
 	writeJSON(w, map[string]any{"rows": rows, "tables": tables, "cursor": cursor})
+}
+
+// writeImportFailure answers a line the store did not write: an export the caller can correct
+// with what to change, and anything else, such as a database that failed, whose text names
+// where the database is, as a failure of ours that names nothing.
+func writeImportFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var invalid *store.ValidationError
+	if errors.Is(err, store.ErrInvalidImport) || errors.Is(err, store.ErrNotACustomConnector) || errors.As(err, &invalid) {
+		writeError(w, invalidRequest(err.Error()))
+		return
+	}
+	writeFailure(w, r, err)
 }
 
 // listDataChanges returns what has happened to the calling app's rows since a cursor.

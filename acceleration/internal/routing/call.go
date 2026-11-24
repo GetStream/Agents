@@ -56,6 +56,11 @@ type Meter struct {
 	// longer, such as a picture a queued provider takes minutes over, holds it for as long as
 	// it may run, or concurrent work could spend past a limit once the hold lapsed.
 	ReserveFor time.Duration
+	// Recorded, when set, is told how a Call ended once its row is recorded: the stat the row
+	// was made of and what the row costs, priced as Record prices it (free work and a quoted
+	// cost included), for a line logged beside the row. It is told of a failure and a panic
+	// too, and not of work Omit leaves out. Nil tells nobody.
+	Recorded func(stat Stat, costMicros int64)
 }
 
 // ReserveTTL is how long what a unit of request-and-answer work may cost is set aside before
@@ -129,6 +134,10 @@ func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.
 		// A failure bills nothing, and work that names its own id settles under that one.
 		if reserved != uuid.Nil && (omitted || stat.UsageID != reserved) {
 			meter.Recorder.Release(reserved)
+		}
+		// Last, so a hook that panics leaves the row queued and the reservation let go.
+		if !omitted && meter.Recorded != nil {
+			meter.Recorded(stat, meter.cost(stat))
 		}
 	}()
 
@@ -220,6 +229,15 @@ func (m Meter) record(stat Stat) {
 	if m.Recorder != nil {
 		m.Recorder.Record(m.Config, stat)
 	}
+}
+
+// cost is what the stat's row costs, priced as Record prices it. Zero with no recorder.
+func (m Meter) cost(stat Stat) int64 {
+	if m.Recorder == nil {
+		return 0
+	}
+	request, _ := m.Recorder.price(m.Config, stat)
+	return request.CostMicros
 }
 
 func (m Meter) code(err error) string {

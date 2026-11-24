@@ -49,7 +49,7 @@ func Database(t testing.TB, name string) string {
 	opened, err := ledger.Open(ledger.Options{DSN: own})
 	require.NoError(t, err)
 	defer opened.Close() //nolint:errcheck // closing a pool the test is done with
-	require.NoError(t, opened.Migrate(context.Background()))
+	require.NoError(t, opened.Migrate(t.Context()))
 	return own
 }
 
@@ -65,7 +65,7 @@ func EmptyDatabase(t testing.TB, name string) string {
 	opened, err := ledger.Open(ledger.Options{DSN: own})
 	require.NoError(t, err)
 	defer opened.Close() //nolint:errcheck // closing a pool the test is done with
-	ctx := context.Background()
+	ctx := t.Context()
 	var database string
 	require.NoError(t, opened.DB().QueryRowContext(ctx, "SELECT current_database()").Scan(&database))
 	require.True(t, strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
@@ -77,7 +77,7 @@ func EmptyDatabase(t testing.TB, name string) string {
 // Empty truncates every table of the service's database, for a suite's next test.
 func Empty(t testing.TB, opened *ledger.Ledger) {
 	t.Helper()
-	_, err := opened.DB().ExecContext(context.Background(),
+	_, err := opened.DB().ExecContext(t.Context(),
 		"TRUNCATE usage_events, usage_windows, tiers, credit_entries, accounts, manage_audit, manage_requests")
 	require.NoError(t, err)
 }
@@ -115,7 +115,7 @@ func Organization() string {
 // Forget deletes the mirror's keys of the organizations, and nothing else.
 func Forget(t testing.TB, client rueidis.Client, organizations ...string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	for _, organization := range organizations {
 		var cursor uint64
 		for {
@@ -195,7 +195,7 @@ func (s *Service) Manage(t testing.TB, method, path string, body any) int {
 		require.NoError(t, err)
 		payload = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequestWithContext(context.Background(), method, s.URL+usage.PathManage+path, payload)
+	request, err := http.NewRequestWithContext(t.Context(), method, s.URL+usage.PathManage+path, payload)
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Manage-Key", s.ManageKey)
@@ -256,7 +256,7 @@ func (s *Service) Spend(t testing.TB, organization string, micros int64, change 
 	event := Event(organization, append([]func(*usage.Event){func(event *usage.Event) {
 		event.CostMicros, event.BaseCostMicros = micros, micros
 	}}, change...)...)
-	ack, err := s.Client.Ship(context.Background(), []usage.Event{event})
+	ack, err := s.Client.Ship(t.Context(), []usage.Event{event})
 	require.NoError(t, err)
 	require.Empty(t, ack.Rejected)
 	return event

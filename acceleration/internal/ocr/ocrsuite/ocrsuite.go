@@ -74,7 +74,7 @@ func (s *Suite) TearDownSuite() {
 func (s *Suite) Read(image []byte) ocr.Result {
 	request := ocr.Request{Image: image}
 	s.Require().NoError(request.Validate())
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), defaultTimeout)
 	defer cancel()
 	read, err := s.Provider.Read(ctx, request)
 	s.Require().NoError(err)
