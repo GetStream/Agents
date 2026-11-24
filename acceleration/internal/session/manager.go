@@ -2133,9 +2133,9 @@ func (m *Manager) guardrail(ctx context.Context, spec Spec, stream streamapp.Ide
 	})
 }
 
-// stream is the Stream app a new session acts in. A deployment with no Stream app still
-// holds a text conversation, so having none is not an error here: what needs one fails
-// where it needs it.
+// stream is the Stream app a new session acts in. Having none is not an error here: an
+// incognito session needs none, and what does need one, such as keeping the conversation
+// (unkeptIn), fails where it needs it.
 func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error) {
 	nowhere := streamapp.Bound{Identity: streamapp.Identity{CustomerID: spec.CustomerID}}
 	if m.options.Stream == nil {

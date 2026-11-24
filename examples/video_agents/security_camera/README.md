@@ -67,6 +67,9 @@ A running acceleration router from the repo root, rebuilt so it has detection:
 docker compose up -d --build router
 ```
 
+It refuses to start until the repo-root `.env` sets `ROUTER_DEV_KEK`: make one once with
+`echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env` (see `DEVELOPMENT.md`).
+
 The router reads the provider keys from the repo-root `.env`:
 
 ```

@@ -18,8 +18,11 @@ app/                 the phone half: chat, voice, and tools that run on the devi
 Start the router and its Postgres and Redis, from the repo root, with `ROUTER_AUTH_MODE=proxy`
 in the repo `.env` so it trusts the customer and user ids it is given. Not `noauth`, which takes
 every caller for the backend: the phone's user would never join its own chat channel.
+The router refuses to start until `.env` sets `ROUTER_DEV_KEK`, so make one first if it has
+none, and only once: running it again leaves the secrets already stored unreadable.
 
 ```bash
+grep -q '^ROUTER_DEV_KEK=.' .env || echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
 docker compose up --build
 ```
 
