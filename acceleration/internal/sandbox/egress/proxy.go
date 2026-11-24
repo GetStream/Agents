@@ -96,6 +96,8 @@ type Options struct {
 	// Now replaces time.Now when set, for tests: it dates a certificate and tells when a kept
 	// one is renewed.
 	Now func() time.Time
+	// KeptBodies replaces maxKeptBodies when set, for tests.
+	KeptBodies int64
 }
 
 // Proxy is an HTTP proxy that takes CONNECT only.
@@ -112,6 +114,9 @@ type Proxy struct {
 	handshakeTimeout, keepAliveTimeout, dryRunTimeout time.Duration
 
 	now func() time.Time
+	// keptBodies is the bytes reserved for bodies kept to send again, of keptBudget at most (resendable).
+	keptBodies atomic.Int64
+	keptBudget int64
 	// leaves holds each host's certificate until it is half of leafValidity old, so a handshake
 	// costs no CA signature (P-256 about 66 us, RSA-4096 about 4.5 ms) once a host has one.
 	leaves leaves
@@ -161,7 +166,7 @@ func New(options Options) (*Proxy, error) {
 		transport: outbound{next: transport, headerTimeout: cmp.Or(options.HeaderTimeout, headerTimeout)}, dial: dial, logger: options.Logger,
 		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout),
 		keepAliveTimeout: cmp.Or(options.KeepAliveTimeout, keepAliveTimeout),
-		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, leaves: leaves{byHost: map[string]keptLeaf{}}}, nil
+		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, keptBudget: cmp.Or(options.KeptBodies, maxKeptBodies), leaves: leaves{byHost: map[string]keptLeaf{}}}, nil
 }
 
 // ServeHTTP opens a tunnel to port 443 of a host the sandbox's grants or allowed domains cover,
@@ -427,7 +432,7 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			return
 		}
 		// A host's GOAWAY can leave the request unprocessed; a body kept in memory lets Go send it again.
-		resendable(r)
+		defer p.resendable(r)()
 		forward := &httputil.ReverseProxy{
 			Rewrite:   func(pr *httputil.ProxyRequest) { p.toHost(pr, t) },
 			Transport: timed{next: p.transport, host: t.label},

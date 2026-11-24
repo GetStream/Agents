@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/http2"
 
@@ -119,11 +120,11 @@ func (o *goAwayOrigin) processed() []string {
 
 // overHTTP2 has the proxy reach its hosts over HTTP/2, as the router's transport does with a host that offers it
 // (http.DefaultTransport, which NewUnpooledClient clones, sets ForceAttemptHTTP2).
-func (s *ProxySuite) overHTTP2() {
+func (s *ProxySuite) overHTTP2(change ...func(*egress.Options)) {
 	s.proxy.Close()
-	s.proxy = httptest.NewServer(s.newProxy(s.store, func(options *egress.Options) {
+	s.proxy = httptest.NewServer(s.newProxy(s.store, append([]func(*egress.Options){func(options *egress.Options) {
 		options.Transport.(*http.Transport).ForceAttemptHTTP2 = true
-	}))
+	}}, change...)...))
 	s.T().Cleanup(s.proxy.Close)
 }
 
@@ -288,5 +289,72 @@ func (s *ProxySuite) TestABodyCutShortIsNoRequest() {
 		s.Require().NoError(err, broken)
 		_ = response.Body.Close()
 		s.Equal(http.StatusBadGateway, response.StatusCode, broken)
+	}
+}
+
+// stalled opens a tunnel and sends a POST to path whose body is declared keptBody and stops one byte short.
+func (s *ProxySuite) stalled(path string) *tls.Conn {
+	conn := s.tunnel(&tls.Config{})
+	_, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s",
+		path, s.placeholder, keptBody, strings.Repeat("x", keptBody-1))
+	s.Require().NoError(err)
+	return conn
+}
+
+// TestStalledBodiesKeepNoMoreThanTheBudget: with a budget of one keptBody, a tunnel whose body is declared keptBody
+// and stops one byte short holds all of it, so a second such tunnel streams to the host as on the base (18962cc3e)
+// instead of the proxy keeping a second body. On the head before the budget the host got nothing from the second
+// tunnel (64 stalled tunnels held 1,282,816 bytes each, the base 261,248).
+func (s *ProxySuite) TestStalledBodiesKeepNoMoreThanTheBudget() {
+	s.readsUploadPack()
+	s.overHTTP2(func(options *egress.Options) { options.KeptBodies = keptBody })
+	arrived := make(chan string, 2)
+	release := make(chan struct{})
+	s.answering(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadFull(r.Body, make([]byte, 1))
+		arrived <- r.URL.Path
+		<-release
+	})
+	defer close(release)
+
+	s.stalled("/o/a.git/git-upload-pack")
+	s.stalled("/o/b.git/git-upload-pack")
+
+	select {
+	case path := <-arrived:
+		s.Equal("/o/b.git/git-upload-pack", path)
+	case <-time.After(5 * time.Second):
+		s.Fail("the second stalled body was kept as well: the host got nothing from it")
+	}
+}
+
+// TestTheBudgetOfKeptBodiesIsGivenBack: a request that was kept and answered leaves the whole budget to the next one,
+// each on a host of its own so none rides the HTTP/2 connection of the one before. The budget is one keptBody, so
+// a next request that is kept at all shows it is back.
+func (s *ProxySuite) TestTheBudgetOfKeptBodiesIsGivenBack() {
+	grant := s.grant(s.placeholder, "*.github.test")
+	grant.Reads = []core.SandboxRead{{Host: "*.github.test", Method: http.MethodPost, Path: "/*/*/git-upload-pack"}}
+	s.put(s.credential, egress.Record{Session: s.session, Grants: []egress.Grant{grant}})
+	s.overHTTP2(func(options *egress.Options) { options.KeptBodies = keptBody })
+	body := strings.Repeat("x", keptBody)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for attempt := 0; ; attempt++ {
+		origin := s.goAwayOrigin()
+		request, err := http.NewRequestWithContext(s.ctx, http.MethodPost,
+			fmt.Sprintf("https://h%d.github.test/o/r.git/git-upload-pack", attempt), strings.NewReader(body))
+		s.Require().NoError(err)
+		request.Header.Set("Authorization", "Bearer "+s.placeholder)
+		response, _, err := s.send(s.sandbox(s.credential), request)
+		s.Require().NoError(err)
+		if response.StatusCode == http.StatusOK {
+			s.Equal([]string{digest([]byte(body))}, origin.processed())
+			if attempt == 0 {
+				continue
+			}
+			return
+		}
+		s.Require().True(time.Now().Before(deadline), "the budget was never given back")
+		time.Sleep(10 * time.Millisecond)
 	}
 }
