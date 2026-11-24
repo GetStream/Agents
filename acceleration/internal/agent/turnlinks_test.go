@@ -327,6 +327,7 @@ func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
 	// The log masks the number to +1•••99. Its digits never show, and searching for them only
 	// matches the clock digits of the line's turn id and time.
 	s.NotContains(fmt.Sprint(back), "•••99")
+	s.NotContains(fmt.Sprint(back), "555 010")
 }
 
 // interruptsATool has the caller interrupt while a tool runs, the tool asking policy of the
