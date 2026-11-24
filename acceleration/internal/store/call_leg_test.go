@@ -778,12 +778,13 @@ func (s *StoreSuite) TestAPhoneIsNotGivenALegThatCameToAnotherCustomersCall() {
 	s.Equal(NothingWaiting, connection, "nor is it revived")
 }
 
-// Another app's call of the same name, another type's call and a call nobody answered keep no
+// Another call, another app's call of the same name, another type's and a call nobody answered keep no
 // phone from its leg, nor does a second leg of the customer's own.
 func (s *StoreSuite) TestAPhoneIsGivenItsLegWhateverElseIsOfTheCallsName() {
 	scope := AppScope{Unpinned: true}
 	s.onCall("theirs", "call", 7, s.base)
 	s.placedLeg("another type", nil)
+	s.onCall("theirs", "another call", 0, s.base)
 	s.onCall("gone", "call", 0, s.base)
 	_, err := s.store.CallLegs.EndCall(s.ctx, scope, "agent", "call", s.base.Add(time.Second))
 	s.Require().NoError(err)

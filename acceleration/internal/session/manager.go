@@ -1129,6 +1129,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
 		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, spec.AgentID, spec.ConversationID)
+		// A session that acts in no Stream app has no call.
 		if spec.StreamApp != store.ForeignStreamApp {
 			m.options.Directory.HoldCall(ctx, spec.CustomerID, created.id, m.callApp(spec.StreamApp))
 		}
@@ -2265,12 +2266,8 @@ func (m *Manager) callApp(app int64) int64 {
 }
 
 // callTaken reports whether the call a session is named after, agent:<id> in the Stream app it
-// acts in, is another customer's: by its phone legs, or by the session some node runs on it. A
-// session that acts in no Stream app has no call.
+// acts in, is another customer's: by its phone legs, or by the session some node runs on it.
 func (m *Manager) callTaken(ctx context.Context, spec Spec) (bool, error) {
-	if spec.StreamApp == store.ForeignStreamApp {
-		return false, nil
-	}
 	if m.options.Store != nil {
 		var deployment int64
 		if m.options.Stream != nil {

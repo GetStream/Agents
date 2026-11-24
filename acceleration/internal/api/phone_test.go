@@ -1525,3 +1525,15 @@ func (s *CallStatusSuite) TestASessionOfNoStreamAppIsOnNoCallOfAnothers() {
 
 	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", request, nil))
 }
+
+func (s *CallStatusSuite) TestASessionMayBeCreatedUnderTheIdOfTheCallersOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: s.customerID(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+	request := textSession(pointerTo(opened.ID()))
+	request.Incognito = pointerTo(true)
+
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", request, nil))
+}

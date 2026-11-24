@@ -178,11 +178,11 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerOnAChannelTwoCustome
 		"one of the customers' sessions answered a message nothing says is theirs")
 }
 
-// Two customers may each run a session of one id, each on a node of its own: a request reaches
-// the session of the caller's own customer, wherever it lands.
+// Two customers in Stream apps of their own may each run a session of one id, each on a node of
+// its own: a request reaches the session of the caller's own customer, wherever it lands.
 func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {
 	id := s.utils.uuid()
-	other := s.data.backendOfAnotherApp()
+	other := s.backendInAppOfItsOwn()
 	mine := s.serverClient.createSession(CreateSessionRequest{Id: &id, Incognito: pointerTo(true), Llm: pointerTo("llm-flow")})
 	theirs := other.on(s.other).createSession(CreateSessionRequest{Id: &id, Incognito: pointerTo(true), Llm: pointerTo("echo/echo-model")})
 	third := s.otherNode()
