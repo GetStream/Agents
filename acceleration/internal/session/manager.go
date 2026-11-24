@@ -1945,9 +1945,9 @@ func (m *Manager) FlushRecords(ctx context.Context) error {
 	return m.records.Flush(ctx)
 }
 
-// Delete stops a session if it is running and deletes it: its row, its turns, and what it
-// taught the memory store. Whoever asks has to have checked the session is the owner's, since
-// one that ended is no longer here to check against.
+// Delete stops a session if it is running and deletes it: its row, its turns, its scheduled
+// tasks, and what it taught the memory store. Whoever asks has to have checked the session is
+// the owner's, since one that ended is no longer here to check against.
 func (m *Manager) Delete(ctx context.Context, id string, owner Owner) error {
 	if _, err := m.Close(id, owner); err != nil {
 		return err
@@ -1967,6 +1967,11 @@ func (m *Manager) Delete(ctx context.Context, id string, owner Owner) error {
 	}
 	if m.options.Store == nil {
 		return nil
+	}
+	// A deleted conversation takes its tasks with it: there is nowhere left for a follow-up to
+	// land. They go before the row too, so a failure keeps the session to delete again.
+	if err := m.options.Store.ScheduledTasks.DeleteForSession(ctx, owner.CustomerID, id); err != nil {
+		return err
 	}
 	return m.options.Store.Sessions.Delete(ctx, owner.CustomerID, id)
 }

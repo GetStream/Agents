@@ -332,6 +332,41 @@ func (s *StoreSuite) TestARunWriteTheSessionDeleteWaitsOnIsRedactedToo() {
 	}, s.taskChanges("acme"), "the run write's change, which holds the task's instructions, is emptied too")
 }
 
+func (s *StoreSuite) TestATaskMovedIntoTheSessionWhileItsDeleteWaitsIsKept() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	due := s.base.Add(-time.Minute)
+	s.task("reminder", func(task *ScheduledTask) { task.SessionID = "session-1"; task.NextRunAt = &due })
+	s.task("later", func(task *ScheduledTask) { task.NextRunAt = nil })
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	// The delete waits on the session's run once it has locked the session's tasks.
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // committed below; this only ends a failed test's transaction
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET session_id = 'call' WHERE customer_id = 'acme' AND task_id = 'reminder'")
+	s.Require().NoError(err)
+
+	deleted := make(chan error, 1)
+	go func() { deleted <- s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1") }()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the delete waits on the run's row")
+	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "later", "session-1"))
+	s.Require().NoError(writing.Commit())
+	s.Require().NoError(<-deleted)
+
+	_, err = s.store.ScheduledTasks.Get(s.ctx, "acme", "later")
+	s.Require().NoError(err, "a task the delete did not lock is not deleted")
+	s.Contains(s.taskChanges("acme"), "scheduled_tasks insert later", "and keeps its changes")
+}
+
+func (s *StoreSuite) TestDeletingTheTasksOfNoSessionDeletesNone() {
+	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = nil })
+
+	s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", ""))
+
+	_, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "reminder")
+	s.Require().NoError(err, "a task that follows up in no session is not one of an empty session id's")
+}
+
 func (s *StoreSuite) TestATaskOfTheUsersMadeWhileTheForgetRedactsIsKeptWithItsChanges() {
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = nil })

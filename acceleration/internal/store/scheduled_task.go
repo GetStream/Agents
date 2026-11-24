@@ -550,7 +550,7 @@ func (r *ScheduledTasks) DeleteForSession(ctx context.Context, customerID, sessi
 	}
 	_, err := deleteTasks(ctx, r.store.global, customerID, func(q bun.QueryBuilder) bun.QueryBuilder {
 		return q.Where("session_id = ? OR origin_session_id = ?", sessionID, sessionID)
-	}, sessionTaskChanges, customerID)
+	}, true, sessionTaskChanges, customerID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete scheduled tasks for session: %w", err))
 	}

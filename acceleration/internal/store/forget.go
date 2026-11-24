@@ -197,7 +197,7 @@ func (s *Store) CountUserTasks(ctx context.Context, appID, userID string) (UserT
 func (s *Store) ForgetUserTasks(ctx context.Context, appID, userID string) (UserTasks, error) {
 	counts, err := deleteTasks(ctx, s.global, appID, func(q bun.QueryBuilder) bun.QueryBuilder {
 		return q.Where("user_id = ?", userID)
-	}, userTaskChanges, appID, userID, userID)
+	}, false, userTaskChanges, appID, userID, userID)
 	if err != nil {
 		return UserTasks{}, stack.Wrap(fmt.Errorf("store: forget user tasks: %w", err))
 	}
@@ -207,7 +207,13 @@ func (s *Store) ForgetUserTasks(ctx context.Context, appID, userID string) (User
 // deleteTasks deletes the app's tasks that tasks narrows, and their runs by cascade, and makes
 // each change that changes picks, as dc, a delete of its row with no payload under its own number,
 // in one transaction. changes may read the ids deleted from the CTE deleted.
-func deleteTasks(ctx context.Context, db bun.IDB, appID string, tasks func(bun.QueryBuilder) bun.QueryBuilder, changes string, args ...any) (UserTasks, error) {
+//
+// onlyLocked deletes just the tasks the lock found, and nothing when it found none, for a set a
+// write can move a task into after the lock (SetSession), whose runs would not be locked.
+// Otherwise tasks is read again by the delete, so a task made after the lock goes with the
+// changes that name it.
+func deleteTasks(ctx context.Context, db bun.IDB, appID string, tasks func(bun.QueryBuilder) bun.QueryBuilder,
+	onlyLocked bool, changes string, args ...any) (UserTasks, error) {
 	var counts UserTasks
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A write to a task or a run that commits while this waits on its row recorded a change
@@ -216,12 +222,15 @@ func deleteTasks(ctx context.Context, db bun.IDB, appID string, tasks func(bun.Q
 		// tasks, as Claim and Finish lock them.
 		var locked []string
 		if err := tx.NewSelect().Model((*ScheduledTask)(nil)).Column("id").
-			Where("customer_id = ?", appID).ApplyQueryBuilder(tasks).For("UPDATE").Scan(ctx, &locked); err != nil {
+			Where("customer_id = ?", appID).ApplyQueryBuilder(tasks).Order("id").For("UPDATE").Scan(ctx, &locked); err != nil {
 			return err
+		}
+		if onlyLocked && len(locked) == 0 {
+			return nil
 		}
 		var runs []string
 		if err := tx.NewSelect().Model((*ScheduledTaskRun)(nil)).Column("id").
-			Where("customer_id = ? AND task_id IN (?)", appID, bun.In(locked)).For("UPDATE").Scan(ctx, &runs); err != nil {
+			Where("customer_id = ? AND task_id IN (?)", appID, bun.In(locked)).Order("id").For("UPDATE").Scan(ctx, &runs); err != nil {
 			return err
 		}
 		// One statement, so the delete and the redaction read one snapshot: a task that commits
@@ -229,7 +238,12 @@ func deleteTasks(ctx context.Context, db bun.IDB, appID string, tasks func(bun.Q
 		// the live tasks read that snapshot, from before the delete.
 		redacted := tx.NewUpdate().Model((*dataChange)(nil)).Set("op = ?", ChangeDelete).Set("payload = NULL").
 			Where(changes, args...).Returning("1")
-		deleted := tx.NewDelete().Model((*ScheduledTask)(nil)).Where("customer_id = ?", appID).ApplyQueryBuilder(tasks).Returning("id")
+		deleted := tx.NewDelete().Model((*ScheduledTask)(nil)).Where("customer_id = ?", appID).Returning("id")
+		if onlyLocked {
+			deleted = deleted.Where("id IN (?)", bun.In(locked))
+		} else {
+			deleted = deleted.ApplyQueryBuilder(tasks)
+		}
 		return tx.NewSelect().With("deleted", deleted).With("redacted", redacted).
 			ColumnExpr("(SELECT count(*) FROM deleted) AS tasks").
 			ColumnExpr("(SELECT count(*) FROM redacted) AS changes").
