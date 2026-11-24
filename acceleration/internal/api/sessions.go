@@ -118,6 +118,9 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	if request.Body != nil {
 		body = *request.Body
 	}
+	if failure, refused := refuseDeviceModels(ctx, body.ModelOverwrites != nil); refused {
+		return nil, failure
+	}
 
 	// A named agent on the fork replaces the parent's config wholesale, which is the point:
 	// asking the same question of a different agent is the reason to fork.
@@ -1558,7 +1561,8 @@ func (s *Server) registerSessions(api huma.API) {
 		Description: "Opens a session from another's spec, carrying its history across by default, and " +
 			"records where it came from. The usual reason is to ask the same question of a different " +
 			"model without losing the original answer, which is why anything in the request is " +
-			"written over what the parent was opened with.\n" +
+			"written over what the parent was opened with. Models are the backend's to change: a device " +
+			"sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.\n" +
 			"The parent is untouched and keeps running if it was running. Forking an incognito " +
 			"session is refused rather than answered with an empty conversation: there is nothing " +
 			"recorded to fork from, and pretending otherwise would hand back a session that quietly " +
@@ -1567,6 +1571,7 @@ func (s *Server) registerSessions(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The fork is running"},
+			"403": errorResponse("`model_overwrites` sent by an end user's device, or an agent config the caller may not use"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.forkSession)
@@ -1800,7 +1805,7 @@ type ForkSessionRequest struct {
 	Incognito       *bool                   `json:"incognito,omitempty" doc:"Hold the fork off the record. The parent still exists; this conversation onwards is simply not kept."`
 	ToolTimeoutMs   *int                    `json:"tool_timeout_ms,omitempty" doc:"How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession."`
 	Messages        *bool                   `json:"messages,omitempty" doc:"Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants." default:"true"`
-	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty"`
+	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
 	ProjectId       *string                 `json:"project_id,omitempty" doc:"What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the \"project\" cost tag, as on createSession. A device's groups the fork, which keeps its parent's cost tag."`
 	ResponseId      *string                 `json:"response_id,omitempty" doc:"Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false."`
 	Title           *string                 `json:"title,omitempty"`

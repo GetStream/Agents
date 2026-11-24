@@ -4462,7 +4462,7 @@ components:
           description: 'The model that controls the floor in this session, and how long a caller may wait once they stop, over the agent config''s. Left out or null, the config''s; an empty object is no choice, which the router''s default rules; {model: flow-controller} keeps the flow controller whatever that default. A model the session was opened with, named here or the config''s then, is its for its life, reopened included; no choice is stored as none, so a reopened session takes its config''s choice as it is then, and the router''s default after it. Server-side only: a device sending it is refused with a 403, because whether a model rules when the agent answers is the app''s to decide.'
         greeting:
           $ref: '#/components/schemas/Greeting'
-          description: What the agent opens the call with, over what the config says.
+          description: 'What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403.'
         history:
           description: 'The conversation so far, for a backend that keeps its own: a thread in its own Slack app, say, that outlives any one session. Send it when a session closed and the thread goes on: open a new session with the thread''s messages here, oldest first, then send the message to answer to the responses endpoint. The model is handed them before the first response, as a resumed conversation''s history is. They are recorded nowhere, as turns, transcript or Chat messages, so add incognito to keep nothing at all. Up to 100 messages and 60000 characters of text, the most a session reads back of a conversation the router kept; more is refused rather than cut. Server-side only: a device sending it is refused with a 403, because an assistant message puts words in the agent''s mouth.'
           items:
@@ -4490,12 +4490,13 @@ components:
             type: string
           type: array
         llm:
-          description: 'A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.'
+          description: 'A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.'
           type: string
         max_tokens:
+          description: 'Server-side only: a device sending it is refused with a 403.'
           type: integer
         max_tool_rounds:
-          description: The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+          description: 'The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.'
           type: integer
         memory:
           $ref: '#/components/schemas/SessionMemory'
@@ -4505,12 +4506,14 @@ components:
           type: number
         model_overwrites:
           $ref: '#/components/schemas/ModelOverwrites'
+          description: 'Server-side only: a device sending it is refused with a 403.'
         navigating:
           default: false
           description: The agent placed this call, so let recordings finish and answer their menus.
           type: boolean
         phone:
           $ref: '#/components/schemas/SessionPhone'
+          description: 'Server-side only: a device sending it is refused with a 403.'
         project_id:
           description: What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
           type: string
@@ -4521,22 +4524,22 @@ components:
           description: 'The app''s own page a login or step-up the chat asks for goes back to, as createAuthorization''s return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization''s return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user''s device may send it: a consent the chat asks for is only ever for the caller''s own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller''s own consent lands.'
           type: string
         search:
-          description: Omit it and the config decides, or search-fast when there is no config.
+          description: 'Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.'
           type: string
         start_voice:
           default: false
           description: 'Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.'
           type: boolean
         sts:
-          description: 'A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.'
+          description: 'A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.'
           type: string
         stt:
-          description: Omit it and the config decides, or en-low-latency when there is no config.
+          description: 'Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.'
           type: string
         tags:
           additionalProperties:
             type: string
-          description: Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+          description: 'Cost labels, carried onto every request the session makes. Merged with the agent config''s tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.'
           type: object
         team:
           description: 'The team the session''s work is counted under, its team spend limits included, as team:<name> is among a token''s usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller''s token names, else the agent config''s team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for.'
@@ -4557,7 +4560,7 @@ components:
             $ref: '#/components/schemas/SessionTool'
           type: array
         tts:
-          description: Omit it and the config decides, or en-low-latency when there is no config.
+          description: 'Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.'
           type: string
         ui:
           description: 'Whether the model is told its config''s ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent''s owner wrote.'
@@ -4572,7 +4575,7 @@ components:
         video:
           $ref: '#/components/schemas/SessionVideo'
         voice:
-          description: 'The voice to speak in: a provider''s own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider''s library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor''s own voice name instead, such as marin at OpenAI.'
+          description: 'The voice to speak in: a provider''s own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider''s library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor''s own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.'
           type: string
       type: object
     CreateSipTrunkRequest:
@@ -5008,7 +5011,7 @@ components:
           type: number
         overwrites:
           additionalProperties: {}
-          description: Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+          description: 'Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.'
           type: object
         providers:
           description: A priority list of where to try, in the order given, which wins over target when it holds anything.
@@ -5342,6 +5345,7 @@ components:
           type: boolean
         model_overwrites:
           $ref: '#/components/schemas/ModelOverwrites'
+          description: 'Server-side only: a device sending it is refused with a 403.'
         project_id:
           description: What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is also the "project" cost tag, as on createSession. A device's groups the fork, which keeps its parent's cost tag.
           type: string
@@ -19395,7 +19399,7 @@ paths:
   /v1/agents/sessions/{id}/fork:
     post:
       description: |-
-        Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+        Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
         The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
       operationId: forkSession
       parameters:
@@ -21249,7 +21253,7 @@ paths:
     get:
       description: |-
         A WebSocket, which OpenAPI cannot describe past the upgrade. Text frames are JSON objects carrying a `type`.
-        The client's first frame is `start`, with `session` (a `CreateSessionRequest`) and an optional `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes one up for the records. A `text` session is refused, because the socket carries audio. A field that `createSession` refuses from an end user's device is refused here too: `history` and `call` are server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream call.
+        The client's first frame is `start`, with `session` (a `CreateSessionRequest`) and an optional `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes one up for the records. A `text` session is refused, because the socket carries audio. A field that `createSession` refuses from an end user's device is refused here too: `history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream call.
         The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away because the caller cut in. Tool calls and every other event go over the session's events socket, as they do for a call.
         A refused start is an `error` frame with `error`, the message, and the socket closes. An `error` frame for a field refused from a device also carries `code` and `error_type`, the `code` and `type` that `createSession` answers the same field with, and so does a session refused for money: `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or `spend_limit_reached` (`payment_required`).
         A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a speech-to-speech conversation that spends it closes.

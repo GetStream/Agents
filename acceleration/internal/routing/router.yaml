@@ -4146,16 +4146,10 @@ detection:
       tier: high-quality
       supports: [confidence, embeddings]
 
-    # The caller's own Roboflow Workflow, named in overwrites.roboflow by workspace and
-    # workflow_id or sent whole as a specification. Its price is whatever its blocks cost,
-    # so this is the detector's rate as a floor.
-    - provider: roboflow
-      model: workflow
-      description: "Your own Roboflow Workflow, named in overwrites. It must output predictions, and may output embeddings."
-      languages: [en]
-      realtime: true
-      tier: high-quality
-      supports: [confidence, embeddings]
+  retired:
+    # A caller's own Roboflow Workflow ran on the deployment's Roboflow account, where it
+    # could run any block Roboflow has at a price no image rate covers.
+    roboflow/workflow: roboflow/faces
 
   aliases:
     # The default: COCO's classes, quickest first.

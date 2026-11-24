@@ -109,12 +109,12 @@ func (s *StoreSuite) TestEveryCustomersDaytonaKeysAreReadTogether() {
 
 func (s *StoreSuite) TestProviderKeyQueryBudgets() {
 	key := s.providerKey("app", "openai", "global", "one")
-	s.Equal(4, s.countQueries(func() {
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			_, _, err := s.store.ProviderKeys.Upsert(s.ctx, &key)
 			s.Require().NoError(err)
 		}))
-	}), "begin, the row it replaces, the write, commit")
+	}), "begin, the row it replaces, the write, its transaction's id when there is a cache, commit")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ProviderKeys.Select(s.ctx, "app", ProviderKeyFilter{})
 		s.Require().NoError(err)
@@ -132,10 +132,10 @@ func (s *StoreSuite) TestProviderKeyQueryBudgets() {
 		all()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(all)) }), "then the local cache answers")
 	}
-	s.Equal(3, s.countQueries(func() {
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			_, err := s.store.ProviderKeys.Delete(s.ctx, "app", "openai", "global")
 			s.Require().NoError(err)
 		}))
-	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }

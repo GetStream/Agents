@@ -65,8 +65,8 @@ Chat's AI components (`StreamChatAI`), which build with Xcode 26 from 5.17.0. Th
 `stream-chat-swift` from its `develop` branch, because the voice glow (`AIVoiceGlowView`) is not
 in a released `StreamChatAI` yet.
 
-The Chat tab asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`; a call keeps the agent's faster model.
+The Chat tab runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one.
 
 Knowledge needs `TURBOPUFFER_API_KEY` on the router. Without it the sync says so and carries on:
 the agent keeps its instructions and its skill and loses the returns policy, and the refund

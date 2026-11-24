@@ -25,6 +25,7 @@ final readonly class ForkSessionRequest
         public ?bool $incognito = null,
         // Carry the parent's history into the fork, so the new conversation continues from what was already said. Fal...
         public ?bool $messages = null,
+        // Server-side only: a device sending it is refused with a 403.
         public ?ModelOverwrites $modelOverwrites = null,
         // What the fork belongs to. Omitted, the parent's project and its cost tag are kept. Sent server-side it is a...
         public ?string $projectId = null,

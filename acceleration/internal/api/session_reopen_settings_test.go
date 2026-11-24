@@ -211,6 +211,19 @@ func (s *SessionReopenSettingsSuite) TestADeviceDoesNotSetTheToolsOrTimeoutItsBa
 	s.Equal(180_000, held.ToolTimeoutMs)
 }
 
+func (s *SessionReopenSettingsSuite) TestADeviceCarriesOnAConversationEndedHereWithItsOverwrites() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.ModelOverwrites = &ModelOverwrites{Llm: pointerTo("counted/counted-model")}
+	opened := s.serverClient.actingFor(user).createSession(request)
+	s.endHere(opened.Id)
+
+	s.Require().Equal(http.StatusOK,
+		user.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, nil))
+
+	s.Equal("counted/counted-model", s.heldSpec(opened.Id).ModelOverwrites.LLM)
+}
+
 func (s *SessionReopenSettingsSuite) TestAConversationEndedHereIsCarriedOnWithItsTools() {
 	request := textSession(nil)
 	request.Tools = s.declared("lookup_order")
