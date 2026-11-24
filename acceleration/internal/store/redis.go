@@ -48,10 +48,11 @@ const missTTL = time.Minute
 // forgetAttempts is how many times a deletion Redis did not take is tried again, the first
 // forgetBackoff after it and each one twice as long after the last. forgetSlots bounds how
 // many are being retried at once, so a Redis that is down costs a few goroutines and not one
-// per write. forgetGrace is how long Close lets them run before it stops them: past the last
+// per write. Lost commits have as many of their own, so that waiting on them takes none from a
+// deletion Redis refused. forgetGrace is how long Close lets them run before it stops them: past the last
 // attempt of one that began as Close did, when Redis answers it promptly. One that waits on a
-// slow Redis can still be cut short at its third attempt, and one waiting for a lost commit to
-// end (settled) is cut short at once.
+// slow Redis can still be cut short at its third attempt, as is one still waiting for a lost
+// commit to end (settled).
 const (
 	forgetAttempts = 3
 	forgetBackoff  = 100 * time.Millisecond
@@ -325,8 +326,12 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 		}
 		return
 	}
+	slots := s.retries
+	if commit != 0 {
+		slots = s.lost
+	}
 	select {
-	case s.retries <- struct{}{}:
+	case slots <- struct{}{}:
 	default:
 		if commit != 0 {
 			slog.Default().Error("lost a commit's answer with no retry free to wait for it, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
@@ -338,7 +343,7 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 	s.retrying.Add(1)
 	go func() {
 		defer s.retrying.Done()
-		defer func() { <-s.retries }()
+		defer func() { <-slots }()
 		client := s.cache.Client()
 		// del deletes names, one DEL per key as forget sends them, since a cluster refuses one
 		// across slots, and returns those Redis did not take.
@@ -381,7 +386,7 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 		}
 		if commit != 0 {
 			if !s.settled(commit) {
-				slog.Default().Error("a commit whose answer was lost had not ended when the store stopped waiting, so the rows it changed can stay cached until they expire", "keys", len(names))
+				slog.Default().Error("a commit whose answer was lost had not ended when the store stopped waiting, so the rows it changed can stay cached until they expire", "keys", len(names), "error", err)
 				if s.closing.Err() != nil {
 					return
 				}
@@ -396,23 +401,30 @@ func (s *Store) forgetLater(names []string, err error, commit int64) {
 
 // commitWait bounds how long a lost COMMIT answer is waited on. A transaction whose COMMIT
 // never reached the server is rolled back once it has been idle for
-// idleInTransactionTimeout, which began before the answer was lost.
+// idleInTransactionTimeout, which began before the answer was lost. One whose DSN sets a longer
+// limit of its own can outlast the wait.
 const commitWait = idleInTransactionTimeout
 
 // settled waits until Postgres says transaction xid is no longer in progress, committed or
 // rolled back, and reports whether it said so before commitWait passed or the store closed.
-// txid_status counts a transaction that has committed but still waits on a synchronous
+// pg_xact_status counts a transaction that has committed but still waits on a synchronous
 // replica as in progress, since its rows are not yet visible to other sessions.
 func (s *Store) settled(xid int64) bool {
 	ctx, cancel := context.WithTimeout(s.closing, commitWait)
 	defer cancel()
 	wait := forgetBackoff
 	for {
-		// NULL is a transaction old enough to have left the commit log: long ended.
-		var status sql.NullString
-		err := s.global.NewSelect().ColumnExpr("txid_status(?)", xid).Scan(ctx, &status)
-		if err == nil && status.String != "in progress" {
-			return true
+		ended := make(chan bool, 1)
+		go func() { ended <- s.ended(ctx, xid) }()
+		// pgdriver heeds a context's deadline and not its cancellation, so a Postgres that
+		// stopped answering holds the query past the store's close. It ends by itself.
+		select {
+		case <-ctx.Done():
+			return false
+		case done := <-ended:
+			if done {
+				return true
+			}
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -423,4 +435,14 @@ func (s *Store) settled(xid int64) bool {
 		}
 		wait = min(2*wait, time.Second)
 	}
+}
+
+// ended asks Postgres, for at most forgetWait, whether transaction xid is no longer in progress.
+func (s *Store) ended(ctx context.Context, xid int64) bool {
+	ctx, cancel := context.WithTimeout(ctx, forgetWait)
+	defer cancel()
+	// NULL is a transaction old enough to have left the commit log: long ended.
+	var status sql.NullString
+	err := s.global.NewSelect().ColumnExpr("pg_xact_status(?::text::xid8)", xid).Scan(ctx, &status)
+	return err == nil && status.String != "in progress"
 }
