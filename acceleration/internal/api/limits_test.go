@@ -648,10 +648,11 @@ func (s *SelfHostedLimitsSuite) backend(app, organization string) *testClient {
 
 // spent records a billable request of app's, costing micros, now.
 func (s *SelfHostedLimitsSuite) spent(app string, micros int64) {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	_, err := s.store.Requests.InsertMany(context.Background(), []store.Request{{
 		Modality: "llm", CustomerID: app, APIKey: "key_a", Provider: "stub", Model: "stub-llm",
 		StartedAt: time.Now(), CostMicros: micros, Billable: true, Success: true,
-	}))
+	}})
+	s.Require().NoError(err)
 }
 
 // stranger is an app the router saw under organization, which has spent.
