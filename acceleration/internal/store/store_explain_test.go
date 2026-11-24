@@ -582,6 +582,22 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Users.ClaimGuest(ctx, "customer-7", "guest-7", "user-7")
 			return err
 		}},
+		{name: "CallLegs.RenameUser", index: "call_legs_user_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.CallLegs.RenameUser(ctx, "customer-7", "user-207", "user-207-renamed")
+			return err
+		}},
+		{name: "CallLegs.CountUser", index: "call_legs_user_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.CallLegs.CountUser(ctx, "customer-7", "user-207")
+			return err
+		}},
+		{name: "AgentLogs.DeleteUser", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
+			_, err := store.AgentLogs.DeleteUser(ctx, "customer-7", "user-207")
+			return err
+		}},
+		{name: "AgentLogs.CountUser", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
+			_, err := store.AgentLogs.CountUser(ctx, "customer-7", "user-207")
+			return err
+		}},
 		{name: "BranchMessages.CountUser", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.BranchMessages.CountUser(ctx, "customer-7", "user-7")
 			return err

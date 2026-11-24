@@ -342,6 +342,23 @@ func (s *TransitionSuite) TestACallCancelledBeforeItWasSentIsNotPlaced() {
 	s.Equal(NotPlaced, resultOf(err).Result)
 }
 
+func (s *TransitionSuite) TestAFailedPlacingIsRungAgainAfterAMinuteWithoutUsingTheAttempt() {
+	now := s.at(2, 10, 0)
+	err := fmt.Errorf("%w: %w: %w", phone.ErrNotPlaced, phone.ErrPlacingFailed, context.DeadlineExceeded)
+	dialed := resultOf(err)
+	s.Equal(Dialed{Result: NotPlaced, Reason: reasonPlacingFailed}, dialed)
+
+	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(2), 1, dialed, now, now)
+
+	s.False(again)
+	s.Equal(store.Enrolled, settle.Stage)
+	s.Equal(2, settle.Attempt)
+	s.True(now.Add(time.Minute).Equal(*settle.NextAttemptAt), settle.NextAttemptAt.String())
+	cancelled, _ := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(2), 1,
+		resultOf(fmt.Errorf("%w: %w", phone.ErrNotPlaced, context.Canceled)), now, now)
+	s.True(now.Equal(*cancelled.NextAttemptAt), "a dial a shutdown cut off is rung again at once")
+}
+
 func (s *TransitionSuite) TestACallCancelledWhileTheVendorWasDialingEndsUnknown() {
 	// The vendor may have taken the call and be ringing the person: going back unused would
 	// ring them again.
