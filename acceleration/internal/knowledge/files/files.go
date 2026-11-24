@@ -467,6 +467,15 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	}
 	current, err := s.waiting(ctx, payload)
 	if errors.Is(err, errOvertaken) {
+		// A removal still holding the row may have deleted the passages before this wrote
+		// them, so it is made to delete them again rather than find them left.
+		interrupted, failed := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID)
+		if failed != nil {
+			return failed
+		}
+		if interrupted {
+			return err
+		}
 		if _, gone := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID); errors.Is(gone, store.ErrNoKnowledgeDocument) {
 			if taken := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, len(passages))); taken != nil {
 				return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", taken)

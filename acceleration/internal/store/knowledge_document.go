@@ -40,7 +40,8 @@ type KnowledgeDocument struct {
 	Bytes       int64  `bun:"bytes,notnull"`
 	// ObjectKey is the uploaded file in the knowledge bucket while it waits to be read, and
 	// empty once it has been. A read that finds another key here was overtaken by a newer
-	// upload of the same source, and leaves the row to it.
+	// upload of the same source, and leaves the row to it. A removal holds the row the same
+	// way, under a key of its own (Take).
 	ObjectKey string    `bun:"object_key,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
 	UpdatedAt time.Time `bun:"updated_at,notnull"`
@@ -261,28 +262,73 @@ func (r *KnowledgeDocuments) Select(ctx context.Context, customerID string, filt
 	return documents, nil
 }
 
-// Delete forgets a document, and returns how many passages it last counted. Its passages are
-// the caller's to remove, since they are not in this database. The count is the row's as it
-// was deleted: a read of its file that wrote passages after the caller read the row counted
-// them on it first (Cover).
-func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id string) (int, error) {
+// removalKey begins the ObjectKey of a document being removed. A file's key begins with its
+// customer, so it is never one.
+const removalKey = "removing:"
+
+// removalUnfinished is the error of a document whose removal has not finished.
+const removalUnfinished = "Its removal did not finish. Delete it again."
+
+// Take begins the removal of a document, and returns the key the removal holds it under and
+// how many passages to remove. Its file is no longer read: the row lets go of it, as it does
+// for a newer upload. The row says failed until it is removed, so a removal that stops part
+// way leaves a document that is listed, not shown as found, and can be removed again.
+func (r *KnowledgeDocuments) Take(ctx context.Context, customerID, id string) (key string, passages int, err error) {
 	if customerID == "" || id == "" {
-		return 0, stack.Wrap(errors.New("store: a customer and a knowledge document id are required"))
+		return "", 0, stack.Wrap(errors.New("store: a customer and a knowledge document id are required"))
 	}
 
-	var passages []int
-	err := r.store.global.NewDelete().Model((*KnowledgeDocument)(nil)).
+	var taken []KnowledgeDocument
+	err = r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
+		Set("object_key = CASE WHEN object_key LIKE ? THEN object_key ELSE ? END", removalKey+"%", removalKey+newID()).
+		Set("state = ?", KnowledgeDocumentFailed).
+		Set("error = ?", removalUnfinished).
+		Set("updated_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
-		Returning("passages").
-		Scan(ctx, &passages)
+		Returning("object_key, passages").
+		Scan(ctx, &taken)
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: delete knowledge document: %w", err))
+		return "", 0, stack.Wrap(fmt.Errorf("store: take knowledge document: %w", err))
 	}
-	if len(passages) == 0 {
-		return 0, unknownKnowledgeDocument(id)
+	if len(taken) == 0 {
+		return "", 0, unknownKnowledgeDocument(id)
 	}
-	return passages[0], nil
+	return taken[0].ObjectKey, taken[0].Passages, nil
+}
+
+// Interrupt makes the removal a document is under take its passages away again, for a read
+// that wrote some after the removal began. It is false when no removal holds the document.
+func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id string) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
+		Set("object_key = ?", removalKey+newID()).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Where("object_key LIKE ?", removalKey+"%").
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: interrupt knowledge document removal: %w", err))
+	}
+	return updatedOne(result, "interrupt knowledge document removal")
+}
+
+// Delete forgets a document whose removal still holds it under key, once its passages are
+// gone, since they are not in this database. It is false when the document was uploaded,
+// posted or written for since the removal took it, and then it may have passages again.
+func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id, key string) (bool, error) {
+	if customerID == "" || id == "" || key == "" {
+		return false, stack.Wrap(errors.New("store: a customer, a knowledge document id and its removal's key are required"))
+	}
+
+	result, err := r.store.global.NewDelete().Model((*KnowledgeDocument)(nil)).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Where("object_key = ?", key).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: delete knowledge document: %w", err))
+	}
+	return updatedOne(result, "delete knowledge document")
 }
 
 // DeleteBase forgets every document and marks every page of one knowledge base as gone, and

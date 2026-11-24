@@ -6,19 +6,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // KnowledgeFilesSuite covers files uploaded to a knowledge base: read in the background into
@@ -36,6 +40,11 @@ func TestKnowledgeFilesSuite(t *testing.T) {
 func (s *KnowledgeFilesSuite) SetupTest() {
 	s.useApp(s.data.createApp())
 	s.namespace = "files-" + uuid.NewString()
+	s.T().Cleanup(func() {
+		s.knowledge.onceBeforeWrite(nil)
+		s.knowledge.onceBeforeDelete(nil)
+		s.knowledge.onceAfterDelete(nil)
+	})
 }
 
 func (s *KnowledgeFilesSuite) TestAPDFIsReadIntoPassagesThatSayTheirPage() {
@@ -154,42 +163,247 @@ func (s *KnowledgeFilesSuite) TestUploadingTheSameSourceAgainReplacesTheDocument
 func (s *KnowledgeFilesSuite) TestADocumentRemovedBeforeItsFileIsReadLeavesNothing() {
 	_, sent, _ := s.upload("removed.pdf", extractFixture(s.T(), "manual.pdf"), "")
 
-	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge/documents/"+sent.Id, nil, nil))
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
 
 	// Removed before the read or after it, the end is the same: no passage of it is found.
-	s.Never(func() bool {
-		_, passages := s.knowledge.stored()
-		for _, passage := range passages {
-			if strings.HasPrefix(passage.Source, "removed.pdf") {
-				return true
-			}
-		}
-		return false
-	}, time.Second, 20*time.Millisecond)
+	s.everyFileRead()
+	s.Zero(s.passagesOf("removed.pdf"))
 	s.Empty(s.listed())
 }
 
-// A removal reads the document, deletes its passages and then its row. A read of its file
-// that finishes between the two writes passages the removal did not count, and those go too.
+func (s *KnowledgeFilesSuite) TestAReadThatWritesAfterItsDocumentIsGoneTakesItBack() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("late.pdf", extractFixture(s.T(), "manual.pdf"), "")
+	s.reached(writing, "the read never wrote")
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	write()
+
+	s.everyFileRead()
+	s.Zero(s.passagesOf("late.pdf"))
+	s.Empty(s.listed())
+}
+
+func (s *KnowledgeFilesSuite) TestAReadThatWritesBetweenARemovalsPassagesAndItsRowLeavesNothing() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("between.pdf", extractFixture(s.T(), "manual.pdf"), "")
+	s.reached(writing, "the read never wrote")
+	s.knowledge.onceAfterDelete(func() {
+		write()
+		s.everyFileRead()
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+
+	s.Zero(s.passagesOf("between.pdf"))
+	s.Empty(s.listed())
+}
+
+// The removal read the row as uploaded, before the read of its file counted any passage on it.
 func (s *KnowledgeFilesSuite) TestAFileReadWhileItsDocumentIsRemovedLeavesNoPassage() {
 	_, sent, _ := s.upload("removing.pdf", extractFixture(s.T(), "manual.pdf"), "")
 	removing, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), sent.Id)
 	s.Require().NoError(err)
-	// The row as the removal read it: as uploaded, before the read counted any passage on it.
 	removing.Passages = 0
 	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
 
 	asked := routing.WithAttribution(context.Background(), routing.Attribution{APIKey: s.app.key})
 	s.Require().NoError(s.router.removeKnowledgeDocument(asked, removing))
 
-	_, passages := s.knowledge.stored()
-	var left []string
-	for _, passage := range passages {
-		if strings.HasPrefix(passage.Source, "removing.pdf") {
-			left = append(left, passage.Source)
-		}
+	s.Zero(s.passagesOf("removing.pdf"))
+	s.Empty(s.listed())
+}
+
+func (s *KnowledgeFilesSuite) TestAFileUploadedAgainWhileItsDocumentIsRemovedLeavesNoPassage() {
+	_, sent, _ := s.upload("again.pdf", extractFixture(s.T(), "manual.pdf"), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.knowledge.onceAfterDelete(func() {
+		_, again, _ := s.upload("again.pdf", extractFixture(s.T(), "manual.pdf"), "")
+		s.Equal(sent.Id, again.Id)
+		s.settled(again.Id)
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+
+	s.everyFileRead()
+	s.Zero(s.passagesOf("again.pdf"))
+	s.Empty(s.listed())
+}
+
+// The document made once the row is gone is a new one, so nothing the removal still does may
+// reach its passages.
+func (s *KnowledgeFilesSuite) TestADocumentMadeOnceItsSourceIsRemovedKeepsItsPassages() {
+	_, sent, _ := s.upload("new.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	posted := 0
+	post := func() {
+		posted++
+		s.Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
+			"namespace": s.namespace, "documents": []map[string]string{{"source": "new.md", "text": sections(8)}},
+		}, nil))
 	}
-	s.Empty(left, "no passage of the removed document is found")
+	// A removal that deletes passages again after the row finds the document posted then.
+	var onDelete func() error
+	onDelete = func() error {
+		if len(s.listed()) == 0 {
+			post()
+			return nil
+		}
+		s.knowledge.onceBeforeDelete(onDelete)
+		return nil
+	}
+	s.knowledge.onceBeforeDelete(func() error {
+		_, _, _ = s.upload("new.md", []byte(sections(8)), "")
+		s.settled(sent.Id)
+		s.knowledge.onceBeforeDelete(onDelete)
+		return nil
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.knowledge.onceBeforeDelete(nil)
+	if posted == 0 {
+		post()
+	}
+
+	s.Equal(1, posted)
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(8, listed[0].Passages)
+	s.Equal(8, s.passagesOf("new.md"))
+}
+
+// The first removal's passages fail to go once and its row stays, so the second finds it and
+// takes away all the first left.
+func (s *KnowledgeFilesSuite) TestARemovalThatFailsIsListedAndCanBeAskedAgain() {
+	_, sent, _ := s.upload("fail.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.knowledge.onceBeforeDelete(func() error {
+		_, _, _ = s.upload("fail.md", []byte(sections(8)), "")
+		s.settled(sent.Id)
+		s.knowledge.onceBeforeDelete(func() error { return errors.New("down") })
+		return nil
+	})
+
+	s.Require().Equal(http.StatusInternalServerError, s.remove(sent.Id))
+
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+	s.Require().NotNil(listed[0].Error)
+	s.Equal("Its removal did not finish. Delete it again.", *listed[0].Error)
+	s.Zero(s.removals(sent.Id), "what was not removed is not recorded as removed")
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+
+	s.Zero(s.passagesOf("fail.md"))
+	s.Empty(s.listed())
+	s.Equal(1, s.removals(sent.Id))
+}
+
+func (s *KnowledgeFilesSuite) TestARemovalWhoseCallerHungUpCanBeAskedAgain() {
+	_, sent, _ := s.upload("hungup.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	removing, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), sent.Id)
+	s.Require().NoError(err)
+	ctx, hangUp := context.WithCancel(routing.WithAttribution(context.Background(), routing.Attribution{APIKey: s.app.key}))
+	// Uploaded again and read before the caller hung up, so it is found again when it does.
+	s.knowledge.onceBeforeDelete(func() error {
+		_, _, _ = s.upload("hungup.md", []byte(sections(8)), "")
+		s.settled(sent.Id)
+		hangUp()
+		return ctx.Err()
+	})
+
+	s.Require().ErrorIs(s.router.removeKnowledgeDocument(ctx, removing), context.Canceled)
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Zero(s.passagesOf("hungup.md"))
+	s.Empty(s.listed())
+}
+
+// Once its passages are gone a removal is finished whether or not its caller still waits.
+func (s *KnowledgeFilesSuite) TestARemovalWhoseCallerHungUpAfterThePassagesWentIsFinished() {
+	_, sent, _ := s.upload("finished.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	removing, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), sent.Id)
+	s.Require().NoError(err)
+	ctx, hangUp := context.WithCancel(context.WithValue(routing.WithAttribution(context.Background(), routing.Attribution{APIKey: s.app.key}), customerContextKey{}, s.customerID()))
+	// The file is put back as if the read had not taken it, to see the removal forget it.
+	removing.ObjectKey = s.customerID() + "/kept/finished.md"
+	_, err = s.knowledgeBucket.Write(context.Background(), removing.ObjectKey, "text/markdown", strings.NewReader("kept"))
+	s.Require().NoError(err)
+	s.knowledge.onceAfterDelete(hangUp)
+
+	s.Require().NoError(s.router.removeKnowledgeDocument(ctx, removing))
+
+	s.Zero(s.passagesOf("finished.md"))
+	s.Empty(s.listed())
+	s.Equal(1, s.removals(sent.Id))
+	_, err = s.knowledgeBucket.Read(context.Background(), removing.ObjectKey)
+	s.Error(err, "the file is deleted with its document")
+}
+
+func (s *KnowledgeFilesSuite) TestTwoRemovalsOfADocumentAtOnceBothFinish() {
+	_, sent, _ := s.upload("twice.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	var second int
+	s.knowledge.onceAfterDelete(func() { second = s.remove(sent.Id) })
+
+	first := s.remove(sent.Id)
+
+	s.Equal(http.StatusNoContent, second)
+	s.Equal(http.StatusNoContent, first)
+	s.Zero(s.passagesOf("twice.md"))
+	s.Empty(s.listed())
+	s.Equal(1, s.removals(sent.Id), "it was removed once")
+}
+
+// Removals that begin during one another must not each keep the other from ending.
+func (s *KnowledgeFilesSuite) TestARemovalIsNotHeldUpByAnotherThatBegins() {
+	_, sent, _ := s.upload("begun.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	deletes := 0
+	var begin func() error
+	begin = func() error {
+		deletes++
+		_, _, err := s.store.KnowledgeDocuments.Take(context.Background(), s.customerID(), sent.Id)
+		s.knowledge.onceBeforeDelete(begin)
+		return err
+	}
+	s.knowledge.onceBeforeDelete(begin)
+
+	s.Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Equal(1, deletes)
+	s.Empty(s.listed())
+}
+
+// A source written over and over keeps its removal from finishing: it ends, and says so.
+func (s *KnowledgeFilesSuite) TestARemovalOfADocumentWrittenAgainAndAgainIsAConflict() {
+	_, sent, _ := s.upload("busy.md", []byte(sections(3)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	deletes := 0
+	var again func() error
+	again = func() error {
+		deletes++
+		_, _, _ = s.upload("busy.md", []byte(sections(3)), "")
+		s.settled(sent.Id)
+		s.knowledge.onceBeforeDelete(again)
+		return nil
+	}
+	s.knowledge.onceBeforeDelete(again)
+
+	s.Require().Equal(http.StatusConflict, s.remove(sent.Id))
+	s.knowledge.onceBeforeDelete(nil)
+
+	s.Equal(5, deletes)
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State, "its passages may be gone, so it is not shown as found")
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Zero(s.passagesOf("busy.md"))
 	s.Empty(s.listed())
 }
 
@@ -305,6 +519,50 @@ func (s *KnowledgeFilesSuite) settled(id string) IndexedKnowledgeDocument {
 		return status == http.StatusOK && read.State != KnowledgeDocumentStatePending
 	}, 30*time.Second, 20*time.Millisecond, "the file was never read")
 	return read
+}
+
+func (s *KnowledgeFilesSuite) remove(id string) int {
+	return s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge/documents/"+id, nil, nil)
+}
+
+// holdWrite holds the next write to the base until write is called, and closes writing once
+// it is there.
+func (s *KnowledgeFilesSuite) holdWrite() (writing chan struct{}, write func()) {
+	writing, released := make(chan struct{}), make(chan struct{})
+	write = sync.OnceFunc(func() { close(released) })
+	s.T().Cleanup(write)
+	s.knowledge.onceBeforeWrite(func() {
+		close(writing)
+		<-released
+	})
+	return writing, write
+}
+
+func (s *KnowledgeFilesSuite) reached(point <-chan struct{}, otherwise string) {
+	select {
+	case <-point:
+	case <-time.After(30 * time.Second):
+		s.FailNow(otherwise)
+	}
+}
+
+// everyFileRead waits until no uploaded file waits to be read or is being read.
+func (s *KnowledgeFilesSuite) everyFileRead() {
+	inspector := asynq.NewInspector(s.knowledgeRedis)
+	defer func() { s.NoError(inspector.Close()) }()
+	s.Eventually(func() bool {
+		queue, err := inspector.GetQueueInfo(s.knowledgeQueue)
+		return err == nil && queue.Pending+queue.Active+queue.Scheduled+queue.Retry == 0
+	}, 30*time.Second, 20*time.Millisecond, "a file is still being read")
+}
+
+// removals is how many times the document's removal is on the app's history.
+func (s *KnowledgeFilesSuite) removals(id string) int {
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.AuditEntry)(nil)).
+		Where("customer_id = ? AND resource_id = ? AND action = ?", s.customerID(), id, store.AuditDeleted).
+		Count(context.Background())
+	s.Require().NoError(err)
+	return count
 }
 
 func (s *KnowledgeFilesSuite) listed() []IndexedKnowledgeDocument {

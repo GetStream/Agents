@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -444,21 +445,59 @@ func (s *Server) forgetKnowledge(
 	return nil
 }
 
+// removeAttempts bounds a removal whose source an upload, a post or a read keeps writing.
+const removeAttempts = 5
+
 // removeKnowledgeDocument deletes a document's passages and then its row. The passages go
 // first: a document we have forgotten but are still answering out of is the failure worth
-// avoiding. A read of its file can finish between the two and write passages document does
-// not count, so those the row counted as it was deleted go after it.
-func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) error {
+// avoiding, and once the row is gone the same passages may be a new document's of its source.
+//
+// An upload, a post or a read can write passages while they are deleted. Each changes the key
+// the removal holds the row under, so the row is deleted only if none did, and otherwise the
+// passages are deleted again.
+func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) (err error) {
 	owned := s.knowledgeFor(ctx, document.CustomerID, "")
-	if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, document.Passages)); err != nil {
-		return err
+	defer func() {
+		if err == nil {
+			return
+		}
+		// A document written again meanwhile may have lost passages to the removal, so it is
+		// marked too, for a caller that hung up as well.
+		held, cancel := detachedWrite(ctx)
+		defer cancel()
+		if _, _, markErr := s.store.KnowledgeDocuments.Take(held, document.CustomerID, document.ID); markErr != nil && !errors.Is(markErr, store.ErrNoKnowledgeDocument) {
+			s.logger.Warn("could not mark a knowledge document whose removal failed", "id", document.ID, "error", markErr)
+		}
+	}()
+	for range removeAttempts {
+		key, passages, err := s.store.KnowledgeDocuments.Take(ctx, document.CustomerID, document.ID)
+		if errors.Is(err, store.ErrNoKnowledgeDocument) {
+			// Another removal of it finished first.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, passages)); err != nil {
+			return err
+		}
+		removed, err := s.forgetKnowledgeDocument(ctx, document, key)
+		if err != nil || removed {
+			return err
+		}
 	}
-	passages, err := s.store.KnowledgeDocuments.Delete(ctx, document.CustomerID, document.ID)
-	if err != nil {
-		return err
-	}
-	if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, document.Passages, passages)); err != nil {
-		return err
+	return conflict("the document is being written while it is removed: delete it again")
+}
+
+// forgetKnowledgeDocument deletes the row of a document whose passages are gone, its file and
+// records the removal, and reports whether the removal still held the row. It outlives the
+// request: past the passages, a caller that hung up must not leave the rest undone.
+func (s *Server) forgetKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument, key string) (bool, error) {
+	ctx, cancel := detachedWrite(ctx)
+	defer cancel()
+	removed, err := s.store.KnowledgeDocuments.Delete(ctx, document.CustomerID, document.ID, key)
+	if err != nil || !removed {
+		return false, err
 	}
 	if s.knowledgeFiles != nil {
 		if err := s.knowledgeFiles.Forget(ctx, document); err != nil {
@@ -471,7 +510,7 @@ func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.Kno
 		Action:  store.AuditDeleted,
 		Changes: auditDiff(auditedKnowledgeOf(document), nil),
 	})
-	return nil
+	return true, nil
 }
 
 // knowledgeFor is the knowledge base as the request reads and writes it: every call is a

@@ -20,8 +20,16 @@ func (s *StoreSuite) TestAKnowledgeDocumentIsOnlyItsOwnCustomers() {
 	s.Require().NoError(err)
 	s.Require().Len(listed, 1)
 	s.Equal(mine.ID, listed[0].ID)
-	_, err = s.store.KnowledgeDocuments.Delete(s.ctx, "other-app", mine.ID)
+	_, _, err = s.store.KnowledgeDocuments.Take(s.ctx, "other-app", mine.ID)
 	s.ErrorIs(err, ErrNoKnowledgeDocument)
+	key, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "other-app", mine.ID)
+	s.Require().NoError(err)
+	s.False(interrupted)
+	deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "other-app", mine.ID, key)
+	s.Require().NoError(err)
+	s.False(deleted)
 	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &KnowledgeDocument{ID: mine.ID, CustomerID: "other-app"}, "")
 	s.Require().NoError(err)
 	s.False(finished)
@@ -144,8 +152,48 @@ func (s *StoreSuite) TestKnowledgeDocumentQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() { s.knowledgeDocument("acme-app", "docs", "faq.pdf") }))
+	var key string
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", file.ID)
+		var err error
+		key, _, err = s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", file.ID)
 		s.Require().NoError(err)
 	}))
+	s.Equal(1, s.countQueries(func() {
+		deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", file.ID, key)
+		s.Require().NoError(err)
+		s.True(deleted)
+	}))
+}
+
+func (s *StoreSuite) TestARemovalDeletesOnlyTheDocumentItStillHolds() {
+	mine, other := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "hours.md")
+	key, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+
+	deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", other.ID, key)
+	s.Require().NoError(err)
+	s.False(deleted)
+	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
+	s.Require().NoError(err)
+	s.Equal(KnowledgeDocumentIndexed, untouched.State)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", other.ID)
+	s.Require().NoError(err)
+	s.False(interrupted, "nothing removes it")
+
+	interrupted, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.True(interrupted)
+	deleted, err = s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
+	s.Require().NoError(err)
+	s.False(deleted, "passages were written since")
+	held, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.NotEqual(key, held.ObjectKey)
+	s.Equal(KnowledgeDocumentFailed, held.State)
+
+	key, _, err = s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	deleted, err = s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
+	s.Require().NoError(err)
+	s.True(deleted)
 }
