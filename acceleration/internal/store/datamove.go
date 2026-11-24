@@ -1657,6 +1657,12 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 	}
+	// The http source runs a stored tool before the call-time checks of AI-3675 exist, and the
+	// API stores no http connector before AI-3676, so no import stores one either, even one the
+	// rules above let through. AI-3676 lifts this.
+	if core.HTTPSource(custom.Sources) != nil {
+		return nil, fmt.Errorf("store: imported connector definition %q: %w: an http connector cannot be imported yet", id, ErrNotACustomConnector)
+	}
 	if fields["manifest"], err = json.Marshal(custom); err != nil {
 		return nil, stack.Wrap(err)
 	}

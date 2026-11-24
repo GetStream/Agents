@@ -827,6 +827,10 @@ func (m Manifest) Validate() error {
 			}
 		}
 		if source.Kind == SourceKindHTTP {
+			// The http source reads only the first one (HTTPSource), as the mcp source does.
+			if HTTPSource(m.Sources) != &m.Sources[i] {
+				fail(field+".kind", "is http a second time: a manifest has at most one http source")
+			}
 			checkHTTPSource(fail, field, source)
 		} else if len(source.HTTPTools) > 0 {
 			fail(field+".http_tools", "is set only on a source of kind %s", SourceKindHTTP)

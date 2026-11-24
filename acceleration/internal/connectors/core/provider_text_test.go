@@ -93,6 +93,15 @@ func (s *LoggedMessageSuite) TestAToolErrorIsTheToolsOwnWords() {
 	s.Equal("the record is locked", core.LoggedMessage(err, nil))
 }
 
+// S1.1 of AI-3674: what an UnreachedError keeps from the model is on the line, its URL kept to
+// its host as any other's.
+func (s *LoggedMessageSuite) TestAnUnreachedErrorAddsWhatFailed() {
+	sending := &url.Error{Op: "Get", URL: "https://crm.example/people/u1?email=alice%40example.com", Err: io.EOF}
+	err := stack.Wrap(&core.UnreachedError{Message: "http: crm__lookup: the API could not be reached", Err: sending})
+
+	s.Equal(`http: crm__lookup: the API could not be reached: Get "https://crm.example": EOF`, core.LoggedMessage(err, nil))
+}
+
 func (s *LoggedMessageSuite) TestNoErrorIsNoMessage() {
 	s.Empty(core.LoggedMessage(nil, nil))
 }
