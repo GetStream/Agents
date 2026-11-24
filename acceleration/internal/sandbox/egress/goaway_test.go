@@ -294,7 +294,7 @@ func (s *ProxySuite) TestABodyCutShortIsNoRequest() {
 
 // stalled opens a tunnel and sends a POST to path whose body stops short: declared keptBody and one byte missing, or
 // chunked with its first chunk of keptBody bytes sent and no end.
-func (s *ProxySuite) stalled(path string, chunked bool) {
+func (s *ProxySuite) stalled(path string, chunked bool) *tls.Conn {
 	conn := s.tunnel(&tls.Config{})
 	head := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: api.github.test\r\nAuthorization: Bearer %s\r\n", path, s.placeholder)
 	var err error
@@ -304,6 +304,7 @@ func (s *ProxySuite) stalled(path string, chunked bool) {
 		_, err = fmt.Fprintf(conn, "%sContent-Length: %d\r\n\r\n%s", head, keptBody, strings.Repeat("x", keptBody-1))
 	}
 	s.Require().NoError(err)
+	return conn
 }
 
 // TestStalledBodiesKeepNoMoreThanTheBudget: with a budget of one keptBody, a tunnel whose body stops short, sized or
@@ -312,6 +313,7 @@ func (s *ProxySuite) stalled(path string, chunked bool) {
 // stalled tunnels held 1,282,816 bytes each, the base 261,248).
 func (s *ProxySuite) TestStalledBodiesKeepNoMoreThanTheBudget() {
 	s.readsUploadPack()
+	open := s.metric("router_sandbox_egress_tunnels_open", nil)
 	for _, chunked := range []bool{false, true} {
 		s.overHTTP2(func(options *egress.Options) { options.KeptBodies = keptBody })
 		arrived := make(chan string, 2)
@@ -322,8 +324,8 @@ func (s *ProxySuite) TestStalledBodiesKeepNoMoreThanTheBudget() {
 			<-release
 		})
 
-		s.stalled("/o/a.git/git-upload-pack", chunked)
-		s.stalled("/o/b.git/git-upload-pack", chunked)
+		a := s.stalled("/o/a.git/git-upload-pack", chunked)
+		b := s.stalled("/o/b.git/git-upload-pack", chunked)
 
 		select {
 		case path := <-arrived:
@@ -331,7 +333,11 @@ func (s *ProxySuite) TestStalledBodiesKeepNoMoreThanTheBudget() {
 		case <-time.After(5 * time.Second):
 			s.Fail("the second stalled body was kept as well: the host got nothing from it", boolName("chunked", chunked))
 		}
+		// The handlers end before the next test starts: they read the suite's fields.
 		close(release)
+		_ = a.Close()
+		_ = b.Close()
+		s.Eventually(func() bool { return s.metric("router_sandbox_egress_tunnels_open", nil) == open }, 5*time.Second, 10*time.Millisecond)
 	}
 }
 
