@@ -48,8 +48,8 @@ func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesTheKeysAnd
 }
 
 func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesTheKeysWithNothingOfStreams() {
-	// A fork answers with the error's own text (refusedRequest), which carried Stream's
-	// answer after the sentence until the refusal read as the sentence alone.
+	// A fork is refused through refusedRequest, which answered this refusal as a 500 saying
+	// only that something went wrong.
 	parent := s.serverClient.createSession(textSession(nil))
 	s.refuseTheKeys()
 
@@ -57,6 +57,7 @@ func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesTheKeysWithNo
 		ForkSessionRequest{Messages: pointerTo(false)})
 
 	s.Equal(http.StatusBadRequest, status, body)
+	s.Equal("not_configured", failure.Code, "the same refusal as a create's")
 	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
 	s.Contains(failure.Message, "incognito: true")
 	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
