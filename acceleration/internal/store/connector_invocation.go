@@ -119,17 +119,31 @@ type ConnectorInvocations struct {
 
 // Insert stores one call.
 func (r *ConnectorInvocations) Insert(ctx context.Context, invocation *ConnectorInvocation) error {
-	if err := invocation.Validate(); err != nil {
-		return stack.Wrap(err)
+	invocations := []ConnectorInvocation{*invocation}
+	err := r.InsertMany(ctx, invocations)
+	*invocation = invocations[0]
+	return err
+}
+
+// InsertMany stores calls in one statement, and none of them when one is refused.
+func (r *ConnectorInvocations) InsertMany(ctx context.Context, invocations []ConnectorInvocation) error {
+	for i := range invocations {
+		invocation := &invocations[i]
+		if err := invocation.Validate(); err != nil {
+			return stack.Wrap(err)
+		}
+		// A caller that names the call before the row exists (the session's log line, AI-1242)
+		// keeps its id.
+		if invocation.ID == "" {
+			invocation.ID = newID()
+		}
+		// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
+		invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
 	}
-	// A caller that names the call before the row exists (the session's log line, AI-1242)
-	// keeps its id.
-	if invocation.ID == "" {
-		invocation.ID = newID()
+	if len(invocations) == 0 {
+		return nil
 	}
-	// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
-	invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
-	_, err := r.store.global.NewInsert().Model(invocation).Exec(ctx)
+	_, err := r.store.global.NewInsert().Model(&invocations).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record connector invocation: %w", err))
 	}
