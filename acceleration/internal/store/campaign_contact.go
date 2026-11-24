@@ -272,9 +272,7 @@ func (r *CampaignContacts) Update(ctx context.Context, campaignID, contactID str
 		if changes.ToNumber == "" {
 			return errors.New("store: a contact needs a number to ring")
 		}
-		if changes.Variables == nil {
-			changes.Variables = map[string]string{}
-		}
+		changes.Variables = orEmptyMap(changes.Variables)
 		err = tx.NewUpdate().Model(&changed).
 			Set("to_number = ?", changes.ToNumber).
 			Set("variables = ?", changes.Variables).
