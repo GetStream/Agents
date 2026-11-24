@@ -3016,6 +3016,24 @@ func (s *ScheduledTasksSuite) TestAFailedTaskCannotBeRescheduledSoonerThanAQuart
 	s.Equal(store.ScheduledTaskFailed, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }
 
+// The same for a completed task: the agent's reschedule that names no new time arms it from its
+// schedule as written, so a device could write one two minutes out and have the agent arm it.
+func (s *ScheduledTasksSuite) TestACompletedTaskCannotBeRescheduledSoonerThanAQuarterHour() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, utcTaskRequest(config))
+	due := s.ranOut(created.Id, store.ScheduledTaskCompleted, time.Now().Add(-time.Hour), 0)
+
+	status, answered := s.taskFailure(user, http.MethodPatch, "/v1/agents/scheduled-tasks/"+created.Id,
+		UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo("PT2M")}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code)
+	reloaded := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Equal(store.ScheduledTaskCompleted, reloaded.State)
+	s.True(due.Equal(reloaded.StartLocal), "the refused schedule was stored: %s", reloaded.StartLocal)
+}
+
 func (s *ScheduledTasksSuite) TestATaskWithNoOccurrenceLeftIsRefusedBeforeItsLimitOrItsConfigIsAsked() {
 	limited := s.agentWithScheduling(func(request *AgentConfigRequest) {
 		request.Scheduling.MaxTasksPerUser = pointerTo(1)

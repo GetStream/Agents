@@ -656,7 +656,6 @@ func (s *TelnyxChannelSuite) TestAThreadTaskSaysItIsDeliveredOnTheThreadsChannel
 	s.Equal([]string{"sms"}, task.Channels)
 }
 
-// A task the agent schedules in a delivered task's turn keeps the thread and its channel too.
 // A task's turn on a thread is as much the customer's spend as one in a conversation, so it
 // cannot make a task either.
 func (s *TelnyxChannelSuite) TestATasksTurnOnAThreadCannotScheduleATask() {
