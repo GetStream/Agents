@@ -223,8 +223,10 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				writeImportFailure(w, r, err)
 				return
 			}
-			rows++
-			tables[line.Change.Table]++
+			if !line.Change.Skipped() {
+				rows++
+				tables[line.Change.Table]++
+			}
 		case line.Table != "":
 			if !checked {
 				table, err := s.store.HoldingTable(r.Context(), customerID)

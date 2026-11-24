@@ -1805,6 +1805,24 @@ func (s *DataMoveSuite) TestAPolicyChangeNamingNoScopeIsNotReplayed() {
 	s.True(*document.PromptInjection)
 }
 
+// A change whose key is not an object names no scope either.
+func (s *DataMoveSuite) TestAPolicyChangeWhoseKeyIsNotAnObjectIsNotReplayed() {
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "policies", Op: ChangeUpdate, At: time.Now(), Key: json.RawMessage(`"acme"`),
+		Payload: json.RawMessage(`{"scope": "organization", "scope_id": "acme", "document": {"prompt_injection": false}, "updated_at": "2026-11-23T00:00:00Z"}`),
+	}}))
+
+	document, err := s.destination.Policies.Get(s.ctx, ScopeApp, "acme")
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection)
+	s.True(*document.PromptInjection)
+}
+
 // The organization's policy is left out before the limit, so the page still holds the app's
 // own change after it, and a follower is not told it caught up early.
 // The organization's policy is still one of the app's rows in the feed, so pruning it would expire
@@ -2157,6 +2175,205 @@ func (s *DataMoveSuite) TestAReplayedVoiceChangeIsServedRightAfterIt() {
 	voice, err := destination.Voices.Get(s.ctx, app, id)
 	s.Require().NoError(err)
 	s.Equal("announcer", voice.Name)
+}
+
+func (s *DataMoveSuite) TestAVoiceDeletedAtTheSourceIsNoLongerSpokenInAfterTheReplay() {
+	destination, app, id, cursor := s.voiceSpokenInHere()
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE voices SET deleted_at = now() WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+func (s *DataMoveSuite) TestAVoiceRemovedAtTheSourceIsNoLongerSpokenInAfterTheReplay() {
+	destination, app, id, cursor := s.voiceSpokenInHere()
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM voices WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+func (s *DataMoveSuite) TestAVoiceImportedDeletedIsNoLongerSpokenIn() {
+	destination, app, id, _ := s.voiceSpokenInHere()
+	exported := s.export("acme").of("voices")[0]
+	exported["deleted_at"] = "2026-01-01T00:00:00Z"
+	row, err := json.Marshal(exported)
+	s.Require().NoError(err)
+
+	s.Require().NoError(destination.ImportRow(s.ctx, app, "voices", row))
+
+	_, err = destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+// The name an import forgets is the one the row had when the import wrote it: a rename here that
+// commits while the import waits for the row is not left served.
+func (s *DataMoveSuite) TestAnImportForgetsTheNameARenameWhileItWaitedGaveTheVoice() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.moveTo(destination, "acme", app)
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	db := destination.GlobalDB()
+
+	renaming, err := db.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = renaming.Rollback() }()
+	_, err = renaming.ExecContext(s.ctx, "UPDATE voices SET name = 'announcer' WHERE id = ?", id)
+	s.Require().NoError(err)
+	holding, err := db.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	held := make(chan error, 1)
+	go func() {
+		_, err := holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", id)
+		held <- err
+	}()
+	s.waitingOnALock(db, "SELECT 1 FROM voices")
+	imported := make(chan error, 1)
+	go func() { imported <- destination.ImportRow(s.ctx, app, "voices", row) }()
+	s.waitingOnALock(db, "INSERT INTO voices")
+
+	s.Require().NoError(renaming.Commit())
+	s.Require().NoError(<-held)
+	_, err = destination.Voices.GetByName(s.ctx, app, "announcer")
+	s.Require().NoError(err)
+	s.Require().NoError(holding.Commit())
+	s.Require().NoError(<-imported)
+
+	_, err = destination.Voices.GetByName(s.ctx, app, "announcer")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+// waitingOnALock waits for a statement holding text to wait on a lock.
+func (s *DataMoveSuite) waitingOnALock(db *bun.DB, text string) {
+	s.Require().Eventually(func() bool {
+		var waiting bool
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM pg_stat_activity"+
+			" WHERE datname = current_database() AND wait_event_type = 'Lock' AND strpos(query, ?) > 0)", text).Scan(&waiting))
+		return waiting
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// voiceSpokenInHere is a voice of acme's moved to a cached destination, prepared there and spoken
+// in, so its ready binding is cached, with the cursor its changes carry on from.
+func (s *DataMoveSuite) voiceSpokenInHere() (destination *Store, app, id string, cursor int64) {
+	destination = s.cachedDestination()
+	app = "moved-" + newID()
+	s.capture("acme")
+	id = s.seedVoice(s.source, "acme", "narrator")
+	cursor = s.moveTo(destination, "acme", app)
+	s.Require().NoError(destination.VoiceBindings.Upsert(s.ctx, &VoiceBinding{
+		VoiceID: id, Provider: "elevenlabs", ExternalID: "el-narrator", State: VoiceReady,
+	}))
+	external, err := destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.Require().NoError(err)
+	s.Require().Equal("el-narrator", external)
+	return destination, app, id, cursor
+}
+
+// A rollup row is keyed by its hour, which a change carries as JSON text.
+func (s *DataMoveSuite) TestARollupRowDeletedAtTheSourceIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO stats_hourly
+		(modality, customer_id, provider, model, bucket, audio_ms_total, characters_total, cost_micros_total, error_count, request_count)
+		VALUES ('llm', 'acme', 'openai', 'gpt-4o', '2026-01-01 00:00:00+00', 0, 0, 0, 0, 3)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("stats_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM stats_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("stats_hourly"))
+}
+
+func (s *DataMoveSuite) TestATurnRollupRowDeletedAtTheSourceIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		`INSERT INTO turn_stats_hourly (customer_id, agent_id, bucket, audio_out_ms_total, interrupted_count, turn_count)
+		VALUES ('acme', 'agent', '2026-01-01 05:00:00+00', 0, 0, 2)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("turn_stats_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM turn_stats_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("turn_stats_hourly"))
+}
+
+// A user the destination already recorded is held in its memory; a replay that removes their row
+// drops that, so their next request records them again.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainOnTheirNextRequest() {
+	s.capture("acme")
+	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.move("acme", "moved")
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "alice", UserKindAuthenticated))
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+	s.Require().Zero(s.usersHeld(s.destination, "moved", "alice"))
+
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "alice", UserKindAuthenticated))
+	s.Equal(1, s.usersHeld(s.destination, "moved", "alice"))
+}
+
+// The same through Redis, which every replica reads.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRedis() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.moveTo(destination, "acme", app)
+	s.Require().NoError(destination.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+	// Another replica: its memory holds nothing, so only Redis can say alice was recorded.
+	other := s.cachedDestination()
+
+	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+	s.Equal(1, s.usersHeld(destination, app, "alice"))
+}
+
+// A user recorded here from their own token, then imported as the guest the source still had them
+// as, is recorded again from their next token.
+func (s *DataMoveSuite) TestAUserImportedOverOneSeenHereIsRecordedAgainOnTheirNextRequest() {
+	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
+	row, err := json.Marshal(s.export("acme").of("users")[0])
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "users", row))
+	s.Require().Equal("guest", s.userKind(s.destination, "moved", "bob"))
+
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
+	s.Equal("authenticated", s.userKind(s.destination, "moved", "bob"))
+}
+
+func (s *DataMoveSuite) usersHeld(store *Store, customerID, id string) int {
+	var held int
+	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM users WHERE customer_id = ? AND id = ?", customerID, id).Scan(&held))
+	return held
+}
+
+func (s *DataMoveSuite) userKind(store *Store, customerID, id string) string {
+	var kind string
+	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT kind FROM users WHERE customer_id = ? AND id = ?", customerID, id).Scan(&kind))
+	return kind
 }
 
 func (s *DataMoveSuite) seedAgentConfig(store *Store, customerID, name string) string {

@@ -367,6 +367,25 @@ func (s *DataMoveSuite) TestChangesAreAppliedToAnAppThatHoldsData() {
 	s.Equal("edited at the source", s.instructionsOf(agent.Id))
 }
 
+// A change to a policy of another scope is skipped, so the answer counts no row for it.
+func (s *DataMoveSuite) TestAChangeToAnotherScopesPolicyIsNotCountedAsWritten() {
+	key := `{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) + `}`
+	lines := []dataLine{{Change: &store.DataChange{
+		Seq: 1, Table: "policies", Op: store.ChangeUpdate, At: time.Now(), Key: json.RawMessage(key),
+		Payload: json.RawMessage(`{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) +
+			`, "document": {"prompt_injection": true}, "updated_at": "2026-01-01T00:00:00Z"}`),
+	}}}
+	var answer struct {
+		Rows   int64            `json:"rows"`
+		Tables map[string]int64 `json:"tables"`
+	}
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(lines), &answer))
+
+	s.Equal(int64(0), answer.Rows)
+	s.Empty(answer.Tables)
+}
+
 func (s *DataMoveSuite) TestAnImportedBoughtNumberIsNotStored() {
 	ctx := context.Background()
 	other, e164 := s.utils.uuid(), s.utils.number()

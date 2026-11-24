@@ -792,6 +792,7 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 		return err
 	}
 	s.forget(ctx, stale...)
+	s.Users.forgetKeys(stale)
 	return nil
 }
 
@@ -996,38 +997,40 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// Every writer of a log draws its id under its customer's lock (AgentLogs.Insert), so ids
 	// commit in order and a reader resuming after one misses none. The row is read through the
 	// lock, so it is taken before the id is drawn and held until the statement's transaction ends.
-	locked, through := "", ""
+	locked, through, returning := "", "", ""
 	if table == "agent_logs" {
 		locked, through = "WITH locked AS (SELECT pg_advisory_xact_lock(hashtextextended(?, ?))) ", "locked, "
 		args = append([]any{customerID, agentLogLockSeed}, args...)
 	}
+	// A row renamed, or a skill moved to another config, is cached under what it was too. What it
+	// was is read in the statement that writes it, locked, so the one forgotten is the one a
+	// concurrent write did not already replace. It is read in the FROM, so before the row is written.
+	if cachedByID(table) {
+		locked, through = fmt.Sprintf("WITH was AS (SELECT (SELECT to_jsonb(h) FROM %s AS h"+
+			" WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ? FOR UPDATE) AS prior) ", spec.name), "was, "
+		args = append([]any{string(row), customerID}, args...)
+		returning = " RETURNING (SELECT prior FROM was), " + cachedRow(table, spec.name)
+	}
 
 	query := fmt.Sprintf(
-		"%sINSERT INTO %s (%s) SELECT %s FROM %sjsonb_populate_record(NULL::%s, %s) AS r%s ON CONFLICT %s %s",
-		locked, spec.name, quoted, selected, through, spec.name, subject, where, spec.conflictTarget(shape), conflict)
+		"%sINSERT INTO %s (%s) SELECT %s FROM %sjsonb_populate_record(NULL::%s, %s) AS r%s ON CONFLICT %s %s%s",
+		locked, spec.name, quoted, selected, through, spec.name, subject, where, spec.conflictTarget(shape), conflict, returning)
 
-	// A row renamed, or a skill moved to another config, is cached under what it was too.
-	var was []byte
-	if cachedByID(table) {
-		err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT to_jsonb(h) FROM %s AS h WHERE h.id::text = ?::jsonb ->> 'id' AND h.customer_id = ?",
-			spec.name), string(row), customerID).Scan(&was)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var written int64
+	if returning == "" {
+		result, err := db.ExecContext(ctx, query, args...)
+		if err != nil {
+			if refused := refusedRow(table, err); refused != nil {
+				return refused
+			}
 			return fmt.Errorf("store: import %s: %w", table, err)
 		}
-	}
-
-	result, err := db.ExecContext(ctx, query, args...)
-	if err != nil {
-		if refused := refusedRow(table, err); refused != nil {
-			return refused
+		*stale = append(*stale, cachedKeys(customerID, table, row)...)
+		if written, err = result.RowsAffected(); err != nil {
+			return stack.Wrap(fmt.Errorf("store: import %s: %w", table, err))
 		}
-		return fmt.Errorf("store: import %s: %w", table, err)
-	}
-	*stale = append(*stale, cachedKeys(customerID, table, was)...)
-	*stale = append(*stale, cachedKeys(customerID, table, row)...)
-	written, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: import %s: %w", table, err))
+	} else if written, err = importCached(ctx, db, customerID, table, query, args, stale); err != nil {
+		return err
 	}
 	if written > 0 || spec.copied != "" {
 		return nil
@@ -1060,6 +1063,36 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	return nil
 }
 
+// importCached runs an import's query of a cachedByID table, which returns what each row it wrote
+// was and is, and adds to stale the values both are cached under. It returns how many it wrote.
+func importCached(ctx context.Context, db bun.IDB, customerID, table, query string, args []any, stale *[]string) (int64, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return 0, refused
+		}
+		return 0, fmt.Errorf("store: import %s: %w", table, err)
+	}
+	defer rows.Close()
+	written := int64(0)
+	for rows.Next() {
+		var was, is []byte
+		if err := rows.Scan(&was, &is); err != nil {
+			return 0, fmt.Errorf("store: import %s: %w", table, err)
+		}
+		written++
+		*stale = append(*stale, cachedKeys(customerID, table, was)...)
+		*stale = append(*stale, cachedKeys(customerID, table, is)...)
+	}
+	if err := rows.Err(); err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return 0, refused
+		}
+		return 0, fmt.Errorf("store: import %s: %w", table, err)
+	}
+	return written, nil
+}
+
 // ErrAnotherCustomersRow refuses an imported row whose key a row of another customer holds here.
 var ErrAnotherCustomersRow = errors.New("a row with this key belongs to another customer here")
 
@@ -1069,14 +1102,26 @@ func cachedByID(table string) bool {
 	return slices.Contains([]string{"agent_configs", "router_configs", "skills", "voices"}, table)
 }
 
+// cachedRow is a row of a cachedByID table, as relation names it in a write, in the form cachedKeys
+// reads. A voice's carries the providers of its bindings, whose ids are cached under the voice
+// (VoiceBindings.GetReady) and read only while it is not deleted.
+func cachedRow(table, relation string) string {
+	if table != "voices" {
+		return "to_jsonb(" + relation + ")"
+	}
+	return fmt.Sprintf("to_jsonb(%[1]s) || jsonb_build_object('binding_providers',"+
+		" ARRAY(SELECT vb.provider FROM voice_bindings AS vb WHERE vb.voice_id = %[1]s.id))", relation)
+}
+
 // cachedKeys are the cached values a row of a moved table, as row reads under customerID, is read
 // through: what the table's own writes forget (AgentConfigs.Update and its siblings). An app's
-// policy is cached by its app alone, so any row of it names the same values.
+// policy is cached by its app alone, so any row of it names the same values. A user is held by
+// every replica that saw them (Users.Forget).
 func cachedKeys(customerID, table string, row []byte) []string {
 	if table == "policies" {
 		return policyKeys(ScopeApp, customerID)
 	}
-	if !cachedByID(table) || len(row) == 0 {
+	if (!cachedByID(table) && table != "users") || len(row) == 0 {
 		return nil
 	}
 	// The columns are text, which jsonb_populate_record also fills from a number, so a value is
@@ -1100,7 +1145,14 @@ func cachedKeys(customerID, table string, row []byte) []string {
 	case "router_configs":
 		return []string{routerConfigKey(customerID, text("id")), routerConfigNameKey(customerID, text("name"))}
 	case "voices":
-		return []string{voiceKey(customerID, text("id")), voiceNameKey(customerID, text("name"))}
+		keys := []string{voiceKey(customerID, text("id")), voiceNameKey(customerID, text("name"))}
+		providers, _ := fields["binding_providers"].([]any)
+		for _, provider := range providers {
+			keys = append(keys, voiceBindingKey(customerID, text("id"), fmt.Sprint(provider)))
+		}
+		return keys
+	case "users":
+		return []string{userKey(customerID, text("id"))}
 	}
 	return []string{skillsKey(customerID, text("config_id"))}
 }
@@ -1952,7 +2004,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 	var stale []string
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range changes {
-			if !appPolicy(change) {
+			if change.Skipped() {
 				continue
 			}
 			switch change.Op {
@@ -1972,20 +2024,22 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 		return err
 	}
 	s.forget(ctx, stale...)
+	s.Users.forgetKeys(stale)
 	return nil
 }
 
-// appPolicy is false for a change to a policy of another scope than an app's. The trigger records
-// a policy under its scope id whatever its scope, so an organization's that shares an id with the
-// app is recorded under the app, and replaying it would write it over the app's (identity).
-func appPolicy(change DataChange) bool {
+// Skipped is whether ApplyChanges leaves the change out: one to a policy of another scope than an
+// app's. The trigger records a policy under its scope id whatever its scope, so an organization's
+// that shares an id with the app is recorded under the app, and replaying it would write it over
+// the app's (identity).
+func (change DataChange) Skipped() bool {
 	if change.Table != "policies" {
-		return true
+		return false
 	}
 	var key struct {
 		Scope string `json:"scope"`
 	}
-	return json.Unmarshal(change.Key, &key) == nil && key.Scope == string(ScopeApp)
+	return json.Unmarshal(change.Key, &key) != nil || key.Scope != string(ScopeApp)
 }
 
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
@@ -2026,7 +2080,8 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 			if column == spec.customer {
 				continue
 			}
-			conditions = append(conditions, fmt.Sprintf("t.%s::text = (?::jsonb ->> '%s')", column, column))
+			// Read as the column's own type, so a time matches however its JSON writes it.
+			conditions = append(conditions, fmt.Sprintf("t.%[1]s = (jsonb_populate_record(NULL::%[2]s, ?::jsonb)).%[1]s", column, spec.name))
 			args = append(args, string(change.Key))
 		}
 	}
@@ -2065,11 +2120,11 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 			return fmt.Errorf("store: delete %s: %w", change.Table, err)
 		}
 		if deleted > 0 {
-			*stale = append(*stale, cachedKeys(customerID, change.Table, nil)...)
+			*stale = append(*stale, cachedKeys(customerID, change.Table, change.Key)...)
 		}
 		return nil
 	}
-	rows, err := db.QueryContext(ctx, query+" RETURNING to_jsonb(t)", args...)
+	rows, err := db.QueryContext(ctx, query+" RETURNING "+cachedRow(change.Table, "t"), args...)
 	if err != nil {
 		if refused := refusedRow(change.Table, err); refused != nil {
 			return refused
