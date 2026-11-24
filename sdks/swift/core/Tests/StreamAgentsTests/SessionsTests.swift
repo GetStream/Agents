@@ -252,6 +252,7 @@ import Testing
         let watched = try #require(try await requests.next())
         #expect(watched.method == "GET")
         #expect(watched.path == "/v1/agents/sessions/s1/events")
+        #expect(watched.headers["x-stream-client"] == "stream-agents-swift-v\(Backend.version)")
         let answer = try JSONDecoder().decode(
             [String: RawJSON].self, from: try #require(try await server.commands.first { @Sendable _ in true }))
         #expect(answer["type"] == .string("tool_result"))
@@ -547,6 +548,8 @@ private struct RouterServer {
     struct Request: Sendable {
         let method: String
         let path: String
+        /// By lowercased name.
+        let headers: [String: String]
         let body: [String: RawJSON]
     }
 
@@ -628,7 +631,7 @@ private struct RouterServer {
             let path = String(line[1].split(separator: "?", maxSplits: 1)[0])
             request.yield(
                 Request(
-                    method: line[0], path: path,
+                    method: line[0], path: path, headers: headers,
                     body: (try? JSONDecoder().decode([String: RawJSON].self, from: body)) ?? [:]))
             if let key = headers["sec-websocket-key"] {
                 upgrade(connection, key: key, command)

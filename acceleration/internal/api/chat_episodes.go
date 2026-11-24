@@ -148,7 +148,7 @@ func (s *Server) retire(found *session.Session) {
 	}
 	go func() {
 		deadline := time.Now().Add(session.RetireWithin)
-		for (s.owing.owes(found.ID()) || found.Busy()) && found.State() != session.Ended && time.Now().Before(deadline) {
+		for (s.owing.owes(found.Key()) || found.Busy()) && found.State() != session.Ended && time.Now().Before(deadline) {
 			time.Sleep(threadTurnPoll)
 		}
 		if _, err := s.sessions.CloseRetired(found); err != nil {
@@ -158,34 +158,34 @@ func (s *Server) retire(found *session.Session) {
 	}()
 }
 
-// owedReplies is, by session id, how many follow-ups were handed to a running session and
-// have not begun yet (followUpMessage). The zero value is empty; an id is kept only while it
+// owedReplies is, by session, how many follow-ups were handed to a running session and have
+// not begun yet (followUpMessage). The zero value is empty; a session is kept only while it
 // owes one.
 type owedReplies struct {
 	mu   sync.Mutex
-	owed map[string]int
+	owed map[session.Key]int
 }
 
 // owe counts one follow-up handed to a session until the func it returns is called.
-func (o *owedReplies) owe(id string) (begun func()) {
+func (o *owedReplies) owe(key session.Key) (begun func()) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.owed == nil {
-		o.owed = map[string]int{}
+		o.owed = map[session.Key]int{}
 	}
-	o.owed[id]++
+	o.owed[key]++
 	return func() {
 		o.mu.Lock()
 		defer o.mu.Unlock()
-		if o.owed[id]--; o.owed[id] <= 0 {
-			delete(o.owed, id)
+		if o.owed[key]--; o.owed[key] <= 0 {
+			delete(o.owed, key)
 		}
 	}
 }
 
 // owes reports whether a follow-up handed to a session has not begun yet.
-func (o *owedReplies) owes(id string) bool {
+func (o *owedReplies) owes(key session.Key) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.owed[id] > 0
+	return o.owed[key] > 0
 }

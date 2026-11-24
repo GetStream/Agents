@@ -138,7 +138,7 @@ func (s *SessionSuite) hangsUp(created *Session) {
 	s.hears(created)
 	s.says(created, "that is all, thanks")
 	s.eventually(func() bool {
-		return created.State() == Ended && !s.manager.Running(created.ID())
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
 	}, "the agent hung up and the session was not closed")
 	s.Equal(EndAgentHangup, created.EndReason())
 }

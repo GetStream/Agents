@@ -46,12 +46,44 @@ func (s *CampaignsSuite) TestANewCampaignGetsTheDefaultSequenceAndHours() {
 	s.Zero(created.Contacts.Total)
 }
 
-func (s *CampaignsSuite) TestAnAutoEnrollCampaignIsRefusedForNow() {
-	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/campaigns",
-		map[string]any{"name": "may", "type": "auto_enroll"})
+func (s *CampaignsSuite) TestAnAutoEnrollCampaignKeepsItsType() {
+	created := s.create(map[string]any{"name": "may", "type": "auto_enroll"})
+
+	s.Equal(CampaignTypeAutoEnroll, created.Type)
+	s.Equal(CampaignTypeAutoEnroll, s.get(created.Id).Type)
+}
+
+func (s *CampaignsSuite) TestAnAutoEnrollCampaignLaunchesBeforeAnybodyIsAdded() {
+	created := s.create(map[string]any{
+		"name": "campaign-" + s.utils.uuid(), "type": "auto_enroll",
+		"config_id": s.data.createAgentConfig().Id, "from_number": s.heldNumber(),
+	})
+	s.setGoal(created, "Confirm the visit")
+
+	s.Equal(CampaignStateRunning, s.launch(created).State)
+}
+
+func (s *CampaignsSuite) TestAStandardCampaignStillNeedsContactsToLaunch() {
+	created := s.create(map[string]any{
+		"name": "campaign-" + s.utils.uuid(), "config_id": s.data.createAgentConfig().Id, "from_number": s.heldNumber(),
+	})
+	s.setGoal(created, "Confirm the visit")
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
+		map[string]any{"consent": true})
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "auto-enroll campaigns are not available yet")
+	s.Contains(string(payload), "a campaign needs contacts to ring before it can launch")
+}
+
+func (s *CampaignsSuite) TestADuplicateOfAnAutoEnrollCampaignIsAutoEnroll() {
+	created := s.create(map[string]any{"name": "may", "type": "auto_enroll"})
+
+	var copied Campaign
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/duplicate",
+		map[string]any{"contacts": "none"}, &copied))
+
+	s.Equal(CampaignTypeAutoEnroll, copied.Type)
 }
 
 func (s *CampaignsSuite) TestACampaignsTypeNeverChanges() {
@@ -731,4 +763,19 @@ func (s *CampaignsSuite) TestLeavingAMessageWithASpeechToSpeechAgentIsRefusedAtL
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/campaigns/"+created.Id,
 		map[string]any{"sequence": sequence}, nil))
 	s.launch(created)
+}
+
+// A delay is made a duration in nanoseconds, which a delay of 200 million minutes overflows:
+// the next attempt would land decades in the past and the rest would ring back to back.
+func (s *CampaignsSuite) TestADelayOverThirtyDaysIsRefused() {
+	created := s.create(map[string]any{"name": "may"})
+	sequence := created.Sequence
+	sequence.Steps[0].Attempts = []CampaignAttempt{{0}, {200000000}}
+
+	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/campaigns/"+created.Id,
+		map[string]any{"sequence": sequence})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "43200 minutes")
+	s.Len(s.get(created.Id).Sequence.Steps[0].Attempts, 4, "the sequence stored is unchanged")
 }

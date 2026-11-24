@@ -187,11 +187,13 @@ func measured(prefix string) string {
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a
-// modality or a cost label value; "other" is everything outside the biggest few and the
-// empty string is spend that carried no such label, so the rows still add up to the total.
+// modality or a cost label value; the row with Other is everything outside the biggest few,
+// with Value "other", and the empty string is spend that carried no such label, so the rows
+// still add up to the total. A label whose value is "other" is a row of its own, without Other.
 type SpendBucket struct {
 	Bucket          time.Time `bun:"bucket"`
 	Value           string    `bun:"value"`
+	Other           bool      `bun:"-"`
 	CostMicrosTotal int64     `bun:"cost_micros_total"`
 	RequestCount    int64     `bun:"request_count"`
 }
@@ -485,7 +487,7 @@ FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
     AS r (customer_id, agent_id, call_id, started_at, ordinal)
 CROSS JOIN LATERAL (
     SELECT COALESCE(s.config_id, '') AS config_id, COALESCE(calls.session_id, '') AS session_id
-    FROM calls LEFT JOIN agent_sessions AS s ON s.id = calls.session_id
+    FROM calls LEFT JOIN agent_sessions AS s ON s.customer_id = calls.customer_id AND s.id = calls.session_id
     WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
         AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
     ORDER BY calls.started_at DESC
@@ -715,18 +717,40 @@ func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64
 	return total, nil
 }
 
-// RenameUser replaces an app's end user id with replacement on every shard's requests, and in
-// the changes recorded of their requests in the same statement (renamedChanges), and answers
-// how many rows it rewrote. A request recorded after the statement keeps its change as it is.
+// RenameUser replaces an app's end user id with replacement on every shard's requests,
+// writeBatch of them per statement, and in the changes recorded of their requests in each of
+// those statements (renamedChanges), and answers how many rows it rewrote. A request recorded
+// after the last statement keeps its change as it is.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
-	renamed, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		// A data-modifying WITH runs to the end whether or not the statement reads it.
-		changes := renamedChanges(db, appID, "requests", userID, replacement)
-		return db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
-			Where("customer_id = ?", appID).Where("user_id = ?", userID).Exec(ctx)
+	if replacement == userID {
+		// Nothing to rewrite, and every batch would match the rows it just wrote.
+		return 0, nil
+	}
+	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
+		var renamed int64
+		for {
+			// A data-modifying WITH runs to the end whether or not the statement reads it.
+			changes := renamedChanges(db, appID, "requests", userID, replacement)
+			batch := db.NewSelect().Model((*Request)(nil)).Column("id").
+				Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch)
+			result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
+				Where("id IN (?)", batch).Exec(ctx)
+			if err != nil {
+				return renamed, err
+			}
+			n, err := result.RowsAffected()
+			renamed += n
+			if err != nil || n < int64(writeBatch) {
+				return renamed, err
+			}
+		}
 	})
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+	}
+	var renamed int64
+	for _, count := range counts {
+		renamed += count
 	}
 	return renamed, nil
 }
@@ -771,7 +795,8 @@ func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) 
 	return "", "", false
 }
 
-// spendOther is the value every group outside the biggest few is summed into.
+// spendOther is the value of the row every group outside the biggest few is summed into,
+// which SpendBucket.Other tells apart from a label of that value.
 const spendOther = "other"
 
 // Spend returns what one customer spent per bucket and group, oldest bucket first. It is the
@@ -780,7 +805,7 @@ const spendOther = "other"
 // groupBy is "modality", who asked (SpendGroupByApp and the rest), or a cost label key. Only
 // the limit biggest values over the whole window keep a group of their own: a label such as
 // customer_id has as many values as the customer has customers, and a chart of all of them
-// says nothing. The rest are summed into "other", and requests carrying no such label into
+// says nothing. The rest are summed into a row marked Other, and requests carrying no such label into
 // the empty value, so the rows still add up to the total; grouped by category, a row counts
 // once in each of its categories.
 //
@@ -834,7 +859,7 @@ func (r *Requests) Spend(
 	// to keep in one shard may be the biggest once the others are added.
 	query := fmt.Sprintf(`
 SELECT
-    date_trunc('%s', started_at) AS bucket,
+    date_trunc('%s', started_at, 'UTC') AS bucket,
     %s AS value,
     COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
     %s AS request_count
@@ -1044,7 +1069,8 @@ func (r *Requests) CountByModel(ctx context.Context, modality string, since time
 // vendorCosts is every row since a time whose vendor reported what it charged, with the list's
 // cost at the vendor's rates: base_cost_micros once something writes it, else cost_micros,
 // which is the same figure for a row priced before either was written. A malformed figure is skipped,
-// never cast, so one bad row cannot fail the read.
+// never cast, so one bad row cannot fail the read. A row on the customer's own key is left out:
+// its vendor bills the customer, so the list puts no cost at the vendor's rates on it.
 const vendorCosts = `
 SELECT id, usage_id, modality, provider, model, started_at, vendor, base
 FROM (
@@ -1053,7 +1079,7 @@ FROM (
                 THEN (attributes->>'vendor_cost_micros')::bigint END AS vendor,
            CASE WHEN price_version = '' THEN cost_micros ELSE base_cost_micros END AS base
     FROM requests
-    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL
+    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL AND NOT byok
 ) AS reported
 WHERE vendor > 0`
 

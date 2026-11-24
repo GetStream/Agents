@@ -143,18 +143,18 @@ func queuedChatInbound(query *bun.SelectQuery) *bun.SelectQuery {
 	return query.Where("cd.state = ?", ChatInboundQueued)
 }
 
-// Claim takes at most limit messages due at now, oldest due first, and moves each one's next
-// attempt to leaseUntil, so no other worker takes it while this one answers it. Rows another
+// Claim takes at most limit messages due now, oldest due first, and moves each one's next
+// attempt to the end of lease, so no other worker takes it while this one answers it. Rows another
 // worker is claiming at the same moment are skipped, not waited for.
-func (r *ChatInbounds) Claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ChatInbound, error) {
-	return r.claim(ctx, now, limit, leaseUntil, queuedChatInbound)
+func (r *ChatInbounds) Claim(ctx context.Context, limit int, lease time.Duration) ([]ChatInbound, error) {
+	return r.claim(ctx, limit, lease, queuedChatInbound)
 }
 
 // claim is Claim narrowed by pick, queuedChatInbound or a test's variant of it with a pause in
 // it.
-func (r *ChatInbounds) claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time,
+func (r *ChatInbounds) claim(ctx context.Context, limit int, lease time.Duration,
 	pick func(*bun.SelectQuery) *bun.SelectQuery) ([]ChatInbound, error) {
-	return claim[ChatInbound](ctx, r.store.global, chatInbounds, now, leaseUntil, limit, pick, chatInboundColumns)
+	return claim[ChatInbound](ctx, r.store.global, chatInbounds, lease, limit, pick, chatInboundColumns)
 }
 
 // Get returns the message queued as seq, in whatever state it is.
@@ -274,13 +274,10 @@ func (r *ChatInbounds) ReleaseAnswer(ctx context.Context, streamApp int64, messa
 // Prune deletes the rows of answered messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
 func (r *ChatInbounds) Prune(ctx context.Context, now time.Time) (int, error) {
-	result, err := r.store.global.NewDelete().Model((*ChatInbound)(nil)).
-		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
-			ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC()).
-		Exec(ctx)
+	pruned, err := deleteInBatches(ctx, r.store.global, "chat_inbound", "(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
+		ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC())
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune chat inbound: %w", err))
+		return int(pruned), stack.Wrap(fmt.Errorf("store: prune chat inbound: %w", err))
 	}
-	pruned, _ := result.RowsAffected()
 	return int(pruned), nil
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -137,6 +138,10 @@ class AgentConfigPatch:
             agents (list[ChildAgent] | Unset): Replaces the list whole. An empty list removes it.
             image (str | Unset): An empty string removes it, and the agent stops being offered generate_image.
             ui_instructions (str | Unset): What teaches the agent's model to answer with UI. An empty string removes them.
+            updated_at (datetime.datetime | Unset): The updated_at of the config this change was made from. Sent, the change
+                is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not
+                write over a newer one: read the config again and make the change on that. Left out, the change is made on the
+                config as it now is, and every field it does not send keeps what is stored.
     """
 
     calls: AgentCalls | Unset = UNSET
@@ -180,6 +185,7 @@ class AgentConfigPatch:
     agents: list[ChildAgent] | Unset = UNSET
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
+    updated_at: datetime.datetime | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_config_patch_plugins_item_type_1 import (
@@ -347,6 +353,10 @@ class AgentConfigPatch:
 
         ui_instructions = self.ui_instructions
 
+        updated_at: str | Unset = UNSET
+        if not isinstance(self.updated_at, Unset):
+            updated_at = self.updated_at.isoformat()
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -432,6 +442,8 @@ class AgentConfigPatch:
             field_dict["image"] = image
         if ui_instructions is not UNSET:
             field_dict["ui_instructions"] = ui_instructions
+        if updated_at is not UNSET:
+            field_dict["updated_at"] = updated_at
 
         return field_dict
 
@@ -694,6 +706,13 @@ class AgentConfigPatch:
 
         ui_instructions = d.pop("ui_instructions", UNSET)
 
+        _updated_at = d.pop("updated_at", UNSET)
+        updated_at: datetime.datetime | Unset
+        if isinstance(_updated_at, Unset):
+            updated_at = UNSET
+        else:
+            updated_at = datetime.datetime.fromisoformat(_updated_at)
+
         agent_config_patch = cls(
             calls=calls,
             channels=channels,
@@ -736,6 +755,7 @@ class AgentConfigPatch:
             agents=agents,
             image=image,
             ui_instructions=ui_instructions,
+            updated_at=updated_at,
         )
 
         return agent_config_patch

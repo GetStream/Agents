@@ -16,7 +16,7 @@ Never use limit/offset. Lists take `limit` + `cursor`.
 - Cursors are opaque base64url. Clients never build or parse them.
 - Sort ends with `id` so the order is total. The cursor holds every sort key.
 - Fetch `limit + 1` to set `has_more`. No counts.
-- Filters are resent with every page; the cursor only holds a position.
+- Filters are resent with every page; the cursor holds a position. It may also record the filters it was handed out for, and is then refused under others (a 400).
 - A bad cursor is a 400.
 - Index the sort keys behind the filter, e.g. `(customer_id, updated_at DESC, id DESC)`.
 - A list that filters and sorts takes a body instead of query parameters: see the `query` skill.

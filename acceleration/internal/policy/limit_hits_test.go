@@ -30,7 +30,7 @@ func (l *limitHits) all() []LimitHit {
 func (s *PolicySuite) TestARefusalAtNoCreditIsAHit() {
 	var hits limitHits
 	enforcer := s.billed(func(settings *Settings) { settings.LimitHit = hits.take })
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrNoCredits)
@@ -50,7 +50,7 @@ func (s *PolicySuite) TestAWouldRefuseInShadowIsAHitThatWasNotEnforced() {
 		settings.Mode = config.LimitsShadow
 		settings.LimitHit = hits.take
 	})
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.NoError(s.admit(enforcer.Enforcer, s.app).Spend)
@@ -66,7 +66,7 @@ func (s *PolicySuite) TestASuspensionIsNoLimitHit() {
 	enforcer := s.billed(func(settings *Settings) { settings.LimitHit = hits.take })
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	s.usage().Suspend(s.T(), s.org, "a test")
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	_, err := enforcer.Admit(s.ctx, ownerOf(s.app))

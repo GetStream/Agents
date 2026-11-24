@@ -656,7 +656,8 @@ func sentBy(t *testing.T, backend Backend) []string {
 }
 
 // Catches a change to what a client built with the deprecated ActingFor sends. The expected
-// requests were read off a client built the same way at the commit that deprecated the field.
+// requests were read off a client built the same way at the commit that deprecated the field,
+// with the X-Stream-Client that names the release since AI-3641.
 func TestABackendBuiltWithActingForSendsWhatItAlwaysDid(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -666,21 +667,21 @@ func TestABackendBuiltWithActingForSendsWhatItAlwaysDid(t *testing.T) {
 		{
 			"a local router told whom to bill",
 			Backend{CustomerID: "acme", ActingFor: "u"},
-			[]string{"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: sdk", "X-Stream-User-Id: u"},
+			[]string{"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: stream-agents-go-v" + Version, "X-Stream-User-Id: u"},
 		},
 		{
 			"a router behind the proxy",
 			Backend{Authenticate: true, APIKey: "ntv9", APISecret: "shh", ActingFor: "u"},
 			[]string{
 				"GET /v1/agents/skills", "Api_key: ntv9", "Authorization: <token>", "Stream-Auth-Type: jwt",
-				"X-Stream-Client: sdk", "X-Stream-User-Id: u",
+				"X-Stream-Client: stream-agents-go-v" + Version, "X-Stream-User-Id: u",
 			},
 		},
 		{
 			"a team and usage categories",
 			Backend{CustomerID: "acme", ActingFor: "u", Team: "finance", UsageCategories: []string{"project:x"}},
 			[]string{
-				"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: sdk",
+				"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: stream-agents-go-v" + Version,
 				"X-Stream-Usage-Categories: project:x,team:finance", "X-Stream-User-Id: u",
 			},
 		},
@@ -719,7 +720,8 @@ func TestActingForAUserKeepsTheServersToken(t *testing.T) {
 
 func TestEveryRequestAndSocketNamesTheGoSDKAndItsRelease(t *testing.T) {
 	// The router's request log and its activity count read these two headers. Left out, a
-	// call is logged as Go's own client with no release, and counted as the API's.
+	// call is logged as Go's own client with no release, and counted as the API's. The router
+	// counts X-Stream-Client as the SDK's by its stream-agents- start.
 	want := "stream-agents-go/" + Version
 	seen := make(chan http.Header, 2)
 	upgrader := websocket.Upgrader{}
@@ -763,8 +765,8 @@ func TestEveryRequestAndSocketNamesTheGoSDKAndItsRelease(t *testing.T) {
 			if got := header.Get("User-Agent"); got != want {
 				t.Errorf("%s: the %s says User-Agent %q, want %q", name, call, got, want)
 			}
-			if got := header.Get(ClientHeader); got != ClientSDK {
-				t.Errorf("%s: the %s says %s %q, want %q", name, call, ClientHeader, got, ClientSDK)
+			if got := header.Get(ClientHeader); got != "stream-agents-go-v"+Version {
+				t.Errorf("%s: the %s says %s %q, want stream-agents-go-v%s", name, call, ClientHeader, got, Version)
 			}
 		}
 		socket.Close()

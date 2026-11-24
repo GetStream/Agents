@@ -38,3 +38,25 @@ func TestAuditEntryValidate(t *testing.T) {
 		require.Equal(t, broken.field, invalid.Field, name)
 	}
 }
+
+// Defect: an SDK naming its release read as the API, a known client in another case or with
+// spaces around it read as unknown, or a name that only resembles the prefix read as the SDK.
+func TestAuditSource(t *testing.T) {
+	for header, want := range map[string]string{
+		"stream-agents-go-v0.3.0":         AuditSourceSDK,
+		"Stream-Agents-JS-v0.8.0-browser": AuditSourceSDK,
+		" stream-agents-js-v0.8.0-node ":  AuditSourceSDK,
+		"sdk":                             AuditSourceSDK,
+		" CLI ":                           AuditSourceCLI,
+		"dashboard":                       AuditSourceDashboard,
+		"api":                             AuditSourceAPI,
+		"":                                AuditSourceAPI,
+		"manage":                          AuditSourceAPI,
+		"stream-agents":                   AuditSourceAPI,
+		"stream-chat-js-v8.40.0-browser":  AuditSourceAPI,
+		"my-stream-agents-go-v0.3.0":      AuditSourceAPI,
+		"stream-go-client-7.0.0":          AuditSourceAPI,
+	} {
+		require.Equal(t, want, AuditSource(header), "%q", header)
+	}
+}

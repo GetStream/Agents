@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -336,7 +337,8 @@ func (a *Agent) prepare(current, next Settings, native, restart bool) (*prepared
 				return fail(fmt.Errorf("agent: %s cannot answer: %w", next.LLMTarget, err))
 			}
 		}
-		if next.controller() != current.controller() {
+		// A text session has no floor to control, so it never opens a flow controller.
+		if !a.options.Text && next.controller() != current.controller() {
 			if prep.controller, err = a.startLLM(next.controller(), nil); err != nil {
 				return fail(fmt.Errorf("agent: start flow controller: %w", err))
 			}
@@ -432,7 +434,7 @@ func (a *Agent) swapCascade(current, next Settings, prep *prepared) []error {
 	var failures []error
 	if prep.tts != nil {
 		p.running.Add(1)
-		go a.consumeTTS(p, prep.tts)
+		goroutine.Go(a.ctx, func() { a.consumeTTS(p, prep.tts) })
 		if err := replacedTTS.Close(); err != nil {
 			failures = append(failures, fmt.Errorf("close tts: %w", err))
 		}
@@ -487,16 +489,16 @@ func (a *Agent) startCascade(prep *prepared) {
 	a.nativeMode.Store(false)
 
 	a.running.Add(1)
-	go a.consumeHarness(prep.harness, drained)
+	goroutine.Go(a.ctx, func() { a.consumeHarness(prep.harness, drained) })
 	p.running.Add(1)
-	go a.consumeLLM(p, replies)
+	goroutine.Go(a.ctx, func() { a.consumeLLM(p, replies) })
 	// The other three all begin at a microphone or end at a speaker, so a conversation
 	// held in writing runs none of them.
 	if !a.options.Text {
 		p.running.Add(3)
-		go a.consumeTTS(p, prep.tts)
-		go a.consumeCadence(p)
-		go a.consumePresence(p)
+		goroutine.Go(a.ctx, func() { a.consumeTTS(p, prep.tts) })
+		goroutine.Go(a.ctx, func() { a.consumeCadence(p) })
+		goroutine.Go(a.ctx, func() { a.consumePresence(p) })
 	}
 }
 
@@ -527,13 +529,14 @@ func (a *Agent) startNative(prep *prepared) {
 
 	if drained != nil {
 		a.running.Add(1)
-		go a.consumeHarness(prep.harness, drained)
+		goroutine.Go(a.ctx, func() { a.consumeHarness(prep.harness, drained) })
 	}
 	events := make(chan sts.Event, sts.EmitterBuffer)
+	source := prep.sts.Events()
 	p.running.Add(3)
-	go a.receiveSTS(p, prep.sts.Events(), events)
-	go a.consumeSTS(p, prep.sts, events)
-	go a.consumeNativePresence(p)
+	goroutine.Go(a.ctx, func() { a.receiveSTS(p, source, events) })
+	goroutine.Go(a.ctx, func() { a.consumeSTS(p, prep.sts, events) })
+	goroutine.Go(a.ctx, func() { a.consumeNativePresence(p) })
 }
 
 // stopPipeline closes the running pipeline's sessions and waits for its goroutines. The
@@ -617,7 +620,7 @@ func (a *Agent) releasePipeline(keepHarness bool) (*pipeline, []error) {
 }
 
 // openCascade opens the conversation model, the flow controller, the harness and the
-// voice a cascade runs on.
+// voice a cascade runs on. A text cascade opens only the model and the harness.
 func (a *Agent) openCascade(s Settings) (*prepared, error) {
 	// A transcriber opens per participant on each frame until one starts, so a target it
 	// could never start on is refused here, once, rather than on every frame of the call.
@@ -635,22 +638,29 @@ func (a *Agent) openCascade(s Settings) (*prepared, error) {
 	// complete never competes with the reply being streamed to the voice. It routes to a
 	// non-thinking model of its own, since a decision this small has nothing to think about
 	// and thinking would only add latency to every turn the caller waits through.
+	//
+	// A conversation held in writing has no floor: nothing is transcribed, so nothing is
+	// ever put to the flow controller or the judge. Neither is opened for one, or a
+	// deployment whose only model is the caller's own would refuse every text session for
+	// want of a hosted vendor's key it would never use.
 	var judge harness.Judge
-	if a.options.Judge != nil && a.options.JudgeTarget != "" {
-		if judge, err = a.options.Judge.Start(a.ctx, decisionrouter.Request{
-			CustomerID: a.options.CustomerID,
-			AgentID:    a.options.AgentID,
-			CallID:     a.options.CallID,
-			Region:     a.options.Region,
-			Tags:       a.options.Tags,
-			Target:     a.options.JudgeTarget,
-		}); err != nil {
+	if !a.options.Text {
+		if a.options.Judge != nil && a.options.JudgeTarget != "" {
+			if judge, err = a.options.Judge.Start(a.ctx, decisionrouter.Request{
+				CustomerID: a.options.CustomerID,
+				AgentID:    a.options.AgentID,
+				CallID:     a.options.CallID,
+				Region:     a.options.Region,
+				Tags:       a.options.Tags,
+				Target:     a.options.JudgeTarget,
+			}); err != nil {
+				prep.close()
+				return nil, stack.Wrap(fmt.Errorf("agent: start flow judge: %w", err))
+			}
+		} else if prep.controller, err = a.startLLM(s.controller(), nil); err != nil {
 			prep.close()
-			return nil, stack.Wrap(fmt.Errorf("agent: start flow judge: %w", err))
+			return nil, stack.Wrap(fmt.Errorf("agent: start flow controller: %w", err))
 		}
-	} else if prep.controller, err = a.startLLM(s.controller(), nil); err != nil {
-		prep.close()
-		return nil, stack.Wrap(fmt.Errorf("agent: start flow controller: %w", err))
 	}
 	prep.harness, err = harness.New(harness.Options{
 		Text:         a.options.Text,
@@ -672,6 +682,7 @@ func (a *Agent) openCascade(s Settings) (*prepared, error) {
 		CacheKey:     a.options.ConfigID,
 		OnModelCall:  func(timing llm.CallTiming) { a.emitter.Send(ModelCall{CallTiming: timing}) },
 		Logger:       a.logger,
+		Call:         a.ctx,
 	})
 	if err != nil {
 		prep.harness = nil
@@ -695,7 +706,7 @@ func (a *Agent) openNative(s Settings) (*prepared, error) {
 		var err error
 		prep.harness, err = harness.New(harness.Options{
 			OpenSubagent: subagent, Capture: a.captureVideo, Skills: a.options.Skills,
-			Sandbox: a.options.Sandbox, Publish: a.options.Publish, Tasks: a.options.Tasks, Logger: a.logger,
+			Sandbox: a.options.Sandbox, Publish: a.options.Publish, Tasks: a.options.Tasks, Logger: a.logger, Call: a.ctx,
 			Lookup: a.subagentLookup(), Search: a.subagentSearch(),
 			OnModelCall: func(timing llm.CallTiming) { a.emitter.Send(ModelCall{CallTiming: timing}) },
 		})
@@ -902,7 +913,7 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 	// The new voice is consumed under this pipeline like the one it replaces, so it is
 	// counted before this one's consumer can return.
 	p.running.Add(1)
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		next, err := a.startVoice(settings, failed)
 		if err != nil {
 			a.mu.Lock()
@@ -941,15 +952,15 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		// server to close the socket), and the reply held for the caller does not wait on it.
 		// The pipeline counts the close, so stopping it or closing the agent waits for it.
 		p.running.Add(1)
-		go func() {
+		goroutine.Go(a.ctx, func() {
 			defer p.running.Done()
 			if err := lost.Close(); err != nil {
 				a.logger.Debug("closing the lost voice", "error", err)
 			}
-		}()
+		})
 		// Start draining before releasing the recovery barrier. The queued answer may
 		// synthesize as soon as it is admitted, and a new voice can fail immediately.
-		go a.consumeTTS(p, next)
+		goroutine.Go(a.ctx, func() { a.consumeTTS(p, next) })
 		a.mu.Lock()
 		recovered := a.recoveringVoice == lost && a.pipe == p && a.tts == next
 		if recovered {
@@ -976,7 +987,7 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		if recovered {
 			a.respondQueued()
 		}
-	}()
+	})
 	return again
 }
 

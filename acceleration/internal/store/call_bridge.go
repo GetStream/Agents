@@ -87,7 +87,9 @@ func (r *CallBridges) Claim(ctx context.Context, token string) (CallBridge, erro
 	}
 
 	// The vendor's fetch lands on whichever shard is nearest it, not the one that parked it.
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallBridge, error) {
+	// The bridge is on one shard, and its delete there is done whatever the others answer, so
+	// a shard that did not answer fails the claim only when no other shard held it.
+	lists, failed := answeringShards(ctx, r.store, "claim bridge", claimReadTimeout, func(claimed []CallBridge) bool { return len(claimed) > 0 }, func(ctx context.Context, db bun.IDB) ([]CallBridge, error) {
 		var claimed []CallBridge
 		err := db.NewDelete().Model((*CallBridge)(nil)).
 			Where("token_hash = ?", callTokenHash(token)).
@@ -96,16 +98,16 @@ func (r *CallBridges) Claim(ctx context.Context, token string) (CallBridge, erro
 			Scan(ctx, &claimed)
 		return claimed, err
 	})
-	if err != nil {
-		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w", err))
-	}
 	claimed := slices.Concat(lists...)
-	if len(claimed) == 0 {
-		// One message for a token that never existed, one that has been used and one that
-		// has expired: telling them apart would say whether a guessed token was ever real.
-		return CallBridge{}, stack.Wrap(errors.New("store: that bridge is not waiting to be claimed"))
+	if len(claimed) > 0 {
+		return claimed[0], nil
 	}
-	return claimed[0], nil
+	if err := errors.Join(failed...); err != nil {
+		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w: %w", ErrShardUnanswered, err))
+	}
+	// One message for a token that never existed, one that has been used and one that has
+	// expired: telling them apart would say whether a guessed token was ever real.
+	return CallBridge{}, stack.Wrap(errors.New("store: that bridge is not waiting to be claimed"))
 }
 
 // Sweep removes bridges nobody claimed, which is what a call that rang out leaves behind.

@@ -136,7 +136,9 @@ func (s *MemoryUnavailableSuite) TestTruncatingWhileTheMemoryStoreRefusesIsUnava
 	answer := answered(s.T(), body)
 	s.Equal("memory_unavailable", answer.Code)
 	s.Equal("What was remembered could not be removed right now. Try again later.", answer.Message)
-	s.Contains(s.servedLine(http.MethodDelete, "/v1/agents/users/"+user+"/memories"), "quota exhausted")
+	line := s.servedLine(http.MethodDelete, "/v1/agents/users/{user_id}/memories")
+	s.Contains(line, "quota exhausted")
+	s.NotContains(line, user, "the access line names no end user")
 }
 
 func (s *MemoryUnavailableSuite) TestForgettingASessionWhileTheMemoryStoreRefusesIsUnavailable() {

@@ -110,6 +110,24 @@ func (s *ActivitySuite) TestAClientNobodyKnowsIsCountedAsTheAPI() {
 	s.Equal(int64(0), s.counted(activity.AreaAgentSetup, "anything-else").requests)
 }
 
+// Defect: an SDK that names its release (stream-agents-<language>-v<version>, in any case)
+// counted as the API, or plain sdk from an older release no longer counted as the SDK; or
+// another Stream product's client, or the product's name with no SDK after it, counted as ours.
+func (s *ActivitySuite) TestAnSDKNamingItsReleaseIsCountedAsTheSDK() {
+	for _, client := range []string{"stream-agents-go-v1.2.3", "Stream-Agents-JS-v0.8.0-browser", "sdk",
+		"stream-chat-js-v8.40.0-browser", "stream-agents"} {
+		s.Require().Equal(http.StatusOK, s.serverClient.with(clientHeader, client).
+			do(http.MethodGet, "/v1/agents/skills", nil, nil), client)
+	}
+
+	s.Require().Eventually(func() bool {
+		return s.counted(activity.AreaAgentSetup, store.AuditSourceSDK).requests+
+			s.counted(activity.AreaAgentSetup, store.AuditSourceAPI).requests == 5
+	}, settleFor, 10*time.Millisecond)
+	s.Equal(int64(3), s.counted(activity.AreaAgentSetup, store.AuditSourceSDK).requests)
+	s.Equal(int64(2), s.counted(activity.AreaAgentSetup, store.AuditSourceAPI).requests)
+}
+
 // Defect: a refusal answered before the request reached its route (withServerSide) counted as
 // a success, under no area, or without the code the caller was told.
 func (s *ActivitySuite) TestARequestRefusedBeforeItsRouteIsCountedAsRefusedWithItsCode() {

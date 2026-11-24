@@ -266,16 +266,25 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 	case <-ctx.Done():
 		return sandbox.Result{}, ctx.Err()
 	}
+	if s.broker != nil {
+		defer s.endRun(ctx)
+	}
 	var ran *types.ExecuteResponse
 	err := s.use(ctx, func() error {
+		env := s.mount.RunEnv
 		if s.broker != nil {
 			// A hung refresh holds the gate, so it is bounded as a check is.
 			before, end := context.WithTimeout(ctx, s.check)
-			err := s.broker.BeforeRun(before)
+			own, err := s.broker.BeforeRun(before)
 			end()
 			if err != nil {
 				return err
 			}
+			// Only the code gets them: a command before it needs no proxy. Daytona sends no
+			// env for an empty map, as for none (sdk-go v0.211.2 process.go:234).
+			env = make(map[string]string, len(env)+len(own))
+			maps.Copy(env, s.mount.RunEnv)
+			maps.Copy(env, own)
 		}
 		each := s.mount.EachRun
 		if s.setUp {
@@ -297,7 +306,7 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 		defer cancel()
 		var err error
 		ran, err = s.box.Process.CodeRun(run, code, options.WithCodeRunTimeout(s.runTimeout),
-			options.WithCodeRunParams(types.CodeRunParams{Env: s.mount.RunEnv}))
+			options.WithCodeRunParams(types.CodeRunParams{Env: env}))
 		return err
 	})
 	if err != nil {
@@ -323,6 +332,18 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 		result.Files = append(result.Files, sandbox.File{Name: path.Base(wanted), MIME: mediaType(wanted, data), Data: data})
 	}
 	return result, nil
+}
+
+// endRun ends what the broker gave the run once the call is over, though ctx was cut: a proxy
+// credential reaches the grants until then. Code a cut call left may still run in the sandbox
+// until its own timeout, and has no proxy from here on. It holds the gate, so it is bounded as a check is. One
+// the broker could not end lasts until it expires, which the log says.
+func (s *Sandbox) endRun(ctx context.Context) {
+	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.check)
+	defer cancel()
+	if err := s.broker.AfterRun(end); err != nil {
+		s.logger.Warn("the run's credential could not be ended; it lasts until it expires", "error", err)
+	}
 }
 
 // download reads a file the code wrote, and no more of it than one byte past the largest a run
