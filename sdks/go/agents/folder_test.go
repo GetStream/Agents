@@ -1187,6 +1187,21 @@ func TestALinkThatStaysInsideTheAgentDirectoryIsRead(t *testing.T) {
 	}
 }
 
+func TestALinkToASiblingInsideWhoseNameStartsWithTwoDotsIsRead(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jean")
+	write(t, root, "agent.yaml", "name: jean\n")
+	write(t, root, "..shared/a.md", "A penny.\n")
+	link(t, root, "knowledge/a.md", filepath.Join("..", "..shared", "a.md"))
+
+	folder, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder.Knowledge) != 1 || folder.Knowledge[0].Text != "A penny.\n" {
+		t.Errorf("the knowledge is %+v", folder.Knowledge)
+	}
+}
+
 func TestHiddenFilesAreLeftOutOfKnowledge(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "jean")
 	write(t, root, "agent.yaml", "name: jean\n")

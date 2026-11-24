@@ -984,9 +984,14 @@ def _load_skill_files(root: Path, folder: Path) -> dict[str, str]:
 def _inside(root: Path, path: Path) -> Path:
     """The real path of `path`, refused when it is outside the agent directory whose real
     path is `root`, as a link left pointing elsewhere on the machine would be."""
-    target = path.resolve()
-    if not target.is_relative_to(root):
-        raise ValueError(f"{path} links outside the agent directory")
+    refused = f"{path} links outside the agent directory"
+    try:
+        target = path.resolve()
+    except RuntimeError as exc:  # A link loop, before Python 3.13.
+        raise ValueError(refused) from exc
+    # From 3.13 on, a link loop resolves to a link instead.
+    if target.is_symlink() or not target.is_relative_to(root):
+        raise ValueError(refused)
     return target
 
 

@@ -225,6 +225,27 @@ class TestFolder:
         with pytest.raises(ValueError, match="links outside the agent directory"):
             load(root)
 
+    def test_a_link_into_a_sibling_sharing_the_name_prefix_is_refused(
+        self, tmp_path: Path
+    ):
+        root = tmp_path / "jean"
+        write(root, "agent.yaml", "name: jean\n")
+        write(tmp_path, "jean-2/doc.md", "Elsewhere.\n")
+        link(root, "knowledge/doc.md", tmp_path / "jean-2" / "doc.md")
+
+        with pytest.raises(ValueError, match="links outside the agent directory"):
+            load(root)
+
+    @pytest.mark.parametrize(
+        "linked", ["instructions.md", "skills/loop.md", "knowledge/loop.md"]
+    )
+    def test_a_link_to_itself_is_refused(self, tmp_path: Path, linked: str):
+        write(tmp_path, "agent.yaml", "name: jean\n")
+        link(tmp_path, linked, tmp_path / linked)
+
+        with pytest.raises(ValueError, match="links outside the agent directory"):
+            load(tmp_path)
+
     def test_a_link_that_stays_inside_the_agent_directory_is_read(self, tmp_path: Path):
         root = tmp_path / "jean"
         write(root, "agent.yaml", "name: jean\n")
