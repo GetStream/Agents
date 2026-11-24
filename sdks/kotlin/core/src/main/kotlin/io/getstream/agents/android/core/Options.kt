@@ -2,8 +2,6 @@ package io.getstream.agents.android.core
 
 import io.getstream.agents.android.core.generated.Equals
 import io.getstream.agents.android.core.generated.EqualsOrIn
-import io.getstream.agents.android.core.generated.Greeting as GreetingSchema
-import io.getstream.agents.android.core.generated.GreetingMode
 import io.getstream.agents.android.core.generated.SessionFilter as FilterSchema
 import io.getstream.agents.android.core.generated.SessionMemory
 import io.getstream.agents.android.core.generated.SessionSort as SortSchema
@@ -46,18 +44,6 @@ public data class SessionOptions(
      * False holds the conversation in writing until [AgentSession.startVoice] starts it.
      */
     val startVoice: Boolean = false,
-    /** What to change about the models for this conversation alone. */
-    val modelOverwrites: ModelOverwrites? = null,
-    /** What the agent opens the call with. */
-    val greeting: Greeting? = null,
-    val llm: String? = null,
-    val stt: String? = null,
-    val tts: String? = null,
-    /**
-     * The voice the agent speaks in: a provider's own voice id, or one of your voices by id or by
-     * the name you gave it. Prefix it with `custom:` to mean only yours.
-     */
-    val voice: String? = null,
     /** Functions of yours the agent may call, answered on this device. */
     val tools: List<AgentTool> = emptyList(),
     /**
@@ -66,8 +52,6 @@ public data class SessionOptions(
      * its turns go through [AgentSession.responses].
      */
     val watch: Boolean = true,
-    /** Cost labels, carried onto every request the session makes. */
-    val tags: Map<String, String> = emptyMap(),
     /**
      * Where a sign-in the conversation asks for goes back to. Name the app's own scheme in
      * reverse domain form, such as `com.example.app:/connected`, and the router hands the
@@ -128,32 +112,6 @@ internal var deviceZoneId: () -> String? = { TimeZone.getDefault().id }
  */
 internal fun deviceTimezone(): String? =
     deviceZoneId()?.takeIf { it.contains('/') || it == "UTC" || it == "GMT" }
-
-/** What the agent says as it joins a call, before anyone speaks. */
-public data class Greeting(
-    /** Empty means the agent waits to be spoken to. */
-    val text: String,
-    /** Null says it word for word, as [Mode.Exact] does. */
-    val mode: Mode? = null,
-) {
-    public enum class Mode {
-        /** Word for word. */
-        Exact,
-
-        /** The model rewords it on every call, so callers do not hear the same opening. */
-        Variation,
-    }
-
-    internal val schema: GreetingSchema
-        get() = GreetingSchema(
-            text,
-            when (mode) {
-                Mode.Exact -> GreetingMode.exact
-                Mode.Variation -> GreetingMode.variation
-                null -> null
-            },
-        )
-}
 
 /**
  * What to change about a conversation while continuing it as a new one.
