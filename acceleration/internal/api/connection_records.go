@@ -24,7 +24,7 @@ type ConnectionInvocation struct {
 	StartedAt    time.Time            `json:"started_at"`
 	LatencyMs    int64                `json:"latency_ms" doc:"From the call reaching the router to its answer, the router's own checks included."`
 	ErrorType    *InvocationErrorType `json:"error_type,omitempty" doc:"How the call failed. Absent for a call that answered."`
-	// The row's provider_status and error_message (20261031130000_connector_invocation_failures.sql).
+	// The row's provider_status and error_message.
 	ProviderStatus *int                 `json:"provider_status,omitempty" doc:"The HTTP status the provider answered the call's last request with. Absent for a call that answered, and for one no request of which was answered: the router refused or held it, or the provider could not be reached."`
 	ErrorMessage   string               `json:"error_message,omitempty" doc:"Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a call recorded before the router kept it."`
 	Arguments      []InvocationArgument `json:"arguments,omitempty" doc:"The shape of what the call was asked, sorted by name. Absent for a call asked with no arguments, for an incognito session's call, for arguments that were not a JSON object, and for a call recorded before the router kept it."`

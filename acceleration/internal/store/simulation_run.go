@@ -121,9 +121,7 @@ func (r *SimulationRuns) Start(ctx context.Context, run *SimulationRun, cases []
 		cases[i].RunID = run.ID
 		cases[i].State = SimulationPending
 		cases[i].StartedAt = run.StartedAt
-		if cases[i].Transcript == nil {
-			cases[i].Transcript = []SimulationLine{}
-		}
+		cases[i].Transcript = orEmpty(cases[i].Transcript)
 		if err := cases[i].Validate(); err != nil {
 			return stack.Wrap(err)
 		}
@@ -187,7 +185,7 @@ func (r *SimulationRuns) Get(ctx context.Context, customerID, id string) (Simula
 // to and what every simulation has come to lately, which is the same question asked twice.
 func (r *SimulationRuns) Select(ctx context.Context, customerID string, filter SimulationRunFilter) ([]SimulationRun, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	limit := filter.Limit
 	if limit <= 0 {

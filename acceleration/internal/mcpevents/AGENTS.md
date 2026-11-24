@@ -19,7 +19,7 @@ POST /v1/agents/connections/{id}/validate          api.validateConnection
 worker (every router)                               off the request
   wakes: at start, on Reconcile, on a delivery for an undeclared event,
          at the first row due, and at least once a lease (1 min)
-  ClaimConnectionEventSubscriptions: one due row at a time, lease 1 min,
+  ConnectionEventSubscriptions.Claim: one due row at a time, lease 1 min,
     SKIP LOCKED; one attempt is two requests of 10 s at most
   per row:
     connection deleted or disconnected -> row dropped

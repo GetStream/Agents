@@ -41,7 +41,7 @@ App mode needs Postgres, a keyring (`ROUTER_AUTH_KEK_V<n>_WRAPPED` with `ROUTER_
 - **Floor.** An organisation can require its apps' own Stream app (`router stream-apps require`).
 - **Operator CLI:** `router stream-apps require|legacy|fallbacks|backfill-pins`.
 
-Apps that registered their keys before forwarded tokens were given a placeholder token row by migration `20261022120000`, so their background work asks the gateway for a token rather than waiting for their next request. Migration `20261023120000` then dropped the old `stream_apps` and `stream_app_keys` tables.
+Apps that registered their keys before forwarded tokens were given a placeholder token row, so their background work asks the gateway for a token rather than waiting for their next request. The old `stream_apps` and `stream_app_keys` tables were then dropped.
 
 ## Testing
 

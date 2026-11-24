@@ -424,7 +424,7 @@ func (s *Server) refuseUserOutside(ctx context.Context, customerID string, bound
 	}
 	// A guest id the router minted is recorded per customer, so it is nobody else's. One only
 	// seen in a guest token is not: the customer signs those for any id it likes.
-	guest, err := s.store.Guest(ctx, customerID, userID)
+	guest, err := s.store.Users.GetGuest(ctx, customerID, userID)
 	if err != nil || !guest.Minted {
 		return errUserInSharedApp
 	}

@@ -202,7 +202,7 @@ func (s *CallsSuite) TestAGuestImportedAsMintedIsNoGuestTheRouterMinted() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import",
 		`{"table":"users","row":`+row+"}\n", &written))
 	s.Require().Equal(int64(1), written.Tables["users"])
-	held, err := s.store.Guest(context.Background(), s.customerID(), imported)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), imported)
 	s.Require().NoError(err, "the guest is imported")
 	s.False(held.Minted)
 
@@ -317,7 +317,7 @@ func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			CustomerID: s.customerID(), AgentID: call.AgentID,
 			Modality: modality, Provider: "stub", Model: model,
 			StartedAt: s.base.Add(time.Second), Success: true,
@@ -338,7 +338,7 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf() {
 	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(),
 		AgentID: "agent-" + s.utils.uuid(), StartedAt: s.base}, "", "")
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt:   s.base.Add(time.Second),
@@ -361,7 +361,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf
 
 func (s *CallsSuite) TestACallStillRunningIsNotToldWhatItHasSpentSoFar() {
 	call := s.started(store.Call{})
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: s.base.Add(time.Second), InputTokens: 900, Success: true,
@@ -386,7 +386,7 @@ func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePrompt
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+		s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 	}
 
 	var spent CallTokens
@@ -413,7 +413,7 @@ func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+		s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 	}
 
 	var spent CallTokens
@@ -434,7 +434,7 @@ func (s *CallsSuite) TestTokensAreStillReadUnderTheCallsPathTheyMovedFrom() {
 	call := s.inSession("", store.Call{})
 	request := store.Request{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 700, OutputTokens: 30,
 		CustomerID: s.customerID(), AgentID: call.AgentID, StartedAt: s.base.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+	s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 
 	var moved, kept CallTokens
 	s.Require().Equal(http.StatusOK,

@@ -212,7 +212,7 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 	}
 	request := Request{CustomerID: "app", AgentID: "agent", SessionID: "called", Modality: "llm", Provider: "stub",
 		Model: "stub-llm", InputTokens: 10, StartedAt: at.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, &request))
 	call := &Call{ID: "budgeted", SessionID: "called", CustomerID: "app", AgentID: "agent", StartedAt: at.Add(time.Hour)}
 	score := 4
 	end := at.Add(2 * time.Hour)

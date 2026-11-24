@@ -25,7 +25,7 @@ func (s *StoreSuite) inbound(channelID, providerMessageID string, change ...func
 	return message
 }
 
-// queue queues message in a transaction of its own, as AcceptChannelInbound does after its claim.
+// queue queues message in a transaction of its own, as ChannelInbounds.Accept does after its claim.
 func (s *StoreSuite) queue(message ChannelInbound) (bool, error) {
 	var queued bool
 	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -669,7 +669,7 @@ func (s *StoreSuite) inboundClaims(channelID string) []string {
 	return ids
 }
 
-// waitedRow is the row AcceptChannelInbound's waited callback makes of a reply in thread-one. It
+// waitedRow is the row ChannelInbounds.Accept's waited callback makes of a reply in thread-one. It
 // touches no table: the transaction holds the thread channel's row.
 func (s *StoreSuite) waitedRow(reply core.InboundMessage) (ChannelInbound, bool, error) {
 	return ChannelInbound{

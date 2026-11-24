@@ -29,10 +29,10 @@ func (s *StoreSuite) TestActivityCountsWhatWasAskedOfTheAgents() {
 }
 
 func (s *StoreSuite) TestAClaimedGuestIsTheSamePersonAsTheUserWhoClaimedThem() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: "guest-1", CustomerID: "acme", Name: "Randy", CreatedAt: s.base,
 	}))
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "randy")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "randy")
 	s.Require().NoError(err)
 
 	s.opened("as-a-guest", "acme", s.base.Add(time.Minute), func(session *AgentSession) {
