@@ -126,7 +126,10 @@ func (s *DirectorySuite) TestTwoCustomersWritingAsOneAgentAreFoundApart() {
 	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
 	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
 
-	writing, err := s.directoryAt("node-c:1").NodesByAgent(s.ctx, "support")
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.writingAs(peer, "acme", "support"))
+	s.Equal("node-b:1", s.writingAs(peer, "globex", "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"acme": "node-a:1", "globex": "node-b:1"}, writing)
 }
@@ -160,7 +163,9 @@ func (s *DirectorySuite) TestAClaimOnAnAgentThatLapsedIsFoundNowhere() {
 		FieldValue().FieldValue("acme", lapsed+" node-a:1").Build()).Error())
 	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
 
-	writing, err := s.directoryAt("node-c:1").NodesByAgent(s.ctx, "support")
+	peer := s.directoryAt("node-c:1")
+	s.Empty(s.writingAs(peer, "acme", "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
 }
@@ -199,6 +204,13 @@ func (s *DirectorySuite) directoryAt(address string) *Directory {
 // nodeOf is where directory says a customer's session runs.
 func (s *DirectorySuite) nodeOf(directory *Directory, customer, session string) string {
 	address, err := directory.Node(s.ctx, customer, session)
+	s.Require().NoError(err)
+	return address
+}
+
+// writingAs is where directory says a customer's session writing as an agent runs.
+func (s *DirectorySuite) writingAs(directory *Directory, customer, agent string) string {
+	address, err := directory.NodeByAgent(s.ctx, customer, agent)
 	s.Require().NoError(err)
 	return address
 }

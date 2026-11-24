@@ -185,29 +185,24 @@ func approvalInPath(path string) (string, bool) {
 // goes to a worker instead, which is a second agent writing into a conversation the first
 // is already answering in. So the directory decides, not the handover: a node that holds
 // the conversation and cannot be reached is still the only one that may answer. taken is
-// false when that node could not be reached or would not take the message, or when whose
-// conversation it is could not be read. A channel sessions of more than one customer write in,
-// and that nothing says is one customer's, is answered by none of them, as liveSessionOn
-// answers one here: elsewhere and taken.
+// false when that node could not be reached or would not take the message. A channel sessions
+// of more than one customer write in, and that nothing says is one customer's, is answered by
+// none of them, as liveSessionOn answers one here: elsewhere and taken.
 func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event messageEvent) (elsewhere, taken bool) {
 	if s.directory == nil || s.forwarder == nil || origin.handOver == nil {
 		return false, false
 	}
 
-	nodes, err := s.directory.NodesByAgent(ctx, event.ChannelID)
-	if err != nil {
-		s.logger.Warn("could not find out which node is answering in a channel",
-			"channel", event.ChannelID, "error", err)
-		return false, false
-	}
-	address, err := s.answeringNode(ctx, origin, event, nodes)
+	address, err := s.answeringNode(ctx, origin, event)
 	if errors.Is(err, store.ErrAmbiguousHook) {
 		s.logger.Warn("not answering a message in a channel more than one customer's sessions run on",
 			"channel", event.ChannelID, "stream_app", origin.app, "error", err)
 		return true, true
 	}
 	if err != nil {
-		return true, false
+		s.logger.Warn("could not find out which node is answering in a channel",
+			"channel", event.ChannelID, "error", err)
+		return false, false
 	}
 	if address == "" || address == s.directory.Address() {
 		return false, false
@@ -230,20 +225,21 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 	return true, false
 }
 
-// answeringNode is which of nodes, by customer, runs the session that answers a message, picked
-// as liveSessionOn picks one here: the hook's customer's, and in the deployment's app the
-// customer's the channel names or else the store does. While neither does, it is the only
-// customer's, and store.ErrAmbiguousHook when there are more.
-func (s *Server) answeringNode(ctx context.Context, origin hookOrigin, event messageEvent, nodes map[string]string) (string, error) {
-	if len(nodes) == 0 {
-		return "", nil
-	}
+// answeringNode is the node running the session that answers a message, picked as liveSessionOn
+// picks one here: the hook's customer's, and in the deployment's app the customer's the channel
+// names or else the store does. While neither does, it is the only customer's writing as the
+// agent, and store.ErrAmbiguousHook when there are more.
+func (s *Server) answeringNode(ctx context.Context, origin hookOrigin, event messageEvent) (string, error) {
 	if !origin.deployment {
-		return nodes[origin.customer], nil
+		return s.directory.NodeByAgent(ctx, origin.customer, event.ChannelID)
 	}
 	if owner, stamped := event.ChannelCustom[conversation.CustomerField]; stamped {
 		customer, _ := owner.(string)
-		return nodes[customer], nil
+		return s.directory.NodeByAgent(ctx, customer, event.ChannelID)
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, event.ChannelID)
+	if err != nil || len(nodes) == 0 {
+		return "", err
 	}
 	owner, known, err := s.storedOwnerOf(ctx, origin, event)
 	if err != nil {

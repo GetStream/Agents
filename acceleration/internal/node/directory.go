@@ -235,10 +235,26 @@ func (d *Directory) Node(ctx context.Context, customerID, sessionID string) (str
 	return "", nil
 }
 
-// NodesByAgent is where the nodes running sessions that write as an agent can be reached, by
-// the customer whose session each is, which is what an arriving message has to be answered by.
-// An agent id is any customer's to choose, so each customer's is held apart, and one customer
-// starting a session as another's agent does not move where the other's messages go.
+// NodeByAgent is the same for a customer's session writing as an agent, which is what an
+// arriving message has to be answered by. An agent id is any customer's to choose, so each
+// customer's is held apart, and one customer starting a session as another's agent does not
+// move where the other's messages go.
+func (d *Directory) NodeByAgent(ctx context.Context, customerID, agentID string) (string, error) {
+	entry, err := d.redis.Do(ctx, d.redis.B().Hget().Key(d.writingAs+agentID).Field(customerID).Build()).ToString()
+	if rueidis.IsRedisNil(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if address, live := liveClaim(entry, time.Now().UnixMilli()); live {
+		return address, nil
+	}
+	return "", nil
+}
+
+// NodesByAgent is where the nodes running every customer's sessions that write as an agent can
+// be reached, by customer, for a message that names none.
 func (d *Directory) NodesByAgent(ctx context.Context, agentID string) (map[string]string, error) {
 	entries, err := d.redis.Do(ctx, d.redis.B().Hgetall().Key(d.writingAs+agentID).Build()).AsStrMap()
 	if err != nil {
@@ -247,8 +263,8 @@ func (d *Directory) NodesByAgent(ctx context.Context, agentID string) (map[strin
 	now := time.Now().UnixMilli()
 	var nodes map[string]string
 	for customerID, entry := range entries {
-		until, address, _ := strings.Cut(entry, " ")
-		if lapses, err := strconv.ParseInt(until, 10, 64); err != nil || lapses <= now {
+		address, live := liveClaim(entry, now)
+		if !live {
 			continue
 		}
 		if nodes == nil {
@@ -393,6 +409,14 @@ func (d *Directory) sessionKey(key heldSession) string {
 	return d.sessions + key.customerID + ":" + key.sessionID
 }
 
+// liveClaim is the address a customer's claim on an agent names, as writeCommands writes it, and
+// false once it lapsed: when, then the address.
+func liveClaim(entry string, now int64) (string, bool) {
+	until, address, _ := strings.Cut(entry, " ")
+	lapses, err := strconv.ParseInt(until, 10, 64)
+	return address, err == nil && lapses > now
+}
+
 // answeringKey is where a customer's session answering in a conversation is held:
 // node:answering-in:<customer>:<cid>. A cid holds a colon and a customer id may, so the customer
 // is escaped, and no customer and cid make the key of another.
@@ -415,8 +439,9 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 // their ids alone as well, which is all a router of the release before reads.
 //
 // The agent is one hash for every customer writing as it, a field each, because a message in
-// the deployment's app may name no customer and is then answered by the only one there is. A
-// hash cannot expire its fields one at a time, so each says when it lapses, before the address.
+// the deployment's app may name no customer, and the node answering it is then picked from all
+// of theirs. A hash cannot expire its fields one at a time, so each says when it lapses, before
+// the address.
 func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Completed {
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),

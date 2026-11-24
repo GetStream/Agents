@@ -162,6 +162,22 @@ func (s *ForwardedSessionSuite) TestAMessageReachesTheNodeOfTheCustomerWhoseConf
 		"the message went to the node of the customer that wrote as the agent last")
 }
 
+// A message on a channel that names no customer, which sessions of two customers write in on
+// other nodes, is answered by neither: nothing says whose it is.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerOnAChannelTwoCustomersWriteInIsAnsweredByNeither() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.data.backendOfAnotherApp().on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"one of the customers' sessions answered a message nothing says is theirs")
+}
+
 // Two customers may each run a session of one id, each on a node of its own: a request reaches
 // the session of the caller's own customer, wherever it lands.
 func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {
