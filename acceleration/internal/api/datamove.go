@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -76,6 +77,9 @@ var errExportsBusy = unavailable("this router is running as many exports as it t
 // errImportRunning refuses a second import of an app while one is running on this router.
 var errImportRunning = APIError{Type: ErrorTypeConflict, Code: codeImportRunning,
 	Message: "an import of this app is already running: wait for it to finish"}
+
+// errImportStalled ends an import whose client sent no line for importLineWait.
+var errImportStalled = newAPIError(ErrorTypeTimeout, "the import's next line did not arrive in time: send the body without pausing")
 
 // errImportsBusy refuses an import while maxImports are running on this router.
 var errImportsBusy = unavailable("this router is running as many imports as it takes at once: try again later")
@@ -246,6 +250,12 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		if !scanner.Scan() {
 			break
 		}
+		// The deadline is for the client's next line, not for writing this one: left on the
+		// connection, it would end net/http's read after the body, which cancels the request.
+		if err := controller.SetReadDeadline(time.Time{}); err != nil {
+			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
+			return
+		}
 		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
 			continue
 		}
@@ -292,6 +302,10 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(scanner.Err(), bufio.ErrTooLong) {
 		writeError(w, payloadTooLarge(fmt.Sprintf("a line of an import is at most %d MiB", maxImportLine>>20)))
+		return
+	}
+	if errors.Is(scanner.Err(), os.ErrDeadlineExceeded) {
+		writeError(w, errImportStalled)
 		return
 	}
 	if err := scanner.Err(); err != nil {
