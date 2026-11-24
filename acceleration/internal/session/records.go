@@ -49,6 +49,12 @@ var recordsLost = promauto.NewCounterVec(prometheus.CounterOpts{
 		"(the row stays open), and items (dropped because their session or response row was never stored)",
 }, []string{"write"})
 
+var recordsDropped = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "session_records_dropped_total",
+	Help:      "Session records of every kind dropped because the writer's queue was full",
+})
+
 // The series exist from the start, so a rate over the first loss reads it.
 func init() {
 	for _, write := range []string{lostSessionEnd, lostCallEnd, lostItems} {
@@ -195,6 +201,10 @@ type sessionRecorder struct {
 	// is another customer's: their turns and calls are not written under it. Kept by the
 	// writer alone, and each until the session closes.
 	taken map[[2]string]struct{}
+	// missing are the turns, by response id, whose items the store refused because the turn's
+	// row is not there: their later items are dropped as they arrive, rather than failing every
+	// batch they are in. Kept by the writer alone, and each until its turn ends.
+	missing map[string]struct{}
 }
 
 func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecorder {
@@ -206,6 +216,7 @@ func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecor
 		done:    make(chan struct{}),
 		refused: map[string]struct{}{},
 		taken:   map[[2]string]struct{}{},
+		missing: map[string]struct{}{},
 	}
 	go r.run()
 	return r
@@ -332,6 +343,7 @@ func (r *sessionRecorder) queueWrite(write recordWrite) {
 	case r.queue <- write:
 	default:
 		r.dropped.Add(1)
+		recordsDropped.Inc()
 		// An end dropped here leaves its row open, as one the store refused does.
 		switch {
 		case write.closed != "":
@@ -383,7 +395,9 @@ func (r *sessionRecorder) run() {
 			taken++
 			if len(write.items) > 0 {
 				for _, item := range write.items {
-					if _, refused := r.refused[item.ResponseID]; !refused {
+					if _, missing := r.missing[item.ResponseID]; missing {
+						recordsLost.WithLabelValues(lostItems).Inc()
+					} else if _, refused := r.refused[item.ResponseID]; !refused {
 						pending = append(pending, item)
 					}
 				}
@@ -465,8 +479,8 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
-		// The id is the customer's now, whether or not the close of a refused session before
-		// it reached the writer: a full queue drops a close.
+		// The id is the customer's now, so it is no longer taken, even when the close of a
+		// session refused before it never reached the writer: a full queue drops a close.
 		delete(r.taken, key)
 		if write.carriedOn {
 			if err := r.attempt(func(ctx context.Context) error {
@@ -509,6 +523,7 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.finished != "":
 		delete(r.refused, write.finished)
+		delete(r.missing, write.finished)
 		if err := r.attempt(func(ctx context.Context) error {
 			return r.store.Responses.Finish(ctx, write.customerID, write.finished, write.status, write.failure, write.finishedAt)
 		}); err != nil {
@@ -606,6 +621,7 @@ func (r *sessionRecorder) writeItems(items []store.AgentResponseItem) {
 		}
 		switch {
 		case store.IsForeignKeyViolation(err):
+			r.missing[response] = struct{}{}
 			recordsLost.WithLabelValues(lostItems).Add(float64(len(own)))
 			r.logger.Warn("dropped what a turn did: its response was never recorded",
 				"session", own[0].SessionID, "response", response, "items", len(own))
