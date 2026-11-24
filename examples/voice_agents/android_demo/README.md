@@ -12,7 +12,8 @@ app/                  the phone half: chat, voice, and tools that run on the dev
 ## Run it
 
 Start the router and store the agent as [swift_demo's README](../swift_demo/README.md) says:
-`docker compose up --build` from the repo root with `ROUTER_AUTH_MODE=proxy`, then
+`docker compose up --build` from the repo root with `ROUTER_AUTH_MODE=proxy` in the repo
+`.env` (that README says when it also needs `ROUTER_DEV_KEK`), then
 `go run ./configure` and `go run ./backend` in `examples/voice_agents/swift_demo`.
 
 Then tell the app the Stream key, in `local.properties` here, which git ignores:
