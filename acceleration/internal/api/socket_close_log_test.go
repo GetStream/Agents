@@ -365,6 +365,7 @@ func (s *SocketCloseLogSuite) TestAVoiceSocketForAConversationHeldOpenIsARefusal
 	s.Require().NotNil(opened.ConversationId)
 	watching := alice.opens("/v1/agents/sessions/" + opened.Id + "/events")
 	defer func() { _ = watching.Close() }()
+	before := len(s.logged.String())
 	id := rand.Text()
 	connection := s.serverClient.actingFor(s.data.createUser()).withRequestID(id).opens("/v1/agents/socket")
 
@@ -375,5 +376,5 @@ func (s *SocketCloseLogSuite) TestAVoiceSocketForAConversationHeldOpenIsARefusal
 	_, _ = s.socketEnd(connection)
 
 	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
-	s.Empty(lineWith(s.logged, "level=ERROR", `msg="could not open a socket session"`, " request_id="+id))
+	s.NotContains(s.logged.String()[before:], "could not open a socket session")
 }
