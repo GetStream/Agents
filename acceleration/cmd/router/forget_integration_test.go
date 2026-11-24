@@ -449,7 +449,7 @@ func (s *ForgetUserSuite) TestForgettingAUserClearsTheirCountersPolicyAndLimits(
 	replacement := s.forgottenAs(out)
 	s.Zero(s.present(s.routers, routers), "their holds and quota buckets")
 	s.Zero(s.present(s.counters, counters), "their spend counter")
-	s.Contains(out, "redis: 8 keys deleted")
+	s.Contains(out, "redis: 9 keys deleted")
 	s.Equal(userRows{appLimits: 1, resetUsers: []string{replacement}, grantUsers: []string{replacement},
 		campaignUser: []string{replacement}}, s.userRows(s.app, person), "the app's limit for every user is what applies now")
 	s.Contains(out, "shared database: 1 policies and 1 limits deleted; 1 resets, 1 grants and 1 campaigns rewritten")
@@ -519,7 +519,7 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 	out := s.forget(s.app, person, "--dry-run")
 
 	s.Equal("dry run, nothing is changed\nscheduled tasks: 1 to delete, 0 recorded changes to redact\nrequests: 2 rows\ncall legs: 0 rows\n"+
-		"branch snapshots: 0 messages to delete\nagent logs: 0 to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
+		"branch snapshots: 0 messages to delete\nagent logs: 0 to delete\nusage service: 2 events, 4 windows\nredis: 9 keys\n"+
 		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n"+
 		"links: 0 phone links, 0 channel link codes and 0 profiles to delete; 0 contacts to unlink; 0 claimed guests to rewrite\n", out)
 	s.Equal(person, s.requests()[id].UserID)
@@ -589,7 +589,7 @@ func (s *ForgetUserSuite) TestARunWhoseRedisDialStallsIsRunAgain() {
 	out := s.forget(s.app, person, "--dry-run")
 
 	s.Contains(out, "requests: 2 rows\n")
-	s.Contains(out, "redis: 8 keys\n", "the Redis was reached on the second run")
+	s.Contains(out, "redis: 9 keys\n", "the Redis was reached on the second run")
 }
 
 func (s *ForgetUserSuite) TestARunWhoseUsageServiceIsGoneFailsAtOnce() {
