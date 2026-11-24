@@ -400,6 +400,25 @@ func (s *DataMoveSuite) TestARowNamingAnIdBeingTakenByAnotherCustomerIsRefused()
 	})
 }
 
+// A row being written elsewhere that names the same row, or an edit of that row, holds no import up.
+func (s *DataMoveSuite) TestAnImportDoesNotWaitForAnEditOfTheRowItNames() {
+	s.layouts(func(destination *Store, rows []namingRow) {
+		n := rows[0]
+		for _, lock := range []string{"KEY SHARE", "NO KEY UPDATE"} {
+			tx, err := destination.shard.BeginTx(s.ctx, nil)
+			s.Require().NoError(err)
+			s.execute(tx, "SELECT 1 FROM agent_sessions WHERE id = ? FOR "+lock, n.own)
+
+			within, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+			err = destination.ImportRow(within, "acme", n.table, n.naming(n.own))
+			cancel()
+
+			s.Require().NoError(tx.Rollback())
+			s.Require().NoError(err, lock)
+		}
+	})
+}
+
 // A delete of a session waits for an import of its turns and takes them with it, so neither
 // deadlocks on the other.
 func (s *DataMoveSuite) TestASessionsDeleteAndAnImportOfItsTurnsDoNotDeadlock() {
