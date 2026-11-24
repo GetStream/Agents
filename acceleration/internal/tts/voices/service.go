@@ -327,9 +327,6 @@ func (s *Service) clonable(admission routing.Admission, provider string) error {
 			models = append(models, model)
 		}
 	}
-	if len(models) == 0 {
-		models = []routing.ProviderConfig{{Provider: provider, Model: VoiceClone}}
-	}
 	if _, err := admission.Allowed(models); err != nil {
 		return err
 	}
