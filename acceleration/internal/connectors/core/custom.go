@@ -1,11 +1,13 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -26,6 +28,24 @@ type CustomConnector struct {
 	Schemes []string
 	Scopes  []string
 	Client  ClientPolicy
+}
+
+// CheckBaseURL is nil for a base URL an http custom connector may have, and one answer for every
+// other: a caller who creates or imports one (customManifest in internal/api/connectors.go,
+// importableDefinition in internal/store/datamove.go) checks it before CustomManifest, whose
+// rules would answer some of them in their own words (AC-7 of AI-3669). One answer, since
+// egress's own errors tell a name that does not resolve from one that resolves to a private
+// address, which would let a caller probe the names the router's resolver knows. It resolves
+// the host, last, after the checks that cost nothing.
+func CheckBaseURL(ctx context.Context, baseURL string) error {
+	// The endpoint rules Manifest.Validate holds an http custom connector's base URL to: its
+	// cap, and checkTemplate's for a manifest that declares no input, capture or var, where a
+	// URL starts with https:// and a {name} names nothing.
+	if len(baseURL) > maxHTTPPath || !strings.HasPrefix(baseURL, "https://") || strings.ContainsAny(baseURL, "{}") ||
+		egress.ValidatePublicHTTPSURL(ctx, baseURL) != nil {
+		return stack.Wrap(errors.New("base_url must be a public https URL without userinfo, query or fragment"))
+	}
+	return nil
 }
 
 // CustomManifest is the manifest a custom connector is stored as, or why it cannot be: one MCP

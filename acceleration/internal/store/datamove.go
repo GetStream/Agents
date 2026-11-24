@@ -18,7 +18,6 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -1651,8 +1650,8 @@ func boughtHere(relation string) string {
 // the API would have stored it, so no field this release does not read arrives for one that does. Every imported
 // definition is a custom one, since the customer is forced onto the row (identity) and importRow refuses an import with
 // no customer, and only the API's rules keep a custom manifest from naming the operator's client or anything else the
-// router would trust a built-in with (core.Manifest.AsCustom). An http one's base URL must be a public https URL, as
-// the API checks it (customManifest in internal/api/connectors.go).
+// router would trust a built-in with (core.Manifest.AsCustom). An http one's base URL is checked as the API checks it
+// (core.CheckBaseURL).
 func importableDefinition(ctx context.Context, row json.RawMessage) (json.RawMessage, error) {
 	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
@@ -1672,17 +1671,16 @@ func importableDefinition(ctx context.Context, row json.RawMessage) (json.RawMes
 			return nil, invalidImport(fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err))
 		}
 	}
+	// Before AsCustom, whose rules would answer an http:// one in their own words: one answer for every base URL
+	// refused, as the API answers (an app imports its own export).
+	if core.HTTPSource(manifest.Sources) != nil {
+		if err := core.CheckBaseURL(ctx, manifest.Endpoints[core.SourceKindHTTP]); err != nil {
+			return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
+		}
+	}
 	custom, err := manifest.AsCustom(id)
 	if err != nil {
 		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
-	}
-	// One answer for every refusal, without egress's own error, as the API answers (an app imports its own export):
-	// that error tells a name that does not resolve from one that resolves to a private address.
-	if core.HTTPSource(custom.Sources) != nil {
-		if err := egress.ValidatePublicHTTPSURL(ctx, custom.Endpoints[core.SourceKindHTTP]); err != nil {
-			return nil, fmt.Errorf("store: imported connector definition %q: %w: base_url must be a public https URL without userinfo, query or fragment",
-				id, ErrNotACustomConnector)
-		}
 	}
 	if fields["manifest"], err = json.Marshal(custom); err != nil {
 		return nil, stack.Wrap(err)

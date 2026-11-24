@@ -482,11 +482,9 @@ func (s *Server) customManifest(ctx context.Context, sent CustomConnectorRequest
 		Endpoint: sent.Endpoint, Schemes: sent.Schemes, Scopes: sent.Scopes, Client: client,
 	}
 	if sent.HTTP != nil {
-		// Before the manifest's rules, which answer an http:// URL in their own words, so every
-		// base_url refused gets one answer (AC-7 of AI-3669). One answer, as for the endpoint
-		// below, so a caller cannot probe the names the router's resolver knows.
-		if err := egress.ValidatePublicHTTPSURL(ctx, sent.HTTP.BaseURL); err != nil {
-			return core.Manifest{}, stack.Wrap(errors.New("base_url must be a public https URL without userinfo, query or fragment"))
+		// Before the manifest's rules, so every base_url refused gets one answer.
+		if err := core.CheckBaseURL(ctx, sent.HTTP.BaseURL); err != nil {
+			return core.Manifest{}, err
 		}
 		custom.BaseURL, custom.Tools = sent.HTTP.BaseURL, httpTools(sent.HTTP.Tools)
 	}

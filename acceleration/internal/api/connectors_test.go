@@ -888,6 +888,8 @@ func (s *ConnectorsSuite) TestAnHTTPConnectorWhoseAPIIsNotPublicHTTPSIsRefused()
 		"https://8.8.8.8/v1?key=secret", // a query
 		"https://user:secret@8.8.8.8",   // userinfo
 		"https://8.8.8.8/v1#top",        // a fragment
+		"HTTPS://8.8.8.8",               // public to egress, which reads the scheme in any case, not to the manifest's rules
+		"https://8.8.8.8/{x}",           // a {name} the manifest's rules refuse, since a custom connector declares no input
 	} {
 		id := s.customID()
 		sent := s.httpConnector(id)
