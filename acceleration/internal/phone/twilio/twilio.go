@@ -521,22 +521,31 @@ func (p *Provider) Client() *http.Client { return p.client }
 // sidFor finds Twilio's own identifier for a number this account owns, which is what
 // changing or releasing it needs.
 func (p *Provider) sidFor(ctx context.Context, e164 string) (string, error) {
+	sid, held, err := p.HoldsNumber(ctx, e164)
+	if err == nil && !held {
+		return "", stack.Wrap(fmt.Errorf("twilio: %s is not one of this account's numbers", e164))
+	}
+	return sid, err
+}
+
+// HoldsNumber reports whether this account holds a number, and Twilio's sid for it.
+func (p *Provider) HoldsNumber(ctx context.Context, e164 string) (string, bool, error) {
 	if e164 == "" {
-		return "", stack.Wrap(errors.New("twilio: a number is required"))
+		return "", false, stack.Wrap(errors.New("twilio: a number is required"))
 	}
 
 	path := fmt.Sprintf("/2010-04-01/Accounts/%s/IncomingPhoneNumbers.json", p.accountSID)
 
 	var owned incomingNumbers
 	if err := p.get(ctx, path, url.Values{"PhoneNumber": {e164}}, &owned); err != nil {
-		return "", err
+		return "", false, err
 	}
 	for _, number := range owned.IncomingPhoneNumbers {
 		if number.PhoneNumber == e164 {
-			return number.SID, nil
+			return number.SID, true, nil
 		}
 	}
-	return "", stack.Wrap(fmt.Errorf("twilio: %s is not one of this account's numbers", e164))
+	return "", false, nil
 }
 
 func (p *Provider) get(ctx context.Context, path string, query url.Values, into any) error {

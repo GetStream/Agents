@@ -398,6 +398,39 @@ func (s *GuestsSuite) TestTheSameClaimArrivingTwiceIsNotAConflict() {
 	s.Equal(0, again.SessionsMoved, "the conversations moved the first time")
 }
 
+// A claim that stopped once the guest was marked, before the account joined the channels of
+// the conversations it moved, was answered as done when sent again, and the account never
+// could read them. The store's half is all the first claim got through.
+func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhenSentAgain() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	_, err := s.store.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
+	s.Require().NoError(err)
+	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), account.userID)
+
+	s.claim(guest, account.userID)
+
+	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID, "the account reads what the guest said")
+}
+
+// A claim sent again once every step of it ran did them all again: a backend that claims at
+// every sign-in put the account back into the channel of a conversation it had left, with two
+// Stream calls for each of the account's conversations every time.
+func (s *GuestsSuite) TestAFinishedClaimSentAgainLeavesTheChannelsAsTheyAre() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	s.claim(guest, account.userID)
+	channel := s.transcriptOf(talked)
+	s.Require().Contains(s.chat.Members(channel), account.userID)
+	_, err := s.chat.Client.Chat().UpdateChannel(context.Background(), chatlog.ChannelType, channel,
+		&getstream.UpdateChannelRequest{RemoveMembers: []string{account.userID}})
+	s.Require().NoError(err)
+
+	s.claim(guest, account.userID)
+
+	s.NotContains(s.chat.Members(channel), account.userID, "the claim had nothing left to do")
+}
+
 func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	guest := s.recordGuest()
 	s.claim(guest, s.utils.uuid())

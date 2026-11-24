@@ -199,8 +199,9 @@ func (s *StoreSuite) TestRollupOverPartOfABucketRecomputesAllOfIt() {
 			s.EqualValues(3000, buckets[0].AudioMsTotal, "the bucket keeps both requests")
 			s.EqualValues(2, buckets[0].RequestCount)
 
-			tagged, err := s.store.TagBuckets.Select(s.ctx, customer, TagBucketFilter{Modality: "stt", Key: "project", Granularity: Hourly, From: s.base, To: s.base.Add(time.Hour)})
-			s.Require().NoError(err)
+			var tagged []TagBucket
+			s.Require().NoError(s.store.shard.NewSelect().Table("stats_tags_hourly").
+				Where("customer_id = ?", customer).Scan(s.ctx, &tagged))
 			s.Require().Len(tagged, 1)
 			s.EqualValues(3000, tagged[0].AudioMsTotal, "so does the label's")
 		})
@@ -519,6 +520,11 @@ func (s *StoreSuite) TestBucketQueryBudgets() {
 	// A router rolls up its own shard: one statement for the table and one for its labels'.
 	s.Equal(2, s.countQueries(func() {
 		_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
+		s.Require().NoError(err)
+	}))
+	// A wider window is the same two a bucket at a time, so no statement covers all of it.
+	s.Equal(6, s.countQueries(func() {
+		_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base.Add(30*time.Minute), s.base.Add(3*time.Hour))
 		s.Require().NoError(err)
 	}))
 	s.Equal(len(s.store.shards()), s.countQueries(func() {

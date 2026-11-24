@@ -33,7 +33,7 @@ func TestSecretsBrokerContract(t *testing.T) {
 			t.Cleanup(stub.server.Close)
 		}
 		secrets, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: stub.server.URL + "/api", Prefix: "stg",
-			Session: session, Tokens: tokens, Bind: bind, Logger: logger})
+			Customer: "app-1", Session: session, Tokens: tokens, Bind: bind, Logger: logger})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +98,7 @@ var github = sandbox.Grant{Connection: core.ConnectionRef{CustomerID: "app", Con
 // under prefix.
 func (s *SecretsSuite) granted(prefix string, config sandbox.Config, grants ...sandbox.Grant) *Sandbox {
 	key, url := "key-1", s.platform.server.URL+"/api"
-	broker, err := NewSecrets(SecretsOptions{APIKey: key, APIURL: url, Prefix: prefix, Session: "session-1",
+	broker, err := NewSecrets(SecretsOptions{APIKey: key, APIURL: url, Prefix: prefix, Customer: "app-1", Session: "session-1",
 		Tokens: func(context.Context, sandbox.Grant) (sandbox.Token, error) { return s.token, s.tokenErr },
 		Logger: slog.New(slog.NewTextHandler(s.logs, nil))})
 	s.Require().NoError(err)
@@ -128,7 +128,7 @@ func (s *SecretsSuite) TestDaytonasBrokerSendsDaytonaWhatItDidBefore() {
 		`{"autoStopInterval":15,"labels":{"code-toolbox-language":"python"},"networkBlockAll":false,"public":false,"secrets":[{"GITHUB_TOKEN":"SECRET"}],"spot":false},`+
 		`{"autoStopInterval":15,"labels":{"code-toolbox-language":"python"},"networkAllowList":"10.0.0.0/8","networkBlockAll":false,"public":false,`+
 		`"secrets":[{"GITHUB_TOKEN":"SECRET"}],"spot":false}]`,
-		regexp.MustCompile(`va_stg_session-1_github_[0-9a-f]{8}`).ReplaceAllString(string(created), "SECRET"))
+		regexp.MustCompile(`va_stg_session-1_app-1_github_[0-9a-f]{8}`).ReplaceAllString(string(created), "SECRET"))
 
 	created, err = json.Marshal(s.platform.requests()[:1])
 	s.Require().NoError(err)
@@ -136,7 +136,7 @@ func (s *SecretsSuite) TestDaytonasBrokerSendsDaytonaWhatItDidBefore() {
 	s.Require().NoError(err)
 	s.Equal(`[{"autoStopInterval":15,"domainAllowList":"pypi.org,api.github.com,uploads.github.com","labels":{"code-toolbox-language":"python"},`+
 		`"networkBlockAll":false,"public":false,"secrets":[{"GITHUB_TOKEN":"SECRET"}],"spot":false}]`,
-		regexp.MustCompile(`va_stg_session-1_github_[0-9a-f]{8}`).ReplaceAllString(string(created), "SECRET"))
+		regexp.MustCompile(`va_stg_session-1_app-1_github_[0-9a-f]{8}`).ReplaceAllString(string(created), "SECRET"))
 	s.Equal(`[{"authorization":"Bearer key-1","code":"print(1)","language":"python","path":"/toolbox/sandbox-2/process/code-run","timeout":30}]`,
 		string(ran))
 	s.Equal([]string{"{\"command\":\"mkdir -p 'dir'\"}\n"}, s.platform.rawCommands)
@@ -146,7 +146,7 @@ func (s *SecretsSuite) TestDaytonasBrokerSendsDaytonaWhatItDidBefore() {
 // connection bound holds once it is set, and whose tokens are s.token.
 func (s *SecretsSuite) lateBox(bound *sandbox.Grant) *Sandbox {
 	key, url := "key-1", s.platform.server.URL+"/api"
-	broker, err := NewSecrets(SecretsOptions{APIKey: key, APIURL: url, Prefix: "stg", Session: "session-1",
+	broker, err := NewSecrets(SecretsOptions{APIKey: key, APIURL: url, Prefix: "stg", Customer: "app-1", Session: "session-1",
 		Tokens: func(context.Context, sandbox.Grant) (sandbox.Token, error) { return s.token, s.tokenErr },
 		Bind: func(context.Context, sandbox.Grant) (sandbox.Grant, bool) {
 			return *bound, bound.Connection.ConnectionID != ""
@@ -208,7 +208,7 @@ func (s *SecretsSuite) TestALateGrantsTokenDaytonaRefusedIsPutInOnTheNextRun() {
 func (s *SecretsSuite) TestAConfigWithoutLateGrantsSendsDaytonaWhatItDidBefore() {
 	var asked []string
 	revision := 1
-	broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Prefix: "stg", Session: "session-1",
+	broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Prefix: "stg", Customer: "app-1", Session: "session-1",
 		Tokens: func(_ context.Context, grant sandbox.Grant) (sandbox.Token, error) {
 			asked = append(asked, grant.Binding+"/"+grant.Connection.ConnectionID)
 			return sandbox.Token{Value: fmt.Sprintf("tok_%s_%d", grant.Binding, revision), Revision: revision}, nil
@@ -223,9 +223,15 @@ func (s *SecretsSuite) TestAConfigWithoutLateGrantsSendsDaytonaWhatItDidBefore()
 
 	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github, gitlab})
 	s.Require().NoError(err)
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	env, err := broker.BeforeRun(s.ctx)
+	s.Require().NoError(err)
+	s.Nil(env, "a run gets no env of its own")
+	s.Require().NoError(broker.AfterRun(s.ctx))
 	revision = 2
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	env, err = broker.BeforeRun(s.ctx)
+	s.Require().NoError(err)
+	s.Nil(env)
+	s.Require().NoError(broker.AfterRun(s.ctx), "a run's end changes no secret")
 
 	s.Len(mount.Secrets, 2)
 	s.Equal([]string{"POST /api/secret", "POST /api/secret", "PATCH /api/secret/secret-1", "PATCH /api/secret/secret-2"}, s.platform.history())
@@ -243,7 +249,7 @@ func (s *SecretsSuite) TestTheSandboxIsCreatedWithTheSecretMadeForItsGrant() {
 
 	names := s.platform.secretNames()
 	s.Require().Len(names, 1)
-	s.Regexp(`^va_stg_session-1_github_[0-9a-f]{8}$`, names[0])
+	s.Regexp(`^va_stg_session-1_app-1_github_[0-9a-f]{8}$`, names[0])
 	s.Equal([]any{map[string]any{"GITHUB_TOKEN": names[0]}}, s.platform.requests()[0]["secrets"])
 	s.Equal([]string{"POST /api/secret", "POST /api/sandbox"}, s.platform.history(), "the secret exists before the sandbox")
 }
@@ -296,7 +302,7 @@ func (s *SecretsSuite) TestADaytonaRefusalOnTheWayLosesNoSecret() {
 				s.T().Cleanup(platform.server.Close)
 				revision, withdrawn := 1, false
 				key, url := "key-1", platform.server.URL+"/api"
-				broker, err := NewSecrets(SecretsOptions{APIKey: key, APIURL: url, Prefix: "stg", Session: "session-1",
+				broker, err := NewSecrets(SecretsOptions{APIKey: key, APIURL: url, Prefix: "stg", Customer: "app-1", Session: "session-1",
 					Tokens: func(_ context.Context, grant sandbox.Grant) (sandbox.Token, error) {
 						// A withdrawal takes every grant's credential; an update only the ones before the refused.
 						if withdrawn && (path == "withdraw" || slices.Index(bindings, grant.Binding) < refused) {
@@ -577,7 +583,7 @@ func (s *SecretsSuite) TestAPrepareCutPartwayDeletesTheSecretsItMade() {
 				defer cancel()
 			}
 			asked := 0
-			broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: platform.server.URL + "/api", Prefix: "stg", Session: "session-1",
+			broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: platform.server.URL + "/api", Prefix: "stg", Customer: "app-1", Session: "session-1",
 				HTTPClient: &http.Client{Transport: cancelsAfterCreate{cancel: cancel, cut: c.cut == "cancel"}},
 				Bind:       c.bind, Logger: slog.New(slog.NewTextHandler(s.logs, nil)),
 				Tokens: func(ctx context.Context, _ sandbox.Grant) (sandbox.Token, error) {
@@ -620,7 +626,7 @@ func (c cancelsAfterCreate) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // TestAPrepareNotCutKeepsItsSecrets is the control: a Prepare that succeeds deletes nothing.
 func (s *SecretsSuite) TestAPrepareNotCutKeepsItsSecrets() {
-	broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Prefix: "stg", Session: "session-1",
+	broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Prefix: "stg", Customer: "app-1", Session: "session-1",
 		Tokens: func(context.Context, sandbox.Grant) (sandbox.Token, error) { return s.token, nil }})
 	s.Require().NoError(err)
 
@@ -637,7 +643,7 @@ func (s *SecretsSuite) TestAPrepareCutPartwayWaitsOnlyTheBoundForADeleteDaytonaS
 	s.platform.mu.Lock()
 	s.platform.slowSecret = map[string]time.Duration{http.MethodDelete: time.Hour}
 	s.platform.mu.Unlock()
-	broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Prefix: "stg", Session: "session-1",
+	broker, err := NewSecrets(SecretsOptions{APIKey: "key-1", APIURL: s.platform.server.URL + "/api", Prefix: "stg", Customer: "app-1", Session: "session-1",
 		Tokens: func(context.Context, sandbox.Grant) (sandbox.Token, error) { return s.token, nil }})
 	s.Require().NoError(err)
 	broker.releaseTimeout = 200 * time.Millisecond
@@ -663,7 +669,7 @@ func (s *SecretsSuite) TestASecretNameKeepsToDaytonasCharacters() {
 	_, err := box.Run(s.ctx, "print(1)", nil)
 
 	s.Require().NoError(err)
-	s.Regexp(`^va_dev_kanat_mac_session-1_github_[0-9a-f]{8}$`, s.platform.secretNames()[0])
+	s.Regexp(`^va_dev_kanat_mac_session-1_app-1_github_[0-9a-f]{8}$`, s.platform.secretNames()[0])
 }
 
 // TestAGrantOpensItsHostsInASandboxThatReachesNothingElse: the config's network blocks
@@ -908,7 +914,7 @@ func (s *SecretsSuite) TestACredentialKeptOnARefusedRefreshLogsWhy() {
 
 	s.Require().NoError(err)
 	s.Regexp(`msg="a connector's credential could not be refreshed for the sandbox; it keeps the one it has" `+
-		`connector=github secret=va_stg_session-1_github_[0-9a-f]{8} class=canceled`, s.logs.String())
+		`connector=github secret=va_stg_session-1_app-1_github_[0-9a-f]{8} class=canceled`, s.logs.String())
 }
 
 // TestAWithdrawnCredentialLogsWhy: the warning names the class of the error that withdrew it.
@@ -921,7 +927,7 @@ func (s *SecretsSuite) TestAWithdrawnCredentialLogsWhy() {
 
 	s.Require().NoError(err)
 	s.Regexp(`msg="a connector's credential is withdrawn from the sandbox" connector=github `+
-		`secret=va_stg_session-1_github_[0-9a-f]{8} class=no_credential`, s.logs.String())
+		`secret=va_stg_session-1_app-1_github_[0-9a-f]{8} class=no_credential`, s.logs.String())
 }
 
 // built is a sandbox of a built config with github granted: its timeout is the 20 minutes a

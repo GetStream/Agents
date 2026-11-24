@@ -12,12 +12,15 @@ import (
 	"testing"
 	"time"
 
+	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -38,6 +41,8 @@ type RecordedCreateSuite struct {
 	ctx      context.Context
 	store    *store.Store
 	customer string
+	// dsn is the suite's database, which store keeps every table in.
+	dsn string
 }
 
 func TestRecordedCreateSuite(t *testing.T) {
@@ -50,7 +55,8 @@ func (s *RecordedCreateSuite) SetupSuite() {
 		s.T().Skip("ROUTER_POSTGRES_DSN is not set")
 	}
 	s.ctx = context.Background()
-	db, err := store.Open(testenv.Database(dsn, "recorded_create"))
+	s.dsn = testenv.Database(dsn, "recorded_create")
+	db, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
 	s.store = db
@@ -86,7 +92,7 @@ func (s *RecordedCreateSuite) TestTheStoredToolsKeepSearch() {
 	s.Require().NoError(created.Close())
 	s.Require().NoError(m.records.Flush(s.ctx))
 
-	stored, err := s.store.SessionTools.Get(s.ctx, created.ID())
+	stored, err := s.store.SessionTools.Get(s.ctx, s.customer, created.ID())
 	s.Require().NoError(err)
 	names := make([]string, 0, len(stored))
 	for _, tool := range stored {
@@ -173,9 +179,9 @@ func (s *RecordedCreateSuite) TestTheSpecReadsRaceNoChose() {
 	m := s.manager(newQuietEdge(), &stubTTS{emitter: tts.NewEmitter(64)}, nil)
 	joining := s.joining(m)
 	joining.naming = &naming{titles: s.titler(m, "Refund a late order")}
-	m.sessions[joining.id] = joining
+	m.sessions[joining.Key()] = joining
 	// Shutdown closes what is registered, and this session has no agent to close.
-	s.T().Cleanup(func() { delete(m.sessions, joining.id) })
+	s.T().Cleanup(func() { delete(m.sessions, joining.Key()) })
 	owner := OwnerOf(joining.spec)
 	reads := map[string]func(){
 		"the session row":   func() { sessionRow(joining) },
@@ -252,6 +258,12 @@ func (s *RecordedCreateSuite) spec(spec Spec) Spec {
 // manager is a session manager over the suite's Postgres, joining every call on edge and
 // speaking with voice. A nil finder leaves the deployment without search.
 func (s *RecordedCreateSuite) manager(edge agent.Edge, voice tts.TTS, finder search.Provider) *Manager {
+	return s.managerOn(s.store, nil, edge, voice, finder)
+}
+
+// managerOn is manager over on, keeping conversations in conversations unless it is nil.
+func (s *RecordedCreateSuite) managerOn(on *store.Store, conversations *persistent.Service, edge agent.Edge, voice tts.TTS,
+	finder search.Provider) *Manager {
 	logger := slog.New(slog.DiscardHandler)
 	transcription := sttrouter.NewRegistry()
 	transcription.Register("stub", func(routing.Spec) (stt.STT, error) { return &stubSTT{emitter: stt.NewEmitter(64)}, nil })
@@ -270,7 +282,7 @@ func (s *RecordedCreateSuite) manager(edge agent.Edge, voice tts.TTS, finder sea
 	s.T().Cleanup(speaker.Close)
 
 	options := ManagerOptions{
-		LLM: reasoner, STT: transcriber, TTS: speaker, Store: s.store, Logger: logger,
+		LLM: reasoner, STT: transcriber, TTS: speaker, Store: on, Conversations: conversations, Logger: logger,
 		Edge: func(context.Context, Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) { return edge, nil },
 	}
 	if finder != nil {
@@ -283,6 +295,55 @@ func (s *RecordedCreateSuite) manager(edge agent.Edge, voice tts.TTS, finder sea
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(m.Shutdown()) })
 	return m
+}
+
+func (s *RecordedCreateSuite) TestAChatReopenedInAnotherShardIsListedByTheRowItRunsIn() {
+	here, there := s.twoShards()
+	chat := chattest.Client(s.T())
+	held := s.chatting(there, chat)
+	first, err := held.Create(s.ctx, Spec{CustomerID: s.customer, Text: true, PersistConversation: true,
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"}})
+	s.Require().NoError(err)
+	s.Require().NoError(first.Close())
+	s.Require().NoError(held.records.Flush(s.ctx))
+	_, err = there.Sessions.Pin(s.ctx, s.customer, first.ID(), true, time.Now().UTC())
+	s.Require().NoError(err)
+
+	carrying := s.chatting(here, chat)
+	reopened, err := carrying.Create(s.ctx, Spec{ID: first.ID(), CustomerID: s.customer, Text: true, PersistConversation: true,
+		ConversationID: first.Spec().ConversationID, Reopened: first.CreatedAt(), LLMTarget: "en-low-latency",
+		Caller: routing.Caller{UserID: "employee-1"}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = reopened.Close() })
+	s.Require().NoError(carrying.records.Flush(s.ctx))
+
+	running, err := here.Sessions.Get(s.ctx, s.customer, first.ID())
+	s.Require().NoError(err)
+	s.NotNil(running.PinnedAt, "the row it runs in lost the pin it had before")
+	left, err := there.Sessions.Get(s.ctx, s.customer, first.ID())
+	s.Require().NoError(err)
+	s.Equal(store.SessionRunning, left.State, "read where it left, it is listed by its closed row there")
+}
+
+// twoShards are the stores of a router of each of two shards, over the suite's database.
+func (s *RecordedCreateSuite) twoShards() (here, there *store.Store) {
+	dsn := os.Getenv("ROUTER_POSTGRES_DSN")
+	a, b := testenv.Database(dsn, "recorded_shard_a"), testenv.Database(dsn, "recorded_shard_b")
+	open := func(own string) *store.Store {
+		router, err := store.OpenShards(store.Options{DSN: s.dsn, ShardDSN: own, Shards: map[string]string{"a": a, "b": b}})
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(router.Close()) })
+		s.Require().NoError(router.Migrate(s.ctx))
+		return router
+	}
+	return open(a), open(b)
+}
+
+// chatting is a session manager over on that keeps its conversations in chat.
+func (s *RecordedCreateSuite) chatting(on *store.Store, chat *getstream.Stream) *Manager {
+	conversations := persistent.NewForChat(chat)
+	s.T().Cleanup(conversations.Close)
+	return s.managerOn(on, conversations, newQuietEdge(), &stubTTS{emitter: tts.NewEmitter(64)}, nil)
 }
 
 // refusingEdge is a call that will not have the agent.

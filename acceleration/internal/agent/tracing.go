@@ -25,13 +25,13 @@ var tracer = tracing.Tracer("internal/agent")
 //
 // A stage that never happened is left out rather than recorded as instant, the way the
 // rows leave it null: a turn interrupted before the model answered has no reply to show.
-func traceTurn(owner routing.Owner, turnID string, current *openTurn) {
+func traceTurn(ctx context.Context, owner routing.Owner, turnID string, current *openTurn) {
 	ended := lastMoment(current)
 	if current.transcriptAt.IsZero() || ended.IsZero() {
 		return
 	}
 
-	ctx, turn := tracer.Start(context.Background(), "agent.turn",
+	ctx, turn := tracer.Start(ctx, "agent.turn",
 		trace.WithTimestamp(current.transcriptAt),
 		trace.WithAttributes(
 			attribute.String("turn.id", turnID),

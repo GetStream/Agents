@@ -43,7 +43,7 @@ func (s *Suite) TestALimitCapsHowManySourcesComeBack() {
 // TestAQuestionWithNothingInItIsRefused is checked against the real provider because a
 // search for nothing is billed like any other.
 func (s *Suite) TestAQuestionWithNothingInItIsRefused() {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 	defer cancel()
 
 	_, err := s.Provider.Search(ctx, search.Query{Text: "  "})
@@ -103,7 +103,7 @@ func (s *Suite) TestAPageIsReadWhole() {
 	if !ok {
 		s.T().Skip("this provider does not read pages")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 	defer cancel()
 
 	page, err := reader.Read(ctx, examplePage)

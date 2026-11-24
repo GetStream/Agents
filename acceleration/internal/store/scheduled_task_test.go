@@ -1216,6 +1216,53 @@ func (s *StoreSuite) TestResumesAtOnceStopAtTheConfigsActiveLimit() {
 	s.Equal(5, active)
 }
 
+func (s *StoreSuite) TestACreateAndAResumeAtOnceStopAtTheActiveLimit() {
+	for round := range 40 {
+		config := s.limitedConfig(1)
+		user := fmt.Sprintf("user-%d", round)
+		paused := s.task(fmt.Sprintf("paused-%d", round), func(task *ScheduledTask) {
+			task.ConfigID, task.UserID, task.State = config.ID, user, ScheduledTaskPaused
+		})
+		resumed := *paused
+		resumed.State = ScheduledTaskActive
+		created := &ScheduledTask{ID: fmt.Sprintf("new-%d", round), CustomerID: "acme", ConfigID: config.ID, UserID: user,
+			CallerKind: "authenticated", Title: "Stretch", Instructions: "Remind Sam to stretch.",
+			StartLocal: s.base, Timezone: "UTC"}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		wg.Go(func() { <-start; errs <- s.store.ScheduledTasks.Insert(s.ctx, created, 1) })
+		wg.Go(func() { <-start; errs <- s.store.ScheduledTasks.Update(s.ctx, &resumed) })
+		close(start)
+		wg.Wait()
+		close(errs)
+		won, refused := 0, 0
+		for err := range errs {
+			switch {
+			case err == nil:
+				won++
+			case errors.Is(err, ErrTooManyScheduledTasks):
+				refused++
+			default:
+				s.Require().NoError(err, "round %d", round)
+			}
+		}
+		s.Require().Equal(1, won, "round %d", round)
+		s.Require().Equal(1, refused, "round %d", round)
+		active, err := s.store.ScheduledTasks.CountActive(s.ctx, "acme", user, config.ID)
+		s.Require().NoError(err)
+		s.Require().Equal(1, active, "round %d", round)
+	}
+}
+
+func (s *StoreSuite) TestAFailedTaskResumedAtTheLimitIsRefused() {
+	config := s.limitedConfig(1)
+	s.task("one", func(task *ScheduledTask) { task.ConfigID = config.ID })
+	failed := s.task("two", func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskFailed })
+	failed.State = ScheduledTaskActive
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, failed), ErrTooManyScheduledTasks)
+}
+
 func (s *StoreSuite) TestAnEditOfAnActiveTaskAtTheLimitIsSaved() {
 	config := s.limitedConfig(1)
 	task := s.task("one", func(task *ScheduledTask) { task.ConfigID = config.ID })

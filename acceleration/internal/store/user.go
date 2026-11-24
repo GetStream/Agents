@@ -116,8 +116,10 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 		// Read through the client-side cache, which is what puts the key under Redis's
 		// tracking: a later claim deleting it drops this entry on every replica holding
 		// one. A Redis that cannot be reached is a slow deployment and not a broken one,
-		// so the answer there is the same as a miss.
-		found, err := redis.DoCache(ctx, redis.B().Get().Key(name).Cache(), userTTL).ToString()
+		// so the answer there is the same as a miss, within cacheWait.
+		read, cancel := context.WithTimeout(ctx, cacheWait)
+		found, err := redis.DoCache(read, redis.B().Get().Key(name).Cache(), userTTL).ToString()
+		cancel()
 		switch {
 		case err == nil && found != "" && settles(found, sighting):
 			r.seen.Keep(customerID, userID, found, time.Time{})
@@ -143,7 +145,10 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 
 	if redis != nil {
 		set := redis.B().Set().Key(name).Value(sighting).Ex(userTTL).Build()
-		if err := redis.Do(ctx, set).Error(); err != nil {
+		write, cancel := context.WithTimeout(ctx, cacheWait)
+		err := redis.Do(write, set).Error()
+		cancel()
+		if err != nil {
 			slog.Default().Error("could not cache a user in redis",
 				"customer", customerID, "user", userID, "error", err)
 		}

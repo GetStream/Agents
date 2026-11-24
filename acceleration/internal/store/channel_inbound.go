@@ -438,13 +438,10 @@ func updateClaimedChannelInbound(ctx context.Context, claimed ChannelInbound, up
 // Prune deletes the rows of written messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
 func (r *ChannelInbounds) Prune(ctx context.Context, now time.Time) (int, error) {
-	result, err := r.store.global.NewDelete().Model((*ChannelInbound)(nil)).
-		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
-			ChannelInboundDone, now.Add(-channelInboundDoneKeep).UTC(), ChannelInboundFailed, now.Add(-channelInboundFailedKeep).UTC()).
-		Exec(ctx)
+	pruned, err := deleteInBatches(ctx, r.store.global, "channel_thread_inbound", "(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
+		ChannelInboundDone, now.Add(-channelInboundDoneKeep).UTC(), ChannelInboundFailed, now.Add(-channelInboundFailedKeep).UTC())
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune channel inbound: %w", err))
+		return int(pruned), stack.Wrap(fmt.Errorf("store: prune channel inbound: %w", err))
 	}
-	pruned, _ := result.RowsAffected()
 	return int(pruned), nil
 }

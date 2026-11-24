@@ -87,8 +87,8 @@ func (s *Server) linkedThread(ctx context.Context, origin hookOrigin, channelID 
 // waits for it. A session this router opens for the turn is closed after it, so the next
 // turn, on whichever router, opens the conversation again from the channel, with every reply
 // in it.
-func (s *Server) answerThread(origin hookOrigin, thread store.ChannelThread, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) answerThread(ctx context.Context, origin hookOrigin, thread store.ChannelThread, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 
 	// Stream may deliver one message.new more than once, and each would be another reply.
@@ -134,7 +134,7 @@ func (s *Server) AnswerQueued(ctx context.Context, thread store.ChannelThread, w
 	}
 	origin := hookOrigin{customer: thread.CustomerID, app: thread.StreamAppPK}
 	return func() {
-		turn, cancel := context.WithTimeout(context.Background(), askTimeout)
+		turn, cancel := context.WithTimeout(context.WithoutCancel(ctx), askTimeout)
 		defer cancel()
 		s.answerClaimed(turn, origin, thread, event)
 	}, nil
@@ -155,7 +155,7 @@ func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread st
 			s.logger.Error("could not let go of a thread's turn; it runs out instead", "channel", thread.ChannelID, "error", err)
 		}
 	}()
-	s.answerHosted(origin, chatlog.ChannelType+":"+thread.ChannelID, thread.CustomerID, event,
+	s.answerHosted(ctx, origin, chatlog.ChannelType+":"+thread.ChannelID, thread.CustomerID, event,
 		func(turn context.Context) (*session.Session, error) {
 			return s.threadSession(turn, origin, thread, event)
 		})
@@ -164,14 +164,14 @@ func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread st
 // answerHosted has the Router's own session on the channel cid, the customer's, answer a
 // person's message there: a thread channel's (answerClaimed), or a channel of a type an agent
 // config answers in (answerChatChannel). open opens the session when none runs on the channel.
-func (s *Server) answerHosted(origin hookOrigin, cid, customer string, event messageEvent,
+func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, customer string, event messageEvent,
 	open func(context.Context) (*session.Session, error)) {
 	// A thread's author is told to the agent by their Stream user alone: the bridge names that
 	// user after the provider's id for them (channelbridge openThread), a phone number on a
 	// texting line, which no model is told. So each person goes under "Speaker N". The people in
 	// a channel of a type an agent config answers in are the customer's own Stream users, whom a
 	// tool may need to name: each goes under their name and user id (agent.WithWriter).
-	attributed := routing.WithAttribution(context.Background(), chatHookAttribution(customer, event))
+	attributed := routing.WithAttribution(context.WithoutCancel(ctx), chatHookAttribution(customer, event))
 	written := agent.WithAuthor(attributed, event.Message.User.ID)
 	if event.ChannelType != chatlog.ChannelType {
 		written = agent.WithWriter(attributed, event.Message.User.ID, conversation.AuthorName(event.Message.User.Name))

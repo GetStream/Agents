@@ -137,7 +137,7 @@ func (s *LiveSuite) box(session string) *Sandbox {
 		return sandbox.Grant{Connection: core.ConnectionRef{CustomerID: "live", ConnectionID: binding}, Binding: binding,
 			Env: env, Hosts: []string{"httpbin.org"}}
 	}
-	broker, err := NewSecrets(SecretsOptions{Prefix: s.prefix, Session: session, Logger: slog.Default(),
+	broker, err := NewSecrets(SecretsOptions{Prefix: s.prefix, Customer: "app-1", Session: session, Logger: slog.Default(),
 		Tokens: func(_ context.Context, g sandbox.Grant) (sandbox.Token, error) {
 			if s.revoked.Load() {
 				return sandbox.Token{}, sandbox.ErrNoCredential

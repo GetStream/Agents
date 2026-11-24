@@ -15,6 +15,7 @@ import (
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -29,6 +30,46 @@ var ErrChangesExpired = errors.New("store: the changes since that cursor are no 
 // have refused for a custom connector (importableDefinition).
 var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
+// ErrInvalidImport is an export that cannot be written as it is: a table no export carries, a
+// row that does not read, or a row the database refuses for what it holds. Its message names
+// the table and nothing of the database. A database that failed is never one.
+var ErrInvalidImport = errors.New("store: the export cannot be imported")
+
+// invalidImport marks err as ErrInvalidImport without changing its message.
+func invalidImport(err error) error { return marked{err, ErrInvalidImport} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
+
+// refusedRow is a row of table that Postgres refused for what it holds, as an ErrInvalidImport
+// that says why in words of its own: Postgres's name a constraint and its columns. It is nil
+// for any other error, such as a database that did not answer.
+func refusedRow(table string, err error) error {
+	var refused pgdriver.Error
+	if !errors.As(err, &refused) {
+		return nil
+	}
+	var reason string
+	switch code := refused.Field('C'); {
+	case code == uniqueViolation:
+		reason = "a row holds a value, such as a name, that another row here already holds"
+	case code == foreignKeyViolation:
+		reason = "a row names a row that neither the export nor this app holds"
+	case strings.HasPrefix(code, "23"):
+		reason = "a row breaks a rule of its table"
+	case strings.HasPrefix(code, "22"):
+		reason = "a row holds a value its column cannot take"
+	default:
+		return nil
+	}
+	// The Postgres error stays in the chain for errors.As, but not in the text: it names the
+	// constraint and the values that broke it.
+	return stack.Wrap(invalidImport(marked{fmt.Errorf("store: import %s: %s", table, reason), err}))
+}
+
 // dataTable is one table a customer's rows live in.
 //
 // A table either holds the customer id itself or belongs to one through a parent, and
@@ -38,7 +79,9 @@ var ErrNotACustomConnector = errors.New("not a definition the API would store fo
 // row it points at.
 type dataTable struct {
 	name string
-	// customer is the column holding the customer id, empty when parent owns the row.
+	// customer is the column holding the customer id, empty when parent owns the row. A table
+	// with a parent may hold one as well, empty on its rows from before it was kept: the row is
+	// then the customer's whose parent it is.
 	customer string
 	// parent and parentColumn name the row this one belongs to.
 	parent       string
@@ -105,7 +148,9 @@ func (t dataTable) rollup() bool {
 // deployment's key. And voice_samples and voice_bindings: a sample's audio is in this
 // deployment's bucket and a binding's clone in this deployment's account at the provider, so
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
-// with its name and description, to be given a recording and prepared again.
+// with its name and description, to be given a recording and prepared again. And
+// phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
+// which only this deployment's sweep can settle.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -141,7 +186,7 @@ var dataTables = []dataTable{
 	{name: "opt_outs", customer: "customer_id", order: "revoked_at IS NULL"},
 	{name: "recordings", customer: "customer_id", shard: true},
 	{name: "agent_sessions", customer: "customer_id", shard: true},
-	{name: "agent_session_tools", parent: "agent_sessions", parentColumn: "session_id", shard: true},
+	{name: "agent_session_tools", customer: "customer_id", parent: "agent_sessions", parentColumn: "session_id", shard: true},
 	// After the sessions their session_id points at.
 	{name: "calls", customer: "customer_id", shard: true},
 	{name: "agent_responses", customer: "customer_id", shard: true},
@@ -278,9 +323,10 @@ func (s *Store) StartDataCapture(ctx context.Context, customerID string, retenti
 		return errors.New("store: a customer id is required")
 	}
 	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		// A lock_timeout of 0 waits for ever.
+		// A lock_timeout of 0 waits for ever. The wait stays under the statement limit, which
+		// would otherwise end it first and answer a statement timeout instead of ErrWritesOpen.
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)",
-			fmt.Sprintf("%dms", max(within.Milliseconds(), 1))); err != nil {
+			fmt.Sprintf("%dms", max(min(within, captureLockWait).Milliseconds(), 1))); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -306,6 +352,10 @@ ON CONFLICT (customer_id) DO UPDATE SET expires_at = EXCLUDED.expires_at,
 	}
 	return nil
 }
+
+// captureLockWait is the longest StartDataCapture waits on a write open before it, a second
+// under the statement limit.
+const captureLockWait = statementTimeout - time.Second
 
 // captureLapseMargin is how close to expiring a capture may be and still count as lapsed when
 // it is renewed. It is well above a renewal's usual length (milliseconds) and far below any
@@ -366,6 +416,9 @@ WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 	return nil
 }
 
+// exportLimit is how long an export's statements may run and its transactions sit idle.
+const exportLimit = time.Hour
+
 // ExportCustomer writes every row belonging to a customer and returns the cursor their
 // changes carry on from.
 //
@@ -386,6 +439,10 @@ WHERE locktype = 'transactionid' AND transactionid::text = ANY(?)`,
 // an object bucket rather than in Postgres. The rows naming them come across, and copying
 // the bucket is a copy between two object stores that neither deployment should be in the
 // middle of.
+//
+// Its transactions run past the serving limits, to exportLimit: a table of a large customer
+// streams for longer than a statement may take, and each transaction sits idle while the
+// others, or a slow reader of the rows, are served.
 func (s *Store) ExportCustomer(ctx context.Context, customerID string, write func(table string, row json.RawMessage) error) (int64, error) {
 	if customerID == "" {
 		return 0, errors.New("store: a customer id is required")
@@ -402,6 +459,9 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 		return 0, fmt.Errorf("store: export: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // read-only, and the error on the way out says nothing
+	if err := boundTransaction(ctx, tx, exportLimit, lockTimeout, exportLimit); err != nil {
+		return 0, fmt.Errorf("store: export: %w", err)
+	}
 
 	// Never below where the recording last started again: Changes refuses a cursor from before
 	// it. A transaction holding a number at or below it had written its row before that start,
@@ -436,6 +496,9 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 			return 0, fmt.Errorf("store: export: shard: %w", err)
 		}
 		defer shardTx.Rollback() //nolint:errcheck // read-only, and the error on the way out says nothing
+		if err := boundTransaction(ctx, shardTx, exportLimit, lockTimeout, exportLimit); err != nil {
+			return 0, fmt.Errorf("store: export: shard: %w", err)
+		}
 		shards = append(shards, shardTx)
 	}
 	for _, table := range dataTables {
@@ -632,9 +695,6 @@ func (s *Store) exportTable(ctx context.Context, tx bun.Tx, table dataTable, cus
 		return fmt.Errorf("store: export %s: %w", table.name, err)
 	}
 	for {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("store: export %s: %w", table.name, err)
-		}
 		fetched, err := s.exportBatch(ctx, tx, table.name, write)
 		if err != nil {
 			return err
@@ -693,9 +753,15 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 	}
 
 	if t.parent != "" {
+		// Two customers may each have a parent of one id: a row naming its customer is the one of
+		// the parent of that customer's.
+		named := ""
+		if t.customer != "" {
+			named = fmt.Sprintf(" AND (t.%[1]s IS NULL OR t.%[1]s = p.customer_id)", t.customer)
+		}
 		return fmt.Sprintf(
-			"SELECT %s FROM %s AS t JOIN %s AS p ON p.id = t.%s WHERE p.customer_id = ?",
-			subject.String(), t.name, t.parent, t.parentColumn), []any{customerID}
+			"SELECT %s FROM %s AS t JOIN %s AS p ON p.id = t.%s WHERE p.customer_id = ?%s",
+			subject.String(), t.name, t.parent, t.parentColumn, named), []any{customerID}
 	}
 	where := t.customer + " = ?"
 	if t.filter != "" {
@@ -751,7 +817,7 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	}
 	spec, found := dataTableByName(table)
 	if !found {
-		return fmt.Errorf("store: %q is not a table an export carries", table)
+		return invalidImport(fmt.Errorf("store: %q is not a table an export carries", table))
 	}
 	row, err := s.importPin(ctx, customerID, table, row)
 	if err != nil {
@@ -868,6 +934,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			" AND h.recipient = r.recipient AND h.channel = r.channel AND h.revoked_at IS NULL AND h.id <> r.id))"
 	}
 	args := []any{string(row), customerID}
+	read := args
+	if spec.customer == "" {
+		read = args[:1]
+	}
+	if spec.customer != "" && spec.parent != "" {
+		// The customer forced onto the row, then checked against its parent.
+		args = append(args, customerID)
+	}
 	if table == "requests" {
 		// The organization a request counts against is the app's here, whatever the row says.
 		// It is in the shared database and requests in this shard's, so it is read first. An app
@@ -877,12 +951,12 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			return err
 		}
 		args = append(args, organization)
-	}
-	read := args
-	if spec.customer == "" {
-		read = args[:1]
+		read = args
 	}
 	if err := validateImported(ctx, db, spec, shape, columns, picked, subject, read); err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 
@@ -944,6 +1018,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 
 	result, err := db.ExecContext(ctx, query, args...)
 	if err != nil {
+		if refused := refusedRow(table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: import %s: %w", table, err)
 	}
 	*stale = append(*stale, cachedKeys(customerID, table, was)...)
@@ -1218,7 +1295,7 @@ FROM %s`, sequence.name)
 func pauseImported(row json.RawMessage, active []string, paused string, claimed bool) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	moved := slices.ContainsFunc(active, func(state string) bool { return string(fields["state"]) == `"`+state+`"` })
 	if moved {
@@ -1237,7 +1314,7 @@ func pauseImported(row json.RawMessage, active []string, paused string, claimed 
 func renameImported(row json.RawMessage, renames map[string]string) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	for old, renamed := range renames {
 		value, found := fields[old]
@@ -1260,7 +1337,7 @@ func renameImported(row json.RawMessage, renames map[string]string) (json.RawMes
 func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	until := json.RawMessage("null")
 	switch string(fields["stage"]) {
@@ -1284,7 +1361,7 @@ func requeueImportedContact(row json.RawMessage, now time.Time) (json.RawMessage
 func endImportedAttempt(row json.RawMessage, now time.Time) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported row: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported row: %w", err))
 	}
 	stamp, err := json.Marshal(now)
 	if err != nil {
@@ -1561,6 +1638,9 @@ func importableNumber(ctx context.Context, db bun.IDB, customerID string, row js
 	if err := db.QueryRowContext(ctx,
 		"SELECT e164, vendor, monthly_cost_micros FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
 		string(row)).Scan(&e164, &vendor, &cost); err != nil {
+		if refused := refusedRow("phone_numbers", err); refused != nil {
+			return false, refused
+		}
 		return false, fmt.Errorf("store: read an imported number: %w", err)
 	}
 	if vendor.String != sipTrunkVendor {
@@ -1589,18 +1669,18 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	// key in another case, which the insert then leaves out.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("store: read an imported connector definition: %w", err)
+		return nil, invalidImport(fmt.Errorf("store: read an imported connector definition: %w", err))
 	}
 	var id string
 	if raw, ok := fields["id"]; ok {
 		if err := json.Unmarshal(raw, &id); err != nil {
-			return nil, fmt.Errorf("store: read an imported connector definition's id: %w", err)
+			return nil, invalidImport(fmt.Errorf("store: read an imported connector definition's id: %w", err))
 		}
 	}
 	var manifest core.Manifest
 	if raw, ok := fields["manifest"]; ok {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
-			return nil, fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err)
+			return nil, invalidImport(fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err))
 		}
 	}
 	custom, err := manifest.AsCustom(id)
@@ -1917,7 +1997,7 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	}
 	spec, found := dataTableByName(change.Table)
 	if !found {
-		return fmt.Errorf("store: %q is not a table an export carries", change.Table)
+		return invalidImport(fmt.Errorf("store: %q is not a table an export carries", change.Table))
 	}
 	shape, err := s.shapeOf(ctx, change.Table)
 	if err != nil {
@@ -1951,6 +2031,12 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		}
 	}
 	if spec.parent != "" {
+		// Two customers may each have a parent of one id: a row naming its customer is only the
+		// one of the customer replaying it.
+		if spec.customer != "" {
+			conditions = append(conditions, fmt.Sprintf("(t.%[1]s IS NULL OR t.%[1]s = ?)", spec.customer))
+			args = append(args, customerID)
+		}
 		conditions = append(conditions, fmt.Sprintf(
 			"EXISTS (SELECT 1 FROM %s AS p WHERE p.id = t.%s AND p.customer_id = ?)",
 			spec.parent, spec.parentColumn))
@@ -1969,6 +2055,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	if !cachedByID(change.Table) {
 		result, err := db.ExecContext(ctx, query, args...)
 		if err != nil {
+			if refused := refusedRow(change.Table, err); refused != nil {
+				return refused
+			}
 			return fmt.Errorf("store: delete %s: %w", change.Table, err)
 		}
 		deleted, err := result.RowsAffected()
@@ -1982,6 +2071,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	}
 	rows, err := db.QueryContext(ctx, query+" RETURNING to_jsonb(t)", args...)
 	if err != nil {
+		if refused := refusedRow(change.Table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: delete %s: %w", change.Table, err)
 	}
 	defer rows.Close()
@@ -1993,6 +2085,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 		*stale = append(*stale, cachedKeys(customerID, change.Table, row)...)
 	}
 	if err := rows.Err(); err != nil {
+		if refused := refusedRow(change.Table, err); refused != nil {
+			return refused
+		}
 		return fmt.Errorf("store: delete %s: %w", change.Table, err)
 	}
 	return nil
@@ -2021,12 +2116,20 @@ func (s *Store) PruneDataChanges(ctx context.Context, retention time.Duration) (
 	// prunes, and of two prunes at once the one that dropped the lower numbers can commit last, so
 	// pruned_through only goes up. A WITH statement that changes rows runs once and to the end
 	// whether or not the query reads it (https://www.postgresql.org/docs/current/queries-with.html).
+	//
+	// The lowest numbers go first, writeBatch of them per statement, so a backlog is pruned in
+	// statements that each finish inside the statement limit, and pruned_through still says
+	// how far the pruning got.
 	var removed int64
-	err = s.global.QueryRowContext(ctx, `
+	for {
+		var batch int64
+		err = s.global.QueryRowContext(ctx, `
 WITH pruned AS (
-  DELETE FROM data_changes
-  WHERE at < now() - make_interval(secs => ?)
-    AND seq <= LEAST(?, (SELECT MIN(seq) - 1 FROM data_changes WHERE at >= now() - make_interval(secs => ?)))
+  DELETE FROM data_changes WHERE seq IN (
+    SELECT seq FROM data_changes
+    WHERE at < now() - make_interval(secs => ?)
+      AND seq <= LEAST(?, (SELECT MIN(seq) - 1 FROM data_changes WHERE at >= now() - make_interval(secs => ?)))
+    ORDER BY seq LIMIT ?)
   RETURNING customer_id, seq
 ), noted AS (
   UPDATE data_change_capture AS c SET pruned_through = p.seq
@@ -2034,11 +2137,15 @@ WITH pruned AS (
   WHERE c.customer_id = p.customer_id AND c.pruned_through < p.seq
 )
 SELECT count(*) FROM pruned`,
-		retention.Seconds(), mark, retention.Seconds()).Scan(&removed)
-	if err != nil {
-		return 0, fmt.Errorf("store: prune data changes: %w", err)
+			retention.Seconds(), mark, retention.Seconds(), writeBatch).Scan(&batch)
+		if err != nil {
+			return removed, fmt.Errorf("store: prune data changes: %w", err)
+		}
+		removed += batch
+		if batch < int64(writeBatch) {
+			return removed, nil
+		}
 	}
-	return removed, nil
 }
 
 // watchDataChanges attaches the recording trigger to every table an export carries, in one
