@@ -48,16 +48,16 @@ var scheduledReplySettle = 2 * time.Second
 // scheduledReplyWindow bounds reading an answer for a channel. The lease is
 // renewed while a delivery runs, so a slow turn is waited out; one still
 // running at the window's end fails the channel, not the conversation.
-var scheduledReplyWindow = 3 * time.Minute
+const scheduledReplyWindow = 3 * time.Minute
 
 // scheduledPhoneWindow is how long a ring is waited out for somebody to
 // pick up: a vendor's ring is the best part of a minute.
-var scheduledPhoneWindow = 90 * time.Second
+const scheduledPhoneWindow = 90 * time.Second
 
 // scheduledCallLimit is how long a call a task placed may last: the agent
 // hangs up then, whatever is being said. A worker holds the call's slot
 // throughout, and a reminder is a short call, not an open line.
-var scheduledCallLimit = 10 * time.Minute
+const scheduledCallLimit = 10 * time.Minute
 
 // scheduledCallGrace is how late a task may still ring: past it the call is
 // not placed and the occurrence is missed, because a call long after the time
@@ -70,9 +70,9 @@ const scheduledCallGrace = 15 * time.Minute
 // (scheduledPhoneWindow), the task sent as the call's first turn, which may
 // wait out a reply for scheduledWindow (followUpWithin), and the call held to
 // its limit (scheduledCallLimit). The occurrence's own budget still bounds
-// it. A function, because tests shorten the ring and the limit.
-func scheduledPeerWindow() time.Duration {
-	return scheduledPhoneWindow + scheduledWindow + scheduledCallLimit
+// it. A method, because a test shortens the ring and the limit of its own router.
+func (s *Server) scheduledPeerWindow() time.Duration {
+	return s.phoneWindow + scheduledWindow + s.callLimit
 }
 
 // errScheduledNotHere says the conversation's session is not live on this
@@ -399,7 +399,7 @@ func textUnreachable(err error) error {
 // refusal about money (moneyError), such as a session that cannot open or a text whose
 // reservation is refused (routing.ReservationRefused). A suspension, spent credit or a spent limit
 // lasts until somebody pays or the limit resets, so the run's retries, minutes apart
-// (scheduling.DeliveryRetries), would only be refused again. A refusal because the money could
+// (the scheduler's delivery retries), would only be refused again. A refusal because the money could
 // not be checked (policy.Transient) passes again on its own, and is tried again. Any other error
 // is returned as it is.
 func unpaid(err error) error {
@@ -524,7 +524,7 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 	var files []sandbox.Attachment
 	active := found.Busy()
 	last := time.Now()
-	deadline := time.Now().Add(scheduledReplyWindow)
+	deadline := time.Now().Add(s.replyWindow)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -579,7 +579,7 @@ func (s *Server) followUpInConversation(ctx context.Context, found *session.Sess
 	if err := s.followUpWithin(ctx, found, delivery); err != nil || known {
 		return err
 	}
-	deadline := time.Now().Add(scheduledReplyWindow)
+	deadline := time.Now().Add(s.replyWindow)
 	ticker := time.NewTicker(s.replyPoll)
 	defer ticker.Stop()
 	for {
@@ -683,7 +683,7 @@ func refusedAgain(found *session.Session, delivery scheduledDelivery) error {
 // has finished: the turn ran for a channel tried before this one, or for an
 // earlier attempt at the occurrence.
 func (s *Server) readBackReply(ctx context.Context, found *session.Session, id string) (conversation.FinishedReply, error) {
-	deadline := time.Now().Add(scheduledReplyWindow)
+	deadline := time.Now().Add(s.replyWindow)
 	for {
 		state, _, _ := found.FollowUpReply(id)
 		switch state {
@@ -912,7 +912,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 	if err != nil {
 		return none, false, err
 	}
-	ask, cancel := context.WithTimeout(ctx, scheduledPeerWindow())
+	ask, cancel := context.WithTimeout(ctx, s.scheduledPeerWindow())
 	answer, err := s.forwarder.Ask(ask, address, request, body)
 	cancel()
 	if err == nil && answer.GetStatus() == http.StatusOK {
@@ -1169,7 +1169,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if from == "" {
 		return session.Spec{}, undelivered(scheduling.ReasonNoLine, errors.New("the agent has no number to call from"))
 	}
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < scheduledPhoneWindow+scheduledCallLimit {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < s.phoneWindow+s.callLimit {
 		return session.Spec{}, &scheduling.Missed{Err: fmt.Errorf("the call would have %s left to ring and be held", lateFor(time.Until(deadline)))}
 	}
 	placed, err := s.phone.Call(ctx, phone.CallRequest{
@@ -1277,7 +1277,7 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 	if created.CallerJoined() {
 		return s.carryOutAnswered(ctx, created, delivery, events)
 	}
-	ring := time.NewTimer(scheduledPhoneWindow)
+	ring := time.NewTimer(s.phoneWindow)
 	defer ring.Stop()
 	for {
 		select {
@@ -1308,7 +1308,7 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 	if err := s.followUpWithin(ctx, created, delivery); err != nil {
 		return undeliveredFinally(scheduling.ReasonFailed, err)
 	}
-	limit := time.NewTimer(scheduledCallLimit)
+	limit := time.NewTimer(s.callLimit)
 	defer limit.Stop()
 	for {
 		select {
