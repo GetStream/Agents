@@ -2396,7 +2396,8 @@ window the replacement already has taking the forgotten one's spend), and again 
 database their own policy and user-level limits, deleted, so the app's defaults apply, and the
 id on their resets, grants and campaigns; their phone links (as `PUT /v1/agents/users/{user_id}`
 unlinks one), channel link codes and profile (`users`), deleted, its recorded changes made
-deletes; their contact map rows, unlinked; and the id on the guests they claimed. Usage and cost stay under the app. It writes one
+deletes (the profile's own delete keeps the id in its key, which a following deployment deletes
+its copy by, until `data_move.retention` drops it); their contact map rows, unlinked; and the id on the guests they claimed. Usage and cost stay under the app. It writes one
 `end_user` audit row naming the replacement and the actor, never the id, and the service one
 `forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Once the
 last step, the shared database's, has started, it completes even if the command is interrupted,
